@@ -1,5 +1,6 @@
 """Read-only access to kiro-cli session data with defensive parsing."""
 
+import collections
 import json
 import os
 import sqlite3
@@ -56,7 +57,7 @@ def discover_workspaces() -> list[str]:
                 updated = str(row[1]) if row[1] else ""
                 if key not in workspaces or updated > workspaces.get(key, ""):
                     workspaces[key] = updated
-        except sqlite3.Error:
+        except sqlite3.OperationalError:
             pass
         finally:
             conn.close()
@@ -112,19 +113,21 @@ def _extract_prompts(jsonl_path: Path) -> tuple[str, str, str]:
         return first_prompt, last_prompt, last_reply_tail
 
     try:
-        lines = jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            # First 50 lines for first_prompt
+            for i, line in enumerate(fh):
+                if i >= 50:
+                    break
+                text = _extract_content(line, "Prompt")
+                if text:
+                    first_prompt = text[:200]
+                    break
+            # Tail: keep last 100 lines via deque
+            tail = collections.deque(fh, maxlen=100)
     except OSError:
         return first_prompt, last_prompt, last_reply_tail
 
-    # First 50 lines for first_prompt
-    for line in lines[:50]:
-        text = _extract_content(line, "Prompt")
-        if text:
-            first_prompt = text[:200]
-            break
-
-    # Last 100 lines for last_prompt and last_reply_tail
-    for line in reversed(lines[-100:]):
+    for line in reversed(tail):
         if not last_reply_tail:
             text = _extract_content(line, "AssistantMessage")
             if text:
@@ -175,8 +178,6 @@ def _normalize_path(p: str) -> str:
 
 def _open_sqlite_readonly() -> sqlite3.Connection | None:
     """Open sqlite read-only with busy_timeout=5000. Returns None if unavailable."""
-    if not SQLITE_PATH.exists():
-        return None
     try:
         uri = f"file:{SQLITE_PATH}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5)

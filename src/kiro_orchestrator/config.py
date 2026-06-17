@@ -8,7 +8,7 @@ from pathlib import Path
 
 import tomli_w
 
-CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "kiro-orchestrator"
+CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")) / "kiro-orchestrator"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 _lock = threading.Lock()
@@ -33,8 +33,8 @@ def load_config() -> Config:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError):
             return Config()
-    fields = {f.name for f in Config.__dataclass_fields__.values()}
-    return Config(**{k: v for k, v in data.items() if k in fields})
+        fields = {f.name for f in Config.__dataclass_fields__.values()}
+        return Config(**{k: v for k, v in data.items() if k in fields})
 
 
 def save_config(config: Config) -> None:
@@ -42,8 +42,12 @@ def save_config(config: Config) -> None:
     with _lock:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG_PATH.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            tomli_w.dump(asdict(config), f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, CONFIG_PATH)
+        try:
+            with open(tmp, "wb") as f:
+                tomli_w.dump(asdict(config), f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, CONFIG_PATH)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise

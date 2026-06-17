@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from kiro_orchestrator.config import Config, load_config, save_config, CONFIG_PATH, CONFIG_DIR
+from kiro_orchestrator.config import Config, load_config, save_config
 
 
 @pytest.fixture(autouse=True)
