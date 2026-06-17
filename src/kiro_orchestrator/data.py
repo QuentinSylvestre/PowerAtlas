@@ -35,6 +35,8 @@ def discover_workspaces() -> list[str]:
             if meta_file.suffix == ".jsonl":
                 continue
             try:
+                if meta_file.stat().st_size > 1_048_576:
+                    continue
                 data = json.loads(meta_file.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, UnicodeDecodeError):
                 continue
@@ -76,6 +78,8 @@ def get_sessions(cwd: str) -> list[Session]:
         if meta_file.suffix == ".jsonl":
             continue
         try:
+            if meta_file.stat().st_size > 1_048_576:
+                continue
             data = json.loads(meta_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
