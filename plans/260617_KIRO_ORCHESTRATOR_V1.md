@@ -571,7 +571,7 @@ Implementation health: Yellow → Green (after auto-fix cycle).
 | 3 | Medium | Orphan .tmp file on crash in save_config | Fixed — try/except BaseException with unlink cleanup |
 | 4 | Medium | Broad sqlite3.Error catch in discover_workspaces | Fixed — narrowed to sqlite3.OperationalError |
 | 5 | Medium | TOCTOU in _open_sqlite_readonly (exists check before open) | Fixed — removed exists() check, EAFP pattern |
-| 6 | Medium | No file-size guard on meta_file.read_text() | Escalated — unlikely in V1 (metadata files <10KB) |
+| 6 | Medium | No file-size guard on meta_file.read_text() | Fixed — 1MB size check added; skips oversized files |
 | 7 | Low | _extract_content has 3-level nested conditionals | Noted — acceptable complexity for V1, two content schemas |
 | 8 | Low | pyproject.toml uses open dep ranges (>=) | Noted — acceptable for early development |
 | 9 | Low | Redundant imports in test_config.py | Fixed — removed top-level CONFIG_PATH/CONFIG_DIR imports |
