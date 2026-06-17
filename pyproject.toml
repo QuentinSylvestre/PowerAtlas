@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kiro-orchestrator"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "jinja2>=3.1",
+    "pystray>=0.19",
+    "Pillow>=10.0",
+    "pywebview>=5.0",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.3"]
+
+[project.scripts]
+kiro-orchestrator = "kiro_orchestrator.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

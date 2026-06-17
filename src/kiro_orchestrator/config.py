@@ -1,0 +1,49 @@
+"""Thread-safe config persistence via TOML."""
+
+import os
+import threading
+import tomllib
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+import tomli_w
+
+CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "kiro-orchestrator"
+CONFIG_PATH = CONFIG_DIR / "config.toml"
+
+_lock = threading.Lock()
+
+
+@dataclass
+class Config:
+    trust_all_tools: bool = False
+    use_pywebview: bool = True
+    terminal_command: str = ""
+    pinned_folders: list[str] = field(default_factory=list)
+    pinned_sessions: list[str] = field(default_factory=list)
+
+
+def load_config() -> Config:
+    """Load config from TOML. Missing keys get defaults, unknown keys ignored."""
+    with _lock:
+        if not CONFIG_PATH.exists():
+            return Config()
+        try:
+            with open(CONFIG_PATH, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            return Config()
+    fields = {f.name for f in Config.__dataclass_fields__.values()}
+    return Config(**{k: v for k, v in data.items() if k in fields})
+
+
+def save_config(config: Config) -> None:
+    """Atomic write: .tmp → fsync → os.replace. Lock-protected."""
+    with _lock:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        with open(tmp, "wb") as f:
+            tomli_w.dump(asdict(config), f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, CONFIG_PATH)
