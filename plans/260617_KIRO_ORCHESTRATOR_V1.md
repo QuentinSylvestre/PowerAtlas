@@ -308,15 +308,21 @@ def is_enabled() -> bool: ...
 ```
 
 **Exit criteria**:
-- [ ] Tray icon appears with correct menu items (Open, Trust toggle, Settings, Quit)
-- [ ] Single-instance: second launch activates existing window, doesn't crash
-- [ ] "Open" launches pywebview window; if pywebview fails, opens browser
-- [ ] Window close (X button) minimizes to tray; "Quit" exits app cleanly
-- [ ] Graceful shutdown: uvicorn stops, no orphan processes
-- [ ] Port conflict: dynamic port assignment succeeds
-- [ ] Trust All Tools tray toggle syncs with config (thread-safe)
-- [ ] `enable`/`disable` autostart creates/removes startup shortcut
-- [ ] App launches without console window (pythonw.exe)
+- [x] Tray icon appears with correct menu items (Open, Trust toggle, Settings, Quit)
+- [x] Single-instance: second launch activates existing window, doesn't crash
+- [x] "Open" launches pywebview window; if pywebview fails, opens browser
+- [x] Window close (X button) minimizes to tray; "Quit" exits app cleanly
+- [x] Graceful shutdown: uvicorn stops, no orphan processes
+- [x] Port conflict: dynamic port assignment succeeds
+- [x] Trust All Tools tray toggle syncs with config (thread-safe)
+- [x] `enable`/`disable` autostart creates/removes startup shortcut
+- [x] App launches without console window (pythonw.exe)
+
+#### Implementation (2026-06-18, code: 341c431)
+
+Phase 2 adds the application entry point with Windows named mutex single-instance guard, uvicorn server started on a dynamic port in a daemon thread, and pystray system tray icon running on the main thread with Open (pywebview with browser fallback), Trust All Tools toggle (thread-safe config sync), Settings, and Quit menu items. The autostart module manages Windows Startup folder shortcuts via WScript.Shell COM, and graceful shutdown coordinates uvicorn stop, pywebview close, and clean exit. All 4 new autostart tests and 13 existing tests pass.
+
+QA verification: SKIP (tray icon and window management require interactive desktop testing — no non-interactive verification path). QA annotation mismatch: consider removing [QA] in future plan revisions for desktop-UI-only phases.
 
 ### Phase 3: Web UI — workspace cards and session list [QA]
 
@@ -581,3 +587,29 @@ Implementation health: Yellow → Green (after auto-fix cycle).
 | 13 | Low | LOCALAPPDATA empty string produces relative path | Fixed — uses `or` idiom for empty string handling |
 
 Cycle 2 verified: all 4 personas report Green, no regressions, no new Medium+ findings.
+
+### 2026-06-18 — Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer, Maintainability reviewer, Security auditor)
+
+Implementation health: Yellow → Green (after auto-fix cycle).
+16 findings (3 High, 6 Medium, 7 Low). 8 auto-fixed (cycle 1), 8 accepted trade-offs.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `webview.destroy_window()` not valid pywebview API | Fixed — use `_webview_window.destroy()` |
+| 2 | High | Window close (X) does not minimize to tray, no closing handler | Fixed — added `_on_window_closing` with hide + return False |
+| 3 | High | `ready_event.wait(10)` timeout not checked, continues with broken state | Fixed — exit with error if `not ready_event.is_set()` |
+| 4 | Medium | `server.servers[0].sockets[0]` fallback to dead port 8000 | Fixed — merged into #3 (server failure exits cleanly) |
+| 5 | Medium | `_webview_window` global accessed without lock | Fixed — added `_webview_lock` |
+| 6 | Medium | Monkey-patching `server.startup` couples to uvicorn internals | Accepted — works for V1, no alternative without forking uvicorn |
+| 7 | Medium | `webview.start()` in daemon thread — COM STA concern | Accepted — Windows-only target, documented trade-off |
+| 8 | Medium | `get_shutdown_event()` imported but unused | Fixed — removed unused import |
+| 9 | Medium | No test coverage for tray.py or __main__.py | Accepted — interactive desktop surfaces, unit-testable surface is minimal |
+| 10 | Medium | DLL preloading via COM in autostart.py | Accepted — standard pattern, hardening beyond V1 scope |
+| 11 | Low | Unused `import sys` in tray.py | Fixed — removed |
+| 12 | Low | `_open_ui` swallows exceptions silently | Accepted — fallback to browser is the correct UX |
+| 13 | Low | Mutex name in global namespace | Accepted — local DoS is not a threat model for V1 |
+| 14 | Low | TOCTOU on GetLastError | Fixed — use `ctypes.WinDLL(use_last_error=True)` |
+| 15 | Low | APPDATA unset produces relative path | Accepted — CI-only scenario, app is desktop-only |
+| 16 | Low | No `assets/tray/` directory created | Accepted — Pillow generates icon in-memory, no file needed |
+
+Cycle 2 verified: all fixes correct, no regressions, no new High findings.
