@@ -1,4 +1,11 @@
-<div class="session-row" data-session-id="{{ session.session_id }}">
+<div class="session-row{% if session.session_id in pinned_sessions %} pinned{% endif %}" data-session-id="{{ session.session_id }}">
+<button class="btn-pin" aria-label="{% if session.session_id in pinned_sessions %}Unpin{% else %}Pin{% endif %} session"
+        hx-post="/api/{% if session.session_id in pinned_sessions %}unpin{% else %}pin{% endif %}-session"
+        hx-vals='{"session_id":"{{ session.session_id }}"}'
+        hx-target="closest .workspace-card" hx-select=".workspace-card" hx-swap="outerHTML"
+        hx-headers='{"X-Workspace":"{{ session.cwd }}"}'>
+{% if session.session_id in pinned_sessions %}&#x1F4CC;{% else %}&#x1F587;{% endif %}
+</button>
 <div class="session-title">{{ session.title }}</div>
 <div class="session-time">{{ session.updated_at }}</div>
 <div class="session-first-prompt">{{ session.first_prompt[:100] }}</div>

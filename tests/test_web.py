@@ -47,9 +47,12 @@ def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
     assert "1 session" in resp.text
 
 
+@patch("kiro_orchestrator.web.load_config")
 @patch("kiro_orchestrator.web.data.get_sessions")
 @patch("kiro_orchestrator.web.data.discover_workspaces")
-def test_partials_workspaces_empty(mock_discover, mock_sessions, client):
+def test_partials_workspaces_empty(mock_discover, mock_sessions, mock_config, client):
+    from kiro_orchestrator.config import Config
+    mock_config.return_value = Config()
     mock_discover.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
@@ -144,3 +147,97 @@ def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_
 
     resp = client.get("/partials/workspaces")
     assert "No sessions yet" in resp.text
+
+
+
+@patch("kiro_orchestrator.web.autostart.is_enabled")
+@patch("kiro_orchestrator.web.load_config")
+def test_settings_page_renders(mock_config, mock_autostart, client):
+    from kiro_orchestrator.config import Config
+    mock_config.return_value = Config(terminal_command="wt", pinned_folders=["C:\\myapp"])
+    mock_autostart.return_value = False
+    resp = client.get("/settings")
+    assert resp.status_code == 200
+    assert "Terminal" in resp.text
+    assert "wt" in resp.text
+    assert "C:\\myapp" in resp.text
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.autostart.is_enabled")
+@patch("kiro_orchestrator.web.load_config")
+def test_save_settings(mock_config, mock_autostart, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_config.return_value = Config()
+    mock_autostart.return_value = False
+    resp = client.post("/api/settings", data={
+        "terminal_command": "pwsh",
+        "trust_all_tools": "on",
+        "pinned_folders": "C:\\a|C:\\b",
+    })
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert saved.terminal_command == "pwsh"
+    assert saved.trust_all_tools is True
+    assert saved.pinned_folders == ["C:\\a", "C:\\b"]
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.load_config")
+@patch("kiro_orchestrator.web.data.get_sessions")
+def test_pin_session(mock_sessions, mock_config, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_config.return_value = Config()
+    mock_sessions.return_value = []
+    resp = client.post("/api/pin-session", json={"session_id": "sess-1"},
+                       headers={"X-Workspace": "C:\\app"})
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert "sess-1" in saved.pinned_sessions
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.load_config")
+@patch("kiro_orchestrator.web.data.get_sessions")
+def test_unpin_session(mock_sessions, mock_config, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_config.return_value = Config(pinned_sessions=["sess-1", "sess-2"])
+    mock_sessions.return_value = []
+    resp = client.post("/api/unpin-session", json={"session_id": "sess-1"},
+                       headers={"X-Workspace": "C:\\app"})
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert "sess-1" not in saved.pinned_sessions
+
+
+@patch("kiro_orchestrator.web.load_config")
+@patch("kiro_orchestrator.web.data.get_sessions")
+@patch("kiro_orchestrator.web.data.discover_workspaces")
+def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, client, tmp_path):
+    from kiro_orchestrator.config import Config
+    workspace = str(tmp_path)
+    pinned = "C:\\my-pinned-workspace"
+    mock_config.return_value = Config(pinned_folders=[pinned])
+    mock_discover.return_value = [workspace]
+    mock_sessions.return_value = []
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert pinned in resp.text
+
+
+@patch("kiro_orchestrator.web.load_config")
+@patch("kiro_orchestrator.web.data.get_sessions")
+@patch("kiro_orchestrator.web.data.discover_workspaces")
+def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config, client, tmp_path):
+    from kiro_orchestrator.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(pinned_sessions=["sess-2"])
+    mock_discover.return_value = [workspace]
+    mock_sessions.return_value = [
+        _make_session(session_id="sess-1", title="unpinned", cwd=workspace),
+        _make_session(session_id="sess-2", title="pinned", cwd=workspace),
+    ]
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # Pinned should appear before unpinned
+    assert resp.text.index("pinned") < resp.text.index("unpinned")
