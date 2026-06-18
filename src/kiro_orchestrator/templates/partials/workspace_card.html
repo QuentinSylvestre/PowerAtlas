@@ -1,0 +1,16 @@
+<details class="workspace-card{% if stale %} stale{% endif %}">
+<summary>
+<span class="workspace-path">{{ cwd }}</span>
+<span class="session-count">{{ sessions|length }} session{{ "s" if sessions|length != 1 }}</span>
+{% if stale %}<span class="badge-stale">folder missing</span>{% endif %}
+</summary>
+<div class="sessions">
+{% if sessions %}
+{% for session in sessions %}
+{% include "partials/session_row.html" %}
+{% endfor %}
+{% else %}
+<p class="empty-card">No sessions yet. <button disabled>New session</button></p>
+{% endif %}
+</div>
+</details>

@@ -5,18 +5,10 @@ import sys
 import threading
 
 import uvicorn
-from fastapi import FastAPI
 
 from .config import load_config
 from .tray import run_tray
-
-# Placeholder app until Phase 3 provides web.py
-_app = FastAPI()
-
-
-@_app.get("/health")
-def _health():
-    return {"ok": True}
+from .web import app as _app
 
 
 def _single_instance_guard() -> None:

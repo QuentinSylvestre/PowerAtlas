@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<header>
+<h1>Kiro Orchestrator</h1>
+<input type="search" name="q" placeholder="Search workspaces..."
+       hx-get="/search" hx-trigger="input changed delay:300ms" hx-target="#workspaces">
+</header>
+<main id="workspaces" hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML">
+<div class="skeleton-card"></div>
+<div class="skeleton-card"></div>
+<div class="skeleton-card"></div>
+</main>
+{% endblock %}

@@ -1,0 +1,25 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, sans-serif; padding: 1rem; background: #1a1a2e; color: #e0e0e0; }
+header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+h1 { font-size: 1.2rem; }
+input[type="search"] { flex: 1; padding: .4rem .6rem; border-radius: 4px; border: 1px solid #333; background: #16213e; color: #e0e0e0; }
+.workspace-card { border: 1px solid #333; border-radius: 6px; margin-bottom: .5rem; background: #16213e; }
+.workspace-card > summary { padding: .6rem .8rem; cursor: pointer; display: flex; align-items: center; gap: .5rem; list-style: none; }
+.workspace-card > summary::-webkit-details-marker { display: none; }
+.workspace-path { flex: 1; font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-count { font-size: .75rem; color: #888; }
+.badge-stale { font-size: .7rem; background: #a33; padding: .1rem .4rem; border-radius: 3px; }
+.sessions { padding: .4rem .8rem .6rem; }
+.session-row { padding: .3rem 0; border-top: 1px solid #222; display: grid; grid-template-columns: 1fr auto; gap: .2rem; font-size: .8rem; }
+.session-title { font-weight: 600; }
+.session-time { color: #888; font-size: .75rem; }
+.session-first-prompt, .session-last-prompt, .session-last-reply { color: #aaa; font-size: .75rem; grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-resume { grid-column: 2; padding: .2rem .5rem; border: 1px solid #555; border-radius: 3px; background: #16213e; color: #e0e0e0; cursor: pointer; font-size: .75rem; }
+.btn-resume:disabled { opacity: .4; cursor: not-allowed; }
+.stale { opacity: .7; }
+.empty-state { padding: 2rem; text-align: center; color: #888; }
+.empty-card { padding: .5rem 0; color: #888; font-size: .8rem; }
+.toast { padding: .6rem 1rem; border-radius: 4px; margin-bottom: .5rem; }
+.toast-error { background: #3a1111; border: 1px solid #a33; }
+.skeleton-card { height: 3rem; margin-bottom: .5rem; border-radius: 6px; background: linear-gradient(90deg, #16213e 25%, #1a2740 50%, #16213e 75%); background-size: 200%; animation: shimmer 1.5s infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
