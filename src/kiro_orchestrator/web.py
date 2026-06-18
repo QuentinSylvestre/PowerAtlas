@@ -132,9 +132,9 @@ async def partials_workspaces(request: Request):
 
     config = load_config()
     # Merge pinned folders (with count=0)
-    existing = {cwd for cwd, _, _ in workspace_data}
+    from .data import _normalize_path
+    existing = {_normalize_path(cwd) for cwd, _, _ in workspace_data}
     for pf in config.pinned_folders:
-        from .data import _normalize_path
         if _normalize_path(pf) not in existing:
             workspace_data.append((pf, 0, ""))
 
@@ -143,7 +143,6 @@ async def partials_workspaces(request: Request):
             "message": "No sessions found. Pin a folder to get started.",
         })
 
-    from .data import _normalize_path
     pinned_set = {_normalize_path(f) for f in config.pinned_folders}
 
     cards_html = ""
@@ -155,8 +154,14 @@ async def partials_workspaces(request: Request):
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
-    # Pinned workspaces
-    pinned_cards = [(c, n, u) for c, n, u in workspace_data if _normalize_path(c) in pinned_set]
+    # Pinned workspaces (deduplicate by normalized path, keep highest count)
+    pinned_cards_raw = [(c, n, u) for c, n, u in workspace_data if _normalize_path(c) in pinned_set]
+    pinned_seen: dict[str, tuple[str, int, str]] = {}
+    for c, n, u in pinned_cards_raw:
+        key = _normalize_path(c)
+        if key not in pinned_seen or n > pinned_seen[key][1]:
+            pinned_seen[key] = (c, n, u)
+    pinned_cards = list(pinned_seen.values())
     if pinned_cards:
         cards_html += '<div class="section-label">Pinned workspaces</div>'
         for cwd, count, updated in pinned_cards:
@@ -199,14 +204,44 @@ async def search(request: Request, q: str = ""):
         })
 
     config = load_config()
-    matched = [(c, n, u) for c, n, u in workspace_data if query in Path(c).name.lower()]
+    matched = [(c, n, u) for c, n, u in workspace_data if query in c.lower()]
 
-    if not matched:
+    # Search pinned sessions by title
+    pinned_rows = ""
+    if config.pinned_sessions:
+        import json as _json
+        from .data import SESSION_DIR
+        for meta_file in SESSION_DIR.glob("*.json"):
+            if meta_file.suffix == ".jsonl" or meta_file.stem not in set(config.pinned_sessions):
+                continue
+            try:
+                d = _json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            title = d.get("title", "")
+            if query in title.lower():
+                cwd = d.get("cwd", "")
+                session = data.Session(
+                    session_id=d.get("session_id", meta_file.stem),
+                    title=title or "<untitled>", cwd=cwd,
+                    created_at=d.get("created_at", ""),
+                    updated_at=d.get("updated_at", ""),
+                    first_prompt="", last_prompt="", last_reply_tail="",
+                )
+                pinned_rows += templates.get_template("partials/session_row.html").render(
+                    request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+                    pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                )
+
+    if not matched and not pinned_rows:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
             "message": f'No results for "{q}"',
         })
 
     cards_html = ""
+    if pinned_rows:
+        cards_html += '<div class="section-label">Pinned sessions</div>'
+        cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
     for cwd, count, updated in matched:
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(

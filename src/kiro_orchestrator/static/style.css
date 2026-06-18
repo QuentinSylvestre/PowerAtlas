@@ -71,6 +71,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .card-count { font-size: 11px; color: var(--text-dim); background: var(--surface); padding: 2px 8px; border-radius: 10px; }
 .card-last-active { font-size: 11px; color: var(--text-dim); }
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
+.card-new-btn { background: none; border: none; cursor: pointer; font-size: 11px; opacity: 0; transition: opacity 0.12s; padding: 2px 4px; color: var(--text-muted); }
+.card-header:hover .card-new-btn { opacity: 0.4; }
+.card-new-btn:hover { opacity: 1 !important; color: var(--accent); }
 .card-pin-btn { background: none; border: none; cursor: pointer; font-size: 12px; opacity: 0; transition: opacity 0.12s; padding: 2px 4px; }
 .card-header:hover .card-pin-btn { opacity: 0.4; }
 .card-pin-btn:hover { opacity: 1 !important; }
