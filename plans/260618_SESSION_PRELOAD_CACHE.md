@@ -1,7 +1,7 @@
 # Session Pre-load Cache
 
 > **Date**: 2026-06-18
-> **Status**: In Progress
+> **Status**: Complete
 > **Scope**: In-memory session cache with background refresh to eliminate loading latency for pinned/viewed workspaces
 > **Estimated effort**: 3-5 hours
 
@@ -403,3 +403,19 @@ High-effort review (4 personas: Architect, Senior engineer, Performance engineer
 | 13 | Low | `search()` endpoint bypasses cache for pinned session lookup | Noted — acceptable; search is rare path and cached workspaces cover most cases |
 | 14 | Low | No test isolation (module singleton) | Resolved — `clear()` method added to SessionCache |
 | 15 | Low | `[P:2]`/`[P:1]` annotation meaning | Resolved — correct per spec: "P:2" means "parallel with Phase 2" (symmetric) |
+
+### 2026-06-18 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Performance engineer.
+7 findings (1 High, 5 Medium, 1 Low). 2 auto-fixed, 5 accepted.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `refresh_stale_entries` parsed ALL .json files per cwd (O(N*M)) instead of stat-checking tracked paths | Fixed — now stats only tracked paths from `_file_stats`; new-file check is a separate filtered scan |
+| 2 | Medium | Race on concurrent get_sessions + refresh for same cwd | User: accepted — benign last-writer-wins with identical data |
+| 3 | Medium | TOCTOU in refresh: stat vs read ordering | User: accepted — background thread; next cycle self-corrects |
+| 4 | Medium | Non-pinned cards missing explicit `is_pinned=False` | Fixed — added to template render call |
+| 5 | Medium | `_render_pinned_sessions` blocks event loop in fallback | User: accepted — rare path for uncached sessions; existing pattern |
+| 6 | Medium | Double warmup from startup + on_open | User: accepted — benign (second call hits cache instantly) |
+| 7 | Low | Full-workspace reload on any file change (not per-session merge) | User: accepted — simplification; functionally correct |
