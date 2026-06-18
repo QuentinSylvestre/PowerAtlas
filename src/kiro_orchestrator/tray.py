@@ -35,9 +35,6 @@ def run_tray(server_url: str, config: Config) -> None:
         save_config(fresh)
         config.trust_all_tools = fresh.trust_all_tools
 
-    def on_settings(icon, item):
-        webbrowser.open(f"{server_url}/settings")
-
     def on_logs(icon, item):
         log_path = CONFIG_DIR / "orchestrator.log"
         if log_path.exists():
@@ -50,7 +47,6 @@ def run_tray(server_url: str, config: Config) -> None:
     menu = pystray.Menu(
         pystray.MenuItem("Open", on_open, default=True),
         pystray.MenuItem("Trust All Tools", on_trust, checked=lambda item: config.trust_all_tools),
-        pystray.MenuItem("Settings", on_settings),
         pystray.MenuItem("Logs", on_logs),
         pystray.MenuItem("Quit", on_quit),
     )
