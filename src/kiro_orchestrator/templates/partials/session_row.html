@@ -3,7 +3,7 @@
   <div class="session-content">
     <div class="session-title-row">
       <span class="session-title">{{ session.title or 'untitled' }}</span>
-      <span class="session-time">{{ session.updated_at[:10] if session.updated_at else '' }}</span>
+      <span class="session-time">{{ session.updated_at[:16] | replace('T', ' ') if session.updated_at else '' }}</span>
     </div>
     <div class="session-preview"><span class="label">First:</span>{{ (session.first_prompt or '')[:100] }}</div>
     <div class="session-last"><span class="label">Last:</span>"{{ (session.last_reply_tail or '')[:80] }}"</div>

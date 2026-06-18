@@ -1,12 +1,13 @@
 <div class="workspace-card{% if stale %} stale{% endif %}{% if not is_pinned %} collapsed{% endif %}" data-cwd="{{ cwd }}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
+    <div class="card-check" onclick="event.stopPropagation();this.closest('.workspace-card').classList.toggle('selected');updateActionBar()"></div>
     <span class="card-chevron">▼</span>
     <span class="card-folder-name">{{ folder_name }}<span class="card-path" title="{{ cwd }}">{{ cwd }}</span></span>
     <div class="card-meta">
       {% if last_updated %}<span class="card-last-active">{{ last_updated[5:16] | replace('T', ' ') }}</span>{% endif %}
       <span class="card-count">{{ session_count if session_count is defined else sessions|length }}</span>
       {% if stale %}<span class="badge-stale">missing</span>{% endif %}
-      <button class="card-new-btn" onclick="event.stopPropagation();launchFresh(this)" aria-label="New session">▶</button>
+      <button class="card-new-btn" onclick="event.stopPropagation();launchFresh(this)" aria-label="New session">+</button>
       <button class="card-pin-btn{% if is_pinned %} pinned{% endif %}" onclick="event.stopPropagation();pinWorkspace(this)" aria-label="Pin workspace">📌</button>
     </div>
   </div>
