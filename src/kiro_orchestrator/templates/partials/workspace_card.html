@@ -5,6 +5,7 @@
     <div class="card-meta">
       <span class="card-count">{{ session_count if session_count is defined else sessions|length }}</span>
       {% if stale %}<span class="badge-stale">missing</span>{% endif %}
+      <button class="card-pin-btn" onclick="event.stopPropagation();fetch('/api/pin-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:this.closest('.workspace-card').dataset.cwd})});this.textContent='✓'" aria-label="Pin workspace">📌</button>
     </div>
   </div>
   <div class="card-body" data-loaded="{% if sessions %}true{% else %}false{% endif %}">

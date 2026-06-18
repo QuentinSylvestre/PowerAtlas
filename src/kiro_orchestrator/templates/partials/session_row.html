@@ -1,4 +1,4 @@
-<div class="session-row" data-session-id="{{ session.session_id }}" onclick="this.classList.toggle('selected');updateActionBar()">
+<div class="session-row" data-session-id="{{ session.session_id }}" onclick="if(!event.target.closest('.session-actions')){this.classList.toggle('selected');updateActionBar()}">
   <div class="session-check"></div>
   <div class="session-content">
     <div class="session-title-row">
@@ -9,9 +9,9 @@
     <div class="session-last"><span class="label">Last:</span>"{{ (session.last_reply_tail or '')[:80] }}"</div>
   </div>
   <div class="session-actions">
-    <button class="row-btn" onclick="event.stopPropagation();fetch('/api/pin-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:'{{ session.session_id }}',workspace:'{{ cwd }}'})}).then(function(){this.textContent='📌'}.bind(this))" aria-label="Pin session">🖇</button>
+    <button class="row-btn" onclick="fetch('/api/pin-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:'{{ session.session_id }}',workspace:'{{ cwd }}'})});this.textContent='📌'" aria-label="Pin session">🖇</button>
     {% if not stale %}
-    <button class="row-btn primary" onclick="event.stopPropagation();fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:'{{ session.session_id }}',workspace:'{{ cwd }}'})}).then(function(r){return r.text()}).then(function(h){showToast(h)})" aria-label="Resume session: {{ session.title or 'untitled' }}">Resume</button>
+    <button class="row-btn primary" onclick="fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:'{{ session.session_id }}',workspace:'{{ cwd }}'})}).then(function(r){return r.text()}).then(showToast)" aria-label="Resume">Resume</button>
     {% endif %}
   </div>
 </div>

@@ -77,8 +77,18 @@ async def pin_session(request: Request):
     if session_id not in config.pinned_sessions:
         config.pinned_sessions.append(session_id)
         save_config(config)
-    cwd = request.headers.get("X-Workspace", "")
-    return await _render_workspace_card(request, cwd)
+    return {"ok": True}
+
+
+@app.post("/api/pin-folder")
+async def pin_folder(request: Request):
+    body = await request.json()
+    folder = body["folder"]
+    config = load_config()
+    if folder not in config.pinned_folders:
+        config.pinned_folders.append(folder)
+        save_config(config)
+    return {"ok": True}
 
 
 @app.post("/api/unpin-session")
@@ -89,8 +99,7 @@ async def unpin_session(request: Request):
     if session_id in config.pinned_sessions:
         config.pinned_sessions.remove(session_id)
         save_config(config)
-    cwd = request.headers.get("X-Workspace", "")
-    return await _render_workspace_card(request, cwd)
+    return {"ok": True}
 
 
 @app.get("/partials/workspaces", response_class=HTMLResponse)
