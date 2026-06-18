@@ -1,92 +1,63 @@
 {% extends "base.html" %}
 {% block content %}
-<header>
-<h1><a href="/">Kiro Orchestrator</a> &rsaquo; Settings</h1>
-</header>
-<main>
-<form method="post" action="/api/settings">
-<fieldset>
-<legend>Terminal</legend>
-<label for="terminal_command">Terminal preference</label>
-<select name="terminal_command" id="terminal_command" onchange="document.getElementById('custom-terminal').style.display=this.value==='custom'?'block':'none'">
-<option value="" {% if config.terminal_command == "" %}selected{% endif %}>Auto-detect (wt &gt; pwsh &gt; cmd)</option>
-<option value="wt" {% if config.terminal_command == "wt" %}selected{% endif %}>Windows Terminal (wt)</option>
-<option value="pwsh" {% if config.terminal_command == "pwsh" %}selected{% endif %}>PowerShell (pwsh)</option>
-<option value="cmd" {% if config.terminal_command == "cmd" %}selected{% endif %}>Command Prompt (cmd)</option>
-<option value="custom" {% if config.terminal_command not in ["", "wt", "pwsh", "cmd"] %}selected{% endif %}>Custom</option>
-</select>
-<div id="custom-terminal" style="display:{% if config.terminal_command not in ['', 'wt', 'pwsh', 'cmd'] %}block{% else %}none{% endif %}">
-<label for="custom_terminal_value">Custom command template</label>
-<input type="text" name="custom_terminal_value" id="custom_terminal_value"
-       value="{{ config.terminal_command if config.terminal_command not in ['', 'wt', 'pwsh', 'cmd'] else '' }}"
-       placeholder="e.g. alacritty -e">
+<div class="topbar">
+  <h1 class="topbar-title"><a href="/" style="color:inherit;text-decoration:none">Kiro Orchestrator</a> <span style="color:var(--text-dim)">› Settings</span></h1>
 </div>
-</fieldset>
 
-<fieldset>
-<legend>Window mode</legend>
-<label>
-<input type="checkbox" name="use_pywebview" {% if config.use_pywebview %}checked{% endif %}>
-Use native window (pywebview)
-</label>
-<p><em>Restart required after changing.</em></p>
-</fieldset>
+<div class="settings-page">
+  <form method="post" action="/api/settings" class="settings-form">
 
-<fieldset>
-<legend>Trust all tools</legend>
-<label>
-<input type="checkbox" name="trust_all_tools" {% if config.trust_all_tools %}checked{% endif %}>
-Pass --trust-all-tools to launched sessions
-</label>
-</fieldset>
+    <div class="settings-group">
+      <div class="settings-group-title">Terminal</div>
+      <div class="settings-row">
+        <label for="terminal_command">Preference</label>
+        <select name="terminal_command" id="terminal_command" class="settings-select" onchange="document.getElementById('custom-terminal').style.display=this.value==='custom'?'flex':'none'">
+          <option value="" {% if config.terminal_command == "" %}selected{% endif %}>Auto-detect (wt › pwsh › cmd)</option>
+          <option value="wt" {% if config.terminal_command == "wt" %}selected{% endif %}>Windows Terminal</option>
+          <option value="pwsh" {% if config.terminal_command == "pwsh" %}selected{% endif %}>PowerShell</option>
+          <option value="cmd" {% if config.terminal_command == "cmd" %}selected{% endif %}>Command Prompt</option>
+          <option value="custom" {% if config.terminal_command not in ["", "wt", "pwsh", "cmd"] %}selected{% endif %}>Custom</option>
+        </select>
+      </div>
+      <div class="settings-row" id="custom-terminal" style="display:{% if config.terminal_command not in ['', 'wt', 'pwsh', 'cmd'] %}flex{% else %}none{% endif %}">
+        <label for="custom_terminal_value">Template</label>
+        <input type="text" name="custom_terminal_value" id="custom_terminal_value" class="settings-input"
+               value="{{ config.terminal_command if config.terminal_command not in ['', 'wt', 'pwsh', 'cmd'] else '' }}"
+               placeholder="e.g. alacritty -e {cmd}">
+      </div>
+    </div>
 
-<fieldset>
-<legend>Pinned folders</legend>
-<ul id="pinned-folders-list">
-{% for folder in config.pinned_folders %}
-<li>{{ folder }} <button type="button" hx-post="/api/unpin-folder" hx-vals='{"folder":"{{ folder }}"}' hx-target="#pinned-folders-list" hx-swap="outerHTML">&times;</button></li>
-{% endfor %}
-</ul>
-<div>
-<input type="text" name="new_folder" placeholder="C:\path\to\workspace">
-<button type="button" onclick="addFolder(this)">Add folder</button>
+    <div class="settings-group">
+      <div class="settings-group-title">Defaults</div>
+      <div class="settings-row">
+        <label>Trust all tools</label>
+        <label class="toggle"><input type="checkbox" name="trust_all_tools" {% if config.trust_all_tools %}checked{% endif %}><span class="toggle-slider"></span></label>
+      </div>
+      <div class="settings-row">
+        <label>Start with Windows</label>
+        <label class="toggle"><input type="checkbox" name="autostart" {% if autostart_enabled %}checked{% endif %} onchange="fetch('/api/autostart',{method:'POST'})"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">Pinned folders</div>
+      <div class="pinned-list" id="pinned-folders-list">
+        {% for folder in config.pinned_folders %}
+        <div class="pinned-item"><span>{{ folder }}</span><button type="button" class="pinned-remove" onclick="this.parentElement.remove()">×</button></div>
+        {% endfor %}
+      </div>
+      <div class="settings-row">
+        <input type="text" name="new_folder" class="settings-input" style="flex:1" placeholder="C:\path\to\workspace">
+        <button type="button" class="settings-btn" onclick="addFolder(this)">Add</button>
+      </div>
+      <input type="hidden" name="pinned_folders" id="pinned_folders_hidden" value="{{ config.pinned_folders | join('|') }}">
+    </div>
+
+    <button type="submit" class="settings-btn primary">Save settings</button>
+  </form>
 </div>
-<input type="hidden" name="pinned_folders" id="pinned_folders_hidden" value="{{ config.pinned_folders | join('|') }}">
-</fieldset>
 
-<fieldset>
-<legend>Autostart</legend>
-<label>
-<input type="checkbox" name="autostart" {% if autostart_enabled %}checked{% endif %}
-       hx-post="/api/autostart" hx-swap="none">
-Start with Windows
-</label>
-</fieldset>
-
-<button type="submit">Save settings</button>
-</form>
-</main>
 <script>
-function addFolder(btn) {
-    const input = btn.previousElementSibling;
-    const val = input.value.trim();
-    if (!val) return;
-    const hidden = document.getElementById('pinned_folders_hidden');
-    const list = document.getElementById('pinned-folders-list');
-    const folders = hidden.value ? hidden.value.split('|') : [];
-    if (!folders.includes(val)) {
-        folders.push(val);
-        hidden.value = folders.join('|');
-        const li = document.createElement('li');
-        li.textContent = val + ' ';
-        const rm = document.createElement('button');
-        rm.type = 'button';
-        rm.textContent = '\u00d7';
-        rm.onclick = function() { li.remove(); hidden.value = hidden.value.split('|').filter(f=>f!==val).join('|'); };
-        li.appendChild(rm);
-        list.appendChild(li);
-    }
-    input.value = '';
-}
+function addFolder(btn){var input=btn.previousElementSibling;var val=input.value.trim();if(!val)return;var hidden=document.getElementById('pinned_folders_hidden');var list=document.getElementById('pinned-folders-list');var folders=hidden.value?hidden.value.split('|'):[];if(!folders.includes(val)){folders.push(val);hidden.value=folders.join('|');var d=document.createElement('div');d.className='pinned-item';d.innerHTML='<span>'+val+'</span><button type="button" class="pinned-remove" onclick="this.parentElement.remove()">×</button>';list.appendChild(d)}input.value=''}
 </script>
 {% endblock %}
