@@ -119,7 +119,7 @@ async def partials_workspaces(request: Request):
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=sessions, stale=stale,
-            pinned_sessions=config.pinned_sessions,
+            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
         )
     return HTMLResponse(cards_html)
 
@@ -154,7 +154,7 @@ async def search(request: Request, q: str = ""):
             stale = not Path(cwd).exists()
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=display_sessions, stale=stale,
-                pinned_sessions=config.pinned_sessions,
+                pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
             )
 
     if not cards_html:
@@ -230,7 +230,7 @@ async def _render_workspace_card(request: Request, cwd: str) -> HTMLResponse:
     stale = not Path(cwd).exists()
     html = templates.get_template("partials/workspace_card.html").render(
         request=request, cwd=cwd, sessions=sessions, stale=stale,
-        pinned_sessions=config.pinned_sessions,
+        pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
     )
     return HTMLResponse(html)
 

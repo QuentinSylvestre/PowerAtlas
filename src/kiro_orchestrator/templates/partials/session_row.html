@@ -1,15 +1,20 @@
-<div class="session-row{% if session.session_id in pinned_sessions %} pinned{% endif %}" data-session-id="{{ session.session_id }}">
-<button class="btn-pin" aria-label="{% if session.session_id in pinned_sessions %}Unpin{% else %}Pin{% endif %} session"
-        hx-post="/api/{% if session.session_id in pinned_sessions %}unpin{% else %}pin{% endif %}-session"
-        hx-vals='{"session_id":"{{ session.session_id }}"}'
-        hx-target="closest .workspace-card" hx-select=".workspace-card" hx-swap="outerHTML"
-        hx-headers='{"X-Workspace":"{{ session.cwd }}"}'>
-{% if session.session_id in pinned_sessions %}&#x1F4CC;{% else %}&#x1F587;{% endif %}
-</button>
-<div class="session-title">{{ session.title }}</div>
-<div class="session-time">{{ session.updated_at }}</div>
-<div class="session-first-prompt">{{ session.first_prompt[:100] }}</div>
-<div class="session-last-prompt">{{ session.last_prompt[:100] }}</div>
-<div class="session-last-reply">{{ session.last_reply_tail[:100] }}</div>
-{% if stale %}<button class="btn-resume" disabled aria-label="Resume session: {{ session.title }}">Resume</button>{% else %}<button class="btn-resume" aria-label="Resume session: {{ session.title }}">Resume</button>{% endif %}
+<div class="session-row" data-session-id="{{ session.session_id }}" onclick="this.classList.toggle('selected');updateActionBar()">
+  <div class="session-check"></div>
+  <div class="session-content">
+    <div class="session-title-row">
+      <span class="session-title">{{ session.title or '<untitled>' }}</span>
+      <span class="session-time">{{ session.updated_at[:10] if session.updated_at else '' }}</span>
+    </div>
+    <div class="session-preview"><span class="label">First:</span>{{ (session.first_prompt or '')[:100] }}</div>
+    <div class="session-last"><span class="label">Last:</span>"{{ (session.last_reply_tail or '')[:80] }}"</div>
+  </div>
+  <div class="session-actions">
+    {% if not stale %}
+    <button class="row-btn primary" aria-label="Resume session: {{ session.title or 'untitled' }}"
+            hx-post="/api/launch" hx-vals='{"session_id":"{{ session.session_id }}","workspace":"{{ cwd }}"}'
+            hx-swap="none" onclick="event.stopPropagation()">Resume</button>
+    {% endif %}
+    <input type="hidden" name="session_id" value="{{ session.session_id }}">
+    <input type="hidden" name="workspace" value="{{ cwd }}">
+  </div>
 </div>

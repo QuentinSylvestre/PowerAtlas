@@ -1,17 +1,19 @@
-<details class="workspace-card{% if stale %} stale{% endif %}">
-<summary>
-<span class="expand-icon" aria-hidden="true"></span>
-<span class="workspace-path">{{ cwd }}</span>
-<span class="session-count">{{ sessions|length }} session{{ "s" if sessions|length != 1 }}</span>
-{% if stale %}<span class="badge-stale">folder missing</span>{% endif %}
-</summary>
-<div class="sessions">
-{% if sessions %}
-{% for session in sessions %}
-{% include "partials/session_row.html" %}
-{% endfor %}
-{% else %}
-<p class="empty-card">No sessions yet. <button disabled>New session</button></p>
-{% endif %}
+<div class="workspace-card{% if stale %} stale{% endif %}">
+  <div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')">
+    <span class="card-chevron">▼</span>
+    <span class="card-folder-name">{{ folder_name }}</span>
+    <div class="card-meta">
+      <span class="card-count">{{ sessions|length }}</span>
+      {% if stale %}<span class="badge-stale">missing</span>{% endif %}
+    </div>
+  </div>
+  <div class="card-body">
+    {% if sessions %}
+    {% for session in sessions %}
+    {% include "partials/session_row.html" %}
+    {% endfor %}
+    {% else %}
+    <div class="new-session-inline">+ New session</div>
+    {% endif %}
+  </div>
 </div>
-</details>

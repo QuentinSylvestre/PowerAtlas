@@ -1,15 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
-<header>
-<h1>Kiro Orchestrator</h1>
-<nav><a href="/settings">Settings</a></nav>
-<input type="search" name="q" placeholder="Search workspaces..." aria-label="Search workspaces"
-       hx-get="/search" hx-trigger="input changed delay:300ms" hx-target="#workspaces">
-</header>
-<main id="workspaces" aria-busy="true" hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
+<div class="topbar">
+  <div class="topbar-title">Kiro Orchestrator</div>
+  <div class="topbar-spacer"></div>
+  <div class="trust-toggle{% if trust_all_tools %} active{% endif %}"
+       hx-post="/api/toggle-trust" hx-swap="none"
+       onclick="this.classList.toggle('active')">
+    <span class="trust-dot"></span>Trust all tools
+  </div>
+  <a href="/settings" class="settings-btn" aria-label="Settings">⚙</a>
+</div>
+
+<div class="search-area">
+  <div class="command-bar">
+    <span class="search-icon">⌕</span>
+    <input type="search" name="q" placeholder="Search sessions, folders..." aria-label="Search workspaces"
+           hx-get="/search" hx-trigger="input changed delay:300ms" hx-target="#cards-area">
+  </div>
+</div>
+
+<main id="cards-area" class="cards-area" aria-busy="true"
+      hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
       hx-on::after-swap="this.removeAttribute('aria-busy')">
-<div class="skeleton-card"></div>
-<div class="skeleton-card"></div>
-<div class="skeleton-card"></div>
+  <div class="skeleton-card"></div>
+  <div class="skeleton-card"></div>
+  <div class="skeleton-card"></div>
 </main>
+
+<div class="action-bar" id="actionBar">
+  <span class="selection-info"><strong id="selCount">0</strong> sessions selected</span>
+  <div class="topbar-spacer"></div>
+  <button class="action-btn secondary" onclick="document.querySelectorAll('.session-row.selected').forEach(r=>r.classList.remove('selected'));updateActionBar()">Clear</button>
+  <button class="action-btn launch" hx-post="/api/launch-batch" hx-include=".session-row.selected [name=session_id]">▶ Launch selected</button>
+</div>
+<script>
+function updateActionBar(){var n=document.querySelectorAll('.session-row.selected').length;document.getElementById('selCount').textContent=n;document.getElementById('actionBar').classList.toggle('visible',n>0)}
+</script>
 {% endblock %}
