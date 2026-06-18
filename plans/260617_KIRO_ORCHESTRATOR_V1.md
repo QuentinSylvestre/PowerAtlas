@@ -1,7 +1,7 @@
 # Kiro Orchestrator — Lightweight Session Launcher
 
 > **Date**: 2026-06-17
-> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Desktop launcher/dashboard for kiro-cli sessions with tray icon, multi-select batch launch, and workspace discovery
 > **Estimated effort**: 2-3 days
 
@@ -500,14 +500,18 @@ Session pinning:
 - Pin state persisted in config.toml (list of session IDs)
 
 **Exit criteria**:
-- [ ] Settings page renders with current values populated
-- [ ] Changing terminal preference persists and applies to next launch
-- [ ] Pywebview/browser toggle persists (note shown: "restart required")
-- [ ] Autostart toggle enables/disables startup shortcut
-- [ ] Pinned sessions show pin indicator and appear first in their card
-- [ ] Pinned folders appear in workspace list even with 0 sessions
-- [ ] Adding a new folder via settings makes it appear immediately
-- [ ] `README.md` created with installation instructions, usage, and config reference
+- [x] Settings page renders with current values populated
+- [x] Changing terminal preference persists and applies to next launch
+- [x] Pywebview/browser toggle persists (note shown: "restart required")
+- [x] Autostart toggle enables/disables startup shortcut
+- [x] Pinned sessions show pin indicator and appear first in their card
+- [x] Pinned folders appear in workspace list even with 0 sessions
+- [x] Adding a new folder via settings makes it appear immediately
+- [x] `README.md` created with installation instructions, usage, and config reference
+
+#### Implementation (2026-06-18, code: 22eb81d)
+
+Added settings page at `/settings` with terminal preference, pywebview toggle (restart-required note), trust-all default, pinned folders management, and autostart toggle. Session pin/unpin via POST endpoints with sort-to-top and pin indicator. Pinned folders merged into workspace list. 6 new tests, 43 total pass.
 
 ## 6) Risk Assessment
 
