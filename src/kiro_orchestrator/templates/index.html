@@ -15,6 +15,10 @@
   <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})">
     <span class="trust-dot"></span>Autostart
   </div>
+  <div class="refresh-group">
+    <span class="refresh-time" id="refreshTime"></span>
+    <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions">↻</button>
+  </div>
 </div>
 
 <div class="search-area">
@@ -49,6 +53,7 @@ function pinWorkspace(btn){var card=btn.closest('.workspace-card');var pinned=bt
 function launchFresh(btn){var card=btn.closest('.workspace-card');fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:card.dataset.cwd})}).then(function(r){return r.text()}).then(showToast)}
 function launchSelected(){var sessions=[];document.querySelectorAll('.session-row.selected').forEach(function(r){sessions.push({session_id:r.dataset.sid,workspace:r.dataset.cwd})});document.querySelectorAll('.workspace-card.selected').forEach(function(c){sessions.push({workspace:c.dataset.cwd})});if(!sessions.length)return;if(sessions.length>5&&!confirm('Launch '+sessions.length+' sessions?'))return;fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:sessions})}).then(function(r){return r.text()}).then(showToast)}
 function loadExpandedCards(){document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(card){var body=card.querySelector('.card-body');if(body&&body.dataset.loaded==='false'){body.dataset.loaded='true';fetch('/partials/sessions?cwd='+encodeURIComponent(card.dataset.cwd)).then(function(r){return r.text()}).then(function(html){body.innerHTML=html})}})}
-document.addEventListener('DOMContentLoaded',function(){document.getElementById('cards-area').addEventListener('htmx:afterSwap',loadExpandedCards)});
+document.addEventListener('DOMContentLoaded',function(){document.getElementById('cards-area').addEventListener('htmx:afterSwap',loadExpandedCards);fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh})});
+function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.textContent='...';fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshCards()}).finally(function(){btn.disabled=false;btn.textContent='\u21BB'})}
 </script>
 {% endblock %}

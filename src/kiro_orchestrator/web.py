@@ -286,6 +286,21 @@ async def toggle_trust():
     return {"trust_all_tools": config.trust_all_tools}
 
 
+@app.post("/api/refresh")
+async def api_refresh():
+    import asyncio
+    data.session_cache.clear()
+    data._cache.clear()
+    config = load_config()
+    await asyncio.to_thread(data.warmup_pinned, config.pinned_folders)
+    return {"last_refresh": data.session_cache.last_refresh}
+
+
+@app.get("/api/last-refresh")
+async def api_last_refresh():
+    return {"last_refresh": data.session_cache.last_refresh}
+
+
 @app.post("/api/save-setting")
 async def save_setting(request: Request):
     body = await request.json()

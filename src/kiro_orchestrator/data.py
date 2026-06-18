@@ -44,6 +44,7 @@ class SessionCache:
         self._sessions: dict[str, list[Session]] = {}
         self._file_stats: dict[str, dict[str, _FileInfo]] = {}
         self._loaded_cwds: set[str] = set()
+        self.last_refresh: str = ""
 
     def get(self, cwd: str) -> list[Session] | None:
         key = _normalize_path(cwd)
@@ -57,6 +58,7 @@ class SessionCache:
             self._sessions[key] = sessions
             self._file_stats[key] = file_stats
             self._loaded_cwds.add(key)
+            self.last_refresh = time.strftime("%H:%M:%S")
 
     def get_loaded_cwds(self) -> set[str]:
         with self._lock:
