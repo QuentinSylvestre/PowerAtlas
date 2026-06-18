@@ -190,8 +190,10 @@ async def partials_workspaces(request: Request):
         cards_html += '<div class="section-label">Pinned workspaces</div>'
         for cwd, count, updated in pinned_cards:
             stale = not Path(cwd).exists()
+            cached = data.session_cache.get(cwd)
+            card_sessions = _sort_pinned_first(cached, config.pinned_sessions) if cached else []
             cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=stale,
+                request=request, cwd=cwd, sessions=card_sessions, stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=True, last_updated=updated,
             )
@@ -370,38 +372,53 @@ async def api_new_session(request: Request):
 
 
 async def _render_pinned_sessions(request, config) -> str:
-    """Render pinned sessions as flat rows (finds them from metadata)."""
-    import asyncio
+    """Render pinned sessions as flat rows. Uses cache when available for full prompts."""
     from .data import SESSION_DIR, _normalize_path
     import json as _json
 
-    # Find session metadata for pinned IDs
     pinned_ids = set(config.pinned_sessions)
     html = ""
-    if not SESSION_DIR.is_dir():
-        return html
-    for meta_file in SESSION_DIR.glob("*.json"):
-        if meta_file.suffix == ".jsonl":
+
+    # Try cache first: find pinned sessions in any cached workspace
+    found_ids: set[str] = set()
+    for norm_cwd in data.session_cache.get_loaded_cwds():
+        cached = data.session_cache.get(norm_cwd)
+        if not cached:
             continue
-        if meta_file.stem not in pinned_ids:
-            continue
-        try:
-            d = _json.loads(meta_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        cwd = d.get("cwd", "")
-        session = data.Session(
-            session_id=d.get("session_id", meta_file.stem),
-            title=d.get("title", "<untitled>"),
-            cwd=cwd,
-            created_at=d.get("created_at", ""),
-            updated_at=d.get("updated_at", ""),
-            first_prompt="", last_prompt="", last_reply_tail="",
-        )
-        html += templates.get_template("partials/session_row.html").render(
-            request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-            pinned_sessions=config.pinned_sessions,
-        )
+        for session in cached:
+            if session.session_id in pinned_ids and session.session_id not in found_ids:
+                found_ids.add(session.session_id)
+                cwd = session.cwd
+                html += templates.get_template("partials/session_row.html").render(
+                    request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+                    pinned_sessions=config.pinned_sessions,
+                )
+
+    # Fallback: pinned sessions not found in cache — read metadata directly (empty prompts)
+    remaining = pinned_ids - found_ids
+    if remaining and SESSION_DIR.is_dir():
+        for meta_file in SESSION_DIR.glob("*.json"):
+            if meta_file.suffix == ".jsonl":
+                continue
+            if meta_file.stem not in remaining:
+                continue
+            try:
+                d = _json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            cwd = d.get("cwd", "")
+            session = data.Session(
+                session_id=d.get("session_id", meta_file.stem),
+                title=d.get("title", "<untitled>"),
+                cwd=cwd,
+                created_at=d.get("created_at", ""),
+                updated_at=d.get("updated_at", ""),
+                first_prompt="", last_prompt="", last_reply_tail="",
+            )
+            html += templates.get_template("partials/session_row.html").render(
+                request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+                pinned_sessions=config.pinned_sessions,
+            )
     return html
 
 
