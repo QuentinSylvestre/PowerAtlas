@@ -96,10 +96,12 @@ async def unpin_session(request: Request):
 @app.get("/partials/workspaces", response_class=HTMLResponse)
 async def partials_workspaces(request: Request):
     import asyncio
+    import time
+    t0 = time.perf_counter()
     try:
-        workspaces = await asyncio.to_thread(data.discover_workspaces)
-        log.info("Discovered %d workspaces", len(workspaces))
-    except Exception as e:
+        workspace_data = await asyncio.to_thread(data.discover_workspaces_with_counts)
+        log.info("Discovered %d workspaces in %.2fs", len(workspace_data), time.perf_counter() - t0)
+    except Exception:
         log.exception("Failed to discover workspaces")
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Error: could not load session data",
@@ -107,21 +109,27 @@ async def partials_workspaces(request: Request):
         })
 
     config = load_config()
-    workspaces = _merge_pinned_folders(workspaces, config.pinned_folders)
+    # Merge pinned folders (with count=0)
+    existing = {cwd for cwd, _ in workspace_data}
+    for pf in config.pinned_folders:
+        from .data import _normalize_path
+        if _normalize_path(pf) not in existing:
+            workspace_data.append((pf, 0))
 
-    if not workspaces:
+    if not workspace_data:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
             "message": "No sessions found. Pin a folder to get started.",
         })
 
     cards_html = ""
-    for cwd in workspaces:
+    for cwd, count in workspace_data:
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-            session_count=_count_sessions(cwd),
+            session_count=count,
         )
+    log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
 
 
@@ -140,7 +148,6 @@ async def search(request: Request, q: str = ""):
         })
 
     config = load_config()
-    workspaces = _merge_pinned_folders(workspaces, config.pinned_folders)
 
     cards_html = ""
     for cwd in workspaces:
@@ -177,11 +184,15 @@ async def toggle_trust():
 async def partials_sessions(request: Request, cwd: str = ""):
     """Lazy-load sessions for a single workspace card."""
     import asyncio
+    import time
+    t0 = time.perf_counter()
+    log.info("Loading sessions for %s", cwd[-40:])
     config = load_config()
     try:
         sessions = await asyncio.to_thread(data.get_sessions, cwd)
     except Exception:
         sessions = []
+    log.info("Got %d sessions for %s in %.2fs", len(sessions), Path(cwd).name, time.perf_counter() - t0)
     sessions = _sort_pinned_first(sessions, config.pinned_sessions)
     if not sessions:
         return HTMLResponse('<div class="new-session-inline">+ New session</div>')
@@ -252,45 +263,6 @@ async def _render_workspace_card(request: Request, cwd: str) -> HTMLResponse:
         pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
     )
     return HTMLResponse(html)
-
-
-def _count_sessions(cwd: str) -> int:
-    """Count sessions for a workspace without reading .jsonl content (fast)."""
-    from .data import SESSION_DIR, _normalize_path
-    import json as _json
-    count = 0
-    target = _normalize_path(cwd)
-    if not SESSION_DIR.is_dir():
-        return 0
-    for meta_file in SESSION_DIR.glob("*.json"):
-        if meta_file.suffix == ".jsonl":
-            continue
-        try:
-            if meta_file.stat().st_size > 1_048_576:
-                continue
-            d = _json.loads(meta_file.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if d.get("parent_session_id"):
-            continue
-        if _normalize_path(d.get("cwd", "")) == target:
-            count += 1
-    return count
-
-
-def _merge_pinned_folders(workspaces: list[str], pinned_folders: list[str]) -> list[str]:
-    """Ensure pinned folders appear in workspace list even with 0 sessions."""
-    import sys
-    existing = set()
-    for w in workspaces:
-        norm = w.casefold() if sys.platform == "win32" else w
-        existing.add(norm)
-    for folder in pinned_folders:
-        norm = folder.casefold() if sys.platform == "win32" else folder
-        if norm not in existing:
-            workspaces.append(folder)
-            existing.add(norm)
-    return workspaces
 
 
 def _sort_pinned_first(sessions: list[data.Session], pinned: list[str]) -> list[data.Session]:

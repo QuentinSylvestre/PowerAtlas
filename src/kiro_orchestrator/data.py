@@ -28,6 +28,7 @@ def discover_workspaces() -> list[str]:
     """Discover workspaces from session metadata + sqlite. Returns unique cwds sorted by recency."""
     # cwd -> most recent updated_at
     workspaces: dict[str, str] = {}
+    counts: dict[str, int] = {}
 
     # Primary: session .json metadata files
     if SESSION_DIR.is_dir():
@@ -47,6 +48,7 @@ def discover_workspaces() -> list[str]:
                 continue
             updated = data.get("updated_at", "")
             key = _normalize_path(cwd)
+            counts[key] = counts.get(key, 0) + 1
             if key not in workspaces or updated > workspaces[key]:
                 workspaces[key] = updated
 
@@ -65,6 +67,46 @@ def discover_workspaces() -> list[str]:
             conn.close()
 
     return sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
+
+
+def discover_workspaces_with_counts() -> list[tuple[str, int]]:
+    """Like discover_workspaces but returns (cwd, session_count) tuples. Single pass."""
+    workspaces: dict[str, str] = {}
+    counts: dict[str, int] = {}
+    if SESSION_DIR.is_dir():
+        for meta_file in SESSION_DIR.glob("*.json"):
+            if meta_file.suffix == ".jsonl":
+                continue
+            try:
+                if meta_file.stat().st_size > 1_048_576:
+                    continue
+                d = json.loads(meta_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if d.get("parent_session_id"):
+                continue
+            cwd = d.get("cwd", "")
+            if not cwd:
+                continue
+            key = _normalize_path(cwd)
+            counts[key] = counts.get(key, 0) + 1
+            updated = d.get("updated_at", "")
+            if key not in workspaces or updated > workspaces[key]:
+                workspaces[key] = updated
+    conn = _open_sqlite_readonly()
+    if conn:
+        try:
+            for row in conn.execute("SELECT key, updated_at FROM conversations_v2"):
+                key = _normalize_path(row[0])
+                if key not in workspaces:
+                    counts[key] = counts.get(key, 0)
+                    workspaces[key] = str(row[1]) if row[1] else ""
+        except sqlite3.OperationalError:
+            pass
+        finally:
+            conn.close()
+    sorted_keys = sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
+    return [(k, counts.get(k, 0)) for k in sorted_keys]
 
 
 def get_sessions(cwd: str) -> list[Session]:

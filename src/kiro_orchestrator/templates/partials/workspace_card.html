@@ -1,5 +1,5 @@
-<div class="workspace-card{% if stale %} stale{% endif %} collapsed">
-  <div class="card-header" onclick="toggleCard(this.parentElement, '{{ cwd }}')">
+<div class="workspace-card{% if stale %} stale{% endif %} collapsed" data-cwd="{{ cwd }}">
+  <div class="card-header" onclick="toggleCard(this.parentElement)">
     <span class="card-chevron">▼</span>
     <span class="card-folder-name">{{ folder_name }}</span>
     <div class="card-meta">

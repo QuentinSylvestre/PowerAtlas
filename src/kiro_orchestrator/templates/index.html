@@ -35,6 +35,5 @@
 </div>
 <script>
 function updateActionBar(){var n=document.querySelectorAll('.session-row.selected').length;document.getElementById('selCount').textContent=n;document.getElementById('actionBar').classList.toggle('visible',n>0)}
-function toggleCard(card,cwd){card.classList.toggle('collapsed');var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)).then(r=>r.text()).then(html=>{body.innerHTML=html}).catch(()=>{body.innerHTML='<div class="new-session-inline">Failed to load sessions</div>'})}}
-</script>
+function toggleCard(card){card.classList.toggle('collapsed');var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)).then(function(r){return r.text()}).then(function(html){body.innerHTML=html}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}</script>
 {% endblock %}

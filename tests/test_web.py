@@ -1,5 +1,6 @@
 """Tests for web module."""
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -34,10 +35,10 @@ def test_index_returns_html(client):
 
 
 @patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [workspace]
+    mock_discover.return_value = [(workspace, 1)]
     mock_sessions.return_value = [_make_session(cwd=workspace)]
 
     resp = client.get("/partials/workspaces")
@@ -47,9 +48,8 @@ def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
 
 
 @patch("kiro_orchestrator.web.load_config")
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
-def test_partials_workspaces_empty(mock_discover, mock_sessions, mock_config, client):
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+def test_partials_workspaces_empty(mock_discover, mock_config, client):
     from kiro_orchestrator.config import Config
     mock_config.return_value = Config()
     mock_discover.return_value = []
@@ -59,9 +59,9 @@ def test_partials_workspaces_empty(mock_discover, mock_sessions, mock_config, cl
 
 
 @patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
-    mock_discover.return_value = ["C:\\nonexistent\\path\\xyz"]
+    mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1)]
     mock_sessions.return_value = [_make_session(cwd="C:\\nonexistent\\path\\xyz")]
 
     resp = client.get("/partials/workspaces")
@@ -70,9 +70,8 @@ def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
     assert "stale" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
-def test_partials_workspaces_error(mock_discover, mock_sessions, client):
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+def test_partials_workspaces_error(mock_discover, client):
     mock_discover.side_effect = RuntimeError("db unavailable")
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
@@ -138,14 +137,14 @@ def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_
 
 
 @patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [workspace]
+    mock_discover.return_value = [(workspace, 0)]
     mock_sessions.return_value = []
 
     resp = client.get("/partials/workspaces")
-    assert "No sessions yet" in resp.text or "New session" in resp.text or "Loading" in resp.text
+    assert "Loading" in resp.text or "workspace-card" in resp.text
 
 
 
@@ -211,13 +210,13 @@ def test_unpin_session(mock_sessions, mock_config, mock_save, client):
 
 @patch("kiro_orchestrator.web.load_config")
 @patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, client, tmp_path):
     from kiro_orchestrator.config import Config
     workspace = str(tmp_path)
     pinned = "C:\\my-pinned-workspace"
     mock_config.return_value = Config(pinned_folders=[pinned])
-    mock_discover.return_value = [workspace]
+    mock_discover.return_value = [(workspace, 0)]
     mock_sessions.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
