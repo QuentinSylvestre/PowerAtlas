@@ -1,5 +1,6 @@
 """FastAPI web application with htmx-powered UI."""
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -13,6 +14,7 @@ from . import autostart, data, launcher
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
+log = logging.getLogger("kiro_orchestrator.web")
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -93,9 +95,12 @@ async def unpin_session(request: Request):
 
 @app.get("/partials/workspaces", response_class=HTMLResponse)
 async def partials_workspaces(request: Request):
+    import asyncio
     try:
-        workspaces = data.discover_workspaces()
-    except Exception:
+        workspaces = await asyncio.to_thread(data.discover_workspaces)
+        log.info("Discovered %d workspaces", len(workspaces))
+    except Exception as e:
+        log.exception("Failed to discover workspaces")
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Error: could not load session data",
             "level": "error",
@@ -111,15 +116,11 @@ async def partials_workspaces(request: Request):
 
     cards_html = ""
     for cwd in workspaces:
-        try:
-            sessions = data.get_sessions(cwd)
-        except Exception:
-            sessions = []
-        sessions = _sort_pinned_first(sessions, config.pinned_sessions)
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
-            request=request, cwd=cwd, sessions=sessions, stale=stale,
+            request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+            session_count=_count_sessions(cwd),
         )
     return HTMLResponse(cards_html)
 
@@ -172,7 +173,25 @@ async def toggle_trust():
     return {"trust_all_tools": config.trust_all_tools}
 
 
-@app.post("/api/launch", response_class=HTMLResponse)
+@app.get("/partials/sessions", response_class=HTMLResponse)
+async def partials_sessions(request: Request, cwd: str = ""):
+    """Lazy-load sessions for a single workspace card."""
+    import asyncio
+    config = load_config()
+    try:
+        sessions = await asyncio.to_thread(data.get_sessions, cwd)
+    except Exception:
+        sessions = []
+    sessions = _sort_pinned_first(sessions, config.pinned_sessions)
+    if not sessions:
+        return HTMLResponse('<div class="new-session-inline">+ New session</div>')
+    stale = not Path(cwd).exists()
+    html = ""
+    for session in sessions:
+        html += templates.get_template("partials/session_row.html").render(
+            request=request, session=session, cwd=cwd, stale=stale,
+        )
+    return HTMLResponse(html)
 async def api_launch(request: Request):
     body = await request.json()
     config = load_config()
@@ -233,6 +252,30 @@ async def _render_workspace_card(request: Request, cwd: str) -> HTMLResponse:
         pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
     )
     return HTMLResponse(html)
+
+
+def _count_sessions(cwd: str) -> int:
+    """Count sessions for a workspace without reading .jsonl content (fast)."""
+    from .data import SESSION_DIR, _normalize_path
+    import json as _json
+    count = 0
+    target = _normalize_path(cwd)
+    if not SESSION_DIR.is_dir():
+        return 0
+    for meta_file in SESSION_DIR.glob("*.json"):
+        if meta_file.suffix == ".jsonl":
+            continue
+        try:
+            if meta_file.stat().st_size > 1_048_576:
+                continue
+            d = _json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if d.get("parent_session_id"):
+            continue
+        if _normalize_path(d.get("cwd", "")) == target:
+            count += 1
+    return count
 
 
 def _merge_pinned_folders(workspaces: list[str], pinned_folders: list[str]) -> list[str]:

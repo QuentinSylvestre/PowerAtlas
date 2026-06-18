@@ -44,6 +44,22 @@ def _relaunch_detached() -> None:
 
 def _run_foreground() -> None:
     """Run the server + tray in this process (blocking)."""
+    import logging
+
+    from .config import CONFIG_DIR
+    log_path = CONFIG_DIR / "orchestrator.log"
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+        ],
+    )
+    log = logging.getLogger("kiro_orchestrator")
+    log.info("Starting kiro-orchestrator (foreground)")
+
     _single_instance_guard()
     config = load_config()
 

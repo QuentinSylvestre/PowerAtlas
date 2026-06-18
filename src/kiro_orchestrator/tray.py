@@ -1,12 +1,13 @@
 """System tray icon and menu."""
 
+import os
 import threading
 import webbrowser
 
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
-from .config import Config, load_config, save_config
+from .config import Config, CONFIG_DIR, load_config, save_config
 
 _shutdown_event = threading.Event()
 
@@ -37,6 +38,11 @@ def run_tray(server_url: str, config: Config) -> None:
     def on_settings(icon, item):
         webbrowser.open(f"{server_url}/settings")
 
+    def on_logs(icon, item):
+        log_path = CONFIG_DIR / "orchestrator.log"
+        if log_path.exists():
+            os.startfile(str(log_path))
+
     def on_quit(icon, item):
         _shutdown_event.set()
         icon.stop()
@@ -45,6 +51,7 @@ def run_tray(server_url: str, config: Config) -> None:
         pystray.MenuItem("Open", on_open, default=True),
         pystray.MenuItem("Trust All Tools", on_trust, checked=lambda item: config.trust_all_tools),
         pystray.MenuItem("Settings", on_settings),
+        pystray.MenuItem("Logs", on_logs),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("kiro-orchestrator", _create_icon(), "Kiro Orchestrator", menu)

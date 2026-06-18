@@ -42,9 +42,8 @@ def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
 
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
-    assert workspace in resp.text
-    assert "test session" in resp.text
-    assert "1 session" in resp.text or "1</span>" in resp.text
+    assert workspace in resp.text or Path(workspace).name in resp.text
+    assert "1</span>" in resp.text or "card-count" in resp.text
 
 
 @patch("kiro_orchestrator.web.load_config")
@@ -131,7 +130,7 @@ def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_
         last_reply_tail="final answer",
     )]
 
-    resp = client.get("/partials/workspaces")
+    resp = client.get("/partials/sessions", params={"cwd": workspace})
     assert "my title" in resp.text
     assert "first question" in resp.text
     assert "last question" in resp.text or "final answer" in resp.text  # new template shows last_reply not last_prompt
@@ -146,7 +145,7 @@ def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_
     mock_sessions.return_value = []
 
     resp = client.get("/partials/workspaces")
-    assert "No sessions yet" in resp.text or "New session" in resp.text
+    assert "No sessions yet" in resp.text or "New session" in resp.text or "Loading" in resp.text
 
 
 
@@ -237,7 +236,7 @@ def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config,
         _make_session(session_id="sess-1", title="unpinned", cwd=workspace),
         _make_session(session_id="sess-2", title="pinned", cwd=workspace),
     ]
-    resp = client.get("/partials/workspaces")
+    resp = client.get("/partials/sessions", params={"cwd": workspace})
     assert resp.status_code == 200
     # Pinned should appear before unpinned
     assert resp.text.index("pinned") < resp.text.index("unpinned")

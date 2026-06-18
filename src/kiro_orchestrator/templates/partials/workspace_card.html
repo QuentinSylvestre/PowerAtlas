@@ -1,19 +1,19 @@
-<div class="workspace-card{% if stale %} stale{% endif %}">
-  <div class="card-header" onclick="this.parentElement.classList.toggle('collapsed')">
+<div class="workspace-card{% if stale %} stale{% endif %} collapsed">
+  <div class="card-header" onclick="toggleCard(this.parentElement, '{{ cwd }}')">
     <span class="card-chevron">▼</span>
     <span class="card-folder-name">{{ folder_name }}</span>
     <div class="card-meta">
-      <span class="card-count">{{ sessions|length }}</span>
+      <span class="card-count">{{ session_count if session_count is defined else sessions|length }}</span>
       {% if stale %}<span class="badge-stale">missing</span>{% endif %}
     </div>
   </div>
-  <div class="card-body">
+  <div class="card-body" data-loaded="{% if sessions %}true{% else %}false{% endif %}">
     {% if sessions %}
     {% for session in sessions %}
     {% include "partials/session_row.html" %}
     {% endfor %}
     {% else %}
-    <div class="new-session-inline">+ New session</div>
+    <div class="loading-sessions">Loading...</div>
     {% endif %}
   </div>
 </div>
