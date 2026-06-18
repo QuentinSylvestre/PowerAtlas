@@ -1,5 +1,6 @@
 <details class="workspace-card{% if stale %} stale{% endif %}">
 <summary>
+<span class="expand-icon" aria-hidden="true"></span>
 <span class="workspace-path">{{ cwd }}</span>
 <span class="session-count">{{ sessions|length }} session{{ "s" if sessions|length != 1 }}</span>
 {% if stale %}<span class="badge-stale">folder missing</span>{% endif %}

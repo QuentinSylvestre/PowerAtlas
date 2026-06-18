@@ -23,3 +23,10 @@ input[type="search"] { flex: 1; padding: .4rem .6rem; border-radius: 4px; border
 .toast-error { background: #3a1111; border: 1px solid #a33; }
 .skeleton-card { height: 3rem; margin-bottom: .5rem; border-radius: 6px; background: linear-gradient(90deg, #16213e 25%, #1a2740 50%, #16213e 75%); background-size: 200%; animation: shimmer 1.5s infinite; }
 @keyframes shimmer { to { background-position: -200% 0; } }
+
+.skip-link { position: absolute; left: -9999px; top: 0; background: #333; color: #fff; padding: .4rem .8rem; z-index: 100; }
+.skip-link:focus { left: 1rem; }
+.expand-icon::before { content: "\25B6"; font-size: .6rem; transition: transform .2s; display: inline-block; }
+details[open] > summary .expand-icon::before { transform: rotate(90deg); }
+.toast { position: relative; display: flex; align-items: center; gap: .5rem; }
+.toast-dismiss { background: none; border: none; color: #e0e0e0; font-size: 1.2rem; cursor: pointer; margin-left: auto; }

@@ -2,10 +2,11 @@
 {% block content %}
 <header>
 <h1>Kiro Orchestrator</h1>
-<input type="search" name="q" placeholder="Search workspaces..."
+<input type="search" name="q" placeholder="Search workspaces..." aria-label="Search workspaces"
        hx-get="/search" hx-trigger="input changed delay:300ms" hx-target="#workspaces">
 </header>
-<main id="workspaces" hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML">
+<main id="workspaces" aria-busy="true" hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
+      hx-on::after-swap="this.removeAttribute('aria-busy')">
 <div class="skeleton-card"></div>
 <div class="skeleton-card"></div>
 <div class="skeleton-card"></div>

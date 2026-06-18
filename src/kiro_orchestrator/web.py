@@ -44,7 +44,10 @@ async def partials_workspaces(request: Request):
 
     cards_html = ""
     for cwd in workspaces:
-        sessions = data.get_sessions(cwd)
+        try:
+            sessions = data.get_sessions(cwd)
+        except Exception:
+            sessions = []
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=sessions, stale=stale,
@@ -68,7 +71,10 @@ async def search(request: Request, q: str = ""):
 
     cards_html = ""
     for cwd in workspaces:
-        sessions = data.get_sessions(cwd)
+        try:
+            sessions = data.get_sessions(cwd)
+        except Exception:
+            sessions = []
         matched = [s for s in sessions if _session_matches(s, query)]
         if query in cwd.lower() or matched:
             display_sessions = matched if matched else sessions

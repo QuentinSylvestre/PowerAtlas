@@ -4,5 +4,5 @@
 <div class="session-first-prompt">{{ session.first_prompt[:100] }}</div>
 <div class="session-last-prompt">{{ session.last_prompt[:100] }}</div>
 <div class="session-last-reply">{{ session.last_reply_tail[:100] }}</div>
-{% if stale %}<button class="btn-resume" disabled>Resume</button>{% else %}<button class="btn-resume">Resume</button>{% endif %}
+{% if stale %}<button class="btn-resume" disabled aria-label="Resume session: {{ session.title }}">Resume</button>{% else %}<button class="btn-resume" aria-label="Resume session: {{ session.title }}">Resume</button>{% endif %}
 </div>
