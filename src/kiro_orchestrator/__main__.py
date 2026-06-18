@@ -89,6 +89,7 @@ def _run_foreground() -> None:
 
     port = server.servers[0].sockets[0].getsockname()[1]
     server_url = f"http://127.0.0.1:{port}"
+    log.info("Server ready at %s", server_url)
 
     # Tray blocks on main thread; on quit, shutdown
     run_tray(server_url, config)

@@ -5,11 +5,16 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 SQLITE_PATH = Path(os.environ.get("LOCALAPPDATA", "")) / "Kiro-Cli" / "data.sqlite3"
+
+# Simple TTL cache to avoid re-reading hundreds of OneDrive-synced files on every request
+_cache: dict[str, tuple[float, object]] = {}
+_CACHE_TTL = 30  # seconds
 
 
 @dataclass
@@ -70,7 +75,12 @@ def discover_workspaces() -> list[str]:
 
 
 def discover_workspaces_with_counts() -> list[tuple[str, int]]:
-    """Like discover_workspaces but returns (cwd, session_count) tuples. Single pass."""
+    """Like discover_workspaces but returns (cwd, session_count) tuples. Cached for 30s."""
+    cache_key = "workspaces_with_counts"
+    if cache_key in _cache:
+        ts, result = _cache[cache_key]
+        if time.time() - ts < _CACHE_TTL:
+            return result
     workspaces: dict[str, str] = {}
     counts: dict[str, int] = {}
     if SESSION_DIR.is_dir():
@@ -106,7 +116,9 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
         finally:
             conn.close()
     sorted_keys = sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
-    return [(k, counts.get(k, 0)) for k in sorted_keys]
+    result = [(k, counts.get(k, 0)) for k in sorted_keys]
+    _cache[cache_key] = (time.time(), result)
+    return result
 
 
 def get_sessions(cwd: str) -> list[Session]:
