@@ -130,11 +130,11 @@ async def partials_workspaces(request: Request):
 
     config = load_config()
     # Merge pinned folders (with count=0)
-    existing = {cwd for cwd, _ in workspace_data}
+    existing = {cwd for cwd, _, _ in workspace_data}
     for pf in config.pinned_folders:
         from .data import _normalize_path
         if _normalize_path(pf) not in existing:
-            workspace_data.append((pf, 0))
+            workspace_data.append((pf, 0, ""))
 
     if not workspace_data:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
@@ -154,28 +154,28 @@ async def partials_workspaces(request: Request):
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
     # Pinned workspaces
-    pinned_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) in pinned_set]
+    pinned_cards = [(c, n, u) for c, n, u in workspace_data if _normalize_path(c) in pinned_set]
     if pinned_cards:
         cards_html += '<div class="section-label">Pinned workspaces</div>'
-        for cwd, count in pinned_cards:
+        for cwd, count, updated in pinned_cards:
             stale = not Path(cwd).exists()
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                session_count=count, is_pinned=True,
+                session_count=count, is_pinned=True, last_updated=updated,
             )
 
     # All other workspaces
-    other_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) not in pinned_set]
+    other_cards = [(c, n, u) for c, n, u in workspace_data if _normalize_path(c) not in pinned_set]
     if other_cards:
         if pinned_cards:
             cards_html += '<div class="section-label">All workspaces</div>'
-        for cwd, count in other_cards:
+        for cwd, count, updated in other_cards:
             stale = not Path(cwd).exists()
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                session_count=count,
+                session_count=count, last_updated=updated,
             )
     log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
     return HTMLResponse(cards_html)

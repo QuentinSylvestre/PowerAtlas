@@ -121,7 +121,7 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
         finally:
             conn.close()
     sorted_keys = sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
-    result = [(display.get(k, k), counts.get(k, 0)) for k in sorted_keys]
+    result = [(display.get(k, k), counts.get(k, 0), workspaces[k]) for k in sorted_keys]
     _cache[cache_key] = (time.time(), result)
     return result
 

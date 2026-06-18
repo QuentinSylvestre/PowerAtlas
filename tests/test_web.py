@@ -38,7 +38,7 @@ def test_index_returns_html(client):
 @patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1)]
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z")]
     mock_sessions.return_value = [_make_session(cwd=workspace)]
 
     resp = client.get("/partials/workspaces")
@@ -61,7 +61,7 @@ def test_partials_workspaces_empty(mock_discover, mock_config, client):
 @patch("kiro_orchestrator.web.data.get_sessions")
 @patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
-    mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1)]
+    mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1, "2026-01-01T00:00:00Z")]
     mock_sessions.return_value = [_make_session(cwd="C:\\nonexistent\\path\\xyz")]
 
     resp = client.get("/partials/workspaces")
@@ -140,7 +140,7 @@ def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_
 @patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
 def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 0)]
+    mock_discover.return_value = [(workspace, 0, "")]
     mock_sessions.return_value = []
 
     resp = client.get("/partials/workspaces")
@@ -216,7 +216,7 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, client
     workspace = str(tmp_path)
     pinned = "C:\\my-pinned-workspace"
     mock_config.return_value = Config(pinned_folders=[pinned])
-    mock_discover.return_value = [(workspace, 0)]
+    mock_discover.return_value = [(workspace, 0, "")]
     mock_sessions.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
