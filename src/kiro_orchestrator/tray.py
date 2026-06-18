@@ -1,6 +1,5 @@
 """System tray icon and menu."""
 
-import sys
 import threading
 import webbrowser
 
@@ -10,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .config import Config, save_config
 
 _webview_window = None
+_webview_lock = threading.Lock()
 _shutdown_event = threading.Event()
 
 
@@ -30,27 +30,40 @@ def _open_ui(server_url: str, config: Config):
         try:
             import webview
 
-            if _webview_window is None:
-                _webview_window = webview.create_window("Kiro Orchestrator", server_url)
-                threading.Thread(target=webview.start, daemon=True).start()
-            else:
-                _webview_window.show()
+            with _webview_lock:
+                if _webview_window is None:
+                    _webview_window = webview.create_window(
+                        "Kiro Orchestrator", server_url, width=900, height=700
+                    )
+                    _webview_window.events.closing += _on_window_closing
+                    threading.Thread(target=webview.start, daemon=True).start()
+                else:
+                    _webview_window.show()
             return
         except Exception:
             pass
     webbrowser.open(server_url)
 
 
+def _on_window_closing():
+    """Hide window instead of destroying — minimize to tray."""
+    global _webview_window
+    with _webview_lock:
+        if _webview_window:
+            _webview_window.hide()
+    return False  # Prevent destruction
+
+
 def _on_quit(icon: pystray.Icon):
     global _webview_window
     _shutdown_event.set()
-    if _webview_window:
-        try:
-            import webview
-            webview.destroy_window(_webview_window)
-        except Exception:
-            pass
-        _webview_window = None
+    with _webview_lock:
+        if _webview_window:
+            try:
+                _webview_window.destroy()
+            except Exception:
+                pass
+            _webview_window = None
     icon.stop()
 
 

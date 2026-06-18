@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from .config import load_config
-from .tray import get_shutdown_event, run_tray
+from .tray import run_tray
 
 # Placeholder app until Phase 3 provides web.py
 _app = FastAPI()
@@ -21,8 +21,9 @@ def _health():
 
 def _single_instance_guard() -> None:
     """Exit if another instance is already running (Windows named mutex)."""
-    ctypes.windll.kernel32.CreateMutexW(None, False, "KiroOrchestratorMutex")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW(None, False, "KiroOrchestratorMutex")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         sys.exit(0)
 
 
@@ -47,8 +48,12 @@ def main() -> None:
     server_thread.start()
     ready_event.wait(timeout=10)
 
+    if not ready_event.is_set() or not server.servers:
+        print("ERROR: Server failed to start", file=sys.stderr)
+        sys.exit(1)
+
     # Get actual bound port
-    port = server.servers[0].sockets[0].getsockname()[1] if server.servers else 8000
+    port = server.servers[0].sockets[0].getsockname()[1]
     server_url = f"http://127.0.0.1:{port}"
 
     # Tray blocks on main thread; on quit, shutdown uvicorn
