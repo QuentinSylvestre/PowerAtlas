@@ -78,28 +78,23 @@ def test_partials_workspaces_error(mock_discover, client):
     assert "Error" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
-def test_search_filters(mock_discover, mock_sessions, client, tmp_path):
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+def test_search_filters(mock_discover, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [workspace]
-    mock_sessions.return_value = [
-        _make_session(title="fix login bug", cwd=workspace),
-        _make_session(title="add feature", cwd=workspace, session_id="sess-2"),
+    mock_discover.return_value = [
+        (workspace, 2, "2026-01-01T00:00:00Z"),
+        ("C:\\other\\project", 1, "2026-01-01T00:00:00Z"),
     ]
 
-    resp = client.get("/search?q=login")
+    resp = client.get(f"/search?q={Path(workspace).name}")
     assert resp.status_code == 200
-    assert "fix login bug" in resp.text
-    assert "add feature" not in resp.text
+    assert Path(workspace).name in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
-def test_search_no_results(mock_discover, mock_sessions, client, tmp_path):
+@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+def test_search_no_results(mock_discover, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [workspace]
-    mock_sessions.return_value = [_make_session(cwd=workspace)]
+    mock_discover.return_value = [(workspace, 1, "")]
 
     resp = client.get("/search?q=zzzznotfound")
     assert resp.status_code == 200

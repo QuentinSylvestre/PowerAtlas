@@ -187,8 +187,9 @@ async def search(request: Request, q: str = ""):
     if not query:
         return await partials_workspaces(request)
 
+    import asyncio
     try:
-        workspaces = data.discover_workspaces()
+        workspace_data = await asyncio.to_thread(data.discover_workspaces_with_counts)
     except Exception:
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Error: could not load session data",
@@ -196,27 +197,21 @@ async def search(request: Request, q: str = ""):
         })
 
     config = load_config()
+    matched = [(c, n, u) for c, n, u in workspace_data if query in c.lower()]
 
-    cards_html = ""
-    for cwd in workspaces:
-        try:
-            sessions = data.get_sessions(cwd)
-        except Exception:
-            sessions = []
-        matched = [s for s in sessions if _session_matches(s, query)]
-        if query in cwd.lower() or matched:
-            display_sessions = matched if matched else sessions
-            display_sessions = _sort_pinned_first(display_sessions, config.pinned_sessions)
-            stale = not Path(cwd).exists()
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=display_sessions, stale=stale,
-                pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-            )
-
-    if not cards_html:
+    if not matched:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
             "message": f'No results for "{q}"',
         })
+
+    cards_html = ""
+    for cwd, count, updated in matched:
+        stale = not Path(cwd).exists()
+        cards_html += templates.get_template("partials/workspace_card.html").render(
+            request=request, cwd=cwd, sessions=[], stale=stale,
+            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+            session_count=count, last_updated=updated,
+        )
     return HTMLResponse(cards_html)
 
 
