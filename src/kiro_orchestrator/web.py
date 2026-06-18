@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import load_config, save_config
-from . import data
+from . import data, launcher
 
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
@@ -96,6 +96,54 @@ async def toggle_trust():
     config.trust_all_tools = not config.trust_all_tools
     save_config(config)
     return {"trust_all_tools": config.trust_all_tools}
+
+
+@app.post("/api/launch", response_class=HTMLResponse)
+async def api_launch(request: Request):
+    body = await request.json()
+    config = load_config()
+    result = launcher.launch_session(
+        cwd=body["workspace"],
+        session_id=body.get("session_id"),
+        trust_all=config.trust_all_tools,
+        terminal_override=config.terminal_command,
+    )
+    level = "success" if result.success else "error"
+    msg = "Session launched" if result.success else result.error
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+
+
+@app.post("/api/launch-batch", response_class=HTMLResponse)
+async def api_launch_batch(request: Request):
+    body = await request.json()
+    config = load_config()
+    results = launcher.launch_batch(
+        sessions=body["sessions"],
+        trust_all=config.trust_all_tools,
+        terminal_override=config.terminal_command,
+    )
+    ok = sum(1 for r in results if r.success)
+    failed = len(results) - ok
+    msg = f"Launched {ok} session{'s' if ok != 1 else ''}"
+    if failed:
+        msg += f", {failed} failed"
+    level = "success" if not failed else ("warning" if ok else "error")
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+
+
+@app.post("/api/new-session", response_class=HTMLResponse)
+async def api_new_session(request: Request):
+    body = await request.json()
+    config = load_config()
+    result = launcher.launch_session(
+        cwd=body["workspace"],
+        session_id=None,
+        trust_all=config.trust_all_tools,
+        terminal_override=config.terminal_command,
+    )
+    level = "success" if result.success else "error"
+    msg = "New session launched" if result.success else result.error
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
 
 def _session_matches(session: data.Session, query: str) -> bool:
