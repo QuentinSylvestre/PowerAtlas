@@ -1,7 +1,7 @@
 # Fix 10 Verified Defects from /qtest Run
 
 > **Date**: 2026-06-18
-> **Status**: In Progress
+> **Status**: Complete
 > **Scope**: Fix 2 High, 5 Medium, 3 Low defects across launcher, data, config, autostart, and templates
 
 ---
@@ -142,3 +142,28 @@ Implementation health: Yellow (Security/Maintainability) / Green (Reliability/Se
 | 12 | Low | Pin endpoints have no type check on body values | Accepted — beyond plan scope |
 
 Cycle 2 skipped — cycle 1 findings all Low/Medium + auto-fixes purely mechanical.
+
+
+
+### 2026-06-18 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Security auditor, Reliability engineer, Senior engineer, Maintainability reviewer.
+11 findings (0 High, 3 Medium, 8 Low).
+QA verification: SKIP (all surfaces are library exports verified by unit tests — no runtime browser surface).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Security] Other POST endpoints (`/api/launch`, `/api/pin-*`) lack `.get()` guards | Accepted — pre-existing pattern, not in plan scope |
+| 2 | Medium | [Security] Pin endpoints use bare `body["key"]` without type checks | Accepted — explicitly out of scope per per-phase finding #12 |
+| 3 | Medium | [Security] pwsh branch trusts `kiro_args` content without per-arg escaping | Accepted — args are hardcoded; document invariant as future work |
+| 4 | Low | [Reliability] Same 500 pattern in launch/pin endpoints (pre-existing) | Accepted — consistent with per-phase decision |
+| 5 | Low | [Reliability] `save_setting` TOCTOU (load-modify-save not atomic) | Accepted — pre-existing architectural pattern for desktop app |
+| 6 | Low | [Reliability] `_CMD_METACHAR_RE` omits `!` (delayed expansion off by default) | Accepted — plan-compliant, expansion off by default |
+| 7 | Low | [Security] `data.py` SQLITE_PATH has no fallback for empty LOCALAPPDATA | Accepted — pre-existing, Windows always sets LOCALAPPDATA |
+| 8 | Low | [Security] Custom template `full.split()` fragile on spaced paths | Accepted — documented accepted risk in code comment |
+| 9 | Low | [Senior] `launch_batch` truthiness guard also catches empty string workspace | Accepted — empty string equally invalid |
+| 10 | Low | [Maintainability] `_normalize_path` should be promoted to public API | Accepted — follow-up refactor candidate |
+| 11 | Low | [Maintainability] save-setting returns 200+ok:false vs REST 400/422 | Accepted — pre-existing API convention |
+
+Invoked on fully-executed plan; performed standalone holistic review. All 10 defects confirmed fixed. 72 tests pass. No regressions. Remaining findings are all pre-existing patterns outside plan scope flagged for future hardening.
