@@ -141,15 +141,22 @@ async def partials_workspaces(request: Request):
             "message": "No sessions found. Pin a folder to get started.",
         })
 
-    # Split into pinned and unpinned
     from .data import _normalize_path
     pinned_set = {_normalize_path(f) for f in config.pinned_folders}
-    pinned_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) in pinned_set]
-    other_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) not in pinned_set]
 
     cards_html = ""
+
+    # Pinned sessions section (flat list, no card wrapper)
+    if config.pinned_sessions:
+        pinned_rows = await _render_pinned_sessions(request, config)
+        if pinned_rows:
+            cards_html += '<div class="section-label">Pinned sessions</div>'
+            cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
+
+    # Pinned workspaces
+    pinned_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) in pinned_set]
     if pinned_cards:
-        cards_html += '<div class="section-label">Pinned</div>'
+        cards_html += '<div class="section-label">Pinned workspaces</div>'
         for cwd, count in pinned_cards:
             stale = not Path(cwd).exists()
             cards_html += templates.get_template("partials/workspace_card.html").render(
@@ -157,6 +164,9 @@ async def partials_workspaces(request: Request):
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=True,
             )
+
+    # All other workspaces
+    other_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) not in pinned_set]
     if other_cards:
         if pinned_cards:
             cards_html += '<div class="section-label">All workspaces</div>'
@@ -290,6 +300,42 @@ async def api_new_session(request: Request):
     level = "success" if result.success else "error"
     msg = "New session launched" if result.success else result.error
     return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+
+
+async def _render_pinned_sessions(request, config) -> str:
+    """Render pinned sessions as flat rows (finds them from metadata)."""
+    import asyncio
+    from .data import SESSION_DIR, _normalize_path
+    import json as _json
+
+    # Find session metadata for pinned IDs
+    pinned_ids = set(config.pinned_sessions)
+    html = ""
+    if not SESSION_DIR.is_dir():
+        return html
+    for meta_file in SESSION_DIR.glob("*.json"):
+        if meta_file.suffix == ".jsonl":
+            continue
+        if meta_file.stem not in pinned_ids:
+            continue
+        try:
+            d = _json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        cwd = d.get("cwd", "")
+        session = data.Session(
+            session_id=d.get("session_id", meta_file.stem),
+            title=d.get("title", "<untitled>"),
+            cwd=cwd,
+            created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at", ""),
+            first_prompt="", last_prompt="", last_reply_tail="",
+        )
+        html += templates.get_template("partials/session_row.html").render(
+            request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+            pinned_sessions=config.pinned_sessions,
+        )
+    return html
 
 
 async def _render_workspace_card(request: Request, cwd: str) -> HTMLResponse:
