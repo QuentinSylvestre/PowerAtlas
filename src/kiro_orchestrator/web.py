@@ -212,6 +212,9 @@ async def partials_sessions(request: Request, cwd: str = ""):
             request=request, session=session, cwd=cwd, stale=stale,
         )
     return HTMLResponse(html)
+
+
+@app.post("/api/launch", response_class=HTMLResponse)
 async def api_launch(request: Request):
     body = await request.json()
     config = load_config()
