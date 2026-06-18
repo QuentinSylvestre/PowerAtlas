@@ -60,7 +60,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .card-header:hover { background: var(--surface-hover); }
 .card-chevron { font-size: 10px; color: var(--text-dim); transition: transform 0.2s; width: 16px; text-align: center; }
 .workspace-card.collapsed .card-chevron { transform: rotate(-90deg); }
-.card-folder-name { font-size: 13px; font-weight: 600; flex: 1; }
+.card-folder-name { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; }
+.card-path { display: block; font-size: 11px; font-weight: 400; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
 .card-meta { display: flex; align-items: center; gap: 8px; }
 .card-count { font-size: 11px; color: var(--text-dim); background: var(--surface); padding: 2px 8px; border-radius: 10px; }
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
