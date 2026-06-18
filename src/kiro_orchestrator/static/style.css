@@ -52,7 +52,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .cards-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
 /* Workspace card */
-.workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); overflow: hidden; transition: border-color 0.2s; }
+.workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); transition: border-color 0.2s; }
 .workspace-card:hover { border-color: #3a4060; }
 .card-header { display: flex; align-items: center; padding: 14px 16px; cursor: pointer; gap: 10px; user-select: none; transition: background 0.12s; }
 .card-header:hover { background: var(--surface-hover); }
@@ -65,7 +65,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .card-pin-btn { background: none; border: none; cursor: pointer; font-size: 12px; opacity: 0; transition: opacity 0.12s; padding: 2px 4px; }
 .card-header:hover .card-pin-btn { opacity: 0.6; }
 .card-pin-btn:hover { opacity: 1 !important; }
-.card-body { border-top: 1px solid var(--card-border); }
+.card-body { border-top: 1px solid var(--card-border); max-height: 400px; overflow-y: auto; }
 .workspace-card.collapsed .card-body { display: none; }
 .workspace-card.stale { opacity: 0.6; }
 
