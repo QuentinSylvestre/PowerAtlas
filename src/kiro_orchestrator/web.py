@@ -1,6 +1,8 @@
 """FastAPI web application with htmx-powered UI."""
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -16,7 +18,28 @@ _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
 log = logging.getLogger("kiro_orchestrator.web")
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app_instance):
+    task = asyncio.create_task(_background_refresh())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def _background_refresh():
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await asyncio.to_thread(data.refresh_stale_entries)
+        except Exception:
+            log.exception("Background refresh failed")
+
+
+app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
@@ -133,6 +156,7 @@ async def partials_workspaces(request: Request):
     config = load_config()
     # Merge pinned folders (with count=0)
     from .data import _normalize_path
+    workspace_data = list(workspace_data)
     existing = {_normalize_path(cwd) for cwd, _, _ in workspace_data}
     for pf in config.pinned_folders:
         if _normalize_path(pf) not in existing:

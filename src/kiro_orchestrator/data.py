@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,53 @@ class Session:
     first_prompt: str
     last_prompt: str
     last_reply_tail: str
+
+
+@dataclass
+class _FileInfo:
+    mtime: float
+    size: int
+
+
+class SessionCache:
+    """Thread-safe in-memory session cache with per-file stat tracking."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sessions: dict[str, list[Session]] = {}
+        self._file_stats: dict[str, dict[str, _FileInfo]] = {}
+        self._loaded_cwds: set[str] = set()
+
+    def get(self, cwd: str) -> list[Session] | None:
+        key = _normalize_path(cwd)
+        with self._lock:
+            sessions = self._sessions.get(key)
+            return list(sessions) if sessions is not None else None
+
+    def put(self, cwd: str, sessions: list[Session], file_stats: dict[str, _FileInfo]) -> None:
+        key = _normalize_path(cwd)
+        with self._lock:
+            self._sessions[key] = sessions
+            self._file_stats[key] = file_stats
+            self._loaded_cwds.add(key)
+
+    def get_loaded_cwds(self) -> set[str]:
+        with self._lock:
+            return self._loaded_cwds.copy()
+
+    def get_file_stats(self, cwd: str) -> dict[str, _FileInfo]:
+        key = _normalize_path(cwd)
+        with self._lock:
+            return self._file_stats.get(key, {}).copy()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._sessions.clear()
+            self._file_stats.clear()
+            self._loaded_cwds.clear()
+
+
+session_cache = SessionCache()
 
 
 def discover_workspaces() -> list[str]:
@@ -80,7 +128,7 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
     if cache_key in _cache:
         ts, result = _cache[cache_key]
         if time.time() - ts < _CACHE_TTL:
-            return result
+            return list(result)
     workspaces: dict[str, str] = {}  # norm_key -> updated_at
     counts: dict[str, int] = {}  # norm_key -> count
     display: dict[str, str] = {}  # norm_key -> original cwd (first seen)
@@ -123,21 +171,33 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
     sorted_keys = sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
     result = [(display.get(k, k), counts.get(k, 0), workspaces[k]) for k in sorted_keys]
     _cache[cache_key] = (time.time(), result)
-    return result
+    return list(result)
 
 
 def get_sessions(cwd: str) -> list[Session]:
     """Return sessions for a workspace, sorted by updated_at desc. Filters subagents."""
+    cached = session_cache.get(cwd)
+    if cached is not None:
+        return cached
+    sessions, file_stats = _load_sessions(cwd)
+    session_cache.put(cwd, sessions, file_stats)
+    return sessions
+
+
+def _load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
+    """Load sessions from disk. Returns (sessions, file_stats). No lock held."""
     sessions: list[Session] = []
+    file_stats: dict[str, _FileInfo] = {}
     if not SESSION_DIR.is_dir():
-        return sessions
+        return sessions, file_stats
 
     target = _normalize_path(cwd)
     for meta_file in SESSION_DIR.glob("*.json"):
         if meta_file.suffix == ".jsonl":
             continue
         try:
-            if meta_file.stat().st_size > 1_048_576:
+            st = meta_file.stat()
+            if st.st_size > 1_048_576:
                 continue
             data = json.loads(meta_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
@@ -147,8 +207,14 @@ def get_sessions(cwd: str) -> list[Session]:
         if _normalize_path(data.get("cwd", "")) != target:
             continue
 
+        file_stats[str(meta_file)] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
         session_id = data.get("session_id", meta_file.stem)
         jsonl_path = meta_file.with_suffix(".jsonl")
+        try:
+            jsonl_st = jsonl_path.stat()
+            file_stats[str(jsonl_path)] = _FileInfo(mtime=jsonl_st.st_mtime, size=jsonl_st.st_size)
+        except OSError:
+            pass
         first_prompt, last_prompt, last_reply_tail = _extract_prompts(jsonl_path)
 
         sessions.append(Session(
@@ -163,7 +229,7 @@ def get_sessions(cwd: str) -> list[Session]:
         ))
 
     sessions.sort(key=lambda s: s.updated_at, reverse=True)
-    return sessions
+    return sessions, file_stats
 
 
 def _extract_prompts(jsonl_path: Path) -> tuple[str, str, str]:
@@ -229,6 +295,66 @@ def _extract_content(line: str, kind: str) -> str:
                     parts.append(text_val)
         return " ".join(parts)
     return ""
+
+
+def refresh_stale_entries() -> None:
+    """Check loaded workspaces for file changes; re-read only changed sessions."""
+    if not SESSION_DIR.is_dir():
+        return
+    for norm_cwd in session_cache.get_loaded_cwds():
+        try:
+            old_stats = session_cache.get_file_stats(norm_cwd)
+            changed = False
+            for meta_file in SESSION_DIR.glob("*.json"):
+                if meta_file.suffix == ".jsonl":
+                    continue
+                try:
+                    d = json.loads(meta_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if d.get("parent_session_id"):
+                    continue
+                if _normalize_path(d.get("cwd", "")) != norm_cwd:
+                    continue
+                # Check .json and .jsonl stats
+                json_key = str(meta_file)
+                jsonl_path = meta_file.with_suffix(".jsonl")
+                jsonl_key = str(jsonl_path)
+                try:
+                    js = meta_file.stat()
+                    cur_json = _FileInfo(mtime=js.st_mtime, size=js.st_size)
+                except OSError:
+                    continue
+                cur_jsonl = None
+                if jsonl_path.exists():
+                    try:
+                        jls = jsonl_path.stat()
+                        cur_jsonl = _FileInfo(mtime=jls.st_mtime, size=jls.st_size)
+                    except OSError:
+                        pass
+                old_json = old_stats.get(json_key)
+                old_jsonl = old_stats.get(jsonl_key)
+                if (json_key not in old_stats
+                        or (old_json and (old_json.mtime != cur_json.mtime or old_json.size != cur_json.size))
+                        or (cur_jsonl and jsonl_key not in old_stats)
+                        or (cur_jsonl and old_jsonl and (old_jsonl.mtime != cur_jsonl.mtime or old_jsonl.size != cur_jsonl.size))):
+                    changed = True
+                    break
+            if changed:
+                sessions, file_stats = _load_sessions(norm_cwd)
+                session_cache.put(norm_cwd, sessions, file_stats)
+        except OSError:
+            continue
+
+
+def warmup_pinned(pinned_folders: list[str]) -> None:
+    """Pre-load sessions for pinned workspaces. Safe to call from any thread."""
+    for folder in pinned_folders:
+        try:
+            if Path(folder).exists():
+                get_sessions(folder)
+        except OSError:
+            continue
 
 
 def _normalize_path(p: str) -> str:
