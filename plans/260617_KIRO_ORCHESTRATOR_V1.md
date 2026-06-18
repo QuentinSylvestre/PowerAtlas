@@ -665,3 +665,21 @@ Implementation health: Yellow → Green (after auto-fix).
 | 2 | High | Custom template split() breaks on paths with spaces; no validation | Accepted — documented limitation; user-authored templates |
 | 3 | Medium | session_id injected unsanitized into command string | Fixed — regex validation (alphanumeric + hyphens only) |
 | 4 | Medium | Popen success doesn't confirm terminal actually launched | Accepted — ephemeral process, immediate feedback not possible |
+
+### 2026-06-18 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer.
+8 findings (0 High, 5 Medium, 3 Low).
+QA verification: SKIP (desktop app requires interactive testing for full verification).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Config race: tray holds stale in-memory Config vs web's fresh loads | Fixed — tray now reloads config before mutating |
+| 2 | Medium | Custom terminal template split() breaks on paths with spaces | Accepted — user-authored templates, documented limitation |
+| 3 | Medium | pwsh -Command with single-quoted cwd vulnerable to quote injection | Accepted — requires adversarial folder name, low-risk |
+| 4 | Medium | No CSRF on POST endpoints (htmx form posts bypass preflight) | Accepted — localhost-only, dynamic port, low risk |
+| 5 | Medium | python-multipart missing from deps (settings form parsing) | Fixed — added to pyproject.toml |
+| 6 | Low | pywin32 may not install automatically in all environments | Accepted — documented in pyproject.toml as dependency |
+| 7 | Low | action_bar.html not included by any template | Accepted — available for client-side integration |
+| 8 | Low | Server shutdown timeout undocumented | Accepted — 5s adequate for desktop tool |
