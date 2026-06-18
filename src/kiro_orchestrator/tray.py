@@ -6,7 +6,7 @@ import webbrowser
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 
-from .config import Config, save_config
+from .config import Config, load_config, save_config
 
 _webview_window = None
 _webview_lock = threading.Lock()
@@ -74,8 +74,10 @@ def run_tray(server_url: str, config: Config) -> None:
         _open_ui(server_url, config)
 
     def on_trust(icon, item):
-        config.trust_all_tools = not config.trust_all_tools
-        save_config(config)
+        fresh = load_config()
+        fresh.trust_all_tools = not fresh.trust_all_tools
+        save_config(fresh)
+        config.trust_all_tools = fresh.trust_all_tools
 
     def on_settings(icon, item):
         webbrowser.open(f"{server_url}/settings")
