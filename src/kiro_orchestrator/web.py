@@ -26,6 +26,8 @@ async def index(request: Request):
     config = load_config()
     return templates.TemplateResponse(request, "index.html", {
         "trust_all_tools": config.trust_all_tools,
+        "terminal_command": config.terminal_command,
+        "autostart": autostart.is_enabled(),
     })
 
 
@@ -221,6 +223,17 @@ async def toggle_trust():
     config.trust_all_tools = not config.trust_all_tools
     save_config(config)
     return {"trust_all_tools": config.trust_all_tools}
+
+
+@app.post("/api/save-setting")
+async def save_setting(request: Request):
+    body = await request.json()
+    config = load_config()
+    key, value = body["key"], body["value"]
+    if hasattr(config, key):
+        setattr(config, key, value)
+        save_config(config)
+    return {"ok": True}
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)

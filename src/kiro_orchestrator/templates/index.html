@@ -3,12 +3,18 @@
 <div class="topbar">
   <div class="topbar-title">Kiro Orchestrator</div>
   <div class="topbar-spacer"></div>
-  <div class="trust-toggle{% if trust_all_tools %} active{% endif %}"
-       hx-post="/api/toggle-trust" hx-swap="none"
-       onclick="this.classList.toggle('active')">
-    <span class="trust-dot"></span>Trust all tools
+  <select class="topbar-select" onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'terminal_command',value:this.value})})">
+    <option value="" {% if not terminal_command %}selected{% endif %}>Terminal: Auto</option>
+    <option value="wt" {% if terminal_command == 'wt' %}selected{% endif %}>Terminal: WT</option>
+    <option value="pwsh" {% if terminal_command == 'pwsh' %}selected{% endif %}>Terminal: pwsh</option>
+    <option value="cmd" {% if terminal_command == 'cmd' %}selected{% endif %}>Terminal: cmd</option>
+  </select>
+  <div class="trust-toggle{% if trust_all_tools %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/toggle-trust',{method:'POST'})">
+    <span class="trust-dot"></span>Trust all
   </div>
-  <a href="/settings" class="settings-btn" aria-label="Settings">⚙</a>
+  <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})">
+    <span class="trust-dot"></span>Autostart
+  </div>
 </div>
 
 <div class="search-area">

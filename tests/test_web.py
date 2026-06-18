@@ -143,19 +143,6 @@ def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_
 
 
 
-@patch("kiro_orchestrator.web.autostart.is_enabled")
-@patch("kiro_orchestrator.web.load_config")
-def test_settings_page_renders(mock_config, mock_autostart, client):
-    from kiro_orchestrator.config import Config
-    mock_config.return_value = Config(terminal_command="wt", pinned_folders=["C:\\myapp"])
-    mock_autostart.return_value = False
-    resp = client.get("/settings")
-    assert resp.status_code == 200
-    assert "Terminal" in resp.text
-    assert "wt" in resp.text
-    assert "C:\\myapp" in resp.text
-
-
 @patch("kiro_orchestrator.web.save_config")
 @patch("kiro_orchestrator.web.autostart.is_enabled")
 @patch("kiro_orchestrator.web.load_config")
