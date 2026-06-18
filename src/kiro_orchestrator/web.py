@@ -91,6 +91,17 @@ async def pin_folder(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/unpin-folder")
+async def unpin_folder(request: Request):
+    body = await request.json()
+    folder = body["folder"]
+    config = load_config()
+    if folder in config.pinned_folders:
+        config.pinned_folders.remove(folder)
+        save_config(config)
+    return {"ok": True}
+
+
 @app.post("/api/unpin-session")
 async def unpin_session(request: Request):
     body = await request.json()
