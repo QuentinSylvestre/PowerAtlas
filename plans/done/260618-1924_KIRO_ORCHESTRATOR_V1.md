@@ -1,7 +1,8 @@
 # Kiro Orchestrator — Lightweight Session Launcher
 
 > **Date**: 2026-06-17
-> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: All 5 phases COMPLETE — archived 2026-06-18
+> **Last Updated**: 2026-06-18T19:22+02:00
 > **Scope**: Desktop launcher/dashboard for kiro-cli sessions with tray icon, multi-select batch launch, and workspace discovery
 > **Estimated effort**: 2-3 days
 
