@@ -81,8 +81,9 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
         ts, result = _cache[cache_key]
         if time.time() - ts < _CACHE_TTL:
             return result
-    workspaces: dict[str, str] = {}
-    counts: dict[str, int] = {}
+    workspaces: dict[str, str] = {}  # norm_key -> updated_at
+    counts: dict[str, int] = {}  # norm_key -> count
+    display: dict[str, str] = {}  # norm_key -> original cwd (first seen)
     if SESSION_DIR.is_dir():
         for meta_file in SESSION_DIR.glob("*.json"):
             if meta_file.suffix == ".jsonl":
@@ -100,6 +101,8 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
                 continue
             key = _normalize_path(cwd)
             counts[key] = counts.get(key, 0) + 1
+            if key not in display:
+                display[key] = cwd
             updated = d.get("updated_at", "")
             if key not in workspaces or updated > workspaces[key]:
                 workspaces[key] = updated
@@ -111,12 +114,14 @@ def discover_workspaces_with_counts() -> list[tuple[str, int]]:
                 if key not in workspaces:
                     counts[key] = counts.get(key, 0)
                     workspaces[key] = str(row[1]) if row[1] else ""
+                if key not in display:
+                    display[key] = row[0]
         except sqlite3.OperationalError:
             pass
         finally:
             conn.close()
     sorted_keys = sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
-    result = [(k, counts.get(k, 0)) for k in sorted_keys]
+    result = [(display.get(k, k), counts.get(k, 0)) for k in sorted_keys]
     _cache[cache_key] = (time.time(), result)
     return result
 
