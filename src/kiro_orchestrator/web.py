@@ -197,7 +197,7 @@ async def search(request: Request, q: str = ""):
         })
 
     config = load_config()
-    matched = [(c, n, u) for c, n, u in workspace_data if query in c.lower()]
+    matched = [(c, n, u) for c, n, u in workspace_data if query in Path(c).name.lower()]
 
     if not matched:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
