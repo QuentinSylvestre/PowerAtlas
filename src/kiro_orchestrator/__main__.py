@@ -91,6 +91,11 @@ def _run_foreground() -> None:
     server_url = f"http://127.0.0.1:{port}"
     log.info("Server ready at %s", server_url)
 
+    # Warmup pinned workspaces in background (non-blocking)
+    import threading as _threading
+    from .data import warmup_pinned
+    _threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+
     # Tray blocks on main thread; on quit, shutdown
     run_tray(server_url, config)
 

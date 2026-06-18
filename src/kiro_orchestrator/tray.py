@@ -27,6 +27,10 @@ def run_tray(server_url: str, config: Config) -> None:
     """Run pystray on the calling thread (blocks). Opens browser for UI."""
 
     def on_open(icon, item):
+        import threading as _t
+        from .data import warmup_pinned
+        from .config import load_config as _load_config
+        _t.Thread(target=warmup_pinned, args=(_load_config().pinned_folders,), daemon=True).start()
         webbrowser.open(server_url)
 
     def on_trust(icon, item):
