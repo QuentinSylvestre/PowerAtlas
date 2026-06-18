@@ -31,9 +31,12 @@
   <span class="selection-info"><strong id="selCount">0</strong> sessions selected</span>
   <div class="topbar-spacer"></div>
   <button class="action-btn secondary" onclick="document.querySelectorAll('.session-row.selected').forEach(r=>r.classList.remove('selected'));updateActionBar()">Clear</button>
-  <button class="action-btn launch" hx-post="/api/launch-batch" hx-include=".session-row.selected [name=session_id]">▶ Launch selected</button>
+  <button class="action-btn launch" onclick="launchSelected()">▶ Launch selected</button>
 </div>
 <script>
 function updateActionBar(){var n=document.querySelectorAll('.session-row.selected').length;document.getElementById('selCount').textContent=n;document.getElementById('actionBar').classList.toggle('visible',n>0)}
-function toggleCard(card){card.classList.toggle('collapsed');var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)).then(function(r){return r.text()}).then(function(html){body.innerHTML=html}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}</script>
+function toggleCard(card){card.classList.toggle('collapsed');var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)).then(function(r){return r.text()}).then(function(html){body.innerHTML=html;if(window.htmx&&htmx.process)htmx.process(body)}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}
+function showToast(html){var d=document.createElement('div');d.innerHTML=html;document.body.appendChild(d.firstElementChild);setTimeout(function(){d.firstElementChild&&d.firstElementChild.remove()},5000)}
+function launchSelected(){var rows=document.querySelectorAll('.session-row.selected');if(!rows.length)return;var sessions=[];rows.forEach(function(r){var card=r.closest('.workspace-card');sessions.push({session_id:r.dataset.sessionId,workspace:card?card.dataset.cwd:''})});if(sessions.length>5&&!confirm('Launch '+sessions.length+' sessions?'))return;fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:sessions})}).then(function(r){return r.text()}).then(showToast)}
+</script>
 {% endblock %}
