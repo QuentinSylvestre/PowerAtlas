@@ -39,25 +39,8 @@
       </div>
     </div>
 
-    <div class="settings-group">
-      <div class="settings-group-title">Pinned folders</div>
-      <div class="pinned-list" id="pinned-folders-list">
-        {% for folder in config.pinned_folders %}
-        <div class="pinned-item"><span>{{ folder }}</span><button type="button" class="pinned-remove" onclick="this.parentElement.remove()">×</button></div>
-        {% endfor %}
-      </div>
-      <div class="settings-row">
-        <input type="text" name="new_folder" class="settings-input" style="flex:1" placeholder="C:\path\to\workspace">
-        <button type="button" class="settings-btn" onclick="addFolder(this)">Add</button>
-      </div>
-      <input type="hidden" name="pinned_folders" id="pinned_folders_hidden" value="{{ config.pinned_folders | join('|') }}">
-    </div>
-
     <button type="submit" class="settings-btn primary">Save settings</button>
   </form>
 </div>
 
-<script>
-function addFolder(btn){var input=btn.previousElementSibling;var val=input.value.trim();if(!val)return;var hidden=document.getElementById('pinned_folders_hidden');var list=document.getElementById('pinned-folders-list');var folders=hidden.value?hidden.value.split('|'):[];if(!folders.includes(val)){folders.push(val);hidden.value=folders.join('|');var d=document.createElement('div');d.className='pinned-item';d.innerHTML='<span>'+val+'</span><button type="button" class="pinned-remove" onclick="this.parentElement.remove()">×</button>';list.appendChild(d)}input.value=''}
-</script>
 {% endblock %}

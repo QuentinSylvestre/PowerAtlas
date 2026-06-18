@@ -146,7 +146,7 @@ script { display: none; }
 .settings-select:focus, .settings-input:focus { border-color: var(--accent); }
 .settings-btn { padding: 6px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: 13px; cursor: pointer; }
 .settings-btn:hover { border-color: var(--accent); color: var(--text); }
-.settings-btn.primary { background: var(--accent); border-color: var(--accent); color: white; }
+.settings-btn.primary { background: var(--accent); border-color: var(--accent); color: white; width: 100%; padding: 10px; }
 .settings-btn.primary:hover { background: var(--accent-hover); }
 .toggle { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; }
 .toggle input { opacity: 0; width: 0; height: 0; }
