@@ -5,7 +5,7 @@
     <div class="card-meta">
       <span class="card-count">{{ session_count if session_count is defined else sessions|length }}</span>
       {% if stale %}<span class="badge-stale">missing</span>{% endif %}
-      <button class="card-pin-btn" onclick="event.stopPropagation();pinWorkspace(this)" aria-label="Pin workspace">📌</button>
+      <button class="card-pin-btn{% if is_pinned %} pinned{% endif %}" onclick="event.stopPropagation();pinWorkspace(this)" aria-label="Pin workspace">📌</button>
     </div>
   </div>
   <div class="card-body" data-loaded="{% if sessions %}true{% else %}false{% endif %}">

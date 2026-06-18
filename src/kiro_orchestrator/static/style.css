@@ -52,6 +52,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .cards-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
 /* Workspace card */
+.section-label { grid-column: 1 / -1; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); padding: 8px 0 4px; }
 .workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); transition: border-color 0.2s; }
 .workspace-card:hover { border-color: #3a4060; }
 .card-header { display: flex; align-items: center; padding: 14px 16px; cursor: pointer; gap: 10px; user-select: none; transition: background 0.12s; }
@@ -63,8 +64,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .card-count { font-size: 11px; color: var(--text-dim); background: var(--surface); padding: 2px 8px; border-radius: 10px; }
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
 .card-pin-btn { background: none; border: none; cursor: pointer; font-size: 12px; opacity: 0; transition: opacity 0.12s; padding: 2px 4px; }
-.card-header:hover .card-pin-btn { opacity: 0.6; }
+.card-header:hover .card-pin-btn { opacity: 0.4; }
 .card-pin-btn:hover { opacity: 1 !important; }
+.card-pin-btn.pinned { opacity: 1 !important; }
+.pin-btn { background: none; border: none; cursor: pointer; font-size: 12px; opacity: 0; transition: opacity 0.12s; padding: 2px 4px; }
+.session-row:hover .pin-btn { opacity: 0.4; }
+.pin-btn:hover { opacity: 1 !important; }
+.pin-btn.pinned { opacity: 1 !important; }
 .card-body { border-top: 1px solid var(--card-border); max-height: 400px; overflow-y: auto; }
 .workspace-card.collapsed .card-body { display: none; }
 .workspace-card.stale { opacity: 0.6; }
@@ -107,7 +113,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .action-btn.launch:hover { background: var(--accent-hover); }
 
 /* Toast */
-.toast { position: fixed; top: 16px; right: 16px; padding: 10px 16px; border-radius: var(--radius-sm); display: flex; align-items: center; gap: 8px; font-size: 13px; z-index: 200; animation: fadeIn 0.2s; }
+.toast-container { position: fixed; top: 16px; right: 16px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 10px 16px; border-radius: var(--radius-sm); display: flex; align-items: center; gap: 8px; font-size: 13px; animation: fadeIn 0.2s; }
 .toast-error { background: rgba(248,113,113,0.12); border: 1px solid #f87171; color: #fca5a5; }
 .toast-success { background: rgba(74,222,128,0.12); border: 1px solid #4ade80; color: #86efac; }
 .toast-dismiss { background: none; border: none; color: inherit; font-size: 16px; cursor: pointer; margin-left: auto; opacity: 0.6; }

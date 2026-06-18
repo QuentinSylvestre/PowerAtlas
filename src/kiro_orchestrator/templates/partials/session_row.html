@@ -9,7 +9,7 @@
     <div class="session-last"><span class="label">Last:</span>"{{ (session.last_reply_tail or '')[:80] }}"</div>
   </div>
   <div class="session-actions">
-    <button class="row-btn" onclick="pinSession(this)" aria-label="Pin session">🖇</button>
+    <button class="pin-btn{% if session.session_id in pinned_sessions %} pinned{% endif %}" onclick="pinSession(this)" aria-label="Pin session">📌</button>
     {% if not stale %}
     <button class="row-btn primary" onclick="resumeSession(this)" aria-label="Resume">Resume</button>
     {% endif %}

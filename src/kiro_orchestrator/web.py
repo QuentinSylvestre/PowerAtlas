@@ -130,14 +130,32 @@ async def partials_workspaces(request: Request):
             "message": "No sessions found. Pin a folder to get started.",
         })
 
+    # Split into pinned and unpinned
+    from .data import _normalize_path
+    pinned_set = {_normalize_path(f) for f in config.pinned_folders}
+    pinned_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) in pinned_set]
+    other_cards = [(c, n) for c, n in workspace_data if _normalize_path(c) not in pinned_set]
+
     cards_html = ""
-    for cwd, count in workspace_data:
-        stale = not Path(cwd).exists()
-        cards_html += templates.get_template("partials/workspace_card.html").render(
-            request=request, cwd=cwd, sessions=[], stale=stale,
-            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-            session_count=count,
-        )
+    if pinned_cards:
+        cards_html += '<div class="section-label">Pinned</div>'
+        for cwd, count in pinned_cards:
+            stale = not Path(cwd).exists()
+            cards_html += templates.get_template("partials/workspace_card.html").render(
+                request=request, cwd=cwd, sessions=[], stale=stale,
+                pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                session_count=count, is_pinned=True,
+            )
+    if other_cards:
+        if pinned_cards:
+            cards_html += '<div class="section-label">All workspaces</div>'
+        for cwd, count in other_cards:
+            stale = not Path(cwd).exists()
+            cards_html += templates.get_template("partials/workspace_card.html").render(
+                request=request, cwd=cwd, sessions=[], stale=stale,
+                pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                session_count=count,
+            )
     log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
 
@@ -210,6 +228,7 @@ async def partials_sessions(request: Request, cwd: str = ""):
     for session in sessions:
         html += templates.get_template("partials/session_row.html").render(
             request=request, session=session, cwd=cwd, stale=stale,
+            pinned_sessions=config.pinned_sessions,
         )
     return HTMLResponse(html)
 
