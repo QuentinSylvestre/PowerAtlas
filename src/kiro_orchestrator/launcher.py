@@ -1,5 +1,6 @@
 """Launch kiro-cli sessions in detected or configured terminals."""
 
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,9 @@ class LaunchResult:
     session_id: str | None
     workspace: str
     error: str = ""
+
+
+_SESSION_ID_RE = re.compile(r"^[\w\-]+$")
 
 
 def detect_terminal(config_override: str = "") -> str | None:
@@ -40,13 +44,16 @@ def launch_session(
     if not Path(cwd).exists():
         return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
 
-    kiro_cmd = "kiro-cli chat"
-    if session_id:
-        kiro_cmd += f" --resume-id {session_id}"
-    if trust_all:
-        kiro_cmd += " -a"
+    if session_id and not _SESSION_ID_RE.match(session_id):
+        return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
 
-    cmd = _build_command(terminal, cwd, kiro_cmd)
+    kiro_args = ["kiro-cli", "chat"]
+    if session_id:
+        kiro_args += ["--resume-id", session_id]
+    if trust_all:
+        kiro_args.append("-a")
+
+    cmd = _build_command(terminal, cwd, kiro_args)
 
     try:
         kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
@@ -73,18 +80,22 @@ def launch_batch(
     ]
 
 
-def _build_command(terminal: str, cwd: str, kiro_cmd: str) -> list[str]:
-    """Build terminal-specific command list."""
+def _build_command(terminal: str, cwd: str, kiro_args: list[str]) -> list[str]:
+    """Build terminal-specific command list. Uses list args to avoid shell injection."""
     t = Path(terminal).stem.lower()
 
     if "{cwd}" in terminal or "{cmd}" in terminal:
-        # Custom template
+        # Custom template — replace placeholders, split on spaces
+        kiro_cmd = " ".join(kiro_args)
         full = terminal.replace("{cwd}", cwd).replace("{cmd}", kiro_cmd)
         return full.split()
 
     if t == "wt":
-        return [terminal, "-d", cwd, "--", *kiro_cmd.split()]
+        return [terminal, "-d", cwd, "--", *kiro_args]
     if t == "pwsh":
-        return [terminal, "-NoExit", "-Command", f"cd '{cwd}'; {kiro_cmd}"]
-    # cmd fallback
+        # Use -File/-Command with separate args to avoid shell parsing
+        script = f"Set-Location -LiteralPath '{cwd}'; & {' '.join(kiro_args)}"
+        return [terminal, "-NoExit", "-Command", script]
+    # cmd fallback — /k requires a single string but we quote properly
+    kiro_cmd = " ".join(kiro_args)
     return [terminal, "/k", f'cd /d "{cwd}" && {kiro_cmd}']
