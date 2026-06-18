@@ -1,7 +1,7 @@
 # Session Pre-load Cache
 
 > **Date**: 2026-06-18
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: In-memory session cache with background refresh to eliminate loading latency for pinned/viewed workspaces
 > **Estimated effort**: 3-5 hours
 
@@ -171,11 +171,15 @@ This fixes the root cause for ALL callers (`partials_workspaces`, `search`, futu
 - `clear()` resets all state
 
 **Exit criteria**:
-- [ ] `get_sessions()` returns cached data on second call (no file I/O)
-- [ ] `SessionCache.get()` returns a copy (mutation-safe)
-- [ ] `SessionCache` is thread-safe (concurrent access test passes)
-- [ ] `discover_workspaces_with_counts()` returns a copy (no caller can mutate the cache)
-- [ ] All existing tests pass
+- [x] `get_sessions()` returns cached data on second call (no file I/O)
+- [x] `SessionCache.get()` returns a copy (mutation-safe)
+- [x] `SessionCache` is thread-safe (concurrent access test passes)
+- [x] `discover_workspaces_with_counts()` returns a copy (no caller can mutate the cache)
+- [x] All existing tests pass
+
+#### Implementation (2026-06-18, code: 27158c0)
+
+Added `_FileInfo` dataclass and `SessionCache` class to `data.py` with thread-safe get/put/clear operations where `get()` returns a shallow copy preventing cache corruption. Extracted `get_sessions` body into `_load_sessions()` that collects per-file stat info for both `.json` and `.jsonl` files, and made `get_sessions()` cache-first (check cache, load on miss, populate). Fixed the mutation bug in `discover_workspaces_with_counts()` to return `list(result)` on both cache-hit and cache-miss paths, and in `web.py` added `workspace_data = list(workspace_data)` before the pinned-folder append loop. Added 5 new tests covering cache hit, miss, copy-on-read safety, thread safety with `threading.Barrier`, and `clear()` reset.
 
 ### Phase 2: Background refresh and startup warmup [QA] [P:1]
 
@@ -287,13 +291,17 @@ def on_open(icon, item):
 - `warmup_pinned()` skips non-existent folders without error
 
 **Exit criteria**:
-- [ ] Pinned workspace sessions are in cache shortly after startup (non-blocking warmup)
-- [ ] Background task detects modified `.jsonl` files and updates only affected sessions
-- [ ] Background task detects new `.json` files and adds new sessions to cache
-- [ ] Unchanged files are not re-read (stat-only check)
-- [ ] Background task survives exceptions (try/except with logging, loop continues)
-- [ ] `on_open` tray action triggers non-blocking warmup
-- [ ] All existing tests pass
+- [x] Pinned workspace sessions are in cache shortly after startup (non-blocking warmup)
+- [x] Background task detects modified `.jsonl` files and updates only affected sessions
+- [x] Background task detects new `.json` files and adds new sessions to cache
+- [x] Unchanged files are not re-read (stat-only check)
+- [x] Background task survives exceptions (try/except with logging, loop continues)
+- [x] `on_open` tray action triggers non-blocking warmup
+- [x] All existing tests pass
+
+#### Implementation (2026-06-18, code: be49db7)
+
+Added `refresh_stale_entries()` to data.py which performs per-session stat checking (mtime+size on both .json and .jsonl files) for all cached workspaces and only reloads via `_load_sessions` when changes are detected. Added `warmup_pinned()` which pre-populates the cache by calling `get_sessions` for each pinned folder. Added FastAPI lifespan handler in web.py with a background asyncio task that calls `refresh_stale_entries` every 30s via `asyncio.to_thread`, with crash-resilient exception handling. Added a daemon thread in `__main__.py` that runs `warmup_pinned` after server startup (non-blocking). Modified `on_open` in tray.py to dispatch warmup in a background thread so pystray's UI thread isn't blocked. Added 5 tests covering refresh detection, unchanged-file skipping, missing-dir handling, warmup population, and warmup skip of non-existent folders.
 
 ### Phase 3: Inline session rendering [QA]
 
@@ -332,11 +340,15 @@ cards_html += templates.get_template("partials/workspace_card.html").render(
 - Pinned sessions section uses cached data when available
 
 **Exit criteria**:
-- [ ] Pinned workspace cards in `/partials/workspaces` response include session rows when cached
-- [ ] Cards rendered with cached sessions have `data-loaded="true"` (no lazy-load triggered)
-- [ ] Cards without cached data still lazy-load as before (graceful fallback)
-- [ ] `_render_pinned_sessions` uses cached session data when available (full prompts displayed)
-- [ ] All existing tests pass
+- [x] Pinned workspace cards in `/partials/workspaces` response include session rows when cached
+- [x] Cards rendered with cached sessions have `data-loaded="true"` (no lazy-load triggered)
+- [x] Cards without cached data still lazy-load as before (graceful fallback)
+- [x] `_render_pinned_sessions` uses cached session data when available (full prompts displayed)
+- [x] All existing tests pass
+
+#### Implementation (2026-06-18, code: c9717e6)
+
+Modified `partials_workspaces()` to pass cached sessions to pinned workspace card templates (using `data.session_cache.get(cwd)` + `_sort_pinned_first`), so pinned cards render with inline session rows and `data-loaded="true"` — eliminating the N+1 lazy-load cascade. Updated `_render_pinned_sessions()` to search the cache first for pinned session IDs (getting full prompt data), falling back to metadata-only reads for sessions not yet cached.
 
 ## 6) Risk Assessment
 
