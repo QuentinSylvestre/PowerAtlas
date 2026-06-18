@@ -260,8 +260,8 @@ def _sort_pinned_first(sessions: list[data.Session], pinned: list[str]) -> list[
 
 def _session_matches(session: data.Session, query: str) -> bool:
     return (
-        query in session.title.lower()
-        or query in session.first_prompt.lower()
-        or query in session.last_prompt.lower()
-        or query in session.last_reply_tail.lower()
+        query in (session.title or "").lower()
+        or query in (session.first_prompt or "").lower()
+        or query in (session.last_prompt or "").lower()
+        or query in (session.last_reply_tail or "").lower()
     )
