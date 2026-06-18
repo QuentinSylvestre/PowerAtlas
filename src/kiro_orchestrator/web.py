@@ -208,7 +208,7 @@ async def partials_workspaces(request: Request):
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                session_count=count, last_updated=updated,
+                session_count=count, is_pinned=False, last_updated=updated,
             )
     log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
     return HTMLResponse(cards_html)

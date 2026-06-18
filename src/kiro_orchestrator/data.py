@@ -304,42 +304,34 @@ def refresh_stale_entries() -> None:
     for norm_cwd in session_cache.get_loaded_cwds():
         try:
             old_stats = session_cache.get_file_stats(norm_cwd)
+            if not old_stats:
+                continue
             changed = False
-            for meta_file in SESSION_DIR.glob("*.json"):
-                if meta_file.suffix == ".jsonl":
-                    continue
+            for path_str, old_info in old_stats.items():
                 try:
-                    d = json.loads(meta_file.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if d.get("parent_session_id"):
-                    continue
-                if _normalize_path(d.get("cwd", "")) != norm_cwd:
-                    continue
-                # Check .json and .jsonl stats
-                json_key = str(meta_file)
-                jsonl_path = meta_file.with_suffix(".jsonl")
-                jsonl_key = str(jsonl_path)
-                try:
-                    js = meta_file.stat()
-                    cur_json = _FileInfo(mtime=js.st_mtime, size=js.st_size)
+                    st = Path(path_str).stat()
+                    if st.st_mtime != old_info.mtime or st.st_size != old_info.size:
+                        changed = True
+                        break
                 except OSError:
-                    continue
-                cur_jsonl = None
-                if jsonl_path.exists():
-                    try:
-                        jls = jsonl_path.stat()
-                        cur_jsonl = _FileInfo(mtime=jls.st_mtime, size=jls.st_size)
-                    except OSError:
-                        pass
-                old_json = old_stats.get(json_key)
-                old_jsonl = old_stats.get(jsonl_key)
-                if (json_key not in old_stats
-                        or (old_json and (old_json.mtime != cur_json.mtime or old_json.size != cur_json.size))
-                        or (cur_jsonl and jsonl_key not in old_stats)
-                        or (cur_jsonl and old_jsonl and (old_jsonl.mtime != cur_jsonl.mtime or old_jsonl.size != cur_jsonl.size))):
-                    changed = True
+                    changed = True  # file deleted
                     break
+            # Also check for new .json files not in old_stats
+            if not changed:
+                for meta_file in SESSION_DIR.glob("*.json"):
+                    if meta_file.suffix == ".jsonl":
+                        continue
+                    if str(meta_file) in old_stats:
+                        continue
+                    try:
+                        d = json.loads(meta_file.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if d.get("parent_session_id"):
+                        continue
+                    if _normalize_path(d.get("cwd", "")) == norm_cwd:
+                        changed = True
+                        break
             if changed:
                 sessions, file_stats = _load_sessions(norm_cwd)
                 session_cache.put(norm_cwd, sessions, file_stats)
