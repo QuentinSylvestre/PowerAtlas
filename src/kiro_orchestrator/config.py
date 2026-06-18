@@ -24,7 +24,7 @@ class Config:
 
 
 def load_config() -> Config:
-    """Load config from TOML. Missing keys get defaults, unknown keys ignored."""
+    """Load config from TOML. Missing keys get defaults, unknown keys ignored, wrong types get defaults."""
     with _lock:
         if not CONFIG_PATH.exists():
             return Config()
@@ -33,8 +33,17 @@ def load_config() -> Config:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError):
             return Config()
+        defaults = Config()
         fields = {f.name for f in Config.__dataclass_fields__.values()}
-        return Config(**{k: v for k, v in data.items() if k in fields})
+        kwargs = {}
+        for k, v in data.items():
+            if k not in fields:
+                continue
+            expected = type(getattr(defaults, k))
+            if isinstance(v, expected):
+                kwargs[k] = v
+            # else: skip — default will fill in via dataclass
+        return Config(**kwargs)
 
 
 def save_config(config: Config) -> None:

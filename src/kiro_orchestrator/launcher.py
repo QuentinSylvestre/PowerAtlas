@@ -54,6 +54,8 @@ def launch_session(
         kiro_args.append("-a")
 
     cmd = _build_command(terminal, cwd, kiro_args)
+    if cmd is None:
+        return LaunchResult(False, session_id, cwd, error="Path contains shell metacharacters unsafe for cmd.exe")
 
     try:
         kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
@@ -69,23 +71,31 @@ def launch_batch(
     terminal_override: str = "",
 ) -> list[LaunchResult]:
     """Launch multiple sessions. Never aborts on single failure."""
-    return [
-        launch_session(
-            cwd=s["workspace"],
+    results = []
+    for s in sessions:
+        workspace = s.get("workspace") or "<unknown>"
+        if workspace == "<unknown>":
+            results.append(LaunchResult(False, s.get("session_id"), workspace, error="Missing 'workspace' key"))
+            continue
+        results.append(launch_session(
+            cwd=workspace,
             session_id=s.get("session_id"),
             trust_all=trust_all,
             terminal_override=terminal_override,
-        )
-        for s in sessions
-    ]
+        ))
+    return results
 
 
-def _build_command(terminal: str, cwd: str, kiro_args: list[str]) -> list[str]:
-    """Build terminal-specific command list. Uses list args to avoid shell injection."""
+_CMD_METACHAR_RE = re.compile(r'[&|<>^%"]')
+
+
+def _build_command(terminal: str, cwd: str, kiro_args: list[str]) -> list[str] | None:
+    """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
     if "{cwd}" in terminal or "{cmd}" in terminal:
-        # Custom template — replace placeholders, split on spaces
+        # Custom template — replace placeholders, split on spaces.
+        # Note: paths with spaces will break due to naive split(); accepted risk for power-user feature.
         kiro_cmd = " ".join(kiro_args)
         full = terminal.replace("{cwd}", cwd).replace("{cmd}", kiro_cmd)
         return full.split()
@@ -93,9 +103,11 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str]) -> list[str]:
     if t == "wt":
         return [terminal, "-d", cwd, "--", *kiro_args]
     if t == "pwsh":
-        # Use -File/-Command with separate args to avoid shell parsing
-        script = f"Set-Location -LiteralPath '{cwd}'; & {' '.join(kiro_args)}"
+        escaped_cwd = cwd.replace("'", "''")
+        script = f"Set-Location -LiteralPath '{escaped_cwd}'; & {' '.join(kiro_args)}"
         return [terminal, "-NoExit", "-Command", script]
-    # cmd fallback — /k requires a single string but we quote properly
+    # cmd fallback — reject paths with shell metacharacters
+    if _CMD_METACHAR_RE.search(cwd):
+        return None
     kiro_cmd = " ".join(kiro_args)
     return [terminal, "/k", f'cd /d "{cwd}" && {kiro_cmd}']

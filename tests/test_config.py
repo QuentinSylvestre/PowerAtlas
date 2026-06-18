@@ -90,3 +90,28 @@ def test_thread_safety():
     # Final state should be valid
     cfg = load_config()
     assert isinstance(cfg, Config)
+
+
+
+def test_wrong_type_bool_gets_default():
+    """A string 'yes' for a bool field should fall back to default."""
+    import tomli_w
+    from kiro_orchestrator.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"trust_all_tools": "yes", "use_pywebview": 1}, f)
+    cfg = load_config()
+    assert cfg.trust_all_tools is False  # default
+    assert cfg.use_pywebview is True  # default (int != bool)
+
+
+def test_wrong_type_list_gets_default():
+    """A scalar string for a list field should fall back to default."""
+    import tomli_w
+    from kiro_orchestrator.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"pinned_folders": "not a list", "terminal_command": 42}, f)
+    cfg = load_config()
+    assert cfg.pinned_folders == []  # default
+    assert cfg.terminal_command == ""  # default (int for str field)

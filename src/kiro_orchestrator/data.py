@@ -80,7 +80,10 @@ session_cache = SessionCache()
 
 
 def discover_workspaces() -> list[str]:
-    """Discover workspaces from session metadata + sqlite. Returns unique cwds sorted by recency."""
+    """Discover workspaces from session metadata + sqlite. Returns unique cwds sorted by recency.
+
+    Unused in production — prefer discover_workspaces_with_counts(). Retained for external/test use.
+    """
     # cwd -> most recent updated_at
     workspaces: dict[str, str] = {}
     counts: dict[str, int] = {}
@@ -124,8 +127,8 @@ def discover_workspaces() -> list[str]:
     return sorted(workspaces.keys(), key=lambda k: workspaces[k], reverse=True)
 
 
-def discover_workspaces_with_counts() -> list[tuple[str, int]]:
-    """Like discover_workspaces but returns (cwd, session_count) tuples. Cached for 30s."""
+def discover_workspaces_with_counts() -> list[tuple[str, int, str]]:
+    """Like discover_workspaces but returns (cwd, session_count, updated_at) tuples. Cached for 30s."""
     cache_key = "workspaces_with_counts"
     if cache_key in _cache:
         ts, result = _cache[cache_key]
@@ -352,8 +355,8 @@ def warmup_pinned(pinned_folders: list[str]) -> None:
 
 
 def _normalize_path(p: str) -> str:
-    """Normalize path: case-fold on Windows, strip trailing sep."""
-    normalized = p.rstrip("/\\")
+    """Normalize path: forward slashes to backslashes, case-fold on Windows, strip trailing sep."""
+    normalized = p.replace("/", "\\").rstrip("\\")
     if sys.platform == "win32":
         normalized = normalized.casefold()
     return normalized

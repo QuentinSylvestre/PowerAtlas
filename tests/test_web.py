@@ -221,3 +221,38 @@ def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config,
     assert resp.status_code == 200
     # Pinned should appear before unpinned
     assert resp.text.index("pinned") < resp.text.index("unpinned")
+
+
+class TestSaveSettingAllowlist:
+    @patch("kiro_orchestrator.web.save_config")
+    @patch("kiro_orchestrator.web.load_config")
+    def test_rejects_unknown_key(self, mock_load, mock_save, client):
+        from kiro_orchestrator.config import Config
+        mock_load.return_value = Config()
+        resp = client.post("/api/save-setting", json={"key": "__class__", "value": "evil"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        assert "unknown" in body["error"].lower()
+        mock_save.assert_not_called()
+
+    @patch("kiro_orchestrator.web.save_config")
+    @patch("kiro_orchestrator.web.load_config")
+    def test_rejects_wrong_type(self, mock_load, mock_save, client):
+        from kiro_orchestrator.config import Config
+        mock_load.return_value = Config()
+        resp = client.post("/api/save-setting", json={"key": "trust_all_tools", "value": "yes"})
+        body = resp.json()
+        assert body["ok"] is False
+        assert "type" in body["error"].lower()
+        mock_save.assert_not_called()
+
+    @patch("kiro_orchestrator.web.save_config")
+    @patch("kiro_orchestrator.web.load_config")
+    def test_accepts_valid_setting(self, mock_load, mock_save, client):
+        from kiro_orchestrator.config import Config
+        mock_load.return_value = Config()
+        resp = client.post("/api/save-setting", json={"key": "trust_all_tools", "value": True})
+        body = resp.json()
+        assert body["ok"] is True
+        mock_save.assert_called_once()

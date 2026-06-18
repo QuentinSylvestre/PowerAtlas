@@ -289,3 +289,24 @@ def test_cache_clear_resets_state():
     assert cache.get("C:\\X") is None
     assert cache.get_loaded_cwds() == set()
     assert cache.get_file_stats("C:\\X") == {}
+
+
+
+class TestNormalizePath:
+    def test_forward_slashes_normalized(self):
+        from kiro_orchestrator.data import _normalize_path
+        assert _normalize_path("C:/Users/test/project") == _normalize_path("C:\\Users\\test\\project")
+
+    def test_mixed_slashes_normalized(self):
+        from kiro_orchestrator.data import _normalize_path
+        assert _normalize_path("C:/Users\\test/project") == _normalize_path("C:\\Users\\test\\project")
+
+    def test_trailing_separator_stripped(self):
+        from kiro_orchestrator.data import _normalize_path
+        assert _normalize_path("C:\\Users\\test\\") == _normalize_path("C:\\Users\\test")
+
+    def test_case_insensitive_on_windows(self):
+        import sys
+        from kiro_orchestrator.data import _normalize_path
+        if sys.platform == "win32":
+            assert _normalize_path("C:\\Users\\Test") == _normalize_path("C:\\users\\test")

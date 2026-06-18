@@ -301,14 +301,32 @@ async def api_last_refresh():
     return {"last_refresh": data.session_cache.last_refresh}
 
 
+_SETTING_TYPES: dict[str, type] = {
+    "trust_all_tools": bool,
+    "use_pywebview": bool,
+    "terminal_command": str,
+    "pinned_folders": list,
+    "pinned_sessions": list,
+}
+
+
 @app.post("/api/save-setting")
 async def save_setting(request: Request):
     body = await request.json()
+    key = body.get("key")
+    value = body.get("value")
+    if key is None or value is None:
+        return {"ok": False, "error": "Missing required field"}
+    expected_type = _SETTING_TYPES.get(key)
+    if expected_type is None:
+        return {"ok": False, "error": f"Unknown setting: {key}"}
+    if not isinstance(value, expected_type):
+        return {"ok": False, "error": f"Invalid type for {key}"}
+    if expected_type is list and not all(isinstance(x, str) for x in value):
+        return {"ok": False, "error": f"All elements of {key} must be strings"}
     config = load_config()
-    key, value = body["key"], body["value"]
-    if hasattr(config, key):
-        setattr(config, key, value)
-        save_config(config)
+    setattr(config, key, value)
+    save_config(config)
     return {"ok": True}
 
 

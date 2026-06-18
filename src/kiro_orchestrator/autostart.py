@@ -4,7 +4,10 @@ import os
 import sys
 from pathlib import Path
 
-STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+_appdata = os.environ.get("APPDATA", "")
+if not _appdata:
+    _appdata = str(Path.home() / "AppData" / "Roaming")
+STARTUP_DIR = Path(_appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
 SHORTCUT_NAME = "Kiro Orchestrator.lnk"
 
 

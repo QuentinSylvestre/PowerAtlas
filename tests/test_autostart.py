@@ -43,3 +43,17 @@ def test_disable_removes_shortcut(tmp_startup):
 
     autostart.disable()
     assert autostart.is_enabled() is False
+
+
+
+def test_appdata_fallback_uses_home(monkeypatch):
+    """When APPDATA is empty, module falls back to Path.home() / AppData / Roaming."""
+    import importlib
+    import os
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("APPDATA", "")
+    # Re-import to trigger module-level code with empty APPDATA
+    import kiro_orchestrator.autostart as _mod
+    importlib.reload(_mod)
+    expected = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    assert _mod.STARTUP_DIR == expected
