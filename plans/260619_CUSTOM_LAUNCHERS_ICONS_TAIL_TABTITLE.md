@@ -273,16 +273,19 @@ icon = norm_icons.get(_normalize_path(cwd), "")
    - `resetIcon()`: calls `/api/set-workspace-icon` with empty icon value
 
 **Exit criteria**:
-- [ ] `workspace_icons` persists in config.toml and round-trips through load/save
-- [ ] Clicking icon slot on workspace card opens emoji picker
-- [ ] Selecting emoji saves via `/api/set-workspace-icon` and updates card display
-- [ ] Categorized picker shows 5 tabs with ~15 emojis each
-- [ ] Text input accepts custom emoji or file path
-- [ ] "Reset to default" removes the icon assignment
-- [ ] Picker is keyboard-navigable (arrow keys, Enter, Escape)
-- [ ] Picker has proper ARIA roles and labels
-- [ ] Icon lookup uses normalized paths on both read and write
-- [ ] Tests cover config round-trip with dict field and API endpoint
+- [x] `workspace_icons` persists in config.toml and round-trips through load/save
+- [x] Clicking icon slot on workspace card opens emoji picker
+- [x] Selecting emoji saves via `/api/set-workspace-icon` and updates card display
+- [x] Categorized picker shows 5 tabs with ~15 emojis each
+- [x] Text input accepts custom emoji or file path
+- [x] "Reset to default" removes the icon assignment
+- [x] Picker is keyboard-navigable (arrow keys, Enter, Escape)
+- [x] Picker has proper ARIA roles and labels
+- [x] Icon lookup uses normalized paths on both read and write
+- [x] Tests cover config round-trip with dict field and API endpoint
+
+**Implementation (2026-06-19, code: 898318c)**
+Added `workspace_icons: dict[str, str]` to Config dataclass. Created `/api/set-workspace-icon` endpoint that normalizes paths on write. Added `emoji_picker.html` partial with 5-category grid (Tools, Objects, Nature, Symbols, Flags, ~15 each), custom text input, reset button, and click-outside-to-close. workspace_card.html gets clickable icon slot (defaults to folder emoji). Icon lookup normalized in `partials_workspaces` and `search` renders. Tests verify config round-trip and both set/reset API flows.
 
 ### Phase 3: Custom launchers [QA]
 
