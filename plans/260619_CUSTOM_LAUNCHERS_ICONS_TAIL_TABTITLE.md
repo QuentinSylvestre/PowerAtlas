@@ -1,7 +1,7 @@
 # Custom Launchers, Icons, Session Tail & Tab Title
 
 > **Date**: 2026-06-19
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Four V2 roadmap features — custom launchers, custom icons, session output tail tooltip, terminal tab title on launch
 > **Estimated effort**: 2-3 days
 
@@ -186,11 +186,14 @@ cmd = _build_command(terminal, cwd, kiro_args, title=title)
 4. Update tests: adjust expected command lists in `TestBuildCommand` and `TestLaunchSession`.
 
 **Exit criteria**:
-- [ ] `_build_command` accepts `title` param and injects it for wt, pwsh, cmd
-- [ ] Custom template branch ignores title (no injection)
-- [ ] `launch_session` passes `"kiro-cli - <folder>"` as title
-- [ ] All existing tests updated and passing
-- [ ] New test verifies title appears in each terminal's command output
+- [x] `_build_command` accepts `title` param and injects it for wt, pwsh, cmd
+- [x] Custom template branch ignores title (no injection)
+- [x] `launch_session` passes `"kiro-cli - <folder>"` as title
+- [x] All existing tests updated and passing
+- [x] New test verifies title appears in each terminal's command output
+
+**Implementation (2026-06-19, code: 27dac16)**
+Added `title: str = ""` parameter to `_build_command()` with `_sanitize_title()` helper that strips shell-unsafe chars (`"`, `'`, `&`, `|`). Title is injected per terminal: wt uses `--title`, pwsh prepends `$Host.UI.RawUI.WindowTitle = '...'`, cmd prepends `title X&&`. Custom templates ignore it. `launch_session()` derives title as `kiro-cli - <folder>`. Six new tests in `TestTabTitle` class verify all branches.
 
 ### Phase 2: Custom icons [QA] [P:1,4]
 
@@ -591,6 +594,18 @@ pytest tests/ -v
 <Reserved — filled during implementation>
 
 ## Review Log
+
+### 2026-06-19 — Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Yellow.
+4 findings (0 High, 1 Medium, 3 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `-p PowerShell` flag not introduced by this phase — pre-existing in working tree | Not applicable — pre-existing change, plan acknowledges it |
+| 2 | Low | `_sanitize_title` stripped spaces making title unreadable | Fixed — removed space from unsafe chars regex |
+| 3 | Low | Custom template test assertion was a tautology (logical OR always true) | Fixed — tightened to direct absence check |
+| 4 | Low | cmd `title X&&` pattern is unconventional but standard | Informational — no action needed |
 
 ### 2026-06-19 — Plan Review (4 personas, High effort)
 
