@@ -310,3 +310,62 @@ class TestNormalizePath:
         from kiro_orchestrator.data import _normalize_path
         if sys.platform == "win32":
             assert _normalize_path("C:\\Users\\Test") == _normalize_path("C:\\users\\test")
+
+
+
+# --- Phase 4: get_session_tail ---
+
+from kiro_orchestrator.data import get_session_tail, _tail_cache
+
+
+class TestGetSessionTail:
+    def test_extracts_assistant_messages(self, mock_sessions):
+        lines = [
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "question 1"}}),
+            json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "answer 1"}}),
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "question 2"}}),
+            json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "answer 2"}}),
+        ]
+        _write_session(mock_sessions, "tail1", "C:\\Work", jsonl_lines=lines)
+        _tail_cache.clear()
+        result = get_session_tail("tail1")
+        assert result == ["answer 1", "answer 2"]
+
+    def test_skips_tool_use_lines(self, mock_sessions):
+        lines = [
+            json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": [{"kind": "toolUse", "data": {"name": "read"}}]}}),
+            json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "real answer"}}),
+        ]
+        _write_session(mock_sessions, "tail2", "C:\\Work", jsonl_lines=lines)
+        _tail_cache.clear()
+        result = get_session_tail("tail2")
+        assert result == ["real answer"]
+
+    def test_truncates_long_messages(self, mock_sessions):
+        long_msg = "x" * 200
+        lines = [json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": long_msg}})]
+        _write_session(mock_sessions, "tail3", "C:\\Work", jsonl_lines=lines)
+        _tail_cache.clear()
+        result = get_session_tail("tail3")
+        assert len(result) == 1
+        assert len(result[0]) == 151  # 150 + ellipsis char
+
+    def test_returns_empty_for_missing_file(self, mock_sessions):
+        _tail_cache.clear()
+        result = get_session_tail("nonexistent")
+        assert result == []
+
+    def test_cache_returns_same_result(self, mock_sessions):
+        lines = [json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "cached"}})]
+        _write_session(mock_sessions, "tail4", "C:\\Work", jsonl_lines=lines)
+        _tail_cache.clear()
+        r1 = get_session_tail("tail4")
+        r2 = get_session_tail("tail4")
+        assert r1 == r2 == ["cached"]
+
+    def test_max_lines_respected(self, mock_sessions):
+        lines = [json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": f"msg{i}"}}) for i in range(10)]
+        _write_session(mock_sessions, "tail5", "C:\\Work", jsonl_lines=lines)
+        _tail_cache.clear()
+        result = get_session_tail("tail5", max_lines=3)
+        assert len(result) == 3

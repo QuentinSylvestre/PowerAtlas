@@ -11,7 +11,14 @@
   <div class="session-actions">
     <button class="pin-btn{% if session.session_id in pinned_sessions %} pinned{% endif %}" onclick="pinSession(this)" aria-label="Pin session">📌</button>
     {% if not stale %}
-    <button class="row-btn primary" onclick="resumeSession(this)" aria-label="Resume">Resume</button>
+    <button class="row-btn primary terminal-btn" onclick="resumeSession(this)" aria-label="Resume">&gt;_</button>
     {% endif %}
+  </div>
+  <div class="session-tooltip-anchor"
+       hx-get="/partials/session-tail?sid={{ session.session_id }}"
+       hx-trigger="mouseenter delay:300ms"
+       hx-target="find .session-tooltip-slot"
+       hx-swap="innerHTML">
+    <div class="session-tooltip-slot"></div>
   </div>
 </div>

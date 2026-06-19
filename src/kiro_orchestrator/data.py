@@ -354,6 +354,47 @@ def warmup_pinned(pinned_folders: list[str]) -> None:
             continue
 
 
+_tail_cache: dict[str, tuple[float, float, list[str]]] = {}  # sid -> (time, mtime, lines)
+_TAIL_CACHE_TTL = 5  # seconds
+
+
+def get_session_tail(session_id: str, max_lines: int = 5) -> list[str]:
+    """Extract last N assistant message texts from a session's .jsonl. Cached 5s."""
+    jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return []
+    try:
+        st = jsonl_path.stat()
+    except OSError:
+        return []
+    cached = _tail_cache.get(session_id)
+    if cached and (time.time() - cached[0] < _TAIL_CACHE_TTL) and cached[1] == st.st_mtime:
+        return list(cached[2])
+    try:
+        with open(jsonl_path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            read_size = min(size, 65536)
+            fh.seek(size - read_size)
+            tail_bytes = fh.read()
+        lines = tail_bytes.decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    messages: list[str] = []
+    for line in reversed(lines):
+        if '"toolUse"' in line:
+            continue
+        text = _extract_content(line, "AssistantMessage")
+        if text:
+            truncated = text[:150] + "\u2026" if len(text) > 150 else text
+            messages.append(truncated)
+            if len(messages) >= max_lines:
+                break
+    messages.reverse()
+    _tail_cache[session_id] = (time.time(), st.st_mtime, messages)
+    return list(messages)
+
+
 def _normalize_path(p: str) -> str:
     """Normalize path: forward slashes to backslashes, case-fold on Windows, strip trailing sep."""
     normalized = p.replace("/", "\\").rstrip("\\")
