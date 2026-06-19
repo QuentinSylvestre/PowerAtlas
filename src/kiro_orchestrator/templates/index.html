@@ -29,6 +29,11 @@
   </div>
 </div>
 
+<div class="launcher-section">
+  <div class="section-label">Launchers <button class="launcher-add-btn" onclick="openNewLauncher()">+</button></div>
+  <div id="launcher-tiles" hx-get="/partials/launchers" hx-trigger="load" hx-swap="innerHTML"></div>
+</div>
+
 <main id="cards-area" class="cards-area" aria-busy="true"
       hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
       hx-on::after-swap="this.removeAttribute('aria-busy')">
@@ -55,5 +60,14 @@ function launchSelected(){var sessions=[];document.querySelectorAll('.session-ro
 function loadExpandedCards(){document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(card){var body=card.querySelector('.card-body');if(body&&body.dataset.loaded==='false'){body.dataset.loaded='true';fetch('/partials/sessions?cwd='+encodeURIComponent(card.dataset.cwd)).then(function(r){return r.text()}).then(function(html){body.innerHTML=html})}})}
 document.addEventListener('DOMContentLoaded',function(){document.getElementById('cards-area').addEventListener('htmx:afterSwap',loadExpandedCards);fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh})});
 function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.textContent='...';fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshCards()}).finally(function(){btn.disabled=false;btn.textContent='\u21BB'})}
+</script>
+{% include "partials/emoji_picker.html" %}
+{% include "partials/launcher_modal.html" %}
+<script>
+function runLauncher(btn){var tile=btn.closest('.launcher-tile');var id=tile.dataset.id;var args=tile.querySelector('.launcher-args').value;var launchers={{launchers|tojson}};var l=launchers.find(function(x){return x.id===id});if(!l)return;fetch('/api/launcher/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:l.command,custom_args:args,cwd:l.cwd,env:l.env,name:l.name})}).then(function(r){return r.text()}).then(showToast)}
+function openNewLauncher(){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value='';document.getElementById('launcherName').value='';document.getElementById('launcherCommand').value='';document.getElementById('launcherArgs').value='';document.getElementById('launcherCwd').value='';document.getElementById('launcherEnv').value='';document.getElementById('launcherIcon').value='';document.getElementById('launcherDeleteBtn').style.display='none';document.getElementById('launcherModalTitle').textContent='New Launcher';m.showModal();m.querySelector('input[type=text]').focus()}
+function editLauncher(id){var launchers={{launchers|tojson}};var l=launchers.find(function(x){return x.id===id});if(!l)return;var m=document.getElementById('launcherModal');document.getElementById('launcherId').value=l.id;document.getElementById('launcherName').value=l.name||'';document.getElementById('launcherCommand').value=l.command||'';document.getElementById('launcherArgs').value=l.custom_args||'';document.getElementById('launcherCwd').value=l.cwd||'';document.getElementById('launcherEnv').value=Object.entries(l.env||{}).map(function(e){return e[0]+'='+e[1]}).join('\n');document.getElementById('launcherIcon').value=l.icon||'';document.getElementById('launcherDeleteBtn').style.display='';document.getElementById('launcherModalTitle').textContent='Edit Launcher';m.showModal();m.querySelector('input[type=text]').focus()}
+function saveLauncher(e){e.preventDefault();var id=document.getElementById('launcherId').value;var envText=document.getElementById('launcherEnv').value;var env={};envText.split('\n').forEach(function(line){var eq=line.indexOf('=');if(eq>0)env[line.slice(0,eq).trim()]=line.slice(eq+1).trim()});var payload={name:document.getElementById('launcherName').value,command:document.getElementById('launcherCommand').value,custom_args:document.getElementById('launcherArgs').value,cwd:document.getElementById('launcherCwd').value,env:env,icon:document.getElementById('launcherIcon').value};var url=id?'/api/launcher/update':'/api/launcher/create';if(id)payload.id=id;fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('launcherModal').close();htmx.ajax('GET','/partials/launchers','#launcher-tiles')})}
+function deleteLauncher(){var id=document.getElementById('launcherId').value;if(!id)return;fetch('/api/launcher/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('launcherModal').close();htmx.ajax('GET','/partials/launchers','#launcher-tiles')})}
 </script>
 {% endblock %}

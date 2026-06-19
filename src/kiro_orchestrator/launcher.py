@@ -1,5 +1,6 @@
 """Launch kiro-cli sessions in detected or configured terminals."""
 
+import os
 import re
 import shutil
 import subprocess
@@ -125,3 +126,44 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
     kiro_cmd = " ".join(kiro_args)
     prefix = f"title {_sanitize_title(title)}&& " if title else ""
     return [terminal, "/k", f'{prefix}cd /d "{cwd}" && {kiro_cmd}']
+
+
+
+def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "") -> LaunchResult:
+    """Launch a custom command in a terminal."""
+    terminal = detect_terminal(terminal_override)
+    if not terminal:
+        return LaunchResult(False, None, cwd or ".", error="No terminal found.")
+    work_dir = cwd or "."
+    if not Path(work_dir).exists():
+        return LaunchResult(False, None, work_dir, error=f"Folder not found: {work_dir}")
+    full_cmd_str = f"{command} {custom_args}".strip() if custom_args else command
+    title = _sanitize_title(f"{Path(command).stem} - {Path(work_dir).name}")
+    cmd = _build_custom_command(terminal, work_dir, full_cmd_str, title)
+    if cmd is None:
+        return LaunchResult(False, None, work_dir, error="Path contains unsafe characters for this terminal")
+    proc_env = {**os.environ, **env} if env else None
+    try:
+        kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
+        if proc_env:
+            kwargs["env"] = proc_env
+        subprocess.Popen(cmd, **kwargs)
+        return LaunchResult(True, None, work_dir)
+    except OSError as e:
+        return LaunchResult(False, None, work_dir, error=str(e))
+
+
+def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str) -> list[str] | None:
+    """Build terminal-specific command for custom launcher. Returns None if unsafe."""
+    t = Path(terminal).stem.lower()
+    if t == "wt":
+        return [terminal, "--title", title, "-p", "PowerShell", "-d", cwd, "--", "cmd", "/c", cmd_str]
+    if t == "pwsh":
+        escaped_cwd = cwd.replace("'", "''")
+        escaped_title = title.replace("'", "''")
+        script = f"$Host.UI.RawUI.WindowTitle = '{escaped_title}'; Set-Location -LiteralPath '{escaped_cwd}'; & cmd /c '{cmd_str}'"
+        return [terminal, "-NoExit", "-Command", script]
+    if _CMD_METACHAR_RE.search(cwd):
+        return None
+    safe_title = _sanitize_title(title)
+    return [terminal, "/k", f'title {safe_title}&& cd /d "{cwd}" && {cmd_str}']

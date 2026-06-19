@@ -22,6 +22,7 @@ class Config:
     pinned_folders: list[str] = field(default_factory=list)
     pinned_sessions: list[str] = field(default_factory=list)
     workspace_icons: dict[str, str] = field(default_factory=dict)
+    custom_launchers: list[dict] = field(default_factory=list)
 
 
 def load_config() -> Config:

@@ -26,6 +26,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 - Trust-all-tools toggle applies to all launches
 - Pin folders and sessions for quick access
 - Search across all workspaces and sessions
+- Custom launchers with inline args editing and one-click execution
 - Settings page for terminal preference, window mode, autostart
 
 ## Configuration

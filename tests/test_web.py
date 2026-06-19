@@ -302,3 +302,50 @@ def test_session_tail_empty(mock_tail, client):
     assert resp.status_code == 200
     assert "tail-empty" in resp.text
     assert "No recent output" in resp.text
+
+
+
+# --- Phase 3: custom launcher CRUD ---
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.load_config")
+def test_launcher_create(mock_load, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/launcher/create", json={
+        "name": "Dev Server", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "icon": "🔥"
+    })
+    assert resp.status_code == 200
+    assert "created" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    assert len(saved.custom_launchers) == 1
+    assert saved.custom_launchers[0]["name"] == "Dev Server"
+    assert saved.custom_launchers[0]["id"]  # UUID generated
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.load_config")
+def test_launcher_delete(mock_load, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_load.return_value = Config(custom_launchers=[{"id": "abc", "name": "x", "command": "y"}])
+    resp = client.post("/api/launcher/delete", json={"id": "abc"})
+    assert resp.status_code == 200
+    assert "deleted" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    assert len(saved.custom_launchers) == 0
+
+
+@patch("kiro_orchestrator.web.launcher.launch_custom")
+@patch("kiro_orchestrator.web.load_config")
+def test_launcher_run(mock_load, mock_launch, client, tmp_path):
+    from kiro_orchestrator.config import Config
+    from kiro_orchestrator.launcher import LaunchResult
+    mock_load.return_value = Config()
+    mock_launch.return_value = LaunchResult(True, None, str(tmp_path))
+    resp = client.post("/api/launcher/run", json={
+        "name": "test", "command": "npm", "custom_args": "start", "cwd": str(tmp_path)
+    })
+    assert resp.status_code == 200
+    assert "started" in resp.text.lower()
+    mock_launch.assert_called_once()

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -51,6 +52,7 @@ async def index(request: Request):
         "trust_all_tools": config.trust_all_tools,
         "terminal_command": config.terminal_command,
         "autostart": autostart.is_enabled(),
+        "launchers": config.custom_launchers,
     })
 
 
@@ -514,6 +516,75 @@ def _session_matches(session: data.Session, query: str) -> bool:
         or query in (session.last_reply_tail or "").lower()
     )
 
+
+
+@app.get("/partials/launchers", response_class=HTMLResponse)
+async def partials_launchers(request: Request):
+    config = load_config()
+    html = ""
+    for l in config.custom_launchers:
+        html += templates.get_template("partials/launcher_tile.html").render(request=request, launcher=l)
+    return HTMLResponse(html)
+
+
+@app.post("/api/launcher/create", response_class=HTMLResponse)
+async def launcher_create(request: Request):
+    body = await request.json()
+    config = load_config()
+    entry = {
+        "id": str(uuid.uuid4()),
+        "name": body.get("name", ""),
+        "command": body.get("command", ""),
+        "custom_args": body.get("custom_args", ""),
+        "cwd": body.get("cwd", ""),
+        "env": body.get("env", {}),
+        "icon": body.get("icon", ""),
+    }
+    config.custom_launchers.append(entry)
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher created", "level": "success"})
+
+
+@app.post("/api/launcher/update", response_class=HTMLResponse)
+async def launcher_update(request: Request):
+    body = await request.json()
+    lid = body.get("id")
+    config = load_config()
+    for entry in config.custom_launchers:
+        if entry["id"] == lid:
+            for k in ("name", "command", "custom_args", "cwd", "env", "icon"):
+                if k in body:
+                    entry[k] = body[k]
+            break
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher updated", "level": "success"})
+
+
+@app.post("/api/launcher/delete", response_class=HTMLResponse)
+async def launcher_delete(request: Request):
+    body = await request.json()
+    lid = body.get("id")
+    config = load_config()
+    config.custom_launchers = [e for e in config.custom_launchers if e["id"] != lid]
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher deleted", "level": "success"})
+
+
+@app.post("/api/launcher/run", response_class=HTMLResponse)
+async def launcher_run(request: Request):
+    body = await request.json()
+    config = load_config()
+    result = launcher.launch_custom(
+        name=body.get("name", ""),
+        command=body.get("command", ""),
+        custom_args=body.get("custom_args", ""),
+        cwd=body.get("cwd", ""),
+        env=body.get("env"),
+        terminal_override=config.terminal_command,
+    )
+    level = "success" if result.success else "error"
+    msg = "Launcher started" if result.success else result.error
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
 
 @app.post("/api/restart")

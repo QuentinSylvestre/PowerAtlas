@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from kiro_orchestrator.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title
+from kiro_orchestrator.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command
 
 
 class TestDetectTerminal:
@@ -162,3 +162,51 @@ class TestTabTitle:
     def test_custom_template_ignores_title(self):
         cmd = _build_command("myterm --dir {cwd} --exec {cmd}", "C:\\proj", ["kiro-cli"], title="kiro-cli - proj")
         assert "kiro-cli - proj" not in " ".join(cmd)
+
+
+class TestBuildCustomCommand:
+    def test_wt_format(self):
+        cmd = _build_custom_command("C:\\wt.exe", "C:\\proj", "npm start", "npm - proj")
+        assert cmd == ["C:\\wt.exe", "--title", "npm - proj", "-p", "PowerShell", "-d", "C:\\proj", "--", "cmd", "/c", "npm start"]
+
+    def test_pwsh_format(self):
+        cmd = _build_custom_command("C:\\pwsh.exe", "C:\\proj", "npm start", "npm - proj")
+        assert "Set-Location" in cmd[3]
+        assert "npm start" in cmd[3]
+        assert "WindowTitle" in cmd[3]
+
+    def test_cmd_format(self):
+        cmd = _build_custom_command("C:\\cmd.exe", "C:\\proj", "npm start", "npm - proj")
+        assert cmd[0] == "C:\\cmd.exe"
+        assert "npm start" in cmd[2]
+
+    def test_cmd_rejects_unsafe_cwd(self):
+        assert _build_custom_command("C:\\cmd.exe", "C:\\a&b", "npm start", "t") is None
+
+
+class TestLaunchCustom:
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_success(self, _, mock_popen, tmp_path):
+        result = launch_custom("test", "npm", custom_args="start", cwd=str(tmp_path))
+        assert result.success is True
+        mock_popen.assert_called_once()
+
+    def test_missing_cwd(self):
+        result = launch_custom("test", "npm", cwd="C:\\nonexistent\\xyz", terminal_override="wt")
+        assert result.success is False
+        assert "not found" in result.error.lower()
+
+    @patch("shutil.which", return_value=None)
+    def test_no_terminal(self, _, tmp_path):
+        result = launch_custom("test", "npm", cwd=str(tmp_path))
+        assert result.success is False
+        assert "no terminal" in result.error.lower()
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_env_passed(self, _, mock_popen, tmp_path):
+        result = launch_custom("test", "npm", cwd=str(tmp_path), env={"FOO": "bar"})
+        assert result.success is True
+        kwargs = mock_popen.call_args[1]
+        assert "FOO" in kwargs["env"]
