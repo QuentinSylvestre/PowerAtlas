@@ -107,7 +107,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .session-title-row { display: flex; align-items: center; gap: 8px; }
 .session-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session-time { font-size: 11px; color: #d4a054; white-space: nowrap; }
+.session-time { font-size: 11px; color: #d4a054; white-space: nowrap; margin-left: auto; }
 .session-preview { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
 .session-last { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
