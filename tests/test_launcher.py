@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from kiro_orchestrator.launcher import detect_terminal, launch_session, launch_batch, _build_command
+from kiro_orchestrator.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title
 
 
 class TestDetectTerminal:
@@ -129,3 +129,36 @@ class TestLaunchBatch:
         assert results[1].success is False
         assert "missing" in results[1].error.lower()
         assert results[1].workspace == "<unknown>"
+
+
+
+class TestTabTitle:
+    def test_sanitize_title_strips_unsafe_chars(self):
+        assert _sanitize_title('hello"world') == "helloworld"
+        assert _sanitize_title("it's") == "its"
+        assert _sanitize_title("a & b | c") == "a  b  c"
+        assert _sanitize_title("safe-title_v2") == "safe-title_v2"
+        assert _sanitize_title("kiro-cli - proj") == "kiro-cli - proj"
+
+    def test_wt_includes_title(self):
+        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj")
+        assert "--title" in cmd
+        idx = cmd.index("--title")
+        assert cmd[idx + 1] == "kiro-cli - proj"
+
+    def test_wt_omits_title_when_empty(self):
+        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="")
+        assert "--title" not in cmd
+
+    def test_pwsh_includes_title(self):
+        cmd = _build_command("C:\\pwsh.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj")
+        script = cmd[3]
+        assert "$Host.UI.RawUI.WindowTitle = 'kiro-cli - proj'" in script
+
+    def test_cmd_includes_title(self):
+        cmd = _build_command("C:\\cmd.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj")
+        assert cmd[2].startswith("title kiro-cli - proj&& ")
+
+    def test_custom_template_ignores_title(self):
+        cmd = _build_command("myterm --dir {cwd} --exec {cmd}", "C:\\proj", ["kiro-cli"], title="kiro-cli - proj")
+        assert "kiro-cli - proj" not in " ".join(cmd)

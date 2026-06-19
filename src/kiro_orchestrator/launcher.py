@@ -53,7 +53,8 @@ def launch_session(
     if trust_all:
         kiro_args.append("-a")
 
-    cmd = _build_command(terminal, cwd, kiro_args)
+    title = f"kiro-cli - {Path(cwd).name}"
+    cmd = _build_command(terminal, cwd, kiro_args, title=title)
     if cmd is None:
         return LaunchResult(False, session_id, cwd, error="Path contains shell metacharacters unsafe for cmd.exe")
 
@@ -87,27 +88,40 @@ def launch_batch(
 
 
 _CMD_METACHAR_RE = re.compile(r'[&|<>^%"]')
+_TITLE_UNSAFE_RE = re.compile(r'["\'&|]')
 
 
-def _build_command(terminal: str, cwd: str, kiro_args: list[str]) -> list[str] | None:
+def _sanitize_title(title: str) -> str:
+    """Strip chars unsafe for shell title injection."""
+    return _TITLE_UNSAFE_RE.sub("", title)
+
+
+def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "") -> list[str] | None:
     """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
     if "{cwd}" in terminal or "{cmd}" in terminal:
-        # Custom template — replace placeholders, split on spaces.
-        # Note: paths with spaces will break due to naive split(); accepted risk for power-user feature.
         kiro_cmd = " ".join(kiro_args)
         full = terminal.replace("{cwd}", cwd).replace("{cmd}", kiro_cmd)
         return full.split()
 
     if t == "wt":
-        return [terminal, "-d", cwd, "--", *kiro_args]
+        cmd = [terminal]
+        if title:
+            cmd += ["--title", _sanitize_title(title)]
+        cmd += ["-p", "PowerShell", "-d", cwd, "--", *kiro_args]
+        return cmd
     if t == "pwsh":
         escaped_cwd = cwd.replace("'", "''")
-        script = f"Set-Location -LiteralPath '{escaped_cwd}'; & {' '.join(kiro_args)}"
+        script = ""
+        if title:
+            safe = _sanitize_title(title).replace("'", "''")
+            script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
+        script += f"Set-Location -LiteralPath '{escaped_cwd}'; & {' '.join(kiro_args)}"
         return [terminal, "-NoExit", "-Command", script]
     # cmd fallback — reject paths with shell metacharacters
     if _CMD_METACHAR_RE.search(cwd):
         return None
     kiro_cmd = " ".join(kiro_args)
-    return [terminal, "/k", f'cd /d "{cwd}" && {kiro_cmd}']
+    prefix = f"title {_sanitize_title(title)}&& " if title else ""
+    return [terminal, "/k", f'{prefix}cd /d "{cwd}" && {kiro_cmd}']
