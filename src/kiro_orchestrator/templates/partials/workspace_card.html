@@ -4,10 +4,10 @@
     <span class="card-chevron">▼</span>
     <span class="card-icon" onclick="event.stopPropagation();showIconPicker(this,'{{ cwd }}')" title="Click to change icon" role="button" aria-label="Workspace icon">{{ icon or '📁' }}</span>
     <span class="card-folder-name">{{ folder_name }}<span class="card-path" title="{{ cwd }}">{{ cwd }}</span></span>
-    <div class="card-meta">
-      {% if last_updated %}<span class="card-last-active">{{ last_updated[5:16] | replace('T', ' ') }}</span>{% endif %}
-      <span class="card-count">{{ session_count if session_count is defined else sessions|length }}</span>
-      {% if stale %}<span class="badge-stale">missing</span>{% endif %}
+    <span class="card-count">{{ session_count if session_count is defined else sessions|length }}</span>
+    {% if stale %}<span class="badge-stale">missing</span>{% endif %}
+    {% if last_updated %}<span class="card-last-active">{{ last_updated[5:16] | replace('T', ' ') }}</span>{% endif %}
+    <div class="card-actions">
       <button class="card-new-btn" onclick="event.stopPropagation();launchFresh(this)" aria-label="New session">&gt;_</button>
       <button class="card-pin-btn{% if is_pinned %} pinned{% endif %}" onclick="event.stopPropagation();pinWorkspace(this)" aria-label="Pin workspace">📌</button>
     </div>
