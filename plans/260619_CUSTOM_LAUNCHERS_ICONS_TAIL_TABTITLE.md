@@ -548,16 +548,19 @@ The loading placeholder appears during the 300ms debounce + fetch time. Tooltip 
    - Positioning computed via JS (small helper that sets `top`/`left` based on anchor rect)
 
 **Exit criteria**:
-- [ ] Hovering a session row (300ms debounce) triggers fetch of `/partials/session-tail?sid=<id>`
-- [ ] Tooltip shows last 5 assistant message snippets (max 150 chars + "…" when truncated)
-- [ ] Tool-use messages filtered out (only prose content shown)
-- [ ] Tooltip disappears on mouseleave (CSS :hover)
-- [ ] Tooltip positioned via `position: fixed` (not clipped by card overflow)
-- [ ] Loading state visible during fetch
-- [ ] Re-fetch on subsequent hovers (not cached client-side; server caches 5s by mtime)
-- [ ] Uses seek-from-end (last 64KB) — O(1) for large files
-- [ ] Graceful fallback for sessions with no .jsonl or no assistant messages
-- [ ] Tests cover `get_session_tail()` extraction, TTL cache behavior, and the API endpoint
+- [x] Hovering a session row (300ms debounce) triggers fetch of `/partials/session-tail?sid=<id>`
+- [x] Tooltip shows last 5 assistant message snippets (max 150 chars + "…" when truncated)
+- [x] Tool-use messages filtered out (only prose content shown)
+- [x] Tooltip disappears on mouseleave (CSS :hover)
+- [x] Tooltip positioned via `position: fixed` (not clipped by card overflow)
+- [x] Loading state visible during fetch
+- [x] Re-fetch on subsequent hovers (not cached client-side; server caches 5s by mtime)
+- [x] Uses seek-from-end (last 64KB) — O(1) for large files
+- [x] Graceful fallback for sessions with no .jsonl or no assistant messages
+- [x] Tests cover `get_session_tail()` extraction, TTL cache behavior, and the API endpoint
+
+**Implementation (2026-06-19, code: e70ed88)**
+Added `get_session_tail()` to data.py with seek-from-end (last 64KB), `_extract_content` reuse for AssistantMessage parsing, toolUse short-circuit filter, 150-char truncation, and 5-second TTL cache keyed by session ID + file mtime. Created `/partials/session-tail` endpoint in web.py with asyncio.to_thread wrapper. session_row.html gets htmx tooltip anchor with mouseenter delay:300ms trigger. session_tail.html renders message lines. CSS positions tooltip above the row with z-index 1000.
 
 ## 6) Risk Assessment
 
