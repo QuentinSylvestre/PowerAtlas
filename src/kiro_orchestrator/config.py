@@ -21,6 +21,7 @@ class Config:
     terminal_command: str = ""
     pinned_folders: list[str] = field(default_factory=list)
     pinned_sessions: list[str] = field(default_factory=list)
+    workspace_icons: dict[str, str] = field(default_factory=dict)
 
 
 def load_config() -> Config:

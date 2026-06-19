@@ -76,7 +76,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .card-count { font-size: 11px; color: var(--text-dim); background: var(--surface); padding: 2px 8px; border-radius: 10px; }
 .card-last-active { font-size: 11px; color: var(--text-dim); }
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
-.card-new-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; font-weight: 600; opacity: 0; transition: all 0.12s; padding: 2px 8px; color: var(--text-muted); }
+.card-new-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 600; font-family: monospace; opacity: 0; transition: all 0.12s; padding: 2px 8px; color: var(--text-muted); }
 .card-header:hover .card-new-btn { opacity: 0.6; }
 .card-new-btn:hover { opacity: 1 !important; color: var(--accent); border-color: var(--accent); }
 .card-check { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; transition: all 0.12s; flex-shrink: 0; cursor: pointer; }
@@ -112,11 +112,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
 .session-last { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
 .session-last .label { font-size: 10px; text-transform: uppercase; margin-right: 3px; font-style: normal; }
-.session-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface); padding-left: 8px; }
+.session-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface-hover); padding-left: 8px; }
 .session-row:hover .session-actions { opacity: 1; }
 .row-btn { font-size: 11px; padding: 4px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.1s; }
 .row-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
 .row-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+.terminal-btn { font-family: monospace; font-weight: 600; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; }
 .row-btn.primary:hover { background: var(--accent); color: white; }
 .new-session-inline { padding: 8px 16px 10px 54px; font-size: 12px; color: var(--text-dim); cursor: pointer; transition: color 0.12s; border-top: 1px solid rgba(45,50,68,0.4); }
 .new-session-inline:hover { color: var(--accent); }
@@ -176,3 +177,31 @@ script { display: none; }
 .pinned-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pinned-remove { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 16px; }
 .pinned-remove:hover { color: #f87171; }
+
+/* Card icon */
+.card-icon { cursor: pointer; font-size: 16px; line-height: 1; flex-shrink: 0; transition: transform 0.12s; }
+.card-icon:hover { transform: scale(1.2); }
+
+/* Emoji picker */
+.emoji-picker { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; width: 280px; z-index: 150; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+.emoji-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.emoji-tab { background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 11px; padding: 4px 8px; cursor: pointer; }
+.emoji-tab.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+.emoji-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 8px; }
+.emoji-grid button { background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); font-size: 18px; padding: 6px; cursor: pointer; transition: background 0.1s; }
+.emoji-grid button:hover { background: var(--surface-hover); border-color: var(--border); }
+.emoji-custom { margin-bottom: 8px; }
+.emoji-custom input { width: 100%; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; outline: none; }
+.emoji-custom input:focus { border-color: var(--accent); }
+.emoji-picker-footer { display: flex; justify-content: flex-end; gap: 8px; }
+.emoji-picker-footer button { background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 12px; padding: 4px 10px; cursor: pointer; }
+.emoji-picker-footer button:hover { border-color: var(--accent); color: var(--text); }
+
+/* Session tail tooltip */
+.session-tooltip-anchor { position: relative; }
+.session-tooltip-slot { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); z-index: 1000; pointer-events: none; }
+.session-row:hover .session-tooltip-slot { display: block; }
+.session-tail-tooltip { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; max-width: 400px; min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.tail-line { font-size: 11px; color: var(--text-muted); padding: 2px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
+.tail-line + .tail-line { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 4px; }
+.tail-empty { font-size: 11px; color: var(--text-dim); padding: 4px 8px; font-style: italic; }

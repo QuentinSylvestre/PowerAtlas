@@ -115,3 +115,12 @@ def test_wrong_type_list_gets_default():
     cfg = load_config()
     assert cfg.pinned_folders == []  # default
     assert cfg.terminal_command == ""  # default (int for str field)
+
+
+def test_workspace_icons_round_trip():
+    """workspace_icons dict persists through save/load cycle."""
+    icons = {"C:\\projects\\app": "🚀", "C:\\work\\lib": "📚"}
+    cfg = Config(workspace_icons=icons)
+    save_config(cfg)
+    loaded = load_config()
+    assert loaded.workspace_icons == icons

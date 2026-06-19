@@ -256,3 +256,49 @@ class TestSaveSettingAllowlist:
         body = resp.json()
         assert body["ok"] is True
         mock_save.assert_called_once()
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.load_config")
+def test_set_workspace_icon(mock_load, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": "🚀"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    saved = mock_save.call_args[0][0]
+    # Check icon was set (normalized path)
+    assert any(v == "🚀" for v in saved.workspace_icons.values())
+
+
+@patch("kiro_orchestrator.web.save_config")
+@patch("kiro_orchestrator.web.load_config")
+def test_set_workspace_icon_reset(mock_load, mock_save, client):
+    from kiro_orchestrator.config import Config
+    mock_load.return_value = Config(workspace_icons={"c:\\projects\\app": "🚀"})
+    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": ""})
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert "🚀" not in saved.workspace_icons.values()
+
+
+# --- Phase 4: session-tail endpoint ---
+
+
+@patch("kiro_orchestrator.web.data.get_session_tail")
+def test_session_tail_returns_messages(mock_tail, client):
+    mock_tail.return_value = ["message one", "message two"]
+    resp = client.get("/partials/session-tail?sid=sess-1")
+    assert resp.status_code == 200
+    assert "message one" in resp.text
+    assert "message two" in resp.text
+    assert "tail-line" in resp.text
+
+
+@patch("kiro_orchestrator.web.data.get_session_tail")
+def test_session_tail_empty(mock_tail, client):
+    mock_tail.return_value = []
+    resp = client.get("/partials/session-tail?sid=sess-1")
+    assert resp.status_code == 200
+    assert "tail-empty" in resp.text
+    assert "No recent output" in resp.text

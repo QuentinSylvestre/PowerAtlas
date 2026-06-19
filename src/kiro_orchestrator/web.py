@@ -94,6 +94,21 @@ async def toggle_autostart():
     return {"enabled": autostart.is_enabled()}
 
 
+@app.post("/api/set-workspace-icon")
+async def set_workspace_icon(request: Request):
+    body = await request.json()
+    config = load_config()
+    from .data import _normalize_path
+    workspace = _normalize_path(body["workspace"])
+    icon = body.get("icon", "")
+    if icon:
+        config.workspace_icons[workspace] = icon
+    else:
+        config.workspace_icons.pop(workspace, None)
+    save_config(config)
+    return {"ok": True}
+
+
 @app.post("/api/pin-session")
 async def pin_session(request: Request):
     body = await request.json()
@@ -156,6 +171,7 @@ async def partials_workspaces(request: Request):
     config = load_config()
     # Merge pinned folders (with count=0)
     from .data import _normalize_path
+    norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
     workspace_data = list(workspace_data)
     existing = {_normalize_path(cwd) for cwd, _, _ in workspace_data}
     for pf in config.pinned_folders:
@@ -196,6 +212,7 @@ async def partials_workspaces(request: Request):
                 request=request, cwd=cwd, sessions=card_sessions, stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=True, last_updated=updated,
+                icon=norm_icons.get(_normalize_path(cwd), ""),
             )
 
     # All other workspaces
@@ -209,6 +226,7 @@ async def partials_workspaces(request: Request):
                 request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=False, last_updated=updated,
+                icon=norm_icons.get(_normalize_path(cwd), ""),
             )
     log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
@@ -268,12 +286,14 @@ async def search(request: Request, q: str = ""):
     if pinned_rows:
         cards_html += '<div class="section-label">Pinned sessions</div>'
         cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
+    config_icons = {data._normalize_path(k): v for k, v in config.workspace_icons.items()}
     for cwd, count, updated in matched:
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
             session_count=count, last_updated=updated,
+            icon=config_icons.get(data._normalize_path(cwd), ""),
         )
     return HTMLResponse(cards_html)
 
@@ -328,6 +348,14 @@ async def save_setting(request: Request):
     setattr(config, key, value)
     save_config(config)
     return {"ok": True}
+
+
+@app.get("/partials/session-tail", response_class=HTMLResponse)
+async def partials_session_tail(request: Request, sid: str = ""):
+    messages = await asyncio.to_thread(data.get_session_tail, sid)
+    if not messages:
+        return HTMLResponse('<div class="tail-empty">No recent output</div>')
+    return templates.TemplateResponse(request, "partials/session_tail.html", {"messages": messages})
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)
@@ -485,3 +513,15 @@ def _session_matches(session: data.Session, query: str) -> bool:
         or query in (session.last_prompt or "").lower()
         or query in (session.last_reply_tail or "").lower()
     )
+
+
+
+@app.post("/api/restart")
+async def api_restart():
+    """Trigger restart via the tray mechanism."""
+    import kiro_orchestrator.tray as _tray
+    _tray._restart_requested = True
+    _tray._shutdown_event.set()
+    if _tray._icon_instance:
+        _tray._icon_instance.stop()
+    return {"ok": True}
