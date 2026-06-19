@@ -427,21 +427,24 @@ Focus management: on open, focus first input; on close (Escape or Cancel), retur
 9. Env vars textarea parsing spec: one var per line, `KEY=VALUE` format (split on first `=` only per line; skip empty lines; trim whitespace from key and value).
 
 **Exit criteria**:
-- [ ] Can create a launcher via "+" button and modal (UUID assigned)
-- [ ] Launcher tile shows name, icon, editable args input, run button, gearcog
-- [ ] Running a launcher opens a terminal with the full command + custom args (no naive split)
-- [ ] Tab title set to `<command-stem> - <cwd-name>`
-- [ ] Gearcog opens modal for editing all fields (name, command, cwd, env, icon)
-- [ ] Delete requires confirmation before removing
-- [ ] Launchers referenced by UUID (not index) — reordering/deletion is safe
-- [ ] Launchers persist in config.toml as `[[custom_launchers]]` with `id` field
-- [ ] Env vars are additive (merged onto os.environ)
-- [ ] Run button shows toast feedback on success/failure
-- [ ] Empty state shown when no launchers configured
-- [ ] Modal has focus management (trap, Escape, return focus)
-- [ ] Tests cover `launch_custom()`, `_build_custom_command()`, CRUD endpoints, config round-trip
-- [ ] Test for malformed launcher dicts in config (empty dict, wrong types) — no crash
-- [ ] Update README.md with Custom Launchers in Features list and config example
+- [x] Can create a launcher via "+" button and modal (UUID assigned)
+- [x] Launcher tile shows name, icon, editable args input, run button, gearcog
+- [x] Running a launcher opens a terminal with the full command + custom args (no naive split)
+- [x] Tab title set to `<command-stem> - <cwd-name>`
+- [x] Gearcog opens modal for editing all fields (name, command, cwd, env, icon)
+- [x] Delete requires confirmation before removing
+- [x] Launchers referenced by UUID (not index) — reordering/deletion is safe
+- [x] Launchers persist in config.toml as `[[custom_launchers]]` with `id` field
+- [x] Env vars are additive (merged onto os.environ)
+- [x] Run button shows toast feedback on success/failure
+- [x] Empty state shown when no launchers configured
+- [x] Modal has focus management (trap, Escape, return focus)
+- [x] Tests cover `launch_custom()`, `_build_custom_command()`, CRUD endpoints, config round-trip
+- [x] Test for malformed launcher dicts in config (empty dict, wrong types) — no crash
+- [x] Update README.md with Custom Launchers in Features list and config example
+
+**Implementation (2026-06-19, code: c6a059b)**
+Added `custom_launchers: list[dict]` to Config. Implemented `launch_custom()` and `_build_custom_command()` in launcher.py — uses full command string (no split), _sanitize_title for tab title, additive env vars via `{**os.environ, **env}`. CRUD endpoints (`/api/launcher/create|update|delete|run`) use UUID-based identity. Created launcher_tile.html with inline editable args and launcher_modal.html dialog with focus trap. Added launcher section to index.html above workspace cards. CSS for tiles, modal, and empty state. Tests cover all launcher execution paths, CRUD, and malformed config resilience. README updated.
 
 ### Phase 4: Session output tail tooltip [QA] [P:1,2]
 
