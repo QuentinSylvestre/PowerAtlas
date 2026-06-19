@@ -104,7 +104,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-row:hover .session-check { border-color: var(--text-muted); }
 .session-row.selected .session-check { border-color: var(--accent); background: var(--accent); }
 .session-row.selected .session-check::after { content: '✓'; color: white; font-size: 11px; font-weight: 700; }
-.session-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.session-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; position: relative; }
 .session-title-row { display: flex; align-items: center; gap: 8px; }
 .session-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
@@ -198,9 +198,7 @@ script { display: none; }
 .emoji-picker-footer button:hover { border-color: var(--accent); color: var(--text); }
 
 /* Session tail tooltip */
-.session-tooltip-anchor { position: relative; }
-.session-tooltip-slot { display: none; position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); z-index: 1000; pointer-events: none; }
-.session-row:hover .session-tooltip-slot { display: block; }
+.session-tooltip-slot { display: none; position: absolute; bottom: 100%; left: 0; z-index: 1000; }
 .session-tail-tooltip { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; max-width: 400px; min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
 .tail-line { font-size: 11px; color: var(--text-muted); padding: 2px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
 .tail-line + .tail-line { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 4px; }
@@ -232,3 +230,5 @@ script { display: none; }
 .modal-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
 .modal-delete-btn { background: none; border: 1px solid #f87171; border-radius: var(--radius-sm); color: #f87171; cursor: pointer; padding: 6px 12px; font-size: 12px; }
 .modal-delete-btn:hover { background: rgba(248,113,113,0.12); }
+.modal-cancel-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; padding: 6px 12px; font-size: 12px; }
+.modal-cancel-btn:hover { border-color: var(--text-muted); color: var(--text); }
