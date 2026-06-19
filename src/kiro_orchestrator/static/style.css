@@ -74,11 +74,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .card-path { display: block; font-size: 11px; font-weight: 400; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
 .card-meta { display: flex; align-items: center; gap: 8px; }
 .card-count { font-size: 11px; color: var(--text-dim); background: var(--surface); padding: 2px 8px; border-radius: 10px; }
-.card-last-active { font-size: 11px; color: var(--text-dim); }
+.card-last-active { font-size: 11px; color: #d4a054; }
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
 .card-new-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 600; font-family: monospace; opacity: 0; transition: all 0.12s; width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
 .card-header:hover .card-new-btn { opacity: 0.6; }
-.card-new-btn:hover { opacity: 1 !important; color: var(--accent); border-color: var(--accent); }
+.card-new-btn:hover { opacity: 1 !important; background: var(--accent); border-color: var(--accent); color: white; }
 .card-check { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; transition: all 0.12s; flex-shrink: 0; cursor: pointer; }
 .card-header:hover .card-check { border-color: var(--text-muted); }
 .workspace-card.selected .card-check { border-color: var(--accent); background: var(--accent); }
@@ -107,7 +107,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .session-title-row { display: flex; align-items: center; gap: 8px; }
 .session-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.session-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.session-time { font-size: 11px; color: #d4a054; white-space: nowrap; }
 .session-preview { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
 .session-last { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
