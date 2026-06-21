@@ -13,6 +13,13 @@ from pathlib import Path
 SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 SQLITE_PATH = Path(os.environ.get("LOCALAPPDATA", "")) / "Kiro-Cli" / "data.sqlite3"
 
+
+def _cap_text(text: str, max_chars: int = 2000, max_lines: int = 15) -> str:
+    """Cap text at max_chars OR max_lines, whichever is shorter."""
+    lines = text.split("\n")[:max_lines]
+    result = "\n".join(lines)
+    return result[:max_chars]
+
 # Simple TTL cache to avoid re-reading hundreds of OneDrive-synced files on every request
 _cache: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 30  # seconds
@@ -246,16 +253,27 @@ def _extract_prompts(jsonl_path: Path) -> tuple[str, str, str]:
     if not jsonl_path.exists():
         return first_prompt, last_prompt, last_reply_tail
 
+    # Prefer .history file for first_prompt (preserves /qskill prefix + newlines)
+    history_path = jsonl_path.with_suffix(".history")
+    if history_path.exists():
+        try:
+            first_line = history_path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+            if first_line:
+                first_prompt = first_line.replace("\\n", " ")[:200]
+        except OSError:
+            pass
+
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
-            # First 50 lines for first_prompt
-            for i, line in enumerate(fh):
-                if i >= 50:
-                    break
-                text = _extract_content(line, "Prompt")
-                if text:
-                    first_prompt = text[:200]
-                    break
+            # Fallback: extract from jsonl if .history didn't provide it
+            if not first_prompt:
+                for i, line in enumerate(fh):
+                    if i >= 50:
+                        break
+                    text = _extract_content(line, "Prompt")
+                    if text:
+                        first_prompt = text[:200]
+                        break
             # Tail: keep last 100 lines via deque
             tail = collections.deque(fh, maxlen=100)
     except OSError:
@@ -358,7 +376,7 @@ _tail_cache: dict[str, tuple[float, float, list[str]]] = {}  # sid -> (time, mti
 _TAIL_CACHE_TTL = 5  # seconds
 
 
-def get_session_tail(session_id: str, max_lines: int = 5) -> list[str]:
+def get_session_tail(session_id: str, max_lines: int = 15) -> list[str]:
     """Extract last N assistant message texts from a session's .jsonl. Cached 5s."""
     jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
     if not jsonl_path.exists():
@@ -374,7 +392,7 @@ def get_session_tail(session_id: str, max_lines: int = 5) -> list[str]:
         with open(jsonl_path, "rb") as fh:
             fh.seek(0, 2)
             size = fh.tell()
-            read_size = min(size, 65536)
+            read_size = min(size, 131072)
             fh.seek(size - read_size)
             tail_bytes = fh.read()
         lines = tail_bytes.decode("utf-8", errors="replace").splitlines()
@@ -386,13 +404,43 @@ def get_session_tail(session_id: str, max_lines: int = 5) -> list[str]:
             continue
         text = _extract_content(line, "AssistantMessage")
         if text:
-            truncated = text[:150] + "\u2026" if len(text) > 150 else text
+            truncated = _cap_text(text)
             messages.append(truncated)
             if len(messages) >= max_lines:
                 break
     messages.reverse()
     _tail_cache[session_id] = (time.time(), st.st_mtime, messages)
     return list(messages)
+
+
+def get_first_prompt(session_id: str) -> str:
+    """Extract first_prompt for tooltip display. Uses .history file (preserves newlines)."""
+    # .history file stores original user input with escaped newlines
+    history_path = SESSION_DIR / f"{session_id}.history"
+    if history_path.exists():
+        try:
+            first_line = history_path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+            if first_line:
+                # Unescape literal \n sequences to real newlines
+                text = first_line.replace("\\n", "\n")
+                return _cap_text(text)
+        except OSError:
+            pass
+    # Fallback to jsonl extraction
+    jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return ""
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i >= 50:
+                    break
+                text = _extract_content(line, "Prompt")
+                if text:
+                    return _cap_text(text)
+    except OSError:
+        pass
+    return ""
 
 
 def _normalize_path(p: str) -> str:

@@ -11,6 +11,7 @@
   </div>
   <div class="session-actions">
     <button class="pin-btn{% if session.session_id in pinned_sessions %} pinned{% endif %}" onclick="pinSession(this)" aria-label="Pin session">📌</button>
+    <button class="row-btn copy-sid-btn" onclick="copySid(this)" aria-label="Copy session ID" title="Copy session ID">📋</button>
     {% if not stale %}
     <button class="row-btn primary terminal-btn" onclick="resumeSession(this)" aria-label="Resume">&gt;_</button>
     {% endif %}

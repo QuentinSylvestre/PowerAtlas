@@ -1,4 +1,8 @@
 <div class="session-tail-tooltip">
+  {% if first_prompt %}
+  <div class="tail-line tail-first-prompt">{{ first_prompt }}</div>
+  {% endif %}
+  {% if first_prompt and messages %}<hr class="tail-separator">{% endif %}
   {% for msg in messages %}
   <div class="tail-line">{{ msg }}</div>
   {% endfor %}

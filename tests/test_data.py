@@ -342,13 +342,13 @@ class TestGetSessionTail:
         assert result == ["real answer"]
 
     def test_truncates_long_messages(self, mock_sessions):
-        long_msg = "x" * 200
+        long_msg = "x" * 2500
         lines = [json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": long_msg}})]
         _write_session(mock_sessions, "tail3", "C:\\Work", jsonl_lines=lines)
         _tail_cache.clear()
         result = get_session_tail("tail3")
         assert len(result) == 1
-        assert len(result[0]) == 151  # 150 + ellipsis char
+        assert len(result[0]) == 2000  # capped at 2000 chars
 
     def test_returns_empty_for_missing_file(self, mock_sessions):
         _tail_cache.clear()

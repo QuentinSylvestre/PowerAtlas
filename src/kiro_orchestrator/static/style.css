@@ -78,18 +78,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
 .card-actions { display: flex; align-items: center; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface-hover); padding-left: 8px; }
 .card-header:hover .card-actions { opacity: 1; }
-.card-new-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 600; font-family: monospace; transition: all 0.12s; width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
+.card-new-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 600; font-family: monospace; transition: all 0.1s; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
 .card-new-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
 .card-check { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; transition: all 0.12s; flex-shrink: 0; cursor: pointer; }
 .card-header:hover .card-check { border-color: var(--text-muted); }
 .workspace-card.selected .card-check { border-color: var(--accent); background: var(--accent); }
 .workspace-card.selected .card-check::after { content: '✓'; color: white; font-size: 11px; font-weight: 700; }
-.card-pin-btn { background: none; border: none; cursor: pointer; font-size: 12px; padding: 2px 4px; opacity: 0.6; transition: opacity 0.12s; }
-.card-pin-btn:hover { opacity: 1; }
-.pin-btn { background: none; border: none; cursor: pointer; font-size: 12px; opacity: 0; transition: opacity 0.12s; padding: 2px 4px; }
-.session-row:hover .pin-btn { opacity: 0.4; }
-.pin-btn:hover { opacity: 1 !important; }
-.pin-btn.pinned { opacity: 1 !important; }
+.card-pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: all 0.1s; }
+.card-pin-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+.card-pin-btn.pinned { color: var(--accent); border-color: var(--accent); }
+.pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; opacity: 0; transition: all 0.1s; color: var(--text-muted); }
+.session-row:hover .pin-btn { opacity: 0.5; }
+.pin-btn:hover { opacity: 1 !important; background: var(--accent); border-color: var(--accent); color: white; }
+.pin-btn.pinned { opacity: 1 !important; color: var(--accent); border-color: var(--accent); }
 .card-body { border-top: 1px solid var(--card-border); max-height: 195px; overflow-y: auto; }
 .workspace-card.collapsed .card-body { display: none; }
 .workspace-card.stale { opacity: 0.6; }
@@ -113,10 +114,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-last .label { font-size: 10px; text-transform: uppercase; margin-right: 3px; font-style: normal; }
 .session-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface-hover); padding-left: 8px; }
 .session-row:hover .session-actions { opacity: 1; }
-.row-btn { font-size: 11px; padding: 4px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.1s; }
+.row-btn { font-size: 11px; padding: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.1s; }
 .row-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
 .row-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
-.terminal-btn { font-family: monospace; font-weight: 600; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.terminal-btn { font-family: monospace; font-weight: 600; }
 .row-btn.primary:hover { background: var(--accent); color: white; }
 .new-session-inline { padding: 8px 16px 10px 54px; font-size: 12px; color: var(--text-dim); cursor: pointer; transition: color 0.12s; border-top: 1px solid rgba(45,50,68,0.4); }
 .new-session-inline:hover { color: var(--accent); }
@@ -198,8 +199,10 @@ script { display: none; }
 
 /* Session tail tooltip */
 .session-tooltip-slot { display: none; position: fixed; z-index: 1000; }
-.session-tail-tooltip { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; max-width: 400px; min-width: 200px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
-.tail-line { font-size: 11px; color: var(--text-muted); padding: 2px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; overflow: hidden; text-overflow: ellipsis; }
+.session-tail-tooltip { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; max-width: 800px; min-width: 200px; max-height: 400px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.tail-line { font-size: 11px; color: var(--text-muted); padding: 2px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; }
+.tail-line.tail-first-prompt { color: var(--accent); font-weight: 500; }
+.tail-separator { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 .tail-line + .tail-line { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 4px; }
 .tail-empty { font-size: 11px; color: var(--text-dim); padding: 4px 8px; font-style: italic; }
 

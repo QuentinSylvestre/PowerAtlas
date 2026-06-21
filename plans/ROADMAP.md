@@ -4,6 +4,8 @@
 
 ---
 
+-- **Rename to PowerAtlas** and use icon
+
 ## Automation & Workflows
 
 - **Dispatch no-interactive tasks** — launch kiro-cli with `--no-interactive` and a prompt, fire-and-forget from the UI
@@ -15,9 +17,7 @@
 
 ## Custom Launch Section
 
-- **Custom launchers** — run arbitrary CLI tools, .exe, .bat, .sh, .ps1 files with configurable params
 - **WSL support** — launch commands inside WSL from the orchestrator
-- **Custom icons** — user-configurable icons for workspaces, sessions, and custom launchers
 
 ## Workspace Intelligence
 
@@ -26,8 +26,13 @@
 - **kiro-cli usage stats** — dashboard with session counts, durations, tool usage patterns over time
 - **Workspace tags/groups** — group workspaces by purpose (personal, work, playbook) with color coding
 
+## Platform
+
+- **Linux support** — run the orchestrator natively on Linux (tray icon, browser UI, terminal detection)
+- **kiro-cli v3 session support** — scan `~/.kiro/sessions/<workspace-hash>/sess_*/` alongside v2 `cli/` directory; handle new message format, subagent detection via `sub-executions/` dir
+
 ## Quality of Life
 
-- **Session output tail** — live-tail last few lines of a running session's .jsonl in a tooltip/preview
 - **Keyboard-driven navigation** — vim-style j/k movement, space to select, enter to launch
 - **Multi-machine session sync** — see WSL kiro-cli sessions alongside Windows ones in the same UI
+- **Peek window** — hotkey-held native window that shows the dashboard while pressed, disappears on release (like a HUD overlay)

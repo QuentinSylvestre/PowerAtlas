@@ -355,9 +355,13 @@ async def save_setting(request: Request):
 @app.get("/partials/session-tail", response_class=HTMLResponse)
 async def partials_session_tail(request: Request, sid: str = ""):
     messages = await asyncio.to_thread(data.get_session_tail, sid)
-    if not messages:
+    first_prompt = await asyncio.to_thread(data.get_first_prompt, sid)
+    if not messages and not first_prompt:
         return HTMLResponse('<div class="tail-empty">No recent output</div>')
-    return templates.TemplateResponse(request, "partials/session_tail.html", {"messages": messages})
+    return templates.TemplateResponse(request, "partials/session_tail.html", {
+        "first_prompt": first_prompt,
+        "messages": messages,
+    })
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)
