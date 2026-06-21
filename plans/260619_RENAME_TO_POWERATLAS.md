@@ -266,6 +266,8 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 
 ### Phase 5: Git remote, folder rename, and push
 
+> **HARD STOP**: Do not proceed with this phase automatically. Ask the user for explicit go-ahead — the folder rename will invalidate the current session's working directory.
+
 **Goal**: Commit all changes, rename workspace folder, set up git remote, push.
 
 **File scope**: git operations, filesystem
