@@ -278,10 +278,11 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 2. Delete old egg-info: `src/kiro_orchestrator.egg-info/` (stale generated artifact)
 3. Commit all changes in current folder
 4. Rename workspace folder: `kiro-orchestrator` → `PowerAtlas` (manual or scripted from parent dir)
-5. From new folder path: `git remote add origin https://github.com/QuentinSylvestre/PowerAtlas`
-6. `git push -u origin main`
-7. Create new venv: `.venv-power-atlas`, `pip install -e ".[dev]"`
-8. Verify tests pass in new location
+5. Run `/qmigrate-kiro-history` to update session metadata and DB keys from the old path to the new path
+6. From new folder path: `git remote add origin https://github.com/QuentinSylvestre/PowerAtlas`
+7. `git push -u origin main`
+8. Create new venv: `.venv-power-atlas`, `pip install -e ".[dev]"`
+9. Verify tests pass in new location
 
 **Exit criteria**:
 - [ ] `.playwright-mcp/` in `.gitignore`
