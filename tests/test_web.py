@@ -6,8 +6,8 @@ from unittest.mock import patch
 import pytest
 from starlette.testclient import TestClient
 
-from kiro_orchestrator.data import Session
-from kiro_orchestrator.web import app
+from power_atlas.data import Session
+from power_atlas.web import app
 
 
 @pytest.fixture
@@ -34,8 +34,8 @@ def test_index_returns_html(client):
     assert "skeleton-card" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z")]
@@ -47,10 +47,10 @@ def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
     assert "1</span>" in resp.text or "card-count" in resp.text
 
 
-@patch("kiro_orchestrator.web.load_config")
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces_empty(mock_discover, mock_config, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_config.return_value = Config()
     mock_discover.return_value = []
     resp = client.get("/partials/workspaces")
@@ -58,8 +58,8 @@ def test_partials_workspaces_empty(mock_discover, mock_config, client):
     assert "No sessions found" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
     mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1, "2026-01-01T00:00:00Z")]
     mock_sessions.return_value = [_make_session(cwd="C:\\nonexistent\\path\\xyz")]
@@ -70,7 +70,7 @@ def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
     assert "stale" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces_error(mock_discover, client):
     mock_discover.side_effect = RuntimeError("db unavailable")
     resp = client.get("/partials/workspaces")
@@ -78,7 +78,7 @@ def test_partials_workspaces_error(mock_discover, client):
     assert "Error" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_search_filters(mock_discover, client, tmp_path):
     workspace = str(tmp_path)
     mock_discover.return_value = [
@@ -91,7 +91,7 @@ def test_search_filters(mock_discover, client, tmp_path):
     assert Path(workspace).name in resp.text
 
 
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_search_no_results(mock_discover, client, tmp_path):
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "")]
@@ -101,10 +101,10 @@ def test_search_no_results(mock_discover, client, tmp_path):
     assert "No results" in resp.text
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
 def test_toggle_trust(mock_load, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_load.return_value = Config(trust_all_tools=False)
 
     resp = client.post("/api/toggle-trust")
@@ -113,8 +113,8 @@ def test_toggle_trust(mock_load, mock_save, client):
     mock_save.assert_called_once()
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.discover_workspaces")
 def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
     mock_discover.return_value = [workspace]
@@ -131,8 +131,8 @@ def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_
     assert "final answer" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 0, "")]
@@ -143,11 +143,11 @@ def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_
 
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.autostart.is_enabled")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.autostart.is_enabled")
+@patch("power_atlas.web.load_config")
 def test_save_settings(mock_config, mock_autostart, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_config.return_value = Config()
     mock_autostart.return_value = False
     resp = client.post("/api/settings", data={
@@ -162,11 +162,11 @@ def test_save_settings(mock_config, mock_autostart, mock_save, client):
     assert saved.pinned_folders == ["C:\\a", "C:\\b"]
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
-@patch("kiro_orchestrator.web.data.get_sessions")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_sessions")
 def test_pin_session(mock_sessions, mock_config, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_config.return_value = Config()
     mock_sessions.return_value = []
     resp = client.post("/api/pin-session", json={"session_id": "sess-1"},
@@ -176,11 +176,11 @@ def test_pin_session(mock_sessions, mock_config, mock_save, client):
     assert "sess-1" in saved.pinned_sessions
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
-@patch("kiro_orchestrator.web.data.get_sessions")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_sessions")
 def test_unpin_session(mock_sessions, mock_config, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_config.return_value = Config(pinned_sessions=["sess-1", "sess-2"])
     mock_sessions.return_value = []
     resp = client.post("/api/unpin-session", json={"session_id": "sess-1"},
@@ -190,11 +190,11 @@ def test_unpin_session(mock_sessions, mock_config, mock_save, client):
     assert "sess-1" not in saved.pinned_sessions
 
 
-@patch("kiro_orchestrator.web.load_config")
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces_with_counts")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, client, tmp_path):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     workspace = str(tmp_path)
     pinned = "C:\\my-pinned-workspace"
     mock_config.return_value = Config(pinned_folders=[pinned])
@@ -205,11 +205,11 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, client
     assert pinned in resp.text or "my-pinned-workspace" in resp.text
 
 
-@patch("kiro_orchestrator.web.load_config")
-@patch("kiro_orchestrator.web.data.get_sessions")
-@patch("kiro_orchestrator.web.data.discover_workspaces")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.discover_workspaces")
 def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config, client, tmp_path):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     workspace = str(tmp_path)
     mock_config.return_value = Config(pinned_sessions=["sess-2"])
     mock_discover.return_value = [workspace]
@@ -224,10 +224,10 @@ def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config,
 
 
 class TestSaveSettingAllowlist:
-    @patch("kiro_orchestrator.web.save_config")
-    @patch("kiro_orchestrator.web.load_config")
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
     def test_rejects_unknown_key(self, mock_load, mock_save, client):
-        from kiro_orchestrator.config import Config
+        from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "__class__", "value": "evil"})
         assert resp.status_code == 200
@@ -236,10 +236,10 @@ class TestSaveSettingAllowlist:
         assert "unknown" in body["error"].lower()
         mock_save.assert_not_called()
 
-    @patch("kiro_orchestrator.web.save_config")
-    @patch("kiro_orchestrator.web.load_config")
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
     def test_rejects_wrong_type(self, mock_load, mock_save, client):
-        from kiro_orchestrator.config import Config
+        from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "trust_all_tools", "value": "yes"})
         body = resp.json()
@@ -247,10 +247,10 @@ class TestSaveSettingAllowlist:
         assert "type" in body["error"].lower()
         mock_save.assert_not_called()
 
-    @patch("kiro_orchestrator.web.save_config")
-    @patch("kiro_orchestrator.web.load_config")
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
     def test_accepts_valid_setting(self, mock_load, mock_save, client):
-        from kiro_orchestrator.config import Config
+        from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "trust_all_tools", "value": True})
         body = resp.json()
@@ -258,10 +258,10 @@ class TestSaveSettingAllowlist:
         mock_save.assert_called_once()
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
 def test_set_workspace_icon(mock_load, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_load.return_value = Config()
     resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": "🚀"})
     assert resp.status_code == 200
@@ -271,10 +271,10 @@ def test_set_workspace_icon(mock_load, mock_save, client):
     assert any(v == "🚀" for v in saved.workspace_icons.values())
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
 def test_set_workspace_icon_reset(mock_load, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_load.return_value = Config(workspace_icons={"c:\\projects\\app": "🚀"})
     resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": ""})
     assert resp.status_code == 200
@@ -285,7 +285,7 @@ def test_set_workspace_icon_reset(mock_load, mock_save, client):
 # --- Phase 4: session-tail endpoint ---
 
 
-@patch("kiro_orchestrator.web.data.get_session_tail")
+@patch("power_atlas.web.data.get_session_tail")
 def test_session_tail_returns_messages(mock_tail, client):
     mock_tail.return_value = ["message one", "message two"]
     resp = client.get("/partials/session-tail?sid=sess-1")
@@ -295,7 +295,7 @@ def test_session_tail_returns_messages(mock_tail, client):
     assert "tail-line" in resp.text
 
 
-@patch("kiro_orchestrator.web.data.get_session_tail")
+@patch("power_atlas.web.data.get_session_tail")
 def test_session_tail_empty(mock_tail, client):
     mock_tail.return_value = []
     resp = client.get("/partials/session-tail?sid=sess-1")
@@ -308,10 +308,10 @@ def test_session_tail_empty(mock_tail, client):
 # --- Phase 3: custom launcher CRUD ---
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
 def test_launcher_create(mock_load, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_load.return_value = Config()
     resp = client.post("/api/launcher/create", json={
         "name": "Dev Server", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "icon": "🔥"
@@ -324,10 +324,10 @@ def test_launcher_create(mock_load, mock_save, client):
     assert saved.custom_launchers[0]["id"]  # UUID generated
 
 
-@patch("kiro_orchestrator.web.save_config")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
 def test_launcher_delete(mock_load, mock_save, client):
-    from kiro_orchestrator.config import Config
+    from power_atlas.config import Config
     mock_load.return_value = Config(custom_launchers=[{"id": "abc", "name": "x", "command": "y"}])
     resp = client.post("/api/launcher/delete", json={"id": "abc"})
     assert resp.status_code == 200
@@ -336,11 +336,11 @@ def test_launcher_delete(mock_load, mock_save, client):
     assert len(saved.custom_launchers) == 0
 
 
-@patch("kiro_orchestrator.web.launcher.launch_custom")
-@patch("kiro_orchestrator.web.load_config")
+@patch("power_atlas.web.launcher.launch_custom")
+@patch("power_atlas.web.load_config")
 def test_launcher_run(mock_load, mock_launch, client, tmp_path):
-    from kiro_orchestrator.config import Config
-    from kiro_orchestrator.launcher import LaunchResult
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
     mock_load.return_value = Config()
     mock_launch.return_value = LaunchResult(True, None, str(tmp_path))
     resp = client.post("/api/launcher/run", json={

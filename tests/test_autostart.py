@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from kiro_orchestrator import autostart
+from power_atlas import autostart
 
 
 @pytest.fixture
@@ -53,7 +53,7 @@ def test_appdata_fallback_uses_home(monkeypatch):
     monkeypatch.delenv("APPDATA", raising=False)
     monkeypatch.setenv("APPDATA", "")
     # Re-import to trigger module-level code with empty APPDATA
-    import kiro_orchestrator.autostart as _mod
+    import power_atlas.autostart as _mod
     importlib.reload(_mod)
     expected = Path.home() / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
     assert _mod.STARTUP_DIR == expected

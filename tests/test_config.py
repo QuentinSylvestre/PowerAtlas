@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from kiro_orchestrator.config import Config, load_config, save_config
+from power_atlas.config import Config, load_config, save_config
 
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     """Redirect config to tmp dir."""
-    monkeypatch.setattr("kiro_orchestrator.config.CONFIG_DIR", tmp_path)
-    monkeypatch.setattr("kiro_orchestrator.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("power_atlas.config.CONFIG_DIR", tmp_path)
+    monkeypatch.setattr("power_atlas.config.CONFIG_PATH", tmp_path / "config.toml")
 
 
 def test_round_trip():
@@ -28,7 +28,7 @@ def test_round_trip():
 def test_missing_keys_use_defaults():
     """A TOML with only one key should still produce a full Config with defaults."""
     import tomli_w
-    from kiro_orchestrator.config import CONFIG_PATH, CONFIG_DIR
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump({"trust_all_tools": True}, f)
@@ -41,7 +41,7 @@ def test_missing_keys_use_defaults():
 def test_unknown_keys_ignored():
     """Unknown keys in TOML should not raise or appear on Config."""
     import tomli_w
-    from kiro_orchestrator.config import CONFIG_PATH, CONFIG_DIR
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump({"trust_all_tools": False, "unknown_key": "hello", "extra": 42}, f)
@@ -96,7 +96,7 @@ def test_thread_safety():
 def test_wrong_type_bool_gets_default():
     """A string 'yes' for a bool field should fall back to default."""
     import tomli_w
-    from kiro_orchestrator.config import CONFIG_PATH, CONFIG_DIR
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump({"trust_all_tools": "yes", "use_pywebview": 1}, f)
@@ -108,7 +108,7 @@ def test_wrong_type_bool_gets_default():
 def test_wrong_type_list_gets_default():
     """A scalar string for a list field should fall back to default."""
     import tomli_w
-    from kiro_orchestrator.config import CONFIG_PATH, CONFIG_DIR
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump({"pinned_folders": "not a list", "terminal_command": 42}, f)

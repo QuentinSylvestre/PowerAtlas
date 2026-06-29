@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from kiro_orchestrator.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command
+from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command
 
 
 class TestDetectTerminal:

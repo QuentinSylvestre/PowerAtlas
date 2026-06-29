@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kiro_orchestrator.data import (
+from power_atlas.data import (
     Session, SessionCache, _FileInfo, _load_sessions,
     discover_workspaces, get_sessions, session_cache,
 )
@@ -17,8 +17,8 @@ def mock_sessions(tmp_path, monkeypatch):
     """Create mock session files."""
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
-    monkeypatch.setattr("kiro_orchestrator.data.SESSION_DIR", session_dir)
-    monkeypatch.setattr("kiro_orchestrator.data.SQLITE_PATH", tmp_path / "nonexistent.db")
+    monkeypatch.setattr("power_atlas.data.SESSION_DIR", session_dir)
+    monkeypatch.setattr("power_atlas.data.SQLITE_PATH", tmp_path / "nonexistent.db")
     session_cache.clear()
     return session_dir
 
@@ -52,8 +52,8 @@ def test_discover_workspaces_with_data(mock_sessions):
 
 
 def test_discover_workspaces_empty_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr("kiro_orchestrator.data.SESSION_DIR", tmp_path / "nonexistent")
-    monkeypatch.setattr("kiro_orchestrator.data.SQLITE_PATH", tmp_path / "nonexistent.db")
+    monkeypatch.setattr("power_atlas.data.SESSION_DIR", tmp_path / "nonexistent")
+    monkeypatch.setattr("power_atlas.data.SQLITE_PATH", tmp_path / "nonexistent.db")
     assert discover_workspaces() == []
 
 
@@ -115,13 +115,13 @@ def test_missing_jsonl_still_returns_session(mock_sessions):
 
 # --- Phase 2: refresh_stale_entries and warmup_pinned ---
 
-from kiro_orchestrator.data import refresh_stale_entries, warmup_pinned
+from power_atlas.data import refresh_stale_entries, warmup_pinned
 
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
     """Clear session cache between tests."""
-    from kiro_orchestrator.data import session_cache
+    from power_atlas.data import session_cache
     session_cache.clear()
     yield
     session_cache.clear()
@@ -129,7 +129,7 @@ def _clear_cache():
 
 class TestRefreshStaleEntries:
     def test_detects_changed_jsonl_and_rereads(self, mock_sessions):
-        from kiro_orchestrator.data import session_cache, _normalize_path, _FileInfo
+        from power_atlas.data import session_cache, _normalize_path, _FileInfo
         cwd = "C:\\Projects\\Refresh"
         _write_session(mock_sessions, "r1", cwd)
         # Populate cache via get_sessions
@@ -152,7 +152,7 @@ class TestRefreshStaleEntries:
         assert cached[0].first_prompt == "Updated prompt"
 
     def test_skips_unchanged_files(self, mock_sessions):
-        from kiro_orchestrator.data import session_cache, _normalize_path
+        from power_atlas.data import session_cache, _normalize_path
         cwd = "C:\\Projects\\Unchanged"
         _write_session(mock_sessions, "u1", cwd)
         get_sessions(cwd)
@@ -167,10 +167,10 @@ class TestRefreshStaleEntries:
         assert stats_before == stats_after
 
     def test_handles_missing_dir_gracefully(self, tmp_path, monkeypatch):
-        from kiro_orchestrator.data import session_cache, _normalize_path, _FileInfo
+        from power_atlas.data import session_cache, _normalize_path, _FileInfo
         # Point SESSION_DIR to non-existent path
-        monkeypatch.setattr("kiro_orchestrator.data.SESSION_DIR", tmp_path / "gone")
-        monkeypatch.setattr("kiro_orchestrator.data.SQLITE_PATH", tmp_path / "no.db")
+        monkeypatch.setattr("power_atlas.data.SESSION_DIR", tmp_path / "gone")
+        monkeypatch.setattr("power_atlas.data.SQLITE_PATH", tmp_path / "no.db")
         # Manually inject a cache entry so refresh has something to check
         session_cache.put("c:\\fake", [], {})
         # Should not raise
@@ -179,7 +179,7 @@ class TestRefreshStaleEntries:
 
 class TestWarmupPinned:
     def test_populates_cache_for_existing_folders(self, mock_sessions):
-        from kiro_orchestrator.data import session_cache, _normalize_path
+        from power_atlas.data import session_cache, _normalize_path
         cwd = "C:\\Projects\\Warm"
         _write_session(mock_sessions, "w1", cwd)
 
@@ -199,7 +199,7 @@ class TestWarmupPinned:
         assert any(s.session_id == "w2" for s in cached)
 
     def test_skips_nonexistent_folders(self, mock_sessions):
-        from kiro_orchestrator.data import session_cache
+        from power_atlas.data import session_cache
         # Should not raise, should not populate cache
         warmup_pinned(["C:\\NonExistent\\Path\\12345"])
         assert session_cache.get("C:\\NonExistent\\Path\\12345") is None
@@ -294,20 +294,20 @@ def test_cache_clear_resets_state():
 
 class TestNormalizePath:
     def test_forward_slashes_normalized(self):
-        from kiro_orchestrator.data import _normalize_path
+        from power_atlas.data import _normalize_path
         assert _normalize_path("C:/Users/test/project") == _normalize_path("C:\\Users\\test\\project")
 
     def test_mixed_slashes_normalized(self):
-        from kiro_orchestrator.data import _normalize_path
+        from power_atlas.data import _normalize_path
         assert _normalize_path("C:/Users\\test/project") == _normalize_path("C:\\Users\\test\\project")
 
     def test_trailing_separator_stripped(self):
-        from kiro_orchestrator.data import _normalize_path
+        from power_atlas.data import _normalize_path
         assert _normalize_path("C:\\Users\\test\\") == _normalize_path("C:\\Users\\test")
 
     def test_case_insensitive_on_windows(self):
         import sys
-        from kiro_orchestrator.data import _normalize_path
+        from power_atlas.data import _normalize_path
         if sys.platform == "win32":
             assert _normalize_path("C:\\Users\\Test") == _normalize_path("C:\\users\\test")
 
@@ -315,7 +315,7 @@ class TestNormalizePath:
 
 # --- Phase 4: get_session_tail ---
 
-from kiro_orchestrator.data import get_session_tail, _tail_cache
+from power_atlas.data import get_session_tail, _tail_cache
 
 
 class TestGetSessionTail:
