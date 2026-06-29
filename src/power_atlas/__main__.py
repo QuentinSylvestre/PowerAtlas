@@ -53,10 +53,37 @@ def _relaunch_detached() -> None:
     print("Run with --foreground to keep it attached to this terminal.")
 
 
+def _migrate_legacy() -> None:
+    """One-time migration from kiro-orchestrator to power-atlas. Remove after first run."""
+    import shutil
+    from pathlib import Path
+    localappdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    old_config = Path(localappdata) / "kiro-orchestrator"
+    new_config = Path(localappdata) / "power-atlas"
+    if old_config.exists() and not new_config.exists():
+        try:
+            shutil.copytree(old_config, new_config)
+        except OSError:
+            shutil.rmtree(new_config, ignore_errors=True)
+            return
+        print(f"Migrated settings from {old_config} to {new_config}")
+    # Clean up old autostart shortcut
+    appdata = os.environ.get("APPDATA", "")
+    old_shortcut = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Kiro Orchestrator.lnk"
+    if old_shortcut.exists():
+        old_shortcut.unlink()
+        try:
+            from .autostart import enable
+            enable()
+        except Exception:
+            print("Warning: could not re-create autostart shortcut after migration")
+
+
 def _run_foreground() -> None:
     """Run the server + tray in this process (blocking)."""
     import logging
     from .config import CONFIG_DIR
+    _migrate_legacy()
     log_path = CONFIG_DIR / "orchestrator.log"
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
