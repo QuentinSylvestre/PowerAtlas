@@ -171,8 +171,11 @@ monkeypatch.setattr("power_atlas.config.CONFIG_DIR", ...)
 ```
 
 **Exit criteria**:
-- [ ] Zero occurrences of `kiro_orchestrator` in test files (grep verification)
-- [ ] All tests pass (`pytest` green)
+- [x] Zero occurrences of `kiro_orchestrator` in test files (grep verification)
+- [x] All tests pass (`pytest` green)
+
+**Implementation (2026-06-29, code: 8122793)**
+Replaced all `kiro_orchestrator` references with `power_atlas` across the 5 test files (test_config.py, test_data.py, test_web.py, test_launcher.py, test_autostart.py). This covered module imports, monkeypatch/patch target strings, and inline imports within test functions. References to `.kiro`/`Kiro-Cli` paths in test data were preserved as they test external kiro-cli tool paths. Grep verification confirms zero remaining occurrences and all 96 tests pass.
 
 ### Phase 3: One-time config migration [QA]
 
@@ -361,3 +364,8 @@ Implementation health: Green.
 | 2 | Low | Two-commit approach leaves intermediate state with both dirs. | Cosmetic — final state at HEAD is correct; not a release point. |
 | 3 | Low | Autostart shortcut name `PowerAtlas.lnk` has no space. | Intentional design decision per plan. |
 | 4 | Low | Duplicate import successfully deduplicated. | Already resolved in implementation. |
+
+### 2026-06-29 — Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+0 findings. Mechanical find-replace verified: zero stale references, all 96 tests pass, external kiro-cli refs preserved.
