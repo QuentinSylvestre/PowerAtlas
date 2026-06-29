@@ -15,15 +15,10 @@ def test_create_icon_loads_ico():
 
 
 def test_create_icon_fallback_on_missing_file():
-    with patch("power_atlas.tray.Path") as mock_path:
-        mock_path.return_value.__truediv__ = lambda *a: mock_path
-        mock_path.__truediv__ = lambda *a: mock_path
-        # Make Image.open raise by providing a non-existent path
-        pass
-
-    # Simpler: patch Image.open to raise OSError
-    with patch("power_atlas.tray.Image.open", side_effect=OSError("not found")):
+    with patch("power_atlas.tray.Image.open", side_effect=OSError("not found")), \
+         patch("power_atlas.tray.log") as mock_log:
         img = _create_icon()
     assert isinstance(img, Image.Image)
     assert img.size == (16, 16)
     assert img.mode == "RGBA"
+    assert mock_log.warning.called
