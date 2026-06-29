@@ -268,10 +268,13 @@ The app starts as a system tray icon. Click to open the dashboard UI.
    - Header: `# Project Memory — PowerAtlas`
 
 **Exit criteria**:
-- [ ] README reflects new name, CLI command, and config path
-- [ ] ROADMAP title updated, rename item removed
-- [ ] memory/MEMORY.md header updated
-- [ ] No stale "kiro-orchestrator" references in these files
+- [x] README reflects new name, CLI command, and config path
+- [x] ROADMAP title updated, rename item removed
+- [x] memory/MEMORY.md header updated
+- [x] No stale "kiro-orchestrator" references in these files
+
+**Implementation (2026-06-29, code: 27b30de)**
+Full README rewrite replacing all kiro-orchestrator references with power-atlas/PowerAtlas. ROADMAP title updated to "PowerAtlas — Roadmap" and the rename item removed. memory/MEMORY.md header updated. Grep verification confirms zero stale references in any of the three files.
 
 ### Phase 5: Git remote, folder rename, and push
 
@@ -383,3 +386,7 @@ Implementation health: Green.
 | 1 | Low | `old_shortcut.unlink()` unguarded against PermissionError. | Fixed — wrapped in try/except OSError with early return (5be09dc). |
 | 2 | Low | Redundant `from pathlib import Path` local import. | Not applicable — Path is not imported at module level; local import is necessary. |
 | 3 | Low | Early return on copytree failure skips shortcut cleanup. | Acceptable — retry-on-next-launch semantics; self-heals on next successful run. |
+
+### 2026-06-29 — Implementation Review (after Phase 4)
+
+Per-phase review deferred to Step 9: docs-only phase (3 prose files, no executable code).
