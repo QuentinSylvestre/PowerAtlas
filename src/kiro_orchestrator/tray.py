@@ -10,6 +10,8 @@ from PIL import Image, ImageDraw, ImageFont
 from .config import Config, CONFIG_DIR, load_config, save_config
 
 _shutdown_event = threading.Event()
+_restart_requested = False
+_icon_instance = None
 
 
 def _create_icon() -> Image.Image:
@@ -48,15 +50,28 @@ def run_tray(server_url: str, config: Config) -> None:
         _shutdown_event.set()
         icon.stop()
 
+    def on_restart(icon, item):
+        global _restart_requested
+        _restart_requested = True
+        _shutdown_event.set()
+        icon.stop()
+
     menu = pystray.Menu(
         pystray.MenuItem("Open", on_open, default=True),
         pystray.MenuItem("Trust All Tools", on_trust, checked=lambda item: config.trust_all_tools),
         pystray.MenuItem("Logs", on_logs),
+        pystray.MenuItem("Restart", on_restart),
         pystray.MenuItem("Quit", on_quit),
     )
     icon = pystray.Icon("kiro-orchestrator", _create_icon(), "Kiro Orchestrator", menu)
+    global _icon_instance
+    _icon_instance = icon
     icon.run()
 
 
 def get_shutdown_event() -> threading.Event:
     return _shutdown_event
+
+
+def restart_requested() -> bool:
+    return _restart_requested

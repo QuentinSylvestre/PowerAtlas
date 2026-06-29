@@ -2,7 +2,7 @@
 
 import argparse
 import ctypes
-import json
+import os
 import subprocess
 import sys
 import threading
@@ -10,18 +10,29 @@ import threading
 import uvicorn
 
 from .config import load_config
-from .tray import run_tray
+from .tray import run_tray, restart_requested
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
 
 
+_mutex_handle = None
+
+
 def _single_instance_guard() -> None:
     """Exit if another instance is already running (Windows named mutex)."""
+    global _mutex_handle
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateMutexW(None, False, "KiroOrchestratorMutex")
+    _mutex_handle = kernel32.CreateMutexW(None, False, "KiroOrchestratorMutex")
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
-        sys.exit(0)
+        os._exit(0)
+
+
+def _release_mutex() -> None:
+    global _mutex_handle
+    if _mutex_handle:
+        ctypes.WinDLL("kernel32").CloseHandle(_mutex_handle)
+        _mutex_handle = None
 
 
 def _relaunch_detached() -> None:
@@ -45,6 +56,7 @@ def _relaunch_detached() -> None:
 def _run_foreground() -> None:
     """Run the server + tray in this process (blocking)."""
     import logging
+    from .config import CONFIG_DIR
 
     from .config import CONFIG_DIR
     log_path = CONFIG_DIR / "orchestrator.log"
@@ -101,7 +113,16 @@ def _run_foreground() -> None:
 
     server.should_exit = True
     server_thread.join(timeout=5)
-    sys.exit(0)
+
+    should_restart = restart_requested()
+
+    _release_mutex()
+    logging.shutdown()
+
+    if should_restart:
+        _relaunch_detached()
+
+    os._exit(0)
 
 
 def main() -> None:
