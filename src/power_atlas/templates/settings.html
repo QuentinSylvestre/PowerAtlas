@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar">
+  <h1 class="topbar-title"><a href="/" style="color:inherit;text-decoration:none">PowerAtlas</a> <span style="color:var(--text-dim)">› Settings</span></h1>
+</div>
+
+<div class="settings-page">
+  <form method="post" action="/api/settings" class="settings-form">
+
+    <div class="settings-group">
+      <div class="settings-group-title">Terminal</div>
+      <div class="settings-row">
+        <label for="terminal_command">Preference</label>
+        <select name="terminal_command" id="terminal_command" class="settings-select" onchange="document.getElementById('custom-terminal').style.display=this.value==='custom'?'flex':'none'">
+          <option value="" {% if config.terminal_command == "" %}selected{% endif %}>Auto-detect (wt › pwsh › cmd)</option>
+          <option value="wt" {% if config.terminal_command == "wt" %}selected{% endif %}>Windows Terminal</option>
+          <option value="pwsh" {% if config.terminal_command == "pwsh" %}selected{% endif %}>PowerShell</option>
+          <option value="cmd" {% if config.terminal_command == "cmd" %}selected{% endif %}>Command Prompt</option>
+          <option value="custom" {% if config.terminal_command not in ["", "wt", "pwsh", "cmd"] %}selected{% endif %}>Custom</option>
+        </select>
+      </div>
+      <div class="settings-row" id="custom-terminal" style="display:{% if config.terminal_command not in ['', 'wt', 'pwsh', 'cmd'] %}flex{% else %}none{% endif %}">
+        <label for="custom_terminal_value">Template</label>
+        <input type="text" name="custom_terminal_value" id="custom_terminal_value" class="settings-input"
+               value="{{ config.terminal_command if config.terminal_command not in ['', 'wt', 'pwsh', 'cmd'] else '' }}"
+               placeholder="e.g. alacritty -e {cmd}">
+      </div>
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">Defaults</div>
+      <div class="settings-row">
+        <label>Trust all tools</label>
+        <label class="toggle"><input type="checkbox" name="trust_all_tools" {% if config.trust_all_tools %}checked{% endif %}><span class="toggle-slider"></span></label>
+      </div>
+      <div class="settings-row">
+        <label>Start with Windows</label>
+        <label class="toggle"><input type="checkbox" name="autostart" {% if autostart_enabled %}checked{% endif %} onchange="fetch('/api/autostart',{method:'POST'})"><span class="toggle-slider"></span></label>
+      </div>
+    </div>
+
+    <button type="submit" class="settings-btn primary">Save settings</button>
+  </form>
+</div>
+
+{% endblock %}
