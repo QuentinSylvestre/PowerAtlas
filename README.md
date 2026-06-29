@@ -47,3 +47,7 @@ pinned_sessions = []
 pip install -e ".[dev]"
 pytest
 ```
+
+## Assets
+
+Branding assets (tray icon, favicon, banner, app icon) come from the `r3-balanced-master-clean-banner` icon pack. The source zip is stored in `assets-source/` for provenance.

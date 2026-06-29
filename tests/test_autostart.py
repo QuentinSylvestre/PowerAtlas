@@ -34,6 +34,8 @@ def test_enable_creates_shortcut(tmp_startup):
     mock_dispatch.assert_called_once_with("WScript.Shell")
     mock_shell.CreateShortCut.assert_called_once_with(str(tmp_startup / autostart.SHORTCUT_NAME))
     mock_shortcut.save.assert_called_once()
+    expected_icon = str(Path(autostart.__file__).parent / "static" / "poweratlas.ico")
+    assert mock_shortcut.IconLocation == f"{expected_icon},0"
 
 
 def test_disable_removes_shortcut(tmp_startup):
