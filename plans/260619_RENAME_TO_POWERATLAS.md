@@ -217,10 +217,13 @@ def _migrate_legacy() -> None:
 ```
 
 **Exit criteria**:
-- [ ] Running with old config at `%LOCALAPPDATA%\kiro-orchestrator\` copies it to `%LOCALAPPDATA%\power-atlas\`
-- [ ] Old `"Kiro Orchestrator.lnk"` is removed if present
-- [ ] New `"PowerAtlas.lnk"` is created if old shortcut existed
-- [ ] Does not error if old paths don't exist (fresh install scenario)
+- [x] Running with old config at `%LOCALAPPDATA%\kiro-orchestrator\` copies it to `%LOCALAPPDATA%\power-atlas\`
+- [x] Old `"Kiro Orchestrator.lnk"` is removed if present
+- [x] New `"PowerAtlas.lnk"` is created if old shortcut existed
+- [x] Does not error if old paths don't exist (fresh install scenario)
+
+**Implementation (2026-06-29, code: 5be09dc)**
+Added `_migrate_legacy()` function at the top of `_run_foreground()` before any `CONFIG_DIR.mkdir()` call. Function uses `shutil.copytree` with try/except cleanup on failure, removes old autostart shortcut (guarded against permission errors) and re-creates with new name via `autostart.enable()`. No-ops gracefully on fresh installs. Verified with 3 scenarios: fresh install, migration with old dir, skip when new dir exists.
 
 ### Phase 4: Documentation and project file updates
 
@@ -369,3 +372,14 @@ Implementation health: Green.
 
 Implementation health: Green.
 0 findings. Mechanical find-replace verified: zero stale references, all 96 tests pass, external kiro-cli refs preserved.
+
+### 2026-06-29 — Implementation Review (after Phase 3, personas: Reliability engineer, Senior engineer)
+
+Implementation health: Green.
+3 findings (0 High, 0 Medium, 3 Low). Cycle 2 skipped — all Low + one mechanical auto-fix applied.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | `old_shortcut.unlink()` unguarded against PermissionError. | Fixed — wrapped in try/except OSError with early return (5be09dc). |
+| 2 | Low | Redundant `from pathlib import Path` local import. | Not applicable — Path is not imported at module level; local import is necessary. |
+| 3 | Low | Early return on copytree failure skips shortcut cleanup. | Acceptable — retry-on-next-launch semantics; self-heals on next successful run. |
