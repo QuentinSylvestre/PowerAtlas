@@ -1,7 +1,7 @@
 # Rename to PowerAtlas
 
 > **Date**: 2026-06-19
-> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Rebrand kiro-orchestrator to PowerAtlas across all surfaces and publish to public GitHub repo
 > **Estimated effort**: 1-2 hours
 
@@ -297,13 +297,16 @@ Full README rewrite replacing all kiro-orchestrator references with power-atlas/
 9. Verify tests pass in new location
 
 **Exit criteria**:
-- [ ] `.playwright-mcp/` in `.gitignore`
-- [ ] Workspace folder is `PowerAtlas`
-- [ ] Git remote `origin` points to `https://github.com/QuentinSylvestre/PowerAtlas`
-- [ ] Code pushed to GitHub
-- [ ] `pip install -e ".[dev]"` succeeds and produces `src/power_atlas.egg-info/`
-- [ ] New venv functional, `power-atlas` command works
-- [ ] `pytest` passes in new location
+- [x] `.playwright-mcp/` in `.gitignore`
+- [x] Workspace folder is `PowerAtlas`
+- [x] Git remote `origin` points to `https://github.com/QuentinSylvestre/PowerAtlas`
+- [x] Code pushed to GitHub
+- [x] `pip install -e ".[dev]"` succeeds and produces `src/power_atlas.egg-info/`
+- [x] New venv functional, `power-atlas` command works
+- [x] `pytest` passes in new location
+
+**Implementation (2026-06-29, code: 07173d1)**
+Added `.playwright-mcp/` to `.gitignore`, removed stale `kiro_orchestrator.egg-info`, folder renamed to `PowerAtlas`, remote added and pushed to GitHub. Venv created as `.venv-PowerAtlas`, editable install produces `power_atlas.egg-info`, `power-atlas` CLI works, 96 tests pass.
 
 ## 6) Risk Assessment
 
