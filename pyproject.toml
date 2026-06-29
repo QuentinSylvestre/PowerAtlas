@@ -25,3 +25,6 @@ power-atlas = "power_atlas.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+power_atlas = ["static/**", "templates/**"]

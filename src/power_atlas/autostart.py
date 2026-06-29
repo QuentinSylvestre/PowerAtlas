@@ -28,6 +28,8 @@ def enable() -> None:
     shortcut.TargetPath = str(Path(sys.executable).parent / "pythonw.exe")
     shortcut.Arguments = "-m power_atlas"
     shortcut.WorkingDirectory = str(Path.home())
+    icon_path = str(Path(__file__).parent / "static" / "poweratlas.ico")
+    shortcut.IconLocation = f"{icon_path},0"
     shortcut.save()
 
 

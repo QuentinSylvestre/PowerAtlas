@@ -1,13 +1,17 @@
 """System tray icon and menu."""
 
+import logging
 import os
 import threading
 import webbrowser
+from pathlib import Path
 
 import pystray
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from .config import Config, CONFIG_DIR, load_config, save_config
+
+log = logging.getLogger("power_atlas.tray")
 
 _shutdown_event = threading.Event()
 _restart_requested = False
@@ -15,14 +19,16 @@ _icon_instance = None
 
 
 def _create_icon() -> Image.Image:
-    img = Image.new("RGBA", (16, 16), (60, 120, 220, 255))
-    draw = ImageDraw.Draw(img)
+    icon_path = Path(__file__).parent / "static" / "poweratlas-tray.ico"
     try:
-        font = ImageFont.truetype("arial.ttf", 11)
+        with Image.open(icon_path) as img:
+            img.load()
+            return img.copy()
     except OSError:
-        font = ImageFont.load_default()
-    draw.text((3, 1), "P", fill="white", font=font)
-    return img
+        log.warning("Tray icon not found at %s, using fallback", icon_path)
+        img = Image.new("RGBA", (16, 16), (60, 120, 220, 255))
+        ImageDraw.Draw(img).text((3, 1), "P", fill="white")
+        return img
 
 
 def run_tray(server_url: str, config: Config) -> None:

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="topbar">
-  <div class="topbar-title">PowerAtlas</div>
+  <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
   <div class="topbar-spacer"></div>
   <select class="topbar-select" onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'terminal_command',value:this.value})})">
     <option value="" {% if not terminal_command %}selected{% endif %}>Terminal: Auto</option>
