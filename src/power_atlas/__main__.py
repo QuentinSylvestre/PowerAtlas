@@ -71,7 +71,10 @@ def _migrate_legacy() -> None:
     appdata = os.environ.get("APPDATA", "")
     old_shortcut = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "Kiro Orchestrator.lnk"
     if old_shortcut.exists():
-        old_shortcut.unlink()
+        try:
+            old_shortcut.unlink()
+        except OSError:
+            return
         try:
             from .autostart import enable
             enable()
