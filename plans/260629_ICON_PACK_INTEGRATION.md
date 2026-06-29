@@ -213,3 +213,17 @@ QA verification: PASS (2 surfaces verified — web UI via test client, tray icon
 | 7 | Low | `.cards-area` magic number `146px` undocumented. | Fixed — added CSS comment (commit 5309984). |
 | 8 | Low | Banner img has no explicit size — potential layout shift. | User: accepted — localhost serving, imperceptible. |
 | 9 | Low | Plan Status still says "Draft". | Fixed — updated to Complete. |
+
+### 2026-06-29 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer.
+4 findings (1 Medium, 3 Low). Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical.
+QA verification: PASS (2 surfaces verified via test client + import, 2 probes executed).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `test_create_icon_fallback` had dead code block + missing log assertion. | Fixed — removed dead code, added `mock_log.warning.called` (commit 9533b32). |
+| 2 | Low | Fallback test depends on real filesystem .ico asset (editable install). | Accepted — project always runs from editable install. |
+| 3 | Low | `assets-source/` 8.5MB binary tracked in git history. | Accepted — provenance per plan intent; git-lfs if more binaries added. |
+| 4 | Low | Minor `Path(__file__).parent / "static"` duplication across 2 modules. | Accepted — 2 call sites insufficient to justify extraction. |
