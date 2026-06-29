@@ -1,4 +1,4 @@
-# Kiro Orchestrator
+# PowerAtlas
 
 Desktop launcher and dashboard for kiro-cli sessions. System tray icon with a web UI for discovering, resuming, and batch-launching kiro-cli workspaces.
 
@@ -13,7 +13,7 @@ Requires Python 3.11+.
 ## Usage
 
 ```bash
-kiro-orchestrator
+power-atlas
 ```
 
 The app starts as a system tray icon. Click to open the dashboard UI.
@@ -31,7 +31,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 
 ## Configuration
 
-Config stored at `%LOCALAPPDATA%\kiro-orchestrator\config.toml`:
+Config stored at `%LOCALAPPDATA%\power-atlas\config.toml`:
 
 ```toml
 trust_all_tools = false

@@ -1,4 +1,4 @@
-# Project Memory — kiro-orchestrator
+# Project Memory — PowerAtlas
 
 ## Pattern
 

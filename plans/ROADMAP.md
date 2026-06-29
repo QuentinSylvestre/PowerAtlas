@@ -1,10 +1,8 @@
-# Kiro Orchestrator — Roadmap
+# PowerAtlas — Roadmap
 
 > Non-executed ideas and future features, organized by theme.
 
 ---
-
--- **Rename to PowerAtlas** and use icon
 
 ## Automation & Workflows
 
