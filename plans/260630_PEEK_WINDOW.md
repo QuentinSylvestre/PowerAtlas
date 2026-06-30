@@ -451,14 +451,18 @@ def _run_foreground() -> None:
 4. Normal shutdown
 
 **Exit criteria**:
-- [ ] Peek window starts on Windows (pywebview on background thread, pystray on main)
-- [ ] Peek window starts on Linux (pywebview on main thread, pystray on background thread)
-- [ ] Tray quit on Linux unblocks main thread via `peek.stop()` callback
-- [ ] Tray restart on Linux triggers full restart cycle (no hang)
-- [ ] `/api/restart` endpoint works with peek active on both platforms
-- [ ] Original startup path preserved when peek is unavailable
-- [ ] Shutdown cleans up peek (idempotent `peek.stop()`)
-- [ ] Server URL is accessible to the peek module
+- [x] Peek window starts on Windows (pywebview on background thread, pystray on main)
+- [x] Peek window starts on Linux (pywebview on main thread, pystray on background thread)
+- [x] Tray quit on Linux unblocks main thread via `peek.stop()` callback
+- [x] Tray restart on Linux triggers full restart cycle (no hang)
+- [x] `/api/restart` endpoint works with peek active on both platforms
+- [x] Original startup path preserved when peek is unavailable
+- [x] Shutdown cleans up peek (idempotent `peek.stop()`)
+- [x] Server URL is accessible to the peek module
+
+#### Implementation (2026-06-30, code: 0c5a411, fix: c189a8f)
+
+Wired the peek module into `_run_foreground()` with platform-specific threading: on Windows, pywebview runs on a background thread and pystray blocks the main thread; on Linux, pywebview takes the main thread (GTK requirement) while pystray runs on a daemon thread. Added `set_peek_stop_callback` mechanism in `tray.py` so `on_quit`/`on_restart` can unblock `webview.start()` on Linux. Updated `api_restart` in `web.py` to also call the peek stop callback. Original startup path preserved when peek is unavailable (create_peek returns None). Review fixes: added defensive try/except around peek_stop_callback calls, removed redundant `import threading as _threading` alias.
 
 ### Phase 4: Settings UI for peek hotkey [QA]
 
@@ -576,3 +580,14 @@ Implementation health: Yellow (all auto-fixed).
 | 4 | Low | Unused imports: sys and Callable never referenced | Fixed — removed both |
 | 5 | Low | _mock_optional_deps autouse fixture is a no-op | Fixed — removed |
 | 6 | Low | After webview timeout, listener still starts but show/hide may crash | Fixed — added _webview_ok flag gating _show |
+
+### 2026-06-30 -- Implementation Review (after Phase 3, persona: Reliability engineer, Senior engineer, Architect, Maintainability reviewer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | _peek_stop_callback not wrapped in try/except — if peek.stop() throws, shutdown sequence skips | Fixed — added defensive try/except in on_quit and on_restart |
+| 2 | Low | Mixed `threading` and `_threading` aliases — redundant aliased re-import | Fixed — removed alias, use top-level `threading` import directly |
