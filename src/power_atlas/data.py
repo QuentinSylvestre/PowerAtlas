@@ -381,6 +381,12 @@ def warmup_pinned(pinned_folders: list[str]) -> None:
             continue
 
 
+def warmup_all(pinned_folders: list[str]) -> None:
+    """Pre-discover all workspaces and load pinned sessions. Safe to call from any thread."""
+    discover_workspaces_with_counts()
+    warmup_pinned(pinned_folders)
+
+
 _tail_cache: dict[str, tuple[float, float, list[str]]] = {}  # sid -> (time, mtime, lines)
 _TAIL_CACHE_TTL = 5  # seconds
 

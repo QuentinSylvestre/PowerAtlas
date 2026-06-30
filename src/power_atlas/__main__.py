@@ -258,7 +258,7 @@ def _run_foreground() -> None:
     # Warmup pinned workspaces in background (non-blocking)
     from .peek import create_peek
     from .tray import run_tray, restart_requested, set_peek_stop_callback
-    from .data import warmup_pinned
+    from .data import warmup_all
 
     peek = create_peek(server_url, config.peek_hotkey)
 
@@ -270,11 +270,11 @@ def _run_foreground() -> None:
         # Pystray runs on a background daemon thread.
         tray_thread = threading.Thread(target=run_tray, args=(server_url, config), daemon=True)
         tray_thread.start()
-        threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+        threading.Thread(target=warmup_all, args=(config.pinned_folders,), daemon=True).start()
         peek.start(on_main_thread=True)  # blocks until peek.stop() is called
     else:
         # No peek available — original path (pystray on main thread)
-        threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+        threading.Thread(target=warmup_all, args=(config.pinned_folders,), daemon=True).start()
         run_tray(server_url, config)
 
     # Shutdown sequence

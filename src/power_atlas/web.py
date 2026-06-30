@@ -343,7 +343,7 @@ async def api_refresh():
     data.session_cache.clear()
     data._cache.clear()
     config = load_config()
-    await asyncio.to_thread(data.warmup_pinned, config.pinned_folders)
+    await asyncio.to_thread(data.warmup_all, config.pinned_folders)
     return {"last_refresh": data.session_cache.last_refresh}
 
 
