@@ -606,3 +606,20 @@ Cycle 2 skipped — cycle 1 findings all Low, both by-design behavior (no fix ne
 |---|---|---|---|
 | 1 | Low | Empty-field submission preserves existing value with no user feedback | Accepted — plan design ("silently rejected"); validation error UI is out of scope |
 | 2 | Low | Internal whitespace in hotkey parts not stripped (e.g. "ctrl + shift + z" fails) | Accepted — consistent with create_peek() pattern; placeholder shows correct format |
+
+
+### 2026-06-30 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, Maintainability reviewer, End-user advocate.
+5 findings (0 High, 2 Medium, 3 Low).
+QA verification: PASS (4 surfaces verified, 38 probes executed).
+Cycle 2 skipped — cycle 1 findings all Low+accepted Medium (auto-fixes purely mechanical).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | pywebview/pynput unconditional deps break install on headless systems | Accepted — plan design decision; runtime graceful degradation covers import failure |
+| 2 | Medium | _pressed_keys mutation not atomic (compound check-then-act in _on_press) | Accepted — pynput guarantees single-thread dispatch; added documenting comment |
+| 3 | Low | Validation duplicated in web.py and peek.py with slightly different styles | Accepted — both reject same invalid inputs correctly; no action needed |
+| 4 | Low | README missing X11 requirement for pynput hotkey listener | Fixed — added "peek hotkey listener requires X11" to Linux note |
+| 5 | Low | No integration test for api_restart → _peek_stop_callback path | Accepted — process-lifecycle endpoint; code path simple and well-traced |
