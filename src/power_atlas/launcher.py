@@ -58,7 +58,7 @@ def available_terminals() -> list[tuple[str, str]]:
     """
     global _terminal_cache
     if _terminal_cache is not None:
-        return _terminal_cache
+        return list(_terminal_cache)
 
     if sys.platform == "win32":
         candidates = [("wt", "Windows Terminal"), ("pwsh", "PowerShell"), ("cmd", "Command Prompt")]
@@ -83,7 +83,7 @@ def available_terminals() -> list[tuple[str, str]]:
     result.extend(found)
     result.append(("custom", "Custom"))
     _terminal_cache = result
-    return result
+    return list(result)
 
 
 def launch_session(
@@ -275,7 +275,11 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
 
     terminal = detect_terminal(terminal_override)
     if not terminal:
-        return LaunchResult(False, None, work_dir, error="No terminal found.")
+        if sys.platform == "win32":
+            msg = "No terminal found. Configure one in Settings."
+        else:
+            msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm — or configure a custom terminal in Settings."
+        return LaunchResult(False, None, work_dir, error=msg)
     title = _sanitize_title(f"{Path(command).stem} - {Path(work_dir).name}")
     cmd = _build_custom_command(terminal, work_dir, full_cmd_str, title)
     if cmd is None:

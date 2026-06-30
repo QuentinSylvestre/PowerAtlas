@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -48,14 +49,22 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 def _terminal_context() -> dict:
     """Build template context for terminal selection UI."""
-    import sys
     options = available_terminals()
     values = {v for v, _ in options}
+    no_found = len(options) == 2  # only Auto-detect + Custom
+    if no_found:
+        if sys.platform == "win32":
+            hint = "No terminal detected. Install Windows Terminal or PowerShell, or configure a custom terminal."
+        else:
+            hint = "No terminal detected. Install one of: kitty, alacritty, gnome-terminal, konsole, or xterm."
+    else:
+        hint = ""
     return {
         "terminal_options": options,
         "terminal_values": values,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
-        "no_terminals_found": len(options) == 2,  # only Auto-detect + Custom
+        "no_terminals_found": no_found,
+        "no_terminals_hint": hint,
     }
 
 

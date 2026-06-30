@@ -18,14 +18,14 @@
         </select>
       </div>
       {% if no_terminals_found %}
-      <p class="settings-hint">No terminal detected. Install one of: kitty, alacritty, gnome-terminal, konsole, or xterm.</p>
+      <p class="settings-hint">{{ no_terminals_hint }}</p>
       {% endif %}
       <div class="settings-row" id="custom-terminal" style="display:{% if config.terminal_command not in terminal_values %}flex{% else %}none{% endif %}">
         <label for="custom_terminal_value">Template</label>
         <input type="text" name="custom_terminal_value" id="custom_terminal_value" class="settings-input"
                value="{{ config.terminal_command if config.terminal_command not in terminal_values else '' }}"
                placeholder="e.g. alacritty --working-directory {cwd} -e {cmd}">
-        <p class="settings-hint">Placeholders: {cwd} = workspace path, {cmd} = kiro-cli command</p>
+        <p class="settings-hint">Placeholders: {cwd} = workspace path, {cmd} = the full command</p>
       </div>
     </div>
 

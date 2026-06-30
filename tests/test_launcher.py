@@ -4,7 +4,8 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command, _build_template_command
+from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command, _build_template_command, available_terminals
+import power_atlas.launcher as launcher_mod
 
 
 class TestDetectTerminal:
@@ -318,3 +319,50 @@ class TestBuildCustomCommandLinux:
         # konsole has no title flag, so title should not appear
         assert "--title" not in cmd
         assert "title" not in cmd[1:]  # first element is the terminal path
+
+
+class TestAvailableTerminals:
+    def setup_method(self):
+        """Reset cache before each test."""
+        launcher_mod._terminal_cache = None
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("shutil.which")
+    def test_windows_with_terminals_found(self, mock_which):
+        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe", "cmd": "C:\\cmd.exe"}.get(n)
+        result = available_terminals()
+        assert result[0][0] == ""  # auto-detect entry
+        assert "Windows Terminal" in result[0][1]
+        assert "Command Prompt" in result[0][1]
+        assert ("wt", "Windows Terminal") in result
+        assert ("cmd", "Command Prompt") in result
+        assert result[-1] == ("custom", "Custom")
+
+    @patch("power_atlas.launcher.sys.platform", "linux")
+    @patch("shutil.which")
+    def test_linux_with_terminals_found(self, mock_which):
+        mock_which.side_effect = lambda n: {"kitty": "/usr/bin/kitty", "alacritty": "/usr/bin/alacritty"}.get(n)
+        result = available_terminals()
+        assert result[0][0] == ""
+        assert "kitty" in result[0][1]
+        assert "Alacritty" in result[0][1]
+        assert ("kitty", "kitty") in result
+        assert ("alacritty", "Alacritty") in result
+        assert result[-1] == ("custom", "Custom")
+
+    @patch("power_atlas.launcher.sys.platform", "linux")
+    @patch("shutil.which", return_value=None)
+    def test_no_terminals_found(self, _):
+        result = available_terminals()
+        assert result[0] == ("", "Auto-detect (none found)")
+        assert len(result) == 2  # only auto-detect + custom
+        assert result[-1] == ("custom", "Custom")
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("shutil.which")
+    def test_cache_returns_copy(self, mock_which):
+        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe"}.get(n)
+        result1 = available_terminals()
+        result1.append(("extra", "Extra"))  # mutate the returned copy
+        result2 = available_terminals()
+        assert ("extra", "Extra") not in result2  # cache unaffected
