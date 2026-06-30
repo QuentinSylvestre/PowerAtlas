@@ -135,8 +135,12 @@ def _build_template_command(template: str, cwd: str, kiro_args: list[str]) -> li
     return result
 
 
-def _build_linux_command(terminal: str, cwd: str, kiro_args: list[str], title: str, stem: str) -> list[str]:
-    """Build command for a Linux terminal using the dispatch table."""
+def _linux_base_cmd(terminal: str, cwd: str, title: str, stem: str) -> tuple[list[str], str | None]:
+    """Build Linux terminal prefix: terminal + title + cwd + exec_sep.
+
+    Returns (cmd_prefix, cwd_flag) so callers know whether the terminal
+    handles cwd natively or needs a shell wrapper.
+    """
     title_flag, cwd_flag, exec_sep = _LINUX_TERMINALS[stem]
     cmd: list[str] = [terminal]
 
@@ -154,6 +158,13 @@ def _build_linux_command(terminal: str, cwd: str, kiro_args: list[str], title: s
 
     if exec_sep:
         cmd.append(exec_sep)
+
+    return cmd, cwd_flag
+
+
+def _build_linux_command(terminal: str, cwd: str, kiro_args: list[str], title: str, stem: str) -> list[str]:
+    """Build command for a Linux terminal using the dispatch table."""
+    cmd, cwd_flag = _linux_base_cmd(terminal, cwd, title, stem)
 
     # For terminals without cwd_flag (xterm), wrap in shell with proper escaping
     if not cwd_flag:
@@ -250,20 +261,7 @@ def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str) -> 
 
     # Linux terminals
     if t in _LINUX_TERMINALS:
-        title_flag, cwd_flag, exec_sep = _LINUX_TERMINALS[t]
-        cmd: list[str] = [terminal]
-        if title and title_flag:
-            if title_flag.endswith("="):
-                cmd.append(f"{title_flag}{_sanitize_title(title)}")
-            else:
-                cmd += [title_flag, _sanitize_title(title)]
-        if cwd_flag:
-            if cwd_flag.endswith("="):
-                cmd.append(f"{cwd_flag}{cwd}")
-            else:
-                cmd += [cwd_flag, cwd]
-        if exec_sep:
-            cmd.append(exec_sep)
+        cmd, cwd_flag = _linux_base_cmd(terminal, cwd, title, t)
         if not cwd_flag:
             cmd += ["sh", "-c", f'cd {shlex.quote(cwd)} && exec {cmd_str}']
         else:
