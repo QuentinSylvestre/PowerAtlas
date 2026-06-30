@@ -10,7 +10,6 @@ import threading
 import uvicorn
 
 from .config import load_config
-from .tray import run_tray, restart_requested
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
@@ -100,6 +99,35 @@ def _migrate_legacy() -> None:
             print("Warning: could not re-create autostart shortcut after migration")
 
 
+def _ensure_display() -> None:
+    """Ensure DISPLAY or WAYLAND_DISPLAY is set. Probe for running display
+    servers if the env var is missing; abort if none found.
+    """
+    if sys.platform == "win32":
+        return
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return
+    # Probe for X11 socket — /tmp/.X11-unix/X<N> exists when Xorg is running
+    import glob
+    x_sockets = glob.glob("/tmp/.X11-unix/X*")
+    if x_sockets:
+        sock_name = os.path.basename(x_sockets[0])  # "X0"
+        display_num = sock_name[1:]  # "0"
+        os.environ["DISPLAY"] = f":{display_num}"
+        return
+    # Check for Wayland socket in XDG_RUNTIME_DIR
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    if os.path.isdir(xdg_runtime):
+        for entry in os.listdir(xdg_runtime):
+            if entry.startswith("wayland-") and not entry.endswith(".lock"):
+                os.environ["WAYLAND_DISPLAY"] = entry
+                return
+    print("ERROR: No display server found (DISPLAY and WAYLAND_DISPLAY unset, "
+          "no X11/Wayland sockets detected). PowerAtlas requires a desktop session.",
+          file=sys.stderr)
+    sys.exit(1)
+
+
 def _run_foreground() -> None:
     """Run the server + tray in this process (blocking)."""
     import logging
@@ -119,6 +147,7 @@ def _run_foreground() -> None:
     log.info("Starting power-atlas (foreground)")
 
     _single_instance_guard()
+    _ensure_display()
     config = load_config()
 
     # Import the real app
@@ -154,6 +183,7 @@ def _run_foreground() -> None:
     from .data import warmup_pinned
     _threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
 
+    from .tray import run_tray, restart_requested
     # Tray blocks on main thread; on quit, shutdown
     run_tray(server_url, config)
 
