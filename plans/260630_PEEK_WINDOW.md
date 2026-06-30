@@ -1,7 +1,7 @@
 # Peek Window — Hotkey-held Native HUD Overlay
 
 > **Date**: 2026-06-30
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Global hotkey-held native window showing the PowerAtlas dashboard as a full-screen overlay
 > **Estimated effort**: 2-3 days
 
@@ -116,13 +116,17 @@ Note: existing config.toml files with `use_pywebview` will have the field silent
 `tests/test_config.py` — update tests: remove `use_pywebview` references, add `peek_hotkey` field tests (default value, round-trip persistence).
 
 **Exit criteria**:
-- [ ] `Config` dataclass has `peek_hotkey: str = "ctrl+shift+z"`, no `use_pywebview`
-- [ ] `pyproject.toml` lists `pywebview>=5.0` and `pynput>=1.7`
-- [ ] `config.use_pywebview` line removed from `save_settings` handler
-- [ ] `use_pywebview` removed from `_SETTING_TYPES`; `peek_hotkey: str` added
-- [ ] `test_config.py` passes with updated fields
-- [ ] README.md config example replaces `use_pywebview` line with `peek_hotkey`
-- [ ] README.md documents Linux system package requirement (`gir1.2-webkit2-4.1`)
+- [x] `Config` dataclass has `peek_hotkey: str = "ctrl+shift+z"`, no `use_pywebview`
+- [x] `pyproject.toml` lists `pywebview>=5.0` and `pynput>=1.7`
+- [x] `config.use_pywebview` line removed from `save_settings` handler
+- [x] `use_pywebview` removed from `_SETTING_TYPES`; `peek_hotkey: str` added
+- [x] `test_config.py` passes with updated fields
+- [x] README.md config example replaces `use_pywebview` line with `peek_hotkey`
+- [x] README.md documents Linux system package requirement (`gir1.2-webkit2-4.1`)
+
+#### Implementation (2026-06-30, code: 537973c, fix: d5aa5f3)
+
+Replaced the dead `use_pywebview: bool = True` config field with `peek_hotkey: str = "ctrl+shift+z"` across the Config dataclass, web.py's save_settings handler and `_SETTING_TYPES` dict, and tests. Added `pywebview>=5.0` and `pynput>=1.7` to pyproject.toml dependencies. Updated README.md to show the new `peek_hotkey` config line and document the `gir1.2-webkit2-4.1` Linux system package requirement. All 10 config tests pass. Review fixes: corrected README comment from "empty = disabled" to accurate format documentation, added int-vs-bool type coverage and peek_hotkey wrong-type test.
 
 ### Phase 2: Peek module — hotkey listener + pywebview window [QA] [P:1]
 
@@ -321,16 +325,20 @@ def create_peek(server_url: str, hotkey: str = "ctrl+shift+z") -> PeekWindow | N
 - `test_create_peek_unavailable`: verifies `create_peek()` returns None when deps missing
 
 **Exit criteria**:
-- [ ] `peek.py` module created with `PeekWindow` class
-- [ ] Hotkey parsing handles `ctrl+shift+z` format correctly
-- [ ] Key normalization handles left/right/bare modifier variants
-- [ ] Escape key dismisses the peek window as a fallback
-- [ ] `create_peek()` validates hotkey format (falls back to default on invalid)
-- [ ] `create_peek()` returns None gracefully when pywebview unavailable
-- [ ] Lifecycle methods (`_show`, `_hide`, `_start_listener`) log at appropriate levels
-- [ ] `_start_listener` catches X11/display errors gracefully on Linux
-- [ ] `_show()` uses `evaluate_js("doRefresh()")` not `load_url()` for data refresh
-- [ ] `test_peek.py` passes (new test file justified: tests a new module)
+- [x] `peek.py` module created with `PeekWindow` class
+- [x] Hotkey parsing handles `ctrl+shift+z` format correctly
+- [x] Key normalization handles left/right/bare modifier variants
+- [x] Escape key dismisses the peek window as a fallback
+- [x] `create_peek()` validates hotkey format (falls back to default on invalid)
+- [x] `create_peek()` returns None gracefully when pywebview unavailable
+- [x] Lifecycle methods (`_show`, `_hide`, `_start_listener`) log at appropriate levels
+- [x] `_start_listener` catches X11/display errors gracefully on Linux
+- [x] `_show()` uses `evaluate_js("doRefresh()")` not `load_url()` for data refresh
+- [x] `test_peek.py` passes (new test file justified: tests a new module)
+
+#### Implementation (2026-06-30, code: 8003973, fix: 7b66bc8)
+
+Created `src/power_atlas/peek.py` with the `PeekWindow` class encapsulating the pynput hotkey listener and pywebview overlay lifecycle — hotkey parsing normalizes `ctrl+shift+z` format, key normalization handles left/right/bare modifier variants, escape dismisses the window as a fallback, and `create_peek()` validates the hotkey (falling back to default on invalid) and returns None gracefully when dependencies are unavailable. Created `tests/test_peek.py` with 25 tests covering parse_hotkey, normalize_key, is_available, create_peek, and hotkey state-machine behavior. Review fixes: added local-capture pattern for thread safety in `_show`/`_hide`, `_webview_ok` flag to gate show on webview readiness, empty-string filter in `_parse_hotkey`, removed unused imports and no-op test fixture, added 6 state-machine tests.
 
 ### Phase 3: Integration into app startup [QA]
 
@@ -541,3 +549,30 @@ if parts & {"ctrl", "shift", "alt"} and parts - {"ctrl", "shift", "alt"}:
 | 11 | Medium | Phase 3 import pattern fragile (conditional imports) | Resolved — moved to single import before platform branch |
 | 12 | Low | _pressed_keys has no timeout/cleanup | Noted — CPython GIL + single listener thread makes this safe; cleared on hide |
 | 13 | Low | No accessibility annotations for peek overlay | Noted — left for user review (low-priority polish) |
+
+
+### 2026-06-30 -- Implementation Review (after Phase 1, persona: Senior engineer, Maintainability reviewer, Reliability engineer, End-user advocate)
+
+Implementation health: Yellow (all auto-fixed).
+4 findings (0 High, 2 Medium, 2 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | README claims "empty = disabled" but code falls back to default hotkey | Fixed — changed comment to "global overlay hotkey (modifier+key format)" |
+| 2 | Medium | pywebview/pynput unconditional deps may break install on headless systems | Accepted — plan design decision; graceful degradation covers runtime import failure |
+| 3 | Low | test_wrong_type_bool lost int-vs-bool coverage after removing use_pywebview | Fixed — restored int-for-bool test case |
+| 4 | Low | No test for peek_hotkey with wrong type (integer value) | Fixed — added test_wrong_type_str_gets_default |
+
+### 2026-06-30 -- Implementation Review (after Phase 2, persona: Reliability engineer, Senior engineer, Maintainability reviewer, Security auditor)
+
+Implementation health: Yellow (all auto-fixed).
+6 findings (0 High, 2 Medium, 4 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | stop() races with listener callbacks — _window destroyed while _show mid-execution | Fixed — added local-capture pattern in _show/_hide |
+| 2 | Medium | No tests for _on_press/_on_release hotkey state machine logic | Fixed — added 5 state-machine tests plus trailing-plus edge case |
+| 3 | Low | _parse_hotkey doesn't filter empty strings from trailing "+" | Fixed — added `if part.strip()` filter |
+| 4 | Low | Unused imports: sys and Callable never referenced | Fixed — removed both |
+| 5 | Low | _mock_optional_deps autouse fixture is a no-op | Fixed — removed |
+| 6 | Low | After webview timeout, listener still starts but show/hide may crash | Fixed — added _webview_ok flag gating _show |
