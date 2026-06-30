@@ -493,11 +493,15 @@ if parts & {"ctrl", "shift", "alt"} and parts - {"ctrl", "shift", "alt"}:
 ```
 
 **Exit criteria**:
-- [ ] Settings page shows peek hotkey field with current value
-- [ ] Saving settings validates hotkey format (rejects invalid values)
-- [ ] Saving settings persists valid `peek_hotkey` to config.toml
-- [ ] Settings page displays "Requires restart" note inline
-- [ ] Update README.md with peek hotkey configuration documentation
+- [x] Settings page shows peek hotkey field with current value
+- [x] Saving settings validates hotkey format (rejects invalid values)
+- [x] Saving settings persists valid `peek_hotkey` to config.toml
+- [x] Settings page displays "Requires restart" note inline
+- [x] Update README.md with peek hotkey configuration documentation
+
+#### Implementation (2026-06-30, code: 5d5c09f)
+
+Added "Peek Window" settings group to settings.html with a text input for `peek_hotkey` that displays the current value and placeholder showing expected format, plus a "Requires restart" hint. Updated `save_settings` handler in web.py with inline validation: normalizes input (strip+lowercase), validates that it contains at least one modifier (ctrl/shift/alt) and one non-modifier key, and only persists valid values (invalid input silently keeps the existing config).
 
 ## 6) Risk Assessment
 
@@ -591,3 +595,14 @@ Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical.
 |---|---|---|---|
 | 1 | Low | _peek_stop_callback not wrapped in try/except — if peek.stop() throws, shutdown sequence skips | Fixed — added defensive try/except in on_quit and on_restart |
 | 2 | Low | Mixed `threading` and `_threading` aliases — redundant aliased re-import | Fixed — removed alias, use top-level `threading` import directly |
+
+### 2026-06-30 -- Implementation Review (after Phase 4, persona: End-user advocate, Senior engineer, Security auditor, Maintainability reviewer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+Cycle 2 skipped — cycle 1 findings all Low, both by-design behavior (no fix needed).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Empty-field submission preserves existing value with no user feedback | Accepted — plan design ("silently rejected"); validation error UI is out of scope |
+| 2 | Low | Internal whitespace in hotkey parts not stripped (e.g. "ctrl + shift + z" fails) | Accepted — consistent with create_peek() pattern; placeholder shows correct format |
