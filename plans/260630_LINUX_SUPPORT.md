@@ -487,13 +487,17 @@ if not terminal:
 ```
 
 **Exit criteria**:
-- [ ] Settings page shows only terminals available on the current platform
-- [ ] Topbar quick selector matches settings page options
-- [ ] "Auto-detect" label shows platform-appropriate terminal names
-- [ ] Autostart label reads "Start at login" on Linux, "Start with Windows" on Windows
-- [ ] "Custom" option still works with template input field
-- [ ] Selecting a terminal via topbar persists correctly to config
-- [ ] README.md updated: add Linux to supported platforms, note PyGObject requirement, update auto-detect description
+- [x] Settings page shows only terminals available on the current platform
+- [x] Topbar quick selector matches settings page options
+- [x] "Auto-detect" label shows platform-appropriate terminal names
+- [x] Autostart label reads "Start at login" on Linux, "Start with Windows" on Windows
+- [x] "Custom" option still works with template input field
+- [x] Selecting a terminal via topbar persists correctly to config
+- [x] README.md updated: add Linux to supported platforms, note PyGObject requirement, update auto-detect description
+
+#### Implementation (2026-06-30, code: cc1fe95)
+
+Added `available_terminals()` to `launcher.py` that probes the system for installed terminals (platform-specific candidates) and returns a cached list of `(value, label)` pairs including an "Auto-detect" entry with a dynamic label showing the priority chain and a "Custom" entry. Added `_terminal_context()` helper in `web.py` that builds template context from the terminal list and passes it to all three template renders (index, settings page, save_settings POST). Replaced the hardcoded terminal dropdown in `settings.html` with a Jinja2 loop over `terminal_options`, added a "no terminals found" hint for Linux, and made the custom-terminal input show/hide based on whether the current config value is in the known values set. Replaced the hardcoded topbar selector in `index.html` with a dynamic loop (excluding the "Custom" option). Replaced "Start with Windows" with `{{ autostart_label }}` for platform-appropriate wording. Updated README.md to mention Linux support, PyGObject requirements, platform-aware terminal detection, and cross-platform config paths.
 
 ### Phase 3: Tray icon PNG for Linux [QA]
 
@@ -573,6 +577,23 @@ pytest tests/ -v  # full suite, ensure no regressions
 <Reserved — filled during implementation>
 
 ## Review Log
+
+### 2026-06-30 -- Implementation Review (after Phase 2, personas: End-user advocate, Senior engineer, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green.
+7 findings (0 High, 4 Medium, 3 Low). High-effort, 4 personas.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `available_terminals()` returns cache by reference, not copy (project memory pattern) | Fixed — returns `list(_terminal_cache)` (dc384ef) |
+| 2 | Medium | "No terminals found" hint is Linux-specific but fires on Windows too | Fixed — platform-aware hint text (dc384ef) |
+| 3 | Medium | No tests for `available_terminals()` | Fixed — added TestAvailableTerminals (4 tests) (dc384ef) |
+| 4 | Medium | Commit includes unrelated scope (launcher terminal toggle, layout refactor) | User: accepted — pre-existing working-tree changes from separate feature |
+| 5 | Low | `_terminal_context()` local `sys` import instead of module-level | Fixed — moved to top-level import (dc384ef) |
+| 6 | Low | `launch_custom()` missing platform-specific error message | Fixed — uses same pattern as `launch_session()` (dc384ef) |
+| 7 | Low | Custom template hint says "kiro-cli command" which is misleading | Fixed — reworded to "the full command" (dc384ef) |
+
+Finding #4: The Phase 2 commit (cc1fe95) includes pre-existing working-tree changes from a separate feature (launcher terminal toggle, DOM layout refactor). These were in the git working tree before Phase 2 was dispatched. The Phase 2 sub-agent included them because it staged all modified files. The changes are functionally correct and tested; they are cosmetically mixed into the commit but do not affect Phase 2's correctness.
 
 ### 2026-06-30 -- Implementation Review (after Phase 1, personas: Security auditor, Reliability engineer, Maintainability reviewer, Senior engineer)
 
