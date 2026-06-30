@@ -265,20 +265,15 @@ def _run_foreground() -> None:
     if peek:
         set_peek_stop_callback(peek.stop)
 
-        if sys.platform != "win32":
-            # Linux: pywebview needs main thread (GTK).
-            # Pystray on background daemon thread.
-            tray_thread = threading.Thread(target=run_tray, args=(server_url, config), daemon=True)
-            tray_thread.start()
-            threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
-            peek.start(on_main_thread=True)  # blocks until peek.stop() is called
-        else:
-            # Windows: pywebview on background thread, pystray on main.
-            peek.start(on_main_thread=False)
-            threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
-            run_tray(server_url, config)  # blocks until tray quit
+        # pywebview requires the main thread on all platforms
+        # (Windows EdgeChromium + Linux GTK both enforce this).
+        # Pystray runs on a background daemon thread.
+        tray_thread = threading.Thread(target=run_tray, args=(server_url, config), daemon=True)
+        tray_thread.start()
+        threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+        peek.start(on_main_thread=True)  # blocks until peek.stop() is called
     else:
-        # No peek available — original path
+        # No peek available — original path (pystray on main thread)
         threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
         run_tray(server_url, config)
 
