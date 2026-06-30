@@ -258,7 +258,6 @@ def _run_foreground() -> None:
     # Warmup pinned workspaces in background (non-blocking)
     from .peek import create_peek
     from .tray import run_tray, restart_requested, set_peek_stop_callback
-    import threading as _threading
     from .data import warmup_pinned
 
     peek = create_peek(server_url, config.peek_hotkey)
@@ -269,18 +268,18 @@ def _run_foreground() -> None:
         if sys.platform != "win32":
             # Linux: pywebview needs main thread (GTK).
             # Pystray on background daemon thread.
-            tray_thread = _threading.Thread(target=run_tray, args=(server_url, config), daemon=True)
+            tray_thread = threading.Thread(target=run_tray, args=(server_url, config), daemon=True)
             tray_thread.start()
-            _threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+            threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
             peek.start(on_main_thread=True)  # blocks until peek.stop() is called
         else:
             # Windows: pywebview on background thread, pystray on main.
             peek.start(on_main_thread=False)
-            _threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+            threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
             run_tray(server_url, config)  # blocks until tray quit
     else:
         # No peek available — original path
-        _threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
+        threading.Thread(target=warmup_pinned, args=(config.pinned_folders,), daemon=True).start()
         run_tray(server_url, config)
 
     # Shutdown sequence

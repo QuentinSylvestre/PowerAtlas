@@ -79,7 +79,10 @@ def run_tray(server_url: str, config: Config) -> None:
 
     def on_quit(icon, item):
         if _peek_stop_callback:
-            _peek_stop_callback()
+            try:
+                _peek_stop_callback()
+            except Exception:
+                pass
         _shutdown_event.set()
         icon.stop()
 
@@ -87,7 +90,10 @@ def run_tray(server_url: str, config: Config) -> None:
         global _restart_requested
         _restart_requested = True
         if _peek_stop_callback:
-            _peek_stop_callback()
+            try:
+                _peek_stop_callback()
+            except Exception:
+                pass
         _shutdown_event.set()
         icon.stop()
 
