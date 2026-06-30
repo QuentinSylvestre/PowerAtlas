@@ -3,19 +3,76 @@
 import argparse
 import ctypes
 import os
+import signal
 import subprocess
 import sys
 import threading
 
 import uvicorn
 
-from .config import load_config
+from .config import load_config, CONFIG_DIR
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
 
+_PID_FILE = CONFIG_DIR / "power-atlas.pid"
 
 _mutex_handle = None
+
+
+def _write_pid() -> None:
+    """Write current PID to file for stop/restart commands."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _PID_FILE.write_text(str(os.getpid()))
+
+
+def _remove_pid() -> None:
+    """Remove PID file on shutdown."""
+    try:
+        _PID_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _read_pid() -> int | None:
+    """Read PID of running instance, or None if not running."""
+    try:
+        pid = int(_PID_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    # Check if process is alive
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
+        if handle:
+            kernel32.CloseHandle(handle)
+            return pid
+        return None
+    else:
+        try:
+            os.kill(pid, 0)
+            return pid
+        except OSError:
+            return None
+
+
+def _stop_running() -> bool:
+    """Stop the running instance. Returns True if a process was stopped."""
+    pid = _read_pid()
+    if pid is None:
+        print("PowerAtlas is not running.")
+        return False
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+        if handle:
+            kernel32.TerminateProcess(handle, 0)
+            kernel32.CloseHandle(handle)
+    else:
+        os.kill(pid, signal.SIGTERM)
+    _remove_pid()
+    print(f"PowerAtlas stopped (pid {pid}).")
+    return True
 
 
 def _single_instance_guard() -> None:
@@ -28,7 +85,6 @@ def _single_instance_guard() -> None:
             os._exit(0)
     else:
         import fcntl
-        from .config import CONFIG_DIR
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         lock_path = CONFIG_DIR / "power-atlas.lock"
         _mutex_handle = open(lock_path, "w")
@@ -131,7 +187,6 @@ def _ensure_display() -> None:
 def _run_foreground() -> None:
     """Run the server + tray in this process (blocking)."""
     import logging
-    from .config import CONFIG_DIR
     _migrate_legacy()
     log_path = CONFIG_DIR / "orchestrator.log"
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -148,6 +203,7 @@ def _run_foreground() -> None:
 
     _single_instance_guard()
     _ensure_display()
+    _write_pid()
     config = load_config()
 
     # Import the real app
@@ -172,6 +228,7 @@ def _run_foreground() -> None:
 
     if not ready_event.is_set() or not server.servers:
         print("ERROR: Server failed to start", file=sys.stderr)
+        _remove_pid()
         sys.exit(1)
 
     port = server.servers[0].sockets[0].getsockname()[1]
@@ -192,6 +249,7 @@ def _run_foreground() -> None:
 
     should_restart = restart_requested()
 
+    _remove_pid()
     _release_mutex()
     logging.shutdown()
 
@@ -207,7 +265,28 @@ def main() -> None:
         "-f", "--foreground", action="store_true",
         help="Run in this terminal instead of detaching to the background",
     )
+    parser.add_argument(
+        "--stop", action="store_true",
+        help="Stop the running PowerAtlas instance",
+    )
+    parser.add_argument(
+        "--restart", action="store_true",
+        help="Restart the running PowerAtlas instance",
+    )
     args = parser.parse_args()
+
+    if args.stop:
+        _stop_running()
+        return
+
+    if args.restart:
+        _stop_running()
+        import time
+        time.sleep(0.5)
+        # Fall through to start a new instance
+        _single_instance_guard()
+        _relaunch_detached()
+        return
 
     if args.foreground:
         _run_foreground()
