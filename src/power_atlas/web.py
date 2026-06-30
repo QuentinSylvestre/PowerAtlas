@@ -633,6 +633,8 @@ async def api_restart():
     """Trigger restart via the tray mechanism."""
     import power_atlas.tray as _tray
     _tray._restart_requested = True
+    if _tray._peek_stop_callback:
+        _tray._peek_stop_callback()
     _tray._shutdown_event.set()
     if _tray._icon_instance:
         _tray._icon_instance.stop()

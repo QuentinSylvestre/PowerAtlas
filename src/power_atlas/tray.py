@@ -6,6 +6,7 @@ import sys
 import threading
 import webbrowser
 from pathlib import Path
+from typing import Callable
 
 import pystray
 from PIL import Image, ImageDraw
@@ -17,6 +18,13 @@ log = logging.getLogger("power_atlas.tray")
 _shutdown_event = threading.Event()
 _restart_requested = False
 _icon_instance = None
+_peek_stop_callback: Callable | None = None
+
+
+def set_peek_stop_callback(cb: Callable) -> None:
+    """Register a callback to stop the peek window on quit/restart."""
+    global _peek_stop_callback
+    _peek_stop_callback = cb
 
 
 def _create_icon() -> Image.Image:
@@ -70,12 +78,16 @@ def run_tray(server_url: str, config: Config) -> None:
                 _sp.Popen(["xdg-open", str(log_path)])
 
     def on_quit(icon, item):
+        if _peek_stop_callback:
+            _peek_stop_callback()
         _shutdown_event.set()
         icon.stop()
 
     def on_restart(icon, item):
         global _restart_requested
         _restart_requested = True
+        if _peek_stop_callback:
+            _peek_stop_callback()
         _shutdown_event.set()
         icon.stop()
 
