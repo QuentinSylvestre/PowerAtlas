@@ -75,7 +75,8 @@ class PeekWindow:
             frameless=True,
             on_top=True,
             hidden=True,
-            fullscreen=True,
+            width=1,
+            height=1,
         )
         webview.start(func=self._on_webview_ready, debug=False)
 
@@ -104,6 +105,7 @@ class PeekWindow:
             self._visible = True
             log.debug("Peek show")
             win.show()
+            win.toggle_fullscreen()
             win.evaluate_js("if(typeof doRefresh==='function') doRefresh()")
 
     def _hide(self) -> None:
@@ -111,6 +113,7 @@ class PeekWindow:
         if win and self._visible:
             self._visible = False
             log.debug("Peek hide")
+            win.toggle_fullscreen()
             win.hide()
 
     def _on_press(self, key) -> None:

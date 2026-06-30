@@ -381,10 +381,42 @@ def warmup_pinned(pinned_folders: list[str]) -> None:
             continue
 
 
-def warmup_all(pinned_folders: list[str]) -> None:
-    """Pre-discover all workspaces and load pinned sessions. Safe to call from any thread."""
+def warmup_all(pinned_folders: list[str], pinned_sessions: list[str] | None = None) -> None:
+    """Pre-discover all workspaces and load pinned folder/session data. Safe to call from any thread."""
     discover_workspaces_with_counts()
     warmup_pinned(pinned_folders)
+    # Pre-load workspaces that contain pinned sessions so they render from cache
+    if pinned_sessions:
+        pinned_ids = set(pinned_sessions)
+        # Check which pinned sessions are already in a loaded workspace
+        found = set()
+        for norm_cwd in session_cache.get_loaded_cwds():
+            cached = session_cache.get(norm_cwd)
+            if cached:
+                for s in cached:
+                    if s.session_id in pinned_ids:
+                        found.add(s.session_id)
+        # For unfound pinned sessions, find their workspace from metadata and load it
+        remaining = pinned_ids - found
+        if remaining and SESSION_DIR.is_dir():
+            for meta_file in SESSION_DIR.glob("*.json"):
+                if meta_file.suffix == ".jsonl":
+                    continue
+                if meta_file.stem not in remaining:
+                    continue
+                try:
+                    d = json.loads(meta_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                cwd = d.get("cwd", "")
+                if cwd:
+                    try:
+                        get_sessions(cwd)
+                    except OSError:
+                        pass
+                remaining.discard(meta_file.stem)
+                if not remaining:
+                    break
 
 
 _tail_cache: dict[str, tuple[float, float, list[str]]] = {}  # sid -> (time, mtime, lines)
