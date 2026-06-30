@@ -1,7 +1,7 @@
 # Linux Support
 
 > **Date**: 2026-06-30
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Make PowerAtlas fully functional on Linux — terminal detection, command building, path normalization, UI adaptation
 > **Estimated effort**: 1-2 days
 
@@ -363,15 +363,19 @@ class TestNormalizePathLinux:
 ```
 
 **Exit criteria**:
-- [ ] `detect_terminal()` returns a Linux terminal path when one is available (mocked test)
-- [ ] `_build_command()` produces correct command lists for all 5 supported Linux terminals
-- [ ] `_build_custom_command()` handles Linux terminals (tested)
-- [ ] Shell-interpolated paths use `shlex.quote()` — no injection via `$`, backticks, or quotes in cwd
-- [ ] `_normalize_path()` preserves forward slashes on Linux, existing Windows behavior unchanged (tested)
-- [ ] `{cwd}/{cmd}` template handles paths with spaces; `{cmd}` expands to separate args
-- [ ] Unknown terminal stems return `None` on Linux (not `cmd /k` fallback)
-- [ ] All existing Windows tests pass unchanged
-- [ ] New Linux tests pass (detection, command build, custom command, normalize path, template)
+- [x] `detect_terminal()` returns a Linux terminal path when one is available (mocked test)
+- [x] `_build_command()` produces correct command lists for all 5 supported Linux terminals
+- [x] `_build_custom_command()` handles Linux terminals (tested)
+- [x] Shell-interpolated paths use `shlex.quote()` — no injection via `$`, backticks, or quotes in cwd
+- [x] `_normalize_path()` preserves forward slashes on Linux, existing Windows behavior unchanged (tested)
+- [x] `{cwd}/{cmd}` template handles paths with spaces; `{cmd}` expands to separate args
+- [x] Unknown terminal stems return `None` on Linux (not `cmd /k` fallback)
+- [x] All existing Windows tests pass unchanged
+- [x] New Linux tests pass (detection, command build, custom command, normalize path, template)
+
+#### Implementation (2026-06-30, code: 9d78acc)
+
+Added Linux terminal support to the launcher module. Implemented a dispatch table (`_LINUX_TERMINALS`) mapping terminal stems to their flag patterns (title, cwd, exec separator), with `_LINUX_PROBE_ORDER` for detection priority. `detect_terminal()` is now platform-aware, probing Linux terminals when not on Windows. Added `_build_linux_command()` helper that constructs commands using the dispatch table, with `shlex.quote()` for shell-interpolated paths (xterm's `sh -c` wrapper). Extracted `_build_template_command()` to properly handle `{cwd}/{cmd}` placeholders as discrete list elements (fixing space handling). Extended `_build_custom_command()` with Linux terminal dispatch. Fixed `_normalize_path()` to gate backslash conversion behind `sys.platform == "win32"`. Added 30 new tests covering Linux detection, all 5 terminal command builds, template space handling, custom command Linux paths, and Linux path normalization.
 
 ### Phase 2: UI adaptation — dynamic terminal list, platform labels [QA]
 
@@ -570,7 +574,22 @@ pytest tests/ -v  # full suite, ensure no regressions
 
 ## Review Log
 
-### 2026-06-30 — Plan Review (via /qplan, High effort)
+### 2026-06-30 -- Implementation Review (after Phase 1, personas: Security auditor, Reliability engineer, Maintainability reviewer, Senior engineer)
+
+Implementation health: Green.
+4 findings (0 High, 3 Medium, 4 Low). High-effort, 4 personas.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `_build_custom_command` Linux path passes `cmd_str` raw to `sh -c` — intentional but undocumented | Fixed — added trust boundary comment (ff7a10e) |
+| 2 | Medium | `_normalize_path("/")` returns empty string on Linux (root path edge case) | Fixed — added `or "/"` guard (ff7a10e) |
+| 3 | Medium | Copy-paste duplication between `_build_linux_command` and `_build_custom_command` Linux block | Escalated — design choice, see below |
+| 4 | Low | Test mocking uses global `sys.platform` instead of module-scoped patch | Accepted — works correctly today, fragility is bounded |
+| 5 | Low | `use_terminal=False` branch is from separate uncommitted feature, not Phase 1 scope | Accepted — unrelated working-tree change, not part of this commit |
+| 6 | Low | No test for empty-title branch on terminals with title_flag (kitty, alacritty) | Accepted — guard logic is simple, covered incidentally via konsole |
+| 7 | Low | `_build_template_command` doesn't warn when `{cmd}` placeholder is absent | Accepted — user misconfiguration, UX issue for future improvement |
+
+Duplication finding (#3): The Security auditor, Reliability, and Maintainability reviewers all noted that `_build_linux_command()` and the Linux block in `_build_custom_command()` share ~20 lines of near-identical flag-building logic. A shared `_build_linux_base()` helper could eliminate this. However, the two functions differ in their final command portion (list of args vs shell string) and the duplication is bounded (won't grow). Deferring to user decision.
 
 4 personas (Architect, Senior engineer, End-user advocate, Reliability engineer). 19 findings total (3 High, 8 Medium, 8 Low). 11 auto-resolved.
 
