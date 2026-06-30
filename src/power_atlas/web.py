@@ -102,7 +102,6 @@ async def save_settings(request: Request):
         terminal = form.get("custom_terminal_value", "")
     config.terminal_command = terminal
     # Toggles
-    config.use_pywebview = "use_pywebview" in form
     config.trust_all_tools = "trust_all_tools" in form
     # Pinned folders from hidden field
     folders_raw = form.get("pinned_folders", "")
@@ -354,8 +353,8 @@ async def api_last_refresh():
 
 _SETTING_TYPES: dict[str, type] = {
     "trust_all_tools": bool,
-    "use_pywebview": bool,
     "terminal_command": str,
+    "peek_hotkey": str,
     "pinned_folders": list,
     "pinned_sessions": list,
 }

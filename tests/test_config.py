@@ -34,7 +34,7 @@ def test_missing_keys_use_defaults():
         tomli_w.dump({"trust_all_tools": True}, f)
     cfg = load_config()
     assert cfg.trust_all_tools is True
-    assert cfg.use_pywebview is True  # default
+    assert cfg.peek_hotkey == "ctrl+shift+z"  # default
     assert cfg.pinned_folders == []  # default
 
 
@@ -99,10 +99,9 @@ def test_wrong_type_bool_gets_default():
     from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump({"trust_all_tools": "yes", "use_pywebview": 1}, f)
+        tomli_w.dump({"trust_all_tools": "yes"}, f)
     cfg = load_config()
     assert cfg.trust_all_tools is False  # default
-    assert cfg.use_pywebview is True  # default (int != bool)
 
 
 def test_wrong_type_list_gets_default():
@@ -137,3 +136,11 @@ def test_custom_launchers_round_trip():
     assert len(loaded.custom_launchers) == 1
     assert loaded.custom_launchers[0]["name"] == "Dev"
     assert loaded.custom_launchers[0]["id"] == "abc"
+
+
+def test_peek_hotkey_round_trip():
+    """peek_hotkey persists through save/load cycle with custom value."""
+    cfg = Config(peek_hotkey="alt+p")
+    save_config(cfg)
+    loaded = load_config()
+    assert loaded.peek_hotkey == "alt+p"

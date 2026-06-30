@@ -51,11 +51,13 @@ Config stored at:
 
 ```toml
 trust_all_tools = false
-use_pywebview = true
+peek_hotkey = "ctrl+shift+z"  # empty = disabled
 terminal_command = ""  # empty = auto-detect (platform-specific)
 pinned_folders = []
 pinned_sessions = []
 ```
+
+Linux users need `gir1.2-webkit2-4.1` system package for pywebview.
 
 ## Development
 

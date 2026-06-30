@@ -28,7 +28,7 @@ _lock = threading.Lock()
 @dataclass
 class Config:
     trust_all_tools: bool = False
-    use_pywebview: bool = True
+    peek_hotkey: str = "ctrl+shift+z"
     terminal_command: str = ""
     pinned_folders: list[str] = field(default_factory=list)
     pinned_sessions: list[str] = field(default_factory=list)
