@@ -1,9 +1,7 @@
 """Peek window: hotkey-held native overlay showing the dashboard."""
 
 import logging
-import sys
 import threading
-from typing import Callable
 
 log = logging.getLogger("power_atlas.peek")
 
@@ -37,6 +35,7 @@ class PeekWindow:
         self._pressed_keys: set = set()
         self._triggered = False  # True after full combo pressed
         self._webview_ready = threading.Event()
+        self._webview_ok = False  # Set True only when webview is confirmed ready
 
     def start(self, on_main_thread: bool = False) -> None:
         """Start the peek window and hotkey listener.
@@ -47,6 +46,7 @@ class PeekWindow:
         """
         if on_main_thread:
             self._start_listener()
+            self._webview_ok = True  # On main thread, webview.start() blocks until ready
             self._run_webview()  # blocks
         else:
             t = threading.Thread(target=self._run_webview, daemon=True)
@@ -54,6 +54,8 @@ class PeekWindow:
             self._webview_ready.wait(timeout=10)
             if not self._webview_ready.is_set():
                 log.warning("Peek webview did not become ready within 10s — peek may be non-functional")
+            else:
+                self._webview_ok = True
             self._start_listener()
 
     def stop(self) -> None:
@@ -96,17 +98,19 @@ class PeekWindow:
             self._listener = None
 
     def _show(self) -> None:
-        if self._window and not self._visible:
+        win = self._window  # local capture for thread safety
+        if win and not self._visible and self._webview_ok:
             self._visible = True
             log.debug("Peek show")
-            self._window.show()
-            self._window.evaluate_js("if(typeof doRefresh==='function') doRefresh()")
+            win.show()
+            win.evaluate_js("if(typeof doRefresh==='function') doRefresh()")
 
     def _hide(self) -> None:
-        if self._window and self._visible:
+        win = self._window  # local capture for thread safety
+        if win and self._visible:
             self._visible = False
             log.debug("Peek hide")
-            self._window.hide()
+            win.hide()
 
     def _on_press(self, key) -> None:
         """Track pressed keys, show on full combo. Escape is a fallback dismiss."""
@@ -138,8 +142,7 @@ class PeekWindow:
     @staticmethod
     def _parse_hotkey(hotkey: str) -> set[str]:
         """Parse 'ctrl+shift+z' into {'ctrl', 'shift', 'z'}."""
-        return {part.strip().lower() for part in hotkey.split("+")}
-
+        return {part.strip().lower() for part in hotkey.split("+") if part.strip()}
     @staticmethod
     def _normalize_key(key) -> str | None:
         """Normalize a pynput key to a string."""

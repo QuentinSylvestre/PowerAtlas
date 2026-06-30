@@ -1,18 +1,8 @@
 """Tests for power_atlas.peek — works without pywebview/pynput installed."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-
-# Ensure the module can be imported even without pywebview/pynput by mocking them
-# before importing peek.py (if they aren't available in the test env).
-@pytest.fixture(autouse=True)
-def _mock_optional_deps(monkeypatch):
-    """Ensure peek module is importable regardless of optional deps."""
-    # If webview/pynput are genuinely installed, tests still pass — no harm.
-    pass
 
 
 def _make_key(char=None, name=None):
@@ -223,3 +213,102 @@ class TestCreatePeek:
 
         result = peek_mod.create_peek("http://localhost:8000")
         assert result is None
+
+
+
+class TestHotkeyStateMachine:
+    """Tests for the press/release state machine driving _show/_hide."""
+
+    def _make_peek(self, monkeypatch):
+        """Create a PeekWindow with mocked internals for state-machine testing."""
+        import power_atlas.peek as peek_mod
+
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+
+        show_calls = []
+        hide_calls = []
+
+        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+            self._server_url = server_url
+            self._hotkey = hotkey
+            self._window = MagicMock()  # mock window so _show/_hide guards pass
+            self._visible = False
+            self._listener = None
+            self._trigger_keys = peek_mod.PeekWindow._parse_hotkey(hotkey)
+            self._pressed_keys = set()
+            self._triggered = False
+            self._webview_ready = None
+            self._webview_ok = True
+
+        monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
+        monkeypatch.setattr(peek_mod.PeekWindow, "_show", lambda self: show_calls.append(True))
+        monkeypatch.setattr(peek_mod.PeekWindow, "_hide", lambda self: hide_calls.append(True))
+
+        pw = peek_mod.PeekWindow("http://localhost:8000", "ctrl+shift+z")
+        return pw, show_calls, hide_calls
+
+    def test_full_combo_triggers_show(self, monkeypatch):
+        pw, show_calls, hide_calls = self._make_peek(monkeypatch)
+        pw._on_press(_make_key(name="ctrl_l"))
+        assert show_calls == []
+        pw._on_press(_make_key(name="shift_l"))
+        assert show_calls == []
+        pw._on_press(_make_key(char="z"))
+        assert show_calls == [True]
+        assert hide_calls == []
+
+    def test_release_modifier_triggers_hide(self, monkeypatch):
+        pw, show_calls, hide_calls = self._make_peek(monkeypatch)
+        # Press full combo
+        pw._on_press(_make_key(name="ctrl_l"))
+        pw._on_press(_make_key(name="shift_l"))
+        pw._on_press(_make_key(char="z"))
+        assert pw._triggered is True
+        # Release ctrl
+        pw._on_release(_make_key(name="ctrl_l"))
+        assert hide_calls == [True]
+        assert pw._triggered is False
+
+    def test_escape_triggers_hide(self, monkeypatch):
+        pw, show_calls, hide_calls = self._make_peek(monkeypatch)
+        # Press full combo
+        pw._on_press(_make_key(name="ctrl_l"))
+        pw._on_press(_make_key(name="shift_l"))
+        pw._on_press(_make_key(char="z"))
+        assert pw._triggered is True
+        # Press escape
+        pw._on_press(_make_key(name="esc"))
+        assert hide_calls == [True]
+        assert pw._triggered is False
+        assert pw._pressed_keys == set()  # cleared on escape
+
+    def test_partial_combo_does_not_trigger(self, monkeypatch):
+        pw, show_calls, hide_calls = self._make_peek(monkeypatch)
+        pw._on_press(_make_key(name="ctrl_l"))
+        pw._on_press(_make_key(char="z"))
+        # Missing shift — should not trigger
+        assert show_calls == []
+        assert pw._triggered is False
+
+    def test_double_press_does_not_show_twice(self, monkeypatch):
+        pw, show_calls, hide_calls = self._make_peek(monkeypatch)
+        # Press full combo
+        pw._on_press(_make_key(name="ctrl_l"))
+        pw._on_press(_make_key(name="shift_l"))
+        pw._on_press(_make_key(char="z"))
+        assert show_calls == [True]
+        # Press z again (key repeat) — should not trigger second show
+        pw._on_press(_make_key(char="z"))
+        assert show_calls == [True]  # still just one call
+
+
+class TestParseHotkeyEdgeCases:
+    """Additional edge-case tests for _parse_hotkey."""
+
+    def test_trailing_plus(self):
+        from power_atlas.peek import PeekWindow
+
+        # Trailing + should not produce empty string in result
+        result = PeekWindow._parse_hotkey("ctrl+shift+")
+        assert "" not in result
+        assert result == {"ctrl", "shift"}
