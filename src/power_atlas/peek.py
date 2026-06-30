@@ -113,7 +113,12 @@ class PeekWindow:
             win.hide()
 
     def _on_press(self, key) -> None:
-        """Track pressed keys, show on full combo. Escape is a fallback dismiss."""
+        """Track pressed keys, show on full combo. Escape is a fallback dismiss.
+        
+        Thread safety: pynput guarantees sequential callback dispatch on a single
+        listener thread — no concurrent press/release delivery. The compound
+        check-then-act here is safe without explicit synchronization.
+        """
         normalized = self._normalize_key(key)
         if normalized:
             self._pressed_keys.add(normalized)

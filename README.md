@@ -57,7 +57,7 @@ pinned_folders = []
 pinned_sessions = []
 ```
 
-Linux users need `gir1.2-webkit2-4.1` system package for pywebview.
+Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).
 
 ## Development
 
