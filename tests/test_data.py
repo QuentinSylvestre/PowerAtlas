@@ -3,6 +3,7 @@
 import json
 import threading
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -369,3 +370,25 @@ class TestGetSessionTail:
         _tail_cache.clear()
         result = get_session_tail("tail5", max_lines=3)
         assert len(result) == 3
+
+
+class TestNormalizePathLinux:
+    @patch("power_atlas.data.sys.platform", "linux")
+    def test_preserves_forward_slashes(self):
+        from power_atlas.data import _normalize_path
+        assert _normalize_path("/home/user/project") == "/home/user/project"
+
+    @patch("power_atlas.data.sys.platform", "linux")
+    def test_strips_trailing_slash(self):
+        from power_atlas.data import _normalize_path
+        assert _normalize_path("/home/user/project/") == "/home/user/project"
+
+    @patch("power_atlas.data.sys.platform", "linux")
+    def test_preserves_case(self):
+        from power_atlas.data import _normalize_path
+        assert _normalize_path("/home/User/MyProject") == "/home/User/MyProject"
+
+    @patch("power_atlas.data.sys.platform", "linux")
+    def test_no_backslash_conversion(self):
+        from power_atlas.data import _normalize_path
+        assert _normalize_path("/home/user/a/b/c") == "/home/user/a/b/c"

@@ -2,6 +2,7 @@
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,12 +20,27 @@ class LaunchResult:
 
 _SESSION_ID_RE = re.compile(r"^[\w\-]+$")
 
+# Terminal dispatch table: stem -> (title_flag, cwd_flag, exec_separator)
+_LINUX_TERMINALS: dict[str, tuple[str | None, str | None, str | None]] = {
+    "kitty":          ("--title",  "--directory",          "--"),
+    "alacritty":      ("--title",  "--working-directory",  "-e"),
+    "gnome-terminal": ("--title=", "--working-directory=", "--"),
+    "konsole":        (None,       "--workdir",            "-e"),
+    "xterm":          ("-title",   None,                   "-e"),
+}
+
+_LINUX_PROBE_ORDER = ("kitty", "alacritty", "gnome-terminal", "konsole", "xterm")
+
 
 def detect_terminal(config_override: str = "") -> str | None:
-    """Detect terminal. Priority: config > wt > pwsh > cmd."""
+    """Detect terminal. Priority: config > platform-specific probe order."""
     if config_override:
         return config_override
-    for name in ("wt", "pwsh", "cmd"):
+    if sys.platform == "win32":
+        candidates = ("wt", "pwsh", "cmd")
+    else:
+        candidates = _LINUX_PROBE_ORDER
+    for name in candidates:
         path = shutil.which(name)
         if path:
             return path
@@ -40,7 +56,11 @@ def launch_session(
     """Launch a kiro-cli session in a terminal. Returns result, never raises."""
     terminal = detect_terminal(terminal_override)
     if not terminal:
-        return LaunchResult(False, session_id, cwd, error="No terminal found. Configure one in Settings.")
+        if sys.platform == "win32":
+            msg = "No terminal found. Configure one in Settings."
+        else:
+            msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm \u2014 or configure a custom terminal in Settings."
+        return LaunchResult(False, session_id, cwd, error=msg)
 
     if not Path(cwd).exists():
         return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
@@ -97,14 +117,60 @@ def _sanitize_title(title: str) -> str:
     return _TITLE_UNSAFE_RE.sub("", title)
 
 
+def _build_template_command(template: str, cwd: str, kiro_args: list[str]) -> list[str]:
+    """Build command from user template with {cwd}/{cmd} placeholders.
+
+    Handles paths with spaces by splitting the template around placeholders
+    and inserting values as discrete elements.
+    """
+    parts = re.split(r"(\{cwd\}|\{cmd\})", template)
+    result: list[str] = []
+    for part in parts:
+        if part == "{cwd}":
+            result.append(cwd)
+        elif part == "{cmd}":
+            result.extend(kiro_args)
+        else:
+            result.extend(p for p in part.split() if p)
+    return result
+
+
+def _build_linux_command(terminal: str, cwd: str, kiro_args: list[str], title: str, stem: str) -> list[str]:
+    """Build command for a Linux terminal using the dispatch table."""
+    title_flag, cwd_flag, exec_sep = _LINUX_TERMINALS[stem]
+    cmd: list[str] = [terminal]
+
+    if title and title_flag:
+        if title_flag.endswith("="):
+            cmd.append(f"{title_flag}{_sanitize_title(title)}")
+        else:
+            cmd += [title_flag, _sanitize_title(title)]
+
+    if cwd_flag:
+        if cwd_flag.endswith("="):
+            cmd.append(f"{cwd_flag}{cwd}")
+        else:
+            cmd += [cwd_flag, cwd]
+
+    if exec_sep:
+        cmd.append(exec_sep)
+
+    # For terminals without cwd_flag (xterm), wrap in shell with proper escaping
+    if not cwd_flag:
+        shell_cmd = f'cd {shlex.quote(cwd)} && exec {" ".join(shlex.quote(a) for a in kiro_args)}'
+        cmd += ["sh", "-c", shell_cmd]
+    else:
+        cmd += kiro_args
+
+    return cmd
+
+
 def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "") -> list[str] | None:
     """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
     if "{cwd}" in terminal or "{cmd}" in terminal:
-        kiro_cmd = " ".join(kiro_args)
-        full = terminal.replace("{cwd}", cwd).replace("{cmd}", kiro_cmd)
-        return full.split()
+        return _build_template_command(terminal, cwd, kiro_args)
 
     if t == "wt":
         cmd = [terminal]
@@ -120,7 +186,14 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
             script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
         script += f"Set-Location -LiteralPath '{escaped_cwd}'; & {' '.join(kiro_args)}"
         return [terminal, "-NoExit", "-Command", script]
-    # cmd fallback — reject paths with shell metacharacters
+
+    # Linux terminals via dispatch table
+    if t in _LINUX_TERMINALS:
+        return _build_linux_command(terminal, cwd, kiro_args, title, t)
+
+    # cmd fallback (Windows only)
+    if sys.platform != "win32":
+        return None
     if _CMD_METACHAR_RE.search(cwd):
         return None
     kiro_cmd = " ".join(kiro_args)
@@ -129,24 +202,35 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
 
 
 
-def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "") -> LaunchResult:
-    """Launch a custom command in a terminal."""
-    terminal = detect_terminal(terminal_override)
-    if not terminal:
-        return LaunchResult(False, None, cwd or ".", error="No terminal found.")
+def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "", use_terminal: bool = True) -> LaunchResult:
+    """Launch a custom command, optionally in a terminal."""
     work_dir = cwd or "."
     if not Path(work_dir).exists():
         return LaunchResult(False, None, work_dir, error=f"Folder not found: {work_dir}")
     full_cmd_str = f"{command} {custom_args}".strip() if custom_args else command
+    proc_env = {**os.environ, **env} if env else None
+    kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
+    if proc_env:
+        kwargs["env"] = proc_env
+
+    if not use_terminal:
+        # Launch directly as a detached process (no terminal window)
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(full_cmd_str, cwd=work_dir, shell=True, **kwargs)
+            return LaunchResult(True, None, work_dir)
+        except OSError as e:
+            return LaunchResult(False, None, work_dir, error=str(e))
+
+    terminal = detect_terminal(terminal_override)
+    if not terminal:
+        return LaunchResult(False, None, work_dir, error="No terminal found.")
     title = _sanitize_title(f"{Path(command).stem} - {Path(work_dir).name}")
     cmd = _build_custom_command(terminal, work_dir, full_cmd_str, title)
     if cmd is None:
         return LaunchResult(False, None, work_dir, error="Path contains unsafe characters for this terminal")
-    proc_env = {**os.environ, **env} if env else None
     try:
-        kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
-        if proc_env:
-            kwargs["env"] = proc_env
         subprocess.Popen(cmd, **kwargs)
         return LaunchResult(True, None, work_dir)
     except OSError as e:
@@ -163,6 +247,32 @@ def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str) -> 
         escaped_title = title.replace("'", "''")
         script = f"$Host.UI.RawUI.WindowTitle = '{escaped_title}'; Set-Location -LiteralPath '{escaped_cwd}'; & cmd /c '{cmd_str}'"
         return [terminal, "-NoExit", "-Command", script]
+
+    # Linux terminals
+    if t in _LINUX_TERMINALS:
+        title_flag, cwd_flag, exec_sep = _LINUX_TERMINALS[t]
+        cmd: list[str] = [terminal]
+        if title and title_flag:
+            if title_flag.endswith("="):
+                cmd.append(f"{title_flag}{_sanitize_title(title)}")
+            else:
+                cmd += [title_flag, _sanitize_title(title)]
+        if cwd_flag:
+            if cwd_flag.endswith("="):
+                cmd.append(f"{cwd_flag}{cwd}")
+            else:
+                cmd += [cwd_flag, cwd]
+        if exec_sep:
+            cmd.append(exec_sep)
+        if not cwd_flag:
+            cmd += ["sh", "-c", f'cd {shlex.quote(cwd)} && exec {cmd_str}']
+        else:
+            cmd += ["sh", "-c", cmd_str]
+        return cmd
+
+    # cmd fallback (Windows only)
+    if sys.platform != "win32":
+        return None
     if _CMD_METACHAR_RE.search(cwd):
         return None
     safe_title = _sanitize_title(title)

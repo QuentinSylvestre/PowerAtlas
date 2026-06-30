@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command
+from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command, _build_template_command
 
 
 class TestDetectTerminal:
@@ -210,3 +210,111 @@ class TestLaunchCustom:
         assert result.success is True
         kwargs = mock_popen.call_args[1]
         assert "FOO" in kwargs["env"]
+
+
+class TestDetectTerminalLinux:
+    @patch("sys.platform", "linux")
+    @patch("shutil.which")
+    def test_finds_kitty_first(self, mock_which):
+        mock_which.side_effect = lambda n: {"kitty": "/usr/bin/kitty"}.get(n)
+        assert detect_terminal() == "/usr/bin/kitty"
+
+    @patch("sys.platform", "linux")
+    @patch("shutil.which")
+    def test_falls_back_to_gnome_terminal(self, mock_which):
+        mock_which.side_effect = lambda n: {"gnome-terminal": "/usr/bin/gnome-terminal"}.get(n)
+        assert detect_terminal() == "/usr/bin/gnome-terminal"
+
+    @patch("sys.platform", "linux")
+    @patch("shutil.which", return_value=None)
+    def test_returns_none_when_nothing_found(self, _):
+        assert detect_terminal() is None
+
+
+class TestBuildCommandLinux:
+    def test_kitty(self):
+        cmd = _build_command("/usr/bin/kitty", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        assert cmd == ["/usr/bin/kitty", "--title", "test", "--directory", "/home/user/proj", "--", "kiro-cli", "chat"]
+
+    def test_alacritty(self):
+        cmd = _build_command("/usr/bin/alacritty", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        assert cmd == ["/usr/bin/alacritty", "--title", "test", "--working-directory", "/home/user/proj", "-e", "kiro-cli", "chat"]
+
+    def test_gnome_terminal(self):
+        cmd = _build_command("/usr/bin/gnome-terminal", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        assert cmd == ["/usr/bin/gnome-terminal", "--title=test", "--working-directory=/home/user/proj", "--", "kiro-cli", "chat"]
+
+    def test_xterm_uses_shell_wrapper(self):
+        cmd = _build_command("/usr/bin/xterm", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        assert cmd[0] == "/usr/bin/xterm"
+        assert "-title" in cmd
+        assert "test" in cmd
+        assert "sh" in cmd
+        assert "-c" in cmd
+        # Verify shlex quoting is used in the shell command
+        shell_cmd = cmd[cmd.index("-c") + 1]
+        assert "cd" in shell_cmd
+        assert "/home/user/proj" in shell_cmd
+
+    def test_konsole(self):
+        cmd = _build_command("/usr/bin/konsole", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        assert cmd == ["/usr/bin/konsole", "--workdir", "/home/user/proj", "-e", "kiro-cli", "chat"]
+
+    def test_xterm_quotes_special_chars_in_cwd(self):
+        cmd = _build_command("/usr/bin/xterm", "/home/user/my$project", ["kiro-cli"], title="")
+        shell_cmd = cmd[cmd.index("-c") + 1]
+        # shlex.quote wraps in single quotes for shell safety
+        assert "'/home/user/my$project'" in shell_cmd
+
+    def test_unknown_stem_returns_none_on_linux(self):
+        with patch("sys.platform", "linux"):
+            # Unknown terminal on Linux should not fall through to cmd fallback
+            result = _build_command("/usr/bin/unknownterm", "/home/user/proj", ["kiro-cli"])
+            assert result is None
+
+
+class TestTemplateSpaceHandling:
+    def test_cwd_with_spaces(self):
+        cmd = _build_template_command("myterm --dir {cwd} -e {cmd}", "/home/user/my project", ["kiro-cli", "chat"])
+        assert cmd == ["myterm", "--dir", "/home/user/my project", "-e", "kiro-cli", "chat"]
+
+    def test_cmd_args_kept_separate(self):
+        cmd = _build_template_command("term -e {cmd}", "/proj", ["kiro-cli", "chat", "--resume-id", "abc"])
+        assert cmd == ["term", "-e", "kiro-cli", "chat", "--resume-id", "abc"]
+
+    def test_cwd_and_cmd_both_present(self):
+        cmd = _build_template_command("t --dir {cwd} --exec {cmd}", "/proj", ["kiro-cli"])
+        assert cmd == ["t", "--dir", "/proj", "--exec", "kiro-cli"]
+
+    def test_windows_cwd_with_spaces(self):
+        cmd = _build_template_command("wt -d {cwd} -- {cmd}", "C:\\Users\\My User\\proj", ["kiro-cli", "chat"])
+        assert cmd == ["wt", "-d", "C:\\Users\\My User\\proj", "--", "kiro-cli", "chat"]
+
+
+class TestBuildCustomCommandLinux:
+    def test_kitty(self):
+        cmd = _build_custom_command("/usr/bin/kitty", "/home/user/proj", "npm start", "npm - proj")
+        assert cmd[0] == "/usr/bin/kitty"
+        assert "--directory" in cmd
+        assert "/home/user/proj" in cmd
+        assert "sh" in cmd
+        assert "-c" in cmd
+        shell_cmd = cmd[cmd.index("-c") + 1]
+        assert "npm start" in shell_cmd
+
+    def test_xterm_uses_shlex_quote(self):
+        cmd = _build_custom_command("/usr/bin/xterm", "/home/user/my$proj", "npm start", "t")
+        shell_cmd = cmd[cmd.index("-c") + 1]
+        # shlex.quote wraps the path in single quotes
+        assert "'/home/user/my$proj'" in shell_cmd
+
+    def test_unknown_stem_returns_none_on_linux(self):
+        with patch("sys.platform", "linux"):
+            assert _build_custom_command("/usr/bin/unknown", "/proj", "cmd", "t") is None
+
+    def test_konsole_no_title(self):
+        cmd = _build_custom_command("/usr/bin/konsole", "/home/user/proj", "npm start", "title")
+        assert cmd[0] == "/usr/bin/konsole"
+        # konsole has no title flag, so title should not appear
+        assert "--title" not in cmd
+        assert "title" not in cmd[1:]  # first element is the terminal path

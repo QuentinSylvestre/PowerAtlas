@@ -453,11 +453,11 @@ def get_first_prompt(session_id: str) -> str:
 
 
 def _normalize_path(p: str) -> str:
-    """Normalize path: forward slashes to backslashes, case-fold on Windows, strip trailing sep."""
-    normalized = p.replace("/", "\\").rstrip("\\")
+    """Normalize path for cache keying: backslash + casefold on Windows, strip trailing sep."""
     if sys.platform == "win32":
-        normalized = normalized.casefold()
-    return normalized
+        normalized = p.replace("/", "\\").rstrip("\\")
+        return normalized.casefold()
+    return p.rstrip("/")
 
 
 def _open_sqlite_readonly() -> sqlite3.Connection | None:
