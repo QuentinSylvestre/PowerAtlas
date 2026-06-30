@@ -41,6 +41,16 @@
       </div>
     </div>
 
+    <div class="settings-group">
+      <div class="settings-group-title">Peek Window</div>
+      <div class="settings-row">
+        <label for="peek_hotkey">Hotkey</label>
+        <input type="text" name="peek_hotkey" id="peek_hotkey" class="settings-input"
+               value="{{ config.peek_hotkey }}" placeholder="ctrl+shift+z">
+      </div>
+      <p class="settings-hint">Format: modifier+modifier+key (e.g. ctrl+shift+z, alt+shift+p). Requires restart.</p>
+    </div>
+
     <button type="submit" class="settings-btn primary">Save settings</button>
   </form>
 </div>
