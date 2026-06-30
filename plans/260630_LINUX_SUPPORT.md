@@ -530,9 +530,13 @@ def _create_icon() -> Image.Image:
 ```
 
 **Exit criteria**:
-- [ ] `poweratlas-tray.png` exists in `static/` and is a valid PNG (128x128+)
-- [ ] `_create_icon()` loads `.ico` on Windows and `.png` on Linux
-- [ ] Fallback still works when icon file is missing
+- [x] `poweratlas-tray.png` exists in `static/` and is a valid PNG (128x128+)
+- [x] `_create_icon()` loads `.ico` on Windows and `.png` on Linux
+- [x] Fallback still works when icon file is missing
+
+#### Implementation (2026-06-30, code: fb04e57)
+
+Generated a 256x256 RGBA PNG from the existing ICO file (extracted and upscaled the 64x64 frame using Lanczos resampling). Updated `_create_icon()` in `tray.py` to select the icon file by platform: `.ico` on Windows, `.png` on Linux. The fallback path (blue square with "P") is unchanged and fires when the icon file is missing regardless of platform.
 
 ## 6) Risk Assessment
 
@@ -577,6 +581,18 @@ pytest tests/ -v  # full suite, ensure no regressions
 <Reserved — filled during implementation>
 
 ## Review Log
+
+### 2026-06-30 -- Implementation Review (after Phase 3, personas: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low). High-effort, 4 personas.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | Whitespace reformatting mixed with functional change inflates diff | User: accepted — cosmetic, non-functional |
+| 2 | Low | 256x256 PNG is larger than typical AppIndicator panel size (22-24px) | User: accepted — HiDPI source is better; pystray downscales |
+
+All 3 exit criteria verified as met. No auto-fixes needed.
 
 ### 2026-06-30 -- Implementation Review (after Phase 2, personas: End-user advocate, Senior engineer, Reliability engineer, Maintainability reviewer)
 
