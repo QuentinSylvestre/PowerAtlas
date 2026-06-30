@@ -2,6 +2,7 @@
 
 import logging
 import os
+import sys
 import threading
 import webbrowser
 from pathlib import Path
@@ -50,7 +51,11 @@ def run_tray(server_url: str, config: Config) -> None:
     def on_logs(icon, item):
         log_path = CONFIG_DIR / "orchestrator.log"
         if log_path.exists():
-            os.startfile(str(log_path))
+            if sys.platform == "win32":
+                os.startfile(str(log_path))
+            else:
+                import subprocess as _sp
+                _sp.Popen(["xdg-open", str(log_path)])
 
     def on_quit(icon, item):
         _shutdown_event.set()

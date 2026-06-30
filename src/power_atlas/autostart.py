@@ -1,37 +1,58 @@
-"""Windows startup shortcut management."""
+"""Startup/autostart management. Windows: Start Menu shortcut. Linux: XDG autostart .desktop file."""
 
 import os
 import sys
 from pathlib import Path
 
-_appdata = os.environ.get("APPDATA", "")
-if not _appdata:
-    _appdata = str(Path.home() / "AppData" / "Roaming")
-STARTUP_DIR = Path(_appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-SHORTCUT_NAME = "PowerAtlas.lnk"
+
+def _windows_shortcut_path() -> Path:
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        appdata = str(Path.home() / "AppData" / "Roaming")
+    return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / "PowerAtlas.lnk"
 
 
-def _shortcut_path() -> Path:
-    return STARTUP_DIR / SHORTCUT_NAME
+def _linux_desktop_path() -> Path:
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config"))
+    return config_home / "autostart" / "power-atlas.desktop"
 
 
 def is_enabled() -> bool:
-    return _shortcut_path().exists()
+    if sys.platform == "win32":
+        return _windows_shortcut_path().exists()
+    else:
+        return _linux_desktop_path().exists()
 
 
 def enable() -> None:
-    """Create startup shortcut via WScript.Shell COM."""
-    import win32com.client
+    """Register power-atlas to start on login."""
+    if sys.platform == "win32":
+        import win32com.client
 
-    shell = win32com.client.Dispatch("WScript.Shell")
-    shortcut = shell.CreateShortCut(str(_shortcut_path()))
-    shortcut.TargetPath = str(Path(sys.executable).parent / "pythonw.exe")
-    shortcut.Arguments = "-m power_atlas"
-    shortcut.WorkingDirectory = str(Path.home())
-    icon_path = str(Path(__file__).parent / "static" / "poweratlas.ico")
-    shortcut.IconLocation = f"{icon_path},0"
-    shortcut.save()
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortCut(str(_windows_shortcut_path()))
+        shortcut.TargetPath = str(Path(sys.executable).parent / "pythonw.exe")
+        shortcut.Arguments = "-m power_atlas"
+        shortcut.WorkingDirectory = str(Path.home())
+        icon_path = str(Path(__file__).parent / "static" / "poweratlas.ico")
+        shortcut.IconLocation = f"{icon_path},0"
+        shortcut.save()
+    else:
+        desktop_path = _linux_desktop_path()
+        desktop_path.parent.mkdir(parents=True, exist_ok=True)
+        desktop_path.write_text(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=PowerAtlas\n"
+            f"Exec={sys.executable} -m power_atlas\n"
+            "Hidden=false\n"
+            "NoDisplay=false\n"
+            "X-GNOME-Autostart-enabled=true\n"
+        )
 
 
 def disable() -> None:
-    _shortcut_path().unlink(missing_ok=True)
+    if sys.platform == "win32":
+        _windows_shortcut_path().unlink(missing_ok=True)
+    else:
+        _linux_desktop_path().unlink(missing_ok=True)

@@ -11,7 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
-SQLITE_PATH = Path(os.environ.get("LOCALAPPDATA", "")) / "Kiro-Cli" / "data.sqlite3"
+
+def _sqlite_path() -> Path:
+    """Platform-appropriate path to kiro-cli conversation database."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", ""))
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share"))
+    return base / "Kiro-Cli" / "data.sqlite3"
+
+SQLITE_PATH = _sqlite_path()
 
 
 def _cap_text(text: str, max_chars: int = 2000, max_lines: int = 15) -> str:

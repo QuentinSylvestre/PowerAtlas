@@ -1,6 +1,7 @@
 """Thread-safe config persistence via TOML."""
 
 import os
+import sys
 import threading
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -8,7 +9,17 @@ from pathlib import Path
 
 import tomli_w
 
-CONFIG_DIR = Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")) / "power-atlas"
+
+def _config_dir() -> Path:
+    """Platform-appropriate config directory."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config"))
+    return base / "power-atlas"
+
+
+CONFIG_DIR = _config_dir()
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 
 _lock = threading.Lock()

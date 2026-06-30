@@ -20,18 +20,34 @@ _mutex_handle = None
 
 
 def _single_instance_guard() -> None:
-    """Exit if another instance is already running (Windows named mutex)."""
+    """Exit if another instance is already running. Windows: named mutex. Linux: lockfile."""
     global _mutex_handle
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    _mutex_handle = kernel32.CreateMutexW(None, False, "PowerAtlasMutex")
-    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
-        os._exit(0)
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        _mutex_handle = kernel32.CreateMutexW(None, False, "PowerAtlasMutex")
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            os._exit(0)
+    else:
+        import fcntl
+        from .config import CONFIG_DIR
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        lock_path = CONFIG_DIR / "power-atlas.lock"
+        _mutex_handle = open(lock_path, "w")
+        try:
+            fcntl.flock(_mutex_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os._exit(0)
 
 
 def _release_mutex() -> None:
     global _mutex_handle
     if _mutex_handle:
-        ctypes.WinDLL("kernel32").CloseHandle(_mutex_handle)
+        if sys.platform == "win32":
+            ctypes.WinDLL("kernel32").CloseHandle(_mutex_handle)
+        else:
+            import fcntl
+            fcntl.flock(_mutex_handle, fcntl.LOCK_UN)
+            _mutex_handle.close()
         _mutex_handle = None
 
 
@@ -54,7 +70,9 @@ def _relaunch_detached() -> None:
 
 
 def _migrate_legacy() -> None:
-    """One-time migration from kiro-orchestrator to power-atlas. Remove after first run."""
+    """One-time migration from kiro-orchestrator to power-atlas. Windows only."""
+    if sys.platform != "win32":
+        return
     import shutil
     from pathlib import Path
     localappdata = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
