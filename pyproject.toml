@@ -13,6 +13,7 @@ dependencies = [
     "pystray>=0.19",
     "Pillow>=10.0",
     "pywin32>=306; sys_platform == 'win32'",
+    "PyGObject>=3.42,<3.50; sys_platform == 'linux'",
     "python-multipart>=0.0.7",
     "tomli-w>=1.0",
 ]

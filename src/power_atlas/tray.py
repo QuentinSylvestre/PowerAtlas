@@ -40,7 +40,15 @@ def run_tray(server_url: str, config: Config) -> None:
         from .data import warmup_pinned
         from .config import load_config as _load_config
         _t.Thread(target=warmup_pinned, args=(_load_config().pinned_folders,), daemon=True).start()
-        webbrowser.open(server_url)
+        try:
+            if sys.platform == "win32":
+                webbrowser.open(server_url)
+            else:
+                import subprocess as _sp
+                _sp.Popen(["xdg-open", server_url],
+                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception as e:
+            log.error("Failed to open browser: %s", e)
 
     def on_trust(icon, item):
         fresh = load_config()
