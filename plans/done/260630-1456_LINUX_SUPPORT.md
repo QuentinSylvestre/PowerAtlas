@@ -2,6 +2,7 @@
 
 > **Date**: 2026-06-30
 > **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Last Updated**: 2026-06-30 14:55
 > **Scope**: Make PowerAtlas fully functional on Linux — terminal detection, command building, path normalization, UI adaptation
 > **Estimated effort**: 1-2 days
 
