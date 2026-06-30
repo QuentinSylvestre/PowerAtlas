@@ -267,6 +267,7 @@ def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str) -> 
         if not cwd_flag:
             cmd += ["sh", "-c", f'cd {shlex.quote(cwd)} && exec {cmd_str}']
         else:
+            # cmd_str is user-authored config, intentionally unquoted (quoting would break shell features)
             cmd += ["sh", "-c", cmd_str]
         return cmd
 

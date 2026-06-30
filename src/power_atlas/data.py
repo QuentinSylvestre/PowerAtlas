@@ -457,7 +457,7 @@ def _normalize_path(p: str) -> str:
     if sys.platform == "win32":
         normalized = p.replace("/", "\\").rstrip("\\")
         return normalized.casefold()
-    return p.rstrip("/")
+    return p.rstrip("/") or "/"
 
 
 def _open_sqlite_readonly() -> sqlite3.Connection | None:
