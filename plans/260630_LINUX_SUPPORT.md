@@ -583,13 +583,13 @@ Implementation health: Green.
 |---|---|---|---|
 | 1 | Medium | `_build_custom_command` Linux path passes `cmd_str` raw to `sh -c` — intentional but undocumented | Fixed — added trust boundary comment (ff7a10e) |
 | 2 | Medium | `_normalize_path("/")` returns empty string on Linux (root path edge case) | Fixed — added `or "/"` guard (ff7a10e) |
-| 3 | Medium | Copy-paste duplication between `_build_linux_command` and `_build_custom_command` Linux block | Escalated — design choice, see below |
+| 3 | Medium | Copy-paste duplication between `_build_linux_command` and `_build_custom_command` Linux block | Fixed — extracted `_linux_base_cmd` helper (5397a4a) |
 | 4 | Low | Test mocking uses global `sys.platform` instead of module-scoped patch | Accepted — works correctly today, fragility is bounded |
 | 5 | Low | `use_terminal=False` branch is from separate uncommitted feature, not Phase 1 scope | Accepted — unrelated working-tree change, not part of this commit |
 | 6 | Low | No test for empty-title branch on terminals with title_flag (kitty, alacritty) | Accepted — guard logic is simple, covered incidentally via konsole |
 | 7 | Low | `_build_template_command` doesn't warn when `{cmd}` placeholder is absent | Accepted — user misconfiguration, UX issue for future improvement |
 
-Duplication finding (#3): The Security auditor, Reliability, and Maintainability reviewers all noted that `_build_linux_command()` and the Linux block in `_build_custom_command()` share ~20 lines of near-identical flag-building logic. A shared `_build_linux_base()` helper could eliminate this. However, the two functions differ in their final command portion (list of args vs shell string) and the duplication is bounded (won't grow). Deferring to user decision.
+Duplication finding (#3): Resolved by extracting `_linux_base_cmd()` helper that builds the terminal prefix (title + cwd + exec_sep flags). Both `_build_linux_command` and `_build_custom_command` now call it and append only their command-specific portion.
 
 4 personas (Architect, Senior engineer, End-user advocate, Reliability engineer). 19 findings total (3 High, 8 Medium, 8 Low). 11 auto-resolved.
 
