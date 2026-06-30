@@ -75,6 +75,7 @@ class PeekWindow:
             frameless=True,
             on_top=True,
             hidden=True,
+            fullscreen=True,
         )
         webview.start(func=self._on_webview_ready, debug=False)
 
