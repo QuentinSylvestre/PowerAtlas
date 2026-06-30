@@ -26,7 +26,6 @@
 
 ## Platform
 
-- **Linux support** — run the orchestrator natively on Linux (tray icon, browser UI, terminal detection)
 - **kiro-cli v3 session support** — scan `~/.kiro/sessions/<workspace-hash>/sess_*/` alongside v2 `cli/` directory; handle new message format, subagent detection via `sub-executions/` dir
 
 ## Quality of Life

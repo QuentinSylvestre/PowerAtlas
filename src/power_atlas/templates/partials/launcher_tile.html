@@ -1,7 +1,11 @@
 <div class="launcher-tile" data-id="{{ launcher.id }}">
-  <span class="launcher-icon">{{ launcher.icon or '🚀' }}</span>
-  <span class="launcher-name">{{ launcher.name }}</span>
-  <input type="text" class="launcher-args" value="{{ launcher.custom_args or '' }}" placeholder="args..." aria-label="Custom arguments for {{ launcher.name }}">
-  <button class="launcher-run-btn" onclick="runLauncher(this)" aria-label="Run {{ launcher.name }}">▶</button>
-  <button class="launcher-gear-btn" onclick="editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">⚙️</button>
+  <div class="launcher-tile-header">
+    <span class="launcher-icon">{{ launcher.icon or '🚀' }}</span>
+    <span class="launcher-name">{{ launcher.name }}</span>
+    <button class="launcher-gear-btn" onclick="editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">⚙️</button>
+  </div>
+  <div class="launcher-tile-body">
+    <input type="text" class="launcher-args" value="{{ launcher.custom_args or '' }}" placeholder="args..." aria-label="Custom arguments for {{ launcher.name }}">
+    <button class="launcher-run-btn" onclick="runLauncher(this)" aria-label="Run {{ launcher.name }}">▶</button>
+  </div>
 </div>
