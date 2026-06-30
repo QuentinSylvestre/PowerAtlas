@@ -51,7 +51,7 @@ Config stored at:
 
 ```toml
 trust_all_tools = false
-peek_hotkey = "ctrl+shift+z"  # empty = disabled
+peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
 terminal_command = ""  # empty = auto-detect (platform-specific)
 pinned_folders = []
 pinned_sessions = []

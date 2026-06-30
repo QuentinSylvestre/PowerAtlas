@@ -94,14 +94,30 @@ def test_thread_safety():
 
 
 def test_wrong_type_bool_gets_default():
-    """A string 'yes' for a bool field should fall back to default."""
+    """A string 'yes' or int 1 for a bool field should fall back to default."""
     import tomli_w
     from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
         tomli_w.dump({"trust_all_tools": "yes"}, f)
     cfg = load_config()
-    assert cfg.trust_all_tools is False  # default
+    assert cfg.trust_all_tools is False  # default (str != bool)
+    # Also test int != bool (TOML distinguishes these)
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"trust_all_tools": 1}, f)
+    cfg = load_config()
+    assert cfg.trust_all_tools is False  # default (int != bool)
+
+
+def test_wrong_type_str_gets_default():
+    """An integer for a str field should fall back to default."""
+    import tomli_w
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"peek_hotkey": 42}, f)
+    cfg = load_config()
+    assert cfg.peek_hotkey == "ctrl+shift+z"  # default (int != str)
 
 
 def test_wrong_type_list_gets_default():
