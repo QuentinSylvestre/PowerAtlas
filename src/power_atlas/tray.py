@@ -20,7 +20,11 @@ _icon_instance = None
 
 
 def _create_icon() -> Image.Image:
-    icon_path = Path(__file__).parent / "static" / "poweratlas-tray.ico"
+    static_dir = Path(__file__).parent / "static"
+    if sys.platform == "win32":
+        icon_path = static_dir / "poweratlas-tray.ico"
+    else:
+        icon_path = static_dir / "poweratlas-tray.png"
     try:
         with Image.open(icon_path) as img:
             img.load()
