@@ -34,26 +34,46 @@ def _remove_pid() -> None:
         pass
 
 
-def _read_pid() -> int | None:
-    """Read PID of running instance, or None if not running."""
-    try:
-        pid = int(_PID_FILE.read_text().strip())
-    except (OSError, ValueError):
-        return None
-    # Check if process is alive
+def _pid_alive(pid: int) -> bool:
+    """Check if a process with the given PID is alive."""
     if sys.platform == "win32":
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         handle = kernel32.OpenProcess(0x0400, False, pid)  # PROCESS_QUERY_INFORMATION
         if handle:
             kernel32.CloseHandle(handle)
-            return pid
-        return None
+            return True
+        return False
     else:
         try:
             os.kill(pid, 0)
-            return pid
+            return True
         except OSError:
-            return None
+            return False
+
+
+def _read_pid() -> int | None:
+    """Read PID of running instance, or None if not running."""
+    # Try PID file first
+    try:
+        pid = int(_PID_FILE.read_text().strip())
+        if _pid_alive(pid):
+            return pid
+    except (OSError, ValueError):
+        pass
+    # Fallback: scan /proc for running power_atlas process (Linux only)
+    if sys.platform != "win32":
+        import glob as _glob
+        for proc_dir in _glob.glob("/proc/[0-9]*/cmdline"):
+            try:
+                with open(proc_dir, "rb") as f:
+                    cmdline = f.read()
+                if b"power_atlas" in cmdline and b"--foreground" in cmdline:
+                    pid = int(proc_dir.split("/")[2])
+                    if pid != os.getpid():
+                        return pid
+            except (OSError, ValueError):
+                continue
+    return None
 
 
 def _stop_running() -> bool:
