@@ -77,6 +77,7 @@ async def index(request: Request):
         "terminal_command": config.terminal_command,
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
+        "peek_hotkey": config.peek_hotkey,
         **ctx,
     })
 
@@ -103,15 +104,6 @@ async def save_settings(request: Request):
     config.terminal_command = terminal
     # Toggles
     config.trust_all_tools = "trust_all_tools" in form
-    # Peek hotkey with basic validation
-    raw_hotkey = form.get("peek_hotkey", "").strip().lower()
-    if raw_hotkey:
-        parts = {p for p in raw_hotkey.split("+") if p}
-        modifiers = parts & {"ctrl", "shift", "alt"}
-        non_modifiers = parts - {"ctrl", "shift", "alt"}
-        if modifiers and non_modifiers:
-            config.peek_hotkey = raw_hotkey
-        # else: keep existing value (invalid input silently rejected)
     # Pinned folders from hidden field
     folders_raw = form.get("pinned_folders", "")
     config.pinned_folders = [f for f in folders_raw.split("|") if f.strip()] if folders_raw else []

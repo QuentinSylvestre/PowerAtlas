@@ -20,6 +20,11 @@
     <span class="refresh-time" id="refreshTime"></span>
     <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions">↻</button>
   </div>
+  <div class="peek-hotkey-group">
+    <label class="peek-label" for="peekHotkey">Peek</label>
+    <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="ctrl+shift+z"
+           onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})})">
+  </div>
 </div>
 
 <div class="search-area">
