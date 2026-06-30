@@ -47,6 +47,45 @@ def detect_terminal(config_override: str = "") -> str | None:
     return None
 
 
+_terminal_cache: list[tuple[str, str]] | None = None
+
+
+def available_terminals() -> list[tuple[str, str]]:
+    """Return (value, label) pairs of detected terminals for the current platform.
+
+    Cached for process lifetime (terminals don't change at runtime).
+    Always includes ("" , "Auto-detect (...)") first and ("custom", "Custom") last.
+    """
+    global _terminal_cache
+    if _terminal_cache is not None:
+        return _terminal_cache
+
+    if sys.platform == "win32":
+        candidates = [("wt", "Windows Terminal"), ("pwsh", "PowerShell"), ("cmd", "Command Prompt")]
+    else:
+        candidates = [
+            ("kitty", "kitty"),
+            ("alacritty", "Alacritty"),
+            ("gnome-terminal", "GNOME Terminal"),
+            ("konsole", "Konsole"),
+            ("xterm", "xterm"),
+        ]
+
+    found = [(val, label) for val, label in candidates if shutil.which(val)]
+
+    # Build auto-detect label from found terminals
+    if found:
+        auto_label = f"Auto-detect ({' \u203a '.join(label for _, label in found)})"
+    else:
+        auto_label = "Auto-detect (none found)"
+
+    result = [("", auto_label)]
+    result.extend(found)
+    result.append(("custom", "Custom"))
+    _terminal_cache = result
+    return result
+
+
 def launch_session(
     cwd: str,
     session_id: str | None = None,

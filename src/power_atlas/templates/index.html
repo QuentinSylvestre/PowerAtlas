@@ -4,10 +4,11 @@
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
   <div class="topbar-spacer"></div>
   <select class="topbar-select" onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'terminal_command',value:this.value})})">
-    <option value="" {% if not terminal_command %}selected{% endif %}>Terminal: Auto</option>
-    <option value="wt" {% if terminal_command == 'wt' %}selected{% endif %}>Terminal: WT</option>
-    <option value="pwsh" {% if terminal_command == 'pwsh' %}selected{% endif %}>Terminal: pwsh</option>
-    <option value="cmd" {% if terminal_command == 'cmd' %}selected{% endif %}>Terminal: cmd</option>
+    {% for value, label in terminal_options %}
+      {% if value != 'custom' %}
+      <option value="{{ value }}" {% if terminal_command == value or (not terminal_command and value == '') %}selected{% endif %}>{{ label }}</option>
+      {% endif %}
+    {% endfor %}
   </select>
   <div class="trust-toggle{% if trust_all_tools %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/toggle-trust',{method:'POST'})">
     <span class="trust-dot"></span>Trust all
@@ -25,21 +26,20 @@
   <div class="command-bar">
     <span class="search-icon">⌕</span>
     <input type="search" name="q" placeholder="Search sessions, folders..." aria-label="Search workspaces"
-           hx-get="/search" hx-trigger="input changed delay:300ms" hx-target="#cards-area">
+           hx-get="/search" hx-trigger="input changed delay:300ms" hx-target="#workspace-cards">
   </div>
 </div>
 
-<div class="launcher-section">
+<main id="cards-area" class="cards-area">
   <div class="section-label">Launchers <button class="launcher-add-btn" onclick="openNewLauncher()">+</button></div>
-  <div id="launcher-tiles" hx-get="/partials/launchers" hx-trigger="load" hx-swap="innerHTML"></div>
-</div>
-
-<main id="cards-area" class="cards-area" aria-busy="true"
-      hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
-      hx-on::after-swap="this.removeAttribute('aria-busy')">
-  <div class="skeleton-card"></div>
-  <div class="skeleton-card"></div>
-  <div class="skeleton-card"></div>
+  <div id="launcher-tiles" class="launcher-grid" hx-get="/partials/launchers" hx-trigger="load" hx-swap="innerHTML"></div>
+  <div id="workspace-cards" style="display:contents" aria-busy="true"
+       hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
+       hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards()">
+    <div class="skeleton-card"></div>
+    <div class="skeleton-card"></div>
+    <div class="skeleton-card"></div>
+  </div>
 </main>
 
 <div class="action-bar" id="actionBar">
@@ -51,7 +51,7 @@
 <script>
 function updateActionBar(){var n=document.querySelectorAll('.session-row.selected').length+document.querySelectorAll('.workspace-card.selected').length;document.getElementById('selCount').textContent=n;document.getElementById('actionBar').classList.toggle('visible',n>0)}
 function toggleCard(card){card.classList.toggle('collapsed');var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)).then(function(r){return r.text()}).then(function(html){body.innerHTML=html}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}
-function refreshCards(){fetch('/partials/workspaces').then(function(r){return r.text()}).then(function(html){document.getElementById('cards-area').innerHTML=html;loadExpandedCards()})}function showToast(html){var c=document.getElementById('toastContainer');if(!c){c=document.createElement('div');c.id='toastContainer';c.className='toast-container';document.body.appendChild(c)}var d=document.createElement('div');d.innerHTML=html;var t=d.firstElementChild;if(!t){t=document.createElement('div');t.className='toast toast-success';t.textContent=html||'Done'}c.appendChild(t);setTimeout(function(){t.remove()},4000)}
+function refreshCards(){fetch('/partials/workspaces').then(function(r){return r.text()}).then(function(html){document.getElementById('workspace-cards').innerHTML=html;loadExpandedCards()})}function showToast(html){var c=document.getElementById('toastContainer');if(!c){c=document.createElement('div');c.id='toastContainer';c.className='toast-container';document.body.appendChild(c)}var d=document.createElement('div');d.innerHTML=html;var t=d.firstElementChild;if(!t){t=document.createElement('div');t.className='toast toast-success';t.textContent=html||'Done'}c.appendChild(t);setTimeout(function(){t.remove()},4000)}
 function resumeSession(btn){var row=btn.closest('.session-row');fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd})}).then(function(r){return r.text()}).then(showToast)}
 function copySid(btn){var row=btn.closest('.session-row');navigator.clipboard.writeText(row.dataset.sid).then(function(){showToast('<div class="toast toast-success">Copied<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')})}
 function pinSession(btn){var row=btn.closest('.session-row');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-session':'/api/pin-session';fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd})}).then(function(){showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');refreshCards()})}
@@ -66,10 +66,11 @@ var _tailTimers={};function loadTail(el){var row=el.closest('.session-row');var 
 {% include "partials/emoji_picker.html" %}
 {% include "partials/launcher_modal.html" %}
 <script>
-function runLauncher(btn){var tile=btn.closest('.launcher-tile');var id=tile.dataset.id;var args=tile.querySelector('.launcher-args').value;var launchers={{launchers|tojson}};var l=launchers.find(function(x){return x.id===id});if(!l)return;fetch('/api/launcher/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:l.command,custom_args:args,cwd:l.cwd,env:l.env,name:l.name})}).then(function(r){return r.text()}).then(showToast)}
-function openNewLauncher(){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value='';document.getElementById('launcherName').value='';document.getElementById('launcherCommand').value='';document.getElementById('launcherArgs').value='';document.getElementById('launcherCwd').value='';document.getElementById('launcherEnv').value='';document.getElementById('launcherIcon').value='';document.getElementById('launcherDeleteBtn').style.display='none';document.getElementById('launcherModalTitle').textContent='New Launcher';m.showModal();m.querySelector('input[type=text]').focus()}
-function editLauncher(id){var launchers={{launchers|tojson}};var l=launchers.find(function(x){return x.id===id});if(!l)return;var m=document.getElementById('launcherModal');document.getElementById('launcherId').value=l.id;document.getElementById('launcherName').value=l.name||'';document.getElementById('launcherCommand').value=l.command||'';document.getElementById('launcherArgs').value=l.custom_args||'';document.getElementById('launcherCwd').value=l.cwd||'';document.getElementById('launcherEnv').value=Object.entries(l.env||{}).map(function(e){return e[0]+'='+e[1]}).join('\n');document.getElementById('launcherIcon').value=l.icon||'';document.getElementById('launcherDeleteBtn').style.display='';document.getElementById('launcherModalTitle').textContent='Edit Launcher';m.showModal();m.querySelector('input[type=text]').focus()}
-function saveLauncher(e){e.preventDefault();var id=document.getElementById('launcherId').value;var envText=document.getElementById('launcherEnv').value;var env={};envText.split('\n').forEach(function(line){var eq=line.indexOf('=');if(eq>0)env[line.slice(0,eq).trim()]=line.slice(eq+1).trim()});var payload={name:document.getElementById('launcherName').value,command:document.getElementById('launcherCommand').value,custom_args:document.getElementById('launcherArgs').value,cwd:document.getElementById('launcherCwd').value,env:env,icon:document.getElementById('launcherIcon').value};var url=id?'/api/launcher/update':'/api/launcher/create';if(id)payload.id=id;fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('launcherModal').close();htmx.ajax('GET','/partials/launchers','#launcher-tiles')})}
-function deleteLauncher(){var id=document.getElementById('launcherId').value;if(!id)return;fetch('/api/launcher/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('launcherModal').close();htmx.ajax('GET','/partials/launchers','#launcher-tiles')})}
+var _launchers={{launchers|tojson}};
+function runLauncher(btn){var tile=btn.closest('.launcher-tile');var id=tile.dataset.id;var args=tile.querySelector('.launcher-args').value;var l=_launchers.find(function(x){return x.id===id});if(!l)return;fetch('/api/launcher/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:l.command,custom_args:args,cwd:l.cwd,env:l.env,name:l.name,terminal:l.terminal})}).then(function(r){return r.text()}).then(showToast)}
+function openNewLauncher(){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value='';document.getElementById('launcherName').value='';document.getElementById('launcherCommand').value='';document.getElementById('launcherArgs').value='';document.getElementById('launcherCwd').value='';document.getElementById('launcherEnv').value='';document.getElementById('launcherIcon').value='';document.getElementById('launcherTerminal').checked=true;document.getElementById('launcherDeleteBtn').style.display='none';document.getElementById('launcherModalTitle').textContent='New Launcher';m.showModal();m.querySelector('input[type=text]').focus()}
+function editLauncher(id){var l=_launchers.find(function(x){return x.id===id});if(!l)return;var m=document.getElementById('launcherModal');document.getElementById('launcherId').value=l.id;document.getElementById('launcherName').value=l.name||'';document.getElementById('launcherCommand').value=l.command||'';document.getElementById('launcherArgs').value=l.custom_args||'';document.getElementById('launcherCwd').value=l.cwd||'';document.getElementById('launcherEnv').value=Object.entries(l.env||{}).map(function(e){return e[0]+'='+e[1]}).join('\n');document.getElementById('launcherIcon').value=l.icon||'';document.getElementById('launcherTerminal').checked=l.terminal!==false;document.getElementById('launcherDeleteBtn').style.display='';document.getElementById('launcherModalTitle').textContent='Edit Launcher';m.showModal();m.querySelector('input[type=text]').focus()}
+function saveLauncher(e){e.preventDefault();var id=document.getElementById('launcherId').value;var envText=document.getElementById('launcherEnv').value;var env={};envText.split('\n').forEach(function(line){var eq=line.indexOf('=');if(eq>0)env[line.slice(0,eq).trim()]=line.slice(eq+1).trim()});var payload={name:document.getElementById('launcherName').value,command:document.getElementById('launcherCommand').value,custom_args:document.getElementById('launcherArgs').value,cwd:document.getElementById('launcherCwd').value,env:env,icon:document.getElementById('launcherIcon').value,terminal:document.getElementById('launcherTerminal').checked};var url=id?'/api/launcher/update':'/api/launcher/create';if(id)payload.id=id;fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/launchers')}).then(function(r){return r.json()}).then(function(d){_launchers=d;document.getElementById('launcherModal').close();htmx.ajax('GET','/partials/launchers','#launcher-tiles')})}
+function deleteLauncher(){var id=document.getElementById('launcherId').value;if(!id)return;fetch('/api/launcher/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/launchers')}).then(function(r){return r.json()}).then(function(d){_launchers=d;document.getElementById('launcherModal').close();htmx.ajax('GET','/partials/launchers','#launcher-tiles')})}
 </script>
 {% endblock %}

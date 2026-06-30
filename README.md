@@ -2,6 +2,8 @@
 
 Desktop launcher and dashboard for kiro-cli sessions. System tray icon with a web UI for discovering, resuming, and batch-launching kiro-cli workspaces.
 
+Supports **Windows** and **Linux**.
+
 ## Installation
 
 ```bash
@@ -9,6 +11,15 @@ pip install -e .
 ```
 
 Requires Python 3.11+.
+
+On Linux, the system tray icon requires PyGObject and a running notification area:
+
+```bash
+# Debian/Ubuntu
+sudo apt install python3-gi gir1.2-ayatanaappindicator3-0.1
+# Fedora
+sudo dnf install python3-gobject libayatana-appindicator-gtk3
+```
 
 ## Usage
 
@@ -28,15 +39,20 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 - Search across all workspaces and sessions
 - Custom launchers with inline args editing and one-click execution
 - Settings page for terminal preference, window mode, autostart
+- Platform-aware terminal detection:
+  - Windows: Windows Terminal › PowerShell › cmd
+  - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm
 
 ## Configuration
 
-Config stored at `%LOCALAPPDATA%\power-atlas\config.toml`:
+Config stored at:
+- Windows: `%LOCALAPPDATA%\power-atlas\config.toml`
+- Linux: `~/.config/power-atlas/config.toml`
 
 ```toml
 trust_all_tools = false
 use_pywebview = true
-terminal_command = ""  # empty = auto-detect (wt > pwsh > cmd)
+terminal_command = ""  # empty = auto-detect (platform-specific)
 pinned_folders = []
 pinned_sessions = []
 ```

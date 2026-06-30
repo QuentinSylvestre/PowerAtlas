@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from .config import load_config, save_config
 from . import autostart, data, launcher
+from .launcher import available_terminals
 
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
@@ -45,23 +46,40 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
+def _terminal_context() -> dict:
+    """Build template context for terminal selection UI."""
+    import sys
+    options = available_terminals()
+    values = {v for v, _ in options}
+    return {
+        "terminal_options": options,
+        "terminal_values": values,
+        "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
+        "no_terminals_found": len(options) == 2,  # only Auto-detect + Custom
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     config = load_config()
+    ctx = _terminal_context()
     return templates.TemplateResponse(request, "index.html", {
         "trust_all_tools": config.trust_all_tools,
         "terminal_command": config.terminal_command,
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
+        **ctx,
     })
 
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
     config = load_config()
+    ctx = _terminal_context()
     return templates.TemplateResponse(request, "settings.html", {
         "config": config,
         "autostart_enabled": autostart.is_enabled(),
+        **ctx,
     })
 
 
@@ -81,9 +99,11 @@ async def save_settings(request: Request):
     folders_raw = form.get("pinned_folders", "")
     config.pinned_folders = [f for f in folders_raw.split("|") if f.strip()] if folders_raw else []
     save_config(config)
+    ctx = _terminal_context()
     return templates.TemplateResponse(request, "settings.html", {
         "config": config,
         "autostart_enabled": autostart.is_enabled(),
+        **ctx,
     })
 
 
@@ -531,6 +551,12 @@ async def partials_launchers(request: Request):
     return HTMLResponse(html)
 
 
+@app.get("/api/launchers")
+async def api_launchers():
+    config = load_config()
+    return config.custom_launchers
+
+
 @app.post("/api/launcher/create", response_class=HTMLResponse)
 async def launcher_create(request: Request):
     body = await request.json()
@@ -543,6 +569,7 @@ async def launcher_create(request: Request):
         "cwd": body.get("cwd", ""),
         "env": body.get("env", {}),
         "icon": body.get("icon", ""),
+        "terminal": body.get("terminal", True),
     }
     config.custom_launchers.append(entry)
     save_config(config)
@@ -556,7 +583,7 @@ async def launcher_update(request: Request):
     config = load_config()
     for entry in config.custom_launchers:
         if entry["id"] == lid:
-            for k in ("name", "command", "custom_args", "cwd", "env", "icon"):
+            for k in ("name", "command", "custom_args", "cwd", "env", "icon", "terminal"):
                 if k in body:
                     entry[k] = body[k]
             break
@@ -578,6 +605,7 @@ async def launcher_delete(request: Request):
 async def launcher_run(request: Request):
     body = await request.json()
     config = load_config()
+    use_terminal = body.get("terminal", True)
     result = launcher.launch_custom(
         name=body.get("name", ""),
         command=body.get("command", ""),
@@ -585,6 +613,7 @@ async def launcher_run(request: Request):
         cwd=body.get("cwd", ""),
         env=body.get("env"),
         terminal_override=config.terminal_command,
+        use_terminal=use_terminal,
     )
     level = "success" if result.success else "error"
     msg = "Launcher started" if result.success else result.error
