@@ -55,6 +55,18 @@ class TestNormalizeKey:
         key = _make_key(char="Z")
         assert PeekWindow._normalize_key(key) == "z"
 
+    def test_ctrl_modified_char(self):
+        """When Ctrl is held, pynput reports control codes (0x01-0x1a) instead of letters."""
+        from power_atlas.peek import PeekWindow
+
+        # Ctrl+Z = 0x1a, Ctrl+A = 0x01, Ctrl+P = 0x10
+        key_z = _make_key(char="\x1a")
+        assert PeekWindow._normalize_key(key_z) == "z"
+        key_a = _make_key(char="\x01")
+        assert PeekWindow._normalize_key(key_a) == "a"
+        key_p = _make_key(char="\x10")
+        assert PeekWindow._normalize_key(key_p) == "p"
+
     def test_ctrl_l(self):
         from power_atlas.peek import PeekWindow
 

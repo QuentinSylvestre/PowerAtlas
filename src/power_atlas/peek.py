@@ -152,7 +152,12 @@ class PeekWindow:
     def _normalize_key(key) -> str | None:
         """Normalize a pynput key to a string."""
         if hasattr(key, "char") and key.char:
-            return key.char.lower()
+            ch = key.char
+            # When Ctrl is held, character keys report control codes (0x01-0x1a).
+            # Map them back to letters: 0x01='a', 0x02='b', ..., 0x1a='z'.
+            if len(ch) == 1 and 1 <= ord(ch) <= 26:
+                return chr(ord(ch) + ord('a') - 1)
+            return ch.lower()
         if hasattr(key, "name"):
             name = key.name.lower()
             if name in ("ctrl_l", "ctrl_r", "ctrl"):
