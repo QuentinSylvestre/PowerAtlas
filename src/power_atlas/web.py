@@ -691,7 +691,10 @@ async def partials_launchers(request: Request):
     config = load_config()
     html = ""
     # Provider-launcher tiles first
-    providers = data.available_providers()
+    try:
+        providers = data.available_providers()
+    except Exception:
+        providers = []
     for p in providers:
         settings = config.provider_settings.get(p, {})
         if not settings.get("enabled", True):
@@ -777,7 +780,7 @@ async def launcher_icon(launcher_id: str):
         if icons.has_icon(launcher_id):
             return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
         binary = launcher._PROVIDER_BINARY.get(provider_key, provider_key)
-        icons.extract_icon(launcher_id, binary, True)
+        await asyncio.to_thread(icons.extract_icon, launcher_id, binary, True)
         if icons.has_icon(launcher_id):
             return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
         svg = icons.default_icon_svg(True)
@@ -832,6 +835,7 @@ async def launcher_run_batch(request: Request):
         env=entry.get("env"),
         terminal_override=config.terminal_command,
         use_terminal=entry.get("terminal", True),
+        pass_workspace_arg=not entry.get("terminal", True) and entry.get("use_selected_workspaces", False),
     )
     ok = sum(1 for r in results if r.success)
     failed = len(results) - ok

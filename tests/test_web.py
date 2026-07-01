@@ -746,3 +746,22 @@ def test_tab_bar_no_gear_icons(mock_discover, mock_providers, client, tmp_path):
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
     assert "tab-gear" not in resp.text
+
+
+@patch("power_atlas.web.launcher.launch_custom_batch")
+@patch("power_atlas.web.load_config")
+def test_launcher_run_batch_passes_workspace_arg_for_non_terminal(mock_load, mock_batch, client):
+    """Non-terminal selection-aware launchers pass pass_workspace_arg=True."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config(
+        custom_launchers=[{"id": "gui-1", "name": "IDE", "command": "code",
+                           "custom_args": "", "cwd": "", "env": {}, "color": "",
+                           "terminal": False, "use_selected_workspaces": True}],
+    )
+    mock_batch.return_value = [LaunchResult(True, None, "/tmp")]
+    resp = client.post("/api/launcher/run-batch", json={"id": "gui-1", "workspaces": ["/tmp"]})
+    assert resp.status_code == 200
+    mock_batch.assert_called_once()
+    call_kwargs = mock_batch.call_args
+    assert call_kwargs.kwargs.get("pass_workspace_arg") is True or call_kwargs[1].get("pass_workspace_arg") is True

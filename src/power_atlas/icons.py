@@ -82,6 +82,8 @@ def _resolve_cmd_to_exe(cmd_path: Path) -> Path | None:
     import re as _re
 
     try:
+        if cmd_path.stat().st_size > 64_000:
+            return None
         content = cmd_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return None
