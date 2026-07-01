@@ -450,17 +450,23 @@ Rewrote `getSelectedWorkspaceCwds()` in `index.html` to use a case-insensitive d
     - Test tab bar no longer has gear icons.
 
 **Exit criteria**:
-- [ ] Provider tiles render first in launcher grid with lock indicator
-- [ ] Clicking provider tile with selection launches `launch_session` per unique workspace (fresh sessions, no resume)
-- [ ] Provider tile gear button opens launcher modal with locked name/command fields
-- [ ] Provider-launcher modal includes "Enabled" toggle that persists to `provider_settings`
-- [ ] Saving from provider-launcher modal updates `provider_settings`
-- [ ] Field lock/unlock resets on dialog close (not just on save success)
-- [ ] Provider modal HTML and tab gear icons removed atomically (server-side rendering + JS in same commit)
-- [ ] Provider tile icon uses extraction pipeline (`.cmd`→`.exe` from Phase 1)
-- [ ] Disabled providers don't appear in launcher grid
-- [ ] All existing tests pass
-- [ ] New tests pass
+- [x] Provider tiles render first in launcher grid with lock indicator
+- [x] Clicking provider tile with selection launches `launch_session` per unique workspace (fresh sessions, no resume)
+- [x] Provider tile gear button opens launcher modal with locked name/command fields
+- [x] Provider-launcher modal includes "Enabled" toggle that persists to `provider_settings`
+- [x] Saving from provider-launcher modal updates `provider_settings`
+- [x] Field lock/unlock resets on dialog close (not just on save success)
+- [x] Provider modal HTML and tab gear icons removed atomically (server-side rendering + JS in same commit)
+- [x] Provider tile icon uses extraction pipeline (`.cmd`→`.exe` from Phase 1)
+- [x] Disabled providers don't appear in launcher grid
+- [x] All existing tests pass
+- [x] New tests pass
+
+**Implementation (2026-07-01, code: cda954d)**
+Providers now render as first-class tiles in the launcher grid, appearing before custom launchers. Each provider tile shows a lock indicator, uses the provider's color for the left border, and has selection-aware badge support. Clicking a provider tile with selected workspaces POSTs to `/api/launch-batch` (fresh sessions, no resume). The gear button opens the existing launcher modal with name/command fields locked (readOnly), terminal/use-selected disabled, delete hidden, and an "Enabled" toggle visible. Saving from the provider modal PUTs to `/api/provider/save`. The dialog's `close` event resets all field locks/disabled states. The old standalone provider modal HTML has been emptied, tab gear icons removed from the workspace tab bar, and `openProviderModal`/`saveProvider` JS functions replaced by the unified `openProviderLauncherModal`. The `/api/launcher-icon/provider--{key}` path uses the extraction pipeline (`.cmd`→`.exe` from Phase 1) to serve provider icons. Disabled providers are excluded from the launcher grid. Four new tests verify: provider tiles render first, correct `data-id` attribute, disabled provider exclusion, and no `tab-gear` class in output.
+
+**Divergences from plan:**
+- Provider tile run with no selection shows toast error instead of silently doing nothing (better UX: user gets feedback that they need to select workspaces first).
 
 ### Phase 4: Provider icon/color in workspace cards [QA]
 
@@ -589,3 +595,18 @@ Implementation health: Green.
 |---|---|---|---|
 | 1 | Low | No client-side test for dedup behavior; trusted to code inspection. | Accepted — plan specified comment-only; QA step covers browser behavior. |
 | 2 | Low | No null guard on `c.dataset.cwd.toLowerCase()` for workspace cards. | Accepted — template always renders `data-cwd`; null impossible in practice. |
+
+### 2026-07-01 -- Implementation Review (after Phase 3, persona: Senior engineer)
+
+Implementation health: Green.
+5 findings (0 High, 2 Medium, 3 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `launcher_icon()` calls `extract_icon()` on every request for provider icons; no `has_icon()` cache gate. | Fixed — added `has_icon()` check before extraction attempt, matching custom launcher path. |
+| 2 | Medium | Orphaned CSS: `.tab-gear` and `.provider-modal` are dead rules after HTML removal. | Fixed — removed dead CSS blocks. |
+| 3 | Low | `{% include "partials/provider_modal.html" %}` still present, rendering only a comment. | Fixed — removed include line and deleted file. |
+| 4 | Low | `refreshCards()` called without `true` after provider save; disabling won't bust cache immediately. | Fixed — pass `refreshCards(true)` in provider save success callback. |
+| 5 | Low | `_providerSettings` var still injected; confirmed still in use (migration toast IIFE). | No action — not dead code. |
+
+Cycle 2 skipped — all findings auto-fixed were purely mechanical (cache gate, CSS deletion, include removal, function arg).
