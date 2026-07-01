@@ -241,7 +241,7 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_p
     from power_atlas.config import Config
     workspace = str(tmp_path)
     pinned = "C:\\my-pinned-workspace"
-    mock_config.return_value = Config(pinned_folders=[pinned])
+    mock_config.return_value = Config(pinned_folders=[{"folder": pinned, "provider": "kiro-cli"}])
     mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = []
@@ -446,8 +446,8 @@ def test_partials_workspaces_provider_filter(mock_discover, mock_providers, clie
     resp = client.get("/partials/workspaces?provider=kiro-cli")
     assert resp.status_code == 200
     assert 'data-provider="kiro-cli"' in resp.text
-    # Verify discover was called with provider="kiro-cli"
-    mock_discover.assert_called_once_with(provider="kiro-cli")
+    # Verify discover was called with provider="kiro-cli" (also called with provider=None for pinned)
+    mock_discover.assert_any_call(provider="kiro-cli")
 
 
 @patch("power_atlas.web.data.available_providers")
@@ -466,8 +466,8 @@ def test_partials_workspaces_all_tab(mock_discover, mock_providers, client, tmp_
     assert resp.status_code == 200
     assert 'data-provider="kiro-cli"' in resp.text
     assert 'data-provider="claude-code"' in resp.text
-    # Verify discover was called with provider=None (all)
-    mock_discover.assert_called_once_with(provider=None)
+    # Verify discover was called with provider=None (all) — called twice (tab + pinned)
+    mock_discover.assert_any_call(provider=None)
 
 
 @patch("power_atlas.web.data.available_providers")

@@ -251,7 +251,24 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
     # Pinned workspaces (per-provider: show all pinned regardless of active tab, with provider color)
-    pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if (_normalize_path(c), p) in pinned_set]
+    # Always use ALL providers' data for pinned — not the tab-filtered workspace_data
+    if pinned_set:
+        try:
+            all_workspace_data = list(await asyncio.to_thread(data.discover_workspaces_with_counts, provider=None))
+        except Exception:
+            all_workspace_data = list(workspace_data)
+        # Merge pinned folders not found in discovery results
+        all_existing = {(_normalize_path(c), p) for c, _, _, p in all_workspace_data}
+        for pf in config.pinned_folders:
+            folder = pf.get("folder", "") if isinstance(pf, dict) else pf
+            prov = pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli"
+            if (_normalize_path(folder), prov) not in all_existing:
+                all_workspace_data.append((folder, 0, "", prov))
+        pinned_cards_raw = [(c, n, u, p) for c, n, u, p in all_workspace_data if (_normalize_path(c), p) in pinned_set]
+    else:
+        pinned_cards_raw = []
+    # Sort alphabetically by folder name
+    pinned_cards_raw.sort(key=lambda x: Path(x[0]).name.lower())
     if pinned_cards_raw:
         cards_html += '<div class="section-label">Pinned workspaces</div>'
         for cwd, count, updated, prov in pinned_cards_raw:
