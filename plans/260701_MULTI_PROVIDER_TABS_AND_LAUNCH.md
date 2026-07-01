@@ -529,3 +529,34 @@ High-effort review (4 personas: Architect, Senior engineer, End-user advocate, R
 | 7 | Medium | Colorblind inaccessible: only colored border distinguishes providers | Resolved — added text badge ("K"/"C") requirement to Phase 2 exit criteria |
 | 8 | Medium | Empty-state UX per tab not defined | Resolved — added helper message requirement to Phase 2 exit criteria |
 | 9 | Medium | Claude Code "last message" by file offset may not be chronological | Resolved — documented "last by file offset" as acceptable approximation with rationale |
+
+### 2026-07-01 -- Implementation Review (after Phases 1-2, persona: Senior engineer, Reliability engineer, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green (post-fix).
+22 findings (3 High, 9 Medium, 10 Low). 15 auto-fixed in cycle 1.
+QA verification: PASS (2 surfaces verified — Library + GUI, 7 probes executed).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | JS `toggleCard()`/`loadExpandedCards()` fetch sessions without `?provider=` | Fixed — reads `data-provider` from card |
+| 2 | High | `refreshCards()` loses active tab state on refresh/pin/unpin | Fixed — stores `window._activeProvider`, includes in URL |
+| 3 | High | `refresh_stale_entries` passes casefolded cwd to Claude adapter | Fixed — added `get_original_cwd()` to SessionCache |
+| 4 | Medium | `partials_session_tail` ignores provider/cwd for Claude sessions | Fixed — added provider/cwd params to endpoint |
+| 5 | Medium | `search()` renders cards without `is_pinned` — always collapsed | Fixed — passes `is_pinned` from `pinned_set` |
+| 6 | Medium | `_path_index_cache` unprotected from concurrent threads | Fixed — added `threading.Lock()` |
+| 7 | Medium | Provider badge contrast fails WCAG AA at small size | Fixed — darker colors (#4a6ede, #c2590f), 11px/600w |
+| 8 | Medium | Tab buttons lack ARIA tab semantics | Fixed — added `role="tab"`, `aria-selected`, `role="tablist"` |
+| 9 | Medium | Pinned folders hardcode "kiro-cli" as default provider | Fixed — uses first available provider |
+| 10 | Medium | Empty-state discards already-rendered tab bar HTML | Fixed — renders tab bar + empty state together |
+| 11 | Medium | Pinned workspace dedup collapses cross-provider entries | Fixed — keyed by `(norm_cwd, provider)` tuple |
+| 12 | Medium | `discover_workspaces()` per-file stat race kills all results | Fixed — per-file try/except in loop |
+| 13 | Low | `_render_workspace_card()` is dead code | Fixed — removed |
+| 14 | Low | No orchestrator-level integration test for `get_sessions` | Accepted — adapter tests suffice for now |
+| 15 | Low | `api_launch` discards provider field from JS | Deferred — Phase 3 scope |
+| 16 | Low | `warmup_all()` only searches kiro-cli for pinned sessions | Accepted — followup improvement |
+| 17 | Low | Tab bar shows raw slugs instead of display names | Fixed — added `PROVIDER_DISPLAY_NAMES` dict |
+| 18 | Low | No loading indicator during tab switch | Accepted — minor UX, followup |
+| 19 | Low | `PROVIDER_COLORS`/`PROVIDER_BADGES` spread across dicts | Accepted — consolidate at Phase 5 |
+| 20 | Low | Unknown provider filter falls through to all | Accepted — defensive, not harmful |
+| 21 | Low | Tab bar HTML string-concatenated in Python | Accepted — works, can extract to partial later |
+| 22 | Low | `_cache` uses stringly-typed keys | Accepted — functional, low risk |
