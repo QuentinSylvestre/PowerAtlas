@@ -511,8 +511,8 @@ def test_workspace_card_has_data_provider(mock_discover, mock_providers, client,
     assert resp.status_code == 200
     assert 'data-provider="claude-code"' in resp.text
     assert "border-left: 3px solid #c2590f" in resp.text
-    # Badge
-    assert "provider-badge" in resp.text
+    # Provider icon badge
+    assert "provider-icon-badge" in resp.text
 
 
 @patch("power_atlas.web.data.available_providers")
