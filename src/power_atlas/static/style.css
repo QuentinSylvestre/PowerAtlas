@@ -299,6 +299,11 @@ script { display: none; }
   vertical-align: middle;
 }
 
+/* Provider icon badge (replaces letter badge) */
+.provider-icon-wrapper { display: inline-flex; align-items: center; margin-left: 6px; }
+.provider-icon-badge { width: 14px; height: 14px; vertical-align: middle; border-radius: 2px; }
+.provider-badge-fallback { display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; color: #fff; vertical-align: middle; }
+
 /* Provider tab gear */
 .tab-spacer { flex: 1; }
 

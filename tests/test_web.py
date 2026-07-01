@@ -515,6 +515,40 @@ def test_workspace_card_has_data_provider(mock_discover, mock_providers, client,
     assert "provider-badge" in resp.text
 
 
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspace_card_has_provider_icon_img(mock_discover, mock_providers, client, tmp_path):
+    """Workspace cards include provider icon img tag with fallback badge."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert 'provider-icon-badge' in resp.text
+    assert 'src="/api/launcher-icon/provider--kiro-cli"' in resp.text
+    assert 'provider-badge-fallback' in resp.text
+    assert 'title="Kiro CLI"' in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspace_card_uses_user_configured_color(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """When user sets a custom color in provider_settings, workspace card uses it."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(provider_settings={
+        "kiro-cli": {"default_args": "", "color": "#ff0000", "enabled": True},
+    })
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "border-left: 3px solid #ff0000" in resp.text
+
+
 @patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")

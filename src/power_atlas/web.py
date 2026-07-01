@@ -33,6 +33,12 @@ _PROVIDER_BINARY_DISPLAY = {
     "claude-code": "claude",
 }
 
+
+def _get_provider_color(provider: str, config) -> str:
+    """Return user-configured color for a provider, falling back to PROVIDER_COLORS."""
+    user_color = config.provider_settings.get(provider, {}).get("color", "")
+    return user_color or PROVIDER_COLORS.get(provider, "#888")
+
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
@@ -266,8 +272,9 @@ async def partials_pinned_workspaces(request: Request, fresh: int = 0):
                     session_count=count, is_pinned=True, last_updated=updated,
                     icon=norm_icons.get(_normalize_path(cwd), ""),
                     provider=prov,
-                    provider_color=PROVIDER_COLORS.get(prov, "#888"),
+                    provider_color=_get_provider_color(prov, config),
                     provider_badge=PROVIDER_BADGES.get(prov, "?"),
+                    provider_display=PROVIDER_DISPLAY_NAMES.get(prov, prov),
                 )
 
     if not cards_html:
@@ -356,8 +363,9 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             session_count=count, is_pinned=False, last_updated=updated,
             icon=norm_icons.get(_normalize_path(cwd), ""),
             provider=prov,
-            provider_color=PROVIDER_COLORS.get(prov, "#888"),
+            provider_color=_get_provider_color(prov, config),
             provider_badge=PROVIDER_BADGES.get(prov, "?"),
+            provider_display=PROVIDER_DISPLAY_NAMES.get(prov, prov),
         )
     log.info("Rendered %d workspace cards in %.2fs total", len(other_cards), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
@@ -428,8 +436,9 @@ async def search(request: Request, q: str = ""):
             is_pinned=(data._normalize_path(cwd), prov) in pinned_set,
             icon=config_icons.get(data._normalize_path(cwd), ""),
             provider=prov,
-            provider_color=PROVIDER_COLORS.get(prov, "#888"),
+            provider_color=_get_provider_color(prov, config),
             provider_badge=PROVIDER_BADGES.get(prov, "?"),
+            provider_display=PROVIDER_DISPLAY_NAMES.get(prov, prov),
         )
     return HTMLResponse(cards_html)
 
