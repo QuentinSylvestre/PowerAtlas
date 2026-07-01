@@ -4,6 +4,7 @@
 > **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Merge providers into launcher grid, fix Kiro IDE icon/launch, propagate provider icon/color to workspace cards, deduplicate workspace selection.
 > **Estimated effort**: 1-2 days
+> **Last Updated**: 2026-07-01 22:50
 
 ---
 
