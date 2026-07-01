@@ -1,7 +1,7 @@
 # Multi-Provider Tabs and Launch
 
 > **Date**: 2026-07-01
-> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Add Claude Code as a second provider alongside kiro-cli (tabbed UI, session discovery, contextual launch), plus selection-aware custom launchers for multi-app workspace launching.
 > **Estimated effort**: 3-5 days
 
@@ -572,3 +572,19 @@ QA verification: PASS (2 surfaces verified — Library + GUI, 7 probes executed)
 | 20 | Low | Unknown provider filter falls through to all | Accepted — defensive, not harmful |
 | 21 | Low | Tab bar HTML string-concatenated in Python | Accepted — works, can extract to partial later |
 | 22 | Low | `_cache` uses stringly-typed keys | Accepted — functional, low risk |
+
+### 2026-07-01 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, End-user advocate, Architect.
+6 findings (2 High, 4 Medium).
+QA verification: PASS (3 surfaces verified — Library, GUI, CLI; 7 probes executed across phases).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `api_launch_batch` doesn't pass per-provider `default_args` to mixed-provider batches | Fixed — `launch_batch` now accepts `provider_settings` dict, looks up per-session |
+| 2 | High | Migration toast uses `sessionStorage` — reappears every window open (desktop app pattern) | Fixed — changed to `localStorage` for true one-time behavior |
+| 3 | Medium | Provider display-name mappings duplicated across 5 dicts in launcher.py and web.py | Accepted — intentional decoupling; consolidate if 3rd provider added |
+| 4 | Medium | `get_session_tail`/`get_first_prompt` use manual if/elif instead of PROVIDERS registry | Accepted — only 2 providers, refactor when 3rd added |
+| 5 | Medium | CSS class `.trust-dot` retained with legacy name (now only used for Autostart) | Accepted — cosmetic, no user impact |
+| 6 | Medium | Module-level `_cache` dict has no lock (GIL provides practical safety) | Accepted — low real-world risk with TTL semantics |
