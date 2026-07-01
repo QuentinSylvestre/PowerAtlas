@@ -618,6 +618,7 @@ async def launcher_create(request: Request):
         "env": body.get("env", {}),
         "color": body.get("color", ""),
         "terminal": body.get("terminal", True),
+        "use_selected_workspaces": body.get("use_selected_workspaces", False),
     }
     config.custom_launchers.append(entry)
     save_config(config)
@@ -632,7 +633,7 @@ async def launcher_update(request: Request):
     config = load_config()
     for entry in config.custom_launchers:
         if entry["id"] == lid:
-            for k in ("name", "command", "custom_args", "cwd", "env", "color", "terminal"):
+            for k in ("name", "command", "custom_args", "cwd", "env", "color", "terminal", "use_selected_workspaces"):
                 if k in body:
                     entry[k] = body[k]
             icons.extract_icon(lid, entry.get("command", ""), entry.get("terminal", True))
@@ -685,6 +686,33 @@ async def launcher_run(request: Request):
     )
     level = "success" if result.success else "error"
     msg = "Launcher started" if result.success else result.error
+    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+
+
+@app.post("/api/launcher/run-batch", response_class=HTMLResponse)
+async def launcher_run_batch(request: Request):
+    body = await request.json()
+    lid = body.get("id")
+    workspaces = body.get("workspaces", [])
+    config = load_config()
+    entry = next((e for e in config.custom_launchers if e["id"] == lid), None)
+    if not entry:
+        return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher not found", "level": "error"})
+    results = launcher.launch_custom_batch(
+        name=entry.get("name", ""),
+        command=entry.get("command", ""),
+        custom_args=entry.get("custom_args", ""),
+        workspaces=workspaces,
+        env=entry.get("env"),
+        terminal_override=config.terminal_command,
+        use_terminal=entry.get("terminal", True),
+    )
+    ok = sum(1 for r in results if r.success)
+    failed = len(results) - ok
+    msg = f"Launched {ok} instance{'s' if ok != 1 else ''}"
+    if failed:
+        msg += f", {failed} failed"
+    level = "success" if not failed else ("warning" if ok else "error")
     return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
 

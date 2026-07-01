@@ -223,6 +223,8 @@ script { display: none; }
 .launcher-tile:hover .launcher-tooltip { display: block; }
 .launcher-tooltip-row { margin-bottom: 3px; }
 .launcher-tooltip-row:last-child { margin-bottom: 0; }
+.launcher-badge { position: absolute; top: -4px; right: -4px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px; background: var(--accent, #4a6ede); color: #fff; display: none; }
+.launcher-badge.visible { display: block; }
 
 /* Launcher modal */
 .launcher-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 420px; width: 90vw; }

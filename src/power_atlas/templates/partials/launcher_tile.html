@@ -1,4 +1,5 @@
 <div class="launcher-tile" data-id="{{ launcher.id }}" onclick="runLauncherById('{{ launcher.id }}')"{% if launcher.color %} style="border-left: 3px solid {{ launcher.color }}"{% endif %}>
+  {% if launcher.use_selected_workspaces %}<span class="launcher-badge" id="badge-{{launcher.id}}"></span>{% endif %}
   <img class="launcher-icon" src="/api/launcher-icon/{{ launcher.id }}" alt="" aria-hidden="true">
   <span class="launcher-name">{{ launcher.name }}</span>
   <button class="launcher-gear-btn" onclick="event.stopPropagation();editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">⚙️</button>
@@ -7,5 +8,6 @@
     {% if launcher.cwd %}<div class="launcher-tooltip-row"><strong>Cwd:</strong> {{ launcher.cwd }}</div>{% endif %}
     {% if launcher.env %}<div class="launcher-tooltip-row"><strong>Env:</strong> {{ launcher.env | tojson }}</div>{% endif %}
     <div class="launcher-tooltip-row"><strong>Terminal:</strong> {{ 'yes' if launcher.terminal != false else 'no' }}</div>
+    {% if launcher.use_selected_workspaces %}<div class="launcher-tooltip-row"><strong>Selection-aware:</strong> yes</div>{% endif %}
   </div>
 </div>

@@ -281,6 +281,27 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
 
 
 
+def launch_custom_batch(
+    name: str,
+    command: str,
+    custom_args: str = "",
+    workspaces: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    terminal_override: str = "",
+    use_terminal: bool = True,
+) -> list[LaunchResult]:
+    """Launch a custom command once per workspace. Returns list of results."""
+    results = []
+    for ws in (workspaces or []):
+        cwd = ws or str(Path.home())
+        results.append(launch_custom(
+            name=name, command=command, custom_args=custom_args,
+            cwd=cwd, env=env, terminal_override=terminal_override,
+            use_terminal=use_terminal,
+        ))
+    return results
+
+
 def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "", use_terminal: bool = True) -> LaunchResult:
     """Launch a custom command, optionally in a terminal."""
     work_dir = cwd or "."

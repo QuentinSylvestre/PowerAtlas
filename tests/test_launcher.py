@@ -1,10 +1,11 @@
 """Tests for launcher module."""
 
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, _build_custom_command, _build_template_command, available_terminals
+from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, launch_custom_batch, _build_custom_command, _build_template_command, available_terminals
 import power_atlas.launcher as launcher_mod
 
 
@@ -468,3 +469,41 @@ class TestAvailableTerminals:
         result1.append(("extra", "Extra"))  # mutate the returned copy
         result2 = available_terminals()
         assert ("extra", "Extra") not in result2  # cache unaffected
+
+
+class TestLaunchCustomBatch:
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_launch_custom_batch_fires_per_workspace(self, _, mock_popen, tmp_path):
+        ws1 = str(tmp_path / "proj1")
+        ws2 = str(tmp_path / "proj2")
+        ws3 = str(tmp_path / "proj3")
+        for d in (ws1, ws2, ws3):
+            Path(d).mkdir()
+        results = launch_custom_batch(
+            name="test", command="npm", custom_args="start",
+            workspaces=[ws1, ws2, ws3],
+            terminal_override="C:\\wt.exe",
+        )
+        assert len(results) == 3
+        assert all(r.success for r in results)
+        assert mock_popen.call_count == 3
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_launch_custom_batch_empty_cwd_uses_home(self, _, mock_popen):
+        from pathlib import Path as P
+        results = launch_custom_batch(
+            name="test", command="echo", custom_args="hi",
+            workspaces=[str(P.home())],
+            terminal_override="C:\\wt.exe",
+        )
+        assert len(results) == 1
+        assert results[0].success is True
+
+    def test_launch_custom_batch_empty_workspaces(self):
+        results = launch_custom_batch(
+            name="test", command="echo",
+            workspaces=[],
+        )
+        assert results == []

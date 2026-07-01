@@ -512,3 +512,39 @@ def test_active_tab_class(mock_discover, mock_providers, client, tmp_path):
     assert 'class="provider-tab active" role="tab" aria-selected="true" hx-get="/partials/workspaces?provider=kiro-cli"' in resp.text
     # "All" tab should NOT be active
     assert 'class="provider-tab" role="tab" aria-selected="false" hx-get="/partials/workspaces?provider=all"' in resp.text
+
+
+# --- Phase 4: Selection-aware launcher batch ---
+
+
+@patch("power_atlas.web.launcher.launch_custom_batch")
+@patch("power_atlas.web.load_config")
+def test_launcher_run_batch_endpoint(mock_load, mock_batch, client, tmp_path):
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    lid = "test-launcher-id"
+    mock_load.return_value = Config(custom_launchers=[{
+        "id": lid, "name": "Dev", "command": "npm", "custom_args": "start",
+        "cwd": "", "env": {}, "terminal": True, "use_selected_workspaces": True,
+    }])
+    ws1 = str(tmp_path / "proj1")
+    ws2 = str(tmp_path / "proj2")
+    mock_batch.return_value = [
+        LaunchResult(True, None, ws1),
+        LaunchResult(True, None, ws2),
+    ]
+    resp = client.post("/api/launcher/run-batch", json={"id": lid, "workspaces": [ws1, ws2]})
+    assert resp.status_code == 200
+    assert "Launched 2" in resp.text
+    mock_batch.assert_called_once()
+    call_kwargs = mock_batch.call_args
+    assert call_kwargs[1]["workspaces"] == [ws1, ws2]
+
+
+@patch("power_atlas.web.load_config")
+def test_launcher_run_batch_not_found(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[])
+    resp = client.post("/api/launcher/run-batch", json={"id": "nonexistent", "workspaces": ["C:\\proj"]})
+    assert resp.status_code == 200
+    assert "not found" in resp.text.lower()
