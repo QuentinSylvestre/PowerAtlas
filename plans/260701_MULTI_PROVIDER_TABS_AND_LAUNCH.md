@@ -440,17 +440,20 @@ Added selection-aware custom launchers: `launch_custom_batch()` iterates workspa
    - Test that launch uses `default_args` from provider settings.
 
 **Exit criteria**:
-- [ ] Trust-all toggle removed from topbar
-- [ ] "Trust All Tools" menu item removed from system tray (`tray.py`)
-- [ ] Gear icon on each tab opens provider modal
-- [ ] Modal shows name (read-only), default args, color picker, enabled toggle
-- [ ] Saving provider settings persists to config.toml
-- [ ] `default_args` applied to all launches of that provider
-- [ ] Disabling a provider hides its tab (even if data exists)
-- [ ] Migration: existing `trust_all_tools=true` → `kiro-cli.default_args = "-a"`
-- [ ] One-time migration toast displayed on first post-upgrade launch
-- [ ] Update README.md: add Claude Code to Features, update Configuration section (provider_settings, remove trust_all_tools)
-- [ ] Tests pass
+- [x] Trust-all toggle removed from topbar
+- [x] "Trust All Tools" menu item removed from system tray (`tray.py`)
+- [x] Gear icon on each tab opens provider modal
+- [x] Modal shows name (read-only), default args, color picker, enabled toggle
+- [x] Saving provider settings persists to config.toml
+- [x] `default_args` applied to all launches of that provider
+- [x] Disabling a provider hides its tab (even if data exists)
+- [x] Migration: existing `trust_all_tools=true` → `kiro-cli.default_args = "-a"`
+- [x] One-time migration toast displayed on first post-upgrade launch
+- [x] Update README.md: add Claude Code to Features, update Configuration section (provider_settings, remove trust_all_tools)
+- [x] Tests pass
+
+**Implementation (2026-07-01, code: 0f91ff7)**
+Removed `trust_all_tools` from Config/tray/web/templates. Added `provider_settings` dict with migration logic (trust_all=true → kiro-cli.default_args="-a"). Provider modal with gear icon on tabs. Launch endpoints read `default_args` from provider_settings. Disabled providers hidden from tab bar. Migration toast shown once. README updated. All 199 tests pass.
 
 ### Phase 6: Claude Code memory-source documentation [P:1,2,3,4,5]
 
