@@ -16,11 +16,11 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 def test_round_trip():
-    cfg = Config(terminal_command="wt.exe", pinned_folders=["/a", "/b"])
+    cfg = Config(terminal_command="wt.exe", pinned_folders=[{"folder": "/a", "provider": "kiro-cli"}, {"folder": "/b", "provider": "claude-code"}])
     save_config(cfg)
     loaded = load_config()
     assert loaded.terminal_command == "wt.exe"
-    assert loaded.pinned_folders == ["/a", "/b"]
+    assert loaded.pinned_folders == [{"folder": "/a", "provider": "kiro-cli"}, {"folder": "/b", "provider": "claude-code"}]
     assert loaded.pinned_sessions == []
 
 

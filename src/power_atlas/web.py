@@ -166,9 +166,12 @@ async def pin_session(request: Request):
 async def pin_folder(request: Request):
     body = await request.json()
     folder = body["folder"]
+    provider = body.get("provider", "kiro-cli")
     config = load_config()
-    if folder not in config.pinned_folders:
-        config.pinned_folders.append(folder)
+    entry = {"folder": folder, "provider": provider}
+    # Check if already pinned for this provider
+    if not any(p.get("folder") == folder and p.get("provider") == provider for p in config.pinned_folders):
+        config.pinned_folders.append(entry)
         save_config(config)
     return {"ok": True}
 
@@ -177,10 +180,10 @@ async def pin_folder(request: Request):
 async def unpin_folder(request: Request):
     body = await request.json()
     folder = body["folder"]
+    provider = body.get("provider", "kiro-cli")
     config = load_config()
-    if folder in config.pinned_folders:
-        config.pinned_folders.remove(folder)
-        save_config(config)
+    config.pinned_folders = [p for p in config.pinned_folders if not (p.get("folder") == folder and p.get("provider") == provider)]
+    save_config(config)
     return {"ok": True}
 
 
@@ -227,14 +230,18 @@ async def partials_workspaces(request: Request, provider: str = "all"):
     from .data import _normalize_path
     norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
     workspace_data = list(workspace_data)
-    existing = {_normalize_path(cwd) for cwd, _, _, _ in workspace_data}
+    existing = {(_normalize_path(cwd), p) for cwd, _, _, p in workspace_data}
     for pf in config.pinned_folders:
-        if _normalize_path(pf) not in existing:
-            default_provider = providers[0] if providers else "kiro-cli"
-            workspace_data.append((pf, 0, "", default_provider))
+        folder = pf.get("folder", "") if isinstance(pf, dict) else pf
+        prov = pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli"
+        if (_normalize_path(folder), prov) not in existing:
+            workspace_data.append((folder, 0, "", prov))
 
     cards_html = ""
-    pinned_set = {_normalize_path(f) for f in config.pinned_folders}
+    # Build pinned set as {(norm_path, provider)} for per-provider pinning
+    pinned_set = {(_normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
+    # Also build a path-only set for "other cards" exclusion
+    pinned_paths = {k[0] for k in pinned_set}
 
     # Pinned sessions section (always shown regardless of active tab)
     if config.pinned_sessions:
@@ -243,30 +250,20 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
-    # Pinned workspaces (aggregate across all providers — these are folder bookmarks, not provider-scoped)
-    pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_set]
-    # Aggregate: sum counts and take latest updated_at per normalized cwd
-    pinned_agg: dict[str, tuple[str, int, str]] = {}  # norm_key -> (display_cwd, total_count, latest_updated)
-    for c, n, u, p in pinned_cards_raw:
-        key = _normalize_path(c)
-        if key not in pinned_agg:
-            pinned_agg[key] = (c, n, u)
-        else:
-            prev_cwd, prev_count, prev_updated = pinned_agg[key]
-            pinned_agg[key] = (prev_cwd, prev_count + n, max(prev_updated, u) if prev_updated and u else prev_updated or u)
-    pinned_cards = list(pinned_agg.values())
-    if pinned_cards:
+    # Pinned workspaces (per-provider: show all pinned regardless of active tab, with provider color)
+    pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if (_normalize_path(c), p) in pinned_set]
+    if pinned_cards_raw:
         cards_html += '<div class="section-label">Pinned workspaces</div>'
-        for cwd, count, updated in pinned_cards:
+        for cwd, count, updated, prov in pinned_cards_raw:
             stale = not Path(cwd).exists()
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=True, last_updated=updated,
                 icon=norm_icons.get(_normalize_path(cwd), ""),
-                provider="",
-                provider_color="transparent",
-                provider_badge="",
+                provider=prov,
+                provider_color=PROVIDER_COLORS.get(prov, "#888"),
+                provider_badge=PROVIDER_BADGES.get(prov, "?"),
             )
 
     # Render tab bar (only if multiple providers available) — AFTER pinned sections
@@ -299,9 +296,9 @@ async def partials_workspaces(request: Request, provider: str = "all"):
         return HTMLResponse(cards_html)
 
     # All other workspaces (non-pinned)
-    other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_set]
+    other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if (_normalize_path(c), p) not in pinned_set]
     if other_cards:
-        if pinned_cards:
+        if pinned_cards_raw:
             cards_html += '<div class="section-label">All workspaces</div>'
         for cwd, count, updated, prov in other_cards:
             stale = not Path(cwd).exists()
@@ -373,14 +370,14 @@ async def search(request: Request, q: str = ""):
         cards_html += '<div class="section-label">Pinned sessions</div>'
         cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
     config_icons = {data._normalize_path(k): v for k, v in config.workspace_icons.items()}
-    pinned_set = {data._normalize_path(f) for f in config.pinned_folders}
+    pinned_set = {(data._normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
     for cwd, count, updated, prov in matched:
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
             session_count=count, last_updated=updated,
-            is_pinned=(data._normalize_path(cwd) in pinned_set),
+            is_pinned=(data._normalize_path(cwd), prov) in pinned_set,
             icon=config_icons.get(data._normalize_path(cwd), ""),
             provider=prov,
             provider_color=PROVIDER_COLORS.get(prov, "#888"),
@@ -395,7 +392,8 @@ async def api_refresh():
     data.session_cache.clear()
     data._cache.clear()
     config = load_config()
-    await asyncio.to_thread(data.warmup_all, config.pinned_folders, config.pinned_sessions)
+    pinned_paths = [pf.get("folder", "") if isinstance(pf, dict) else pf for pf in config.pinned_folders]
+    await asyncio.to_thread(data.warmup_all, pinned_paths, config.pinned_sessions)
     return {"last_refresh": data.session_cache.last_refresh}
 
 
