@@ -1,7 +1,8 @@
 # Multi-Provider Tabs and Launch
 
 > **Date**: 2026-07-01
-> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete — all 6 phases implemented, reviewed, pushed.
+> **Last Updated**: 2026-07-01 18:17
 > **Scope**: Add Claude Code as a second provider alongside kiro-cli (tabbed UI, session discovery, contextual launch), plus selection-aware custom launchers for multi-app workspace launching.
 > **Estimated effort**: 3-5 days
 
