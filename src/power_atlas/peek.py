@@ -1,6 +1,7 @@
 """Peek window: hotkey-held native overlay showing the dashboard."""
 
 import logging
+import sys
 import threading
 
 log = logging.getLogger("power_atlas.peek")
@@ -88,16 +89,86 @@ class PeekWindow:
     def _start_listener(self) -> None:
         """Start the pynput keyboard listener."""
         try:
-            self._listener = keyboard.Listener(
+            kwargs: dict = dict(
                 on_press=self._on_press,
                 on_release=self._on_release,
             )
+            # On Windows, use win32_event_filter to suppress the hotkey keystroke
+            # so it doesn't propagate to the focused application (e.g. terminal
+            # echoing ^Z repeatedly).
+            if sys.platform == "win32":
+                kwargs["win32_event_filter"] = self._win32_event_filter
+            self._listener = keyboard.Listener(**kwargs)
             self._listener.daemon = True
             self._listener.start()
             log.info("Peek hotkey listener started (hotkey: %s)", self._hotkey)
         except Exception as e:
             log.warning("Failed to start hotkey listener: %s", e)
             self._listener = None
+
+    def _win32_event_filter(self, msg, data) -> None:
+        """Suppress hotkey keystrokes on Windows to prevent them reaching other apps.
+
+        Called by pynput before on_press/on_release. When we suppress an event,
+        on_press/on_release will NOT be called for it, so we must update the
+        key state and trigger show/hide logic here.
+        """
+        # Win32 message constants
+        _WM_KEYDOWN = 0x0100
+        _WM_KEYUP = 0x0101
+        _WM_SYSKEYDOWN = 0x0104
+        _WM_SYSKEYUP = 0x0105
+        # VK codes for modifiers we track
+        _VK_MODIFIERS = {
+            0xA0, 0xA1,  # VK_LSHIFT, VK_RSHIFT
+            0xA2, 0xA3,  # VK_LCONTROL, VK_RCONTROL
+            0xA4, 0xA5,  # VK_LMENU, VK_RMENU (Alt)
+            0x10, 0x11, 0x12,  # VK_SHIFT, VK_CONTROL, VK_MENU (generic)
+        }
+        vk = data.vkCode
+        name = self._vk_to_name(vk)
+        is_down = msg in (_WM_KEYDOWN, _WM_SYSKEYDOWN)
+
+        # Only suppress non-modifier keys when the full hotkey combo is active
+        if vk not in _VK_MODIFIERS and name:
+            if is_down and self._trigger_keys.issubset(self._pressed_keys | {name}):
+                # Update state FIRST — suppress_event() raises an exception
+                # so nothing after it executes
+                self._pressed_keys.add(name)
+                if not self._triggered:
+                    self._triggered = True
+                    self._show()
+                # Suppress the key so it doesn't reach the terminal
+                self._listener.suppress_event()
+            elif not is_down and name in self._trigger_keys:
+                # Also suppress the key-up for the hotkey's non-modifier key
+                # and clean up pressed state
+                if self._trigger_keys.issubset(self._pressed_keys):
+                    self._pressed_keys.discard(name)
+                    self._listener.suppress_event()
+
+    @staticmethod
+    def _vk_to_name(vk: int) -> str | None:
+        """Map a Windows VK code to our normalized key name."""
+        # Letters A-Z: VK 0x41-0x5A
+        if 0x41 <= vk <= 0x5A:
+            return chr(vk).lower()
+        # Digits 0-9: VK 0x30-0x39
+        if 0x30 <= vk <= 0x39:
+            return chr(vk)
+        # F-keys: VK 0x70-0x87
+        if 0x70 <= vk <= 0x87:
+            return f"f{vk - 0x6F}"
+        # Common special keys
+        _SPECIAL = {
+            0x1B: "esc", 0x20: "space", 0x09: "tab", 0x0D: "enter",
+            0x08: "backspace", 0x2E: "delete", 0x24: "home", 0x23: "end",
+            0x21: "page_up", 0x22: "page_down",
+            0xBF: "/", 0xBE: ".", 0xBC: ",", 0xBA: ";",
+            0xBB: "=", 0xBD: "-", 0xDB: "[", 0xDD: "]", 0xDC: "\\",
+            0xC0: "`", 0xDE: "'",
+        }
+        return _SPECIAL.get(vk)
 
     def _show(self) -> None:
         win = self._window  # local capture for thread safety

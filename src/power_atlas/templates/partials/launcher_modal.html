@@ -2,12 +2,29 @@
   <form method="dialog" onsubmit="saveLauncher(event)">
     <h3 id="launcherModalTitle">New Launcher</h3>
     <input type="hidden" id="launcherId" value="">
+    <input type="hidden" id="launcherColor" value="">
     <label>Name <input type="text" id="launcherName" required></label>
     <label>Command <input type="text" id="launcherCommand" required></label>
     <label>Default args <input type="text" id="launcherArgs"></label>
     <label>Working directory <input type="text" id="launcherCwd"></label>
     <label>Env (KEY=VAL per line) <textarea id="launcherEnv" rows="3"></textarea></label>
-    <label>Icon <input type="text" id="launcherIcon" maxlength="2"></label>
+    <div class="color-picker-field">
+      <span class="color-picker-label">Card color</span>
+      <div class="color-picker-swatches" id="launcherColorPicker">
+        <button type="button" class="color-swatch" data-color="#ef4444" style="background:#ef4444" aria-label="Red"></button>
+        <button type="button" class="color-swatch" data-color="#f97316" style="background:#f97316" aria-label="Orange"></button>
+        <button type="button" class="color-swatch" data-color="#eab308" style="background:#eab308" aria-label="Yellow"></button>
+        <button type="button" class="color-swatch" data-color="#22c55e" style="background:#22c55e" aria-label="Green"></button>
+        <button type="button" class="color-swatch" data-color="#14b8a6" style="background:#14b8a6" aria-label="Teal"></button>
+        <button type="button" class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" aria-label="Cyan"></button>
+        <button type="button" class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" aria-label="Blue"></button>
+        <button type="button" class="color-swatch" data-color="#6366f1" style="background:#6366f1" aria-label="Indigo"></button>
+        <button type="button" class="color-swatch" data-color="#8b5cf6" style="background:#8b5cf6" aria-label="Violet"></button>
+        <button type="button" class="color-swatch" data-color="#d946ef" style="background:#d946ef" aria-label="Fuchsia"></button>
+        <button type="button" class="color-swatch" data-color="#ec4899" style="background:#ec4899" aria-label="Pink"></button>
+        <button type="button" class="color-swatch" data-color="#64748b" style="background:#64748b" aria-label="Slate"></button>
+      </div>
+    </div>
     <label class="launcher-checkbox"><input type="checkbox" id="launcherTerminal" checked> Open in terminal</label>
     <div class="modal-actions">
       <button type="button" class="modal-delete-btn" id="launcherDeleteBtn" onclick="deleteLauncher()">Delete</button>

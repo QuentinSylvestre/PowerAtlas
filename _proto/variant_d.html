@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kiro Orchestrator — Variant D</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface-hover: #232733;
+  --surface-selected: #2a3040;
+  --border: #2d3244;
+  --text: #e4e6ed;
+  --text-muted: #8b90a0;
+  --text-dim: #5c6070;
+  --accent: #6c8cff;
+  --accent-hover: #8ba4ff;
+  --accent-dim: rgba(108, 140, 255, 0.12);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --radius: 10px;
+  --radius-sm: 6px;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  gap: 16px;
+  -webkit-app-region: drag;
+}
+.topbar-title {
+  font-weight: 600;
+  font-size: 14px;
+  letter-spacing: -0.3px;
+}
+.topbar-spacer { flex: 1; }
+.trust-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  transition: all 0.2s;
+}
+.trust-toggle:hover { border-color: var(--accent); color: var(--text); }
+.trust-toggle.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+.trust-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-dim);
+  transition: background 0.2s;
+}
+.trust-toggle.active .trust-dot { background: var(--success); }
+.settings-btn {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  transition: all 0.2s;
+}
+.settings-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* Main content area */
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 20px;
+  gap: 16px;
+}
+
+/* Search / command bar */
+.command-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.command-bar input {
+  width: 100%;
+  padding: 12px 16px 12px 40px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+.command-bar input:focus { border-color: var(--accent); }
+.command-bar input::placeholder { color: var(--text-dim); }
+.command-bar .search-icon {
+  position: absolute;
+  left: 14px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.command-bar .shortcut-hint {
+  position: absolute;
+  right: 14px;
+  color: var(--text-dim);
+  font-size: 11px;
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* Unified session list */
+.session-area {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.session-area::-webkit-scrollbar { width: 6px; }
+.session-area::-webkit-scrollbar-track { background: transparent; }
+.session-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Group headers */
+.group-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px 4px;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 2;
+}
+.group-header .folder-name {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+.group-header .session-count {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--surface);
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+.group-header .group-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.group-header:hover .group-actions { opacity: 1; }
+.group-action-btn {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.group-action-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Session row */
+.session-row {
+  display: grid;
+  grid-template-columns: 32px 1fr auto;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s;
+  gap: 12px;
+  position: relative;
+}
+.session-row:hover { background: var(--surface-hover); }
+.session-row.selected { background: var(--surface-selected); }
+
+/* Checkbox */
+.session-check {
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.session-row:hover .session-check { border-color: var(--text-muted); }
+.session-row.selected .session-check {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.session-row.selected .session-check::after {
+  content: '✓';
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* Session content */
+.session-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.session-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.session-title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-time {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.session-preview {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-preview .label {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  margin-right: 4px;
+}
+.session-last {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+
+/* Row actions (on hover) */
+.session-actions {
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.session-row:hover .session-actions { opacity: 1; }
+.row-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s;
+}
+.row-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+.row-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+.row-btn.primary:hover { background: var(--accent); color: white; }
+
+/* Bottom action bar (appears when selection > 0) */
+.action-bar {
+  display: flex;
+  align-items: center;
+  padding: 14px 20px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  gap: 12px;
+  transform: translateY(100%);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.action-bar.visible { transform: translateY(0); }
+.action-bar .selection-info {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.action-bar .selection-info strong {
+  color: var(--accent);
+}
+.action-bar-spacer { flex: 1; }
+.action-btn {
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.action-btn.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.action-btn.secondary:hover { border-color: var(--text-muted); color: var(--text); }
+.action-btn.launch {
+  background: var(--accent);
+  color: white;
+}
+.action-btn.launch:hover { background: var(--accent-hover); }
+.action-btn.new-session {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+.action-btn.new-session:hover { background: var(--accent); color: white; }
+
+/* Empty state for the "new" action row */
+.new-session-row {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px 10px 56px;
+  gap: 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 13px;
+  transition: all 0.12s;
+}
+.new-session-row:hover { background: var(--surface-hover); color: var(--accent); }
+.new-session-row .plus { font-size: 16px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-title">Kiro Orchestrator</div>
+  <div class="topbar-spacer"></div>
+  <div class="trust-toggle active" onclick="this.classList.toggle('active')">
+    <span class="trust-dot"></span>
+    Trust all tools
+  </div>
+  <button class="settings-btn">⚙</button>
+</div>
+
+<div class="main">
+  <div class="command-bar">
+    <span class="search-icon">⌕</span>
+    <input type="text" placeholder="Search sessions, folders, or type a path to open...">
+    <span class="shortcut-hint">Ctrl+K</span>
+  </div>
+
+  <div class="session-area" id="sessionList">
+    <!-- Group: kiro-orchestrator -->
+    <div class="group-header">
+      <span class="folder-name">kiro-orchestrator</span>
+      <span class="session-count">2</span>
+      <div class="group-actions">
+        <button class="group-action-btn" onclick="selectGroup(this)">Select all</button>
+        <button class="group-action-btn">+ New</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Set up project scaffolding</span>
+          <span class="session-time">35 min ago</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>Create the pyproject.toml and basic FastAPI structure</div>
+        <div class="session-last"><span class="label">Last:</span>"All scaffolding in place. Ready for the tray integration."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Design the session discovery module</span>
+          <span class="session-time">2 hours ago</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>Read kiro-cli sqlite schema and build the query layer</div>
+        <div class="session-last"><span class="label">Last:</span>"Query layer done, returns sessions sorted by updated_at."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="new-session-row"><span class="plus">+</span> New session in kiro-orchestrator</div>
+
+    <!-- Group: SamWhispers -->
+    <div class="group-header">
+      <span class="folder-name">SamWhispers</span>
+      <span class="session-count">4</span>
+      <div class="group-actions">
+        <button class="group-action-btn" onclick="selectGroup(this)">Select all</button>
+        <button class="group-action-btn">+ New</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">HF model discovery and manifest fix</span>
+          <span class="session-time">4 hours ago</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>/qdev plans/260617_HF_MODEL_DISCOVERY_AND_MANIFEST_FIX.md</div>
+        <div class="session-last"><span class="label">Last:</span>"Phase 3 complete. All tests green, committed abc1234."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Streaming sentence boundary trimming</span>
+          <span class="session-time">Yesterday</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>/qexplore streaming cuts mid-sentence at buffer boundary</div>
+        <div class="session-last"><span class="label">Last:</span>"Exploration complete. Run /qplan to continue."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Runtime hardening and UI reliability</span>
+          <span class="session-time">Yesterday</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>/qdev plans/260617_RUNTIME_HARDENING.md</div>
+        <div class="session-last"><span class="label">Last:</span>"Archived to plans/done/. All phases complete."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Full restart lifecycle</span>
+          <span class="session-time">3 days ago</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>The supervisor doesn't handle full restart cleanly</div>
+        <div class="session-last"><span class="label">Last:</span>"Restart lifecycle works end-to-end. Closing."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="new-session-row"><span class="plus">+</span> New session in SamWhispers</div>
+
+    <!-- Group: agent-playbook -->
+    <div class="group-header">
+      <span class="folder-name">agent-playbook</span>
+      <span class="session-count">3</span>
+      <div class="group-actions">
+        <button class="group-action-btn" onclick="selectGroup(this)">Select all</button>
+        <button class="group-action-btn">+ New</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Qtest lifecycle skill implementation</span>
+          <span class="session-time">Today</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>/qdev plans/260617_QTEST_LIFECYCLE_SKILL.md</div>
+        <div class="session-last"><span class="label">Last:</span>"Phase 1 review: 2 high-severity findings. Fixing."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Config sync verification</span>
+          <span class="session-time">2 days ago</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>/qconfig-sync</div>
+        <div class="session-last"><span class="label">Last:</span>"All files synced. 0 drift detected."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="session-row" onclick="toggleSelect(this)">
+      <div class="session-check"></div>
+      <div class="session-content">
+        <div class="session-title-row">
+          <span class="session-title">Dream run — cross-project sweep</span>
+          <span class="session-time">4 days ago</span>
+        </div>
+        <div class="session-preview"><span class="label">First:</span>/qdream</div>
+        <div class="session-last"><span class="label">Last:</span>"3 memory entries proposed. 1 governance improvement."</div>
+      </div>
+      <div class="session-actions">
+        <button class="row-btn primary">Resume</button>
+      </div>
+    </div>
+    <div class="new-session-row"><span class="plus">+</span> New session in agent-playbook</div>
+  </div>
+</div>
+
+<!-- Floating action bar -->
+<div class="action-bar" id="actionBar">
+  <span class="selection-info"><strong id="selCount">0</strong> sessions selected</span>
+  <div class="action-bar-spacer"></div>
+  <button class="action-btn secondary" onclick="clearSelection()">Clear</button>
+  <button class="action-btn launch" onclick="launchSelected()">▶ Launch all selected</button>
+</div>
+
+<script>
+let selected = new Set();
+
+function toggleSelect(row) {
+  row.classList.toggle('selected');
+  if (row.classList.contains('selected')) {
+    selected.add(row);
+  } else {
+    selected.delete(row);
+  }
+  updateActionBar();
+}
+
+function selectGroup(btn) {
+  const header = btn.closest('.group-header');
+  let el = header.nextElementSibling;
+  while (el && !el.classList.contains('group-header')) {
+    if (el.classList.contains('session-row') && !el.classList.contains('selected')) {
+      el.classList.add('selected');
+      selected.add(el);
+    }
+    el = el.nextElementSibling;
+  }
+  updateActionBar();
+}
+
+function clearSelection() {
+  selected.forEach(row => row.classList.remove('selected'));
+  selected.clear();
+  updateActionBar();
+}
+
+function updateActionBar() {
+  const bar = document.getElementById('actionBar');
+  const count = document.getElementById('selCount');
+  count.textContent = selected.size;
+  if (selected.size > 0) {
+    bar.classList.add('visible');
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+function launchSelected() {
+  alert(`Launching ${selected.size} session(s) in separate terminal tabs...`);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PowerAtlas Icon Feedback</title>
+  <link rel="icon" type="image/png" href="poweratlas-round2-icons/icon-08.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: #101521;
+      --line: #273149;
+      --text: #eef4ff;
+      --muted: #9aa8bf;
+      --accent: #6f91ff;
+      --cyan: #35d3ff;
+      --good: #72ffc7;
+      --warn: #ffd36d;
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 8% 0%, rgba(111, 145, 255, 0.16), transparent 32%),
+        linear-gradient(180deg, #090d16 0%, var(--bg) 54%, #070910 100%);
+      color: var(--text);
+    }
+
+    button,
+    input,
+    textarea,
+    select {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(1640px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0 40px;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 0;
+      backdrop-filter: blur(18px);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(22px, 3vw, 34px);
+      line-height: 1.08;
+    }
+
+    .subhead {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .btn {
+      border: 1px solid rgba(111, 145, 255, 0.55);
+      color: var(--text);
+      background: linear-gradient(180deg, rgba(111, 145, 255, 0.22), rgba(54, 81, 154, 0.18));
+      border-radius: 8px;
+      padding: 9px 13px;
+      cursor: pointer;
+    }
+
+    .btn:hover,
+    .btn:focus-visible {
+      border-color: rgba(53, 211, 255, 0.9);
+      outline: none;
+    }
+
+    .status {
+      min-width: 120px;
+      color: var(--good);
+      font-size: 13px;
+      text-align: right;
+    }
+
+    .note {
+      margin: 18px 0 22px;
+      padding: 12px 14px;
+      border: 1px solid rgba(111, 145, 255, 0.28);
+      border-radius: var(--radius);
+      background: rgba(16, 21, 33, 0.82);
+      color: var(--muted);
+      line-height: 1.45;
+    }
+
+    .note strong {
+      color: var(--warn);
+      font-weight: 700;
+    }
+
+    .feedback-workbench {
+      display: grid;
+      grid-template-columns: minmax(430px, 0.92fr) minmax(0, 1.08fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .visual-panel {
+      position: sticky;
+      top: 78px;
+      max-height: calc(100vh - 92px);
+      overflow: auto;
+      display: grid;
+      gap: 14px;
+      padding-right: 2px;
+    }
+
+    .feedback-panel {
+      min-width: 0;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin: 28px 0 12px;
+    }
+
+    .section-title h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    .section-title span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .sheet-wrap,
+    .image-card,
+    .qa-card {
+      background: rgba(16, 21, 33, 0.82);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .sheet-stage {
+      position: relative;
+      min-height: 220px;
+      display: grid;
+      place-items: center;
+      background: #090d16;
+    }
+
+    .sheet-stage img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .missing {
+      display: none;
+      padding: 36px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.45;
+    }
+
+    .sheet-stage.missing-image img,
+    .sheet-stage.missing-image .number-grid {
+      display: none;
+    }
+
+    .sheet-stage.missing-image .missing {
+      display: block;
+    }
+
+    .number-grid {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      grid-template-rows: repeat(2, 1fr);
+      pointer-events: none;
+    }
+
+    .number-grid span {
+      align-self: start;
+      justify-self: start;
+      display: grid;
+      place-items: center;
+      width: clamp(28px, 3.4vw, 44px);
+      height: clamp(28px, 3.4vw, 44px);
+      margin: clamp(10px, 1.4vw, 18px);
+      border-radius: 8px;
+      background: rgba(5, 8, 14, 0.72);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: #eef4ff;
+      font-weight: 800;
+      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+    }
+
+    .sheet-meta,
+    .image-meta {
+      padding: 10px 12px 12px;
+    }
+
+    .sheet-meta strong,
+    .image-meta strong {
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .sheet-meta small,
+    .image-meta small {
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .context-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .image-card img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #0b0f19;
+    }
+
+    .qa-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .qa-card {
+      padding: 14px;
+    }
+
+    .qa-card.full {
+      grid-column: 1 / -1;
+    }
+
+    label,
+    .field {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    input,
+    textarea,
+    select {
+      width: 100%;
+      border: 1px solid #344057;
+      border-radius: 7px;
+      color: var(--text);
+      background: #0b101b;
+      padding: 8px 9px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 74px;
+      resize: vertical;
+      line-height: 1.4;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(111, 145, 255, 0.14);
+    }
+
+    .concept-notes {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    .concept-card {
+      display: grid;
+      grid-template-columns: minmax(150px, 210px) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(16, 21, 33, 0.82);
+    }
+
+    .concept-preview {
+      position: relative;
+      margin: 0;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #090d16;
+      border: 1px solid rgba(111, 145, 255, 0.24);
+    }
+
+    .concept-preview img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .concept-preview figcaption {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      display: grid;
+      place-items: center;
+      min-width: 38px;
+      height: 30px;
+      padding: 0 9px;
+      border-radius: 7px;
+      background: rgba(5, 8, 14, 0.76);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: #eef4ff;
+      font-weight: 800;
+      font-size: 13px;
+      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.32);
+    }
+
+    .concept-fields {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .verdict-buttons {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .verdict-button {
+      border: 1px solid #344057;
+      border-radius: 7px;
+      color: var(--muted);
+      background: #0b101b;
+      padding: 8px 9px;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .verdict-button:hover,
+    .verdict-button:focus-visible {
+      border-color: var(--accent);
+      color: var(--text);
+      outline: none;
+    }
+
+    .verdict-button.is-active {
+      border-color: rgba(53, 211, 255, 0.9);
+      color: var(--text);
+      background: linear-gradient(180deg, rgba(111, 145, 255, 0.28), rgba(53, 211, 255, 0.12));
+      box-shadow: 0 0 0 3px rgba(111, 145, 255, 0.12);
+    }
+
+    .copy-zone {
+      margin-top: 18px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .output {
+      min-height: 180px;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      color: #dce7ff;
+    }
+
+    .bottom-actions {
+      position: sticky;
+      bottom: 14px;
+      z-index: 15;
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 20px;
+      pointer-events: none;
+    }
+
+    .bottom-actions > * {
+      pointer-events: auto;
+      box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
+    }
+
+    @media (max-width: 900px) {
+      .feedback-workbench {
+        grid-template-columns: 1fr;
+      }
+
+      .visual-panel {
+        position: static;
+        max-height: none;
+        overflow: visible;
+      }
+
+      .context-grid,
+      .qa-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 700px) {
+      .shell {
+        width: min(100vw - 20px, 720px);
+        padding-top: 10px;
+      }
+
+      .topbar {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .concept-card {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>PowerAtlas Icon Feedback</h1>
+        <p class="subhead">Raster-only concept review helper for desktop app, tray, favicon, and web UI banner direction.</p>
+      </div>
+      <div class="actions">
+        <button class="btn" type="button" data-copy-all>Copy All Feedback</button>
+        <button class="btn" type="button" data-refresh>Refresh Output</button>
+        <span class="status" data-status></span>
+      </div>
+    </header>
+
+    <p class="note">
+      <strong>Raster-only:</strong> the generated contact sheet stays visible in the left panel while you answer, and each concept note includes its own cropped PNG preview. No handcrafted icon SVGs are used.
+    </p>
+
+    <div class="feedback-workbench">
+      <aside class="visual-panel" aria-label="Visible concept reference">
+        <section aria-labelledby="sheet-title">
+      <div class="section-title">
+        <h2 id="sheet-title">Round 2 Concept Sheet</h2>
+        <span>Numbers are HTML overlays so the bitmap can stay text-free.</span>
+      </div>
+      <article class="sheet-wrap">
+        <div class="sheet-stage" data-sheet-stage>
+          <img src="poweratlas-round2-contact-sheet.png" alt="PowerAtlas Round 2 generated icon concept contact sheet" data-sheet-img>
+          <div class="number-grid" aria-hidden="true">
+            <span>1</span><span>2</span><span>3</span><span>4</span>
+            <span>5</span><span>6</span><span>7</span><span>8</span>
+          </div>
+          <div class="missing">
+            <strong>Missing local raster image.</strong><br>
+            Generate or place <code>poweratlas-round2-contact-sheet.png</code> in this <code>_proto</code> folder, then reload the page.
+          </div>
+        </div>
+        <div class="sheet-meta">
+          <strong>Round 2 refinement sheet</strong>
+          <small>Polished raster icon concepts only. External overlay numbers map the feedback fields below to the 4x2 grid.</small>
+        </div>
+      </article>
+        </section>
+      </aside>
+
+      <div class="feedback-panel">
+        <section aria-labelledby="context-title">
+      <div class="section-title">
+        <h2 id="context-title">UI Context References</h2>
+        <span>Use these only for fit with the current product surface.</span>
+      </div>
+      <div class="context-grid">
+        <article class="image-card">
+          <img src="variant_d_selected.png" alt="PowerAtlas selected prototype visual reference">
+          <div class="image-meta">
+            <strong>Prototype reference - selected</strong>
+            <small>Existing dark operational UI reference from <code>_proto/variant_d_selected.png</code>.</small>
+          </div>
+        </article>
+        <article class="image-card">
+          <img src="variant_d_screenshot.png" alt="PowerAtlas dashboard prototype screenshot">
+          <div class="image-meta">
+            <strong>Prototype reference - dashboard</strong>
+            <small>Existing dense web UI reference from <code>_proto/variant_d_screenshot.png</code>.</small>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="qa-title">
+      <div class="section-title">
+        <h2 id="qa-title">Overall Q&A</h2>
+        <span>These answers drive the next refinement round.</span>
+      </div>
+      <div class="qa-grid">
+        <div class="qa-card">
+          <label>Favorite overall
+            <input data-field="favorite_overall" placeholder="Example: #7, or #7 with #2 metaphor">
+          </label>
+        </div>
+        <div class="qa-card">
+          <label>Best silhouette
+            <input data-field="best_silhouette" placeholder="Which one reads best at small size?">
+          </label>
+        </div>
+        <div class="qa-card">
+          <label>Best metaphor
+            <input data-field="best_metaphor" placeholder="Which one feels most like PowerAtlas?">
+          </label>
+        </div>
+        <div class="qa-card">
+          <label>Best color/material
+            <input data-field="best_color" placeholder="Any color or material direction to preserve?">
+          </label>
+        </div>
+        <div class="qa-card">
+          <label>Too generic or reject
+            <input data-field="rejects" placeholder="List concepts or traits to avoid.">
+          </label>
+        </div>
+        <div class="qa-card">
+          <label>Traits to combine
+            <input data-field="combine" placeholder="Example: #7 silhouette + #2 layered routes + #6 tray clarity">
+          </label>
+        </div>
+        <div class="qa-card full">
+          <label>Anything missing or important for the next round
+            <textarea data-field="missing" placeholder="Notes about desktop app, tray icon, favicon, web UI top banner, wordmark, or brand feel."></textarea>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="concept-title">
+      <div class="section-title">
+        <h2 id="concept-title">Per-Concept Notes</h2>
+        <span>Each card includes the cropped raster icon for that concept.</span>
+      </div>
+      <div class="concept-notes" data-concept-list></div>
+    </section>
+
+    <section class="copy-zone" aria-labelledby="output-title">
+      <div class="section-title">
+        <h2 id="output-title">Copy Preview</h2>
+        <span>This is the exact chunk copied to the clipboard.</span>
+      </div>
+      <textarea class="output" data-output readonly></textarea>
+    </section>
+
+        <div class="bottom-actions">
+          <button class="btn" type="button" data-copy-all-bottom>Copy All Feedback</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const statusEl = document.querySelector("[data-status]");
+    const outputEl = document.querySelector("[data-output]");
+    const conceptList = document.querySelector("[data-concept-list]");
+    const sheetStage = document.querySelector("[data-sheet-stage]");
+    const sheetImg = document.querySelector("[data-sheet-img]");
+
+    const fieldLabels = {
+      favorite_overall: "Favorite overall",
+      best_silhouette: "Best silhouette",
+      best_metaphor: "Best metaphor",
+      best_color: "Best color/material",
+      rejects: "Too generic / reject",
+      combine: "Traits to combine",
+      missing: "Anything missing"
+    };
+
+    for (let index = 1; index <= 8; index += 1) {
+      const card = document.createElement("article");
+      card.className = "concept-card";
+      card.dataset.concept = String(index);
+      const iconSrc = `poweratlas-round2-icons/icon-${String(index).padStart(2, "0")}.png`;
+      card.innerHTML = `
+        <figure class="concept-preview">
+          <img src="${iconSrc}" alt="PowerAtlas concept #${index}">
+          <figcaption>#${index}</figcaption>
+        </figure>
+        <div class="concept-fields">
+          <input type="hidden" data-verdict value="">
+          <div class="field">
+            <div>Verdict</div>
+            <div class="verdict-buttons" role="group" aria-label="Verdict for concept #${index}">
+              <button class="verdict-button" type="button" data-verdict-button="Keep">Keep</button>
+              <button class="verdict-button" type="button" data-verdict-button="Refine">Refine</button>
+              <button class="verdict-button" type="button" data-verdict-button="Reject">Reject</button>
+            </div>
+          </div>
+          <label>Notes
+            <textarea data-notes placeholder="What works or fails for concept #${index}?"></textarea>
+          </label>
+        </div>
+      `;
+      conceptList.appendChild(card);
+    }
+
+    sheetImg.addEventListener("error", () => {
+      sheetStage.classList.add("missing-image");
+    });
+
+    function valueFor(selector) {
+      const el = document.querySelector(selector);
+      return el ? el.value.trim() : "";
+    }
+
+    function buildFeedback() {
+      const lines = [];
+      lines.push("PowerAtlas icon feedback - Round 2");
+      lines.push("");
+      lines.push("Overall Q&A");
+
+      Object.entries(fieldLabels).forEach(([key, label]) => {
+        const value = valueFor(`[data-field="${key}"]`);
+        lines.push(`- ${label}: ${value || "(blank)"}`);
+      });
+
+      lines.push("");
+      lines.push("Concept notes");
+      document.querySelectorAll("[data-concept]").forEach((card) => {
+        const number = card.dataset.concept;
+        const verdict = card.querySelector("[data-verdict]").value.trim() || "(blank)";
+        const notes = card.querySelector("[data-notes]").value.trim() || "(blank)";
+        lines.push(`- #${number}: ${verdict} - ${notes}`);
+      });
+
+      lines.push("");
+      lines.push("Context/UI-fit notes");
+      lines.push("- Existing UI references reviewed: variant_d_selected.png, variant_d_screenshot.png");
+
+      return lines.join("\n");
+    }
+
+    function refreshOutput() {
+      outputEl.value = buildFeedback();
+    }
+
+    async function copyAll() {
+      refreshOutput();
+      const text = outputEl.value;
+
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          outputEl.focus();
+          outputEl.select();
+          document.execCommand("copy");
+          outputEl.setSelectionRange(0, 0);
+        }
+        statusEl.textContent = "Copied";
+      } catch (error) {
+        statusEl.textContent = "Copy failed";
+        outputEl.focus();
+        outputEl.select();
+      }
+
+      window.setTimeout(() => {
+        statusEl.textContent = "";
+      }, 1800);
+    }
+
+
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-verdict-button]");
+      if (!button) {
+        return;
+      }
+
+      const card = button.closest("[data-concept]");
+      const input = card.querySelector("[data-verdict]");
+      input.value = button.dataset.verdictButton;
+      card.querySelectorAll("[data-verdict-button]").forEach((candidate) => {
+        candidate.classList.toggle("is-active", candidate === button);
+      });
+      refreshOutput();
+    });
+    document.addEventListener("input", (event) => {
+      if (event.target.matches("input, textarea, select")) {
+        refreshOutput();
+      }
+    });
+
+    document.addEventListener("change", (event) => {
+      if (event.target.matches("input, textarea, select")) {
+        refreshOutput();
+      }
+    });
+
+    document.querySelector("[data-copy-all]").addEventListener("click", copyAll);
+    document.querySelector("[data-copy-all-bottom]").addEventListener("click", copyAll);
+    document.querySelector("[data-refresh]").addEventListener("click", refreshOutput);
+
+    refreshOutput();
+  </script>
+</body>
+</html>

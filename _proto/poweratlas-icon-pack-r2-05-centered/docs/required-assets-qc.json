@@ -1,0 +1,82 @@
+{
+  "required_assets_count": 38,
+  "missing_required_assets": [],
+  "dimension_failures": [],
+  "ico_sizes": {
+    "concept-raster/app/windows/poweratlas.ico": [
+      [
+        16,
+        16
+      ],
+      [
+        20,
+        20
+      ],
+      [
+        24,
+        24
+      ],
+      [
+        32,
+        32
+      ],
+      [
+        48,
+        48
+      ],
+      [
+        64,
+        64
+      ],
+      [
+        128,
+        128
+      ],
+      [
+        256,
+        256
+      ]
+    ],
+    "concept-raster/tray/ico/poweratlas-tray.ico": [
+      [
+        16,
+        16
+      ],
+      [
+        20,
+        20
+      ],
+      [
+        24,
+        24
+      ],
+      [
+        32,
+        32
+      ],
+      [
+        48,
+        48
+      ],
+      [
+        64,
+        64
+      ]
+    ],
+    "concept-raster/web/favicon/favicon.ico": [
+      [
+        16,
+        16
+      ],
+      [
+        32,
+        32
+      ],
+      [
+        48,
+        48
+      ]
+    ]
+  },
+  "icns_created": true
+}

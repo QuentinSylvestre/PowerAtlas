@@ -210,21 +210,19 @@ script { display: none; }
 
 
 /* Launcher section */
-.launcher-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; }
+.launcher-grid { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
 .launcher-add-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 14px; width: 22px; height: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .launcher-add-btn:hover { border-color: var(--accent); color: var(--accent); }
-.launcher-tile { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 16px; transition: border-color 0.2s; }
-.launcher-tile:hover { border-color: #3a4060; }
-.launcher-tile-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.launcher-icon { font-size: 18px; flex-shrink: 0; }
+.launcher-tile { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 8px 12px; transition: border-color 0.2s, background 0.2s; cursor: pointer; display: flex; align-items: center; gap: 8px; position: relative; }
+.launcher-tile:hover { border-color: var(--accent); background: var(--surface); }
 .launcher-name { font-size: 13px; font-weight: 500; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.launcher-tile-body { display: flex; align-items: center; gap: 8px; }
-.launcher-args { flex: 1; min-width: 60px; padding: 4px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 12px; outline: none; }
-.launcher-args:focus { border-color: var(--accent); }
-.launcher-run-btn { background: var(--accent-dim); border: 1px solid var(--accent); border-radius: var(--radius-sm); color: var(--accent); cursor: pointer; padding: 4px 8px; font-size: 12px; }
-.launcher-run-btn:hover { background: var(--accent); color: white; }
-.launcher-gear-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; padding: 4px 6px; font-size: 12px; }
+.launcher-icon { width: 20px; height: 20px; flex-shrink: 0; object-fit: contain; }
+.launcher-gear-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; padding: 4px 6px; font-size: 12px; flex-shrink: 0; }
 .launcher-gear-btn:hover { border-color: var(--accent); color: var(--accent); }
+.launcher-tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 11px; color: var(--text-muted); white-space: nowrap; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: none; }
+.launcher-tile:hover .launcher-tooltip { display: block; }
+.launcher-tooltip-row { margin-bottom: 3px; }
+.launcher-tooltip-row:last-child { margin-bottom: 0; }
 
 /* Launcher modal */
 .launcher-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 420px; width: 90vw; }
@@ -240,3 +238,11 @@ script { display: none; }
 .modal-delete-btn:hover { background: rgba(248,113,113,0.12); }
 .modal-cancel-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; padding: 6px 12px; font-size: 12px; }
 .modal-cancel-btn:hover { border-color: var(--text-muted); color: var(--text); }
+
+/* Color picker */
+.color-picker-field { margin-bottom: 10px; }
+.color-picker-label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; }
+.color-picker-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+.color-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; transition: border-color 0.15s, transform 0.15s; }
+.color-swatch:hover { transform: scale(1.15); }
+.color-swatch.selected { border-color: white; box-shadow: 0 0 0 2px var(--accent); }

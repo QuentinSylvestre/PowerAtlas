@@ -1,0 +1,141 @@
+{
+  "before_previous_centered": {
+    "size": [
+      1024,
+      1024
+    ],
+    "background_sample": [
+      1,
+      3,
+      8
+    ],
+    "visible_panel": {
+      "count": 334912,
+      "bbox": [
+        143,
+        141,
+        950,
+        937
+      ],
+      "bbox_center": [
+        546.5,
+        539.0
+      ],
+      "bbox_center_offset_px": [
+        34.5,
+        27.0
+      ],
+      "weighted_centroid": [
+        522.32,
+        470.71
+      ],
+      "weighted_centroid_offset_px": [
+        10.32,
+        -41.29
+      ]
+    },
+    "bright_mark": {
+      "count": 113385,
+      "bbox": [
+        146,
+        147,
+        933,
+        885
+      ],
+      "bbox_center": [
+        539.5,
+        516.0
+      ],
+      "bbox_center_offset_px": [
+        27.5,
+        4.0
+      ],
+      "weighted_centroid": [
+        483.9,
+        507.01
+      ],
+      "weighted_centroid_offset_px": [
+        -28.1,
+        -4.99
+      ]
+    }
+  },
+  "crop_info": {
+    "crop_box": [
+      78,
+      71,
+      1014,
+      1007
+    ],
+    "requested_padding_px": 64,
+    "crop_size": [
+      936,
+      936
+    ],
+    "padded_crop_size": [
+      936,
+      936
+    ]
+  },
+  "after_optical_centered": {
+    "size": [
+      1024,
+      1024
+    ],
+    "background_sample": [
+      1,
+      3,
+      8
+    ],
+    "visible_panel": {
+      "count": 398666,
+      "bbox": [
+        71,
+        76,
+        954,
+        948
+      ],
+      "bbox_center": [
+        512.5,
+        512.0
+      ],
+      "bbox_center_offset_px": [
+        0.5,
+        0.0
+      ],
+      "weighted_centroid": [
+        486.07,
+        437.43
+      ],
+      "weighted_centroid_offset_px": [
+        -25.93,
+        -74.57
+      ]
+    },
+    "bright_mark": {
+      "count": 135007,
+      "bbox": [
+        74,
+        83,
+        954,
+        890
+      ],
+      "bbox_center": [
+        514.0,
+        486.5
+      ],
+      "bbox_center_offset_px": [
+        2.0,
+        -25.5
+      ],
+      "weighted_centroid": [
+        443.93,
+        477.0
+      ],
+      "weighted_centroid_offset_px": [
+        -68.07,
+        -35.0
+      ]
+    }
+  }
+}

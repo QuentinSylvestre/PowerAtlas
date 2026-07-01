@@ -308,13 +308,14 @@ def test_session_tail_empty(mock_tail, client):
 # --- Phase 3: custom launcher CRUD ---
 
 
+@patch("power_atlas.web.icons.extract_icon")
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
-def test_launcher_create(mock_load, mock_save, client):
+def test_launcher_create(mock_load, mock_save, mock_extract, client):
     from power_atlas.config import Config
     mock_load.return_value = Config()
     resp = client.post("/api/launcher/create", json={
-        "name": "Dev Server", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "icon": "🔥"
+        "name": "Dev Server", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "color": "#ef4444"
     })
     assert resp.status_code == 200
     assert "created" in resp.text.lower()
@@ -324,9 +325,10 @@ def test_launcher_create(mock_load, mock_save, client):
     assert saved.custom_launchers[0]["id"]  # UUID generated
 
 
+@patch("power_atlas.web.icons.remove_icon")
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
-def test_launcher_delete(mock_load, mock_save, client):
+def test_launcher_delete(mock_load, mock_save, mock_remove_icon, client):
     from power_atlas.config import Config
     mock_load.return_value = Config(custom_launchers=[{"id": "abc", "name": "x", "command": "y"}])
     resp = client.post("/api/launcher/delete", json={"id": "abc"})
@@ -349,3 +351,37 @@ def test_launcher_run(mock_load, mock_launch, client, tmp_path):
     assert resp.status_code == 200
     assert "started" in resp.text.lower()
     mock_launch.assert_called_once()
+
+
+@patch("power_atlas.web.icons.has_icon", return_value=False)
+@patch("power_atlas.web.load_config")
+def test_launcher_icon_fallback_terminal(mock_load, mock_has, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[{"id": "abc", "terminal": True, "command": "kiro-cli"}])
+    resp = client.get("/api/launcher-icon/abc")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/svg+xml"
+    assert "polyline" in resp.text  # terminal icon has polyline
+
+
+@patch("power_atlas.web.icons.has_icon", return_value=False)
+@patch("power_atlas.web.load_config")
+def test_launcher_icon_fallback_app(mock_load, mock_has, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[{"id": "xyz", "terminal": False, "command": "app.exe"}])
+    resp = client.get("/api/launcher-icon/xyz")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/svg+xml"
+    assert "circle" in resp.text  # app icon has circle
+
+
+@patch("power_atlas.web.icons.icon_path")
+@patch("power_atlas.web.icons.has_icon", return_value=True)
+def test_launcher_icon_serves_png(mock_has, mock_path, client, tmp_path):
+    # Create a fake PNG file
+    fake_png = tmp_path / "test.png"
+    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    mock_path.return_value = fake_png
+    resp = client.get("/api/launcher-icon/abc")
+    assert resp.status_code == 200
+    assert "image/png" in resp.headers["content-type"]

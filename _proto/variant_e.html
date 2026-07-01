@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Kiro Orchestrator — Variant E</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0f1117;
+  --surface: #1a1d27;
+  --surface-hover: #232733;
+  --surface-selected: #2a3040;
+  --card-bg: #161922;
+  --card-border: #252a3a;
+  --card-hover: #1e2230;
+  --border: #2d3244;
+  --text: #e4e6ed;
+  --text-muted: #8b90a0;
+  --text-dim: #5c6070;
+  --accent: #6c8cff;
+  --accent-hover: #8ba4ff;
+  --accent-dim: rgba(108, 140, 255, 0.12);
+  --success: #4ade80;
+  --radius: 12px;
+  --radius-sm: 6px;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Top bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  gap: 16px;
+}
+.topbar-title { font-weight: 600; font-size: 14px; letter-spacing: -0.3px; }
+.topbar-spacer { flex: 1; }
+.trust-toggle {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text-muted); cursor: pointer;
+  padding: 6px 12px; border-radius: 20px;
+  border: 1px solid var(--border); transition: all 0.2s;
+}
+.trust-toggle:hover { border-color: var(--accent); color: var(--text); }
+.trust-toggle.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+.trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s; }
+.trust-toggle.active .trust-dot { background: var(--success); }
+.settings-btn {
+  width: 32px; height: 32px; border-radius: 50%;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text-muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; transition: all 0.2s;
+}
+.settings-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* Search bar */
+.search-area { padding: 16px 24px 0; }
+.command-bar { position: relative; }
+.command-bar input {
+  width: 100%; padding: 12px 16px 12px 40px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text);
+  font-size: 14px; outline: none; transition: border-color 0.2s;
+}
+.command-bar input:focus { border-color: var(--accent); }
+.command-bar input::placeholder { color: var(--text-dim); }
+.command-bar .search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-dim); font-size: 14px; }
+.command-bar .shortcut-hint {
+  position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+  color: var(--text-dim); font-size: 11px;
+  background: var(--bg); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border);
+}
+
+/* Cards grid */
+.cards-area {
+  flex: 1; overflow-y: auto; padding: 16px 24px 80px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+.cards-area::-webkit-scrollbar { width: 6px; }
+.cards-area::-webkit-scrollbar-track { background: transparent; }
+.cards-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Workspace card */
+.workspace-card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.workspace-card:hover { border-color: #3a4060; }
+.workspace-card.has-selection { border-color: var(--accent); }
+
+.card-header {
+  display: flex; align-items: center; padding: 14px 16px;
+  cursor: pointer; gap: 10px; user-select: none;
+  transition: background 0.12s;
+}
+.card-header:hover { background: var(--surface-hover); }
+.card-chevron {
+  font-size: 10px; color: var(--text-dim);
+  transition: transform 0.2s; width: 16px; text-align: center;
+}
+.workspace-card.collapsed .card-chevron { transform: rotate(-90deg); }
+.card-folder-name { font-size: 13px; font-weight: 600; }
+.card-meta {
+  margin-left: auto; display: flex; align-items: center; gap: 8px;
+}
+.card-count {
+  font-size: 11px; color: var(--text-dim);
+  background: var(--surface); padding: 2px 8px; border-radius: 10px;
+}
+.card-last-active { font-size: 11px; color: var(--text-dim); }
+.card-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.12s; }
+.card-header:hover .card-actions { opacity: 1; }
+.card-action-btn {
+  font-size: 11px; color: var(--text-muted); background: transparent;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 3px 8px; cursor: pointer; transition: all 0.12s;
+}
+.card-action-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Card body (sessions list) */
+.card-body { border-top: 1px solid var(--card-border); }
+.workspace-card.collapsed .card-body { display: none; }
+
+.session-row {
+  display: grid; grid-template-columns: 28px 1fr auto;
+  align-items: center; padding: 10px 16px; gap: 10px;
+  cursor: pointer; transition: background 0.1s;
+}
+.session-row:hover { background: var(--surface-hover); }
+.session-row.selected { background: var(--surface-selected); }
+.session-row + .session-row { border-top: 1px solid rgba(45,50,68,0.4); }
+
+.session-check {
+  width: 18px; height: 18px; border-radius: 4px;
+  border: 1.5px solid var(--border); display: flex;
+  align-items: center; justify-content: center;
+  transition: all 0.12s; flex-shrink: 0;
+}
+.session-row:hover .session-check { border-color: var(--text-muted); }
+.session-row.selected .session-check { border-color: var(--accent); background: var(--accent); }
+.session-row.selected .session-check::after { content: '✓'; color: white; font-size: 11px; font-weight: 700; }
+
+.session-content { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.session-title-row { display: flex; align-items: center; gap: 8px; }
+.session-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-time { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.session-preview { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
+.session-last { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+
+.session-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; }
+.session-row:hover .session-actions { opacity: 1; }
+.row-btn {
+  font-size: 11px; padding: 4px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: transparent;
+  color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.1s;
+}
+.row-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+.row-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+.row-btn.primary:hover { background: var(--accent); color: white; }
+
+/* New session row inside card */
+.new-session-inline {
+  padding: 8px 16px 10px 54px; font-size: 12px;
+  color: var(--text-dim); cursor: pointer; transition: color 0.12s;
+  border-top: 1px solid rgba(45,50,68,0.4);
+}
+.new-session-inline:hover { color: var(--accent); }
+
+/* Bottom action bar */
+.action-bar {
+  position: fixed; bottom: 0; left: 0; right: 0;
+  display: flex; align-items: center; padding: 14px 24px;
+  background: var(--surface); border-top: 1px solid var(--border);
+  gap: 12px;
+  transform: translateY(100%);
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  z-index: 100;
+}
+.action-bar.visible { transform: translateY(0); }
+.selection-info { font-size: 13px; color: var(--text-muted); }
+.selection-info strong { color: var(--accent); }
+.action-bar-spacer { flex: 1; }
+.action-btn {
+  padding: 8px 16px; border-radius: var(--radius-sm);
+  border: none; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.12s;
+}
+.action-btn.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+.action-btn.secondary:hover { border-color: var(--text-muted); color: var(--text); }
+.action-btn.launch { background: var(--accent); color: white; }
+.action-btn.launch:hover { background: var(--accent-hover); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-title">Kiro Orchestrator</div>
+  <div class="topbar-spacer"></div>
+  <div class="trust-toggle active" onclick="this.classList.toggle('active')">
+    <span class="trust-dot"></span>Trust all tools
+  </div>
+  <button class="settings-btn">⚙</button>
+</div>
+
+<div class="search-area">
+  <div class="command-bar">
+    <span class="search-icon">⌕</span>
+    <input type="text" placeholder="Search sessions, folders, or type a path to open...">
+    <span class="shortcut-hint">Ctrl+K</span>
+  </div>
+</div>
+
+<div class="cards-area" id="cardsArea">
+  <!-- Cards will be inserted by JS, ordered by most recent activity -->
+</div>
+
+<div class="action-bar" id="actionBar">
+  <span class="selection-info"><strong id="selCount">0</strong> sessions selected</span>
+  <div class="action-bar-spacer"></div>
+  <button class="action-btn secondary" onclick="clearSelection()">Clear</button>
+  <button class="action-btn launch">▶ Launch all selected</button>
+</div>
+
+<script>
+// Data: workspaces with sessions, each session has a lastActivityMs for sorting
+const workspaces = [
+  {
+    name: "kiro-orchestrator",
+    path: "C:\\Dev\\Perso\\kiro-orchestrator",
+    lastActivity: Date.now() - 35*60*1000,
+    sessions: [
+      { title: "Set up project scaffolding", time: "35 min ago", first: "Create the pyproject.toml and basic FastAPI structure", last: "All scaffolding in place. Ready for the tray integration.", ms: 35*60*1000 },
+      { title: "Design the session discovery module", time: "2 hours ago", first: "Read kiro-cli sqlite schema and build the query layer", last: "Query layer done, returns sessions sorted by updated_at.", ms: 2*3600*1000 },
+    ]
+  },
+  {
+    name: "agent-playbook",
+    path: "C:\\Dev\\Perso\\agent-playbook",
+    lastActivity: Date.now() - 1*3600*1000,
+    sessions: [
+      { title: "Qtest lifecycle skill implementation", time: "1 hour ago", first: "/qdev plans/260617_QTEST_LIFECYCLE_SKILL.md", last: "Phase 1 review: 2 high-severity findings. Fixing.", ms: 1*3600*1000 },
+      { title: "Config sync verification", time: "2 days ago", first: "/qconfig-sync", last: "All files synced. 0 drift detected.", ms: 2*86400*1000 },
+      { title: "Dream run — cross-project sweep", time: "4 days ago", first: "/qdream", last: "3 memory entries proposed. 1 governance improvement.", ms: 4*86400*1000 },
+    ]
+  },
+  {
+    name: "SamWhispers",
+    path: "C:\\Dev\\Perso\\SamWhispers",
+    lastActivity: Date.now() - 4*3600*1000,
+    sessions: [
+      { title: "HF model discovery and manifest fix", time: "4 hours ago", first: "/qdev plans/260617_HF_MODEL_DISCOVERY_AND_MANIFEST_FIX.md", last: "Phase 3 complete. All tests green, committed abc1234.", ms: 4*3600*1000 },
+      { title: "Streaming sentence boundary trimming", time: "Yesterday", first: "/qexplore streaming cuts mid-sentence at buffer boundary", last: "Exploration complete. Run /qplan to continue.", ms: 24*3600*1000 },
+      { title: "Runtime hardening and UI reliability", time: "Yesterday", first: "/qdev plans/260617_RUNTIME_HARDENING.md", last: "Archived to plans/done/. All phases complete.", ms: 26*3600*1000 },
+      { title: "Full restart lifecycle", time: "3 days ago", first: "The supervisor doesn't handle full restart cleanly", last: "Restart lifecycle works end-to-end. Closing.", ms: 3*86400*1000 },
+    ]
+  },
+  {
+    name: "StreamLab",
+    path: "C:\\Dev\\Perso\\StreamLab",
+    lastActivity: Date.now() - 5*86400*1000,
+    sessions: [
+      { title: "WebSocket reconnection logic", time: "5 days ago", first: "Handle graceful reconnection when server drops", last: "Reconnection with exponential backoff working.", ms: 5*86400*1000 },
+      { title: "Dashboard layout refactor", time: "1 week ago", first: "The grid system breaks on narrow viewports", last: "Responsive grid done, tested at 320px-4k.", ms: 7*86400*1000 },
+    ]
+  },
+];
+
+// Sort workspaces by most recent activity (ascending age = most recent first)
+workspaces.sort((a, b) => b.lastActivity - a.lastActivity);
+
+const selected = new Set();
+const cardsArea = document.getElementById('cardsArea');
+
+function render() {
+  cardsArea.innerHTML = '';
+  workspaces.forEach((ws, wi) => {
+    const card = document.createElement('div');
+    card.className = 'workspace-card';
+    card.dataset.ws = wi;
+
+    const sessionCount = ws.sessions.length;
+    const lastTime = ws.sessions[0]?.time || '';
+
+    card.innerHTML = `
+      <div class="card-header" onclick="toggleCollapse(this.parentElement)">
+        <span class="card-chevron">▼</span>
+        <span class="card-folder-name">${ws.name}</span>
+        <div class="card-meta">
+          <span class="card-last-active">${lastTime}</span>
+          <span class="card-count">${sessionCount}</span>
+          <div class="card-actions">
+            <button class="card-action-btn" onclick="event.stopPropagation(); selectAllInCard(${wi})">Select all</button>
+            <button class="card-action-btn" onclick="event.stopPropagation()">+ New</button>
+          </div>
+        </div>
+      </div>
+      <div class="card-body">
+        ${ws.sessions.map((s, si) => `
+          <div class="session-row" data-ws="${wi}" data-si="${si}" onclick="toggleSelect(this)">
+            <div class="session-check"></div>
+            <div class="session-content">
+              <div class="session-title-row">
+                <span class="session-title">${s.title}</span>
+                <span class="session-time">${s.time}</span>
+              </div>
+              <div class="session-preview"><span class="label">First:</span>${s.first}</div>
+              <div class="session-last"><span class="label">Last:</span>"${s.last}"</div>
+            </div>
+            <div class="session-actions">
+              <button class="row-btn primary" onclick="event.stopPropagation()">Resume</button>
+            </div>
+          </div>
+        `).join('')}
+        <div class="new-session-inline">+ New session in ${ws.name}</div>
+      </div>
+    `;
+    cardsArea.appendChild(card);
+  });
+}
+
+function toggleCollapse(card) {
+  card.classList.toggle('collapsed');
+}
+
+function toggleSelect(row) {
+  const key = row.dataset.ws + '-' + row.dataset.si;
+  row.classList.toggle('selected');
+  if (row.classList.contains('selected')) {
+    selected.add(key);
+  } else {
+    selected.delete(key);
+  }
+  updateCardBorder(row.closest('.workspace-card'));
+  updateActionBar();
+}
+
+function selectAllInCard(wi) {
+  const card = cardsArea.querySelector(`.workspace-card[data-ws="${wi}"]`);
+  card.querySelectorAll('.session-row').forEach(row => {
+    const key = row.dataset.ws + '-' + row.dataset.si;
+    if (!row.classList.contains('selected')) {
+      row.classList.add('selected');
+      selected.add(key);
+    }
+  });
+  updateCardBorder(card);
+  updateActionBar();
+}
+
+function updateCardBorder(card) {
+  const hasSelected = card.querySelector('.session-row.selected') !== null;
+  card.classList.toggle('has-selection', hasSelected);
+}
+
+function clearSelection() {
+  document.querySelectorAll('.session-row.selected').forEach(r => r.classList.remove('selected'));
+  document.querySelectorAll('.workspace-card.has-selection').forEach(c => c.classList.remove('has-selection'));
+  selected.clear();
+  updateActionBar();
+}
+
+function updateActionBar() {
+  const bar = document.getElementById('actionBar');
+  document.getElementById('selCount').textContent = selected.size;
+  bar.classList.toggle('visible', selected.size > 0);
+}
+
+render();
+</script>
+</body>
+</html>

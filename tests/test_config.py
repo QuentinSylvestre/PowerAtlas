@@ -144,7 +144,7 @@ def test_workspace_icons_round_trip():
 def test_custom_launchers_round_trip():
     """custom_launchers list[dict] persists through save/load cycle."""
     launchers = [
-        {"id": "abc", "name": "Dev", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "env": {}, "icon": "🔥"},
+        {"id": "abc", "name": "Dev", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "env": {}, "color": "#ef4444"},
     ]
     cfg = Config(custom_launchers=launchers)
     save_config(cfg)

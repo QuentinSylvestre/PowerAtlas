@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import load_config, save_config
-from . import autostart, data, launcher
+from . import autostart, data, icons, launcher
 from .launcher import available_terminals
 
 _PKG_DIR = Path(__file__).parent
@@ -577,11 +577,12 @@ async def launcher_create(request: Request):
         "custom_args": body.get("custom_args", ""),
         "cwd": body.get("cwd", ""),
         "env": body.get("env", {}),
-        "icon": body.get("icon", ""),
+        "color": body.get("color", ""),
         "terminal": body.get("terminal", True),
     }
     config.custom_launchers.append(entry)
     save_config(config)
+    icons.extract_icon(entry["id"], entry["command"], entry["terminal"])
     return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher created", "level": "success"})
 
 
@@ -592,9 +593,10 @@ async def launcher_update(request: Request):
     config = load_config()
     for entry in config.custom_launchers:
         if entry["id"] == lid:
-            for k in ("name", "command", "custom_args", "cwd", "env", "icon", "terminal"):
+            for k in ("name", "command", "custom_args", "cwd", "env", "color", "terminal"):
                 if k in body:
                     entry[k] = body[k]
+            icons.extract_icon(lid, entry.get("command", ""), entry.get("terminal", True))
             break
     save_config(config)
     return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher updated", "level": "success"})
@@ -607,7 +609,25 @@ async def launcher_delete(request: Request):
     config = load_config()
     config.custom_launchers = [e for e in config.custom_launchers if e["id"] != lid]
     save_config(config)
+    icons.remove_icon(lid)
     return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher deleted", "level": "success"})
+
+
+@app.get("/api/launcher-icon/{launcher_id}")
+async def launcher_icon(launcher_id: str):
+    from fastapi.responses import FileResponse, Response
+
+    if icons.has_icon(launcher_id):
+        return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
+    # Determine if terminal launcher for appropriate fallback
+    config = load_config()
+    is_terminal = True
+    for entry in config.custom_launchers:
+        if entry["id"] == launcher_id:
+            is_terminal = entry.get("terminal", True)
+            break
+    svg = icons.default_icon_svg(is_terminal)
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 @app.post("/api/launcher/run", response_class=HTMLResponse)

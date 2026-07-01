@@ -1,0 +1,202 @@
+{
+  "project": "PowerAtlas",
+  "package": "poweratlas-icon-pack-r2-05",
+  "created": "2026-06-29",
+  "status": "concept-derived prototype asset pack",
+  "selected_direction": "Round 2 concept #5",
+  "source": "_proto/poweratlas-round2-icons/icon-05.png",
+  "app_icon_treatment": "contained tile",
+  "notes": [
+    "The selected concept crop is RGB and 444x443, so app-icon-source.png is an upscaled normalized source, not a native clean 1024 render.",
+    "Use this pack for visual review and implementation planning. A clean master redraw/regeneration is recommended before public release packaging.",
+    "No transparent logo mark is included yet because the selected concept is a contained raster tile."
+  ],
+  "files": [
+    {
+      "path": "input/round2-concept-05-reference.png",
+      "role": "selected Round 2 concept reference",
+      "size": "444x443",
+      "bytes": 235770
+    },
+    {
+      "path": "input/app-icon-source.png",
+      "role": "normalized app icon source",
+      "size": "1024x1024",
+      "bytes": 795697
+    },
+    {
+      "path": "concept-raster/web/logo/poweratlas-mark-contained-1024.png",
+      "role": "contained logo mark preview",
+      "size": "1024x1024",
+      "bytes": 795697
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-16x16.png",
+      "role": "app png",
+      "size": "16x16",
+      "bytes": 632
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-20x20.png",
+      "role": "app png",
+      "size": "20x20",
+      "bytes": 896
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-24x24.png",
+      "role": "app png",
+      "size": "24x24",
+      "bytes": 1165
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-32x32.png",
+      "role": "app png",
+      "size": "32x32",
+      "bytes": 1894
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-48x48.png",
+      "role": "app png",
+      "size": "48x48",
+      "bytes": 3595
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-64x64.png",
+      "role": "app png",
+      "size": "64x64",
+      "bytes": 5905
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-128x128.png",
+      "role": "app png",
+      "size": "128x128",
+      "bytes": 21845
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-256x256.png",
+      "role": "app png",
+      "size": "256x256",
+      "bytes": 86800
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-512x512.png",
+      "role": "app png",
+      "size": "512x512",
+      "bytes": 316636
+    },
+    {
+      "path": "concept-raster/app/png/app-icon-1024x1024.png",
+      "role": "app png",
+      "size": "1024x1024",
+      "bytes": 795697
+    },
+    {
+      "path": "concept-raster/app/windows/poweratlas.ico",
+      "role": "windows app ico",
+      "size": "multi-size",
+      "bytes": 122684
+    },
+    {
+      "path": "concept-raster/tray/png/tray-16x16.png",
+      "role": "tray png",
+      "size": "16x16",
+      "bytes": 634
+    },
+    {
+      "path": "concept-raster/tray/png/tray-20x20.png",
+      "role": "tray png",
+      "size": "20x20",
+      "bytes": 906
+    },
+    {
+      "path": "concept-raster/tray/png/tray-24x24.png",
+      "role": "tray png",
+      "size": "24x24",
+      "bytes": 1175
+    },
+    {
+      "path": "concept-raster/tray/png/tray-32x32.png",
+      "role": "tray png",
+      "size": "32x32",
+      "bytes": 1903
+    },
+    {
+      "path": "concept-raster/tray/png/tray-48x48.png",
+      "role": "tray png",
+      "size": "48x48",
+      "bytes": 3737
+    },
+    {
+      "path": "concept-raster/tray/png/tray-64x64.png",
+      "role": "tray png",
+      "size": "64x64",
+      "bytes": 6128
+    },
+    {
+      "path": "concept-raster/tray/ico/poweratlas-tray.ico",
+      "role": "tray ico",
+      "size": "multi-size",
+      "bytes": 14007
+    },
+    {
+      "path": "concept-raster/web/favicon/favicon-16x16.png",
+      "role": "favicon png",
+      "size": "16x16",
+      "bytes": 633
+    },
+    {
+      "path": "concept-raster/web/favicon/favicon-32x32.png",
+      "role": "favicon png",
+      "size": "32x32",
+      "bytes": 1916
+    },
+    {
+      "path": "concept-raster/web/favicon/favicon-48x48.png",
+      "role": "favicon png",
+      "size": "48x48",
+      "bytes": 3768
+    },
+    {
+      "path": "concept-raster/web/favicon/favicon.ico",
+      "role": "favicon ico",
+      "size": "multi-size",
+      "bytes": 6073
+    },
+    {
+      "path": "concept-raster/web/pwa/apple-touch-icon.png",
+      "role": "web pwa icon",
+      "size": "180x180",
+      "bytes": 42927
+    },
+    {
+      "path": "concept-raster/web/pwa/android-chrome-192x192.png",
+      "role": "web pwa icon",
+      "size": "192x192",
+      "bytes": 48857
+    },
+    {
+      "path": "concept-raster/web/pwa/android-chrome-512x512.png",
+      "role": "web pwa icon",
+      "size": "512x512",
+      "bytes": 316636
+    },
+    {
+      "path": "concept-raster/web/banner/poweratlas-webui-banner-dark.png",
+      "role": "web ui top banner",
+      "size": "1400x320",
+      "bytes": 117322
+    },
+    {
+      "path": "concept-raster/previews/poweratlas-r2-05-asset-preview.png",
+      "role": "asset preview sheet",
+      "size": "1500x1040",
+      "bytes": 339771
+    },
+    {
+      "path": "review-selected-r2-05.html",
+      "role": "interactive selected-icon review html",
+      "size": null,
+      "bytes": 7296
+    }
+  ]
+}
