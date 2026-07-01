@@ -59,7 +59,7 @@ def test_partials_workspaces_empty(mock_discover, mock_providers, mock_config, c
     mock_providers.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
-    assert "No sessions found" in resp.text
+    assert "No workspaces found" in resp.text
 
 
 @patch("power_atlas.web.data.get_sessions")
@@ -245,7 +245,7 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_p
     mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = []
-    resp = client.get("/partials/workspaces")
+    resp = client.get("/partials/pinned-workspaces")
     assert resp.status_code == 200
     assert pinned in resp.text or "my-pinned-workspace" in resp.text
 

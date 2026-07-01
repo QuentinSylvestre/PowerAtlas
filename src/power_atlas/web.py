@@ -198,11 +198,92 @@ async def unpin_session(request: Request):
     return {"ok": True}
 
 
-@app.get("/partials/workspaces", response_class=HTMLResponse)
-async def partials_workspaces(request: Request, provider: str = "all"):
+@app.get("/partials/pinned-sessions", response_class=HTMLResponse)
+async def partials_pinned_sessions(request: Request, fresh: int = 0):
+    """Render pinned sessions for the left panel."""
+    import asyncio
+    if fresh:
+        data._cache.pop("workspaces_with_counts:all", None)
+
+    config = load_config()
+    cards_html = ""
+
+    if config.pinned_sessions:
+        # Ensure pinned session workspaces are loaded into cache for full content
+        await asyncio.to_thread(data.warmup_all, [], config.pinned_sessions)
+        pinned_rows = await _render_pinned_sessions(request, config)
+        if pinned_rows:
+            cards_html += '<div class="section-label">Pinned sessions</div>'
+            cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
+
+    if not cards_html:
+        cards_html = '<div class="empty-state">No pinned sessions.</div>'
+
+    return HTMLResponse(cards_html)
+
+
+@app.get("/partials/pinned-workspaces", response_class=HTMLResponse)
+async def partials_pinned_workspaces(request: Request, fresh: int = 0):
+    """Render pinned workspaces for the center panel."""
     import asyncio
     import time
     t0 = time.perf_counter()
+    if fresh:
+        data._cache.pop("workspaces_with_counts:all", None)
+
+    config = load_config()
+    from .data import _normalize_path
+    norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
+
+    cards_html = ""
+
+    pinned_set = {(_normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
+    if pinned_set:
+        try:
+            all_workspace_data = list(await asyncio.to_thread(data.discover_workspaces_with_counts, provider=None))
+        except Exception:
+            all_workspace_data = []
+        # Merge pinned folders not found in discovery results
+        all_existing = {(_normalize_path(c), p) for c, _, _, p in all_workspace_data}
+        for pf in config.pinned_folders:
+            folder = pf.get("folder", "") if isinstance(pf, dict) else pf
+            prov = pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli"
+            if (_normalize_path(folder), prov) not in all_existing:
+                all_workspace_data.append((folder, 0, "", prov))
+        pinned_cards_raw = [(c, n, u, p) for c, n, u, p in all_workspace_data if (_normalize_path(c), p) in pinned_set]
+        pinned_cards_raw.sort(key=lambda x: Path(x[0]).name.lower())
+        if pinned_cards_raw:
+            cards_html += '<div class="section-label">Pinned workspaces</div>'
+            for cwd, count, updated, prov in pinned_cards_raw:
+                stale = not Path(cwd).exists()
+                cards_html += templates.get_template("partials/workspace_card.html").render(
+                    request=request, cwd=cwd, sessions=[], stale=stale,
+                    pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                    session_count=count, is_pinned=True, last_updated=updated,
+                    icon=norm_icons.get(_normalize_path(cwd), ""),
+                    provider=prov,
+                    provider_color=PROVIDER_COLORS.get(prov, "#888"),
+                    provider_badge=PROVIDER_BADGES.get(prov, "?"),
+                )
+
+    if not cards_html:
+        cards_html = '<div class="empty-state">No pinned workspaces. Pin a workspace to see it here.</div>'
+
+    log.info("Rendered pinned workspaces in %.2fs", time.perf_counter() - t0)
+    return HTMLResponse(cards_html)
+
+
+@app.get("/partials/workspaces", response_class=HTMLResponse)
+async def partials_workspaces(request: Request, provider: str = "all", fresh: int = 0):
+    """Render non-pinned workspaces with provider tabs for the right panel."""
+    import asyncio
+    import time
+    t0 = time.perf_counter()
+    if fresh:
+        cache_key = f"workspaces_with_counts:{provider if provider != 'all' else 'all'}"
+        _all_key = "workspaces_with_counts:all"
+        data._cache.pop(cache_key, None)
+        data._cache.pop(_all_key, None)
     try:
         workspace_data = await asyncio.to_thread(
             data.discover_workspaces_with_counts,
@@ -226,64 +307,15 @@ async def partials_workspaces(request: Request, provider: str = "all"):
     # Filter out disabled providers
     providers = [p for p in providers if config.provider_settings.get(p, {}).get("enabled", True)]
 
-    # Merge pinned folders (with count=0)
     from .data import _normalize_path
     norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
     workspace_data = list(workspace_data)
-    existing = {(_normalize_path(cwd), p) for cwd, _, _, p in workspace_data}
-    for pf in config.pinned_folders:
-        folder = pf.get("folder", "") if isinstance(pf, dict) else pf
-        prov = pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli"
-        if (_normalize_path(folder), prov) not in existing:
-            workspace_data.append((folder, 0, "", prov))
 
     cards_html = ""
-    # Build pinned set as {(norm_path, provider)} for per-provider pinning
+    # Build pinned set to exclude from right panel
     pinned_set = {(_normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
-    # Also build a path-only set for "other cards" exclusion
-    pinned_paths = {k[0] for k in pinned_set}
 
-    # Pinned sessions section (always shown regardless of active tab)
-    if config.pinned_sessions:
-        pinned_rows = await _render_pinned_sessions(request, config)
-        if pinned_rows:
-            cards_html += '<div class="section-label">Pinned sessions</div>'
-            cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
-
-    # Pinned workspaces (per-provider: show all pinned regardless of active tab, with provider color)
-    # Always use ALL providers' data for pinned — not the tab-filtered workspace_data
-    if pinned_set:
-        try:
-            all_workspace_data = list(await asyncio.to_thread(data.discover_workspaces_with_counts, provider=None))
-        except Exception:
-            all_workspace_data = list(workspace_data)
-        # Merge pinned folders not found in discovery results
-        all_existing = {(_normalize_path(c), p) for c, _, _, p in all_workspace_data}
-        for pf in config.pinned_folders:
-            folder = pf.get("folder", "") if isinstance(pf, dict) else pf
-            prov = pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli"
-            if (_normalize_path(folder), prov) not in all_existing:
-                all_workspace_data.append((folder, 0, "", prov))
-        pinned_cards_raw = [(c, n, u, p) for c, n, u, p in all_workspace_data if (_normalize_path(c), p) in pinned_set]
-    else:
-        pinned_cards_raw = []
-    # Sort alphabetically by folder name
-    pinned_cards_raw.sort(key=lambda x: Path(x[0]).name.lower())
-    if pinned_cards_raw:
-        cards_html += '<div class="section-label">Pinned workspaces</div>'
-        for cwd, count, updated, prov in pinned_cards_raw:
-            stale = not Path(cwd).exists()
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=stale,
-                pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                session_count=count, is_pinned=True, last_updated=updated,
-                icon=norm_icons.get(_normalize_path(cwd), ""),
-                provider=prov,
-                provider_color=PROVIDER_COLORS.get(prov, "#888"),
-                provider_badge=PROVIDER_BADGES.get(prov, "?"),
-            )
-
-    # Render tab bar (only if multiple providers available) — AFTER pinned sections
+    # Render tab bar (only if multiple providers available)
     if len(providers) > 1:
         cards_html += '<div class="provider-tabs" id="providerTabs" role="tablist">'
         active_cls = ' active' if provider == "all" else ''
@@ -299,8 +331,10 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             cards_html += f'<button class="tab-gear" onclick="openProviderModal(\'{p}\')" title="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}" aria-label="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}">&#9881;</button>'
         cards_html += '</div>'
 
-    if not workspace_data:
-        # Provider-specific empty state
+    # Filter to non-pinned workspaces only
+    other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if (_normalize_path(c), p) not in pinned_set]
+
+    if not other_cards:
         if provider != "all" and provider:
             empty_msgs = {
                 "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
@@ -308,27 +342,22 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             }
             msg = empty_msgs.get(provider, f"No {provider} sessions found.")
             cards_html += f'<div class="empty-state">{msg}</div>'
-            return HTMLResponse(cards_html)
-        cards_html += '<div class="empty-state">No sessions found. Pin a folder to get started.</div>'
+        else:
+            cards_html += '<div class="empty-state">No workspaces found yet.</div>'
         return HTMLResponse(cards_html)
 
-    # All other workspaces (non-pinned)
-    other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if (_normalize_path(c), p) not in pinned_set]
-    if other_cards:
-        if pinned_cards_raw:
-            cards_html += '<div class="section-label">All workspaces</div>'
-        for cwd, count, updated, prov in other_cards:
-            stale = not Path(cwd).exists()
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=stale,
-                pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                session_count=count, is_pinned=False, last_updated=updated,
-                icon=norm_icons.get(_normalize_path(cwd), ""),
-                provider=prov,
-                provider_color=PROVIDER_COLORS.get(prov, "#888"),
-                provider_badge=PROVIDER_BADGES.get(prov, "?"),
-            )
-    log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
+    for cwd, count, updated, prov in other_cards:
+        stale = not Path(cwd).exists()
+        cards_html += templates.get_template("partials/workspace_card.html").render(
+            request=request, cwd=cwd, sessions=[], stale=stale,
+            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+            session_count=count, is_pinned=False, last_updated=updated,
+            icon=norm_icons.get(_normalize_path(cwd), ""),
+            provider=prov,
+            provider_color=PROVIDER_COLORS.get(prov, "#888"),
+            provider_badge=PROVIDER_BADGES.get(prov, "?"),
+        )
+    log.info("Rendered %d workspace cards in %.2fs total", len(other_cards), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
 
 
@@ -623,6 +652,7 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
             html += templates.get_template("partials/session_row.html").render(
                 request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                 pinned_sessions=config.pinned_sessions,
+                provider_color=PROVIDER_COLORS.get("kiro-cli", ""),
             )
     return html
 
