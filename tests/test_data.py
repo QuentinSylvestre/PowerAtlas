@@ -8,9 +8,10 @@ from unittest.mock import patch
 import pytest
 
 from power_atlas.data import (
-    Session, SessionCache, _FileInfo, _load_sessions,
+    Session, SessionCache, _FileInfo,
     discover_workspaces, get_sessions, session_cache,
 )
+from power_atlas import data_kiro
 
 
 @pytest.fixture
@@ -18,8 +19,9 @@ def mock_sessions(tmp_path, monkeypatch):
     """Create mock session files."""
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
+    monkeypatch.setattr("power_atlas.data_kiro.SESSION_DIR", session_dir)
     monkeypatch.setattr("power_atlas.data.SESSION_DIR", session_dir)
-    monkeypatch.setattr("power_atlas.data.SQLITE_PATH", tmp_path / "nonexistent.db")
+    monkeypatch.setattr("power_atlas.data_kiro.SQLITE_PATH", tmp_path / "nonexistent.db")
     session_cache.clear()
     return session_dir
 
@@ -48,13 +50,13 @@ def test_discover_workspaces_with_data(mock_sessions):
     _write_session(mock_sessions, "s2", "C:\\Projects\\B", updated_at="2026-06-02T00:00:00Z")
     result = discover_workspaces()
     assert len(result) == 2
-    # B is more recent
-    assert "projects\\b" in result[0] or "projects/b" in result[0]
+    # B is more recent, returns display paths (original casing)
+    assert "Projects\\B" in result[0] or "Projects/B" in result[0]
 
 
 def test_discover_workspaces_empty_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr("power_atlas.data.SESSION_DIR", tmp_path / "nonexistent")
-    monkeypatch.setattr("power_atlas.data.SQLITE_PATH", tmp_path / "nonexistent.db")
+    monkeypatch.setattr("power_atlas.data_kiro.SESSION_DIR", tmp_path / "nonexistent")
+    monkeypatch.setattr("power_atlas.data_kiro.SQLITE_PATH", tmp_path / "nonexistent.db")
     assert discover_workspaces() == []
 
 
@@ -130,7 +132,7 @@ def _clear_cache():
 
 class TestRefreshStaleEntries:
     def test_detects_changed_jsonl_and_rereads(self, mock_sessions):
-        from power_atlas.data import session_cache, _normalize_path, _FileInfo
+        from power_atlas.data import session_cache, _normalize_path
         cwd = "C:\\Projects\\Refresh"
         _write_session(mock_sessions, "r1", cwd)
         # Populate cache via get_sessions
@@ -139,8 +141,8 @@ class TestRefreshStaleEntries:
         assert sessions[0].first_prompt == "Hello world"
 
         # Modify the .jsonl file content and mtime
-        jsonl_path = mock_sessions / "r1.jsonl"
         import time; time.sleep(0.05)
+        jsonl_path = mock_sessions / "r1.jsonl"
         jsonl_path.write_text(
             json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "Updated prompt"}}) + "\n"
             + json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "Updated reply"}}),
@@ -168,10 +170,10 @@ class TestRefreshStaleEntries:
         assert stats_before == stats_after
 
     def test_handles_missing_dir_gracefully(self, tmp_path, monkeypatch):
-        from power_atlas.data import session_cache, _normalize_path, _FileInfo
+        from power_atlas.data import session_cache
         # Point SESSION_DIR to non-existent path
-        monkeypatch.setattr("power_atlas.data.SESSION_DIR", tmp_path / "gone")
-        monkeypatch.setattr("power_atlas.data.SQLITE_PATH", tmp_path / "no.db")
+        monkeypatch.setattr("power_atlas.data_kiro.SESSION_DIR", tmp_path / "gone")
+        monkeypatch.setattr("power_atlas.data_kiro.SQLITE_PATH", tmp_path / "no.db")
         # Manually inject a cache entry so refresh has something to check
         session_cache.put("c:\\fake", [], {})
         # Should not raise
@@ -184,12 +186,6 @@ class TestWarmupPinned:
         cwd = "C:\\Projects\\Warm"
         _write_session(mock_sessions, "w1", cwd)
 
-        # Pretend the folder exists by patching Path.exists for that path
-        warmup_pinned([str(mock_sessions)])
-        # Since mock_sessions is the SESSION_DIR but cwd is C:\Projects\Warm,
-        # let's use a path that exists and has sessions
-        # Actually: warmup calls get_sessions(folder), so let's use the cwd directly
-        # We need a folder that exists. mock_sessions exists, so use it as a proxy cwd.
         # Write a session with cwd matching mock_sessions path
         _write_session(mock_sessions, "w2", str(mock_sessions))
         session_cache.clear()
@@ -293,6 +289,7 @@ def test_cache_clear_resets_state():
 
 
 
+
 class TestNormalizePath:
     def test_forward_slashes_normalized(self):
         from power_atlas.data import _normalize_path
@@ -316,7 +313,8 @@ class TestNormalizePath:
 
 # --- Phase 4: get_session_tail ---
 
-from power_atlas.data import get_session_tail, _tail_cache
+from power_atlas.data import get_session_tail
+from power_atlas.data_kiro import _tail_cache
 
 
 class TestGetSessionTail:
@@ -392,3 +390,220 @@ class TestNormalizePathLinux:
     def test_no_backslash_conversion(self):
         from power_atlas.data import _normalize_path
         assert _normalize_path("/home/user/a/b/c") == "/home/user/a/b/c"
+
+
+# --- Compound cache key tests ---
+
+
+class TestCompoundCacheKey:
+    def test_provider_isolation(self):
+        """Same cwd with different providers should be isolated in cache."""
+        cache = SessionCache()
+        s_kiro = Session("k1", "kiro session", "C:\\Work", "", "", "", "", "")
+        s_claude = Session("c1", "claude session", "C:\\Work", "", "", "", "", "")
+        cache.put("C:\\Work", [s_kiro], {}, provider="kiro-cli")
+        cache.put("C:\\Work", [s_claude], {}, provider="claude-code")
+
+        kiro_result = cache.get("C:\\Work", provider="kiro-cli")
+        claude_result = cache.get("C:\\Work", provider="claude-code")
+
+        assert len(kiro_result) == 1
+        assert kiro_result[0].session_id == "k1"
+        assert len(claude_result) == 1
+        assert claude_result[0].session_id == "c1"
+
+    def test_get_loaded_cwds_with_provider_filter(self):
+        """get_loaded_cwds with provider returns only that provider's cwds."""
+        cache = SessionCache()
+        s1 = Session("s1", "t", "C:\\A", "", "", "", "", "")
+        s2 = Session("s2", "t", "C:\\B", "", "", "", "", "")
+        cache.put("C:\\A", [s1], {}, provider="kiro-cli")
+        cache.put("C:\\B", [s2], {}, provider="claude-code")
+
+        from power_atlas.data import _normalize_path
+        kiro_cwds = cache.get_loaded_cwds("kiro-cli")
+        claude_cwds = cache.get_loaded_cwds("claude-code")
+        all_cwds = cache.get_loaded_cwds()
+
+        assert _normalize_path("C:\\A") in kiro_cwds
+        assert _normalize_path("C:\\B") not in kiro_cwds
+        assert _normalize_path("C:\\B") in claude_cwds
+        assert _normalize_path("C:\\A") not in claude_cwds
+        assert _normalize_path("C:\\A") in all_cwds
+        assert _normalize_path("C:\\B") in all_cwds
+
+
+
+
+# --- Claude Code adapter tests ---
+
+from power_atlas import data_claude
+
+
+class TestClaudeIsAvailable:
+    def test_available_when_projects_dir_has_content(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "some-project").mkdir()
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        assert data_claude.is_available() is True
+
+    def test_not_available_when_dir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", tmp_path / "nonexistent")
+        assert data_claude.is_available() is False
+
+    def test_not_available_when_dir_empty(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        assert data_claude.is_available() is False
+
+
+class TestClaudePathToFolderName:
+    def test_windows_path(self):
+        result = data_claude._path_to_folder_name("C:\\Users\\QSylvestre.POLESTAR")
+        assert result == "C--Users-QSylvestre-POLESTAR"
+
+    def test_unix_path(self):
+        result = data_claude._path_to_folder_name("/home/user/my-project")
+        assert result == "-home-user-my-project"
+
+    def test_spaces_replaced(self):
+        result = data_claude._path_to_folder_name("C:\\Users\\My User\\project")
+        assert result == "C--Users-My-User-project"
+
+    def test_dots_replaced(self):
+        result = data_claude._path_to_folder_name("C:\\Users\\user.name\\proj")
+        assert result == "C--Users-user-name-proj"
+
+
+class TestClaudeBuildPathIndex:
+    def test_builds_index_from_history(self, tmp_path, monkeypatch):
+        history = tmp_path / "history.jsonl"
+        lines = [
+            json.dumps({"display": "hello", "timestamp": 1000, "project": "C:\\Users\\Dev\\ProjectA"}),
+            json.dumps({"display": "world", "timestamp": 2000, "project": "C:\\Users\\Dev\\ProjectB"}),
+            json.dumps({"display": "no project"}),  # no project field
+        ]
+        history.write_text("\n".join(lines), encoding="utf-8")
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_HISTORY_PATH", history)
+        # Reset cache
+        monkeypatch.setattr("power_atlas.data_claude._path_index_cache", None)
+
+        index = data_claude._build_path_index()
+        assert "C--Users-Dev-ProjectA" in index
+        assert index["C--Users-Dev-ProjectA"] == "C:\\Users\\Dev\\ProjectA"
+        assert "C--Users-Dev-ProjectB" in index
+
+    def test_returns_empty_when_no_history(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_HISTORY_PATH", tmp_path / "nope.jsonl")
+        monkeypatch.setattr("power_atlas.data_claude._path_index_cache", None)
+        assert data_claude._build_path_index() == {}
+
+
+class TestClaudeDiscoverWorkspaces:
+    def test_discovers_projects(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        # Create project folder with session files
+        proj_folder = projects_dir / "C--Users-Dev-MyProject"
+        proj_folder.mkdir()
+        (proj_folder / "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl").write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}}),
+            encoding="utf-8",
+        )
+
+        # History for path resolution
+        history = tmp_path / "history.jsonl"
+        history.write_text(
+            json.dumps({"display": "hi", "timestamp": 1000, "project": "C:\\Users\\Dev\\MyProject"}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_HISTORY_PATH", history)
+        monkeypatch.setattr("power_atlas.data_claude._path_index_cache", None)
+
+        results = data_claude.discover_workspaces()
+        assert len(results) == 1
+        cwd, count, updated_at = results[0]
+        assert cwd == "C:\\Users\\Dev\\MyProject"
+        assert count == 1
+        assert updated_at  # non-empty ISO timestamp
+
+    def test_skips_empty_folders(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "empty-folder").mkdir()
+
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_HISTORY_PATH", tmp_path / "nope.jsonl")
+        monkeypatch.setattr("power_atlas.data_claude._path_index_cache", None)
+
+        results = data_claude.discover_workspaces()
+        assert len(results) == 0
+
+
+class TestClaudeLoadSessions:
+    def _make_project(self, tmp_path, monkeypatch, folder_name, sessions_data):
+        """Helper to set up a mock Claude Code project."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir(exist_ok=True)
+        proj_folder = projects_dir / folder_name
+        proj_folder.mkdir(exist_ok=True)
+
+        for sid, lines in sessions_data.items():
+            (proj_folder / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        return proj_folder
+
+    def test_parses_ai_title(self, tmp_path, monkeypatch):
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        lines = [
+            json.dumps({"type": "mode", "mode": "normal", "sessionId": sid}),
+            json.dumps({"type": "ai-title", "aiTitle": "Fix the login bug", "sessionId": sid}),
+            json.dumps({"parentUuid": "x", "type": "user", "message": {"role": "user", "content": "Please fix login"}, "uuid": "u1"}),
+            json.dumps({"parentUuid": "u1", "type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done!"}]}, "uuid": "u2"}),
+        ]
+        self._make_project(tmp_path, monkeypatch, "C--Work", {sid: lines})
+
+        sessions, stats = data_claude.load_sessions("C:\\Work")
+        assert len(sessions) == 1
+        assert sessions[0].title == "Fix the login bug"
+        assert sessions[0].first_prompt == "Please fix login"
+        assert sessions[0].session_id == sid
+
+    def test_fallback_title_from_first_user_message(self, tmp_path, monkeypatch):
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        lines = [
+            json.dumps({"type": "mode", "mode": "normal", "sessionId": sid}),
+            json.dumps({"parentUuid": "x", "type": "user", "message": {"role": "user", "content": "Refactor the auth module completely"}, "uuid": "u1"}),
+            json.dumps({"parentUuid": "u1", "type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "OK"}]}, "uuid": "u2"}),
+        ]
+        self._make_project(tmp_path, monkeypatch, "C--Work", {sid: lines})
+
+        sessions, stats = data_claude.load_sessions("C:\\Work")
+        assert len(sessions) == 1
+        # No ai-title, so title is first 80 chars of first user message
+        assert sessions[0].title == "Refactor the auth module completely"
+        assert sessions[0].first_prompt == "Refactor the auth module completely"
+
+    def test_skips_non_uuid_files(self, tmp_path, monkeypatch):
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        lines = [
+            json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}, "uuid": "u1"}),
+        ]
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        proj = projects_dir / "C--Work"
+        proj.mkdir()
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+        (proj / "_meta.jsonl").write_text("not a session", encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+
+        sessions, stats = data_claude.load_sessions("C:\\Work")
+        assert len(sessions) == 1
+        assert sessions[0].session_id == sid
