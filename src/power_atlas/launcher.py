@@ -158,19 +158,29 @@ def launch_batch(
     sessions: list[dict],
     default_args: str = "",
     terminal_override: str = "",
+    provider_settings: dict[str, dict] | None = None,
 ) -> list[LaunchResult]:
-    """Launch multiple sessions. Never aborts on single failure."""
+    """Launch multiple sessions. Never aborts on single failure.
+
+    If provider_settings is provided, per-provider default_args are looked up
+    for each session (overriding the flat default_args parameter).
+    """
     results = []
     for s in sessions:
         workspace = s.get("workspace") or "<unknown>"
         if workspace == "<unknown>":
             results.append(LaunchResult(False, s.get("session_id"), workspace, error="Missing 'workspace' key"))
             continue
+        provider = s.get("provider", "kiro-cli")
+        if provider_settings:
+            args = provider_settings.get(provider, {}).get("default_args", "")
+        else:
+            args = default_args
         results.append(launch_session(
             cwd=workspace,
             session_id=s.get("session_id"),
-            provider=s.get("provider", "kiro-cli"),
-            default_args=default_args,
+            provider=provider,
+            default_args=args,
             terminal_override=terminal_override,
         ))
     return results

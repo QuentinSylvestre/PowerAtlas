@@ -520,6 +520,7 @@ async def api_launch_batch(request: Request):
     results = launcher.launch_batch(
         sessions=body["sessions"],
         terminal_override=config.terminal_command,
+        provider_settings=config.provider_settings,
     )
     ok = sum(1 for r in results if r.success)
     failed = len(results) - ok
