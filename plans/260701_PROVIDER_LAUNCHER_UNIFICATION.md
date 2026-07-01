@@ -1,7 +1,7 @@
 # Provider-Launcher Unification
 
 > **Date**: 2026-07-01
-> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Merge providers into launcher grid, fix Kiro IDE icon/launch, propagate provider icon/color to workspace cards, deduplicate workspace selection.
 > **Estimated effort**: 1-2 days
 
@@ -626,3 +626,25 @@ Implementation health: Green.
 | 3 | Low | No test for onerror fallback path (unreachable in normal flow per Finding 1). | Accepted — only testable via browser with endpoint down; covered by Step 9b QA if needed. |
 
 Cycle 2 skipped — cycle 1 findings: 1 Medium accepted (design-intentional), 2 Low (1 fixed mechanically, 1 accepted).
+
+### 2026-07-01 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer.
+12 findings (2 High, 4 Medium, 6 Low). All High and auto-fixable Medium findings resolved.
+QA verification: SKIP — no browser surface exercised per-phase; full integration testing requires running app.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `launcher_icon()` calls `extract_icon()` synchronously in async endpoint, blocking event loop. | Fixed — wrapped in `asyncio.to_thread()`. |
+| 2 | High | `partials_launchers()` calls `available_providers()` without try/except; crash = 500. | Fixed — added try/except matching `partials_workspaces()` pattern. |
+| 3 | Medium | SC5 broken: `launcher_run_batch` endpoint never passes `pass_workspace_arg` to `launch_custom_batch`. | Fixed — added `pass_workspace_arg=not terminal and use_selected_workspaces` to call. |
+| 4 | Medium | No integration test verifying `pass_workspace_arg` flows through web endpoint. | Fixed — added test asserting `pass_workspace_arg=True` for non-terminal selection-aware launchers. |
+| 5 | Medium | `_resolve_cmd_to_exe()` has no file size guard; large files could stall regex. | Fixed — added early-out for files >64KB. |
+| 6 | Medium | `launch_custom()` shell=True + `%VAR%` in Windows paths could expand env vars. | Accepted — NTFS paths with `%` are exceptionally rare; documented as known limitation. |
+| 7 | Low | `re` imported lazily inside `_resolve_cmd_to_exe()`. | Accepted — avoids loading regex on Linux (per Phase 1 review). |
+| 8 | Low | First icon request falls through to extraction (no cache yet). | Non-issue — correct behavior; subsequent requests cached. |
+| 9 | Low | No null guard on `c.dataset.cwd.toLowerCase()`. | Accepted — template always renders `data-cwd`. |
+| 10 | Low | `onerror` fallback unreachable in normal operation (endpoint returns valid SVG). | Accepted — defense-in-depth for catastrophic endpoint failure. |
+| 11 | Low | JS fetch chains have no `.catch()` for network errors. | Accepted — consistent with existing codebase pattern. |
+| 12 | Low | Dead `.provider-badge` CSS rule. | Already fixed in Phase 4 review cycle. |
