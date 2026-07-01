@@ -86,11 +86,11 @@ async def index(request: Request):
     config = load_config()
     ctx = _terminal_context()
     return templates.TemplateResponse(request, "index.html", {
-        "trust_all_tools": config.trust_all_tools,
         "terminal_command": config.terminal_command,
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
         "peek_hotkey": config.peek_hotkey,
+        "provider_settings": config.provider_settings,
         **ctx,
     })
 
@@ -115,8 +115,6 @@ async def save_settings(request: Request):
     if terminal == "custom":
         terminal = form.get("custom_terminal_value", "")
     config.terminal_command = terminal
-    # Toggles
-    config.trust_all_tools = "trust_all_tools" in form
     # Pinned folders from hidden field
     folders_raw = form.get("pinned_folders", "")
     config.pinned_folders = [f for f in folders_raw.split("|") if f.strip()] if folders_raw else []
@@ -222,6 +220,9 @@ async def partials_workspaces(request: Request, provider: str = "all"):
     except Exception:
         providers = []
 
+    # Filter out disabled providers
+    providers = [p for p in providers if config.provider_settings.get(p, {}).get("enabled", True)]
+
     # Merge pinned folders (with count=0)
     from .data import _normalize_path
     norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
@@ -244,6 +245,9 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             aria_sel = ' aria-selected="true"' if provider == p else ' aria-selected="false"'
             display_name = PROVIDER_DISPLAY_NAMES.get(p, p)
             cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML">{display_name}</button>'
+        cards_html += '<span class="tab-spacer"></span>'
+        for p in providers:
+            cards_html += f'<button class="tab-gear" onclick="openProviderModal(\'{p}\')" title="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}" aria-label="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}">&#9881;</button>'
         cards_html += '</div>'
 
     if not workspace_data:
@@ -383,14 +387,6 @@ async def search(request: Request, q: str = ""):
     return HTMLResponse(cards_html)
 
 
-@app.post("/api/toggle-trust")
-async def toggle_trust():
-    config = load_config()
-    config.trust_all_tools = not config.trust_all_tools
-    save_config(config)
-    return {"trust_all_tools": config.trust_all_tools}
-
-
 @app.post("/api/refresh")
 async def api_refresh():
     import asyncio
@@ -406,8 +402,34 @@ async def api_last_refresh():
     return {"last_refresh": data.session_cache.last_refresh}
 
 
+@app.get("/api/provider/{key}")
+async def get_provider_settings(key: str):
+    config = load_config()
+    settings = config.provider_settings.get(key, {"default_args": "", "color": "", "enabled": True})
+    return {"provider": key, **settings}
+
+
+@app.post("/api/provider/save", response_class=HTMLResponse)
+async def save_provider_settings(request: Request):
+    body = await request.json()
+    provider = body.get("provider", "")
+    if not provider:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Missing provider key", "level": "error",
+        })
+    config = load_config()
+    config.provider_settings[provider] = {
+        "default_args": body.get("default_args", ""),
+        "color": body.get("color", ""),
+        "enabled": body.get("enabled", True),
+    }
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": f"Provider settings saved", "level": "success",
+    })
+
+
 _SETTING_TYPES: dict[str, type] = {
-    "trust_all_tools": bool,
     "terminal_command": str,
     "peek_hotkey": str,
     "pinned_folders": list,
@@ -477,10 +499,13 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "ki
 async def api_launch(request: Request):
     body = await request.json()
     config = load_config()
+    provider = body.get("provider", "kiro-cli")
+    default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
         cwd=body["workspace"],
         session_id=body.get("session_id"),
-        provider=body.get("provider", "kiro-cli"),
+        provider=provider,
+        default_args=default_args,
         terminal_override=config.terminal_command,
     )
     level = "success" if result.success else "error"
@@ -509,10 +534,13 @@ async def api_launch_batch(request: Request):
 async def api_new_session(request: Request):
     body = await request.json()
     config = load_config()
+    provider = body.get("provider", "kiro-cli")
+    default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
         cwd=body["workspace"],
         session_id=None,
-        provider=body.get("provider", "kiro-cli"),
+        provider=provider,
+        default_args=default_args,
         terminal_override=config.terminal_command,
     )
     level = "success" if result.success else "error"

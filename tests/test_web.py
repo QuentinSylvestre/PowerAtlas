@@ -111,14 +111,49 @@ def test_search_no_results(mock_discover, client, tmp_path):
 
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
-def test_toggle_trust(mock_load, mock_save, client):
+def test_save_provider_settings(mock_load, mock_save, client):
     from power_atlas.config import Config
-    mock_load.return_value = Config(trust_all_tools=False)
+    mock_load.return_value = Config()
 
-    resp = client.post("/api/toggle-trust")
+    resp = client.post("/api/provider/save", json={
+        "provider": "kiro-cli",
+        "default_args": "-a --verbose",
+        "color": "",
+        "enabled": True,
+    })
     assert resp.status_code == 200
-    assert resp.json()["trust_all_tools"] is True
-    mock_save.assert_called_once()
+    assert "saved" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    assert saved.provider_settings["kiro-cli"]["default_args"] == "-a --verbose"
+    assert saved.provider_settings["kiro-cli"]["enabled"] is True
+
+
+@patch("power_atlas.web.load_config")
+def test_get_provider_settings(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(provider_settings={
+        "kiro-cli": {"default_args": "-a", "color": "", "enabled": True},
+    })
+
+    resp = client.get("/api/provider/kiro-cli")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provider"] == "kiro-cli"
+    assert body["default_args"] == "-a"
+    assert body["enabled"] is True
+
+
+@patch("power_atlas.web.load_config")
+def test_get_provider_settings_default(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.get("/api/provider/claude-code")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["provider"] == "claude-code"
+    assert body["default_args"] == ""
+    assert body["enabled"] is True
 
 
 @patch("power_atlas.web.data.get_sessions")
@@ -162,13 +197,11 @@ def test_save_settings(mock_config, mock_autostart, mock_save, client):
     mock_autostart.return_value = False
     resp = client.post("/api/settings", data={
         "terminal_command": "pwsh",
-        "trust_all_tools": "on",
         "pinned_folders": "C:\\a|C:\\b",
     })
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert saved.terminal_command == "pwsh"
-    assert saved.trust_all_tools is True
     assert saved.pinned_folders == ["C:\\a", "C:\\b"]
 
 
@@ -253,7 +286,7 @@ class TestSaveSettingAllowlist:
     def test_rejects_wrong_type(self, mock_load, mock_save, client):
         from power_atlas.config import Config
         mock_load.return_value = Config()
-        resp = client.post("/api/save-setting", json={"key": "trust_all_tools", "value": "yes"})
+        resp = client.post("/api/save-setting", json={"key": "terminal_command", "value": 42})
         body = resp.json()
         assert body["ok"] is False
         assert "type" in body["error"].lower()
@@ -264,7 +297,7 @@ class TestSaveSettingAllowlist:
     def test_accepts_valid_setting(self, mock_load, mock_save, client):
         from power_atlas.config import Config
         mock_load.return_value = Config()
-        resp = client.post("/api/save-setting", json={"key": "trust_all_tools", "value": True})
+        resp = client.post("/api/save-setting", json={"key": "terminal_command", "value": "wt.exe"})
         body = resp.json()
         assert body["ok"] is True
         mock_save.assert_called_once()
@@ -548,3 +581,67 @@ def test_launcher_run_batch_not_found(mock_load, client):
     resp = client.post("/api/launcher/run-batch", json={"id": "nonexistent", "workspaces": ["C:\\proj"]})
     assert resp.status_code == 200
     assert "not found" in resp.text.lower()
+
+
+# --- Phase 5: Provider settings and default_args ---
+
+
+@patch("power_atlas.web.launcher.launch_session")
+@patch("power_atlas.web.load_config")
+def test_launch_uses_provider_default_args(mock_load, mock_launch, client, tmp_path):
+    """Launch endpoint passes default_args from provider_settings to launch_session."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config(provider_settings={
+        "kiro-cli": {"default_args": "-a --verbose", "color": "", "enabled": True},
+    })
+    mock_launch.return_value = LaunchResult(True, None, str(tmp_path))
+
+    resp = client.post("/api/launch", json={
+        "workspace": str(tmp_path),
+        "provider": "kiro-cli",
+    })
+    assert resp.status_code == 200
+    mock_launch.assert_called_once()
+    call_kwargs = mock_launch.call_args[1]
+    assert call_kwargs["default_args"] == "-a --verbose"
+
+
+@patch("power_atlas.web.launcher.launch_session")
+@patch("power_atlas.web.load_config")
+def test_launch_no_provider_settings_uses_empty_default_args(mock_load, mock_launch, client, tmp_path):
+    """Launch endpoint passes empty default_args when no provider_settings configured."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config()
+    mock_launch.return_value = LaunchResult(True, None, str(tmp_path))
+
+    resp = client.post("/api/launch", json={
+        "workspace": str(tmp_path),
+        "provider": "kiro-cli",
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_launch.call_args[1]
+    assert call_kwargs["default_args"] == ""
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_disabled_provider_hidden_from_tabs(mock_discover, mock_config, mock_providers, client, tmp_path):
+    """Disabling a provider via provider_settings hides it from the tab bar."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(provider_settings={
+        "claude-code": {"default_args": "", "color": "", "enabled": False},
+    })
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # claude-code tab should not be rendered
+    assert "provider=claude-code" not in resp.text
+    # kiro-cli tab should still be there (but single provider = no tabs)
+    # With only one enabled provider, no tab bar at all
+    assert "provider-tabs" not in resp.text

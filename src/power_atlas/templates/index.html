@@ -10,9 +10,6 @@
       {% endif %}
     {% endfor %}
   </select>
-  <div class="trust-toggle{% if trust_all_tools %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/toggle-trust',{method:'POST'})">
-    <span class="trust-dot"></span>Trust all
-  </div>
   <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})">
     <span class="trust-dot"></span>Autostart
   </div>
@@ -71,6 +68,13 @@ var _tailTimers={};function loadTail(el){var row=el.closest('.session-row');var 
 </script>
 {% include "partials/emoji_picker.html" %}
 {% include "partials/launcher_modal.html" %}
+{% include "partials/provider_modal.html" %}
+<script>
+var _providerSettings={{provider_settings|tojson}};
+function openProviderModal(key){fetch('/api/provider/'+encodeURIComponent(key)).then(function(r){return r.json()}).then(function(d){document.getElementById('providerKey').value=key;document.getElementById('providerName').value=key;document.getElementById('providerArgs').value=d.default_args||'';document.getElementById('providerEnabled').checked=d.enabled!==false;document.getElementById('providerModalTitle').textContent='Provider Settings — '+(key);document.getElementById('providerModal').showModal()})}
+function saveProvider(e){e.preventDefault();var key=document.getElementById('providerKey').value;var payload={provider:key,default_args:document.getElementById('providerArgs').value,color:'',enabled:document.getElementById('providerEnabled').checked};fetch('/api/provider/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('providerModal').close();refreshCards()})}
+(function(){if(_providerSettings&&_providerSettings['kiro-cli']&&_providerSettings['kiro-cli'].default_args==='-a'&&!sessionStorage.getItem('pa_migration_toast')){sessionStorage.setItem('pa_migration_toast','1');setTimeout(function(){showToast('<div class="toast toast-success">Trust All is now per-provider \u2014 click \u2699\ufe0f on the provider tab to configure.<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')},1000)}})();
+</script>
 <script>
 var _launchers={{launchers|tojson}};
 function getSelectedWorkspaceCwds(){var cwds=[];document.querySelectorAll('.workspace-card.selected').forEach(function(c){cwds.push(c.dataset.cwd)});document.querySelectorAll('.session-row.selected').forEach(function(r){var cwd=r.dataset.cwd;if(cwd&&cwds.indexOf(cwd)===-1)cwds.push(cwd)});return cwds}

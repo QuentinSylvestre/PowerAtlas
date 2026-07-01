@@ -16,10 +16,9 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 def test_round_trip():
-    cfg = Config(trust_all_tools=True, terminal_command="wt.exe", pinned_folders=["/a", "/b"])
+    cfg = Config(terminal_command="wt.exe", pinned_folders=["/a", "/b"])
     save_config(cfg)
     loaded = load_config()
-    assert loaded.trust_all_tools is True
     assert loaded.terminal_command == "wt.exe"
     assert loaded.pinned_folders == ["/a", "/b"]
     assert loaded.pinned_sessions == []
@@ -31,9 +30,9 @@ def test_missing_keys_use_defaults():
     from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump({"trust_all_tools": True}, f)
+        tomli_w.dump({"terminal_command": "wt.exe"}, f)
     cfg = load_config()
-    assert cfg.trust_all_tools is True
+    assert cfg.terminal_command == "wt.exe"
     assert cfg.peek_hotkey == "ctrl+shift+z"  # default
     assert cfg.pinned_folders == []  # default
 
@@ -44,9 +43,9 @@ def test_unknown_keys_ignored():
     from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump({"trust_all_tools": False, "unknown_key": "hello", "extra": 42}, f)
+        tomli_w.dump({"terminal_command": "cmd", "unknown_key": "hello", "extra": 42}, f)
     cfg = load_config()
-    assert cfg.trust_all_tools is False
+    assert cfg.terminal_command == "cmd"
     assert not hasattr(cfg, "unknown_key")
 
 
@@ -69,7 +68,7 @@ def test_thread_safety():
         try:
             cfg = load_config()
             # Should always be a valid Config
-            assert isinstance(cfg.trust_all_tools, bool)
+            assert isinstance(cfg.terminal_command, str)
         except Exception as e:
             errors.append(e)
 
@@ -98,15 +97,11 @@ def test_wrong_type_bool_gets_default():
     import tomli_w
     from power_atlas.config import CONFIG_PATH, CONFIG_DIR
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # peek_hotkey should be str — test that int falls back to default
     with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump({"trust_all_tools": "yes"}, f)
+        tomli_w.dump({"peek_hotkey": 42}, f)
     cfg = load_config()
-    assert cfg.trust_all_tools is False  # default (str != bool)
-    # Also test int != bool (TOML distinguishes these)
-    with open(CONFIG_PATH, "wb") as f:
-        tomli_w.dump({"trust_all_tools": 1}, f)
-    cfg = load_config()
-    assert cfg.trust_all_tools is False  # default (int != bool)
+    assert cfg.peek_hotkey == "ctrl+shift+z"  # default (int != str)
 
 
 def test_wrong_type_str_gets_default():
@@ -160,3 +155,63 @@ def test_peek_hotkey_round_trip():
     save_config(cfg)
     loaded = load_config()
     assert loaded.peek_hotkey == "alt+p"
+
+
+def test_provider_settings_round_trip():
+    """provider_settings dict persists through save/load cycle."""
+    settings = {
+        "kiro-cli": {"default_args": "-a --verbose", "color": "#4a6ede", "enabled": True},
+        "claude-code": {"default_args": "", "color": "#c2590f", "enabled": False},
+    }
+    cfg = Config(provider_settings=settings)
+    save_config(cfg)
+    loaded = load_config()
+    assert loaded.provider_settings == settings
+
+
+def test_trust_all_tools_migration():
+    """trust_all_tools=true migrates to provider_settings['kiro-cli'].default_args='-a'."""
+    import tomli_w
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"trust_all_tools": True, "terminal_command": "wt.exe"}, f)
+    cfg = load_config()
+    assert cfg.provider_settings == {"kiro-cli": {"default_args": "-a", "color": "", "enabled": True}}
+    assert cfg.terminal_command == "wt.exe"
+
+
+def test_trust_all_tools_no_migration_when_provider_settings_exist():
+    """trust_all_tools=true does NOT migrate if provider_settings already exist."""
+    import tomli_w
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    existing = {"claude-code": {"default_args": "--dangerously-skip-permissions", "color": "", "enabled": True}}
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"trust_all_tools": True, "provider_settings": existing}, f)
+    cfg = load_config()
+    assert cfg.provider_settings == existing
+    # No kiro-cli entry added
+    assert "kiro-cli" not in cfg.provider_settings
+
+
+def test_trust_all_tools_false_no_migration():
+    """trust_all_tools=false does not trigger migration."""
+    import tomli_w
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump({"trust_all_tools": False}, f)
+    cfg = load_config()
+    assert cfg.provider_settings == {}
+
+
+def test_save_config_drops_trust_all_tools():
+    """save_config never writes trust_all_tools to TOML."""
+    import tomllib
+    from power_atlas.config import CONFIG_PATH
+    cfg = Config(provider_settings={"kiro-cli": {"default_args": "-a", "color": "", "enabled": True}})
+    save_config(cfg)
+    with open(CONFIG_PATH, "rb") as f:
+        raw = tomllib.load(f)
+    assert "trust_all_tools" not in raw

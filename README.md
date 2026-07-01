@@ -1,6 +1,6 @@
 # PowerAtlas
 
-Desktop launcher and dashboard for kiro-cli sessions. System tray icon with a web UI for discovering, resuming, and batch-launching kiro-cli workspaces.
+Desktop launcher and dashboard for kiro-cli and Claude Code sessions. System tray icon with a web UI for discovering, resuming, and batch-launching AI coding assistant workspaces.
 
 Supports **Windows** and **Linux**.
 
@@ -31,10 +31,10 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 
 ### Features
 
-- Auto-discovers workspaces from kiro-cli session data
+- Auto-discovers workspaces from kiro-cli and Claude Code session data
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Multi-select and batch launch sessions
-- Trust-all-tools toggle applies to all launches
+- Per-provider settings with default args (e.g. trust-all-tools)
 - Pin folders and sessions for quick access
 - Search across all workspaces and sessions
 - Custom launchers with inline args editing and one-click execution
@@ -50,11 +50,20 @@ Config stored at:
 - Linux: `~/.config/power-atlas/config.toml`
 
 ```toml
-trust_all_tools = false
 peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
 terminal_command = ""  # empty = auto-detect (platform-specific)
 pinned_folders = []
 pinned_sessions = []
+
+[provider_settings.kiro-cli]
+default_args = "-a"  # e.g. trust-all-tools
+color = ""
+enabled = true
+
+[provider_settings.claude-code]
+default_args = ""
+color = ""
+enabled = true
 ```
 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).

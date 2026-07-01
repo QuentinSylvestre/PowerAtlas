@@ -27,13 +27,13 @@ _lock = threading.Lock()
 
 @dataclass
 class Config:
-    trust_all_tools: bool = False
     peek_hotkey: str = "ctrl+shift+z"
     terminal_command: str = ""
     pinned_folders: list[str] = field(default_factory=list)
     pinned_sessions: list[str] = field(default_factory=list)
     workspace_icons: dict[str, str] = field(default_factory=dict)
     custom_launchers: list[dict] = field(default_factory=list)
+    provider_settings: dict[str, dict] = field(default_factory=dict)
 
 
 def load_config() -> Config:
@@ -56,7 +56,15 @@ def load_config() -> Config:
             if isinstance(v, expected):
                 kwargs[k] = v
             # else: skip — default will fill in via dataclass
-        return Config(**kwargs)
+        config = Config(**kwargs)
+        # Migration: trust_all_tools=true → provider_settings["kiro-cli"].default_args = "-a"
+        if data.get("trust_all_tools") is True and not config.provider_settings:
+            config.provider_settings["kiro-cli"] = {
+                "default_args": "-a",
+                "color": "",
+                "enabled": True,
+            }
+        return config
 
 
 def save_config(config: Config) -> None:
@@ -65,8 +73,10 @@ def save_config(config: Config) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG_PATH.with_suffix(".tmp")
         try:
+            data = asdict(config)
+            data.pop("trust_all_tools", None)  # never write legacy key
             with open(tmp, "wb") as f:
-                tomli_w.dump(asdict(config), f)
+                tomli_w.dump(data, f)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, CONFIG_PATH)

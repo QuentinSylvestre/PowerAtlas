@@ -1,0 +1,13 @@
+<dialog class="provider-modal" id="providerModal">
+  <form method="dialog" onsubmit="saveProvider(event)">
+    <h3 id="providerModalTitle">Provider Settings</h3>
+    <input type="hidden" id="providerKey" value="">
+    <label>Name <input type="text" id="providerName" readonly></label>
+    <label>Default args <input type="text" id="providerArgs" placeholder="e.g. -a --verbose"></label>
+    <label class="launcher-checkbox"><input type="checkbox" id="providerEnabled" checked> Enabled</label>
+    <div class="modal-actions">
+      <button type="button" class="modal-cancel-btn" onclick="document.getElementById('providerModal').close()">Cancel</button>
+      <button type="submit" class="action-btn launch">Save</button>
+    </div>
+  </form>
+</dialog>

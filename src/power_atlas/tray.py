@@ -11,7 +11,7 @@ from typing import Callable
 import pystray
 from PIL import Image, ImageDraw
 
-from .config import Config, CONFIG_DIR, load_config, save_config
+from .config import Config, CONFIG_DIR, load_config
 
 log = logging.getLogger("power_atlas.tray")
 
@@ -62,12 +62,6 @@ def run_tray(server_url: str, config: Config) -> None:
         except Exception as e:
             log.error("Failed to open browser: %s", e)
 
-    def on_trust(icon, item):
-        fresh = load_config()
-        fresh.trust_all_tools = not fresh.trust_all_tools
-        save_config(fresh)
-        config.trust_all_tools = fresh.trust_all_tools
-
     def on_logs(icon, item):
         log_path = CONFIG_DIR / "orchestrator.log"
         if log_path.exists():
@@ -99,7 +93,6 @@ def run_tray(server_url: str, config: Config) -> None:
 
     menu = pystray.Menu(
         pystray.MenuItem("Open", on_open, default=True),
-        pystray.MenuItem("Trust All Tools", on_trust, checked=lambda item: config.trust_all_tools),
         pystray.MenuItem("Logs", on_logs),
         pystray.MenuItem("Restart", on_restart),
         pystray.MenuItem("Quit", on_quit),
