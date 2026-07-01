@@ -765,6 +765,8 @@ async def launcher_icon(launcher_id: str):
     # Handle provider launcher icons
     if launcher_id.startswith("provider--"):
         provider_key = launcher_id[len("provider--"):]
+        if icons.has_icon(launcher_id):
+            return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
         binary = launcher._PROVIDER_BINARY.get(provider_key, provider_key)
         icons.extract_icon(launcher_id, binary, True)
         if icons.has_icon(launcher_id):
