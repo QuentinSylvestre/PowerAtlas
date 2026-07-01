@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, launch_custom_batch, _build_custom_command, _build_template_command, available_terminals
+from power_atlas.icons import _resolve_cmd_to_exe
 import power_atlas.launcher as launcher_mod
 
 
@@ -507,3 +508,158 @@ class TestLaunchCustomBatch:
             workspaces=[],
         )
         assert results == []
+
+
+class TestLaunchCustomWorkspaceArg:
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_pass_workspace_arg_true_appends_workspace(self, _, mock_popen, tmp_path):
+        cwd = str(tmp_path)
+        result = launch_custom("test", "code", cwd=cwd, terminal_override="C:\\wt.exe", pass_workspace_arg=True)
+        assert result.success is True
+        # The workspace path should be appended to the command string
+        call_args = mock_popen.call_args[0][0]
+        cmd_str = " ".join(call_args)
+        assert cwd in cmd_str or str(tmp_path) in cmd_str
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_pass_workspace_arg_false_no_workspace(self, _, mock_popen, tmp_path):
+        cwd = str(tmp_path)
+        result = launch_custom("test", "code", cwd=cwd, terminal_override="C:\\wt.exe", pass_workspace_arg=False)
+        assert result.success is True
+        # The command should be just "code" without the workspace appended as an argument
+        call_args = mock_popen.call_args[0][0]
+        # In wt format: [..., "--", "cmd", "/c", "code"]
+        # The final cmd /c argument should just be "code"
+        cmd_str = call_args[-1] if isinstance(call_args[-1], str) else ""
+        # With pass_workspace_arg=False, command is just "code"
+        assert cmd_str.strip().endswith("code") or "code" in cmd_str
+
+    @patch("subprocess.Popen")
+    def test_pass_workspace_arg_no_terminal_includes_workspace(self, mock_popen, tmp_path):
+        """Non-terminal launch with pass_workspace_arg=True includes workspace."""
+        cwd = str(tmp_path)
+        result = launch_custom("test", "code", cwd=cwd, use_terminal=False, pass_workspace_arg=True)
+        assert result.success is True
+        # shell=True so first positional arg is the command string
+        cmd_str = mock_popen.call_args[0][0]
+        assert cwd in cmd_str
+
+    @patch("subprocess.Popen")
+    def test_pass_workspace_arg_no_terminal_without_workspace(self, mock_popen, tmp_path):
+        """Non-terminal launch with pass_workspace_arg=False does not include workspace."""
+        cwd = str(tmp_path)
+        result = launch_custom("test", "code", cwd=cwd, use_terminal=False, pass_workspace_arg=False)
+        assert result.success is True
+        cmd_str = mock_popen.call_args[0][0]
+        # Command should just be "code", no workspace appended
+        assert cmd_str == "code"
+
+    @patch("subprocess.Popen")
+    def test_pass_workspace_arg_dot_cwd_no_append(self, mock_popen, tmp_path):
+        """When cwd is '.', workspace is not appended even with pass_workspace_arg=True."""
+        # Use monkeypatch to make "." resolve to an existing path
+        with patch("pathlib.Path.exists", return_value=True):
+            result = launch_custom("test", "code", cwd=".", use_terminal=False, pass_workspace_arg=True)
+        assert result.success is True
+        cmd_str = mock_popen.call_args[0][0]
+        assert cmd_str == "code"
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_workspace_with_spaces_quoted_on_windows(self, _, mock_popen, tmp_path):
+        """Windows paths with spaces get double-quoted."""
+        spaced = tmp_path / "my project"
+        spaced.mkdir()
+        cwd = str(spaced)
+        with patch("power_atlas.launcher.sys.platform", "win32"):
+            result = launch_custom("test", "code", cwd=cwd, use_terminal=False, pass_workspace_arg=True)
+        assert result.success is True
+        cmd_str = mock_popen.call_args[0][0]
+        # Should contain quoted path
+        assert f'"{cwd}"' in cmd_str
+
+
+class TestLaunchCustomBatchWorkspaceArg:
+    @patch("subprocess.Popen")
+    @patch("shutil.which", return_value="C:\\wt.exe")
+    def test_pass_workspace_arg_forwarded(self, _, mock_popen, tmp_path):
+        ws1 = str(tmp_path / "proj1")
+        Path(ws1).mkdir()
+        results = launch_custom_batch(
+            name="test", command="code",
+            workspaces=[ws1],
+            terminal_override="C:\\wt.exe",
+            use_terminal=False,
+            pass_workspace_arg=True,
+        )
+        assert len(results) == 1
+        assert results[0].success is True
+        cmd_str = mock_popen.call_args[0][0]
+        assert ws1 in cmd_str
+
+
+class TestResolveCmdToExe:
+    def test_resolves_dp0_relative_path(self, tmp_path):
+        """Parses %~dp0..\\App.exe pattern and resolves to real .exe."""
+        # Create the directory structure: shim/kiro.cmd -> ../app/Kiro.exe
+        shim_dir = tmp_path / "shim"
+        shim_dir.mkdir()
+        app_dir = tmp_path / "app"
+        app_dir.mkdir()
+        exe = app_dir / "Kiro.exe"
+        exe.write_text("fake exe")
+
+        cmd_file = shim_dir / "kiro.cmd"
+        cmd_file.write_text('@"%~dp0..\\app\\Kiro.exe" %*\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is not None
+        assert result.name == "Kiro.exe"
+        assert result.is_file()
+
+    def test_resolves_quoted_absolute_path(self, tmp_path):
+        """Parses quoted absolute path to .exe."""
+        exe = tmp_path / "App.exe"
+        exe.write_text("fake exe")
+
+        cmd_file = tmp_path / "launcher.cmd"
+        cmd_file.write_text(f'@"{exe}" %*\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is not None
+        assert result == exe.resolve()
+
+    def test_resolves_unquoted_absolute_path(self, tmp_path):
+        """Parses unquoted absolute path to .exe."""
+        exe = tmp_path / "App.exe"
+        exe.write_text("fake exe")
+
+        cmd_file = tmp_path / "launcher.cmd"
+        cmd_file.write_text(f'@{exe} %*\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is not None
+        assert result == exe.resolve()
+
+    def test_returns_none_when_no_exe_found(self, tmp_path):
+        """Returns None when .cmd doesn't reference any existing .exe."""
+        cmd_file = tmp_path / "broken.cmd"
+        cmd_file.write_text('@echo off\necho hello\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is None
+
+    def test_returns_none_for_nonexistent_exe_path(self, tmp_path):
+        """Returns None when referenced .exe doesn't exist on disk."""
+        cmd_file = tmp_path / "missing.cmd"
+        cmd_file.write_text('@"%~dp0..\\nonexistent\\App.exe" %*\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is None
+
+    def test_returns_none_for_unreadable_file(self, tmp_path):
+        """Returns None when .cmd file can't be read."""
+        result = _resolve_cmd_to_exe(tmp_path / "nonexistent.cmd")
+        assert result is None

@@ -47,6 +47,10 @@ def extract_icon(launcher_id: str, command: str, is_terminal: bool) -> bool:
 
     # Resolve the binary path (first token of command)
     binary = _resolve_binary(command)
+    if binary and binary.suffix.lower() in (".cmd", ".bat"):
+        resolved = _resolve_cmd_to_exe(binary)
+        if resolved:
+            binary = resolved
     if binary and binary.suffix.lower() in (".exe", ".msi") and sys.platform == "win32":
         if _extract_windows_icon(binary, target):
             return True
@@ -64,6 +68,47 @@ def remove_icon(launcher_id: str) -> None:
 def default_icon_svg(is_terminal: bool) -> str:
     """Return the appropriate default SVG icon markup."""
     return _TERMINAL_ICON if is_terminal else _APP_ICON
+
+
+def _resolve_cmd_to_exe(cmd_path: Path) -> Path | None:
+    """Parse a .cmd/.bat shim to find the underlying .exe it wraps.
+
+    Common patterns (e.g. Electron apps installed via npm/scoop):
+      - %~dp0..\\App.exe  (relative to shim directory)
+      - "%~dp0..\\App.exe"
+      - "C:\\Absolute\\Path\\App.exe"
+      - C:\\Absolute\\Path\\App.exe
+    """
+    import re as _re
+
+    try:
+        content = cmd_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+
+    cmd_dir = cmd_path.parent
+
+    # Pattern 1: %~dp0-relative paths (Electron/scoop shim pattern)
+    # Matches both quoted and unquoted: "%~dp0..\app.exe" or %~dp0..\app.exe
+    for match in _re.finditer(r'["\']?%~dp0([^"\s\r\n]+\.exe)["\']?', content, _re.IGNORECASE):
+        rel = match.group(1)
+        candidate = (cmd_dir / rel).resolve()
+        if candidate.is_file():
+            return candidate
+
+    # Pattern 2: Quoted absolute paths
+    for match in _re.finditer(r'"([A-Za-z]:\\[^"]+\.exe)"', content):
+        candidate = Path(match.group(1))
+        if candidate.is_file():
+            return candidate
+
+    # Pattern 3: Unquoted absolute paths
+    for match in _re.finditer(r'(?<!")([A-Za-z]:\\[^\s"]+\.exe)', content):
+        candidate = Path(match.group(1))
+        if candidate.is_file():
+            return candidate
+
+    return None
 
 
 def _resolve_binary(command: str) -> Path | None:

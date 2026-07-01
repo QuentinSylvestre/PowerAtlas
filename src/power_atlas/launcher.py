@@ -299,6 +299,7 @@ def launch_custom_batch(
     env: dict[str, str] | None = None,
     terminal_override: str = "",
     use_terminal: bool = True,
+    pass_workspace_arg: bool = False,
 ) -> list[LaunchResult]:
     """Launch a custom command once per workspace. Returns list of results."""
     results = []
@@ -307,17 +308,28 @@ def launch_custom_batch(
         results.append(launch_custom(
             name=name, command=command, custom_args=custom_args,
             cwd=cwd, env=env, terminal_override=terminal_override,
-            use_terminal=use_terminal,
+            use_terminal=use_terminal, pass_workspace_arg=pass_workspace_arg,
         ))
     return results
 
 
-def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "", use_terminal: bool = True) -> LaunchResult:
+def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "", use_terminal: bool = True, pass_workspace_arg: bool = False) -> LaunchResult:
     """Launch a custom command, optionally in a terminal."""
     work_dir = cwd or "."
     if not Path(work_dir).exists():
         return LaunchResult(False, None, work_dir, error=f"Folder not found: {work_dir}")
     full_cmd_str = f"{command} {custom_args}".strip() if custom_args else command
+
+    # Append workspace path as argument when requested and a real workspace is set
+    if pass_workspace_arg and work_dir != ".":
+        if sys.platform == "win32":
+            # Quote paths with spaces; no inner-quote escaping needed since NTFS
+            # forbids " in filenames so work_dir can never contain one.
+            quoted_ws = f'"{work_dir}"' if " " in work_dir else work_dir
+        else:
+            quoted_ws = shlex.quote(work_dir)
+        full_cmd_str = f"{full_cmd_str} {quoted_ws}"
+
     proc_env = {**os.environ, **env} if env else None
     kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
     if proc_env:
