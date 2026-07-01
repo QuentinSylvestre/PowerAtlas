@@ -480,7 +480,7 @@ async def api_launch(request: Request):
     result = launcher.launch_session(
         cwd=body["workspace"],
         session_id=body.get("session_id"),
-        trust_all=config.trust_all_tools,
+        provider=body.get("provider", "kiro-cli"),
         terminal_override=config.terminal_command,
     )
     level = "success" if result.success else "error"
@@ -494,7 +494,6 @@ async def api_launch_batch(request: Request):
     config = load_config()
     results = launcher.launch_batch(
         sessions=body["sessions"],
-        trust_all=config.trust_all_tools,
         terminal_override=config.terminal_command,
     )
     ok = sum(1 for r in results if r.success)
@@ -513,7 +512,7 @@ async def api_new_session(request: Request):
     result = launcher.launch_session(
         cwd=body["workspace"],
         session_id=None,
-        trust_all=config.trust_all_tools,
+        provider=body.get("provider", "kiro-cli"),
         terminal_override=config.terminal_command,
     )
     level = "success" if result.success else "error"

@@ -86,13 +86,34 @@ def available_terminals() -> list[tuple[str, str]]:
     return list(result)
 
 
+_PROVIDER_DISPLAY = {
+    "kiro-cli": "Kiro CLI",
+    "claude-code": "Claude Code",
+}
+
+_PROVIDER_BINARY = {
+    "kiro-cli": "kiro-cli",
+    "claude-code": "claude",
+}
+
+
 def launch_session(
     cwd: str,
     session_id: str | None = None,
-    trust_all: bool = False,
+    provider: str = "kiro-cli",
+    default_args: str = "",
     terminal_override: str = "",
 ) -> LaunchResult:
-    """Launch a kiro-cli session in a terminal. Returns result, never raises."""
+    """Launch a provider session in a terminal. Returns result, never raises."""
+    binary = _PROVIDER_BINARY.get(provider, provider)
+    display = _PROVIDER_DISPLAY.get(provider, provider)
+
+    if not shutil.which(binary):
+        return LaunchResult(
+            False, session_id, cwd,
+            error=f"'{binary}' not found on PATH. Install {display} or check your PATH.",
+        )
+
     terminal = detect_terminal(terminal_override)
     if not terminal:
         if sys.platform == "win32":
@@ -107,14 +128,21 @@ def launch_session(
     if session_id and not _SESSION_ID_RE.match(session_id):
         return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
 
-    kiro_args = ["kiro-cli", "chat"]
-    if session_id:
-        kiro_args += ["--resume-id", session_id]
-    if trust_all:
-        kiro_args.append("-a")
+    # Build args based on provider
+    if provider == "claude-code":
+        cli_args = ["claude"]
+        if session_id:
+            cli_args += ["--resume", session_id]
+    else:
+        cli_args = ["kiro-cli", "chat"]
+        if session_id:
+            cli_args += ["--resume-id", session_id]
 
-    title = f"kiro-cli - {Path(cwd).name}"
-    cmd = _build_command(terminal, cwd, kiro_args, title=title)
+    if default_args:
+        cli_args += shlex.split(default_args)
+
+    title = f"{display} - {Path(cwd).name}"
+    cmd = _build_command(terminal, cwd, cli_args, title=title)
     if cmd is None:
         return LaunchResult(False, session_id, cwd, error="Path contains shell metacharacters unsafe for cmd.exe")
 
@@ -128,7 +156,7 @@ def launch_session(
 
 def launch_batch(
     sessions: list[dict],
-    trust_all: bool = False,
+    default_args: str = "",
     terminal_override: str = "",
 ) -> list[LaunchResult]:
     """Launch multiple sessions. Never aborts on single failure."""
@@ -141,7 +169,8 @@ def launch_batch(
         results.append(launch_session(
             cwd=workspace,
             session_id=s.get("session_id"),
-            trust_all=trust_all,
+            provider=s.get("provider", "kiro-cli"),
+            default_args=default_args,
             terminal_override=terminal_override,
         ))
     return results

@@ -55,31 +55,110 @@ class TestBuildCommand:
 
 class TestLaunchSession:
     @patch("subprocess.Popen")
-    @patch("shutil.which", return_value="C:\\Windows\\System32\\cmd.exe")
-    def test_success(self, _, mock_popen, tmp_path):
+    @patch("shutil.which")
+    def test_success(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "cmd": "C:\\cmd.exe"}.get(n, "C:\\cmd.exe" if n == "cmd" else None)
         cwd = str(tmp_path)
-        result = launch_session(cwd, session_id="abc123", trust_all=True)
+        result = launch_session(cwd, session_id="abc123")
         assert result.success is True
         assert result.session_id == "abc123"
         assert result.workspace == cwd
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         assert "--resume-id" in " ".join(cmd)
-        assert "-a" in " ".join(cmd)
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_session_kiro_builds_correct_args(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", terminal_override="C:\\wt.exe")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        cmd_str = " ".join(cmd)
+        assert "kiro-cli" in cmd_str
+        assert "chat" in cmd_str
+        assert "--resume-id" in cmd_str
+        assert "sess-1" in cmd_str
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_session_claude_builds_correct_args(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"claude": "C:\\claude.exe", "wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id="sess-abc", provider="claude-code", terminal_override="C:\\wt.exe")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        cmd_str = " ".join(cmd)
+        assert "claude" in cmd_str
+        assert "--resume" in cmd_str
+        assert "sess-abc" in cmd_str
+        # Should NOT have kiro-cli specific flags
+        assert "kiro-cli" not in cmd_str
+        assert "--resume-id" not in cmd_str
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_session_claude_new_session(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"claude": "C:\\claude.exe", "wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id=None, provider="claude-code", terminal_override="C:\\wt.exe")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        cmd_str = " ".join(cmd)
+        assert "claude" in cmd_str
+        # No --resume when session_id=None
+        assert "--resume" not in cmd_str
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_session_default_args_appended(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id="s1", provider="kiro-cli", default_args="--verbose --model opus", terminal_override="C:\\wt.exe")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        cmd_str = " ".join(cmd)
+        assert "--verbose" in cmd_str
+        assert "--model" in cmd_str
+        assert "opus" in cmd_str
+
+    @patch("shutil.which")
+    def test_launch_session_binary_not_found(self, mock_which, tmp_path):
+        mock_which.return_value = None
+        cwd = str(tmp_path)
+        result = launch_session(cwd, provider="claude-code")
+        assert result.success is False
+        assert "'claude' not found on PATH" in result.error
+        assert "Claude Code" in result.error
+
+    @patch("shutil.which")
+    def test_launch_session_kiro_binary_not_found(self, mock_which, tmp_path):
+        mock_which.return_value = None
+        cwd = str(tmp_path)
+        result = launch_session(cwd, provider="kiro-cli")
+        assert result.success is False
+        assert "'kiro-cli' not found on PATH" in result.error
+        assert "Kiro CLI" in result.error
 
     def test_deleted_folder(self):
-        result = launch_session("C:\\nonexistent\\path\\xyz", terminal_override="wt.exe")
-        assert result.success is False
-        assert "not found" in result.error.lower()
+        with patch("shutil.which", return_value="C:\\kiro-cli.exe"):
+            result = launch_session("C:\\nonexistent\\path\\xyz", terminal_override="wt.exe")
+            assert result.success is False
+            assert "not found" in result.error.lower()
 
-    @patch("shutil.which", return_value=None)
-    def test_no_terminal(self, _, tmp_path):
+    @patch("shutil.which")
+    def test_no_terminal(self, mock_which, tmp_path):
+        # Binary found but no terminal
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe"}.get(n)
         result = launch_session(str(tmp_path))
         assert result.success is False
         assert "no terminal" in result.error.lower()
 
     @patch("subprocess.Popen")
-    def test_custom_template(self, mock_popen, tmp_path):
+    @patch("shutil.which")
+    def test_custom_template(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe"}.get(n)
         cwd = str(tmp_path)
         template = "myterm --dir {cwd} --exec {cmd}"
         result = launch_session(cwd, session_id=None, terminal_override=template)
@@ -89,10 +168,12 @@ class TestLaunchSession:
         assert cwd in " ".join(cmd)
 
     @patch("subprocess.Popen")
-    def test_cmd_metachar_rejected(self, mock_popen, tmp_path):
+    @patch("shutil.which")
+    def test_cmd_metachar_rejected(self, mock_which, mock_popen, tmp_path):
         # Create a directory with & in the name
         bad_dir = tmp_path / "a&b"
         bad_dir.mkdir()
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "cmd": "C:\\cmd.exe"}.get(n)
         result = launch_session(str(bad_dir), terminal_override="C:\\cmd.exe")
         assert result.success is False
         assert "metacharacters" in result.error.lower()
@@ -101,13 +182,14 @@ class TestLaunchSession:
 
 class TestLaunchBatch:
     @patch("subprocess.Popen")
-    @patch("shutil.which", return_value="C:\\wt.exe")
-    def test_mixed_results(self, _, mock_popen, tmp_path):
+    @patch("shutil.which")
+    def test_mixed_results(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": "C:\\wt.exe"}.get(n)
         good = str(tmp_path)
         bad = "C:\\nonexistent\\nope"
         sessions = [
-            {"session_id": "s1", "workspace": good},
-            {"session_id": "s2", "workspace": bad},
+            {"session_id": "s1", "workspace": good, "provider": "kiro-cli"},
+            {"session_id": "s2", "workspace": bad, "provider": "kiro-cli"},
         ]
         results = launch_batch(sessions, terminal_override="C:\\wt.exe")
         assert len(results) == 2
@@ -117,11 +199,12 @@ class TestLaunchBatch:
         assert mock_popen.call_count == 1
 
     @patch("subprocess.Popen")
-    @patch("shutil.which", return_value="C:\\wt.exe")
-    def test_missing_workspace_key(self, _, mock_popen, tmp_path):
+    @patch("shutil.which")
+    def test_missing_workspace_key(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": "C:\\wt.exe"}.get(n)
         good = str(tmp_path)
         sessions = [
-            {"session_id": "s1", "workspace": good},
+            {"session_id": "s1", "workspace": good, "provider": "kiro-cli"},
             {"session_id": "s2"},  # missing workspace
         ]
         results = launch_batch(sessions, terminal_override="C:\\wt.exe")
@@ -130,6 +213,25 @@ class TestLaunchBatch:
         assert results[1].success is False
         assert "missing" in results[1].error.lower()
         assert results[1].workspace == "<unknown>"
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_batch_mixed_providers(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "claude": "C:\\claude.exe", "wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        sessions = [
+            {"session_id": "s1", "workspace": cwd, "provider": "kiro-cli"},
+            {"session_id": "s2", "workspace": cwd, "provider": "claude-code"},
+        ]
+        results = launch_batch(sessions, terminal_override="C:\\wt.exe")
+        assert len(results) == 2
+        assert results[0].success is True
+        assert results[1].success is True
+        # Verify different commands were built
+        call1 = " ".join(mock_popen.call_args_list[0][0][0])
+        call2 = " ".join(mock_popen.call_args_list[1][0][0])
+        assert "kiro-cli" in call1
+        assert "claude" in call2
 
 
 
