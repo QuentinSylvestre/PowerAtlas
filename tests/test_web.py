@@ -645,3 +645,70 @@ def test_disabled_provider_hidden_from_tabs(mock_discover, mock_config, mock_pro
     # kiro-cli tab should still be there (but single provider = no tabs)
     # With only one enabled provider, no tab bar at all
     assert "provider-tabs" not in resp.text
+
+
+# --- Phase 3 (unification): Provider-launcher tiles in grid ---
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.load_config")
+def test_partials_launchers_provider_tiles_before_custom(mock_load, mock_providers, client):
+    """Provider tiles render before custom launchers in the grid."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(
+        custom_launchers=[{"id": "custom-1", "name": "My Script", "command": "python",
+                           "custom_args": "", "cwd": "", "env": {}, "color": "",
+                           "terminal": True, "use_selected_workspaces": False}],
+        provider_settings={"kiro-cli": {"default_args": "-a", "color": "", "enabled": True}},
+    )
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/launchers")
+    assert resp.status_code == 200
+    # Provider tile comes first
+    kiro_pos = resp.text.find('data-id="provider--kiro-cli"')
+    custom_pos = resp.text.find('data-id="custom-1"')
+    assert kiro_pos >= 0, "Provider tile not found"
+    assert custom_pos >= 0, "Custom tile not found"
+    assert kiro_pos < custom_pos, "Provider tile should appear before custom tile"
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.load_config")
+def test_provider_tile_has_correct_data_id(mock_load, mock_providers, client):
+    """Provider tile has data-id='provider--kiro-cli'."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/launchers")
+    assert resp.status_code == 200
+    assert 'data-id="provider--kiro-cli"' in resp.text
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.load_config")
+def test_disabled_provider_not_in_launcher_grid(mock_load, mock_providers, client):
+    """Disabled providers don't appear in the launcher grid."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(
+        provider_settings={"kiro-cli": {"default_args": "", "color": "", "enabled": False}},
+    )
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/launchers")
+    assert resp.status_code == 200
+    assert 'provider--kiro-cli' not in resp.text
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_tab_bar_no_gear_icons(mock_discover, mock_providers, client, tmp_path):
+    """Tab bar no longer has gear icons (no tab-gear class)."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "tab-gear" not in resp.text

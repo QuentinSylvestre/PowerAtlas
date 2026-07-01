@@ -1,8 +1,9 @@
-<div class="launcher-tile" data-id="{{ launcher.id }}" onclick="runLauncherById('{{ launcher.id }}')"{% if launcher.color %} style="border-left: 3px solid {{ launcher.color }}"{% endif %}>
+<div class="launcher-tile{% if launcher.is_provider %} provider-tile{% endif %}" data-id="{{ launcher.id }}" onclick="runLauncherById('{{ launcher.id }}')"{% if launcher.color %} style="border-left: 3px solid {{ launcher.color }}"{% endif %}>
+  {% if launcher.is_provider %}<span class="launcher-lock" title="System launcher">&#128274;</span>{% endif %}
   {% if launcher.use_selected_workspaces %}<span class="launcher-badge" id="badge-{{launcher.id}}"></span>{% endif %}
   <img class="launcher-icon" src="/api/launcher-icon/{{ launcher.id }}" alt="" aria-hidden="true">
   <span class="launcher-name">{{ launcher.name }}</span>
-  <button class="launcher-gear-btn" onclick="event.stopPropagation();editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">⚙️</button>
+  <button class="launcher-gear-btn" onclick="event.stopPropagation();editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">&#9881;&#65039;</button>
   <div class="launcher-tooltip">
     <div class="launcher-tooltip-row"><strong>Command:</strong> {{ launcher.command }}{% if launcher.custom_args %} {{ launcher.custom_args }}{% endif %}</div>
     {% if launcher.cwd %}<div class="launcher-tooltip-row"><strong>Cwd:</strong> {{ launcher.cwd }}</div>{% endif %}

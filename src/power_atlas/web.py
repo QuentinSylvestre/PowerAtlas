@@ -28,6 +28,10 @@ PROVIDER_BADGES = {
     "kiro-cli": "K",
     "claude-code": "C",
 }
+_PROVIDER_BINARY_DISPLAY = {
+    "kiro-cli": "kiro-cli chat",
+    "claude-code": "claude",
+}
 
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
@@ -327,8 +331,6 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             display_name = PROVIDER_DISPLAY_NAMES.get(p, p)
             cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML" hx-trigger="click">{display_name}</button>'
         cards_html += '<span class="tab-spacer"></span>'
-        for p in providers:
-            cards_html += f'<button class="tab-gear" onclick="openProviderModal(\'{p}\')" title="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}" aria-label="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}">&#9881;</button>'
         cards_html += '</div>'
 
     # Filter to non-pinned workspaces only
@@ -679,6 +681,24 @@ def _session_matches(session: data.Session, query: str) -> bool:
 async def partials_launchers(request: Request):
     config = load_config()
     html = ""
+    # Provider-launcher tiles first
+    providers = data.available_providers()
+    for p in providers:
+        settings = config.provider_settings.get(p, {})
+        if not settings.get("enabled", True):
+            continue
+        provider_launcher = {
+            "id": f"provider--{p}",
+            "name": PROVIDER_DISPLAY_NAMES.get(p, p),
+            "command": _PROVIDER_BINARY_DISPLAY.get(p, p),
+            "custom_args": settings.get("default_args", ""),
+            "color": settings.get("color", "") or PROVIDER_COLORS.get(p, ""),
+            "terminal": True,
+            "use_selected_workspaces": True,
+            "is_provider": True,
+        }
+        html += templates.get_template("partials/launcher_tile.html").render(request=request, launcher=provider_launcher)
+    # Custom launchers after
     for l in config.custom_launchers:
         html += templates.get_template("partials/launcher_tile.html").render(request=request, launcher=l)
     return HTMLResponse(html)
@@ -741,6 +761,16 @@ async def launcher_delete(request: Request):
 @app.get("/api/launcher-icon/{launcher_id}")
 async def launcher_icon(launcher_id: str):
     from fastapi.responses import FileResponse, Response
+
+    # Handle provider launcher icons
+    if launcher_id.startswith("provider--"):
+        provider_key = launcher_id[len("provider--"):]
+        binary = launcher._PROVIDER_BINARY.get(provider_key, provider_key)
+        icons.extract_icon(launcher_id, binary, True)
+        if icons.has_icon(launcher_id):
+            return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
+        svg = icons.default_icon_svg(True)
+        return Response(content=svg, media_type="image/svg+xml")
 
     if icons.has_icon(launcher_id):
         return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
