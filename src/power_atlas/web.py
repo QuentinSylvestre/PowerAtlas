@@ -580,6 +580,7 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                     html += templates.get_template("partials/session_row.html").render(
                         request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                         pinned_sessions=config.pinned_sessions,
+                        provider_color=PROVIDER_COLORS.get(prov_name, ""),
                     )
 
     # Fallback: pinned sessions not found in cache — read metadata directly (empty prompts)

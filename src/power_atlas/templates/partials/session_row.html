@@ -1,4 +1,4 @@
-<div class="session-row" data-sid="{{ session.session_id }}" data-cwd="{{ cwd }}" onclick="if(!event.target.closest('.session-actions')){this.classList.toggle('selected');updateActionBar()}">
+<div class="session-row" data-sid="{{ session.session_id }}" data-cwd="{{ cwd }}"{% if provider_color %} style="border-left: 3px solid {{ provider_color }}"{% endif %} onclick="if(!event.target.closest('.session-actions')){this.classList.toggle('selected');updateActionBar()}">
   <div class="session-check"></div>
   <div class="session-content" onmouseenter="loadTail(this)" onmouseleave="hideTail(this)">
     <div class="session-title-row">
