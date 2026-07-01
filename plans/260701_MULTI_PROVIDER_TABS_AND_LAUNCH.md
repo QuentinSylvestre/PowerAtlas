@@ -311,13 +311,16 @@ Added multi-provider tab UI: `partials_workspaces()` now accepts `?provider=` pa
    - Test binary-not-found error message.
 
 **Exit criteria**:
-- [ ] kiro-cli sessions launch with existing behavior (regression-free)
-- [ ] Claude Code sessions launch `claude --resume <id>` in correct cwd
-- [ ] New sessions launch bare `claude` / `kiro-cli chat` based on provider
-- [ ] `default_args` appended to launch commands
-- [ ] Clear error toast when provider binary not on PATH
-- [ ] Batch launch handles mixed providers correctly
-- [ ] All launcher tests pass
+- [x] kiro-cli sessions launch with existing behavior (regression-free)
+- [x] Claude Code sessions launch `claude --resume <id>` in correct cwd
+- [x] New sessions launch bare `claude` / `kiro-cli chat` based on provider
+- [x] `default_args` appended to launch commands
+- [x] Clear error toast when provider binary not on PATH
+- [x] Batch launch handles mixed providers correctly
+- [x] All launcher tests pass
+
+**Implementation (2026-07-01, code: 2a99314)**
+Made `launch_session` and `launch_batch` provider-aware. Replaced `trust_all: bool` with `provider: str` and `default_args: str` parameters. Added `_PROVIDER_DISPLAY` and `_PROVIDER_BINARY` lookup tables. Binary detection via `shutil.which()` returns clear error naming the missing binary. Builds provider-specific args: `kiro-cli chat --resume-id <id>` for kiro-cli, `claude --resume <id>` for claude-code. Web endpoints updated to read provider from request body. 6 new launcher tests added. All 184 tests pass.
 
 ### Phase 4: Selection-aware custom launchers [QA]
 
