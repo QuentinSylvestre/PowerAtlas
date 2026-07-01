@@ -1,7 +1,7 @@
 # Multi-Provider Tabs and Launch
 
 > **Date**: 2026-07-01
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Add Claude Code as a second provider alongside kiro-cli (tabbed UI, session discovery, contextual launch), plus selection-aware custom launchers for multi-app workspace launching.
 > **Estimated effort**: 3-5 days
 
@@ -216,13 +216,16 @@ None. No recurring cost changes.
    - Add tests for compound cache key behavior.
 
 **Exit criteria**:
-- [ ] `data_kiro.py` passes all extracted tests (existing kiro-cli behavior unchanged)
-- [ ] `data_claude.py` discovers real Claude Code sessions from `~/.claude/projects/`
-- [ ] Path decoding tested against all real project folders on disk
-- [ ] `data.py` orchestrates both providers, `available_providers()` returns correct list
-- [ ] SessionCache correctly isolates same-cwd entries from different providers
-- [ ] All existing `test_data.py` tests pass (may need import path updates)
-- [ ] New Claude Code parsing tests pass
+- [x] `data_kiro.py` passes all extracted tests (existing kiro-cli behavior unchanged)
+- [x] `data_claude.py` discovers real Claude Code sessions from `~/.claude/projects/`
+- [x] Path decoding tested against all real project folders on disk
+- [x] `data.py` orchestrates both providers, `available_providers()` returns correct list
+- [x] SessionCache correctly isolates same-cwd entries from different providers
+- [x] All existing `test_data.py` tests pass (may need import path updates)
+- [x] New Claude Code parsing tests pass
+
+**Implementation (2026-07-01, code: d917186)**
+Refactored the data layer into a multi-provider architecture: created `data_kiro.py` (extracted kiro-cli logic), `data_claude.py` (Claude Code adapter using history.jsonl path index), and refactored `data.py` into a thin orchestrator with compound `(provider, cwd)` cache keys. Claude Code adapter discovers 5 real workspaces from `~/.claude/projects/` with all 13 folder names resolved via history.jsonl. Both providers integrated: `available_providers()` returns `['kiro-cli', 'claude-code']`, `discover_workspaces_with_counts()` returns 41 total workspaces across both. All 177 tests pass.
 
 ### Phase 2: Tab UI and provider-filtered rendering [QA] [P:1]
 
@@ -260,14 +263,17 @@ None. No recurring cost changes.
    - Test tab auto-hide when only one provider available.
 
 **Exit criteria**:
-- [ ] Tab bar renders with correct tabs based on `available_providers()`
-- [ ] Clicking a tab fetches filtered workspaces via htmx
-- [ ] Cards show colored left-border per provider AND a small text provider badge (e.g., "K" / "C") for colorblind accessibility
-- [ ] Pinned sessions/workspaces remain visible above tabs regardless of active tab
-- [ ] "All" tab shows interleaved cards sorted by `updated_at`
-- [ ] Tab bar hidden when only one provider has data
-- [ ] Empty tab shows helper message (e.g., "No Claude Code sessions found — start one with `claude` to see it here")
-- [ ] Tests pass for filtered rendering
+- [x] Tab bar renders with correct tabs based on `available_providers()`
+- [x] Clicking a tab fetches filtered workspaces via htmx
+- [x] Cards show colored left-border per provider AND a small text provider badge (e.g., "K" / "C") for colorblind accessibility
+- [x] Pinned sessions/workspaces remain visible above tabs regardless of active tab
+- [x] "All" tab shows interleaved cards sorted by `updated_at`
+- [x] Tab bar hidden when only one provider has data
+- [x] Empty tab shows helper message (e.g., "No Claude Code sessions found — start one with `claude` to see it here")
+- [x] Tests pass for filtered rendering
+
+**Implementation (2026-07-01, code: a5f8db4)**
+Added multi-provider tab UI: `partials_workspaces()` now accepts `?provider=` param; tab bar renders conditionally (only when 2+ providers available); workspace cards get `data-provider` attribute, colored left-border, and "K"/"C" text badge for colorblind accessibility. JS functions (`launchFresh`, `launchSelected`, `resumeSession`) updated to pass provider. Empty-state helper messages show per provider. 7 new tests added. All existing tests updated to 4-tuple API.
 
 ### Phase 3: Contextual launch and Claude Code resume [QA]
 
@@ -503,7 +509,8 @@ pytest tests/ -v
 | `agent-playbook/.../claude-code-local-data.md` | New file documenting Claude Code local data format | 6 (doc-table-only) |
 
 ## 9) Implementation Divergences from Plan
-<Reserved — filled during implementation>
+
+- Phase 2 fixed a circular import in `data.py` introduced by Phase 1: moved `from . import data_kiro, data_claude` below shared type definitions. Minimal (reorder only, no API change).
 
 ## Review Log
 
