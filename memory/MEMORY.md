@@ -14,3 +14,11 @@
 **Why**: Two non-obvious platform behaviors caused runtime bugs despite passing unit tests: (1) pywebview enforces main-thread execution on Windows too (not just Linux/GTK) — `webview.start()` raises `WebViewException` from any non-main thread, and (2) pynput reports ASCII control codes (0x01–0x1a) instead of letter chars when Ctrl is held on Windows (e.g. Ctrl+Z → `\x1a`, not `'z'`).
 **How to apply**: When working with pywebview, always use the main thread regardless of platform. When processing pynput key events with Ctrl held, normalize control codes back to letters via `chr(ord(ch) + ord('a') - 1)`.
 **Source**: `plans/done/260630-1607_PEEK_WINDOW.md` — post-implementation empirical testing | **Verified**: 2026-06-30
+
+
+
+### Custom htmx-mini requires manual `process()` after every innerHTML swap
+
+**Why**: The `htmx.min.js` in PowerAtlas is a 56-line custom implementation (not the real htmx library). It only attaches event handlers at `DOMContentLoaded`. Any content inserted via innerHTML (htmx swaps, manual `fetch().then(innerHTML=...)`) needs an explicit `process(targetEl)` call to attach handlers to new `hx-get`/`hx-post` elements. This caused tabs to be unresponsive on first implementation.
+**How to apply**: After any innerHTML assignment in JS (refreshCards, manual fetches, etc.), always call `htmx.process(el)` on the container. The htmx-mini's internal swap handler already does this, but manual JS bypasses it.
+**Source**: `plans/done/260701-1817_MULTI_PROVIDER_TABS_AND_LAUNCH.md` — tabs unresponsive bug, fixed in de1f68a | **Verified**: 2026-07-01
