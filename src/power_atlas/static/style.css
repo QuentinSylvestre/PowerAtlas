@@ -250,6 +250,8 @@ script { display: none; }
   gap: 6px;
   padding: 8px 12px 0;
   margin-bottom: 8px;
+  grid-column: 1 / -1;
+  align-self: start;
 }
 .provider-tab {
   padding: 6px 14px;
