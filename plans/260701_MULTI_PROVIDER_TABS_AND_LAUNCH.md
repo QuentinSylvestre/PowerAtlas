@@ -477,9 +477,12 @@ Write `claude-code-local-data.md` documenting:
 - Differences from kiro-cli: no separate metadata `.json` file, no `parent_session_id` filtering needed (sub-agents don't produce separate project-level sessions)
 
 **Exit criteria**:
-- [ ] File created in agent-playbook steering
-- [ ] Content covers all known session data paths and formats
-- [ ] Consistent style with existing `kiro-cli-local-data.md`
+- [x] File created in agent-playbook steering
+- [x] Content covers all known session data paths and formats
+- [x] Consistent style with existing `kiro-cli-local-data.md`
+
+**Implementation (2026-07-01)**
+Created `providers/kiro/steering/claude-code-local-data.md` in agent-playbook. Documents session file location, folder naming convention, all JSONL message types, title extraction chain, user/assistant message format, global history format, active sessions, CLI resume, and a comparison table vs kiro-cli.
 
 ## 6) Risk Assessment
 
