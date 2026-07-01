@@ -17,7 +17,7 @@ from . import autostart, data, icons, launcher
 from .launcher import available_terminals
 
 PROVIDER_COLORS = {
-    "kiro-cli": "#4a6ede",
+    "kiro-cli": "#7138cc",
     "claude-code": "#c2590f",
 }
 PROVIDER_DISPLAY_NAMES = {
@@ -233,47 +233,21 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             default_provider = providers[0] if providers else "kiro-cli"
             workspace_data.append((pf, 0, "", default_provider))
 
-    # Render tab bar (only if multiple providers available)
     cards_html = ""
-    if len(providers) > 1:
-        cards_html += '<div class="provider-tabs" id="providerTabs" role="tablist">'
-        active_cls = ' active' if provider == "all" else ''
-        aria_sel = ' aria-selected="true"' if provider == "all" else ' aria-selected="false"'
-        cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider=all" hx-target="#workspace-cards" hx-swap="innerHTML">All</button>'
-        for p in providers:
-            active_cls = ' active' if provider == p else ''
-            aria_sel = ' aria-selected="true"' if provider == p else ' aria-selected="false"'
-            display_name = PROVIDER_DISPLAY_NAMES.get(p, p)
-            cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML">{display_name}</button>'
-        cards_html += '<span class="tab-spacer"></span>'
-        for p in providers:
-            cards_html += f'<button class="tab-gear" onclick="openProviderModal(\'{p}\')" title="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}" aria-label="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}">&#9881;</button>'
-        cards_html += '</div>'
-
-    if not workspace_data:
-        # Provider-specific empty state
-        if provider != "all" and provider:
-            empty_msgs = {
-                "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
-                "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
-            }
-            msg = empty_msgs.get(provider, f"No {provider} sessions found.")
-            cards_html += f'<div class="empty-state">{msg}</div>'
-            return HTMLResponse(cards_html)
-        cards_html += '<div class="empty-state">No sessions found. Pin a folder to get started.</div>'
-        return HTMLResponse(cards_html)
-
     pinned_set = {_normalize_path(f) for f in config.pinned_folders}
 
-    # Pinned sessions section (flat list, no card wrapper)
+    # Pinned sessions section (filtered by active provider)
     if config.pinned_sessions:
-        pinned_rows = await _render_pinned_sessions(request, config)
+        pinned_rows = await _render_pinned_sessions(request, config, provider=provider)
         if pinned_rows:
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
     # Pinned workspaces (deduplicate by normalized path + provider, keep highest count)
     pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_set]
+    # Filter by active provider
+    if provider != "all":
+        pinned_cards_raw = [(c, n, u, p) for c, n, u, p in pinned_cards_raw if p == provider]
     pinned_seen: dict[tuple[str, str], tuple[str, int, str, str]] = {}
     for c, n, u, p in pinned_cards_raw:
         key = (_normalize_path(c), p)
@@ -296,7 +270,36 @@ async def partials_workspaces(request: Request, provider: str = "all"):
                 provider_badge=PROVIDER_BADGES.get(prov, "?"),
             )
 
-    # All other workspaces
+    # Render tab bar (only if multiple providers available) — AFTER pinned sections
+    if len(providers) > 1:
+        cards_html += '<div class="provider-tabs" id="providerTabs" role="tablist">'
+        active_cls = ' active' if provider == "all" else ''
+        aria_sel = ' aria-selected="true"' if provider == "all" else ' aria-selected="false"'
+        cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider=all" hx-target="#workspace-cards" hx-swap="innerHTML" hx-trigger="click">All</button>'
+        for p in providers:
+            active_cls = ' active' if provider == p else ''
+            aria_sel = ' aria-selected="true"' if provider == p else ' aria-selected="false"'
+            display_name = PROVIDER_DISPLAY_NAMES.get(p, p)
+            cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML" hx-trigger="click">{display_name}</button>'
+        cards_html += '<span class="tab-spacer"></span>'
+        for p in providers:
+            cards_html += f'<button class="tab-gear" onclick="openProviderModal(\'{p}\')" title="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}" aria-label="Settings for {PROVIDER_DISPLAY_NAMES.get(p, p)}">&#9881;</button>'
+        cards_html += '</div>'
+
+    if not workspace_data:
+        # Provider-specific empty state
+        if provider != "all" and provider:
+            empty_msgs = {
+                "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
+                "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
+            }
+            msg = empty_msgs.get(provider, f"No {provider} sessions found.")
+            cards_html += f'<div class="empty-state">{msg}</div>'
+            return HTMLResponse(cards_html)
+        cards_html += '<div class="empty-state">No sessions found. Pin a folder to get started.</div>'
+        return HTMLResponse(cards_html)
+
+    # All other workspaces (non-pinned)
     other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_set]
     if other_cards:
         if pinned_cards:
@@ -549,8 +552,12 @@ async def api_new_session(request: Request):
     return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
 
-async def _render_pinned_sessions(request, config) -> str:
-    """Render pinned sessions as flat rows. Uses cache when available for full prompts."""
+async def _render_pinned_sessions(request, config, provider: str = "all") -> str:
+    """Render pinned sessions as flat rows. Uses cache when available for full prompts.
+
+    Args:
+        provider: Filter to only show sessions from this provider. "all" shows all.
+    """
     from .data import SESSION_DIR, _normalize_path
     import json as _json
 
@@ -559,7 +566,10 @@ async def _render_pinned_sessions(request, config) -> str:
 
     # Try cache first: find pinned sessions in any cached workspace
     found_ids: set[str] = set()
-    for prov_name in data.PROVIDERS:
+    providers_to_check = [provider] if provider != "all" else list(data.PROVIDERS.keys())
+    for prov_name in providers_to_check:
+        if prov_name not in data.PROVIDERS:
+            continue
         for norm_cwd in data.session_cache.get_loaded_cwds(prov_name):
             cached = data.session_cache.get(norm_cwd, prov_name)
             if not cached:
@@ -574,8 +584,9 @@ async def _render_pinned_sessions(request, config) -> str:
                     )
 
     # Fallback: pinned sessions not found in cache — read metadata directly (empty prompts)
+    # Only fall back for kiro-cli (session metadata files) when provider allows it
     remaining = pinned_ids - found_ids
-    if remaining and SESSION_DIR.is_dir():
+    if remaining and SESSION_DIR.is_dir() and (provider == "all" or provider == "kiro-cli"):
         for meta_file in SESSION_DIR.glob("*.json"):
             if meta_file.suffix == ".jsonl":
                 continue
