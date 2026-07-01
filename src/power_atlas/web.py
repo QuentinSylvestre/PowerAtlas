@@ -243,29 +243,30 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
-    # Pinned workspaces (deduplicate by normalized path, keep highest count regardless of provider)
+    # Pinned workspaces (aggregate across all providers — these are folder bookmarks, not provider-scoped)
     pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_set]
-    # Deduplicate by normalized cwd — same workspace from multiple providers shows only once (highest count wins)
-    pinned_seen: dict[str, tuple[str, int, str, str]] = {}
+    # Aggregate: sum counts and take latest updated_at per normalized cwd
+    pinned_agg: dict[str, tuple[str, int, str]] = {}  # norm_key -> (display_cwd, total_count, latest_updated)
     for c, n, u, p in pinned_cards_raw:
         key = _normalize_path(c)
-        if key not in pinned_seen or n > pinned_seen[key][1]:
-            pinned_seen[key] = (c, n, u, p)
-    pinned_cards = list(pinned_seen.values())
+        if key not in pinned_agg:
+            pinned_agg[key] = (c, n, u)
+        else:
+            prev_cwd, prev_count, prev_updated = pinned_agg[key]
+            pinned_agg[key] = (prev_cwd, prev_count + n, max(prev_updated, u) if prev_updated and u else prev_updated or u)
+    pinned_cards = list(pinned_agg.values())
     if pinned_cards:
         cards_html += '<div class="section-label">Pinned workspaces</div>'
-        for cwd, count, updated, prov in pinned_cards:
+        for cwd, count, updated in pinned_cards:
             stale = not Path(cwd).exists()
-            cached = data.session_cache.get(cwd, prov)
-            card_sessions = _sort_pinned_first(cached, config.pinned_sessions) if cached else []
             cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=card_sessions, stale=stale,
+                request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=True, last_updated=updated,
                 icon=norm_icons.get(_normalize_path(cwd), ""),
-                provider=prov,
-                provider_color=PROVIDER_COLORS.get(prov, "#888"),
-                provider_badge=PROVIDER_BADGES.get(prov, "?"),
+                provider="",
+                provider_color="transparent",
+                provider_badge="",
             )
 
     # Render tab bar (only if multiple providers available) — AFTER pinned sections
