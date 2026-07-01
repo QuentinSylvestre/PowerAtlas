@@ -783,7 +783,9 @@ async def launcher_icon(launcher_id: str):
         await asyncio.to_thread(icons.extract_icon, launcher_id, binary, True)
         if icons.has_icon(launcher_id):
             return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
-        svg = icons.default_icon_svg(True)
+        config = load_config()
+        color = _get_provider_color(provider_key, config)
+        svg = icons.default_icon_svg(True, color)
         return Response(content=svg, media_type="image/svg+xml")
 
     if icons.has_icon(launcher_id):
@@ -791,11 +793,13 @@ async def launcher_icon(launcher_id: str):
     # Determine if terminal launcher for appropriate fallback
     config = load_config()
     is_terminal = True
+    color = ""
     for entry in config.custom_launchers:
         if entry["id"] == launcher_id:
             is_terminal = entry.get("terminal", True)
+            color = entry.get("color", "")
             break
-    svg = icons.default_icon_svg(is_terminal)
+    svg = icons.default_icon_svg(is_terminal, color)
     return Response(content=svg, media_type="image/svg+xml")
 
 

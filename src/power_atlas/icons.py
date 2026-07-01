@@ -65,9 +65,12 @@ def remove_icon(launcher_id: str) -> None:
     icon_path(launcher_id).unlink(missing_ok=True)
 
 
-def default_icon_svg(is_terminal: bool) -> str:
-    """Return the appropriate default SVG icon markup."""
-    return _TERMINAL_ICON if is_terminal else _APP_ICON
+def default_icon_svg(is_terminal: bool, color: str = "") -> str:
+    """Return the appropriate default SVG icon markup, optionally colored."""
+    svg = _TERMINAL_ICON if is_terminal else _APP_ICON
+    if color:
+        svg = svg.replace('stroke="currentColor"', f'stroke="{color}"')
+    return svg
 
 
 def _resolve_cmd_to_exe(cmd_path: Path) -> Path | None:
