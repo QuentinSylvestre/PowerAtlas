@@ -16,6 +16,15 @@ from .config import load_config, save_config
 from . import autostart, data, icons, launcher
 from .launcher import available_terminals
 
+PROVIDER_COLORS = {
+    "kiro-cli": "#6c8cff",
+    "claude-code": "#f97316",
+}
+PROVIDER_BADGES = {
+    "kiro-cli": "K",
+    "claude-code": "C",
+}
+
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
@@ -185,12 +194,15 @@ async def unpin_session(request: Request):
 
 
 @app.get("/partials/workspaces", response_class=HTMLResponse)
-async def partials_workspaces(request: Request):
+async def partials_workspaces(request: Request, provider: str = "all"):
     import asyncio
     import time
     t0 = time.perf_counter()
     try:
-        workspace_data = await asyncio.to_thread(data.discover_workspaces_with_counts)
+        workspace_data = await asyncio.to_thread(
+            data.discover_workspaces_with_counts,
+            provider=None if provider == "all" else provider,
+        )
         log.info("Discovered %d workspaces in %.2fs", len(workspace_data), time.perf_counter() - t0)
     except Exception:
         log.exception("Failed to discover workspaces")
@@ -200,23 +212,47 @@ async def partials_workspaces(request: Request):
         })
 
     config = load_config()
+    # Get available providers for tab rendering
+    try:
+        providers = data.available_providers()
+    except Exception:
+        providers = []
+
     # Merge pinned folders (with count=0)
     from .data import _normalize_path
     norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
     workspace_data = list(workspace_data)
-    existing = {_normalize_path(cwd) for cwd, _, _ in workspace_data}
+    existing = {_normalize_path(cwd) for cwd, _, _, _ in workspace_data}
     for pf in config.pinned_folders:
         if _normalize_path(pf) not in existing:
-            workspace_data.append((pf, 0, ""))
+            workspace_data.append((pf, 0, "", "kiro-cli"))
+
+    # Render tab bar (only if multiple providers available)
+    cards_html = ""
+    if len(providers) > 1:
+        cards_html += '<div class="provider-tabs" id="providerTabs">'
+        active_cls = ' active' if provider == "all" else ''
+        cards_html += f'<button class="provider-tab{active_cls}" hx-get="/partials/workspaces?provider=all" hx-target="#workspace-cards" hx-swap="innerHTML">All</button>'
+        for p in providers:
+            active_cls = ' active' if provider == p else ''
+            cards_html += f'<button class="provider-tab{active_cls}" hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML">{p}</button>'
+        cards_html += '</div>'
 
     if not workspace_data:
+        # Provider-specific empty state
+        if provider != "all" and provider:
+            empty_msgs = {
+                "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
+                "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
+            }
+            msg = empty_msgs.get(provider, f"No {provider} sessions found.")
+            cards_html += f'<div class="empty-state">{msg}</div>'
+            return HTMLResponse(cards_html)
         return templates.TemplateResponse(request, "partials/empty_state.html", {
             "message": "No sessions found. Pin a folder to get started.",
         })
 
     pinned_set = {_normalize_path(f) for f in config.pinned_folders}
-
-    cards_html = ""
 
     # Pinned sessions section (flat list, no card wrapper)
     if config.pinned_sessions:
@@ -226,38 +262,44 @@ async def partials_workspaces(request: Request):
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
     # Pinned workspaces (deduplicate by normalized path, keep highest count)
-    pinned_cards_raw = [(c, n, u) for c, n, u in workspace_data if _normalize_path(c) in pinned_set]
-    pinned_seen: dict[str, tuple[str, int, str]] = {}
-    for c, n, u in pinned_cards_raw:
+    pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_set]
+    pinned_seen: dict[str, tuple[str, int, str, str]] = {}
+    for c, n, u, p in pinned_cards_raw:
         key = _normalize_path(c)
         if key not in pinned_seen or n > pinned_seen[key][1]:
-            pinned_seen[key] = (c, n, u)
+            pinned_seen[key] = (c, n, u, p)
     pinned_cards = list(pinned_seen.values())
     if pinned_cards:
         cards_html += '<div class="section-label">Pinned workspaces</div>'
-        for cwd, count, updated in pinned_cards:
+        for cwd, count, updated, prov in pinned_cards:
             stale = not Path(cwd).exists()
-            cached = data.session_cache.get(cwd)
+            cached = data.session_cache.get(cwd, prov)
             card_sessions = _sort_pinned_first(cached, config.pinned_sessions) if cached else []
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=card_sessions, stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=True, last_updated=updated,
                 icon=norm_icons.get(_normalize_path(cwd), ""),
+                provider=prov,
+                provider_color=PROVIDER_COLORS.get(prov, "#888"),
+                provider_badge=PROVIDER_BADGES.get(prov, "?"),
             )
 
     # All other workspaces
-    other_cards = [(c, n, u) for c, n, u in workspace_data if _normalize_path(c) not in pinned_set]
+    other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_set]
     if other_cards:
         if pinned_cards:
             cards_html += '<div class="section-label">All workspaces</div>'
-        for cwd, count, updated in other_cards:
+        for cwd, count, updated, prov in other_cards:
             stale = not Path(cwd).exists()
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=[], stale=stale,
                 pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
                 session_count=count, is_pinned=False, last_updated=updated,
                 icon=norm_icons.get(_normalize_path(cwd), ""),
+                provider=prov,
+                provider_color=PROVIDER_COLORS.get(prov, "#888"),
+                provider_badge=PROVIDER_BADGES.get(prov, "?"),
             )
     log.info("Rendered %d cards in %.2fs total", len(workspace_data), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
@@ -279,7 +321,7 @@ async def search(request: Request, q: str = ""):
         })
 
     config = load_config()
-    matched = [(c, n, u) for c, n, u in workspace_data if query in c.lower()]
+    matched = [(c, n, u, p) for c, n, u, p in workspace_data if query in c.lower()]
 
     # Search pinned sessions by title
     pinned_rows = ""
@@ -318,13 +360,16 @@ async def search(request: Request, q: str = ""):
         cards_html += '<div class="section-label">Pinned sessions</div>'
         cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
     config_icons = {data._normalize_path(k): v for k, v in config.workspace_icons.items()}
-    for cwd, count, updated in matched:
+    for cwd, count, updated, prov in matched:
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
             session_count=count, last_updated=updated,
             icon=config_icons.get(data._normalize_path(cwd), ""),
+            provider=prov,
+            provider_color=PROVIDER_COLORS.get(prov, "#888"),
+            provider_badge=PROVIDER_BADGES.get(prov, "?"),
         )
     return HTMLResponse(cards_html)
 
@@ -394,7 +439,7 @@ async def partials_session_tail(request: Request, sid: str = ""):
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)
-async def partials_sessions(request: Request, cwd: str = ""):
+async def partials_sessions(request: Request, cwd: str = "", provider: str = "kiro-cli"):
     """Lazy-load sessions for a single workspace card."""
     import asyncio
     import time
@@ -402,7 +447,7 @@ async def partials_sessions(request: Request, cwd: str = ""):
     log.info("Loading sessions for %s", cwd[-40:])
     config = load_config()
     try:
-        sessions = await asyncio.to_thread(data.get_sessions, cwd)
+        sessions = await asyncio.to_thread(data.get_sessions, cwd, provider)
     except Exception:
         sessions = []
     log.info("Got %d sessions for %s in %.2fs", len(sessions), Path(cwd).name, time.perf_counter() - t0)
@@ -477,18 +522,19 @@ async def _render_pinned_sessions(request, config) -> str:
 
     # Try cache first: find pinned sessions in any cached workspace
     found_ids: set[str] = set()
-    for norm_cwd in data.session_cache.get_loaded_cwds():
-        cached = data.session_cache.get(norm_cwd)
-        if not cached:
-            continue
-        for session in cached:
-            if session.session_id in pinned_ids and session.session_id not in found_ids:
-                found_ids.add(session.session_id)
-                cwd = session.cwd
-                html += templates.get_template("partials/session_row.html").render(
-                    request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-                    pinned_sessions=config.pinned_sessions,
-                )
+    for prov_name in data.PROVIDERS:
+        for norm_cwd in data.session_cache.get_loaded_cwds(prov_name):
+            cached = data.session_cache.get(norm_cwd, prov_name)
+            if not cached:
+                continue
+            for session in cached:
+                if session.session_id in pinned_ids and session.session_id not in found_ids:
+                    found_ids.add(session.session_id)
+                    cwd = session.cwd
+                    html += templates.get_template("partials/session_row.html").render(
+                        request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+                        pinned_sessions=config.pinned_sessions,
+                    )
 
     # Fallback: pinned sessions not found in cache — read metadata directly (empty prompts)
     remaining = pinned_ids - found_ids
@@ -518,10 +564,10 @@ async def _render_pinned_sessions(request, config) -> str:
     return html
 
 
-async def _render_workspace_card(request: Request, cwd: str) -> HTMLResponse:
+async def _render_workspace_card(request: Request, cwd: str, provider: str = "kiro-cli") -> HTMLResponse:
     config = load_config()
     try:
-        sessions = data.get_sessions(cwd)
+        sessions = data.get_sessions(cwd, provider)
     except Exception:
         sessions = []
     sessions = _sort_pinned_first(sessions, config.pinned_sessions)

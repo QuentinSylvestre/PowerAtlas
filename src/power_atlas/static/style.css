@@ -241,6 +241,43 @@ script { display: none; }
 
 /* Color picker */
 .color-picker-field { margin-bottom: 10px; }
+
+/* Provider tabs */
+.provider-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 0;
+  margin-bottom: 8px;
+}
+.provider-tab {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 16px;
+  background: var(--card-bg, #23232a);
+  color: var(--text-muted, #aaa);
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+.provider-tab:hover {
+  background: var(--surface-hover, #2d2d35);
+}
+.provider-tab.active {
+  background: var(--accent, #6c8cff);
+  color: #fff;
+}
+
+/* Provider badge on workspace cards */
+.provider-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #fff;
+  margin-left: 6px;
+  vertical-align: middle;
+}
 .color-picker-label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 6px; }
 .color-picker-swatches { display: flex; flex-wrap: wrap; gap: 6px; }
 .color-swatch { width: 24px; height: 24px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; transition: border-color 0.15s, transform 0.15s; }

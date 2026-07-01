@@ -35,10 +35,12 @@ def test_index_returns_html(client):
 
 
 @patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
+def test_partials_workspaces(mock_discover, mock_providers, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z")]
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = [_make_session(cwd=workspace)]
 
     resp = client.get("/partials/workspaces")
@@ -48,20 +50,24 @@ def test_partials_workspaces(mock_discover, mock_sessions, client, tmp_path):
 
 
 @patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_empty(mock_discover, mock_config, client):
+def test_partials_workspaces_empty(mock_discover, mock_providers, mock_config, client):
     from power_atlas.config import Config
     mock_config.return_value = Config()
     mock_discover.return_value = []
+    mock_providers.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
     assert "No sessions found" in resp.text
 
 
 @patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
-    mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1, "2026-01-01T00:00:00Z")]
+def test_partials_workspaces_stale(mock_discover, mock_providers, mock_sessions, client):
+    mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = [_make_session(cwd="C:\\nonexistent\\path\\xyz")]
 
     resp = client.get("/partials/workspaces")
@@ -70,9 +76,11 @@ def test_partials_workspaces_stale(mock_discover, mock_sessions, client):
     assert "stale" in resp.text
 
 
+@patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_error(mock_discover, client):
+def test_partials_workspaces_error(mock_discover, mock_providers, client):
     mock_discover.side_effect = RuntimeError("db unavailable")
+    mock_providers.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
     assert "Error" in resp.text
@@ -82,8 +90,8 @@ def test_partials_workspaces_error(mock_discover, client):
 def test_search_filters(mock_discover, client, tmp_path):
     workspace = str(tmp_path)
     mock_discover.return_value = [
-        (workspace, 2, "2026-01-01T00:00:00Z"),
-        ("C:\\other\\project", 1, "2026-01-01T00:00:00Z"),
+        (workspace, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
+        ("C:\\other\\project", 1, "2026-01-01T00:00:00Z", "claude-code"),
     ]
 
     resp = client.get(f"/search?q={Path(workspace).name}")
@@ -94,7 +102,7 @@ def test_search_filters(mock_discover, client, tmp_path):
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_search_no_results(mock_discover, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "")]
+    mock_discover.return_value = [(workspace, 1, "", "kiro-cli")]
 
     resp = client.get("/search?q=zzzznotfound")
     assert resp.status_code == 200
@@ -132,10 +140,12 @@ def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_
 
 
 @patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_folder_empty_sessions(mock_discover, mock_sessions, client, tmp_path):
+def test_pinned_folder_empty_sessions(mock_discover, mock_providers, mock_sessions, client, tmp_path):
     workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 0, "")]
+    mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = []
 
     resp = client.get("/partials/workspaces")
@@ -190,15 +200,17 @@ def test_unpin_session(mock_sessions, mock_config, mock_save, client):
     assert "sess-1" not in saved.pinned_sessions
 
 
+@patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.get_sessions")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, client, tmp_path):
+def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_providers, client, tmp_path):
     from power_atlas.config import Config
     workspace = str(tmp_path)
     pinned = "C:\\my-pinned-workspace"
     mock_config.return_value = Config(pinned_folders=[pinned])
-    mock_discover.return_value = [(workspace, 0, "")]
+    mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = []
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
@@ -385,3 +397,118 @@ def test_launcher_icon_serves_png(mock_has, mock_path, client, tmp_path):
     resp = client.get("/api/launcher-icon/abc")
     assert resp.status_code == 200
     assert "image/png" in resp.headers["content-type"]
+
+
+# --- Phase 2: Provider tabs and filtering ---
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_partials_workspaces_provider_filter(mock_discover, mock_providers, client, tmp_path):
+    """Filtering by provider passes the provider arg and renders only matching cards."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 3, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces?provider=kiro-cli")
+    assert resp.status_code == 200
+    assert 'data-provider="kiro-cli"' in resp.text
+    # Verify discover was called with provider="kiro-cli"
+    mock_discover.assert_called_once_with(provider="kiro-cli")
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_partials_workspaces_all_tab(mock_discover, mock_providers, client, tmp_path):
+    """All tab shows cards from all providers interleaved."""
+    ws1 = str(tmp_path / "proj1")
+    ws2 = str(tmp_path / "proj2")
+    mock_discover.return_value = [
+        (ws1, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (ws2, 1, "2026-01-01T00:00:00Z", "claude-code"),
+    ]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces?provider=all")
+    assert resp.status_code == 200
+    assert 'data-provider="kiro-cli"' in resp.text
+    assert 'data-provider="claude-code"' in resp.text
+    # Verify discover was called with provider=None (all)
+    mock_discover.assert_called_once_with(provider=None)
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_tab_hidden_single_provider(mock_discover, mock_providers, client, tmp_path):
+    """When only one provider available, no tab bar rendered."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "provider-tabs" not in resp.text
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_tab_shown_multiple_providers(mock_discover, mock_providers, client, tmp_path):
+    """When multiple providers available, tab bar is rendered with correct tabs."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "provider-tabs" in resp.text
+    assert "provider=all" in resp.text
+    assert "provider=kiro-cli" in resp.text
+    assert "provider=claude-code" in resp.text
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspace_card_has_data_provider(mock_discover, mock_providers, client, tmp_path):
+    """Workspace cards include data-provider attribute and colored border."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "claude-code")]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert 'data-provider="claude-code"' in resp.text
+    assert "border-left: 3px solid #f97316" in resp.text
+    # Badge
+    assert "provider-badge" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_empty_provider_tab_shows_helper(mock_discover, mock_providers, mock_config, client):
+    """When a filtered provider has no results, a helper message is shown."""
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    mock_discover.return_value = []
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces?provider=claude-code")
+    assert resp.status_code == 200
+    assert "No Claude Code sessions found" in resp.text
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_active_tab_class(mock_discover, mock_providers, client, tmp_path):
+    """The active tab has the 'active' class."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    # Request kiro-cli tab
+    resp = client.get("/partials/workspaces?provider=kiro-cli")
+    assert resp.status_code == 200
+    # kiro-cli tab should be active
+    assert 'class="provider-tab active" hx-get="/partials/workspaces?provider=kiro-cli"' in resp.text
+    # "All" tab should NOT be active
+    assert 'class="provider-tab" hx-get="/partials/workspaces?provider=all"' in resp.text
