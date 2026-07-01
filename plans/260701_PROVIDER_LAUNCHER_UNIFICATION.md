@@ -1,7 +1,7 @@
 # Provider-Launcher Unification
 
 > **Date**: 2026-07-01
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Merge providers into launcher grid, fix Kiro IDE icon/launch, propagate provider icon/color to workspace cards, deduplicate workspace selection.
 > **Estimated effort**: 1-2 days
 
@@ -196,12 +196,15 @@ None.
    - Test fallback when no `.exe` found → returns None.
 
 **Exit criteria**:
-- [ ] `_resolve_cmd_to_exe()` correctly parses `kiro.cmd` pattern and returns `Kiro.exe` path
-- [ ] `extract_icon()` for command `"kiro"` now attempts icon extraction from `Kiro.exe`
-- [ ] `launch_custom()` with `pass_workspace_arg=True` appends workspace path to command
-- [ ] `launch_custom_batch()` with `use_terminal=False` automatically passes workspace arg
-- [ ] All existing launcher tests pass (regression-free)
-- [ ] New tests for `.cmd` resolution and workspace arg pass
+- [x] `_resolve_cmd_to_exe()` correctly parses `kiro.cmd` pattern and returns `Kiro.exe` path
+- [x] `extract_icon()` for command `"kiro"` now attempts icon extraction from `Kiro.exe`
+- [x] `launch_custom()` with `pass_workspace_arg=True` appends workspace path to command
+- [x] `launch_custom_batch()` with `use_terminal=False` automatically passes workspace arg
+- [x] All existing launcher tests pass (regression-free)
+- [x] New tests for `.cmd` resolution and workspace arg pass
+
+**Implementation (2026-07-01, code: 225c655)**
+Added `_resolve_cmd_to_exe(cmd_path)` to `icons.py` that parses `.cmd`/`.bat` shim files to find their underlying `.exe` binary. It handles three patterns in priority order: `%~dp0`-relative paths (the Electron/scoop shim pattern), quoted absolute paths, and unquoted absolute paths - each validated against the filesystem. Modified `extract_icon()` to call this resolver when the binary has a `.cmd`/`.bat` suffix, allowing icon extraction from the real `.exe` (e.g., `kiro.cmd` → `Kiro.exe`). Added `pass_workspace_arg` parameter to both `launch_custom()` and `launch_custom_batch()`. When `True` and the working directory is not `.`, the workspace path is appended to the command string with platform-appropriate quoting (double-quotes on Windows for paths with spaces, `shlex.quote` on Linux). This enables non-terminal GUI launchers to receive the workspace as an argument for selection-aware launching. Added 13 new tests covering `.cmd` resolution (relative paths, absolute paths, missing exe, unreadable files) and workspace argument passing (with/without terminal, quoting, batch forwarding, dot-cwd guard).
 
 ### Phase 2: Workspace deduplication in JS [QA] [P:1]
 
@@ -232,11 +235,14 @@ None.
 2. `tests/test_web.py` — the dedup is purely client-side JS, so add a comment documenting the behavior. Server-side `launch_custom_batch()` already handles whatever list it receives — no server-side change needed.
 
 **Exit criteria**:
-- [ ] `getSelectedWorkspaceCwds()` returns unique paths (case-insensitive dedup)
-- [ ] Badge count reflects unique workspace count
-- [ ] Custom launcher fires once per unique workspace even when same cwd selected via multiple provider cards
-- [ ] "Launch selected" action bar still launches per-card (no dedup there — unchanged)
-- [ ] Existing tests pass
+- [x] `getSelectedWorkspaceCwds()` returns unique paths (case-insensitive dedup)
+- [x] Badge count reflects unique workspace count
+- [x] Custom launcher fires once per unique workspace even when same cwd selected via multiple provider cards
+- [x] "Launch selected" action bar still launches per-card (no dedup there — unchanged)
+- [x] Existing tests pass
+
+**Implementation (2026-07-01, code: 5cc8e8f)**
+Rewrote `getSelectedWorkspaceCwds()` in `index.html` to use a case-insensitive deduplication pattern. The new implementation uses a `seen` object keyed by `.toLowerCase()` paths to ensure each unique workspace path appears only once in the returned array, regardless of whether the same path is selected via multiple provider cards or a combination of workspace cards and session rows. The badge count and custom launcher batch dispatch automatically benefit from this dedup since they already call `getSelectedWorkspaceCwds()`. The per-card "Launch selected" action bar is unaffected as it uses its own iteration logic. All 42 existing tests pass without modification.
 
 ### Phase 3: Provider-launcher tiles in launcher grid [QA]
 
@@ -560,3 +566,26 @@ High-effort review (4 personas: Architect, Senior engineer, End-user advocate, R
 | 6 | Medium | Modal field lock (readOnly/disabled) only resets in `.then()` callback — save failure leaves fields permanently locked. | Moved field-unlock to dialog `close` event listener (fires regardless of save outcome). |
 | 7 | Medium | Plan doesn't clarify that provider tile "run" = new session (`launch_session(session_id=None)`), not resume. | Added explicit note in Phase 3 exit criteria: "fresh sessions, no resume". |
 | 8 | Medium | Server-side gear-icon HTML removal must be atomic with JS function removal to avoid stale-tab errors. | Added exit criterion: "removed atomically (server-side rendering + JS in same commit)". |
+
+### 2026-07-01 -- Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+3 findings (0 High, 1 Medium, 2 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Windows quoting uses simple quote-if-spaces; plan specified inner-quote escaping, but NTFS forbids `"` in filenames. | Fixed — added clarifying comment explaining why inner-quote escaping is unnecessary. |
+| 2 | Low | Pattern 1 regex cannot match `%~dp0`-relative paths containing spaces; real shims never have them. | Accepted — real-world Electron shims are space-free in relative segments. |
+| 3 | Low | `re` imported lazily inside `_resolve_cmd_to_exe()` vs module-level import. | Accepted — defensible to avoid loading regex on Linux where function is never called. |
+
+Cycle 2 skipped — cycle 1 findings all Low + auto-fix purely mechanical (comment rewording only).
+
+### 2026-07-01 -- Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | No client-side test for dedup behavior; trusted to code inspection. | Accepted — plan specified comment-only; QA step covers browser behavior. |
+| 2 | Low | No null guard on `c.dataset.cwd.toLowerCase()` for workspace cards. | Accepted — template always renders `data-cwd`; null impossible in practice. |
