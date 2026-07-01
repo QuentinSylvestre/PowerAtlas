@@ -73,6 +73,7 @@ class SessionCache:
         self._sessions: dict[tuple[str, str], list[Session]] = {}
         self._file_stats: dict[tuple[str, str], dict[str, _FileInfo]] = {}
         self._loaded_keys: set[tuple[str, str]] = set()
+        self._original_cwds: dict[tuple[str, str], str] = {}
         self.last_refresh: str = ""
 
     def get(self, cwd: str, provider: str = "kiro-cli") -> list[Session] | None:
@@ -87,7 +88,14 @@ class SessionCache:
             self._sessions[key] = sessions
             self._file_stats[key] = file_stats
             self._loaded_keys.add(key)
+            self._original_cwds[key] = cwd
             self.last_refresh = time.strftime("%H:%M:%S")
+
+    def get_original_cwd(self, norm_cwd: str, provider: str) -> str:
+        """Return the original (non-normalized) cwd for a given provider + normalized key."""
+        key = (provider, norm_cwd)
+        with self._lock:
+            return self._original_cwds.get(key, norm_cwd)
 
     def get_loaded_cwds(self, provider: str | None = None) -> set[str]:
         """Return normalized cwds that have been loaded.
@@ -109,6 +117,7 @@ class SessionCache:
             self._sessions.clear()
             self._file_stats.clear()
             self._loaded_keys.clear()
+            self._original_cwds.clear()
 
 
 session_cache = SessionCache()
@@ -195,8 +204,9 @@ def refresh_stale_entries() -> None:
                 if not old_stats:
                     continue
                 if mod.refresh_stale_entries_for_cwd(norm_cwd, old_stats):
-                    sessions, file_stats = mod.load_sessions(norm_cwd)
-                    session_cache.put(norm_cwd, sessions, file_stats, prov_name)
+                    original_cwd = session_cache.get_original_cwd(norm_cwd, prov_name)
+                    sessions, file_stats = mod.load_sessions(original_cwd)
+                    session_cache.put(original_cwd, sessions, file_stats, prov_name)
             except (OSError, Exception):
                 continue
 

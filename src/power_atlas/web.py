@@ -17,8 +17,12 @@ from . import autostart, data, icons, launcher
 from .launcher import available_terminals
 
 PROVIDER_COLORS = {
-    "kiro-cli": "#6c8cff",
-    "claude-code": "#f97316",
+    "kiro-cli": "#4a6ede",
+    "claude-code": "#c2590f",
+}
+PROVIDER_DISPLAY_NAMES = {
+    "kiro-cli": "Kiro CLI",
+    "claude-code": "Claude Code",
 }
 PROVIDER_BADGES = {
     "kiro-cli": "K",
@@ -225,17 +229,21 @@ async def partials_workspaces(request: Request, provider: str = "all"):
     existing = {_normalize_path(cwd) for cwd, _, _, _ in workspace_data}
     for pf in config.pinned_folders:
         if _normalize_path(pf) not in existing:
-            workspace_data.append((pf, 0, "", "kiro-cli"))
+            default_provider = providers[0] if providers else "kiro-cli"
+            workspace_data.append((pf, 0, "", default_provider))
 
     # Render tab bar (only if multiple providers available)
     cards_html = ""
     if len(providers) > 1:
-        cards_html += '<div class="provider-tabs" id="providerTabs">'
+        cards_html += '<div class="provider-tabs" id="providerTabs" role="tablist">'
         active_cls = ' active' if provider == "all" else ''
-        cards_html += f'<button class="provider-tab{active_cls}" hx-get="/partials/workspaces?provider=all" hx-target="#workspace-cards" hx-swap="innerHTML">All</button>'
+        aria_sel = ' aria-selected="true"' if provider == "all" else ' aria-selected="false"'
+        cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider=all" hx-target="#workspace-cards" hx-swap="innerHTML">All</button>'
         for p in providers:
             active_cls = ' active' if provider == p else ''
-            cards_html += f'<button class="provider-tab{active_cls}" hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML">{p}</button>'
+            aria_sel = ' aria-selected="true"' if provider == p else ' aria-selected="false"'
+            display_name = PROVIDER_DISPLAY_NAMES.get(p, p)
+            cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML">{display_name}</button>'
         cards_html += '</div>'
 
     if not workspace_data:
@@ -248,9 +256,8 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             msg = empty_msgs.get(provider, f"No {provider} sessions found.")
             cards_html += f'<div class="empty-state">{msg}</div>'
             return HTMLResponse(cards_html)
-        return templates.TemplateResponse(request, "partials/empty_state.html", {
-            "message": "No sessions found. Pin a folder to get started.",
-        })
+        cards_html += '<div class="empty-state">No sessions found. Pin a folder to get started.</div>'
+        return HTMLResponse(cards_html)
 
     pinned_set = {_normalize_path(f) for f in config.pinned_folders}
 
@@ -261,11 +268,11 @@ async def partials_workspaces(request: Request, provider: str = "all"):
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
-    # Pinned workspaces (deduplicate by normalized path, keep highest count)
+    # Pinned workspaces (deduplicate by normalized path + provider, keep highest count)
     pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_set]
-    pinned_seen: dict[str, tuple[str, int, str, str]] = {}
+    pinned_seen: dict[tuple[str, str], tuple[str, int, str, str]] = {}
     for c, n, u, p in pinned_cards_raw:
-        key = _normalize_path(c)
+        key = (_normalize_path(c), p)
         if key not in pinned_seen or n > pinned_seen[key][1]:
             pinned_seen[key] = (c, n, u, p)
     pinned_cards = list(pinned_seen.values())
@@ -360,12 +367,14 @@ async def search(request: Request, q: str = ""):
         cards_html += '<div class="section-label">Pinned sessions</div>'
         cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
     config_icons = {data._normalize_path(k): v for k, v in config.workspace_icons.items()}
+    pinned_set = {data._normalize_path(f) for f in config.pinned_folders}
     for cwd, count, updated, prov in matched:
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
             session_count=count, last_updated=updated,
+            is_pinned=(data._normalize_path(cwd) in pinned_set),
             icon=config_icons.get(data._normalize_path(cwd), ""),
             provider=prov,
             provider_color=PROVIDER_COLORS.get(prov, "#888"),
@@ -427,9 +436,9 @@ async def save_setting(request: Request):
 
 
 @app.get("/partials/session-tail", response_class=HTMLResponse)
-async def partials_session_tail(request: Request, sid: str = ""):
-    messages = await asyncio.to_thread(data.get_session_tail, sid)
-    first_prompt = await asyncio.to_thread(data.get_first_prompt, sid)
+async def partials_session_tail(request: Request, sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
+    messages = await asyncio.to_thread(data.get_session_tail, sid, provider, cwd)
+    first_prompt = await asyncio.to_thread(data.get_first_prompt, sid, provider, cwd)
     if not messages and not first_prompt:
         return HTMLResponse('<div class="tail-empty">No recent output</div>')
     return templates.TemplateResponse(request, "partials/session_tail.html", {
@@ -562,21 +571,6 @@ async def _render_pinned_sessions(request, config) -> str:
                 pinned_sessions=config.pinned_sessions,
             )
     return html
-
-
-async def _render_workspace_card(request: Request, cwd: str, provider: str = "kiro-cli") -> HTMLResponse:
-    config = load_config()
-    try:
-        sessions = data.get_sessions(cwd, provider)
-    except Exception:
-        sessions = []
-    sessions = _sort_pinned_first(sessions, config.pinned_sessions)
-    stale = not Path(cwd).exists()
-    html = templates.get_template("partials/workspace_card.html").render(
-        request=request, cwd=cwd, sessions=sessions, stale=stale,
-        pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-    )
-    return HTMLResponse(html)
 
 
 def _sort_pinned_first(sessions: list[data.Session], pinned: list[str]) -> list[data.Session]:

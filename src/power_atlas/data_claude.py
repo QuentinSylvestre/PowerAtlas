@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,7 @@ def _path_to_folder_name(path: str) -> str:
 
 _path_index_cache: tuple[float, dict[str, str]] | None = None
 _PATH_INDEX_TTL = 60  # seconds
+_path_index_lock = threading.Lock()
 
 
 def _build_path_index() -> dict[str, str]:
@@ -49,10 +51,11 @@ def _build_path_index() -> dict[str, str]:
     Returns {folder_name: real_path}. Cached for 60s.
     """
     global _path_index_cache
-    if _path_index_cache is not None:
-        ts, index = _path_index_cache
-        if time.time() - ts < _PATH_INDEX_TTL:
-            return dict(index)  # return copy
+    with _path_index_lock:
+        if _path_index_cache is not None:
+            ts, index = _path_index_cache
+            if time.time() - ts < _PATH_INDEX_TTL:
+                return dict(index)  # return copy
 
     index: dict[str, str] = {}
     if CLAUDE_HISTORY_PATH.exists():
@@ -73,7 +76,8 @@ def _build_path_index() -> dict[str, str]:
         except OSError:
             pass
 
-    _path_index_cache = (time.time(), index)
+    with _path_index_lock:
+        _path_index_cache = (time.time(), index)
     return dict(index)  # return copy
 
 
@@ -129,8 +133,16 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
                 continue
 
             count = len(session_files)
-            # Get latest mtime
-            latest_mtime = max(f.stat().st_mtime for f in session_files)
+            # Get latest mtime (skip files that fail stat)
+            mtimes = []
+            for f in session_files:
+                try:
+                    mtimes.append(f.stat().st_mtime)
+                except OSError:
+                    continue
+            if not mtimes:
+                continue
+            latest_mtime = max(mtimes)
             updated_at = datetime.fromtimestamp(latest_mtime, tz=timezone.utc).isoformat()
 
             real_path = _resolve_folder_to_path(folder.name, path_index)

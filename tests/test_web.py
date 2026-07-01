@@ -477,7 +477,7 @@ def test_workspace_card_has_data_provider(mock_discover, mock_providers, client,
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
     assert 'data-provider="claude-code"' in resp.text
-    assert "border-left: 3px solid #f97316" in resp.text
+    assert "border-left: 3px solid #c2590f" in resp.text
     # Badge
     assert "provider-badge" in resp.text
 
@@ -508,7 +508,7 @@ def test_active_tab_class(mock_discover, mock_providers, client, tmp_path):
     # Request kiro-cli tab
     resp = client.get("/partials/workspaces?provider=kiro-cli")
     assert resp.status_code == 200
-    # kiro-cli tab should be active
-    assert 'class="provider-tab active" hx-get="/partials/workspaces?provider=kiro-cli"' in resp.text
+    # kiro-cli tab should be active (with ARIA attributes)
+    assert 'class="provider-tab active" role="tab" aria-selected="true" hx-get="/partials/workspaces?provider=kiro-cli"' in resp.text
     # "All" tab should NOT be active
-    assert 'class="provider-tab" hx-get="/partials/workspaces?provider=all"' in resp.text
+    assert 'class="provider-tab" role="tab" aria-selected="false" hx-get="/partials/workspaces?provider=all"' in resp.text
