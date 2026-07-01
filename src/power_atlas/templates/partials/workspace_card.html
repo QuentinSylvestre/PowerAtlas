@@ -1,4 +1,4 @@
-<div class="workspace-card{% if stale %} stale{% endif %}{% if not is_pinned %} collapsed{% endif %}" data-cwd="{{ cwd }}" data-provider="{{ provider|default('') }}" style="border-left: 3px solid {{ provider_color|default('#888') }}">
+<div class="workspace-card{% if stale %} stale{% endif %} collapsed" data-cwd="{{ cwd }}" data-provider="{{ provider|default('') }}" style="border-left: 3px solid {{ provider_color|default('#888') }}">
   <div class="card-header" onclick="toggleCard(this.parentElement)">
     <div class="card-check" onclick="event.stopPropagation();this.closest('.workspace-card').classList.toggle('selected');updateActionBar()"></div>
     <span class="card-chevron">▼</span>

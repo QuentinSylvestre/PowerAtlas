@@ -236,21 +236,19 @@ async def partials_workspaces(request: Request, provider: str = "all"):
     cards_html = ""
     pinned_set = {_normalize_path(f) for f in config.pinned_folders}
 
-    # Pinned sessions section (filtered by active provider)
+    # Pinned sessions section (always shown regardless of active tab)
     if config.pinned_sessions:
-        pinned_rows = await _render_pinned_sessions(request, config, provider=provider)
+        pinned_rows = await _render_pinned_sessions(request, config)
         if pinned_rows:
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
-    # Pinned workspaces (deduplicate by normalized path + provider, keep highest count)
+    # Pinned workspaces (deduplicate by normalized path, keep highest count regardless of provider)
     pinned_cards_raw = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_set]
-    # Filter by active provider
-    if provider != "all":
-        pinned_cards_raw = [(c, n, u, p) for c, n, u, p in pinned_cards_raw if p == provider]
-    pinned_seen: dict[tuple[str, str], tuple[str, int, str, str]] = {}
+    # Deduplicate by normalized cwd — same workspace from multiple providers shows only once (highest count wins)
+    pinned_seen: dict[str, tuple[str, int, str, str]] = {}
     for c, n, u, p in pinned_cards_raw:
-        key = (_normalize_path(c), p)
+        key = _normalize_path(c)
         if key not in pinned_seen or n > pinned_seen[key][1]:
             pinned_seen[key] = (c, n, u, p)
     pinned_cards = list(pinned_seen.values())
