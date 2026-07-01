@@ -138,24 +138,33 @@ def _resolve_binary(command: str) -> Path | None:
 
 
 def _extract_windows_icon(binary: Path, target: Path) -> bool:
-    """Extract icon from a Windows PE binary using win32gui + PIL."""
+    """Extract icon from a Windows PE binary using PrivateExtractIconsW + PIL.
+
+    Requests a 48x48 icon (crisp for UI display) via the undocumented but
+    stable PrivateExtractIconsW API, which — unlike ExtractIconEx — can
+    retrieve any size present in the resource table (including high-res 256x256
+    icons that Electron apps embed).
+    """
     try:
-        import win32gui  # noqa: F401 — Windows-only
+        import ctypes
+        from ctypes import wintypes
+        import win32gui
         import win32ui
-        import win32con
         from PIL import Image
 
-        large, small = win32gui.ExtractIconEx(str(binary), 0)
-        if not large:
-            # Clean up small icons if any
-            for h in small:
-                win32gui.DestroyIcon(h)
+        ICON_SIZE = 48
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        hIcon = (wintypes.HANDLE * 1)()
+        iconId = (ctypes.c_uint * 1)()
+        count = user32.PrivateExtractIconsW(
+            str(binary), 0, ICON_SIZE, ICON_SIZE, hIcon, iconId, 1, 0
+        )
+        if not count or not hIcon[0]:
             return False
 
-        hicon = large[0]
         try:
-            # Get icon bitmap info
-            info = win32gui.GetIconInfo(hicon)
+            info = win32gui.GetIconInfo(hIcon[0])
             hbm_mask = info[3]
             hbm_color = info[4]
 
@@ -165,29 +174,15 @@ def _extract_windows_icon(binary: Path, target: Path) -> bool:
                 w = bmp_info["bmWidth"]
                 h = bmp_info["bmHeight"]
 
-                # Create device context and select bitmap
-                hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
-                mem_dc = hdc.CreateCompatibleDC()
-                mem_dc.SelectObject(bmp)
-
-                # Read pixel data
                 bmp_bits = bmp.GetBitmapBits(True)
-
-                # Create PIL image from BGRA data
                 img = Image.frombuffer("RGBA", (w, h), bmp_bits, "raw", "BGRA", 0, 1)
                 img.save(str(target), "PNG")
-
-                mem_dc.DeleteDC()
-                hdc.DeleteDC()
                 return True
             finally:
                 win32gui.DeleteObject(hbm_mask)
                 win32gui.DeleteObject(hbm_color)
         finally:
-            for h_icon in large:
-                win32gui.DestroyIcon(h_icon)
-            for h_icon in small:
-                win32gui.DestroyIcon(h_icon)
+            win32gui.DestroyIcon(hIcon[0])
 
     except Exception:
         return False
