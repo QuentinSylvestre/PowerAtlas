@@ -365,13 +365,16 @@ Made `launch_session` and `launch_batch` provider-aware. Replaced `trust_all: bo
    - `test_web.py`: test `/api/launcher/run-batch` endpoint.
 
 **Exit criteria**:
-- [ ] Launcher modal shows "Use selected workspaces" checkbox
-- [ ] Toggle persists in config
-- [ ] Selection-aware launcher tile shows badge with count when workspaces selected
-- [ ] Clicking selection-aware tile with selection fires launcher per workspace
-- [ ] Clicking selection-aware tile without selection uses configured cwd (or `~`)
-- [ ] Non-selection-aware launchers unchanged (regression-free)
-- [ ] Tests pass
+- [x] Launcher modal shows "Use selected workspaces" checkbox
+- [x] Toggle persists in config
+- [x] Selection-aware launcher tile shows badge with count when workspaces selected
+- [x] Clicking selection-aware tile with selection fires launcher per workspace
+- [x] Clicking selection-aware tile without selection uses configured cwd (or `~`)
+- [x] Non-selection-aware launchers unchanged (regression-free)
+- [x] Tests pass
+
+**Implementation (2026-07-01, code: d22d494)**
+Added selection-aware custom launchers: `launch_custom_batch()` iterates workspaces and fires `launch_custom()` per each. New `POST /api/launcher/run-batch` endpoint. Badge renders on tiles with count from selection. Checkbox in modal persists `use_selected_workspaces` to config. JS wires selection detection, badge updates via `updateLauncherBadges()`, and batch dispatch in `runLauncherById()`. 5 new tests. All 189 tests pass.
 
 ### Phase 5: Provider settings modal and trust-all removal [QA]
 
