@@ -229,22 +229,40 @@ def _run_foreground() -> None:
     # Import the real app
     from .web import app
 
-    # Start uvicorn on dynamic port in daemon thread
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+    # Determine port: 0 = random, >0 = attempt static with random fallback
+    desired_port = config.port
+
+    def _make_patched_startup(srv, evt):
+        """Factory to create a patched startup coroutine for a given server instance."""
+        orig = srv.startup
+        async def _patched(sockets=None):
+            await orig(sockets=sockets)
+            evt.set()
+        return _patched
+
+    uv_config = uvicorn.Config(app, host="127.0.0.1", port=desired_port, log_level="warning")
     server = uvicorn.Server(uv_config)
-
     ready_event = threading.Event()
-    original_startup = server.startup
-
-    async def _patched_startup(sockets=None):
-        await original_startup(sockets=sockets)
-        ready_event.set()
-
-    server.startup = _patched_startup
+    server.startup = _make_patched_startup(server, ready_event)
 
     server_thread = threading.Thread(target=server.run, daemon=True)
     server_thread.start()
     ready_event.wait(timeout=10)
+
+    # Detect failure: either timeout or thread died (port-in-use exits run() immediately)
+    if (not ready_event.is_set() or not server.servers) and desired_port > 0:
+        # Static port failed — shut down failed server, fall back to random
+        log.warning("Port %d unavailable, falling back to random port", desired_port)
+        server.should_exit = True
+        server_thread.join(timeout=3)
+
+        uv_config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        server = uvicorn.Server(uv_config)
+        ready_event = threading.Event()
+        server.startup = _make_patched_startup(server, ready_event)
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+        ready_event.wait(timeout=10)
 
     if not ready_event.is_set() or not server.servers:
         print("ERROR: Server failed to start", file=sys.stderr)
