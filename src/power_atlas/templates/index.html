@@ -39,7 +39,7 @@
             style="display:{% if port %}inline-block{% else %}none{% endif %}"
             title="Pick a random port">&#x1f504;</button>
     <button class="port-save-btn" id="portSave" onclick="savePort()"
-            style="display:none">Apply</button>
+            style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
   </div>
 </div>
 
@@ -93,7 +93,7 @@ function togglePortInput(mode) {
   };
 }
 function randomizePort() {
-  var port = 49152 + Math.floor(Math.random() * (65535 - 49152));
+  var port = 49152 + Math.floor(Math.random() * (65535 - 49152 + 1));
   document.getElementById('portValue').value = port;
   document.getElementById('portSave').style.display = 'inline-block';
 }
@@ -119,10 +119,9 @@ function showRestartOverlay(newPort) {
   var attempts = 0;
   var poll = setInterval(function() {
     attempts++;
-    if (attempts > 30) { clearInterval(poll); overlay.innerHTML = '<div class="restart-msg">Restart timed out. Refresh manually.</div>'; return; }
-    fetch(target + '/api/last-refresh', {mode: 'no-cors'}).then(function() {
-      clearInterval(poll);
-      window.location.href = target;
+    if (attempts > 30) { clearInterval(poll); overlay.innerHTML = '<div class="restart-msg">Restart timed out. <a href="javascript:void(0)" onclick="this.closest(\'.restart-overlay\').remove()">Dismiss</a></div>'; return; }
+    fetch(target + '/api/last-refresh').then(function(r) {
+      if (r.ok) { clearInterval(poll); window.location.href = target; }
     }).catch(function() {});
   }, 500);
 }
