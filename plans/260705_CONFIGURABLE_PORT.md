@@ -1,7 +1,7 @@
 # Configurable App Port
 
 > **Date**: 2026-07-05
-> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Make the web server port configurable (static or random) via the dashboard UI
 
 ---
@@ -411,3 +411,28 @@ Implementation health: Green.
 | 3 | High | no-cors opaque response causes premature redirect on cross-port change. | Fixed then reverted — no-cors is correct (opaque=reachable, error=down) (6827d52). |
 | 4 | High | Timeout overlay permanently blocks page with no dismiss. | Fixed — added Dismiss link (f7180bf). |
 | 5 | Medium | Custom terminal migration absent (expected in Phase 4). | Not a divergence — Phase 4 owns this per plan structure. |
+
+### 2026-07-05 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer.
+6 findings (0 High, 0 Medium, 6 Low).
+QA verification: PASS (7 port tests, integration checks, deleted settings 404 verified).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | `_SETTING_TYPES` includes unreachable list entries. | Pre-existing, no action. |
+| 2 | Low | Phase 1 commit mixed with unrelated changes. | Noted, no runtime impact. |
+| 3 | Low | Timeout overlay gives no fallback port indication. | Deferred (plan review #10). |
+| 4 | Low | No debounce on Apply button click. | UX polish, acceptable for v1. |
+| 5 | Low | No load-time port range validation in load_config. | Self-heals via fallback, acceptable. |
+| 6 | Low | api_restart response may not reach client. | Handled by catch() + overlay. |
+
+All success criteria verified:
+- SC1: `port` field in config.toml (int, default 0, backward-compatible) ✓
+- SC2: Index page port control (mode toggle, numeric input, randomize, Apply) ✓
+- SC3: Saving port triggers restart via /api/restart ✓
+- SC4: Static port occupied → fallback to random with log warning ✓
+- SC5: /settings route and settings.html removed ✓
+
+Invoked on fully-executed plan; performed standalone holistic review.
