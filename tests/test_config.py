@@ -215,3 +215,28 @@ def test_save_config_drops_trust_all_tools():
     with open(CONFIG_PATH, "rb") as f:
         raw = tomllib.load(f)
     assert "trust_all_tools" not in raw
+
+
+def test_port_round_trip():
+    """Port value survives write + reload."""
+    save_config(Config(port=9876))
+    c = load_config()
+    assert c.port == 9876
+
+
+def test_port_missing_defaults_zero():
+    """Config without port key defaults to 0."""
+    from power_atlas.config import CONFIG_DIR, CONFIG_PATH
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (CONFIG_PATH).write_text('peek_hotkey = "ctrl+z"\n')
+    c = load_config()
+    assert c.port == 0
+
+
+def test_port_bool_in_toml_rejected():
+    """TOML boolean for port is rejected by load_config (bool guard)."""
+    from power_atlas.config import CONFIG_DIR, CONFIG_PATH
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    (CONFIG_PATH).write_text('port = true\n')
+    c = load_config()
+    assert c.port == 0  # Falls back to default

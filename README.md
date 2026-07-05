@@ -51,6 +51,7 @@ Config stored at:
 - Linux: `~/.config/power-atlas/config.toml`
 
 ```toml
+port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port
 peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
 terminal_command = ""  # empty = auto-detect (platform-specific)
 pinned_folders = []

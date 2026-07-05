@@ -288,6 +288,46 @@ class TestSaveSettingAllowlist:
 
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
+def test_save_setting_port_valid(mock_load, mock_save, client):
+    """Valid port value is accepted and saved."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 8080})
+    assert resp.json()["ok"] is True
+    saved = mock_save.call_args[0][0]
+    assert saved.port == 8080
+
+
+@patch("power_atlas.web.load_config")
+def test_save_setting_port_bool_rejected(mock_load, client):
+    """Boolean value for port is rejected."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/save-setting", json={"key": "port", "value": True})
+    assert resp.json()["ok"] is False
+
+
+@patch("power_atlas.web.load_config")
+def test_save_setting_port_out_of_range(mock_load, client):
+    """Out-of-range port is rejected."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 99999})
+    assert resp.json()["ok"] is False
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
+    """Port 0 (random mode) is accepted."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 0})
+    assert resp.json()["ok"] is True
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
 def test_set_workspace_icon(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config()
