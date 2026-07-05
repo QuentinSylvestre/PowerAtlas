@@ -305,6 +305,10 @@ Then remove:
 
 Keep the `POST /api/autostart` endpoint (still used by the topbar toggle).
 
+#### Implementation (2026-07-05, code: 4c6e1fb)
+
+Removed `settings_page` (GET /settings) and `save_settings` (POST /api/settings) routes from web.py. Deleted `settings.html` template. Removed `test_save_settings` from test_web.py (218 tests remain). Migrated custom terminal to topbar: removed `{% if value != 'custom' %}` filter from terminal select, added onchange handler that shows custom input when "custom" selected, added `#customTerminal` text input with conditional visibility, added `terminal_values` to template context for the conditional. Per-phase review deferred to Step 9 — mechanical migration with no new logic.
+
 ### 5. Tests and README [QA]
 
 **Tests:**
