@@ -1,7 +1,7 @@
 # Configurable App Port
 
 > **Date**: 2026-07-05
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Scope**: Make the web server port configurable (static or random) via the dashboard UI
 
 ---
@@ -122,6 +122,12 @@ async def index(request: Request):
 ```
 
 **Test**: Add `test_port_round_trip` in `test_config.py` — write `port = 9876`, reload, assert value. Verify missing key → default 0. Add `test_save_setting_port_bool_rejected` — post `{key: "port", value: true}`, assert rejected. Add `test_save_setting_port_out_of_range` — post port=99999, assert rejected.
+
+#### Implementation (2026-07-05, code: 2ef6774)
+
+Added `port: int = 0` as the first field in the Config dataclass, added `"port": int` to `_SETTING_TYPES`, added a bool guard before the isinstance check in `save_setting` (with comment explaining the Python `isinstance(True, int)` gotcha), added port-specific range validation (0 or 1024-65535), and passed `config.port` to the index template context. Review also identified and fixed a missing bool guard in `load_config()` where TOML `port = true` would have passed `isinstance(True, int)` — added `if isinstance(v, bool) and expected is not bool: continue` before the type check (fix commit: 196cc2c).
+
+**Divergence**: The code commit (2ef6774) includes pre-existing unrelated working-tree changes (~60 lines of session refresh, shift-click selection, Claude Code fallback scan) alongside the Phase 1 changes. These were uncommitted changes from a prior session that the implementation sub-agent staged with `git add`.
 
 ### 2. Port binding with fallback [QA]
 
@@ -349,3 +355,17 @@ port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port
 | 12 | Medium | Custom terminal input only in settings.html — deleting it loses functionality. | Resolved — migrated custom terminal to topbar in Steps 3-4. |
 | 13 | Low | Test coverage gaps (bool, fallback). | Resolved — expanded test list in Step 5. |
 | 14 | Low | Files table claimed "add port-save-with-restart endpoint" but step-by-step reuses existing. | Resolved — removed misleading claim from Files table. |
+
+### 2026-07-05 — Implementation Review (after Phase 1, persona: Senior engineer, Security auditor, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green.
+4 findings auto-fixed (cycle 1), 0 regressions (cycle 2). QA: PASS (11 probes, 2 adversarial).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `load_config()` has no bool guard — TOML `port = true` passes as int. | Fixed — added `if isinstance(v, bool) and expected is not bool: continue` (196cc2c). |
+| 2 | Medium | Bool guard in `save_setting` has no comment explaining WHY. | Fixed — added inline comment about `isinstance(True, int)` (196cc2c). |
+| 3 | Medium | `_SETTING_TYPES` key order doesn't match Config field order. | Fixed — reordered to match Config declaration (196cc2c). |
+| 4 | Low | Redundant `isinstance(value, int)` in port range check. | Fixed — simplified to `if key == "port":` (196cc2c). |
+
+Noted (not blocking): tests deferred to Phase 5 per plan structure; commit 2ef6774 includes pre-existing unrelated working-tree changes (mixed scope).
