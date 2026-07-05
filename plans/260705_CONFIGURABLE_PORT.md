@@ -329,6 +329,10 @@ Removed `settings_page` (GET /settings) and `save_settings` (POST /api/settings)
 port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port
 ```
 
+#### Implementation (2026-07-05, code: b10908a)
+
+Added 7 new tests: 3 in test_config.py (port round-trip, missing defaults to 0, bool in TOML rejected) and 4 in test_web.py (valid port, bool rejected, out-of-range, zero accepted). Updated README.md Configuration section with the `port` field. Total: 225 tests pass. Per-phase review deferred to Step 9.
+
 ## Verification
 
 1. `pytest` — all tests pass
