@@ -27,6 +27,7 @@ _lock = threading.Lock()
 
 @dataclass
 class Config:
+    port: int = 0  # 0 = random (OS-assigned), >0 = static port
     peek_hotkey: str = "ctrl+shift+z"
     terminal_command: str = ""
     pinned_folders: list[dict] = field(default_factory=list)  # [{"folder": "path", "provider": "kiro-cli"}, ...]

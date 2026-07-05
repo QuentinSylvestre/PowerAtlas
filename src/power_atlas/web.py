@@ -96,6 +96,7 @@ async def index(request: Request):
     config = load_config()
     ctx = _terminal_context()
     return templates.TemplateResponse(request, "index.html", {
+        "port": config.port,
         "terminal_command": config.terminal_command,
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
@@ -219,8 +220,9 @@ async def partials_pinned_sessions(request: Request, fresh: int = 0):
     cards_html = ""
 
     if config.pinned_sessions:
-        # Ensure pinned session workspaces are loaded into cache for full content
-        await asyncio.to_thread(data.warmup_all, [], config.pinned_sessions)
+        # Only run full warmup on fresh requests (initial load / manual refresh)
+        if fresh:
+            await asyncio.to_thread(data.warmup_all, [], config.pinned_sessions)
         pinned_rows = await _render_pinned_sessions(request, config)
         if pinned_rows:
             cards_html += '<div class="section-label">Pinned sessions</div>'
@@ -414,6 +416,8 @@ async def search(request: Request, q: str = ""):
                 pinned_rows += templates.get_template("partials/session_row.html").render(
                     request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                     pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                    show_workspace=True,
+                    workspace_name=Path(cwd).name if cwd else "",
                 )
 
     if not matched and not pinned_rows:
@@ -487,6 +491,7 @@ async def save_provider_settings(request: Request):
 
 
 _SETTING_TYPES: dict[str, type] = {
+    "port": int,
     "terminal_command": str,
     "peek_hotkey": str,
     "pinned_folders": list,
@@ -504,10 +509,16 @@ async def save_setting(request: Request):
     expected_type = _SETTING_TYPES.get(key)
     if expected_type is None:
         return {"ok": False, "error": f"Unknown setting: {key}"}
+    if isinstance(value, bool):
+        return {"ok": False, "error": f"Invalid type for {key}"}
     if not isinstance(value, expected_type):
         return {"ok": False, "error": f"Invalid type for {key}"}
     if expected_type is list and not all(isinstance(x, str) for x in value):
         return {"ok": False, "error": f"All elements of {key} must be strings"}
+    # Port-specific range validation
+    if key == "port" and isinstance(value, int):
+        if value != 0 and not (1024 <= value <= 65535):
+            return {"ok": False, "error": "Port must be 0 (random) or 1024\u201365535"}
     config = load_config()
     setattr(config, key, value)
     save_config(config)
@@ -527,17 +538,29 @@ async def partials_session_tail(request: Request, sid: str = "", provider: str =
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)
-async def partials_sessions(request: Request, cwd: str = "", provider: str = "kiro-cli"):
+async def partials_sessions(request: Request, cwd: str = "", provider: str = "kiro-cli", fresh: int = 0):
     """Lazy-load sessions for a single workspace card."""
     import asyncio
     import time
     t0 = time.perf_counter()
     log.info("Loading sessions for %s", cwd[-40:])
     config = load_config()
-    try:
-        sessions = await asyncio.to_thread(data.get_sessions, cwd, provider)
-    except Exception:
-        sessions = []
+    if fresh:
+        # Bypass cache: reload from disk directly
+        mod = data.PROVIDERS.get(provider)
+        if mod and mod.is_available():
+            try:
+                sessions, file_stats = await asyncio.to_thread(mod.load_sessions, cwd)
+                data.session_cache.put(cwd, sessions, file_stats, provider)
+            except Exception:
+                sessions = []
+        else:
+            sessions = []
+    else:
+        try:
+            sessions = await asyncio.to_thread(data.get_sessions, cwd, provider)
+        except Exception:
+            sessions = []
     log.info("Got %d sessions for %s in %.2fs", len(sessions), Path(cwd).name, time.perf_counter() - t0)
     sessions = _sort_pinned_first(sessions, config.pinned_sessions)
     if not sessions:
@@ -556,7 +579,7 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "ki
 async def api_launch(request: Request):
     body = await request.json()
     config = load_config()
-    provider = body.get("provider", "kiro-cli")
+    provider = body.get("provider") or "kiro-cli"
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
         cwd=body["workspace"],
@@ -592,7 +615,7 @@ async def api_launch_batch(request: Request):
 async def api_new_session(request: Request):
     body = await request.json()
     config = load_config()
-    provider = body.get("provider", "kiro-cli")
+    provider = body.get("provider") or "kiro-cli"
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
         cwd=body["workspace"],
@@ -636,6 +659,8 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                         request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                         pinned_sessions=config.pinned_sessions,
                         provider_color=PROVIDER_COLORS.get(prov_name, ""),
+                        show_workspace=True,
+                        workspace_name=Path(cwd).name if cwd else "",
                     )
 
     # Fallback: pinned sessions not found in cache — read metadata directly (empty prompts)
@@ -664,7 +689,41 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                 request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                 pinned_sessions=config.pinned_sessions,
                 provider_color=PROVIDER_COLORS.get("kiro-cli", ""),
+                show_workspace=True,
+                workspace_name=Path(cwd).name if cwd else "",
             )
+    # Fallback for Claude Code: scan project folders for remaining pinned sessions
+    remaining = pinned_ids - found_ids
+    if remaining and (provider == "all" or provider == "claude-code"):
+        from .data_claude import CLAUDE_PROJECTS_DIR, _build_path_index, _resolve_folder_to_path, _is_session_file
+        if CLAUDE_PROJECTS_DIR.is_dir():
+            path_index = _build_path_index()
+            try:
+                for folder in CLAUDE_PROJECTS_DIR.iterdir():
+                    if not remaining:
+                        break
+                    if not folder.is_dir():
+                        continue
+                    for f in folder.iterdir():
+                        if f.suffix == ".jsonl" and _is_session_file(f.name) and f.stem in remaining:
+                            remaining.discard(f.stem)
+                            found_ids.add(f.stem)
+                            real_path = _resolve_folder_to_path(folder.name, path_index)
+                            # Load into cache so subsequent requests are fast
+                            sessions = data.get_sessions(real_path, "claude-code")
+                            for s in sessions:
+                                if s.session_id == f.stem:
+                                    html += templates.get_template("partials/session_row.html").render(
+                                        request=request, session=s, cwd=s.cwd,
+                                        stale=not Path(s.cwd).exists(),
+                                        pinned_sessions=config.pinned_sessions,
+                                        provider_color=PROVIDER_COLORS.get("claude-code", ""),
+                                        show_workspace=True,
+                                        workspace_name=Path(s.cwd).name if s.cwd else "",
+                                    )
+                                    break
+            except OSError:
+                pass
     return html
 
 
