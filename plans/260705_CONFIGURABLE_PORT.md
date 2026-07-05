@@ -180,6 +180,10 @@ Key fixes vs naive approach:
 - Failed server is explicitly shut down (`should_exit=True` + `join`) before retrying, preventing orphaned threads/sockets.
 - Check `server_thread.is_alive()` isn't needed: if the thread died from a bind error, `server.servers` will be empty and `ready_event` won't be set — both conditions already trigger the fallback.
 
+#### Implementation (2026-07-05, code: c243b9d)
+
+Replaced hardcoded `port=0` with `desired_port = config.port` and implemented fallback-to-random logic. Uses `_make_patched_startup` factory pattern for per-instance closure safety. On bind failure when `desired_port > 0`: logs warning, sets `should_exit=True`, joins thread (3s timeout with orphan warning if alive), then retries on port 0. Added `log.error` before catastrophic exit path. Review fix commit: 9b26815.
+
 ### 3. Banner UI control [QA]
 
 Add a port control group in the topbar of `index.html`, after the peek hotkey group:
@@ -369,3 +373,16 @@ Implementation health: Green.
 | 4 | Low | Redundant `isinstance(value, int)` in port range check. | Fixed — simplified to `if key == "port":` (196cc2c). |
 
 Noted (not blocking): tests deferred to Phase 5 per plan structure; commit 2ef6774 includes pre-existing unrelated working-tree changes (mixed scope).
+
+### 2026-07-05 — Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer)
+
+Implementation health: Green.
+2 findings auto-fixed, 3 informational (no action). Cycle 2 skipped — auto-fixes add only log lines (3 LOC, purely additive, zero behavior change).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | No log warning when join(timeout=3) times out and thread is orphaned. | Fixed — added `if server_thread.is_alive(): log.warning(...)` (9b26815). |
+| 2 | Medium | `ready_event.set()` fires after `server.servers` populated — ordering correct. | No action — reviewer confirmed correct behavior. |
+| 3 | Low | No `log.error` on catastrophic failure (both port attempts fail). | Fixed — added `log.error(...)` before stderr print (9b26815). |
+| 4 | Low | Negative port values skip fallback branch. | No action — save-setting validation already rejects. |
+| 5 | Low | Factory closure captures `srv.startup` eagerly. | No action — verified safe (uvicorn doesn't mutate). |
