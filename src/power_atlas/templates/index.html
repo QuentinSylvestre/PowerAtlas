@@ -3,13 +3,16 @@
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
   <div class="topbar-spacer"></div>
-  <select class="topbar-select" onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'terminal_command',value:this.value})})">
+  <select class="topbar-select" onchange="if(this.value==='custom'){document.getElementById('customTerminal').style.display='inline-block'}else{document.getElementById('customTerminal').style.display='none';fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'terminal_command',value:this.value})})}">
     {% for value, label in terminal_options %}
-      {% if value != 'custom' %}
-      <option value="{{ value }}" {% if terminal_command == value or (not terminal_command and value == '') %}selected{% endif %}>{{ label }}</option>
-      {% endif %}
+      <option value="{{ value }}" {% if terminal_command == value or (value == 'custom' and terminal_command not in terminal_values) or (not terminal_command and value == '') %}selected{% endif %}>{{ label }}</option>
     {% endfor %}
   </select>
+  <input type="text" id="customTerminal" class="topbar-input"
+         value="{{ terminal_command if terminal_command not in terminal_values else '' }}"
+         style="display:{% if terminal_command not in terminal_values and terminal_command %}inline-block{% else %}none{% endif %}"
+         placeholder="{cwd} = path, {cmd} = command"
+         onchange="fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'terminal_command',value:this.value})})">
   <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})">
     <span class="trust-dot"></span>Autostart
   </div>

@@ -106,38 +106,6 @@ async def index(request: Request):
     })
 
 
-@app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
-    config = load_config()
-    ctx = _terminal_context()
-    return templates.TemplateResponse(request, "settings.html", {
-        "config": config,
-        "autostart_enabled": autostart.is_enabled(),
-        **ctx,
-    })
-
-
-@app.post("/api/settings", response_class=HTMLResponse)
-async def save_settings(request: Request):
-    form = await request.form()
-    config = load_config()
-    # Terminal
-    terminal = form.get("terminal_command", "")
-    if terminal == "custom":
-        terminal = form.get("custom_terminal_value", "")
-    config.terminal_command = terminal
-    # Pinned folders from hidden field
-    folders_raw = form.get("pinned_folders", "")
-    config.pinned_folders = [f for f in folders_raw.split("|") if f.strip()] if folders_raw else []
-    save_config(config)
-    ctx = _terminal_context()
-    return templates.TemplateResponse(request, "settings.html", {
-        "config": config,
-        "autostart_enabled": autostart.is_enabled(),
-        **ctx,
-    })
-
-
 @app.post("/api/autostart")
 async def toggle_autostart():
     if autostart.is_enabled():
@@ -416,6 +384,7 @@ async def search(request: Request, q: str = ""):
                 pinned_rows += templates.get_template("partials/session_row.html").render(
                     request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                     pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                    provider_name="kiro-cli",
                     show_workspace=True,
                     workspace_name=Path(cwd).name if cwd else "",
                 )
@@ -572,6 +541,7 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "ki
         html += templates.get_template("partials/session_row.html").render(
             request=request, session=session, cwd=cwd, stale=stale,
             pinned_sessions=config.pinned_sessions,
+            provider_name=provider,
         )
     return HTMLResponse(html)
 
@@ -660,6 +630,7 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                         request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                         pinned_sessions=config.pinned_sessions,
                         provider_color=PROVIDER_COLORS.get(prov_name, ""),
+                        provider_name=prov_name,
                         show_workspace=True,
                         workspace_name=Path(cwd).name if cwd else "",
                     )
@@ -690,6 +661,7 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                 request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
                 pinned_sessions=config.pinned_sessions,
                 provider_color=PROVIDER_COLORS.get("kiro-cli", ""),
+                provider_name="kiro-cli",
                 show_workspace=True,
                 workspace_name=Path(cwd).name if cwd else "",
             )
@@ -719,6 +691,7 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                                         stale=not Path(s.cwd).exists(),
                                         pinned_sessions=config.pinned_sessions,
                                         provider_color=PROVIDER_COLORS.get("claude-code", ""),
+                                        provider_name="claude-code",
                                         show_workspace=True,
                                         workspace_name=Path(s.cwd).name if s.cwd else "",
                                     )

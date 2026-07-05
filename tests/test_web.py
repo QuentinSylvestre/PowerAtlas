@@ -189,23 +189,6 @@ def test_pinned_folder_empty_sessions(mock_discover, mock_providers, mock_sessio
 
 
 @patch("power_atlas.web.save_config")
-@patch("power_atlas.web.autostart.is_enabled")
-@patch("power_atlas.web.load_config")
-def test_save_settings(mock_config, mock_autostart, mock_save, client):
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_autostart.return_value = False
-    resp = client.post("/api/settings", data={
-        "terminal_command": "pwsh",
-        "pinned_folders": "C:\\a|C:\\b",
-    })
-    assert resp.status_code == 200
-    saved = mock_save.call_args[0][0]
-    assert saved.terminal_command == "pwsh"
-    assert saved.pinned_folders == ["C:\\a", "C:\\b"]
-
-
-@patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.get_sessions")
 def test_pin_session(mock_sessions, mock_config, mock_save, client):
