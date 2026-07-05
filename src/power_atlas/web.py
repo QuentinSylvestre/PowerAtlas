@@ -492,8 +492,8 @@ async def save_provider_settings(request: Request):
 
 _SETTING_TYPES: dict[str, type] = {
     "port": int,
-    "terminal_command": str,
     "peek_hotkey": str,
+    "terminal_command": str,
     "pinned_folders": list,
     "pinned_sessions": list,
 }
@@ -510,13 +510,14 @@ async def save_setting(request: Request):
     if expected_type is None:
         return {"ok": False, "error": f"Unknown setting: {key}"}
     if isinstance(value, bool):
+        # Python: isinstance(True, int) is True; reject booleans before the int check
         return {"ok": False, "error": f"Invalid type for {key}"}
     if not isinstance(value, expected_type):
         return {"ok": False, "error": f"Invalid type for {key}"}
     if expected_type is list and not all(isinstance(x, str) for x in value):
         return {"ok": False, "error": f"All elements of {key} must be strings"}
     # Port-specific range validation
-    if key == "port" and isinstance(value, int):
+    if key == "port":
         if value != 0 and not (1024 <= value <= 65535):
             return {"ok": False, "error": "Port must be 0 (random) or 1024\u201365535"}
     config = load_config()

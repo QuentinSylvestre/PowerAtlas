@@ -54,6 +54,9 @@ def load_config() -> Config:
             if k not in fields:
                 continue
             expected = type(getattr(defaults, k))
+            # Python: isinstance(True, int) is True; reject booleans for non-bool fields
+            if isinstance(v, bool) and expected is not bool:
+                continue
             if isinstance(v, expected):
                 kwargs[k] = v
             # else: skip — default will fill in via dataclass
