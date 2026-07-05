@@ -286,6 +286,10 @@ function togglePortInput(mode) {
 
 This prevents accidental restarts from a single dropdown change (review finding #7).
 
+#### Implementation (2026-07-05, code: 78603e1)
+
+Added port control group to topbar with mode select (Random/Static), numeric input (min 1024, max 65535, Enter-key handler), randomize button (49152-65535), and conditional Apply button. JavaScript functions: togglePortInput (shows/hides based on mode), randomizePort (inclusive range), savePort (client-side validation), savePortAndRestart (sequential save→restart), showRestartOverlay (no-cors polling with 15s timeout + dismiss link). CSS added to style.css matching existing topbar patterns. Review fixes: Apply button visibility conditional on port value, randomize range off-by-one, overlay dismiss mechanism. Cycle 2 caught a CORS regression from removing no-cors — restored (opaque response correctly detects cross-port server liveness). Fix commits: f7180bf, 6827d52.
+
 ### 4. Delete settings page + migrate custom terminal
 
 The topbar select in `index.html` currently filters out the "Custom" terminal option (`{% if value != 'custom' %}`). Before deleting `settings.html`, restore the custom option:
@@ -386,3 +390,16 @@ Implementation health: Green.
 | 3 | Low | No `log.error` on catastrophic failure (both port attempts fail). | Fixed — added `log.error(...)` before stderr print (9b26815). |
 | 4 | Low | Negative port values skip fallback branch. | No action — save-setting validation already rejects. |
 | 5 | Low | Factory closure captures `srv.startup` eagerly. | No action — verified safe (uvicorn doesn't mutate). |
+
+### 2026-07-05 — Implementation Review (after Phase 3, persona: Senior engineer, End-user advocate)
+
+Implementation health: Green.
+4 findings auto-fixed (cycle 1), 1 regression caught and fixed (cycle 2). QA: PASS (code-level; runtime at Step 9b).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Apply button hidden on initial render in static mode. | Fixed — conditional display matching sibling pattern (f7180bf). |
+| 2 | Low | randomizePort excludes 65535 (off-by-one). | Fixed — added +1 to range calculation (f7180bf). |
+| 3 | High | no-cors opaque response causes premature redirect on cross-port change. | Fixed then reverted — no-cors is correct (opaque=reachable, error=down) (6827d52). |
+| 4 | High | Timeout overlay permanently blocks page with no dismiss. | Fixed — added Dismiss link (f7180bf). |
+| 5 | Medium | Custom terminal migration absent (expected in Phase 4). | Not a divergence — Phase 4 owns this per plan structure. |
