@@ -255,6 +255,8 @@ def _run_foreground() -> None:
         log.warning("Port %d unavailable, falling back to random port", desired_port)
         server.should_exit = True
         server_thread.join(timeout=3)
+        if server_thread.is_alive():
+            log.warning("Failed server thread did not exit within 3s — orphaned (daemon)")
 
         uv_config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
         server = uvicorn.Server(uv_config)
@@ -265,6 +267,7 @@ def _run_foreground() -> None:
         ready_event.wait(timeout=10)
 
     if not ready_event.is_set() or not server.servers:
+        log.error("Server failed to start on port %d and random fallback", desired_port)
         print("ERROR: Server failed to start", file=sys.stderr)
         _remove_pid()
         sys.exit(1)
