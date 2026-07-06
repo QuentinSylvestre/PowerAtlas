@@ -260,6 +260,27 @@ def warmup_all(pinned_folders: list[str], pinned_sessions: list[str] | None = No
                 remaining.discard(meta_file.stem)
                 if not remaining:
                     break
+        # For still-unfound pinned sessions, scan Claude Code project folders
+        if remaining and data_claude.CLAUDE_PROJECTS_DIR.is_dir():
+            try:
+                for folder in data_claude.CLAUDE_PROJECTS_DIR.iterdir():
+                    if not remaining:
+                        break
+                    if not folder.is_dir():
+                        continue
+                    for f in folder.iterdir():
+                        if f.suffix == ".jsonl" and f.stem in remaining:
+                            path_index = data_claude._build_path_index()
+                            real_path = data_claude._resolve_folder_to_path(folder.name, path_index)
+                            if real_path:
+                                try:
+                                    get_sessions(real_path, "claude-code")
+                                except OSError:
+                                    pass
+                            remaining.discard(f.stem)
+                            break
+            except OSError:
+                pass
 
 
 def get_session_tail(session_id: str, provider: str = "kiro-cli", cwd: str = "", max_lines: int = 15) -> list[str]:

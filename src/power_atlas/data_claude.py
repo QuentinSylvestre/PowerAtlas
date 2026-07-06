@@ -19,6 +19,33 @@ _METADATA_TYPES = frozenset({
     "permission-mode",
 })
 
+# XML tags used by Claude Code for command/meta messages — strip these from content
+_XML_TAG_RE = re.compile(r"</?(?:command-message|command-name|command-args|local-command-caveat|local-command-stdout|local-command-stderr)(?:\s[^>]*)?>")
+
+# Pattern to detect messages that are purely command metadata (should be skipped entirely)
+_COMMAND_MSG_RE = re.compile(r"^\s*<(?:command-name|command-message|local-command-caveat|local-command-stdout|local-command-stderr|task-notification)")
+
+
+def _strip_command_xml(text: str) -> str:
+    """Strip Claude Code internal XML command tags from message content."""
+    cleaned = _XML_TAG_RE.sub("", text)
+    # Collapse multiple whitespace/newlines left after tag removal
+    cleaned = re.sub(r"\n\s*\n", "\n", cleaned).strip()
+    return cleaned
+
+
+def _is_meta_or_command_message(obj: dict) -> bool:
+    """Return True if this message is a meta/command message that should be skipped."""
+    if obj.get("isMeta"):
+        return True
+    # Check if content is a command message (starts with command XML tags)
+    msg = obj.get("message", {})
+    content = msg.get("content", "")
+    if isinstance(content, str) and content:
+        if _COMMAND_MSG_RE.match(content):
+            return True
+    return False
+
 
 def is_available() -> bool:
     """Return True if Claude Code project data exists on disk."""
@@ -221,9 +248,10 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
 
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
-            # Read first 100 lines for title and first_prompt
+            # Read first 500 lines for title and first_prompt (command-heavy sessions
+            # can have hundreds of meta/task lines before real user text)
             for i, line in enumerate(fh):
-                if i >= 100:
+                if i >= 500:
                     break
                 try:
                     obj = json.loads(line)
@@ -243,13 +271,18 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
                 # Skip hook_* types
                 if obj_type.startswith("hook_"):
                     continue
+                # Skip meta/command messages
+                if obj_type == "user" and _is_meta_or_command_message(obj):
+                    continue
 
                 # Extract first user message
                 if obj_type == "user" and not first_prompt:
                     msg = obj.get("message", {})
                     content = msg.get("content", "")
                     if isinstance(content, str) and content:
-                        first_prompt = content[:200]
+                        cleaned = _strip_command_xml(content)
+                        if cleaned:
+                            first_prompt = cleaned[:200]
                         # Use first message timestamp as created_at if available
                         ts = obj.get("timestamp")
                         if ts and isinstance(ts, (int, float)):
@@ -296,10 +329,15 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
                     last_reply_tail = text[-100:]
 
         elif obj_type == "user" and not last_prompt:
+            # Skip meta/command messages
+            if _is_meta_or_command_message(obj):
+                continue
             msg = obj.get("message", {})
             content = msg.get("content", "")
             if isinstance(content, str) and content:
-                last_prompt = content[:200]
+                cleaned = _strip_command_xml(content)
+                if cleaned:
+                    last_prompt = cleaned[:200]
             elif isinstance(content, list):
                 text = _extract_text_from_content(content)
                 if text:
@@ -350,7 +388,12 @@ def get_session_tail(session_id: str, cwd: str, max_lines: int = 15) -> list[str
             obj = json.loads(line)
         except (json.JSONDecodeError, ValueError):
             continue
-        if obj.get("type") != "assistant":
+        obj_type = obj.get("type")
+        if obj_type == "user":
+            # Skip meta/command messages
+            if _is_meta_or_command_message(obj):
+                continue
+        if obj_type != "assistant":
             continue
         msg = obj.get("message", {})
         content = msg.get("content", "")
@@ -379,7 +422,7 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
-                if i >= 100:
+                if i >= 500:
                     break
                 try:
                     obj = json.loads(line)
@@ -389,10 +432,15 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
                 if obj_type in _METADATA_TYPES or obj_type.startswith("hook_"):
                     continue
                 if obj_type == "user":
+                    # Skip meta/command messages
+                    if _is_meta_or_command_message(obj):
+                        continue
                     msg = obj.get("message", {})
                     content = msg.get("content", "")
                     if isinstance(content, str) and content:
-                        return _cap_text(content)
+                        cleaned = _strip_command_xml(content)
+                        if cleaned:
+                            return _cap_text(cleaned)
                     elif isinstance(content, list):
                         text = _extract_text_from_content(content)
                         if text:

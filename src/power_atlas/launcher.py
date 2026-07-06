@@ -171,7 +171,7 @@ def launch_batch(
         if workspace == "<unknown>":
             results.append(LaunchResult(False, s.get("session_id"), workspace, error="Missing 'workspace' key"))
             continue
-        provider = s.get("provider", "kiro-cli")
+        provider = s.get("provider") or "kiro-cli"
         if provider_settings:
             args = provider_settings.get(provider, {}).get("default_args", "")
         else:
