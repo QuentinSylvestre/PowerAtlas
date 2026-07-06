@@ -59,11 +59,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Cards grid */
 .panels-container { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.left-panel { width: 300px; min-width: 260px; max-width: 360px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+.left-panel { width: 330px; min-width: 286px; max-width: 396px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
 .left-panel::-webkit-scrollbar { width: 6px; }
 .left-panel::-webkit-scrollbar-track { background: transparent; }
 .left-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.center-panel { width: 380px; min-width: 320px; max-width: 440px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+.center-panel { width: 418px; min-width: 352px; max-width: 484px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
 .center-panel::-webkit-scrollbar { width: 6px; }
 .center-panel::-webkit-scrollbar-track { background: transparent; }
 .center-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
