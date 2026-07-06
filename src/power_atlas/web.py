@@ -430,33 +430,33 @@ async def search(request: Request, q: str = ""):
                             workspace_name=Path(cwd).name if cwd else "",
                         )
                         pinned_set.discard(session.session_id)
-        # Fallback: scan kiro-cli metadata for remaining pinned sessions not in cache
-        if pinned_set and data.SESSION_DIR.is_dir():
-            import json as _json
-            for meta_file in data.SESSION_DIR.glob("*.json"):
-                if meta_file.suffix == ".jsonl" or meta_file.stem not in pinned_set:
+        # Fallback: scan all providers for remaining pinned sessions not in cache
+        if pinned_set:
+            for sid in list(pinned_set):
+                result = data._find_pinned_session_workspace(sid)
+                if not result:
                     continue
+                cwd_found, prov_found = result
                 try:
-                    d = _json.loads(meta_file.read_text(encoding="utf-8"))
-                except Exception:
+                    sessions = data.get_sessions(cwd_found, prov_found)
+                except OSError:
                     continue
-                title = d.get("title", "")
-                if query in title.lower():
-                    cwd = d.get("cwd", "")
-                    session = data.Session(
-                        session_id=d.get("session_id", meta_file.stem),
-                        title=title or "<untitled>", cwd=cwd,
-                        created_at=d.get("created_at", ""),
-                        updated_at=d.get("updated_at", ""),
-                        first_prompt="", last_prompt="", last_reply_tail="",
-                    )
-                    pinned_rows += templates.get_template("partials/session_row.html").render(
-                        request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-                        pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                        provider_name="kiro-cli",
-                        show_workspace=True,
-                        workspace_name=Path(cwd).name if cwd else "",
-                    )
+                for session in sessions:
+                    if session.session_id == sid:
+                        title = session.title or ""
+                        if query in title.lower():
+                            provider_color = _get_provider_color(prov_found, config)
+                            pinned_rows += templates.get_template("partials/session_row.html").render(
+                                request=request, session=session, cwd=cwd_found,
+                                stale=not Path(cwd_found).exists(),
+                                pinned_sessions=config.pinned_sessions,
+                                folder_name=Path(cwd_found).name or cwd_found,
+                                provider_name=prov_found, provider_color=provider_color,
+                                show_workspace=True,
+                                workspace_name=Path(cwd_found).name if cwd_found else "",
+                            )
+                        pinned_set.discard(sid)
+                        break
 
     if not matched and not pinned_rows:
         return templates.TemplateResponse(request, "partials/empty_state.html", {

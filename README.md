@@ -68,6 +68,11 @@ enabled = true
 default_args = ""
 color = ""
 enabled = true
+
+[provider_settings.kiro-ide]
+default_args = ""
+color = ""
+enabled = true
 ```
 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).
