@@ -234,6 +234,40 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_p
 
 
 @patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_partials_pinned_workspaces_provider_filter(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Provider filter on partials_pinned_workspaces shows only matching pinned workspaces."""
+    from power_atlas.config import Config
+    ws_kiro = str(tmp_path / "kiro-proj")
+    ws_claude = str(tmp_path / "claude-proj")
+    mock_config.return_value = Config(pinned_folders=[ws_kiro, ws_claude])
+    mock_discover.return_value = [
+        (ws_kiro, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (ws_claude, 1, "2026-01-01T00:00:00Z", "claude-code"),
+    ]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    # Filter by kiro-cli — only kiro workspace should appear
+    resp = client.get("/partials/pinned-workspaces?provider=kiro-cli")
+    assert resp.status_code == 200
+    assert "kiro-proj" in resp.text
+    assert "claude-proj" not in resp.text
+
+    # Filter by claude-code — only claude workspace should appear
+    resp = client.get("/partials/pinned-workspaces?provider=claude-code")
+    assert resp.status_code == 200
+    assert "claude-proj" in resp.text
+    assert "kiro-proj" not in resp.text
+
+    # No filter (all) — both should appear
+    resp = client.get("/partials/pinned-workspaces?provider=all")
+    assert resp.status_code == 200
+    assert "kiro-proj" in resp.text
+    assert "claude-proj" in resp.text
+
+
+@patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.get_sessions")
 @patch("power_atlas.web.data.discover_workspaces")
 def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config, client, tmp_path):
