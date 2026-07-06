@@ -148,6 +148,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .action-btn.secondary:hover { border-color: var(--text-muted); color: var(--text); }
 .action-btn.launch { background: var(--accent); color: white; }
 .action-btn.launch:hover { background: var(--accent-hover); }
+.action-btn.launch:disabled { opacity: 0.5; cursor: not-allowed; background: var(--accent); }
 
 /* Toast */
 .toast-container { position: fixed; top: 16px; right: 16px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
