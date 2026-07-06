@@ -1,7 +1,7 @@
 # Merged Multi-Provider Workspace Cards
 
 > **Date**: 2026-07-06
-> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: All 5 phases COMPLETE  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Estimated effort**: 2-3 days
 > **Scope**: Merge per-provider workspace cards into unified cards with gradient borders, top-level provider filter, redesigned hover actions, and revised multi-select semantics.
 
