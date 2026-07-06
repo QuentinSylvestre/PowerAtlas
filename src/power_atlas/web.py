@@ -521,7 +521,7 @@ async def api_last_refresh():
 @app.get("/api/available-providers")
 async def api_available_providers():
     """Return list of available (enabled) providers with display names and colors."""
-    providers = data.available_providers()
+    providers = sorted(data.available_providers())
     config = load_config()
     providers = [p for p in providers if config.provider_settings.get(p, {}).get("enabled", True)]
     return [{"name": p, "display": PROVIDER_DISPLAY_NAMES.get(p, p), "color": _get_provider_color(p, config)} for p in providers]
@@ -819,7 +819,7 @@ async def partials_launchers(request: Request):
     html = ""
     # Provider-launcher tiles first
     try:
-        providers = data.available_providers()
+        providers = sorted(data.available_providers())
     except Exception:
         providers = []
     for p in providers:
