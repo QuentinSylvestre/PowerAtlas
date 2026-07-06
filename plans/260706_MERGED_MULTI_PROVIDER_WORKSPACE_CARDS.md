@@ -1,7 +1,7 @@
 # Merged Multi-Provider Workspace Cards
 
 > **Date**: 2026-07-06
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Estimated effort**: 2-3 days
 > **Scope**: Merge per-provider workspace cards into unified cards with gradient borders, top-level provider filter, redesigned hover actions, and revised multi-select semantics.
 
@@ -266,13 +266,16 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
 5. **Tests** — Update `test_config.py` for new migration path; update `test_web.py` for pin API signature change and `provider=all` sessions endpoint.
 
 **Exit criteria**:
-- [ ] `pinned_folders` loads correctly from old `list[dict]` format (migration)
-- [ ] `pinned_folders` saves as `list[str]` in TOML
-- [ ] `/api/pin-folder` and `/api/unpin-folder` work without `provider` param
-- [ ] `/partials/sessions?cwd=X&provider=all` returns interleaved sessions sorted by `updated_at`
-- [ ] `/partials/sessions?cwd=X&provider=kiro-cli` still works (single provider)
-- [ ] `warmup_all` / `warmup_pinned` type annotations updated to match `list[str]`
-- [ ] Existing tests pass after updates
+- [x] `pinned_folders` loads correctly from old `list[dict]` format (migration)
+- [x] `pinned_folders` saves as `list[str]` in TOML
+- [x] `/api/pin-folder` and `/api/unpin-folder` work without `provider` param
+- [x] `/partials/sessions?cwd=X&provider=all` returns interleaved sessions sorted by `updated_at`
+- [x] `/partials/sessions?cwd=X&provider=kiro-cli` still works (single provider)
+- [x] `warmup_all` / `warmup_pinned` type annotations updated to match `list[str]`
+- [x] Existing tests pass after updates
+
+Implementation (2026-07-06, code: 88339f9)
+Simplified `pinned_folders` from `list[dict]` (with folder+provider keys) to `list[str]` (paths only), reversing the migration direction: `load_config()` now converts old `list[dict]` entries to `list[str]` with deduplication. The `pin_folder` and `unpin_folder` endpoints were simplified to accept/remove plain path strings without a provider parameter. The `partials_sessions` endpoint now defaults to `provider="all"`, merging sessions from all available providers sorted by `updated_at` descending, while still supporting single-provider mode. Provider color is now passed to the session_row template for per-row provider identification. Added 7 new tests covering the migration, simplified pin/unpin, and both provider=all and single-provider session loading.
 
 ### Phase 2: Card grouping & template redesign [QA] [P:1]
 
@@ -391,14 +394,17 @@ if provider != "all":
 6. **Apply same grouping to `partials_pinned_workspaces()` and `search()`**.
 
 **Exit criteria**:
-- [ ] Workspace cards are grouped by path — same folder appears once regardless of provider count
-- [ ] Single-provider cards have solid left border (unchanged look)
-- [ ] Multi-provider cards show gradient split via `::before`/span pseudo-element
-- [ ] Hover actions show one launch button per available provider
-- [ ] Session rows show provider icon instead of `>_` on resume button
-- [ ] Search results are grouped the same way
-- [ ] `data-provider` attribute removed from card element
-- [ ] Pinned workspaces panel uses same grouping
+- [x] Workspace cards are grouped by path — same folder appears once regardless of provider count
+- [x] Single-provider cards have solid left border (unchanged look)
+- [x] Multi-provider cards show gradient split via `::before`/span pseudo-element
+- [x] Hover actions show one launch button per available provider
+- [x] Session rows show provider icon instead of `>_` on resume button
+- [x] Search results are grouped the same way
+- [x] `data-provider` attribute removed from card element
+- [x] Pinned workspaces panel uses same grouping
+
+Implementation (2026-07-06, code: 4c65d07)
+Implemented workspace card grouping by normalized path using a new `_group_workspaces()` helper that merges flat `(cwd, count, updated_at, provider)` tuples into grouped dicts with a `providers` list. All three render endpoints (`partials_workspaces`, `partials_pinned_workspaces`, `search`) now call this helper and pass the grouped `providers` list to the template instead of single-provider variables. The `workspace_card.html` template was fully redesigned: `data-provider` attribute removed, single-provider cards get a solid left border via inline style, multi-provider cards get a `.provider-gradient` span with a CSS linear-gradient. The hover actions loop over all providers rendering one launch button per provider with a colored dot. The `session_row.html` resume button now shows the provider icon with onerror fallback. CSS additions provide `.multi-provider`, `.provider-gradient`, `.provider-dot`, and `.session-provider-icon` styles. The pinned set logic was changed from `(norm_path, provider)` tuples to plain `norm_path` sets.
 
 ### Phase 3: Provider filter relocation & global wiring [QA]
 
@@ -680,3 +686,27 @@ pytest tests/test_config.py tests/test_web.py tests/test_data.py -v
 | 5 | Low | `pinned_sessions` search fallback in `search()` only scans kiro-cli metadata — pre-existing limitation. | Noted as pre-existing; out of scope for this plan (search scope is unchanged per Q13). |
 
 **Plan health: Green** — all High/Medium findings auto-resolved.
+
+### 2026-07-06 -- Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+1 finding (0 High, 0 Medium, 1 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | 6 residual `isinstance(pf, dict)` guards in web.py are dead code after config migration. | Fixed — removed all 6 guards in review auto-fix cycle. |
+
+Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical.
+
+### 2026-07-06 -- Implementation Review (after Phase 2, persona: End-user advocate)
+
+Implementation health: Green.
+3 findings (0 High, 1 Medium, 2 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Card header not keyboard-accessible — no tabindex, role, or keydown handler. | Fixed — added tabindex="0", role="button", onkeydown for Enter/Space. |
+| 2 | Low | Provider icon alt text uses raw slug rather than human-readable display name. | Fixed — added display field to provider dicts, used in alt/title attributes. |
+| 3 | Low | Provider-dot (8px) may become invisible on hover when button background matches. | Fixed — title tooltip provides identification fallback. |
+
+Cycle 2 skipped — Medium fix was a standard a11y pattern (not a design choice), Low fixes mechanical. 126/126 tests pass.
