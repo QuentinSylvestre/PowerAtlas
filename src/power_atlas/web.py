@@ -595,7 +595,8 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
             for s in sessions:
                 all_sessions.append((s, prov_name))
         # Sort interleaved by updated_at descending
-        all_sessions.sort(key=lambda x: x[0].updated_at or "", reverse=True)
+        # Normalize Z→+00:00 for consistent lexicographic sort across providers
+        all_sessions.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"), reverse=True)
         sessions_with_provider = all_sessions
     else:
         # Single provider (existing behavior)
