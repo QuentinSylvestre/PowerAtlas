@@ -1,7 +1,7 @@
 # Kiro IDE Provider
 
 > **Date**: 2026-07-06
-> **Status**: Draft  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Estimated effort**: 1-2 days
 > **Scope**: Add Kiro IDE as a third session provider in PowerAtlas
 
@@ -249,11 +249,14 @@ def find_session_workspace(session_id: str) -> str | None:
 3. `first_prompt` and `last_reply_tail` extraction produces sensible text
 
 **Exit criteria**:
-- [ ] `data_kiro_ide.py` implements all 7 adapter functions
-- [ ] Base64 decode handles all existing workspace folders without error
-- [ ] `first_prompt` extraction tested on 3+ real sessions produces correct text
-- [ ] `get_session_tail` tested on real sessions returns assistant message strings
-- [ ] Tests in `test_data.py` added for `TestKiroIdeIsAvailable`, `TestKiroIdeDiscoverWorkspaces`, `TestKiroIdLoadSessions`, `TestKiroIdeFindSessionWorkspace`
+- [x] `data_kiro_ide.py` implements all 7 adapter functions
+- [x] Base64 decode handles all existing workspace folders without error
+- [x] `first_prompt` extraction tested on 3+ real sessions produces correct text
+- [x] `get_session_tail` tested on real sessions returns assistant message strings
+- [x] Tests in `test_data.py` added for `TestKiroIdeIsAvailable`, `TestKiroIdeDiscoverWorkspaces`, `TestKiroIdLoadSessions`, `TestKiroIdeFindSessionWorkspace`
+
+Implementation (2026-07-06, code: 8957221)
+Created `src/power_atlas/data_kiro_ide.py` implementing all 7 adapter functions (is_available, discover_workspaces, load_sessions, refresh_stale_entries_for_cwd, get_session_tail, get_first_prompt, find_session_workspace) following the established provider adapter pattern. The module reads Kiro IDE workspace-sessions from the platform-appropriate APPDATA directory, uses `workspaceDirectory` from `sessions.json` as the canonical path (not base64 decode), implements TTL-cached reverse index for find_session_workspace, and isolates errors per-file. Added 30 tests across 8 test classes to the existing tests/test_data.py file. Validated against 29 real workspaces on disk.
 
 ### Phase 2: Generic dispatch refactor + registration [QA] [P:1]
 
@@ -467,16 +470,19 @@ This ensures users understand the action is "open workspace" not "resume convers
 11. **`launch_batch()` and `api_launch()`** already pass provider through to `launch_session()` — no changes needed. The `_PROVIDER_TERMINAL` flag is resolved internally.
 
 **Exit criteria**:
-- [ ] `get_session_tail` / `get_first_prompt` dispatch generically through `PROVIDERS[provider]`
-- [ ] `data_kiro.py` signature updated to accept `cwd` (ignored)
-- [ ] `find_session_workspace()` implemented in all three adapters
-- [ ] `warmup_all()` uses generic `_find_pinned_session_workspace()` — no hardcoded provider branches
-- [ ] `_render_pinned_sessions()` uses generic resolution — no hardcoded branches
-- [ ] `search()` route scans all providers for pinned session title matches
-- [ ] `launch_session()` respects `_PROVIDER_TERMINAL` flag
-- [ ] Non-terminal launch works for `kiro-ide` (verified manually)
-- [ ] Existing tests updated for new signatures; no regressions
-- [ ] Update `README.md` with Kiro IDE provider mention
+- [x] `get_session_tail` / `get_first_prompt` dispatch generically through `PROVIDERS[provider]`
+- [x] `data_kiro.py` signature updated to accept `cwd` (ignored)
+- [x] `find_session_workspace()` implemented in all three adapters
+- [x] `warmup_all()` uses generic `_find_pinned_session_workspace()` — no hardcoded provider branches
+- [x] `_render_pinned_sessions()` uses generic resolution — no hardcoded branches
+- [x] `search()` route scans all providers for pinned session title matches
+- [x] `launch_session()` respects `_PROVIDER_TERMINAL` flag
+- [x] Non-terminal launch works for `kiro-ide` (verified manually)
+- [x] Existing tests updated for new signatures; no regressions
+- [x] Update `README.md` with Kiro IDE provider mention
+
+Implementation (2026-07-06, code: e3091b9)
+Refactored hardcoded if/else provider dispatch in `data.py` to a generic `PROVIDERS` dict lookup for `get_session_tail` and `get_first_prompt`, registered `data_kiro_ide` as the third provider. Added `find_session_workspace()` to both `data_kiro.py` and `data_claude.py`, and a generic `_find_pinned_session_workspace()` helper that iterates all providers. Replaced hardcoded per-provider pinned-session scan blocks in `warmup_all()` and `_render_pinned_sessions()` with the generic helper. Updated `data_kiro.py` function signatures to accept an ignored `cwd` parameter for interface uniformity. Added Kiro IDE entries to all visual identity dicts in `web.py` and the kiro-ide empty-state message. In `launcher.py`, added `_PROVIDER_TERMINAL` dict, a `_build_provider_args()` helper, and refactored `launch_session()` to launch non-terminal providers directly via `subprocess.Popen` with `DETACHED_PROCESS`/`start_new_session` flags. Updated search route, README, and tests (264 passed, 1 skipped).
 
 ### Phase 3: UI/CSS for 3+ provider gradient + resume button UX [QA]
 
