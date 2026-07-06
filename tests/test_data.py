@@ -607,3 +607,408 @@ class TestClaudeLoadSessions:
         sessions, stats = data_claude.load_sessions("C:\\Work")
         assert len(sessions) == 1
         assert sessions[0].session_id == sid
+
+
+# --- Kiro IDE adapter tests ---
+
+from power_atlas import data_kiro_ide
+
+
+class TestKiroIdeEncodeDecode:
+    def test_encode_path_basic(self):
+        encoded = data_kiro_ide._encode_path("c:\\Users\\Test")
+        # Should be URL-safe base64 with - / _ / ? replacements
+        assert "+" not in encoded
+        assert "/" not in encoded
+        assert "=" not in encoded
+
+    def test_decode_roundtrip(self):
+        original = "c:\\Users\\QSylvestre.POLESTAR\\Documents\\test"
+        encoded = data_kiro_ide._encode_path(original)
+        decoded = data_kiro_ide._decode_folder_name(encoded)
+        # Decode should recover the original (no trailing garbage for exact-length inputs)
+        assert decoded.startswith(original) or original in decoded
+
+    def test_encode_replaces_correctly(self):
+        # Test specific character replacements
+        path = "c:\\test"
+        import base64
+        raw = base64.b64encode(path.encode("utf-8")).decode("ascii")
+        encoded = data_kiro_ide._encode_path(path)
+        expected = raw.replace("+", "-").replace("/", "_").replace("=", "?")
+        assert encoded == expected
+
+
+class TestKiroIdeIsAvailable:
+    def test_available_when_dir_has_content(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        (sessions_dir / "some_folder").mkdir()
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        assert data_kiro_ide.is_available() is True
+
+    def test_not_available_when_dir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", tmp_path / "nonexistent")
+        assert data_kiro_ide.is_available() is False
+
+    def test_not_available_when_dir_empty(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        assert data_kiro_ide.is_available() is False
+
+
+class TestKiroIdeDiscoverWorkspaces:
+    def _make_workspace(self, sessions_dir, folder_name, sessions_data):
+        """Helper to create a mock workspace folder with sessions.json."""
+        folder = sessions_dir / folder_name
+        folder.mkdir(exist_ok=True)
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+        return folder
+
+    def test_discovers_workspaces(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        self._make_workspace(sessions_dir, "folder_a", [
+            {"sessionId": "s1", "title": "Session 1", "dateCreated": "1700000000000", "workspaceDirectory": "C:\\ProjectA"},
+        ])
+        self._make_workspace(sessions_dir, "folder_b", [
+            {"sessionId": "s2", "title": "Session 2", "dateCreated": "1700100000000", "workspaceDirectory": "C:\\ProjectB"},
+            {"sessionId": "s3", "title": "Session 3", "dateCreated": "1700200000000", "workspaceDirectory": "C:\\ProjectB"},
+        ])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        results = data_kiro_ide.discover_workspaces()
+        assert len(results) == 2
+        # ProjectB has more recent dateCreated, should be first
+        assert results[0][0] == "C:\\ProjectB"
+        assert results[0][1] == 2  # 2 sessions
+        assert results[1][0] == "C:\\ProjectA"
+        assert results[1][1] == 1  # 1 session
+
+    def test_empty_sessions_json_skipped(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        self._make_workspace(sessions_dir, "empty_folder", [])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        results = data_kiro_ide.discover_workspaces()
+        assert results == []
+
+    def test_malformed_json_skipped(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        folder = sessions_dir / "bad_folder"
+        folder.mkdir()
+        (folder / "sessions.json").write_text("not valid json{{{", encoding="utf-8")
+
+        # Also add a valid workspace
+        self._make_workspace(sessions_dir, "good_folder", [
+            {"sessionId": "s1", "title": "OK", "dateCreated": "1700000000000", "workspaceDirectory": "C:\\Good"},
+        ])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        results = data_kiro_ide.discover_workspaces()
+        assert len(results) == 1
+        assert results[0][0] == "C:\\Good"
+
+    def test_no_workspace_directory_falls_back_to_decode(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        # Create folder with sessions that lack workspaceDirectory
+        self._make_workspace(sessions_dir, "some_folder", [
+            {"sessionId": "s1", "title": "S", "dateCreated": "1700000000000"},
+        ])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        results = data_kiro_ide.discover_workspaces()
+        # Should try decode; may or may not produce valid path, but shouldn't crash
+        # The decode of "some_folder" won't be a valid path, so it'll be skipped or included
+        assert isinstance(results, list)
+
+    def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", tmp_path / "nonexistent")
+        assert data_kiro_ide.discover_workspaces() == []
+
+
+class TestKiroIdeLoadSessions:
+    def _make_workspace_with_sessions(self, sessions_dir, cwd, sessions, folder_name=None):
+        """Helper to create a workspace folder with sessions.json and session files."""
+        # Use explicit folder_name to avoid Windows-incompatible chars from base64 encoding
+        if folder_name is None:
+            folder_name = cwd.replace("\\", "_").replace(":", "_").replace("/", "_")
+        folder = sessions_dir / folder_name
+        folder.mkdir(exist_ok=True)
+
+        sessions_index = []
+        for sid, title, date_created, history in sessions:
+            sessions_index.append({
+                "sessionId": sid,
+                "title": title,
+                "dateCreated": date_created,
+                "workspaceDirectory": cwd,
+            })
+            if history is not None:
+                session_data = {
+                    "history": history,
+                    "title": title,
+                    "sessionId": sid,
+                    "workspaceDirectory": cwd,
+                }
+                (folder / f"{sid}.json").write_text(json.dumps(session_data), encoding="utf-8")
+
+        (folder / "sessions.json").write_text(json.dumps(sessions_index), encoding="utf-8")
+        return folder
+
+    def test_loads_sessions_with_content(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        history = [
+            {"message": {"role": "user", "content": [{"type": "text", "text": "Hello world"}]}, "contextItems": []},
+            {"message": {"role": "assistant", "content": "Hi there!"}, "contextItems": []},
+        ]
+        self._make_workspace_with_sessions(sessions_dir, "C:\\MyProject", [
+            ("sess-1", "My Session", "1700000000000", history),
+        ])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        sessions, stats = data_kiro_ide.load_sessions("C:\\MyProject")
+        assert len(sessions) == 1
+        s = sessions[0]
+        assert s.session_id == "sess-1"
+        assert s.title == "My Session"
+        assert s.first_prompt == "Hello world"
+        assert s.last_reply_tail == "Hi there!"
+        assert stats  # should have file stats
+
+    def test_missing_session_file_still_returns_entry(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        # Pass None for history to skip creating session file
+        self._make_workspace_with_sessions(sessions_dir, "C:\\Project", [
+            ("sess-missing", "No File", "1700000000000", None),
+        ])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        sessions, stats = data_kiro_ide.load_sessions("C:\\Project")
+        assert len(sessions) == 1
+        assert sessions[0].session_id == "sess-missing"
+        assert sessions[0].first_prompt == ""
+        assert sessions[0].last_reply_tail == ""
+
+    def test_returns_empty_for_unknown_workspace(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        sessions, stats = data_kiro_ide.load_sessions("C:\\NonExistent")
+        assert sessions == []
+        assert stats == {}
+
+    def test_multiple_sessions_sorted_by_date(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        history = [
+            {"message": {"role": "user", "content": [{"type": "text", "text": "test"}]}, "contextItems": []},
+        ]
+        self._make_workspace_with_sessions(sessions_dir, "C:\\Multi", [
+            ("older", "Older", "1700000000000", history),
+            ("newer", "Newer", "1700200000000", history),
+        ])
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        sessions, _ = data_kiro_ide.load_sessions("C:\\Multi")
+        assert len(sessions) == 2
+        # Newer should be first (sorted by created_at desc)
+        assert sessions[0].session_id == "newer"
+        assert sessions[1].session_id == "older"
+
+    def test_finds_workspace_by_scan_fallback(self, tmp_path, monkeypatch):
+        """When encode doesn't match folder name, scan finds it via workspaceDirectory."""
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        # Create with a non-standard folder name (not the expected encoding)
+        folder = sessions_dir / "arbitrary_name"
+        folder.mkdir()
+        sessions_data = [
+            {"sessionId": "s1", "title": "T", "dateCreated": "1700000000000", "workspaceDirectory": "C:\\FindMe"},
+        ]
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+        history = [{"message": {"role": "user", "content": [{"type": "text", "text": "found"}]}, "contextItems": []}]
+        session_data = {"history": history, "title": "T", "sessionId": "s1", "workspaceDirectory": "C:\\FindMe"}
+        (folder / "s1.json").write_text(json.dumps(session_data), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+
+        sessions, _ = data_kiro_ide.load_sessions("C:\\FindMe")
+        assert len(sessions) == 1
+        assert sessions[0].first_prompt == "found"
+
+
+class TestKiroIdeFindSessionWorkspace:
+    def test_finds_workspace_for_known_session(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        folder = sessions_dir / "ws_folder"
+        folder.mkdir()
+        sessions_data = [
+            {"sessionId": "target-sess", "title": "T", "dateCreated": "1700000000000", "workspaceDirectory": "C:\\Target"},
+        ]
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        # Clear cached reverse index
+        monkeypatch.setattr("power_atlas.data_kiro_ide._reverse_index", None)
+
+        result = data_kiro_ide.find_session_workspace("target-sess")
+        assert result == "C:\\Target"
+
+    def test_returns_none_for_unknown_session(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        monkeypatch.setattr("power_atlas.data_kiro_ide._reverse_index", None)
+
+        result = data_kiro_ide.find_session_workspace("nonexistent-session")
+        assert result is None
+
+    def test_returns_none_when_dir_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", tmp_path / "nonexistent")
+        monkeypatch.setattr("power_atlas.data_kiro_ide._reverse_index", None)
+
+        result = data_kiro_ide.find_session_workspace("any-session")
+        assert result is None
+
+
+class TestKiroIdeGetSessionTail:
+    def test_extracts_assistant_messages(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        cwd = "C:\\TailTest"
+        folder = sessions_dir / "tail_test_folder"
+        folder.mkdir()
+
+        sessions_data = [{"sessionId": "t1", "title": "T", "dateCreated": "1700000000000", "workspaceDirectory": cwd}]
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+
+        history = [
+            {"message": {"role": "user", "content": [{"type": "text", "text": "q1"}]}, "contextItems": []},
+            {"message": {"role": "assistant", "content": "answer 1"}, "contextItems": []},
+            {"message": {"role": "user", "content": [{"type": "text", "text": "q2"}]}, "contextItems": []},
+            {"message": {"role": "assistant", "content": "answer 2"}, "contextItems": []},
+        ]
+        (folder / "t1.json").write_text(json.dumps({"history": history}), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        data_kiro_ide._tail_cache.clear()
+
+        result = data_kiro_ide.get_session_tail("t1", cwd)
+        assert result == ["answer 1", "answer 2"]
+
+    def test_max_lines_respected(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        cwd = "C:\\MaxLines"
+        folder = sessions_dir / "max_lines_folder"
+        folder.mkdir()
+
+        sessions_data = [{"sessionId": "ml1", "title": "T", "dateCreated": "1700000000000", "workspaceDirectory": cwd}]
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+
+        history = [
+            {"message": {"role": "assistant", "content": f"msg{i}"}, "contextItems": []}
+            for i in range(10)
+        ]
+        (folder / "ml1.json").write_text(json.dumps({"history": history}), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        data_kiro_ide._tail_cache.clear()
+
+        result = data_kiro_ide.get_session_tail("ml1", cwd, max_lines=3)
+        assert len(result) == 3
+
+    def test_returns_empty_for_missing_session(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        data_kiro_ide._tail_cache.clear()
+
+        result = data_kiro_ide.get_session_tail("nonexistent", "C:\\Whatever")
+        assert result == []
+
+
+class TestKiroIdeGetFirstPrompt:
+    def test_extracts_first_user_message(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+
+        cwd = "C:\\PromptTest"
+        folder = sessions_dir / "prompt_test_folder"
+        folder.mkdir()
+
+        sessions_data = [{"sessionId": "p1", "title": "T", "dateCreated": "1700000000000", "workspaceDirectory": cwd}]
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+
+        history = [
+            {"message": {"role": "assistant", "content": "I can help!"}, "contextItems": []},
+            {"message": {"role": "user", "content": [{"type": "text", "text": "First question"}]}, "contextItems": []},
+            {"message": {"role": "assistant", "content": "Here's the answer"}, "contextItems": []},
+        ]
+        (folder / "p1.json").write_text(json.dumps({"history": history}), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        data_kiro_ide._first_prompt_cache.clear()
+
+        result = data_kiro_ide.get_first_prompt("p1", cwd)
+        assert result == "First question"
+
+    def test_returns_empty_for_missing_session(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        data_kiro_ide._first_prompt_cache.clear()
+
+        result = data_kiro_ide.get_first_prompt("nonexistent", "C:\\Whatever")
+        assert result == ""
+
+
+class TestKiroIdeRefreshStale:
+    def test_detects_changed_file(self, tmp_path):
+        f = tmp_path / "test.json"
+        f.write_text("[]", encoding="utf-8")
+        st = f.stat()
+        old_stats = {str(f): _FileInfo(mtime=st.st_mtime - 1, size=2)}
+
+        assert data_kiro_ide.refresh_stale_entries_for_cwd("C:\\X", old_stats) is True
+
+    def test_no_change_when_same(self, tmp_path):
+        f = tmp_path / "test.json"
+        f.write_text("[]", encoding="utf-8")
+        st = f.stat()
+        old_stats = {str(f): _FileInfo(mtime=st.st_mtime, size=st.st_size)}
+
+        assert data_kiro_ide.refresh_stale_entries_for_cwd("C:\\X", old_stats) is False
+
+    def test_detects_deleted_file(self, tmp_path):
+        old_stats = {str(tmp_path / "gone.json"): _FileInfo(mtime=1.0, size=10)}
+        assert data_kiro_ide.refresh_stale_entries_for_cwd("C:\\X", old_stats) is True
+
+    def test_empty_stats_returns_false(self):
+        assert data_kiro_ide.refresh_stale_entries_for_cwd("C:\\X", {}) is False
