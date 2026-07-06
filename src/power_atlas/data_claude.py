@@ -241,6 +241,7 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
     Returns (title, first_prompt, last_prompt, last_reply_tail, created_at).
     """
     title = ""
+    custom_title = ""
     first_prompt = ""
     first_timestamp = ""
     last_prompt = ""
@@ -260,7 +261,10 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
 
                 obj_type = obj.get("type", "")
 
-                # Extract title from ai-title line
+                # Extract title — custom-title (user rename) takes priority over ai-title
+                if obj_type == "custom-title":
+                    custom_title = obj.get("customTitle", "")
+                    continue
                 if obj_type == "ai-title" and not title:
                     title = obj.get("aiTitle", "")
                     continue
@@ -302,11 +306,12 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
             fh.seek(max(0, size - read_size))
             tail_text = fh.read()
     except OSError:
-        if not title and not first_prompt:
+        if not custom_title and not title and not first_prompt:
             title = jsonl_path.stem
-        return title or first_prompt[:80] or jsonl_path.stem, first_prompt, "", "", first_timestamp
+        final_title = custom_title or title or first_prompt[:80] or jsonl_path.stem
+        return final_title, first_prompt, "", "", first_timestamp
 
-    # Parse tail for last user/assistant messages
+    # Parse tail for last user/assistant messages and custom-title
     tail_lines = tail_text.splitlines()
     for line in reversed(tail_lines):
         if last_prompt and last_reply_tail:
@@ -317,6 +322,13 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
             continue
 
         obj_type = obj.get("type", "")
+
+        # custom-title can appear anywhere — last one wins (most recent rename)
+        if obj_type == "custom-title":
+            ct = obj.get("customTitle", "")
+            if ct:
+                custom_title = ct
+            continue
 
         if obj_type == "assistant" and not last_reply_tail:
             msg = obj.get("message", {})
@@ -343,7 +355,8 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
                 if text:
                     last_prompt = text[:200]
 
-    # Final title resolution
+    # Final title resolution: custom-title (user rename) > ai-title > first prompt > filename
+    title = custom_title or title
     if not title:
         title = first_prompt[:80] if first_prompt else jsonl_path.stem
 
