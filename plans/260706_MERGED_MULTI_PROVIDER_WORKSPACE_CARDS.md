@@ -1,7 +1,7 @@
 # Merged Multi-Provider Workspace Cards
 
 > **Date**: 2026-07-06
-> **Status**: In Progress  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Status lifecycle: Exploring → Draft → In Progress → Complete -->
 > **Estimated effort**: 2-3 days
 > **Scope**: Merge per-provider workspace cards into unified cards with gradient borders, top-level provider filter, redesigned hover actions, and revised multi-select semantics.
 
@@ -719,3 +719,24 @@ Implementation health: Green.
 | 3 | Low | Provider-dot (8px) may become invisible on hover when button background matches. | Fixed — title tooltip provides identification fallback. |
 
 Cycle 2 skipped — Medium fix was a standard a11y pattern (not a design choice), Low fixes mechanical. 126/126 tests pass.
+
+### 2026-07-06 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate.
+11 findings (3 Medium, 8 Low). 4 auto-fixed, 7 accepted as Low-priority follow-ups.
+QA verification: PASS (3 surfaces verified: merged cards, provider filter, session interleaving).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | loadTail() reads removed card.dataset.provider, fails for Claude Code sessions. | Fixed — reads row.dataset.provider instead (c29c763). |
+| 2 | Medium | aria-expanded never updated by toggleCard() — screen readers always hear "collapsed". | Fixed — added setAttribute in toggleCard (c29c763). |
+| 3 | Medium | Session rows not keyboard-accessible (no tabindex/onkeydown). | User: accepted — pre-existing gap, out of scope for this plan. |
+| 4 | Low | launchFresh() is dead code after Phase 2 replaced it with launchNew(). | Fixed — removed (c29c763). |
+| 5 | Low | Disabled launch button has no visual differentiation. | Fixed — added opacity:0.5 + cursor:not-allowed CSS (c29c763). |
+| 6 | Low | search() doesn't filter by active provider tab (shows all regardless). | User: accepted — search scope unchanged per plan Q13 decision. |
+| 7 | Low | No direct unit test for _group_workspaces() merge behavior. | User: accepted — merge exercised implicitly via integration tests. |
+| 8 | Low | Gradient hard-codes 2 providers (not future-proof). | User: accepted — 2-provider assumption explicit in non-goals. |
+| 9 | Low | No prefers-reduced-motion media query. | User: accepted — pre-existing gap, not plan-scoped. |
+| 10 | Low | Provider-dot may be insufficient for colorblind users. | User: accepted — title tooltip provides fallback identification. |
+| 11 | Low | README feature documentation could be more explicit. | User: accepted — adequate for current scope. |
