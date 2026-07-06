@@ -687,8 +687,9 @@ def test_workspace_card_has_data_provider(mock_discover, mock_providers, client,
     assert resp.status_code == 200
     # data-provider removed; card is workspace-level now
     assert 'data-provider=' not in resp.text
-    # Single-provider card has solid border
-    assert "border-left: 3px solid #c2590f" in resp.text
+    # Provider color shown via gradient span (solid color for single provider)
+    assert "provider-gradient" in resp.text
+    assert "#c2590f" in resp.text
     # Provider icon badge
     assert "provider-icon-badge" in resp.text
 
@@ -725,7 +726,7 @@ def test_workspace_card_uses_user_configured_color(mock_discover, mock_providers
 
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
-    assert "border-left: 3px solid #ff0000" in resp.text
+    assert "#ff0000" in resp.text
 
 
 @patch("power_atlas.web.load_config")

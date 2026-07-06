@@ -303,13 +303,11 @@ script { display: none; }
 .restart-msg { color: white; font-size: 1.2rem; }
 
 
-/* Multi-provider cards */
-.workspace-card.multi-provider .card-header {
-  border-left: 3px solid transparent;
-  border-radius: var(--radius) 0 0 var(--radius);
+/* Provider color bar (inside card-header for both single and multi-provider) */
+.card-header {
   overflow: hidden;
 }
-.workspace-card.multi-provider .provider-gradient {
+.provider-gradient {
   position: absolute;
   left: 0;
   top: 0;

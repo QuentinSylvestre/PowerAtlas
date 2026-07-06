@@ -1,9 +1,7 @@
 <div class="workspace-card{% if stale %} stale{% endif %}{% if providers|length > 1 %} multi-provider{% endif %} collapsed"
      data-cwd="{{ cwd }}">
-  <div class="card-header" tabindex="0" role="button" aria-expanded="false" onclick="toggleCard(this.parentElement)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCard(this.parentElement)}"{% if providers|length == 1 %} style="border-left: 3px solid {{ providers[0].color }}; border-radius: var(--radius) 0 0 var(--radius)"{% endif %}>
-    {% if providers|length > 1 %}
-    <span class="provider-gradient" style="background: linear-gradient(to bottom, {{ providers[0].color }} 50%, {{ providers[1].color }} 50%)"></span>
-    {% endif %}
+  <div class="card-header" tabindex="0" role="button" aria-expanded="false" onclick="toggleCard(this.parentElement)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCard(this.parentElement)}">
+    <span class="provider-gradient" style="background: {% if providers|length > 1 %}linear-gradient(to bottom, {{ providers[0].color }} 50%, {{ providers[1].color }} 50%){% else %}{{ providers[0].color }}{% endif %}"></span>
     <div class="card-check" onclick="event.stopPropagation();handleItemClick(this.closest('.workspace-card'),event,'.workspace-card')"></div>
     <span class="card-chevron">▼</span>
     <span class="card-icon" onclick="event.stopPropagation();showIconPicker(this,'{{ cwd }}')" title="Click to change icon" role="button" aria-label="Workspace icon">{{ icon or '📁' }}</span>
