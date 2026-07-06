@@ -63,16 +63,26 @@ def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -
     for cwd, count, updated_at, prov_name in workspace_data:
         norm = _normalize_path(cwd)
         if norm not in groups:
-            groups[norm] = {"providers": [], "total_count": 0, "latest_updated": ""}
+            groups[norm] = {"providers": [], "total_count": 0, "latest_updated": "", "_seen_providers": set()}
             original_cwds[norm] = cwd
         g = groups[norm]
-        g["providers"].append({
-            "name": prov_name,
-            "display": PROVIDER_DISPLAY_NAMES.get(prov_name, prov_name),
-            "color": _get_provider_color(prov_name, config),
-            "count": count,
-            "updated_at": updated_at,
-        })
+        if prov_name in g["_seen_providers"]:
+            # Duplicate provider for same workspace — merge counts, keep latest updated_at
+            for p in g["providers"]:
+                if p["name"] == prov_name:
+                    p["count"] += count
+                    if updated_at and updated_at > p["updated_at"]:
+                        p["updated_at"] = updated_at
+                    break
+        else:
+            g["_seen_providers"].add(prov_name)
+            g["providers"].append({
+                "name": prov_name,
+                "display": PROVIDER_DISPLAY_NAMES.get(prov_name, prov_name),
+                "color": _get_provider_color(prov_name, config),
+                "count": count,
+                "updated_at": updated_at,
+            })
         g["total_count"] += count
         if updated_at and updated_at > g["latest_updated"]:
             g["latest_updated"] = updated_at
@@ -80,6 +90,8 @@ def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -
     result = []
     for norm, g in groups.items():
         cwd = original_cwds[norm]
+        # Sort providers alphabetically for consistent gradient ordering
+        g["providers"].sort(key=lambda p: p["name"])
         result.append({
             "cwd": cwd,
             "folder_name": Path(cwd).name or cwd,
