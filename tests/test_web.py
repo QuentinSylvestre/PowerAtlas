@@ -602,7 +602,7 @@ def test_launcher_icon_serves_png(mock_has, mock_path, client, tmp_path):
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_partials_workspaces_provider_filter(mock_discover, mock_providers, client, tmp_path):
-    """Filtering by provider passes the provider arg and renders only matching cards."""
+    """Filtering by provider shows only groups containing that provider, but preserves multi-provider info."""
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 3, "2026-01-01T00:00:00Z", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli", "claude-code"]
@@ -612,8 +612,8 @@ def test_partials_workspaces_provider_filter(mock_discover, mock_providers, clie
     # Cards no longer have data-provider; verify the workspace is rendered with the provider icon
     assert 'provider--kiro-cli' in resp.text
     assert 'workspace-card' in resp.text
-    # Verify discover was called with provider="kiro-cli"
-    mock_discover.assert_any_call(provider="kiro-cli")
+    # Always discovers all providers, then filters post-grouping
+    mock_discover.assert_any_call(provider=None)
 
 
 @patch("power_atlas.web.data.available_providers")

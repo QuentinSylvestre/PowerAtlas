@@ -317,14 +317,11 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     import time
     t0 = time.perf_counter()
     if fresh:
-        cache_key = f"workspaces_with_counts:{provider if provider != 'all' else 'all'}"
-        _all_key = "workspaces_with_counts:all"
-        data._cache.pop(cache_key, None)
-        data._cache.pop(_all_key, None)
+        data._cache.pop("workspaces_with_counts:all", None)
     try:
         workspace_data = await asyncio.to_thread(
             data.discover_workspaces_with_counts,
-            provider=None if provider == "all" else provider,
+            provider=None,
         )
         log.info("Discovered %d workspaces in %.2fs", len(workspace_data), time.perf_counter() - t0)
     except Exception:
@@ -371,10 +368,16 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     for group in grouped:
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
+        # Filter-aware count: show provider-specific count when filtered, total when "all"
+        if provider != "all":
+            prov_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
+            session_count = prov_count
+        else:
+            session_count = group["total_count"]
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-            session_count=group["total_count"], is_pinned=False,
+            session_count=session_count, is_pinned=False,
             last_updated=group["latest_updated"],
             icon=norm_icons.get(_normalize_path(cwd), ""),
             providers=group["providers"],

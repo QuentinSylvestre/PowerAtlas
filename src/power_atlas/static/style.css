@@ -308,14 +308,14 @@ script { display: none; }
   position: relative;
   border-left: none;
   padding-left: 6px;
-  overflow: hidden;
 }
 .workspace-card.multi-provider .provider-gradient {
   position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
+  left: -1px;
+  top: -1px;
+  bottom: -1px;
+  width: 4px;
+  border-radius: var(--radius) 0 0 var(--radius);
 }
 .card-new-icon { width: 18px; height: 18px; vertical-align: middle; }
 .provider-dot {
