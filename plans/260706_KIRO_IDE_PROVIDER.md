@@ -513,12 +513,15 @@ This produces:
 **Resume button differentiation**: Update `session_row.html` to show "Open in Kiro IDE" title/aria-label for non-terminal providers instead of "Resume" (per Phase 2 item 10).
 
 **Exit criteria**:
-- [ ] Workspace cards with 1, 2, and 3 providers render correct gradient
-- [ ] 3-provider gradient is visually distinguishable (4px width, ~1.3px per color)
-- [ ] Resume button shows "Open workspace in Kiro IDE" tooltip for kiro-ide sessions
-- [ ] Resume button shows "Resume session" tooltip for kiro-cli/claude-code sessions
-- [ ] CSS renders cleanly — no visual glitches on card borders
-- [ ] Test in `test_web.py` verifies 3-provider card HTML includes all three colors
+- [x] Workspace cards with 1, 2, and 3 providers render correct gradient
+- [x] 3-provider gradient is visually distinguishable (4px width, ~1.3px per color)
+- [x] Resume button shows "Open workspace in Kiro IDE" tooltip for kiro-ide sessions
+- [x] Resume button shows "Resume session" tooltip for kiro-cli/claude-code sessions
+- [x] CSS renders cleanly — no visual glitches on card borders
+- [x] Test in `test_web.py` verifies 3-provider card HTML includes all three colors
+
+Implementation (2026-07-06, code: 8f136e4)
+Extended workspace_card.html gradient template to compute even-split gradient stops for N providers using Jinja loop math. Added `gradient-3plus` CSS class that widens the bar from 3px to 4px for 3+ providers. Updated session_row.html resume button with provider-aware title and aria-label attributes — "Open workspace in Kiro IDE" for non-terminal providers, "Resume session" for CLI providers. Added 3 tests: gradient rendering, kiro-ide tooltip, terminal-provider tooltip.
 
 ## 6) Risk Assessment
 
