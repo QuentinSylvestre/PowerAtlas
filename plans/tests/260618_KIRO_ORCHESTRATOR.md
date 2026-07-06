@@ -1,5 +1,10 @@
 # Test Plan: kiro-orchestrator
 
+> **SUPERSEDED (2026-07-01)** by `plans/tests/260701_POWERATLAS.md`. This plan predates the
+> kiro-orchestrator -> power-atlas rename, multi-provider (kiro-cli + Claude Code) support,
+> the three-panel UI, custom launchers, extracted icons, the peek overlay, and Linux support.
+> Retained for historical reference only. Do not execute.
+
 approach: organic
 created: 2026-06-18T17:08:00+02:00
 last_executed: null
