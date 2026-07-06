@@ -606,30 +606,39 @@ def test_partials_workspaces_all_tab(mock_discover, mock_providers, client, tmp_
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_tab_hidden_single_provider(mock_discover, mock_providers, client, tmp_path):
-    """When only one provider available, no tab bar rendered."""
+    """When only one provider available, no tab bar rendered in partials (tabs now static in index.html)."""
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli"]
 
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
+    # Tab bar no longer rendered inline by partials_workspaces (moved to static HTML)
     assert "provider-tabs" not in resp.text
+    assert "provider-filter" not in resp.text
 
 
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_tab_shown_multiple_providers(mock_discover, mock_providers, client, tmp_path):
-    """When multiple providers available, tab bar is rendered with correct tabs."""
+    """When multiple providers available, /api/available-providers returns them for the static filter."""
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli", "claude-code"]
 
+    # Tab bar no longer rendered inline by partials_workspaces
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
-    assert "provider-tabs" in resp.text
-    assert "provider=all" in resp.text
-    assert "provider=kiro-cli" in resp.text
-    assert "provider=claude-code" in resp.text
+    assert "provider-tabs" not in resp.text
+
+    # Instead, /api/available-providers returns the provider list for JS-rendered filter
+    resp = client.get("/api/available-providers")
+    assert resp.status_code == 200
+    providers = resp.json()
+    names = [p["name"] for p in providers]
+    assert "kiro-cli" in names
+    assert "claude-code" in names
+    assert all("display" in p and "color" in p for p in providers)
 
 
 @patch("power_atlas.web.data.available_providers")
@@ -703,18 +712,17 @@ def test_empty_provider_tab_shows_helper(mock_discover, mock_providers, mock_con
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_active_tab_class(mock_discover, mock_providers, client, tmp_path):
-    """The active tab has the 'active' class."""
+    """Provider filter is now client-side (via /api/available-providers); tabs no longer in partials."""
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli", "claude-code"]
 
-    # Request kiro-cli tab
+    # Request kiro-cli filtered view — no tab bar in response (tabs are static HTML now)
     resp = client.get("/partials/workspaces?provider=kiro-cli")
     assert resp.status_code == 200
-    # kiro-cli tab should be active (with ARIA attributes)
-    assert 'class="provider-tab active" role="tab" aria-selected="true" hx-get="/partials/workspaces?provider=kiro-cli"' in resp.text
-    # "All" tab should NOT be active
-    assert 'class="provider-tab" role="tab" aria-selected="false" hx-get="/partials/workspaces?provider=all"' in resp.text
+    assert "provider-tabs" not in resp.text
+    # The endpoint still filters correctly by provider
+    assert "workspace-card" in resp.text
 
 
 # --- Phase 4: Selection-aware launcher batch ---

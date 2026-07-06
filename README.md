@@ -33,6 +33,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 
 - Auto-discovers workspaces from kiro-cli and Claude Code session data
 - Unified provider-launcher system with extracted icons and configurable colors
+- Inline provider filter next to search bar — filters workspace cards, pinned workspaces, and pinned sessions globally
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Multi-select and batch launch sessions
 - Per-provider settings with default args (e.g. trust-all-tools)

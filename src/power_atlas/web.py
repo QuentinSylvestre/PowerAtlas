@@ -223,7 +223,7 @@ async def unpin_session(request: Request):
 
 
 @app.get("/partials/pinned-sessions", response_class=HTMLResponse)
-async def partials_pinned_sessions(request: Request, fresh: int = 0):
+async def partials_pinned_sessions(request: Request, provider: str = "all", fresh: int = 0):
     """Render pinned sessions for the left panel."""
     import asyncio
     if fresh:
@@ -236,7 +236,7 @@ async def partials_pinned_sessions(request: Request, fresh: int = 0):
         # Only run full warmup on fresh requests (initial load / manual refresh)
         if fresh:
             await asyncio.to_thread(data.warmup_all, [], config.pinned_sessions)
-        pinned_rows = await _render_pinned_sessions(request, config)
+        pinned_rows = await _render_pinned_sessions(request, config, provider=provider)
         if pinned_rows:
             cards_html += '<div class="section-label">Pinned sessions</div>'
             cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
@@ -248,7 +248,7 @@ async def partials_pinned_sessions(request: Request, fresh: int = 0):
 
 
 @app.get("/partials/pinned-workspaces", response_class=HTMLResponse)
-async def partials_pinned_workspaces(request: Request, fresh: int = 0):
+async def partials_pinned_workspaces(request: Request, provider: str = "all", fresh: int = 0):
     """Render pinned workspaces for the center panel."""
     import asyncio
     import time
@@ -282,6 +282,11 @@ async def partials_pinned_workspaces(request: Request, fresh: int = 0):
         pinned_data = [(c, n, u, p) for c, n, u, p in all_workspace_data if _normalize_path(c) in pinned_norm_paths]
         # Group by normalized path
         grouped = _group_workspaces(pinned_data, config)
+
+        # If filtering by a specific provider, only show groups that include that provider
+        if provider != "all":
+            grouped = [g for g in grouped if any(prov["name"] == provider for prov in g["providers"])]
+
         # Sort pinned by folder name
         grouped.sort(key=lambda x: x["folder_name"].lower())
         if grouped:
@@ -330,14 +335,6 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
         })
 
     config = load_config()
-    # Get available providers for tab rendering
-    try:
-        providers = data.available_providers()
-    except Exception:
-        providers = []
-
-    # Filter out disabled providers
-    providers = [p for p in providers if config.provider_settings.get(p, {}).get("enabled", True)]
 
     from .data import _normalize_path
     norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
@@ -348,20 +345,6 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     pinned_norm_paths: set[str] = set()
     for folder in config.pinned_folders:
         pinned_norm_paths.add(_normalize_path(folder))
-
-    # Render tab bar (only if multiple providers available)
-    if len(providers) > 1:
-        cards_html += '<div class="provider-tabs" id="providerTabs" role="tablist">'
-        active_cls = ' active' if provider == "all" else ''
-        aria_sel = ' aria-selected="true"' if provider == "all" else ' aria-selected="false"'
-        cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider=all" hx-target="#workspace-cards" hx-swap="innerHTML" hx-trigger="click">All</button>'
-        for p in providers:
-            active_cls = ' active' if provider == p else ''
-            aria_sel = ' aria-selected="true"' if provider == p else ' aria-selected="false"'
-            display_name = PROVIDER_DISPLAY_NAMES.get(p, p)
-            cards_html += f'<button class="provider-tab{active_cls}" role="tab"{aria_sel} hx-get="/partials/workspaces?provider={p}" hx-target="#workspace-cards" hx-swap="innerHTML" hx-trigger="click">{display_name}</button>'
-        cards_html += '<span class="tab-spacer"></span>'
-        cards_html += '</div>'
 
     # Filter to non-pinned workspaces only (by normalized path)
     other_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_norm_paths]
@@ -494,6 +477,15 @@ async def api_refresh():
 @app.get("/api/last-refresh")
 async def api_last_refresh():
     return {"last_refresh": data.session_cache.last_refresh}
+
+
+@app.get("/api/available-providers")
+async def api_available_providers():
+    """Return list of available (enabled) providers with display names and colors."""
+    providers = data.available_providers()
+    config = load_config()
+    providers = [p for p in providers if config.provider_settings.get(p, {}).get("enabled", True)]
+    return [{"name": p, "display": PROVIDER_DISPLAY_NAMES.get(p, p), "color": _get_provider_color(p, config)} for p in providers]
 
 
 @app.get("/api/provider/{key}")
