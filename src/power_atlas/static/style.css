@@ -308,6 +308,7 @@ script { display: none; }
   position: relative;
   border-left: none;
   padding-left: 6px;
+  overflow: hidden;
 }
 .workspace-card.multi-provider .provider-gradient {
   position: absolute;
@@ -315,8 +316,8 @@ script { display: none; }
   top: 0;
   bottom: 0;
   width: 3px;
-  border-radius: var(--radius, 8px) 0 0 var(--radius, 8px);
 }
+.card-new-icon { width: 18px; height: 18px; vertical-align: middle; }
 .provider-dot {
   display: inline-block;
   width: 8px;
