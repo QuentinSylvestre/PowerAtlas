@@ -19,18 +19,22 @@ from .launcher import available_terminals
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
     "claude-code": "#c2590f",
+    "kiro-ide": "#8b5cf6",
 }
 PROVIDER_DISPLAY_NAMES = {
     "kiro-cli": "Kiro CLI",
     "claude-code": "Claude Code",
+    "kiro-ide": "Kiro IDE",
 }
 PROVIDER_BADGES = {
     "kiro-cli": "K",
     "claude-code": "C",
+    "kiro-ide": "I",
 }
 _PROVIDER_BINARY_DISPLAY = {
     "kiro-cli": "kiro-cli chat",
     "claude-code": "claude",
+    "kiro-ide": "kiro",
 }
 
 
@@ -358,6 +362,7 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             empty_msgs = {
                 "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
                 "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
+                "kiro-ide": "No Kiro IDE sessions found \u2014 open a folder in Kiro IDE and start a conversation to see it here.",
             }
             msg = empty_msgs.get(provider, f"No {provider} sessions found.")
             cards_html += f'<div class="empty-state">{msg}</div>'
@@ -404,35 +409,54 @@ async def search(request: Request, q: str = ""):
     config = load_config()
     matched = [(c, n, u, p) for c, n, u, p in workspace_data if query in c.lower()]
 
-    # Search pinned sessions by title
+    # Search pinned sessions by title across all providers
     pinned_rows = ""
     if config.pinned_sessions:
-        import json as _json
-        from .data import SESSION_DIR
-        for meta_file in SESSION_DIR.glob("*.json"):
-            if meta_file.suffix == ".jsonl" or meta_file.stem not in set(config.pinned_sessions):
-                continue
-            try:
-                d = _json.loads(meta_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            title = d.get("title", "")
-            if query in title.lower():
-                cwd = d.get("cwd", "")
-                session = data.Session(
-                    session_id=d.get("session_id", meta_file.stem),
-                    title=title or "<untitled>", cwd=cwd,
-                    created_at=d.get("created_at", ""),
-                    updated_at=d.get("updated_at", ""),
-                    first_prompt="", last_prompt="", last_reply_tail="",
-                )
-                pinned_rows += templates.get_template("partials/session_row.html").render(
-                    request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-                    pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                    provider_name="kiro-cli",
-                    show_workspace=True,
-                    workspace_name=Path(cwd).name if cwd else "",
-                )
+        pinned_set = set(config.pinned_sessions)
+        # Check cache first for pinned session titles
+        for prov_name in data.PROVIDERS:
+            for norm_cwd in data.session_cache.get_loaded_cwds(prov_name):
+                cached = data.session_cache.get(norm_cwd, prov_name)
+                if not cached:
+                    continue
+                for session in cached:
+                    if session.session_id in pinned_set and query in (session.title or "").lower():
+                        cwd = session.cwd
+                        pinned_rows += templates.get_template("partials/session_row.html").render(
+                            request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+                            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                            provider_name=prov_name,
+                            show_workspace=True,
+                            workspace_name=Path(cwd).name if cwd else "",
+                        )
+                        pinned_set.discard(session.session_id)
+        # Fallback: scan kiro-cli metadata for remaining pinned sessions not in cache
+        if pinned_set and data.SESSION_DIR.is_dir():
+            import json as _json
+            for meta_file in data.SESSION_DIR.glob("*.json"):
+                if meta_file.suffix == ".jsonl" or meta_file.stem not in pinned_set:
+                    continue
+                try:
+                    d = _json.loads(meta_file.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                title = d.get("title", "")
+                if query in title.lower():
+                    cwd = d.get("cwd", "")
+                    session = data.Session(
+                        session_id=d.get("session_id", meta_file.stem),
+                        title=title or "<untitled>", cwd=cwd,
+                        created_at=d.get("created_at", ""),
+                        updated_at=d.get("updated_at", ""),
+                        first_prompt="", last_prompt="", last_reply_tail="",
+                    )
+                    pinned_rows += templates.get_template("partials/session_row.html").render(
+                        request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
+                        pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
+                        provider_name="kiro-cli",
+                        show_workspace=True,
+                        workspace_name=Path(cwd).name if cwd else "",
+                    )
 
     if not matched and not pinned_rows:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
@@ -699,8 +723,7 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
     Args:
         provider: Filter to only show sessions from this provider. "all" shows all.
     """
-    from .data import SESSION_DIR, _normalize_path
-    import json as _json
+    from .data import _normalize_path
 
     pinned_ids = set(config.pinned_sessions)
     html = ""
@@ -728,69 +751,35 @@ async def _render_pinned_sessions(request, config, provider: str = "all") -> str
                         workspace_name=Path(cwd).name if cwd else "",
                     )
 
-    # Fallback: pinned sessions not found in cache — read metadata directly (empty prompts)
-    # Only fall back for kiro-cli (session metadata files) when provider allows it
+    # Fallback: pinned sessions not found in cache — use generic resolution
     remaining = pinned_ids - found_ids
-    if remaining and SESSION_DIR.is_dir() and (provider == "all" or provider == "kiro-cli"):
-        for meta_file in SESSION_DIR.glob("*.json"):
-            if meta_file.suffix == ".jsonl":
-                continue
-            if meta_file.stem not in remaining:
-                continue
-            try:
-                d = _json.loads(meta_file.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            cwd = d.get("cwd", "")
-            session = data.Session(
-                session_id=d.get("session_id", meta_file.stem),
-                title=d.get("title", "<untitled>"),
-                cwd=cwd,
-                created_at=d.get("created_at", ""),
-                updated_at=d.get("updated_at", ""),
-                first_prompt="", last_prompt="", last_reply_tail="",
-            )
-            html += templates.get_template("partials/session_row.html").render(
-                request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-                pinned_sessions=config.pinned_sessions,
-                provider_color=PROVIDER_COLORS.get("kiro-cli", ""),
-                provider_name="kiro-cli",
-                show_workspace=True,
-                workspace_name=Path(cwd).name if cwd else "",
-            )
-    # Fallback for Claude Code: scan project folders for remaining pinned sessions
-    remaining = pinned_ids - found_ids
-    if remaining and (provider == "all" or provider == "claude-code"):
-        from .data_claude import CLAUDE_PROJECTS_DIR, _build_path_index, _resolve_folder_to_path, _is_session_file
-        if CLAUDE_PROJECTS_DIR.is_dir():
-            path_index = _build_path_index()
-            try:
-                for folder in CLAUDE_PROJECTS_DIR.iterdir():
-                    if not remaining:
+    if remaining:
+        for sid in list(remaining):
+            result = data._find_pinned_session_workspace(sid)
+            if result:
+                cwd_found, prov_found = result
+                # Check provider filter
+                if provider != "all" and prov_found != provider:
+                    remaining.discard(sid)
+                    continue
+                try:
+                    sessions = data.get_sessions(cwd_found, prov_found)
+                except Exception:
+                    sessions = []
+                for s in sessions:
+                    if s.session_id == sid:
+                        found_ids.add(sid)
+                        html += templates.get_template("partials/session_row.html").render(
+                            request=request, session=s, cwd=s.cwd,
+                            stale=not Path(s.cwd).exists(),
+                            pinned_sessions=config.pinned_sessions,
+                            provider_color=PROVIDER_COLORS.get(prov_found, ""),
+                            provider_name=prov_found,
+                            show_workspace=True,
+                            workspace_name=Path(s.cwd).name if s.cwd else "",
+                        )
                         break
-                    if not folder.is_dir():
-                        continue
-                    for f in folder.iterdir():
-                        if f.suffix == ".jsonl" and _is_session_file(f.name) and f.stem in remaining:
-                            remaining.discard(f.stem)
-                            found_ids.add(f.stem)
-                            real_path = _resolve_folder_to_path(folder.name, path_index)
-                            # Load into cache so subsequent requests are fast
-                            sessions = data.get_sessions(real_path, "claude-code")
-                            for s in sessions:
-                                if s.session_id == f.stem:
-                                    html += templates.get_template("partials/session_row.html").render(
-                                        request=request, session=s, cwd=s.cwd,
-                                        stale=not Path(s.cwd).exists(),
-                                        pinned_sessions=config.pinned_sessions,
-                                        provider_color=PROVIDER_COLORS.get("claude-code", ""),
-                                        provider_name="claude-code",
-                                        show_workspace=True,
-                                        workspace_name=Path(s.cwd).name if s.cwd else "",
-                                    )
-                                    break
-            except OSError:
-                pass
+                remaining.discard(sid)
     return html
 
 

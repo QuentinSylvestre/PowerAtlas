@@ -89,12 +89,35 @@ def available_terminals() -> list[tuple[str, str]]:
 _PROVIDER_DISPLAY = {
     "kiro-cli": "Kiro CLI",
     "claude-code": "Claude Code",
+    "kiro-ide": "Kiro IDE",
 }
 
 _PROVIDER_BINARY = {
     "kiro-cli": "kiro-cli",
     "claude-code": "claude",
+    "kiro-ide": "kiro",
 }
+
+_PROVIDER_TERMINAL = {
+    "kiro-cli": True,
+    "claude-code": True,
+    "kiro-ide": False,
+}
+
+
+def _build_provider_args(provider: str, binary: str, session_id: str | None) -> list[str]:
+    """Build CLI args for a given provider."""
+    if provider == "claude-code":
+        args = [binary]
+        if session_id:
+            args += ["--resume", session_id]
+    elif provider == "kiro-ide":
+        args = [binary]  # No session resume support
+    else:  # kiro-cli
+        args = [binary, "chat"]
+        if session_id:
+            args += ["--resume-id", session_id]
+    return args
 
 
 def launch_session(
@@ -104,7 +127,7 @@ def launch_session(
     default_args: str = "",
     terminal_override: str = "",
 ) -> LaunchResult:
-    """Launch a provider session in a terminal. Returns result, never raises."""
+    """Launch a provider session in a terminal (or directly for non-terminal providers). Returns result, never raises."""
     binary = _PROVIDER_BINARY.get(provider, provider)
     display = _PROVIDER_DISPLAY.get(provider, provider)
 
@@ -114,6 +137,31 @@ def launch_session(
             error=f"'{binary}' not found on PATH. Install {display} or check your PATH.",
         )
 
+    if not Path(cwd).exists():
+        return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
+
+    if session_id and not _SESSION_ID_RE.match(session_id):
+        return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
+
+    # Non-terminal providers: launch directly without a terminal
+    if not _PROVIDER_TERMINAL.get(provider, True):
+        cli_args = _build_provider_args(provider, binary, session_id)
+        if default_args:
+            cli_args += shlex.split(default_args)
+        # Append workspace path as positional arg for IDE-style providers
+        cli_args.append(cwd)
+        try:
+            kwargs: dict = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+            else:
+                kwargs["start_new_session"] = True
+            subprocess.Popen(cli_args, **kwargs)
+            return LaunchResult(True, session_id, cwd)
+        except OSError as e:
+            return LaunchResult(False, session_id, cwd, error=str(e))
+
+    # Terminal-based providers
     terminal = detect_terminal(terminal_override)
     if not terminal:
         if sys.platform == "win32":
@@ -122,22 +170,7 @@ def launch_session(
             msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm \u2014 or configure a custom terminal in Settings."
         return LaunchResult(False, session_id, cwd, error=msg)
 
-    if not Path(cwd).exists():
-        return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
-
-    if session_id and not _SESSION_ID_RE.match(session_id):
-        return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
-
-    # Build args based on provider
-    if provider == "claude-code":
-        cli_args = ["claude"]
-        if session_id:
-            cli_args += ["--resume", session_id]
-    else:
-        cli_args = ["kiro-cli", "chat"]
-        if session_id:
-            cli_args += ["--resume-id", session_id]
-
+    cli_args = _build_provider_args(provider, binary, session_id)
     if default_args:
         cli_args += shlex.split(default_args)
 

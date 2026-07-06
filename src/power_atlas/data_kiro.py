@@ -255,7 +255,22 @@ _tail_cache: dict[str, tuple[float, float, list[str]]] = {}  # sid -> (time, mti
 _TAIL_CACHE_TTL = 5  # seconds
 
 
-def get_session_tail(session_id: str, max_lines: int = 15) -> list[str]:
+def find_session_workspace(session_id: str) -> str | None:
+    """Find the workspace (cwd) for a given session by scanning metadata files."""
+    if not SESSION_DIR.is_dir():
+        return None
+    meta_file = SESSION_DIR / f"{session_id}.json"
+    if not meta_file.exists():
+        return None
+    try:
+        d = json.loads(meta_file.read_text(encoding="utf-8"))
+        cwd = d.get("cwd", "")
+        return cwd or None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
+def get_session_tail(session_id: str, cwd: str = "", max_lines: int = 15) -> list[str]:
     """Extract last N assistant message texts from a session's .jsonl. Cached 5s."""
     jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
     if not jsonl_path.exists():
@@ -296,7 +311,7 @@ _first_prompt_cache: dict[str, tuple[float, str]] = {}  # sid -> (time, prompt)
 _FIRST_PROMPT_TTL = 60  # seconds
 
 
-def get_first_prompt(session_id: str) -> str:
+def get_first_prompt(session_id: str, cwd: str = "") -> str:
     """Extract first_prompt for tooltip display. Uses .history file (preserves newlines)."""
     cached = _first_prompt_cache.get(session_id)
     if cached and (time.time() - cached[0] < _FIRST_PROMPT_TTL):

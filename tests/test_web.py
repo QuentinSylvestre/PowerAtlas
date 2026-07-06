@@ -622,17 +622,20 @@ def test_partials_workspaces_all_tab(mock_discover, mock_providers, client, tmp_
     """All tab shows cards from all providers interleaved."""
     ws1 = str(tmp_path / "proj1")
     ws2 = str(tmp_path / "proj2")
+    ws3 = str(tmp_path / "proj3")
     mock_discover.return_value = [
         (ws1, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
         (ws2, 1, "2026-01-01T00:00:00Z", "claude-code"),
+        (ws3, 1, "2026-01-03T00:00:00Z", "kiro-ide"),
     ]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
+    mock_providers.return_value = ["kiro-cli", "claude-code", "kiro-ide"]
 
     resp = client.get("/partials/workspaces?provider=all")
     assert resp.status_code == 200
-    # Cards no longer have data-provider; verify both provider icons appear
+    # Cards no longer have data-provider; verify all provider icons appear
     assert 'provider--kiro-cli' in resp.text
     assert 'provider--claude-code' in resp.text
+    assert 'provider--kiro-ide' in resp.text
     # Verify discover was called with provider=None (all)
     mock_discover.assert_any_call(provider=None)
 
@@ -737,11 +740,15 @@ def test_empty_provider_tab_shows_helper(mock_discover, mock_providers, mock_con
     from power_atlas.config import Config
     mock_config.return_value = Config()
     mock_discover.return_value = []
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
+    mock_providers.return_value = ["kiro-cli", "claude-code", "kiro-ide"]
 
     resp = client.get("/partials/workspaces?provider=claude-code")
     assert resp.status_code == 200
     assert "No Claude Code sessions found" in resp.text
+
+    resp = client.get("/partials/workspaces?provider=kiro-ide")
+    assert resp.status_code == 200
+    assert "No Kiro IDE sessions found" in resp.text
 
 
 @patch("power_atlas.web.data.available_providers")

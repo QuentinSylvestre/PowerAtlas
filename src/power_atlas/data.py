@@ -50,13 +50,14 @@ def _cap_text(text: str, max_chars: int = 2000, max_lines: int = 15) -> str:
 
 
 # Import provider modules AFTER defining shared types to avoid circular import
-from . import data_kiro, data_claude  # noqa: E402
+from . import data_kiro, data_claude, data_kiro_ide  # noqa: E402
 
 
 # Provider registry: name -> module
 PROVIDERS: dict[str, object] = {
     "kiro-cli": data_kiro,
     "claude-code": data_claude,
+    "kiro-ide": data_kiro_ide,
 }
 
 
@@ -223,6 +224,20 @@ def warmup_pinned(pinned_folders: list[str]) -> None:
             continue
 
 
+def _find_pinned_session_workspace(session_id: str) -> tuple[str, str] | None:
+    """Find the workspace for a pinned session across all providers.
+
+    Returns (cwd, provider_name) or None if not found.
+    """
+    for prov_name, mod in PROVIDERS.items():
+        if not mod.is_available():
+            continue
+        cwd = mod.find_session_workspace(session_id)
+        if cwd:
+            return (cwd, prov_name)
+    return None
+
+
 def warmup_all(pinned_folders: list[str], pinned_sessions: list[str] | None = None) -> None:
     """Pre-discover all workspaces and load pinned folder/session data."""
     discover_workspaces_with_counts()
@@ -238,60 +253,31 @@ def warmup_all(pinned_folders: list[str], pinned_sessions: list[str] | None = No
                     for s in cached:
                         if s.session_id in pinned_ids:
                             found.add(s.session_id)
-        # For unfound pinned sessions, scan kiro-cli metadata to find their workspace
+        # For unfound pinned sessions, scan all providers generically
         remaining = pinned_ids - found
-        if remaining and data_kiro.SESSION_DIR.is_dir():
-            import json
-            for meta_file in data_kiro.SESSION_DIR.glob("*.json"):
-                if meta_file.suffix == ".jsonl":
-                    continue
-                if meta_file.stem not in remaining:
-                    continue
-                try:
-                    d = json.loads(meta_file.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                cwd = d.get("cwd", "")
-                if cwd:
+        if remaining:
+            for sid in list(remaining):
+                result = _find_pinned_session_workspace(sid)
+                if result:
+                    cwd_found, prov_found = result
                     try:
-                        get_sessions(cwd, "kiro-cli")
+                        get_sessions(cwd_found, prov_found)
                     except OSError:
                         pass
-                remaining.discard(meta_file.stem)
-                if not remaining:
-                    break
-        # For still-unfound pinned sessions, scan Claude Code project folders
-        if remaining and data_claude.CLAUDE_PROJECTS_DIR.is_dir():
-            try:
-                for folder in data_claude.CLAUDE_PROJECTS_DIR.iterdir():
-                    if not remaining:
-                        break
-                    if not folder.is_dir():
-                        continue
-                    for f in folder.iterdir():
-                        if f.suffix == ".jsonl" and f.stem in remaining:
-                            path_index = data_claude._build_path_index()
-                            real_path = data_claude._resolve_folder_to_path(folder.name, path_index)
-                            if real_path:
-                                try:
-                                    get_sessions(real_path, "claude-code")
-                                except OSError:
-                                    pass
-                            remaining.discard(f.stem)
-                            break
-            except OSError:
-                pass
+                    remaining.discard(sid)
 
 
 def get_session_tail(session_id: str, provider: str = "kiro-cli", cwd: str = "", max_lines: int = 15) -> list[str]:
     """Extract last N assistant message texts from a session. Dispatches to provider."""
-    if provider == "claude-code":
-        return data_claude.get_session_tail(session_id, cwd, max_lines)
-    return data_kiro.get_session_tail(session_id, max_lines)
+    mod = PROVIDERS.get(provider)
+    if mod is None:
+        return []
+    return mod.get_session_tail(session_id, cwd, max_lines)
 
 
 def get_first_prompt(session_id: str, provider: str = "kiro-cli", cwd: str = "") -> str:
     """Extract first_prompt for tooltip display. Dispatches to provider."""
-    if provider == "claude-code":
-        return data_claude.get_first_prompt(session_id, cwd)
-    return data_kiro.get_first_prompt(session_id)
+    mod = PROVIDERS.get(provider)
+    if mod is None:
+        return ""
+    return mod.get_first_prompt(session_id, cwd)

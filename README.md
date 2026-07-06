@@ -1,6 +1,6 @@
 # PowerAtlas
 
-Desktop launcher and dashboard for kiro-cli and Claude Code sessions. System tray icon with a web UI for discovering, resuming, and batch-launching AI coding assistant workspaces.
+Desktop launcher and dashboard for kiro-cli, Claude Code, and Kiro IDE sessions. System tray icon with a web UI for discovering, resuming, and batch-launching AI coding assistant workspaces.
 
 Supports **Windows** and **Linux**.
 
@@ -31,7 +31,8 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 
 ### Features
 
-- Auto-discovers workspaces from kiro-cli and Claude Code session data
+- Auto-discovers workspaces from kiro-cli, Claude Code, and Kiro IDE session data
+  - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
 - Unified provider-launcher system with extracted icons and configurable colors
 - Inline provider filter next to search bar — filters workspace cards, pinned workspaces, and pinned sessions globally
 - Resume sessions with one click (opens terminal with `--resume-id`)

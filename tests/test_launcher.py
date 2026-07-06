@@ -181,6 +181,47 @@ class TestLaunchSession:
         assert "metacharacters" in result.error.lower()
         mock_popen.assert_not_called()
 
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_session_kiro_ide_non_terminal(self, mock_which, mock_popen, tmp_path):
+        """Kiro IDE launches directly without a terminal."""
+        mock_which.side_effect = lambda n: {"kiro": "C:\\kiro.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id=None, provider="kiro-ide")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "kiro"
+        assert cwd in cmd  # workspace path passed as positional arg
+        # No terminal detection needed
+        mock_popen.assert_called_once()
+        # Verify DETACHED_PROCESS flags used (Windows)
+        kwargs = mock_popen.call_args[1]
+        import subprocess
+        assert kwargs.get("creationflags") == (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_launch_session_kiro_ide_no_resume(self, mock_which, mock_popen, tmp_path):
+        """Kiro IDE does not support session resume."""
+        mock_which.side_effect = lambda n: {"kiro": "C:\\kiro.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id="some-session-id", provider="kiro-ide")
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        # No --resume flags
+        assert "--resume" not in cmd
+        assert "--resume-id" not in cmd
+
+    @patch("shutil.which")
+    def test_launch_session_kiro_ide_binary_not_found(self, mock_which, tmp_path):
+        """Kiro IDE reports helpful error when binary not found."""
+        mock_which.return_value = None
+        cwd = str(tmp_path)
+        result = launch_session(cwd, provider="kiro-ide")
+        assert result.success is False
+        assert "'kiro' not found on PATH" in result.error
+        assert "Kiro IDE" in result.error
+
 
 class TestLaunchBatch:
     @patch("subprocess.Popen")

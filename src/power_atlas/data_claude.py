@@ -450,6 +450,24 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
     return ""
 
 
+def find_session_workspace(session_id: str) -> str | None:
+    """Find the workspace for a given Claude Code session by scanning project folders."""
+    if not CLAUDE_PROJECTS_DIR.is_dir():
+        return None
+    try:
+        path_index = _build_path_index()
+        for folder in CLAUDE_PROJECTS_DIR.iterdir():
+            if not folder.is_dir():
+                continue
+            session_file = folder / f"{session_id}.jsonl"
+            if session_file.exists():
+                real_path = _resolve_folder_to_path(folder.name, path_index)
+                return real_path or None
+    except OSError:
+        pass
+    return None
+
+
 def refresh_stale_entries_for_cwd(norm_cwd: str, old_stats: dict[str, _FileInfo]) -> bool:
     """Check if Claude Code session files for a cwd have changed. Returns True if stale."""
     if not old_stats:
