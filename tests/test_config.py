@@ -16,12 +16,31 @@ def isolated_config(tmp_path, monkeypatch):
 
 
 def test_round_trip():
-    cfg = Config(terminal_command="wt.exe", pinned_folders=[{"folder": "/a", "provider": "kiro-cli"}, {"folder": "/b", "provider": "claude-code"}])
+    cfg = Config(terminal_command="wt.exe", pinned_folders=["/a", "/b"])
     save_config(cfg)
     loaded = load_config()
     assert loaded.terminal_command == "wt.exe"
-    assert loaded.pinned_folders == [{"folder": "/a", "provider": "kiro-cli"}, {"folder": "/b", "provider": "claude-code"}]
+    assert loaded.pinned_folders == ["/a", "/b"]
     assert loaded.pinned_sessions == []
+
+
+def test_pinned_folders_dict_to_str_migration():
+    """list[dict] pinned_folders migrates to list[str] with deduplication."""
+    import tomli_w
+    from power_atlas.config import CONFIG_PATH, CONFIG_DIR
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # Simulate old format: list of dicts with duplicates across providers
+    old_data = {
+        "pinned_folders": [
+            {"folder": "/a", "provider": "kiro-cli"},
+            {"folder": "/b", "provider": "claude-code"},
+            {"folder": "/a", "provider": "claude-code"},  # duplicate path
+        ]
+    }
+    with open(CONFIG_PATH, "wb") as f:
+        tomli_w.dump(old_data, f)
+    cfg = load_config()
+    assert cfg.pinned_folders == ["/a", "/b"]  # deduplicated, order preserved
 
 
 def test_missing_keys_use_defaults():

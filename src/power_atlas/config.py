@@ -30,7 +30,7 @@ class Config:
     port: int = 0  # 0 = random (OS-assigned), >0 = static port
     peek_hotkey: str = "ctrl+shift+z"
     terminal_command: str = ""
-    pinned_folders: list[dict] = field(default_factory=list)  # [{"folder": "path", "provider": "kiro-cli"}, ...]
+    pinned_folders: list[str] = field(default_factory=list)  # paths only
     pinned_sessions: list[str] = field(default_factory=list)
     workspace_icons: dict[str, str] = field(default_factory=dict)
     custom_launchers: list[dict] = field(default_factory=list)
@@ -61,9 +61,17 @@ def load_config() -> Config:
                 kwargs[k] = v
             # else: skip — default will fill in via dataclass
         config = Config(**kwargs)
-        # Migration: pinned_folders list[str] → list[dict]
-        if config.pinned_folders and config.pinned_folders[0] and isinstance(config.pinned_folders[0], str):
-            config.pinned_folders = [{"folder": f, "provider": "kiro-cli"} for f in config.pinned_folders]
+        # Migration: pinned_folders list[dict] -> list[str] (provider-agnostic)
+        if config.pinned_folders and isinstance(config.pinned_folders[0], dict):
+            seen = set()
+            paths = []
+            for entry in config.pinned_folders:
+                folder = entry.get("folder", "")
+                if folder and folder not in seen:
+                    seen.add(folder)
+                    paths.append(folder)
+            config.pinned_folders = paths
+        # Already list[str] — no migration needed
         # Migration: trust_all_tools=true → provider_settings["kiro-cli"].default_args = "-a"
         if data.get("trust_all_tools") is True and not config.provider_settings:
             config.provider_settings["kiro-cli"] = {
