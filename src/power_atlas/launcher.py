@@ -154,6 +154,10 @@ def launch_session(
             kwargs: dict = {}
             if sys.platform == "win32":
                 kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+                # .cmd/.bat files need shell=True on Windows to execute properly
+                resolved = shutil.which(binary) or binary
+                if resolved.lower().endswith((".cmd", ".bat")):
+                    kwargs["shell"] = True
             else:
                 kwargs["start_new_session"] = True
             subprocess.Popen(cli_args, **kwargs)
