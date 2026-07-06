@@ -14,7 +14,7 @@
     <button class="pin-btn{% if session.session_id in pinned_sessions %} pinned{% endif %}" onclick="pinSession(this)" aria-label="Pin session">📌</button>
     <button class="row-btn copy-sid-btn" onclick="copySid(this)" aria-label="Copy session ID" title="Copy session ID">📋</button>
     {% if not stale %}
-    <button class="row-btn primary terminal-btn" onclick="resumeSession(this)" aria-label="Resume">
+    <button class="row-btn primary terminal-btn" onclick="resumeSession(this)" aria-label="{% if provider_name == 'kiro-ide' %}Open in Kiro IDE{% else %}Resume{% endif %}" title="{% if provider_name == 'kiro-ide' %}Open workspace in Kiro IDE{% else %}Resume session{% endif %}">
       <img src="/api/launcher-icon/provider--{{ provider_name }}" class="session-provider-icon" alt="{{ provider_name }}" onerror="this.outerHTML='&gt;_'">
     </button>
     {% endif %}

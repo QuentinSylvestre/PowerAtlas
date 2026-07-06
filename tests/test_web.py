@@ -951,3 +951,82 @@ def test_launcher_run_batch_passes_workspace_arg_for_non_terminal(mock_load, moc
     mock_batch.assert_called_once()
     call_kwargs = mock_batch.call_args
     assert call_kwargs.kwargs.get("pass_workspace_arg") is True or call_kwargs[1].get("pass_workspace_arg") is True
+
+
+# --- Phase 3: 3-provider gradient + resume button UX ---
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_three_provider_gradient_has_all_colors(mock_discover, mock_providers, client, tmp_path):
+    """Workspace card with 3 providers renders gradient with all three colors and gradient-3plus class."""
+    workspace = str(tmp_path)
+    mock_discover.return_value = [
+        (workspace, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (workspace, 1, "2026-01-01T00:00:00Z", "claude-code"),
+        (workspace, 1, "2026-01-01T00:00:00Z", "kiro-ide"),
+    ]
+    mock_providers.return_value = ["kiro-cli", "claude-code", "kiro-ide"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # All three provider colors present
+    assert "#7138cc" in resp.text  # kiro-cli
+    assert "#c2590f" in resp.text  # claude-code
+    assert "#8b5cf6" in resp.text  # kiro-ide
+    # Gradient class for 3+ providers
+    assert "gradient-3plus" in resp.text
+    # Multi-provider class present
+    assert "multi-provider" in resp.text
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_resume_button_kiro_ide_tooltip(mock_discover, mock_providers, mock_sessions, client, tmp_path):
+    """Kiro IDE sessions show 'Open workspace in Kiro IDE' tooltip; others show 'Resume session'."""
+    from power_atlas.data import Session
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-ide")]
+    mock_providers.return_value = ["kiro-ide"]
+    mock_sessions.return_value = [Session(
+        session_id="test-ide-session",
+        title="Test IDE Session",
+        cwd=workspace,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        first_prompt="Hello",
+        last_prompt="",
+        last_reply_tail="",
+    )]
+
+    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "kiro-ide"})
+    assert resp.status_code == 200
+    assert 'title="Open workspace in Kiro IDE"' in resp.text
+    assert 'aria-label="Open in Kiro IDE"' in resp.text
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_resume_button_terminal_provider_tooltip(mock_discover, mock_providers, mock_sessions, client, tmp_path):
+    """Terminal providers (kiro-cli, claude-code) show 'Resume session' tooltip."""
+    from power_atlas.data import Session
+    workspace = str(tmp_path)
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+    mock_sessions.return_value = [Session(
+        session_id="test-cli-session",
+        title="Test CLI Session",
+        cwd=workspace,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        first_prompt="Hello",
+        last_prompt="",
+        last_reply_tail="",
+    )]
+
+    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "kiro-cli"})
+    assert resp.status_code == 200
+    assert 'title="Resume session"' in resp.text
+    assert 'aria-label="Resume"' in resp.text

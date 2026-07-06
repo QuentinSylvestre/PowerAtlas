@@ -314,6 +314,9 @@ script { display: none; }
   bottom: 0;
   width: 3px;
 }
+.provider-gradient.gradient-3plus {
+  width: 4px;
+}
 .card-new-icon { width: 18px; height: 18px; vertical-align: middle; }
 .provider-dot {
   display: inline-block;
