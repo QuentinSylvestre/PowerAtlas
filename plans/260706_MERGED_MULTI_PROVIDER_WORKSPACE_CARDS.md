@@ -505,15 +505,18 @@ async def partials_pinned_workspaces(request: Request, provider: str = "all", fr
 - `refreshCards()`: expanded state key = `card.dataset.cwd` (not `cwd|provider`)
 
 **Exit criteria**:
-- [ ] Provider tabs render inline with search bar
-- [ ] Selecting a tab filters all three panels (workspace cards, pinned workspaces, pinned sessions)
-- [ ] "All" tab shows all workspaces; specific provider tab hides cards with zero sessions for that provider
-- [ ] Tab state is preserved across page refreshes (via `_activeProvider` + initial render)
-- [ ] Old `.provider-tabs` CSS removed from right panel
-- [ ] `toggleCard()` uses active filter for session loading
-- [ ] `refreshCards()` expanded key simplified to `cwd`
-- [ ] Provider filter buttons have `role="tab"`, `aria-selected`, and keyboard navigation support
-- [ ] Update README.md Features section (provider filter is now a top-level UI element)
+- [x] Provider tabs render inline with search bar
+- [x] Selecting a tab filters all three panels (workspace cards, pinned workspaces, pinned sessions)
+- [x] "All" tab shows all workspaces; specific provider tab hides cards with zero sessions for that provider
+- [x] Tab state is preserved across page refreshes (via `_activeProvider` + initial render)
+- [x] Old `.provider-tabs` CSS removed from right panel
+- [x] `toggleCard()` uses active filter for session loading
+- [x] `refreshCards()` expanded key simplified to `cwd`
+- [x] Provider filter buttons have `role="tab"`, `aria-selected`, and keyboard navigation support
+- [x] Update README.md Features section (provider filter is now a top-level UI element)
+
+Implementation (2026-07-06, code: bdfbe1f)
+Relocated the provider filter from server-rendered tab bar inside `partials_workspaces()` to a client-side inline element next to the search bar. Added `/api/available-providers` endpoint returning enabled providers with display names and colors. New `initProviderFilter()` JS function renders pill-shaped filter buttons with `role="tab"`, `aria-selected`, and keyboard arrow-key navigation. `switchProvider()` updates all three panels by passing `?provider=` query param. Both pinned endpoints now accept the `provider` param and filter results accordingly. Updated `toggleCard()`, `loadExpandedCards()`, `refreshExpandedSessions()`, and `refreshCards()` to use `window._activeProvider`. Simplified expanded-state key from `cwd|provider` to `cwd`. Replaced old `.provider-tabs` CSS with new `.provider-filter` styles. Updated README Features section.
 
 ### Phase 4: Multi-select & launch logic [QA]
 
@@ -592,12 +595,15 @@ function pinWorkspace(btn) {
 ```
 
 **Exit criteria**:
-- [ ] "Launch selected" only dispatches session rows (not workspace cards)
-- [ ] "Launch selected" button disabled when only workspace cards selected
-- [ ] Workspace selection still updates launcher tile badges
-- [ ] Per-provider `launchNew()` on card hover buttons works
-- [ ] `pinWorkspace()` sends only folder path (no provider)
-- [ ] Selection info shows session/workspace breakdown
+- [x] "Launch selected" only dispatches session rows (not workspace cards)
+- [x] "Launch selected" button disabled when only workspace cards selected
+- [x] Workspace selection still updates launcher tile badges
+- [x] Per-provider `launchNew()` on card hover buttons works
+- [x] `pinWorkspace()` sends only folder path (no provider)
+- [x] Selection info shows session/workspace breakdown
+
+Implementation (2026-07-06, code: c4acfda)
+Updated `launchSelected()` to only collect `.session-row.selected` entries (workspace cards excluded from batch payload). `updateActionBar()` now disables the launch button with a tooltip when `sessionCount===0`. Added `launchNew(btn, provider)` for per-provider launch from card hover buttons. `pinWorkspace()` already sends only folder path (from Phase 3). Workspace selection continues to update launcher tile badges via `updateLauncherBadges()`.
 
 ### Phase 5: Test updates & cleanup [QA]
 
@@ -626,12 +632,15 @@ function pinWorkspace(btn) {
 4. **Remove `_proto/border-gradient-prototype.html`** (cleanup after verification).
 
 **Exit criteria**:
-- [ ] All existing tests pass
-- [ ] Config migration test covers `list[dict]` → `list[str]` with dedup
-- [ ] Pin API tests updated (no provider param)
-- [ ] Sessions merge endpoint tested
-- [ ] Prototype file removed
-- [ ] `pytest` runs clean
+- [x] All existing tests pass
+- [x] Config migration test covers `list[dict]` → `list[str]` with dedup
+- [x] Pin API tests updated (no provider param)
+- [x] Sessions merge endpoint tested
+- [x] Prototype file removed
+- [x] `pytest` runs clean
+
+Implementation (2026-07-06, code: b280736)
+Verified existing test coverage for: config migration (list[dict]→list[str] with dedup), pin API (no provider param), sessions merge (provider=all), available-providers endpoint, grouped workspace output. Added `test_partials_pinned_workspaces_provider_filter` verifying provider param filtering on pinned workspaces. Deleted `_proto/border-gradient-prototype.html`. 233 passed, 1 skipped.
 
 ## 6) Risk Assessment
 
