@@ -137,7 +137,7 @@ def launch_session(
             error=f"'{binary}' not found on PATH. Install {display} or check your PATH.",
         )
 
-    if not Path(cwd).exists():
+    if cwd and cwd != "." and not Path(cwd).exists():
         return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
 
     if session_id and not _SESSION_ID_RE.match(session_id):
@@ -148,8 +148,9 @@ def launch_session(
         cli_args = _build_provider_args(provider, binary, session_id)
         if default_args:
             cli_args += shlex.split(default_args)
-        # Append workspace path as positional arg for IDE-style providers
-        cli_args.append(cwd)
+        # Append workspace path if a real workspace was specified
+        if cwd and cwd != "." and Path(cwd).exists():
+            cli_args.append(cwd)
         try:
             kwargs: dict = {}
             if sys.platform == "win32":
