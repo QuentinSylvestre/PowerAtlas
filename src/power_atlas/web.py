@@ -39,6 +39,54 @@ def _get_provider_color(provider: str, config) -> str:
     user_color = config.provider_settings.get(provider, {}).get("color", "")
     return user_color or PROVIDER_COLORS.get(provider, "#888")
 
+def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -> list[dict]:
+    """Group flat (cwd, count, updated_at, provider) rows into one entry per workspace.
+
+    Returns list of dicts sorted by latest_updated desc:
+    {
+        "cwd": str,              # original (first-seen) cwd path
+        "folder_name": str,      # Path(cwd).name or cwd
+        "providers": [{"name": str, "color": str, "count": int, "updated_at": str}],
+        "total_count": int,      # sum of all provider counts
+        "latest_updated": str,   # max updated_at across providers
+    }
+    """
+    from .data import _normalize_path
+
+    groups: dict[str, dict] = {}  # norm_cwd -> group dict
+    original_cwds: dict[str, str] = {}  # norm -> original (first seen)
+
+    for cwd, count, updated_at, prov_name in workspace_data:
+        norm = _normalize_path(cwd)
+        if norm not in groups:
+            groups[norm] = {"providers": [], "total_count": 0, "latest_updated": ""}
+            original_cwds[norm] = cwd
+        g = groups[norm]
+        g["providers"].append({
+            "name": prov_name,
+            "display": PROVIDER_DISPLAY_NAMES.get(prov_name, prov_name),
+            "color": _get_provider_color(prov_name, config),
+            "count": count,
+            "updated_at": updated_at,
+        })
+        g["total_count"] += count
+        if updated_at and updated_at > g["latest_updated"]:
+            g["latest_updated"] = updated_at
+
+    result = []
+    for norm, g in groups.items():
+        cwd = original_cwds[norm]
+        result.append({
+            "cwd": cwd,
+            "folder_name": Path(cwd).name or cwd,
+            "providers": g["providers"],
+            "total_count": g["total_count"],
+            "latest_updated": g["latest_updated"],
+        })
+    result.sort(key=lambda x: x["latest_updated"], reverse=True)
+    return result
+
+
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"
@@ -145,12 +193,9 @@ async def pin_session(request: Request):
 async def pin_folder(request: Request):
     body = await request.json()
     folder = body["folder"]
-    provider = body.get("provider", "kiro-cli")
     config = load_config()
-    entry = {"folder": folder, "provider": provider}
-    # Check if already pinned for this provider
-    if not any(p.get("folder") == folder and p.get("provider") == provider for p in config.pinned_folders):
-        config.pinned_folders.append(entry)
+    if folder not in config.pinned_folders:
+        config.pinned_folders.append(folder)
         save_config(config)
     return {"ok": True}
 
@@ -159,10 +204,10 @@ async def pin_folder(request: Request):
 async def unpin_folder(request: Request):
     body = await request.json()
     folder = body["folder"]
-    provider = body.get("provider", "kiro-cli")
     config = load_config()
-    config.pinned_folders = [p for p in config.pinned_folders if not (p.get("folder") == folder and p.get("provider") == provider)]
-    save_config(config)
+    if folder in config.pinned_folders:
+        config.pinned_folders.remove(folder)
+        save_config(config)
     return {"ok": True}
 
 
@@ -217,34 +262,40 @@ async def partials_pinned_workspaces(request: Request, fresh: int = 0):
 
     cards_html = ""
 
-    pinned_set = {(_normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
-    if pinned_set:
+    # Build pinned set by normalized path only (workspace-level, not provider-specific)
+    pinned_norm_paths: set[str] = set()
+    for folder in config.pinned_folders:
+        pinned_norm_paths.add(_normalize_path(folder))
+
+    if pinned_norm_paths:
         try:
             all_workspace_data = list(await asyncio.to_thread(data.discover_workspaces_with_counts, provider=None))
         except Exception:
             all_workspace_data = []
         # Merge pinned folders not found in discovery results
-        all_existing = {(_normalize_path(c), p) for c, _, _, p in all_workspace_data}
-        for pf in config.pinned_folders:
-            folder = pf.get("folder", "") if isinstance(pf, dict) else pf
-            prov = pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli"
-            if (_normalize_path(folder), prov) not in all_existing:
-                all_workspace_data.append((folder, 0, "", prov))
-        pinned_cards_raw = [(c, n, u, p) for c, n, u, p in all_workspace_data if (_normalize_path(c), p) in pinned_set]
-        pinned_cards_raw.sort(key=lambda x: Path(x[0]).name.lower())
-        if pinned_cards_raw:
+        all_existing_norms = {_normalize_path(c) for c, _, _, _ in all_workspace_data}
+        for folder in config.pinned_folders:
+            if _normalize_path(folder) not in all_existing_norms:
+                all_workspace_data.append((folder, 0, "", ""))
+                all_existing_norms.add(_normalize_path(folder))
+        # Filter to pinned paths only
+        pinned_data = [(c, n, u, p) for c, n, u, p in all_workspace_data if _normalize_path(c) in pinned_norm_paths]
+        # Group by normalized path
+        grouped = _group_workspaces(pinned_data, config)
+        # Sort pinned by folder name
+        grouped.sort(key=lambda x: x["folder_name"].lower())
+        if grouped:
             cards_html += '<div class="section-label">Pinned workspaces</div>'
-            for cwd, count, updated, prov in pinned_cards_raw:
+            for group in grouped:
+                cwd = group["cwd"]
                 stale = not Path(cwd).exists()
                 cards_html += templates.get_template("partials/workspace_card.html").render(
                     request=request, cwd=cwd, sessions=[], stale=stale,
-                    pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                    session_count=count, is_pinned=True, last_updated=updated,
+                    pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
+                    session_count=group["total_count"], is_pinned=True,
+                    last_updated=group["latest_updated"],
                     icon=norm_icons.get(_normalize_path(cwd), ""),
-                    provider=prov,
-                    provider_color=_get_provider_color(prov, config),
-                    provider_badge=PROVIDER_BADGES.get(prov, "?"),
-                    provider_display=PROVIDER_DISPLAY_NAMES.get(prov, prov),
+                    providers=group["providers"],
                 )
 
     if not cards_html:
@@ -293,8 +344,10 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     workspace_data = list(workspace_data)
 
     cards_html = ""
-    # Build pinned set to exclude from right panel
-    pinned_set = {(_normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
+    # Build pinned set by normalized path only (workspace-level)
+    pinned_norm_paths: set[str] = set()
+    for folder in config.pinned_folders:
+        pinned_norm_paths.add(_normalize_path(folder))
 
     # Render tab bar (only if multiple providers available)
     if len(providers) > 1:
@@ -310,10 +363,17 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
         cards_html += '<span class="tab-spacer"></span>'
         cards_html += '</div>'
 
-    # Filter to non-pinned workspaces only
-    other_cards = [(c, n, u, p) for c, n, u, p in workspace_data if (_normalize_path(c), p) not in pinned_set]
+    # Filter to non-pinned workspaces only (by normalized path)
+    other_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_norm_paths]
 
-    if not other_cards:
+    # Group by normalized path
+    grouped = _group_workspaces(other_data, config)
+
+    # If filtering by a specific provider, only show groups that include that provider
+    if provider != "all":
+        grouped = [g for g in grouped if any(prov["name"] == provider for prov in g["providers"])]
+
+    if not grouped:
         if provider != "all" and provider:
             empty_msgs = {
                 "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
@@ -325,19 +385,18 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             cards_html += '<div class="empty-state">No workspaces found yet.</div>'
         return HTMLResponse(cards_html)
 
-    for cwd, count, updated, prov in other_cards:
+    for group in grouped:
+        cwd = group["cwd"]
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
-            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-            session_count=count, is_pinned=False, last_updated=updated,
+            pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
+            session_count=group["total_count"], is_pinned=False,
+            last_updated=group["latest_updated"],
             icon=norm_icons.get(_normalize_path(cwd), ""),
-            provider=prov,
-            provider_color=_get_provider_color(prov, config),
-            provider_badge=PROVIDER_BADGES.get(prov, "?"),
-            provider_display=PROVIDER_DISPLAY_NAMES.get(prov, prov),
+            providers=group["providers"],
         )
-    log.info("Rendered %d workspace cards in %.2fs total", len(other_cards), time.perf_counter() - t0)
+    log.info("Rendered %d workspace cards in %.2fs total", len(grouped), time.perf_counter() - t0)
     return HTMLResponse(cards_html)
 
 
@@ -398,20 +457,25 @@ async def search(request: Request, q: str = ""):
     if pinned_rows:
         cards_html += '<div class="section-label">Pinned sessions</div>'
         cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
-    config_icons = {data._normalize_path(k): v for k, v in config.workspace_icons.items()}
-    pinned_set = {(data._normalize_path(pf.get("folder", "") if isinstance(pf, dict) else pf), pf.get("provider", "kiro-cli") if isinstance(pf, dict) else "kiro-cli") for pf in config.pinned_folders}
-    for cwd, count, updated, prov in matched:
+
+    from .data import _normalize_path
+    config_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
+    pinned_norm_paths: set[str] = set()
+    for folder in config.pinned_folders:
+        pinned_norm_paths.add(_normalize_path(folder))
+
+    # Group matched workspaces
+    grouped = _group_workspaces(matched, config)
+    for group in grouped:
+        cwd = group["cwd"]
         stale = not Path(cwd).exists()
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
-            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-            session_count=count, last_updated=updated,
-            is_pinned=(data._normalize_path(cwd), prov) in pinned_set,
-            icon=config_icons.get(data._normalize_path(cwd), ""),
-            provider=prov,
-            provider_color=_get_provider_color(prov, config),
-            provider_badge=PROVIDER_BADGES.get(prov, "?"),
-            provider_display=PROVIDER_DISPLAY_NAMES.get(prov, prov),
+            pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
+            session_count=group["total_count"], last_updated=group["latest_updated"],
+            is_pinned=_normalize_path(cwd) in pinned_norm_paths,
+            icon=config_icons.get(_normalize_path(cwd), ""),
+            providers=group["providers"],
         )
     return HTMLResponse(cards_html)
 
@@ -422,7 +486,7 @@ async def api_refresh():
     data.session_cache.clear()
     data._cache.clear()
     config = load_config()
-    pinned_paths = [pf.get("folder", "") if isinstance(pf, dict) else pf for pf in config.pinned_folders]
+    pinned_paths = list(config.pinned_folders)
     await asyncio.to_thread(data.warmup_all, pinned_paths, config.pinned_sessions)
     return {"last_refresh": data.session_cache.last_refresh}
 
@@ -508,40 +572,73 @@ async def partials_session_tail(request: Request, sid: str = "", provider: str =
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)
-async def partials_sessions(request: Request, cwd: str = "", provider: str = "kiro-cli", fresh: int = 0):
-    """Lazy-load sessions for a single workspace card."""
+async def partials_sessions(request: Request, cwd: str = "", provider: str = "all", fresh: int = 0):
+    """Lazy-load sessions for a workspace card. provider=all merges all providers."""
     import asyncio
     import time
     t0 = time.perf_counter()
     log.info("Loading sessions for %s", cwd[-40:])
     config = load_config()
-    if fresh:
-        # Bypass cache: reload from disk directly
-        mod = data.PROVIDERS.get(provider)
-        if mod and mod.is_available():
-            try:
-                sessions, file_stats = await asyncio.to_thread(mod.load_sessions, cwd)
-                data.session_cache.put(cwd, sessions, file_stats, provider)
-            except Exception:
+
+    if provider == "all":
+        # Merge sessions from all providers, sorted by updated_at desc
+        all_sessions = []
+        for prov_name, mod in data.PROVIDERS.items():
+            if not mod.is_available():
+                continue
+            if fresh:
+                try:
+                    sessions, file_stats = await asyncio.to_thread(mod.load_sessions, cwd)
+                    data.session_cache.put(cwd, sessions, file_stats, prov_name)
+                except Exception:
+                    sessions = []
+            else:
+                try:
+                    sessions = await asyncio.to_thread(data.get_sessions, cwd, prov_name)
+                except Exception:
+                    sessions = []
+            for s in sessions:
+                all_sessions.append((s, prov_name))
+        # Sort interleaved by updated_at descending
+        all_sessions.sort(key=lambda x: x[0].updated_at or "", reverse=True)
+        sessions_with_provider = all_sessions
+    else:
+        # Single provider (existing behavior)
+        if fresh:
+            mod = data.PROVIDERS.get(provider)
+            if mod and mod.is_available():
+                try:
+                    sessions, file_stats = await asyncio.to_thread(mod.load_sessions, cwd)
+                    data.session_cache.put(cwd, sessions, file_stats, provider)
+                except Exception:
+                    sessions = []
+            else:
                 sessions = []
         else:
-            sessions = []
-    else:
-        try:
-            sessions = await asyncio.to_thread(data.get_sessions, cwd, provider)
-        except Exception:
-            sessions = []
-    log.info("Got %d sessions for %s in %.2fs", len(sessions), Path(cwd).name, time.perf_counter() - t0)
-    sessions = _sort_pinned_first(sessions, config.pinned_sessions)
-    if not sessions:
+            try:
+                sessions = await asyncio.to_thread(data.get_sessions, cwd, provider)
+            except Exception:
+                sessions = []
+        sessions_with_provider = [(s, provider) for s in sessions]
+
+    log.info("Got %d sessions for %s in %.2fs", len(sessions_with_provider), Path(cwd).name, time.perf_counter() - t0)
+    # Flatten for pinned sort, then re-pair
+    flat_sessions = [s for s, _ in sessions_with_provider]
+    flat_sessions = _sort_pinned_first(flat_sessions, config.pinned_sessions)
+    # Rebuild provider mapping after sort
+    prov_map = {id(s): p for s, p in sessions_with_provider}
+
+    if not flat_sessions:
         return HTMLResponse('<div class="new-session-inline">+ New session</div>')
     stale = not Path(cwd).exists()
     html = ""
-    for session in sessions:
+    for session in flat_sessions:
+        prov_name = prov_map.get(id(session), provider if provider != "all" else "kiro-cli")
         html += templates.get_template("partials/session_row.html").render(
             request=request, session=session, cwd=cwd, stale=stale,
             pinned_sessions=config.pinned_sessions,
-            provider_name=provider,
+            provider_name=prov_name,
+            provider_color=_get_provider_color(prov_name, config),
         )
     return HTMLResponse(html)
 

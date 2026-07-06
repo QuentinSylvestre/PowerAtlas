@@ -224,7 +224,7 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_p
     from power_atlas.config import Config
     workspace = str(tmp_path)
     pinned = "C:\\my-pinned-workspace"
-    mock_config.return_value = Config(pinned_folders=[{"folder": pinned, "provider": "kiro-cli"}])
+    mock_config.return_value = Config(pinned_folders=[pinned])
     mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = []
@@ -249,6 +249,113 @@ def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config,
     assert resp.status_code == 200
     # Pinned should appear before unpinned
     assert resp.text.index("pinned") < resp.text.index("unpinned")
+
+
+# --- Phase 1: Simplified pin/unpin and provider=all sessions ---
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_pin_folder_simple(mock_load, mock_save, client):
+    """Pin folder API accepts just folder path (no provider)."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    saved = mock_save.call_args[0][0]
+    assert "C:\\projects\\myapp" in saved.pinned_folders
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_pin_folder_no_duplicate(mock_load, mock_save, client):
+    """Pin folder API does not duplicate already-pinned paths."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(pinned_folders=["C:\\projects\\myapp"])
+    resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"})
+    assert resp.status_code == 200
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_unpin_folder_simple(mock_load, mock_save, client):
+    """Unpin folder API removes path from list."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(pinned_folders=["C:\\projects\\myapp", "C:\\other"])
+    resp = client.post("/api/unpin-folder", json={"folder": "C:\\projects\\myapp"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    saved = mock_save.call_args[0][0]
+    assert "C:\\projects\\myapp" not in saved.pinned_folders
+    assert "C:\\other" in saved.pinned_folders
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_unpin_folder_not_present(mock_load, mock_save, client):
+    """Unpin folder API is no-op for non-pinned path."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(pinned_folders=["C:\\other"])
+    resp = client.post("/api/unpin-folder", json={"folder": "C:\\nonexistent"})
+    assert resp.status_code == 200
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.data.PROVIDERS")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_sessions")
+def test_partials_sessions_provider_all(mock_get_sessions, mock_config, mock_providers, client, tmp_path):
+    """provider=all merges sessions from all providers sorted by updated_at."""
+    from power_atlas.config import Config
+    from unittest.mock import MagicMock
+
+    workspace = str(tmp_path)
+    mock_config.return_value = Config()
+
+    # Create mock providers
+    kiro_mod = MagicMock()
+    kiro_mod.is_available.return_value = True
+    claude_mod = MagicMock()
+    claude_mod.is_available.return_value = True
+
+    mock_providers.items.return_value = [("kiro-cli", kiro_mod), ("claude-code", claude_mod)]
+
+    # get_sessions returns different sessions per provider
+    def side_effect(cwd, prov):
+        if prov == "kiro-cli":
+            return [_make_session(session_id="k1", title="kiro session", updated_at="2026-06-17T14:00:00")]
+        elif prov == "claude-code":
+            return [_make_session(session_id="c1", title="claude session", updated_at="2026-06-17T15:00:00")]
+        return []
+
+    mock_get_sessions.side_effect = side_effect
+
+    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "all"})
+    assert resp.status_code == 200
+    # Both sessions present
+    assert "kiro session" in resp.text
+    assert "claude session" in resp.text
+    # Claude session (newer) should appear first
+    assert resp.text.index("claude session") < resp.text.index("kiro session")
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_sessions")
+def test_partials_sessions_single_provider(mock_get_sessions, mock_config, client, tmp_path):
+    """provider=kiro-cli still works (single provider mode)."""
+    from power_atlas.config import Config
+
+    workspace = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_get_sessions.return_value = [
+        _make_session(session_id="k1", title="kiro only", cwd=workspace),
+    ]
+
+    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "kiro-cli"})
+    assert resp.status_code == 200
+    assert "kiro only" in resp.text
 
 
 class TestSaveSettingAllowlist:
@@ -468,8 +575,10 @@ def test_partials_workspaces_provider_filter(mock_discover, mock_providers, clie
 
     resp = client.get("/partials/workspaces?provider=kiro-cli")
     assert resp.status_code == 200
-    assert 'data-provider="kiro-cli"' in resp.text
-    # Verify discover was called with provider="kiro-cli" (also called with provider=None for pinned)
+    # Cards no longer have data-provider; verify the workspace is rendered with the provider icon
+    assert 'provider--kiro-cli' in resp.text
+    assert 'workspace-card' in resp.text
+    # Verify discover was called with provider="kiro-cli"
     mock_discover.assert_any_call(provider="kiro-cli")
 
 
@@ -487,9 +596,10 @@ def test_partials_workspaces_all_tab(mock_discover, mock_providers, client, tmp_
 
     resp = client.get("/partials/workspaces?provider=all")
     assert resp.status_code == 200
-    assert 'data-provider="kiro-cli"' in resp.text
-    assert 'data-provider="claude-code"' in resp.text
-    # Verify discover was called with provider=None (all) — called twice (tab + pinned)
+    # Cards no longer have data-provider; verify both provider icons appear
+    assert 'provider--kiro-cli' in resp.text
+    assert 'provider--claude-code' in resp.text
+    # Verify discover was called with provider=None (all)
     mock_discover.assert_any_call(provider=None)
 
 
@@ -525,14 +635,16 @@ def test_tab_shown_multiple_providers(mock_discover, mock_providers, client, tmp
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_workspace_card_has_data_provider(mock_discover, mock_providers, client, tmp_path):
-    """Workspace cards include data-provider attribute and colored border."""
+    """Workspace cards no longer have data-provider; they show provider icons and colored border."""
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "claude-code")]
     mock_providers.return_value = ["kiro-cli", "claude-code"]
 
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
-    assert 'data-provider="claude-code"' in resp.text
+    # data-provider removed; card is workspace-level now
+    assert 'data-provider=' not in resp.text
+    # Single-provider card has solid border
     assert "border-left: 3px solid #c2590f" in resp.text
     # Provider icon badge
     assert "provider-icon-badge" in resp.text
@@ -551,6 +663,7 @@ def test_workspace_card_has_provider_icon_img(mock_discover, mock_providers, cli
     assert 'provider-icon-badge' in resp.text
     assert 'src="/api/launcher-icon/provider--kiro-cli"' in resp.text
     assert 'provider-badge-fallback' in resp.text
+    # Title now uses the display name
     assert 'title="Kiro CLI"' in resp.text
 
 
