@@ -219,19 +219,24 @@ Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $ShellProcessName }
 - Update `tests/test_launcher.py` in place for profile-driven WT profile, shell process matching, helper-runner resolution, timeout propagation, disabled MCP-safe mode, fallback warning metadata, double-failure error metadata, Linux/custom-template behavior, and Kiro IDE non-terminal behavior.
 
 **Exit criteria**:
-- [ ] Provider and custom WT direct commands use the profile's `wt_profile`; hard-coded `PowerShell` remains only as the default profile value or in tests for that default.
-- [ ] MCP-safe helper receives profile-driven WT profile, validated shell process name, resolved helper runner, attach timeout, and helper timeout.
-- [ ] `mcp_safe_enabled=false` uses the direct launch path without running the helper.
-- [ ] Helper failure followed by fallback success returns `success=True`, `used_fallback=True`, and a non-empty `warning`.
-- [ ] Helper failure followed by direct fallback failure returns `success=False` and an `error` containing both failure reasons.
-- [ ] Custom terminal templates containing `{cwd}` or `{cmd}` still bypass MCP-safe helper routing.
-- [ ] Custom launchers in WT use the profile's `wt_profile` for direct WT commands but never invoke the MCP-safe helper.
-- [ ] `launch_custom` and `launch_custom_batch` accept `launch_profile` (not `terminal_override`); batch iteration propagates the profile to per-workspace calls.
-- [ ] `detect_terminal` accepts the profile's terminal command; `_terminal_cache` is removed.
-- [ ] Kiro IDE/non-terminal launches do not attempt terminal detection or read launch-profile fields.
-- [ ] Mocked non-Windows and unknown-terminal cases still degrade through existing command-builder behavior.
-- [ ] `tests/test_launcher.py` covers the profile-driven routing and fallback diagnostics above.
-- [ ] `python -m pytest tests/test_launcher.py` passes.
+- [x] Provider and custom WT direct commands use the profile's `wt_profile`; hard-coded `PowerShell` remains only as the default profile value or in tests for that default.
+- [x] MCP-safe helper receives profile-driven WT profile, validated shell process name, resolved helper runner, attach timeout, and helper timeout.
+- [x] `mcp_safe_enabled=false` uses the direct launch path without running the helper.
+- [x] Helper failure followed by fallback success returns `success=True`, `used_fallback=True`, and a non-empty `warning`.
+- [x] Helper failure followed by direct fallback failure returns `success=False` and an `error` containing both failure reasons.
+- [x] Custom terminal templates containing `{cwd}` or `{cmd}` still bypass MCP-safe helper routing.
+- [x] Custom launchers in WT use the profile's `wt_profile` for direct WT commands but never invoke the MCP-safe helper.
+- [x] `launch_custom` and `launch_custom_batch` accept `launch_profile` (not `terminal_override`); batch iteration propagates the profile to per-workspace calls.
+- [x] `detect_terminal` accepts the profile's terminal command; `_terminal_cache` is removed.
+- [x] Kiro IDE/non-terminal launches do not attempt terminal detection or read launch-profile fields.
+- [x] Mocked non-Windows and unknown-terminal cases still degrade through existing command-builder behavior.
+- [x] `tests/test_launcher.py` covers the profile-driven routing and fallback diagnostics above.
+- [x] `python -m pytest tests/test_launcher.py` passes.
+
+Implementation (2026-07-07, code: be41b95, fix: f5dcecb)
+Replaced the flat `terminal_override: str` parameter across all four launcher functions (`launch_session`, `launch_batch`, `launch_custom`, `launch_custom_batch`) with `launch_profile: LaunchProfile | None`. The profile drives terminal detection (via `terminal_command`), Windows Terminal tab profile selection (via `wt_profile`), and MCP-safe helper configuration (shell process name, helper runner, attach/helper timeouts, enable/disable gate). The MCP-safe PowerShell helper script now accepts parameterized `-WtProfile`, `-ShellProcessName`, and `-AttachTimeoutMs` arguments instead of hard-coding `'PowerShell'`, `'pwsh.exe'`, and `4500`. The `_terminal_cache` global and `_MCP_SAFE_WT_TIMEOUT_SECONDS` constant were removed. `_launch_mcp_safe_wt` returns `tuple[bool, str]` with helper-specific diagnostics propagated to warnings/errors. `wt_profile` parameter in builder functions is keyword-only without defaults. Custom launchers use profile's `wt_profile` for WT but never invoke the MCP-safe helper. Also fixed `web.py` callers referencing removed `Config.terminal_command`.
+
+QA verification: PASS — 96 unit tests cover all profile-driven routing paths; runtime subprocess testing deferred to Phase 5 manual verification.
 
 ### Phase 3: Wire Profiles Through Web API and Settings UI [QA]
 **Goal**: Replace the topbar terminal selector with active launch-profile controls, route all Web launches through the active profile, and protect profile mutation endpoints.
@@ -416,7 +421,7 @@ rg -n "terminal_command|terminal_override|PowerShell|MCP-safe|launch_profiles|ac
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
 | 1 | Pre-migrate local config and add launch-profile schema | Complete | Foundation and backup guard for all later phases. |
-| 2 | Make launcher runtime profile-driven | Pending | Depends on Phase 1 active-profile contract. |
+| 2 | Make launcher runtime profile-driven | Complete | Depends on Phase 1 active-profile contract. |
 | 3 | Wire profiles through Web API and settings UI | Pending | Depends on Phases 1-2. |
 | 4 | README and migration rollback/cleanup | Pending | Documents user-visible behavior and backup restore path. |
 | 5 | Final integration verification and cleanup | Pending | Runs after all code/docs/migration work. |
@@ -551,8 +556,24 @@ Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical (con
 | 5 | Low | No test for whitespace-only or control-char profile names. | Fixed — added two tests (bbf3746). |
 | 6 | Low | Test `test_non_dict_profiles_skipped` has misleading name/docstring. | Fixed — renamed to `test_non_dict_profile_entries_guarded` with updated docstring (bbf3746). |
 
+### 2026-07-07 -- Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+6 findings (0 High, 2 Medium, 4 Low).
+Cycle 2 skipped — all auto-fixes mechanical (tuple return type, parameter default removal, TODO comment, additional test).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Helper stderr/stdout discarded — fallback warnings generic. | Fixed — `_launch_mcp_safe_wt` returns `tuple[bool, str]` with diagnostics (f5dcecb). |
+| 2 | Medium | `wt_profile` parameter has default in builders, masking missing callers. | Fixed — now keyword-only with no default; all callers explicit (f5dcecb). |
+| 3 | Low | Pre-existing: `launch_custom` non-terminal path `shell=True` with quoted workspace. | Noted — pre-existing behavior, not introduced by Phase 2. |
+| 4 | Low | `available_terminals()` retained but no longer referenced by production code. | Fixed — TODO comment added for Phase 3 cleanup decision (f5dcecb). |
+| 5 | Low | web.py transitional bridge mutates profile in-place before save. | Noted — acceptable transitional behavior; Phase 3 replaces with profile endpoints. |
+| 6 | Low | Double-failure test only covers OSError path, not metachar-cwd path. | Fixed — added `test_metachar_cwd_double_failure` (f5dcecb). |
+
 ## 9) Implementation Divergences from Plan
 
 - **`default_args` validation deferred to Phase 3**: The plan lists `default_args` validation (max 256 chars, no control/shell metacharacters) under Phase 1's detailed changes, but the `/api/provider/save` endpoint it targets is in `web.py` — explicitly Phase 3's file scope. Implementing it in Phase 1 would violate file-scope boundaries. Deferred to Phase 3 where the web endpoint is being reworked. The pre-existing gap remains until then.
+- **web.py and test_web.py updated in Phase 2** (outside declared file scope): Phase 1 removed `Config.terminal_command` but `web.py` still referenced it at multiple sites (template context, API settings response, save-setting handler, launch endpoints). This caused test failures. Phase 2 fixed these to use `get_active_launch_profile()` as a transitional bridge until Phase 3 replaces them with dedicated profile endpoints.
 
 
