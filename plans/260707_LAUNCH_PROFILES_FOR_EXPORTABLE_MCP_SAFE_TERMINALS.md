@@ -371,15 +371,24 @@ rg -n "terminal_command|terminal_override|PowerShell|MCP-safe|launch_profiles|ac
 - Manually verify on Windows after migration: Kiro CLI new session, Kiro CLI resume, Claude Code new session, Claude Code resume, one custom terminal launcher, intentional helper failure fallback, `mcp_safe_enabled=false`, invalid profile recovery, and restoring the known-good profile from backup.
 
 **Exit criteria**:
-- [ ] No active source or test path still depends on top-level `terminal_command` or `terminal_override` except explicit migration comments/tests.
-- [ ] Focused ruff command passes.
-- [ ] Focused pytest command passes.
+- [x] No active source or test path still depends on top-level `terminal_command` or `terminal_override` except explicit migration comments/tests.
+- [x] Focused ruff command passes.
+- [x] Focused pytest command passes.
 - [ ] Browser runtime verification passes for profile modal create/edit/delete/activate/refresh and warning toast rendering.
-- [ ] Full pytest is run and passes, or the only failure is the known unrelated stale-card assertion and is reported with exact test name.
+- [x] Full pytest is run and passes, or the only failure is the known unrelated stale-card assertion and is reported with exact test name.
 - [ ] Windows manual provider verification completed for Kiro CLI new, Kiro CLI resume, Claude Code new, Claude Code resume, intentional helper failure fallback, and `mcp_safe_enabled=false`.
 - [ ] Windows manual custom-launcher verification completed through the active launch profile.
 - [ ] Restore drill from the pre-migration backup is completed or explicitly deferred by the user.
-- [ ] `## 9) Implementation Divergences from Plan` is updated if implementation differs from this plan.
+- [x] `## 9) Implementation Divergences from Plan` is updated if implementation differs from this plan.
+
+Implementation (2026-07-07, code: c0ca17a)
+Removed dead `available_terminals()` function and its test class (78 lines deleted across 2 files). All `terminal_command` references in active source correctly reference the `LaunchProfile.terminal_command` field (new per-profile design). Focused ruff passes on plan-scope files. Full pytest: 345 passed, 1 skipped, 1 known failure (`test_partials_workspaces_stale`).
+
+**Remaining manual verification (user action required)**:
+- Browser runtime verification: profile modal create/edit/delete/activate/refresh, warning toast rendering
+- Windows manual provider launches: Kiro CLI new, Kiro CLI resume, Claude Code new/resume, intentional helper failure fallback, `mcp_safe_enabled=false`
+- Windows manual custom-launcher verification
+- Restore drill from pre-migration backup
 
 ## 6) Risk Assessment
 
@@ -436,7 +445,7 @@ rg -n "terminal_command|terminal_override|PowerShell|MCP-safe|launch_profiles|ac
 | 2 | Make launcher runtime profile-driven | Complete | Depends on Phase 1 active-profile contract. |
 | 3 | Wire profiles through Web API and settings UI | Complete | Depends on Phases 1-2. |
 | 4 | README and migration rollback/cleanup | Complete | Documents user-visible behavior and backup restore path. |
-| 5 | Final integration verification and cleanup | Pending | Runs after all code/docs/migration work. |
+| 5 | Final integration verification and cleanup | In Progress | Automated verification complete; manual Windows/browser verification pending user action. |
 
 ## Dependency Graph
 
