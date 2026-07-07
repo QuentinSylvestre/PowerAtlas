@@ -6,6 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,7 +76,7 @@ def available_terminals() -> list[tuple[str, str]]:
 
     # Build auto-detect label from found terminals
     if found:
-        auto_label = f"Auto-detect ({' \u203a '.join(label for _, label in found)})"
+        auto_label = "Auto-detect (" + " \u203a ".join(label for _, label in found) + ")"
     else:
         auto_label = "Auto-detect (none found)"
 
@@ -104,6 +105,173 @@ _PROVIDER_TERMINAL = {
     "kiro-ide": False,
 }
 
+_MCP_SAFE_WT_PROVIDERS = {"kiro-cli", "claude-code"}
+_MCP_SAFE_WT_TIMEOUT_SECONDS = 8
+
+_MCP_SAFE_WT_HELPER = r"""
+param(
+    [Parameter(Mandatory=$true)][string]$Wt,
+    [Parameter(Mandatory=$true)][string]$Title,
+    [Parameter(Mandatory=$true)][string]$Cwd,
+    [Parameter(Mandatory=$true)][string]$Command
+)
+
+$ErrorActionPreference = 'Stop'
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace NativeConsole
+{
+    public static class Kernel32
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool AttachConsole(uint dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool FreeConsole();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr GetStdHandle(int nStdHandle);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool WriteConsoleInput(
+            IntPtr hConsoleInput,
+            INPUT_RECORD[] lpBuffer,
+            uint nLength,
+            out uint lpNumberOfEventsWritten
+        );
+    }
+
+    [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
+    public struct INPUT_RECORD
+    {
+        [FieldOffset(0)]
+        public ushort EventType;
+
+        [FieldOffset(4)]
+        public KEY_EVENT_RECORD KeyEvent;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct KEY_EVENT_RECORD
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool bKeyDown;
+        public ushort wRepeatCount;
+        public ushort wVirtualKeyCode;
+        public ushort wVirtualScanCode;
+        public char UnicodeChar;
+        public uint dwControlKeyState;
+    }
+}
+"@
+
+function New-KeyRecord {
+    param(
+        [Parameter(Mandatory=$true)][char]$Char,
+        [Parameter(Mandatory=$true)][bool]$KeyDown
+    )
+
+    $record = New-Object NativeConsole.INPUT_RECORD
+    $record.EventType = 0x0001
+    $record.KeyEvent = New-Object NativeConsole.KEY_EVENT_RECORD
+    $record.KeyEvent.bKeyDown = $KeyDown
+    $record.KeyEvent.wRepeatCount = 1
+    $record.KeyEvent.wVirtualScanCode = 0
+    $record.KeyEvent.UnicodeChar = $Char
+    $record.KeyEvent.dwControlKeyState = 0
+    if ([int][char]$Char -eq 13) {
+        $record.KeyEvent.wVirtualKeyCode = 0x0D
+    } else {
+        $record.KeyEvent.wVirtualKeyCode = 0
+    }
+    return $record
+}
+
+$beforePwsh = @{}
+Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" | ForEach-Object {
+    $beforePwsh[[int]$_.ProcessId] = $true
+}
+
+$wtArgs = @('new-tab')
+if ($Title) {
+    $wtArgs += @('--title', $Title)
+}
+$wtArgs += @('-p', 'PowerShell', '-d', $Cwd)
+& $Wt @wtArgs | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows Terminal exited with code $LASTEXITCODE."
+}
+
+$target = $null
+$deadline = (Get-Date).AddMilliseconds(4500)
+do {
+    Start-Sleep -Milliseconds 100
+    $candidates = @()
+    $pwshProcesses = Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'"
+    foreach ($process in $pwshProcesses) {
+        $processId = [int]$process.ProcessId
+        if ($beforePwsh.ContainsKey($processId)) {
+            continue
+        }
+        if (-not $process.ParentProcessId) {
+            continue
+        }
+        $parent = Get-CimInstance Win32_Process -Filter ("ProcessId = {0}" -f [int]$process.ParentProcessId) -ErrorAction SilentlyContinue
+        if ($parent -and $parent.Name -eq 'WindowsTerminal.exe') {
+            $candidates += $process
+        }
+    }
+    if ($candidates.Count -gt 0) {
+        $target = $candidates | Sort-Object CreationDate -Descending | Select-Object -First 1
+        break
+    }
+} while ((Get-Date) -lt $deadline)
+
+if (-not $target) {
+    throw "Could not find a new Windows Terminal pwsh.exe process."
+}
+
+$attached = $false
+try {
+    [NativeConsole.Kernel32]::FreeConsole() | Out-Null
+    if (-not [NativeConsole.Kernel32]::AttachConsole([uint32]$target.ProcessId)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "AttachConsole failed with Win32 error $errorCode."
+    }
+    $attached = $true
+
+    $inputHandle = [NativeConsole.Kernel32]::GetStdHandle(-10)
+    if ($inputHandle -eq [IntPtr]::Zero -or $inputHandle.ToInt64() -eq -1) {
+        throw "GetStdHandle(STD_INPUT_HANDLE) failed."
+    }
+
+    $text = $Command + [string][char]13
+    $records = New-Object 'NativeConsole.INPUT_RECORD[]' ($text.Length * 2)
+    $i = 0
+    foreach ($char in $text.ToCharArray()) {
+        $records[$i] = New-KeyRecord -Char $char -KeyDown $true
+        $i += 1
+        $records[$i] = New-KeyRecord -Char $char -KeyDown $false
+        $i += 1
+    }
+
+    [uint32]$written = 0
+    if (-not [NativeConsole.Kernel32]::WriteConsoleInput($inputHandle, $records, [uint32]$records.Length, [ref]$written)) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        throw "WriteConsoleInputW failed with Win32 error $errorCode."
+    }
+    if ($written -ne $records.Length) {
+        throw "WriteConsoleInputW wrote $written of $($records.Length) input records."
+    }
+} finally {
+    if ($attached) {
+        [NativeConsole.Kernel32]::FreeConsole() | Out-Null
+    }
+}
+"""
 
 def _build_provider_args(provider: str, binary: str, session_id: str | None) -> list[str]:
     """Build CLI args for a given provider."""
@@ -118,6 +286,85 @@ def _build_provider_args(provider: str, binary: str, session_id: str | None) -> 
         if session_id:
             args += ["--resume-id", session_id]
     return args
+
+
+def _quote_powershell_arg(arg: str) -> str:
+    """Render one argv element as a PowerShell single-quoted literal."""
+    return "'" + arg.replace("'", "''") + "'"
+
+
+def _build_powershell_invocation(args: list[str]) -> str:
+    """Render argv as a typed PowerShell command line."""
+    return "& " + " ".join(_quote_powershell_arg(arg) for arg in args)
+
+
+def _is_windows_terminal(terminal: str) -> bool:
+    """Return true for Windows Terminal executables, excluding user templates."""
+    if "{cwd}" in terminal or "{cmd}" in terminal:
+        return False
+    return Path(terminal).stem.lower() == "wt"
+
+
+def _write_mcp_safe_wt_helper() -> Path:
+    """Write the generated helper script to a temporary .ps1 file."""
+    with tempfile.NamedTemporaryFile("w", suffix=".ps1", delete=False, encoding="utf-8") as handle:
+        handle.write(_MCP_SAFE_WT_HELPER)
+        return Path(handle.name)
+
+
+def _launch_mcp_safe_wt(terminal: str, cwd: str, typed_command: str, title: str) -> bool:
+    """Launch a WT PowerShell profile tab, attach to its console, and type the command."""
+    pwsh = shutil.which("pwsh")
+    if not pwsh:
+        return False
+
+    script_path = _write_mcp_safe_wt_helper()
+    try:
+        cmd = [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+            "-Wt",
+            terminal,
+            "-Title",
+            _sanitize_title(title),
+            "-Cwd",
+            cwd,
+            "-Command",
+            typed_command,
+        ]
+        kwargs: dict = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=_MCP_SAFE_WT_TIMEOUT_SECONDS,
+            **kwargs,
+        )
+        return completed.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        try:
+            script_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _should_use_mcp_safe_wt(provider: str, terminal: str) -> bool:
+    """Use the MCP-safe path only for supported Windows CLI providers in WT."""
+    return (
+        sys.platform == "win32"
+        and provider in _MCP_SAFE_WT_PROVIDERS
+        and _is_windows_terminal(terminal)
+    )
 
 
 def launch_session(
@@ -180,6 +427,11 @@ def launch_session(
         cli_args += shlex.split(default_args)
 
     title = f"{display} - {Path(cwd).name}"
+    if _should_use_mcp_safe_wt(provider, terminal):
+        typed_command = _build_powershell_invocation(cli_args)
+        if _launch_mcp_safe_wt(terminal, cwd, typed_command, title):
+            return LaunchResult(True, session_id, cwd)
+
     cmd = _build_command(terminal, cwd, cli_args, title=title)
     if cmd is None:
         return LaunchResult(False, session_id, cwd, error="Path contains shell metacharacters unsafe for cmd.exe")

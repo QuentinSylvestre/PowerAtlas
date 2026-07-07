@@ -1,11 +1,23 @@
 """Tests for launcher module."""
 
+import subprocess
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
-
-from power_atlas.launcher import detect_terminal, launch_session, launch_batch, _build_command, _sanitize_title, launch_custom, launch_custom_batch, _build_custom_command, _build_template_command, available_terminals
+from power_atlas.launcher import (
+    available_terminals,
+    detect_terminal,
+    launch_batch,
+    launch_custom,
+    launch_custom_batch,
+    launch_session,
+    _build_command,
+    _build_custom_command,
+    _build_powershell_invocation,
+    _build_provider_args,
+    _build_template_command,
+    _sanitize_title,
+)
 from power_atlas.icons import _resolve_cmd_to_exe
 import power_atlas.launcher as launcher_mod
 
@@ -53,6 +65,24 @@ class TestBuildCommand:
         cmd = _build_command("C:\\cmd.exe", "C:\\Users\\normal path", ["kiro-cli"])
         assert cmd is not None
         assert "C:\\Users\\normal path" in cmd[2]
+
+
+class TestPowerShellInvocation:
+    def test_kiro_new_session_command(self):
+        args = _build_provider_args("kiro-cli", "kiro-cli", None)
+        assert _build_powershell_invocation(args) == "& 'kiro-cli' 'chat'"
+
+    def test_kiro_resume_command(self):
+        args = _build_provider_args("kiro-cli", "kiro-cli", "sess-1")
+        assert _build_powershell_invocation(args) == "& 'kiro-cli' 'chat' '--resume-id' 'sess-1'"
+
+    def test_claude_resume_command(self):
+        args = _build_provider_args("claude-code", "claude", "sess-abc")
+        assert _build_powershell_invocation(args) == "& 'claude' '--resume' 'sess-abc'"
+
+    def test_escapes_spaces_and_single_quotes(self):
+        args = ["kiro-cli", "chat", "--label", "can't stop", "C:\\my project"]
+        assert _build_powershell_invocation(args) == "& 'kiro-cli' 'chat' '--label' 'can''t stop' 'C:\\my project'"
 
 
 class TestLaunchSession:
@@ -124,6 +154,94 @@ class TestLaunchSession:
         assert "--verbose" in cmd_str
         assert "--model" in cmd_str
         assert "opus" in cmd_str
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_windows_kiro_wt_uses_mcp_safe_helper(self, mock_which, mock_run, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        cwd = str(tmp_path)
+
+        result = launch_session(cwd, provider="kiro-cli", terminal_override="C:\\wt.exe")
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        mock_popen.assert_not_called()
+        helper_cmd = mock_run.call_args[0][0]
+        typed_command = helper_cmd[helper_cmd.index("-Command") + 1]
+        assert typed_command == "& 'kiro-cli' 'chat'"
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_windows_claude_wt_uses_mcp_safe_helper(self, mock_which, mock_run, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"claude": "C:\\claude.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+        cwd = str(tmp_path)
+
+        result = launch_session(cwd, session_id="sess-abc", provider="claude-code", terminal_override="C:\\wt.exe")
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        mock_popen.assert_not_called()
+        helper_cmd = mock_run.call_args[0][0]
+        typed_command = helper_cmd[helper_cmd.index("-Command") + 1]
+        assert typed_command == "& 'claude' '--resume' 'sess-abc'"
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_windows_wt_helper_failure_falls_back_to_direct_launch(self, mock_which, mock_run, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1)
+        cwd = str(tmp_path)
+
+        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", terminal_override="C:\\wt.exe")
+
+        assert result.success is True
+        mock_run.assert_called_once()
+        mock_popen.assert_called_once()
+        fallback_cmd = mock_popen.call_args[0][0]
+        assert fallback_cmd[:2] == ["C:\\wt.exe", "--title"]
+        assert fallback_cmd[-4:] == ["kiro-cli", "chat", "--resume-id", "sess-1"]
+
+    @patch("power_atlas.launcher.sys.platform", "linux")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_non_windows_launch_uses_existing_builder(self, mock_which, mock_run, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "/usr/bin/kiro-cli"}.get(n)
+        cwd = str(tmp_path)
+
+        result = launch_session(cwd, provider="kiro-cli", terminal_override="/usr/bin/kitty")
+
+        assert result.success is True
+        mock_run.assert_not_called()
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "/usr/bin/kitty"
+        assert cmd[-2:] == ["kiro-cli", "chat"]
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_custom_terminal_template_bypasses_mcp_safe_helper(self, mock_which, mock_run, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        cwd = str(tmp_path)
+        template = "myterm --dir {cwd} --exec {cmd}"
+
+        result = launch_session(cwd, provider="kiro-cli", terminal_override=template)
+
+        assert result.success is True
+        mock_run.assert_not_called()
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        assert cmd == ["myterm", "--dir", cwd, "--exec", "kiro-cli", "chat"]
 
     @patch("shutil.which")
     def test_launch_session_binary_not_found(self, mock_which, tmp_path):

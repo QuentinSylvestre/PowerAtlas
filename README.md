@@ -45,6 +45,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 - Platform-aware terminal detection:
   - Windows: Windows Terminal › PowerShell › cmd
   - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm
+- On Windows, Kiro CLI and Claude Code launches through Windows Terminal use an MCP-safe PowerShell profile tab: PowerAtlas opens a normal PowerShell tab, then writes the provider command into that prompt. If that helper path fails, it falls back to the direct Windows Terminal launch.
 
 ## Configuration
 
