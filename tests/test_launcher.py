@@ -49,21 +49,21 @@ class TestDetectTerminal:
 
 class TestBuildCommand:
     def test_pwsh_escapes_single_quotes(self):
-        cmd = _build_command("C:\\pwsh.exe", "C:\\it's a path", ["kiro-cli", "chat"])
+        cmd = _build_command("C:\\pwsh.exe", "C:\\it's a path", ["kiro-cli", "chat"], wt_profile="PowerShell")
         script = cmd[3]
         assert "it''s a path" in script
 
     def test_cmd_rejects_metacharacters(self):
-        assert _build_command("C:\\cmd.exe", "C:\\foo&bar", ["kiro-cli"]) is None
-        assert _build_command("C:\\cmd.exe", "C:\\foo|pipe", ["kiro-cli"]) is None
-        assert _build_command("C:\\cmd.exe", "C:\\foo>out", ["kiro-cli"]) is None
-        assert _build_command("C:\\cmd.exe", "C:\\foo<in", ["kiro-cli"]) is None
-        assert _build_command("C:\\cmd.exe", "C:\\foo^caret", ["kiro-cli"]) is None
-        assert _build_command("C:\\cmd.exe", "C:\\100%done", ["kiro-cli"]) is None
-        assert _build_command("C:\\cmd.exe", 'C:\\foo"bar', ["kiro-cli"]) is None
+        assert _build_command("C:\\cmd.exe", "C:\\foo&bar", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command("C:\\cmd.exe", "C:\\foo|pipe", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command("C:\\cmd.exe", "C:\\foo>out", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command("C:\\cmd.exe", "C:\\foo<in", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command("C:\\cmd.exe", "C:\\foo^caret", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command("C:\\cmd.exe", "C:\\100%done", ["kiro-cli"], wt_profile="PowerShell") is None
+        assert _build_command("C:\\cmd.exe", 'C:\\foo"bar', ["kiro-cli"], wt_profile="PowerShell") is None
 
     def test_cmd_allows_safe_paths(self):
-        cmd = _build_command("C:\\cmd.exe", "C:\\Users\\normal path", ["kiro-cli"])
+        cmd = _build_command("C:\\cmd.exe", "C:\\Users\\normal path", ["kiro-cli"], wt_profile="PowerShell")
         assert cmd is not None
         assert "C:\\Users\\normal path" in cmd[2]
 
@@ -233,7 +233,7 @@ class TestLaunchSession:
     @patch("shutil.which")
     def test_windows_wt_helper_failure_falls_back_to_direct_launch(self, mock_which, mock_run, mock_popen, tmp_path):
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="some error detail")
         cwd = str(tmp_path)
 
         result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
@@ -242,6 +242,7 @@ class TestLaunchSession:
         assert result.used_fallback is True
         assert result.warning != ""
         assert "MCP-safe helper failed" in result.warning
+        assert "some error detail" in result.warning
         mock_run.assert_called_once()
         mock_popen.assert_called_once()
         fallback_cmd = mock_popen.call_args[0][0]
@@ -255,14 +256,14 @@ class TestLaunchSession:
     def test_windows_wt_helper_and_direct_both_fail(self, mock_which, mock_run, mock_popen, tmp_path):
         """When both MCP-safe helper and direct fallback fail, returns error with both reasons."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="helper broke")
         mock_popen.side_effect = OSError("Cannot start process")
         cwd = str(tmp_path)
 
         result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
 
         assert result.success is False
-        assert "MCP-safe helper failed" in result.error
+        assert "MCP-safe helper failed: helper broke" in result.error
         assert "Direct fallback also failed" in result.error
         assert "Cannot start process" in result.error
 
@@ -283,6 +284,27 @@ class TestLaunchSession:
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "C:\\wt.exe"
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("power_atlas.launcher._build_command", return_value=None)
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
+    def test_metachar_cwd_double_failure(self, mock_which, mock_run, mock_popen, mock_build_cmd, tmp_path):
+        """When helper fails and _build_command returns None (e.g. metachar cwd), double failure reported."""
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="some error")
+        # Use a cwd with shell metacharacters
+        bad_dir = tmp_path / "a&b"
+        bad_dir.mkdir()
+        cwd = str(bad_dir)
+
+        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+
+        assert result.success is False
+        assert "MCP-safe helper failed: some error" in result.error
+        assert "metacharacters" in result.error.lower()
+        mock_popen.assert_not_called()
 
     @patch("power_atlas.launcher.sys.platform", "linux")
     @patch("subprocess.Popen")
@@ -500,26 +522,26 @@ class TestTabTitle:
         assert _sanitize_title("kiro-cli - proj") == "kiro-cli - proj"
 
     def test_wt_includes_title(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj")
+        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj", wt_profile="PowerShell")
         assert "--title" in cmd
         idx = cmd.index("--title")
         assert cmd[idx + 1] == "kiro-cli - proj"
 
     def test_wt_omits_title_when_empty(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="")
+        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="", wt_profile="PowerShell")
         assert "--title" not in cmd
 
     def test_pwsh_includes_title(self):
-        cmd = _build_command("C:\\pwsh.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj")
+        cmd = _build_command("C:\\pwsh.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj", wt_profile="PowerShell")
         script = cmd[3]
         assert "$Host.UI.RawUI.WindowTitle = 'kiro-cli - proj'" in script
 
     def test_cmd_includes_title(self):
-        cmd = _build_command("C:\\cmd.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj")
+        cmd = _build_command("C:\\cmd.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj", wt_profile="PowerShell")
         assert cmd[2].startswith("title kiro-cli - proj&& ")
 
     def test_custom_template_ignores_title(self):
-        cmd = _build_command("myterm --dir {cwd} --exec {cmd}", "C:\\proj", ["kiro-cli"], title="kiro-cli - proj")
+        cmd = _build_command("myterm --dir {cwd} --exec {cmd}", "C:\\proj", ["kiro-cli"], title="kiro-cli - proj", wt_profile="PowerShell")
         assert "kiro-cli - proj" not in " ".join(cmd)
 
     def test_wt_uses_custom_wt_profile(self):
@@ -528,12 +550,12 @@ class TestTabTitle:
         assert cmd[idx + 1] == "MyProfile"
 
     def test_wt_default_profile_is_powershell(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="t")
+        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="t", wt_profile="PowerShell")
         idx = cmd.index("-p")
         assert cmd[idx + 1] == "PowerShell"
 class TestBuildCustomCommand:
     def test_wt_format(self):
-        cmd = _build_custom_command("C:\\wt.exe", "C:\\proj", "npm start", "npm - proj")
+        cmd = _build_custom_command("C:\\wt.exe", "C:\\proj", "npm start", "npm - proj", wt_profile="PowerShell")
         assert cmd == ["C:\\wt.exe", "--title", "npm - proj", "-p", "PowerShell", "-d", "C:\\proj", "--", "cmd", "/c", "npm start"]
 
     def test_wt_custom_profile(self):
@@ -541,18 +563,18 @@ class TestBuildCustomCommand:
         assert cmd == ["C:\\wt.exe", "--title", "npm - proj", "-p", "Git Bash", "-d", "C:\\proj", "--", "cmd", "/c", "npm start"]
 
     def test_pwsh_format(self):
-        cmd = _build_custom_command("C:\\pwsh.exe", "C:\\proj", "npm start", "npm - proj")
+        cmd = _build_custom_command("C:\\pwsh.exe", "C:\\proj", "npm start", "npm - proj", wt_profile="PowerShell")
         assert "Set-Location" in cmd[3]
         assert "npm start" in cmd[3]
         assert "WindowTitle" in cmd[3]
 
     def test_cmd_format(self):
-        cmd = _build_custom_command("C:\\cmd.exe", "C:\\proj", "npm start", "npm - proj")
+        cmd = _build_custom_command("C:\\cmd.exe", "C:\\proj", "npm start", "npm - proj", wt_profile="PowerShell")
         assert cmd[0] == "C:\\cmd.exe"
         assert "npm start" in cmd[2]
 
     def test_cmd_rejects_unsafe_cwd(self):
-        assert _build_custom_command("C:\\cmd.exe", "C:\\a&b", "npm start", "t") is None
+        assert _build_custom_command("C:\\cmd.exe", "C:\\a&b", "npm start", "t", wt_profile="PowerShell") is None
 
 
 class TestLaunchCustom:
@@ -618,19 +640,19 @@ class TestDetectTerminalLinux:
 
 class TestBuildCommandLinux:
     def test_kitty(self):
-        cmd = _build_command("/usr/bin/kitty", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        cmd = _build_command("/usr/bin/kitty", "/home/user/proj", ["kiro-cli", "chat"], title="test", wt_profile="PowerShell")
         assert cmd == ["/usr/bin/kitty", "--title", "test", "--directory", "/home/user/proj", "--", "kiro-cli", "chat"]
 
     def test_alacritty(self):
-        cmd = _build_command("/usr/bin/alacritty", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        cmd = _build_command("/usr/bin/alacritty", "/home/user/proj", ["kiro-cli", "chat"], title="test", wt_profile="PowerShell")
         assert cmd == ["/usr/bin/alacritty", "--title", "test", "--working-directory", "/home/user/proj", "-e", "kiro-cli", "chat"]
 
     def test_gnome_terminal(self):
-        cmd = _build_command("/usr/bin/gnome-terminal", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        cmd = _build_command("/usr/bin/gnome-terminal", "/home/user/proj", ["kiro-cli", "chat"], title="test", wt_profile="PowerShell")
         assert cmd == ["/usr/bin/gnome-terminal", "--title=test", "--working-directory=/home/user/proj", "--", "kiro-cli", "chat"]
 
     def test_xterm_uses_shell_wrapper(self):
-        cmd = _build_command("/usr/bin/xterm", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        cmd = _build_command("/usr/bin/xterm", "/home/user/proj", ["kiro-cli", "chat"], title="test", wt_profile="PowerShell")
         assert cmd[0] == "/usr/bin/xterm"
         assert "-title" in cmd
         assert "test" in cmd
@@ -642,11 +664,11 @@ class TestBuildCommandLinux:
         assert "/home/user/proj" in shell_cmd
 
     def test_konsole(self):
-        cmd = _build_command("/usr/bin/konsole", "/home/user/proj", ["kiro-cli", "chat"], title="test")
+        cmd = _build_command("/usr/bin/konsole", "/home/user/proj", ["kiro-cli", "chat"], title="test", wt_profile="PowerShell")
         assert cmd == ["/usr/bin/konsole", "--workdir", "/home/user/proj", "-e", "kiro-cli", "chat"]
 
     def test_xterm_quotes_special_chars_in_cwd(self):
-        cmd = _build_command("/usr/bin/xterm", "/home/user/my$project", ["kiro-cli"], title="")
+        cmd = _build_command("/usr/bin/xterm", "/home/user/my$project", ["kiro-cli"], title="", wt_profile="PowerShell")
         shell_cmd = cmd[cmd.index("-c") + 1]
         # shlex.quote wraps in single quotes for shell safety
         assert "'/home/user/my$project'" in shell_cmd
@@ -654,7 +676,7 @@ class TestBuildCommandLinux:
     def test_unknown_stem_returns_none_on_linux(self):
         with patch("sys.platform", "linux"):
             # Unknown terminal on Linux should not fall through to cmd fallback
-            result = _build_command("/usr/bin/unknownterm", "/home/user/proj", ["kiro-cli"])
+            result = _build_command("/usr/bin/unknownterm", "/home/user/proj", ["kiro-cli"], wt_profile="PowerShell")
             assert result is None
 
 
@@ -678,7 +700,7 @@ class TestTemplateSpaceHandling:
 
 class TestBuildCustomCommandLinux:
     def test_kitty(self):
-        cmd = _build_custom_command("/usr/bin/kitty", "/home/user/proj", "npm start", "npm - proj")
+        cmd = _build_custom_command("/usr/bin/kitty", "/home/user/proj", "npm start", "npm - proj", wt_profile="PowerShell")
         assert cmd[0] == "/usr/bin/kitty"
         assert "--directory" in cmd
         assert "/home/user/proj" in cmd
@@ -688,17 +710,17 @@ class TestBuildCustomCommandLinux:
         assert "npm start" in shell_cmd
 
     def test_xterm_uses_shlex_quote(self):
-        cmd = _build_custom_command("/usr/bin/xterm", "/home/user/my$proj", "npm start", "t")
+        cmd = _build_custom_command("/usr/bin/xterm", "/home/user/my$proj", "npm start", "t", wt_profile="PowerShell")
         shell_cmd = cmd[cmd.index("-c") + 1]
         # shlex.quote wraps the path in single quotes
         assert "'/home/user/my$proj'" in shell_cmd
 
     def test_unknown_stem_returns_none_on_linux(self):
         with patch("sys.platform", "linux"):
-            assert _build_custom_command("/usr/bin/unknown", "/proj", "cmd", "t") is None
+            assert _build_custom_command("/usr/bin/unknown", "/proj", "cmd", "t", wt_profile="PowerShell") is None
 
     def test_konsole_no_title(self):
-        cmd = _build_custom_command("/usr/bin/konsole", "/home/user/proj", "npm start", "title")
+        cmd = _build_custom_command("/usr/bin/konsole", "/home/user/proj", "npm start", "title", wt_profile="PowerShell")
         assert cmd[0] == "/usr/bin/konsole"
         # konsole has no title flag, so title should not appear
         assert "--title" not in cmd

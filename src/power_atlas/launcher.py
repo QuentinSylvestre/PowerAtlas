@@ -52,6 +52,7 @@ def detect_terminal(terminal_command: str = "") -> str | None:
     return None
 
 
+# TODO: Phase 3 — remove if not needed for profile-creation dropdown
 def available_terminals() -> list[tuple[str, str]]:
     """Return (value, label) pairs of detected terminals for the current platform.
 
@@ -314,11 +315,14 @@ def _launch_mcp_safe_wt(
     terminal: str, cwd: str, typed_command: str, title: str,
     wt_profile: str, shell_process_name: str, helper_runner: str,
     attach_timeout_ms: int, helper_timeout_ms: int,
-) -> bool:
-    """Launch a WT profile tab, attach to its console, and type the command."""
+) -> tuple[bool, str]:
+    """Launch a WT profile tab, attach to its console, and type the command.
+
+    Returns (success, error_message). On success error_message is empty.
+    """
     runner = shutil.which(helper_runner)
     if not runner:
-        return False
+        return (False, f"{helper_runner} not found on PATH")
 
     script_path = _write_mcp_safe_wt_helper()
     try:
@@ -356,9 +360,11 @@ def _launch_mcp_safe_wt(
             timeout=helper_timeout_ms / 1000,
             **kwargs,
         )
-        return completed.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+        if completed.returncode == 0:
+            return (True, "")
+        return (False, completed.stderr.strip() or "helper exited with non-zero status")
+    except (OSError, subprocess.SubprocessError) as e:
+        return (False, str(e))
     finally:
         try:
             script_path.unlink(missing_ok=True)
@@ -439,34 +445,36 @@ def launch_session(
     title = f"{display} - {Path(cwd).name}"
     if _should_use_mcp_safe_wt(provider, terminal, profile.mcp_safe_enabled):
         typed_command = _build_powershell_invocation(cli_args)
-        if _launch_mcp_safe_wt(
+        helper_ok, helper_error = _launch_mcp_safe_wt(
             terminal, cwd, typed_command, title,
             wt_profile=profile.wt_profile,
             shell_process_name=profile.shell_process_name,
             helper_runner=profile.helper_runner,
             attach_timeout_ms=profile.attach_timeout_ms,
             helper_timeout_ms=profile.helper_timeout_ms,
-        ):
+        )
+        if helper_ok:
             return LaunchResult(True, session_id, cwd)
         # Helper failed — try direct fallback
         cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
         if cmd is None:
             return LaunchResult(
                 False, session_id, cwd,
-                error="MCP-safe helper failed. Direct fallback also failed: path contains shell metacharacters unsafe for cmd.exe",
+                error=f"MCP-safe helper failed: {helper_error}. Direct fallback also failed: path contains shell metacharacters unsafe for cmd.exe",
             )
         try:
             fb_kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
             subprocess.Popen(cmd, **fb_kwargs)
             return LaunchResult(
                 True, session_id, cwd,
-                warning="MCP-safe helper failed; launched via direct Windows Terminal tab.",
+                warning=f"MCP-safe helper failed ({helper_error}); launched via direct Windows Terminal tab.",
                 used_fallback=True,
             )
         except OSError as e:
+            direct_error = str(e)
             return LaunchResult(
                 False, session_id, cwd,
-                error=f"MCP-safe helper failed. Direct fallback also failed: {e}",
+                error=f"MCP-safe helper failed: {helper_error}. Direct fallback also failed: {direct_error}.",
             )
 
     cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
@@ -581,7 +589,7 @@ def _build_linux_command(terminal: str, cwd: str, kiro_args: list[str], title: s
     return cmd
 
 
-def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "", wt_profile: str = "PowerShell") -> list[str] | None:
+def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "", *, wt_profile: str) -> list[str] | None:
     """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
@@ -691,7 +699,7 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
         return LaunchResult(False, None, work_dir, error=str(e))
 
 
-def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str, wt_profile: str = "PowerShell") -> list[str] | None:
+def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str, *, wt_profile: str) -> list[str] | None:
     """Build terminal-specific command for custom launcher. Returns None if unsafe."""
     t = Path(terminal).stem.lower()
     if t == "wt":
