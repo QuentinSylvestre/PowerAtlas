@@ -272,6 +272,10 @@ refreshCards(true);
 
 This ensures the provider tile immediately reflects color/enabled changes without waiting for the next full refresh, and eliminates the broken `htmx.ajax` call.
 
+#### Implementation (2026-07-07, code: 75b67a4)
+
+Replaced the last `htmx.ajax` call in the provider-save branch of `saveLauncher()` with `_providerSettings[key]=payload` for instant local state update followed by the manual `fetch('/partials/launchers').then(...)` pattern for tile refresh. Zero `htmx.ajax` calls remain in the codebase.
+
 ## Verification
 
 - `pytest tests/test_web.py tests/test_peek.py` — all pass
@@ -339,3 +343,13 @@ QA verification: PASS (2 test probes: happy path + exception non-propagation).
 Implementation health: Green.
 0 findings.
 QA verification: PASS (launcher endpoint tests all pass, htmx.ajax calls confirmed replaced).
+
+### 2026-07-07 — Implementation Review (after Phase 5, persona: Senior engineer)
+
+Implementation health: Green.
+1 finding (0 High, 0 Medium, 1 Low).
+QA verification: PASS (92/93 tests pass, 1 pre-existing failure; zero htmx.ajax calls confirmed).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | `_providerSettings[key]=payload` stores extra `provider` key not in canonical shape. | User: accepted — self-healing on next refreshSettings(); no consumer reads `.provider` from this dict. |
