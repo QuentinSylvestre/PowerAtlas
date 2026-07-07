@@ -324,3 +324,55 @@ class TestParseHotkeyEdgeCases:
         result = PeekWindow._parse_hotkey("ctrl+shift+")
         assert "" not in result
         assert result == {"ctrl", "shift"}
+
+
+class TestHideCallsResetOverlays:
+    """Tests that _hide() calls evaluate_js with resetOverlays before hiding."""
+
+    def test_hide_calls_evaluate_js(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+
+        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+            self._server_url = server_url
+            self._hotkey = hotkey
+            self._window = MagicMock()
+            self._visible = True  # start visible so _hide() fires
+            self._listener = None
+            self._trigger_keys = peek_mod.PeekWindow._parse_hotkey(hotkey)
+            self._pressed_keys = set()
+            self._triggered = False
+            self._webview_ready = None
+            self._webview_ok = True
+
+        monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
+        pw = peek_mod.PeekWindow("http://localhost:8000")
+        pw._hide()
+        pw._window.evaluate_js.assert_called_once_with(
+            "if(typeof resetOverlays==='function') resetOverlays()"
+        )
+
+    def test_hide_evaluate_js_exception_does_not_propagate(self, monkeypatch):
+        import power_atlas.peek as peek_mod
+        monkeypatch.setattr(peek_mod, "_AVAILABLE", True)
+
+        def mock_init(self, server_url, hotkey="ctrl+shift+z"):
+            self._server_url = server_url
+            self._hotkey = hotkey
+            self._window = MagicMock()
+            self._window.evaluate_js.side_effect = RuntimeError("webview gone")
+            self._visible = True
+            self._listener = None
+            self._trigger_keys = peek_mod.PeekWindow._parse_hotkey(hotkey)
+            self._pressed_keys = set()
+            self._triggered = False
+            self._webview_ready = None
+            self._webview_ok = True
+
+        monkeypatch.setattr(peek_mod.PeekWindow, "__init__", mock_init)
+        pw = peek_mod.PeekWindow("http://localhost:8000")
+        # Should not raise
+        pw._hide()
+        # toggle_fullscreen and hide should still be called
+        pw._window.toggle_fullscreen.assert_called_once()
+        pw._window.hide.assert_called_once()

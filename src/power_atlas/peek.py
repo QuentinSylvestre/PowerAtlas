@@ -184,6 +184,10 @@ class PeekWindow:
         if win and self._visible:
             self._visible = False
             log.debug("Peek hide")
+            try:
+                win.evaluate_js("if(typeof resetOverlays==='function') resetOverlays()")
+            except Exception:
+                pass  # defensive — rapid hotkey toggling can race with webview teardown
             win.toggle_fullscreen()
             win.hide()
 
