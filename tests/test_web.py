@@ -12,7 +12,18 @@ from power_atlas.web import app
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    """TestClient with default Origin header for same-origin guard."""
+    c = TestClient(app)
+    # Patch the post method to add Origin by default
+    _original_post = c.post
+    def _post_with_origin(*args, **kwargs):
+        headers = kwargs.get("headers", {})
+        if "Origin" not in headers and "origin" not in headers:
+            headers["Origin"] = "http://testserver"
+            kwargs["headers"] = headers
+        return _original_post(*args, **kwargs)
+    c.post = _post_with_origin
+    return c
 
 
 def _make_session(title="test session", cwd="C:\\projects\\myapp", **kwargs):
@@ -120,7 +131,7 @@ def test_save_provider_settings(mock_load, mock_save, client):
         "default_args": "-a --verbose",
         "color": "",
         "enabled": True,
-    })
+    }, headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     assert "saved" in resp.text.lower()
     saved = mock_save.call_args[0][0]
@@ -196,7 +207,7 @@ def test_pin_session(mock_sessions, mock_config, mock_save, client):
     mock_config.return_value = Config()
     mock_sessions.return_value = []
     resp = client.post("/api/pin-session", json={"session_id": "sess-1"},
-                       headers={"X-Workspace": "C:\\app"})
+                       headers={"X-Workspace": "C:\\app", "Origin": "http://testserver"})
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert "sess-1" in saved.pinned_sessions
@@ -210,7 +221,7 @@ def test_unpin_session(mock_sessions, mock_config, mock_save, client):
     mock_config.return_value = Config(pinned_sessions=["sess-1", "sess-2"])
     mock_sessions.return_value = []
     resp = client.post("/api/unpin-session", json={"session_id": "sess-1"},
-                       headers={"X-Workspace": "C:\\app"})
+                       headers={"X-Workspace": "C:\\app", "Origin": "http://testserver"})
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert "sess-1" not in saved.pinned_sessions
@@ -294,7 +305,8 @@ def test_pin_folder_simple(mock_load, mock_save, client):
     """Pin folder API accepts just folder path (no provider)."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"})
+    resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"},
+                       headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
@@ -307,7 +319,8 @@ def test_pin_folder_no_duplicate(mock_load, mock_save, client):
     """Pin folder API does not duplicate already-pinned paths."""
     from power_atlas.config import Config
     mock_load.return_value = Config(pinned_folders=["C:\\projects\\myapp"])
-    resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"})
+    resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"},
+                       headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     mock_save.assert_not_called()
 
@@ -318,7 +331,8 @@ def test_unpin_folder_simple(mock_load, mock_save, client):
     """Unpin folder API removes path from list."""
     from power_atlas.config import Config
     mock_load.return_value = Config(pinned_folders=["C:\\projects\\myapp", "C:\\other"])
-    resp = client.post("/api/unpin-folder", json={"folder": "C:\\projects\\myapp"})
+    resp = client.post("/api/unpin-folder", json={"folder": "C:\\projects\\myapp"},
+                       headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
@@ -332,7 +346,8 @@ def test_unpin_folder_not_present(mock_load, mock_save, client):
     """Unpin folder API is no-op for non-pinned path."""
     from power_atlas.config import Config
     mock_load.return_value = Config(pinned_folders=["C:\\other"])
-    resp = client.post("/api/unpin-folder", json={"folder": "C:\\nonexistent"})
+    resp = client.post("/api/unpin-folder", json={"folder": "C:\\nonexistent"},
+                       headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     mock_save.assert_not_called()
 
@@ -398,8 +413,22 @@ class TestSaveSettingAllowlist:
     def test_rejects_unknown_key(self, mock_load, mock_save, client):
         from power_atlas.config import Config
         mock_load.return_value = Config()
-        resp = client.post("/api/save-setting", json={"key": "__class__", "value": "evil"})
+        resp = client.post("/api/save-setting", json={"key": "__class__", "value": "evil"},
+                           headers={"Origin": "http://testserver"})
         assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False
+        assert "unknown" in body["error"].lower()
+        mock_save.assert_not_called()
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_rejects_terminal_command(self, mock_load, mock_save, client):
+        """terminal_command is no longer a valid setting — profile edits go through /api/launch-profile/save."""
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        resp = client.post("/api/save-setting", json={"key": "terminal_command", "value": "wt.exe"},
+                           headers={"Origin": "http://testserver"})
         body = resp.json()
         assert body["ok"] is False
         assert "unknown" in body["error"].lower()
@@ -410,7 +439,8 @@ class TestSaveSettingAllowlist:
     def test_rejects_wrong_type(self, mock_load, mock_save, client):
         from power_atlas.config import Config
         mock_load.return_value = Config()
-        resp = client.post("/api/save-setting", json={"key": "terminal_command", "value": 42})
+        resp = client.post("/api/save-setting", json={"key": "port", "value": "not_int"},
+                           headers={"Origin": "http://testserver"})
         body = resp.json()
         assert body["ok"] is False
         assert "type" in body["error"].lower()
@@ -421,7 +451,8 @@ class TestSaveSettingAllowlist:
     def test_accepts_valid_setting(self, mock_load, mock_save, client):
         from power_atlas.config import Config
         mock_load.return_value = Config()
-        resp = client.post("/api/save-setting", json={"key": "terminal_command", "value": "wt.exe"})
+        resp = client.post("/api/save-setting", json={"key": "peek_hotkey", "value": "ctrl+shift+x"},
+                           headers={"Origin": "http://testserver"})
         body = resp.json()
         assert body["ok"] is True
         mock_save.assert_called_once()
@@ -433,7 +464,7 @@ def test_save_setting_port_valid(mock_load, mock_save, client):
     """Valid port value is accepted and saved."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": 8080})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 8080}, headers={"Origin": "http://testserver"})
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
     assert saved.port == 8080
@@ -444,7 +475,7 @@ def test_save_setting_port_bool_rejected(mock_load, client):
     """Boolean value for port is rejected."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": True})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": True}, headers={"Origin": "http://testserver"})
     assert resp.json()["ok"] is False
 
 
@@ -453,7 +484,7 @@ def test_save_setting_port_out_of_range(mock_load, client):
     """Out-of-range port is rejected."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": 99999})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 99999}, headers={"Origin": "http://testserver"})
     assert resp.json()["ok"] is False
 
 
@@ -463,7 +494,7 @@ def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
     """Port 0 (random mode) is accepted."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": 0})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 0}, headers={"Origin": "http://testserver"})
     assert resp.json()["ok"] is True
 
 
@@ -472,7 +503,7 @@ def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
 def test_set_workspace_icon(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": "🚀"})
+    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": "\U0001f680"}, headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
@@ -485,7 +516,8 @@ def test_set_workspace_icon(mock_load, mock_save, client):
 def test_set_workspace_icon_reset(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config(workspace_icons={"c:\\projects\\app": "🚀"})
-    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": ""})
+    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": ""},
+                       headers={"Origin": "http://testserver"})
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert "🚀" not in saved.workspace_icons.values()
@@ -1038,7 +1070,7 @@ def test_resume_button_terminal_provider_tooltip(mock_discover, mock_providers, 
 @patch("power_atlas.web.autostart.is_enabled")
 @patch("power_atlas.web.load_config")
 def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
-    """GET /api/settings returns 200 with all 6 expected keys."""
+    """GET /api/settings returns 200 with all expected keys (no terminal_command)."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
     mock_autostart.return_value = False
@@ -1046,9 +1078,10 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     body = resp.json()
-    expected_keys = {"terminal_command", "peek_hotkey", "port", "provider_settings", "custom_launchers", "autostart"}
+    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "provider_settings", "custom_launchers", "autostart"}
     assert set(body.keys()) == expected_keys
     assert body["autostart"] is False
+    assert "terminal_command" not in body
 
 
 @patch("power_atlas.web.autostart.is_enabled")
@@ -1057,7 +1090,8 @@ def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
     """GET /api/settings reflects pre-populated config values."""
     from power_atlas.config import Config, LaunchProfile
     mock_load.return_value = Config(
-        launch_profiles=[LaunchProfile(terminal_command="wt.exe")],
+        launch_profiles=[LaunchProfile(id="prod", name="Production", terminal_command="wt.exe")],
+        active_launch_profile="prod",
         peek_hotkey="ctrl+shift+z",
         port=8080,
         provider_settings={
@@ -1070,7 +1104,10 @@ def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["terminal_command"] == "wt.exe"
+    assert body["active_launch_profile"] == "prod"
+    assert len(body["launch_profiles"]) == 1
+    assert body["launch_profiles"][0]["name"] == "Production"
+    assert body["launch_profiles"][0]["terminal_command"] == "wt.exe"
     assert body["peek_hotkey"] == "ctrl+shift+z"
     assert body["port"] == 8080
     assert body["provider_settings"]["kiro-cli"]["default_args"] == "-a"
@@ -1091,3 +1128,337 @@ def test_api_settings_autostart_exception_returns_false(mock_load, mock_autostar
     assert resp.status_code == 200
     body = resp.json()
     assert body["autostart"] is False
+
+
+# --- Phase 3 (Launch Profiles): Same-origin guard tests ---
+
+
+@pytest.fixture
+def raw_client():
+    """TestClient WITHOUT default Origin header, for testing the guard itself."""
+    return TestClient(app)
+
+
+class TestSameOriginGuard:
+    def test_origin_null_rejected(self, raw_client):
+        """Origin: null is always rejected."""
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
+                               headers={"Origin": "null"})
+        assert resp.status_code == 403
+        assert "Forbidden" in resp.json()["error"]
+
+    def test_both_absent_rejected(self, raw_client):
+        """Request with neither Origin nor Referer is rejected."""
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080})
+        assert resp.status_code == 403
+
+    def test_mismatched_origin_rejected(self, raw_client):
+        """Origin from different host is rejected."""
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
+                               headers={"Origin": "http://evil.example.com"})
+        assert resp.status_code == 403
+
+    def test_mismatched_referer_rejected(self, raw_client):
+        """Referer from different host (no Origin) is rejected."""
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
+                               headers={"Referer": "http://evil.example.com/path"})
+        assert resp.status_code == 403
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_valid_origin_accepted(self, mock_load, mock_save, raw_client):
+        """Matching Origin header passes the guard."""
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
+                               headers={"Origin": "http://testserver"})
+        assert resp.status_code == 200
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_valid_referer_only_accepted(self, mock_load, mock_save, raw_client):
+        """Matching Referer (without Origin) passes the guard."""
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
+                               headers={"Referer": "http://testserver/some/page"})
+        assert resp.status_code == 200
+
+    def test_guard_applies_to_multiple_endpoints(self, raw_client):
+        """Multiple POST endpoints are all protected by the guard."""
+        endpoints = [
+            "/api/pin-folder",
+            "/api/unpin-folder",
+            "/api/pin-session",
+            "/api/unpin-session",
+            "/api/launch",
+            "/api/provider/save",
+            "/api/launch-profile/activate",
+        ]
+        for endpoint in endpoints:
+            resp = raw_client.post(endpoint, json={},
+                                   headers={"Origin": "null"})
+            assert resp.status_code == 403, f"{endpoint} should reject Origin: null"
+
+
+# --- Phase 3 (Launch Profiles): Profile endpoint tests ---
+
+
+class TestLaunchProfileEndpoints:
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_activate_valid_profile(self, mock_load, mock_save, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(
+            launch_profiles=[LaunchProfile(id="default"), LaunchProfile(id="fast", name="Fast")],
+            active_launch_profile="default",
+        )
+        resp = client.post("/api/launch-profile/activate", json={"id": "fast"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        saved = mock_save.call_args[0][0]
+        assert saved.active_launch_profile == "fast"
+
+    @patch("power_atlas.web.load_config")
+    def test_activate_nonexistent_profile(self, mock_load, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+        resp = client.post("/api/launch-profile/activate", json={"id": "nonexistent"})
+        assert resp.status_code == 404
+        assert resp.json()["ok"] is False
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_save_new_profile(self, mock_load, mock_save, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+        resp = client.post("/api/launch-profile/save", json={
+            "id": "__new__",
+            "name": "My Custom Profile",
+            "terminal_command": "wt.exe",
+            "wt_profile": "PowerShell",
+            "shell_process_name": "pwsh.exe",
+            "helper_runner": "pwsh",
+            "attach_timeout_ms": 4500,
+            "helper_timeout_ms": 8000,
+            "mcp_safe_enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "saved" in resp.text.lower()
+        saved = mock_save.call_args[0][0]
+        assert len(saved.launch_profiles) == 2
+        assert saved.launch_profiles[1].name == "My Custom Profile"
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_save_update_existing(self, mock_load, mock_save, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile(id="default", name="Default")])
+        resp = client.post("/api/launch-profile/save", json={
+            "id": "default",
+            "name": "Renamed",
+            "terminal_command": "",
+            "wt_profile": "PowerShell",
+            "shell_process_name": "pwsh.exe",
+            "helper_runner": "pwsh",
+            "attach_timeout_ms": 4500,
+            "helper_timeout_ms": 8000,
+            "mcp_safe_enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "saved" in resp.text.lower()
+        saved = mock_save.call_args[0][0]
+        assert len(saved.launch_profiles) == 1
+        assert saved.launch_profiles[0].name == "Renamed"
+
+    @patch("power_atlas.web.load_config")
+    def test_save_invalid_name_empty(self, mock_load, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+        resp = client.post("/api/launch-profile/save", json={
+            "id": "__new__", "name": "", "terminal_command": "",
+            "wt_profile": "PowerShell", "shell_process_name": "pwsh.exe",
+            "helper_runner": "pwsh", "attach_timeout_ms": 4500,
+            "helper_timeout_ms": 8000, "mcp_safe_enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "1-80" in resp.text
+
+    @patch("power_atlas.web.load_config")
+    def test_save_invalid_shell_process(self, mock_load, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+        resp = client.post("/api/launch-profile/save", json={
+            "id": "__new__", "name": "Test", "terminal_command": "",
+            "wt_profile": "PowerShell", "shell_process_name": "not-valid",
+            "helper_runner": "pwsh", "attach_timeout_ms": 4500,
+            "helper_timeout_ms": 8000, "mcp_safe_enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "name.exe" in resp.text
+
+    @patch("power_atlas.web.load_config")
+    def test_save_invalid_helper_timeout(self, mock_load, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+        resp = client.post("/api/launch-profile/save", json={
+            "id": "__new__", "name": "Test", "terminal_command": "",
+            "wt_profile": "PowerShell", "shell_process_name": "pwsh.exe",
+            "helper_runner": "pwsh", "attach_timeout_ms": 5000,
+            "helper_timeout_ms": 5500, "mcp_safe_enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "attach timeout + 1000" in resp.text
+
+    @patch("power_atlas.web.load_config")
+    def test_save_denied_shell_process(self, mock_load, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+        resp = client.post("/api/launch-profile/save", json={
+            "id": "__new__", "name": "Test", "terminal_command": "",
+            "wt_profile": "PowerShell", "shell_process_name": "cmd.exe",
+            "helper_runner": "pwsh", "attach_timeout_ms": 4500,
+            "helper_timeout_ms": 8000, "mcp_safe_enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "not allowed" in resp.text
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_delete_profile(self, mock_load, mock_save, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(
+            launch_profiles=[LaunchProfile(id="a", name="A"), LaunchProfile(id="b", name="B")],
+            active_launch_profile="a",
+        )
+        resp = client.post("/api/launch-profile/delete", json={"id": "b"})
+        assert resp.status_code == 200
+        assert "deleted" in resp.text.lower()
+        saved = mock_save.call_args[0][0]
+        assert len(saved.launch_profiles) == 1
+        assert saved.launch_profiles[0].id == "a"
+
+    @patch("power_atlas.web.load_config")
+    def test_delete_last_profile_rejected(self, mock_load, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(launch_profiles=[LaunchProfile(id="only")])
+        resp = client.post("/api/launch-profile/delete", json={"id": "only"})
+        assert resp.status_code == 200
+        assert "cannot delete" in resp.text.lower()
+
+    @patch("power_atlas.web.save_config")
+    @patch("power_atlas.web.load_config")
+    def test_delete_active_reassigns(self, mock_load, mock_save, client):
+        from power_atlas.config import Config, LaunchProfile
+        mock_load.return_value = Config(
+            launch_profiles=[LaunchProfile(id="a"), LaunchProfile(id="b")],
+            active_launch_profile="a",
+        )
+        resp = client.post("/api/launch-profile/delete", json={"id": "a"})
+        assert resp.status_code == 200
+        saved = mock_save.call_args[0][0]
+        assert saved.active_launch_profile == "b"
+
+
+# --- Phase 3 (Launch Profiles): default_args validation ---
+
+
+class TestDefaultArgsValidation:
+    @patch("power_atlas.web.load_config")
+    def test_default_args_control_chars_rejected(self, mock_load, client):
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        resp = client.post("/api/provider/save", json={
+            "provider": "kiro-cli",
+            "default_args": "valid\x01evil",
+            "color": "",
+            "enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "control" in resp.text.lower()
+
+    @patch("power_atlas.web.load_config")
+    def test_default_args_too_long_rejected(self, mock_load, client):
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        resp = client.post("/api/provider/save", json={
+            "provider": "kiro-cli",
+            "default_args": "x" * 257,
+            "color": "",
+            "enabled": True,
+        })
+        assert resp.status_code == 200
+        assert "too long" in resp.text.lower()
+
+
+# --- Phase 3 (Launch Profiles): Launch profile propagation ---
+
+
+@patch("power_atlas.web.launcher.launch_session")
+@patch("power_atlas.web.load_config")
+def test_launch_uses_active_profile(mock_load, mock_launch, client, tmp_path):
+    """Launch endpoint passes get_active_launch_profile(config) to launcher."""
+    from power_atlas.config import Config, LaunchProfile
+    from power_atlas.launcher import LaunchResult
+    profile = LaunchProfile(id="custom", name="Custom", terminal_command="wt.exe")
+    mock_load.return_value = Config(
+        launch_profiles=[profile],
+        active_launch_profile="custom",
+    )
+    mock_launch.return_value = LaunchResult(True, None, str(tmp_path))
+
+    resp = client.post("/api/launch", json={
+        "workspace": str(tmp_path),
+        "provider": "kiro-cli",
+    })
+    assert resp.status_code == 200
+    call_kwargs = mock_launch.call_args[1]
+    assert call_kwargs["launch_profile"].terminal_command == "wt.exe"
+    assert call_kwargs["launch_profile"].name == "Custom"
+
+
+# --- Phase 3 (Launch Profiles): Batch warning aggregation ---
+
+
+@patch("power_atlas.web.launcher.launch_batch")
+@patch("power_atlas.web.load_config")
+def test_launch_batch_warning_aggregation(mock_load, mock_batch, client, tmp_path):
+    """When all launches succeed but some warn, aggregate into persistent warning toast."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config()
+    mock_batch.return_value = [
+        LaunchResult(True, None, str(tmp_path), warning="MCP-safe failed; launched directly"),
+        LaunchResult(True, None, str(tmp_path)),
+        LaunchResult(True, None, str(tmp_path), warning="MCP-safe failed; launched directly"),
+    ]
+    resp = client.post("/api/launch-batch", json={
+        "sessions": [
+            {"session_id": "s1", "workspace": str(tmp_path), "provider": "kiro-cli"},
+            {"session_id": "s2", "workspace": str(tmp_path), "provider": "kiro-cli"},
+            {"session_id": "s3", "workspace": str(tmp_path), "provider": "kiro-cli"},
+        ],
+    })
+    assert resp.status_code == 200
+    assert "2 launches used fallback" in resp.text
+    assert "toast-persistent" in resp.text
+    assert "toast-warning" in resp.text
+
+
+@patch("power_atlas.web.launcher.launch_session")
+@patch("power_atlas.web.load_config")
+def test_single_launch_warning_persistent(mock_load, mock_launch, client, tmp_path):
+    """Single launch with warning renders persistent warning toast."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config()
+    mock_launch.return_value = LaunchResult(True, None, str(tmp_path), warning="MCP-safe failed")
+
+    resp = client.post("/api/launch", json={
+        "workspace": str(tmp_path),
+        "provider": "kiro-cli",
+    })
+    assert resp.status_code == 200
+    assert "MCP-safe failed" in resp.text
+    assert "toast-persistent" in resp.text
+    assert "toast-warning" in resp.text

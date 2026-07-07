@@ -2,19 +2,21 @@
 
 import asyncio
 import logging
+import re
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import load_config, save_config, get_active_launch_profile
+from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
 from . import autostart, data, icons, launcher
-from .launcher import available_terminals
 
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
@@ -134,40 +136,40 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
-def _terminal_context() -> dict:
-    """Build template context for terminal selection UI."""
-    options = available_terminals()
-    values = {v for v, _ in options}
-    no_found = len(options) == 2  # only Auto-detect + Custom
-    if no_found:
-        if sys.platform == "win32":
-            hint = "No terminal detected. Install Windows Terminal or PowerShell, or configure a custom terminal."
-        else:
-            hint = "No terminal detected. Install one of: kitty, alacritty, gnome-terminal, konsole, or xterm."
-    else:
-        hint = ""
-    return {
-        "terminal_options": options,
-        "terminal_values": values,
-        "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
-        "no_terminals_found": no_found,
-        "no_terminals_hint": hint,
-    }
+@app.middleware("http")
+async def same_origin_guard(request: Request, call_next):
+    """Reject cross-origin POST requests to prevent CSRF."""
+    if request.method == "POST":
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+        if origin == "null":
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if not origin and not referer:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+        if origin and origin != expected_origin:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if not origin and referer:
+            parsed = urlparse(referer)
+            referer_origin = f"{parsed.scheme}://{parsed.netloc}"
+            if referer_origin != expected_origin:
+                return JSONResponse({"error": "Forbidden"}, status_code=403)
+    return await call_next(request)
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     config = load_config()
-    ctx = _terminal_context()
     profile = get_active_launch_profile(config)
     return templates.TemplateResponse(request, "index.html", {
         "port": config.port,
-        "terminal_command": profile.terminal_command,
+        "active_launch_profile": profile,
+        "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
         "peek_hotkey": config.peek_hotkey,
         "provider_settings": config.provider_settings,
-        **ctx,
+        "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
     })
 
 
@@ -526,9 +528,9 @@ async def api_settings():
         autostart_enabled = autostart.is_enabled()
     except Exception:
         autostart_enabled = False
-    profile = get_active_launch_profile(config)
     return {
-        "terminal_command": profile.terminal_command,
+        "active_launch_profile": config.active_launch_profile,
+        "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "peek_hotkey": config.peek_hotkey,
         "port": config.port,
         "provider_settings": config.provider_settings,
@@ -561,9 +563,19 @@ async def save_provider_settings(request: Request):
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Missing provider key", "level": "error",
         })
+    # Validate default_args: max 256 chars, no control characters
+    default_args = body.get("default_args", "")
+    if len(default_args) > 256:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Default args too long (max 256 chars)", "level": "error",
+        })
+    if any(ord(ch) < 0x20 for ch in default_args):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Default args contains invalid control characters", "level": "error",
+        })
     config = load_config()
     config.provider_settings[provider] = {
-        "default_args": body.get("default_args", ""),
+        "default_args": default_args,
         "color": body.get("color", ""),
         "enabled": body.get("enabled", True),
     }
@@ -573,10 +585,195 @@ async def save_provider_settings(request: Request):
     })
 
 
+# --- Launch profile validation constants ---
+_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SHELL_PROCESS_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}\.exe$")
+_SHELL_DENY_LIST = frozenset({"cmd.exe", "conhost.exe", "explorer.exe", "svchost.exe"})
+_HELPER_ALLOW_LIST = frozenset({"pwsh", "pwsh.exe"})
+
+
+def _has_control_chars(s: str) -> bool:
+    """Return True if string contains characters < 0x20."""
+    return any(ord(ch) < 0x20 for ch in s)
+
+
+@app.post("/api/launch-profile/activate")
+async def activate_launch_profile(request: Request):
+    body = await request.json()
+    profile_id = body.get("id", "")
+    config = load_config()
+    if not any(p.id == profile_id for p in config.launch_profiles):
+        return JSONResponse({"ok": False, "error": "Profile not found"}, status_code=404)
+    config.active_launch_profile = profile_id
+    save_config(config)
+    return {"ok": True}
+
+
+@app.post("/api/launch-profile/save", response_class=HTMLResponse)
+async def save_launch_profile(request: Request):
+    body = await request.json()
+    config = load_config()
+
+    # Validate profile ID
+    profile_id = body.get("id", "")
+    is_new = profile_id == "__new__" or not profile_id
+    if is_new:
+        profile_id = str(uuid.uuid4()).replace("-", "")[:16]
+    elif not _PROFILE_ID_RE.match(profile_id):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid profile ID format", "level": "error",
+        })
+
+    # Validate name
+    name = str(body.get("name", "")).strip()
+    if not name or len(name) > 80:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Name must be 1-80 characters", "level": "error",
+        })
+    if _has_control_chars(name):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Name contains invalid control characters", "level": "error",
+        })
+
+    # Validate terminal_command
+    terminal_command = str(body.get("terminal_command", ""))
+    if len(terminal_command) > 512:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Terminal command too long (max 512 chars)", "level": "error",
+        })
+    if _has_control_chars(terminal_command):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Terminal command contains invalid control characters", "level": "error",
+        })
+
+    # Validate wt_profile
+    wt_profile = str(body.get("wt_profile", "PowerShell")).strip()
+    if len(wt_profile) > 128:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "WT Profile too long (max 128 chars)", "level": "error",
+        })
+    if _has_control_chars(wt_profile):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "WT Profile contains invalid control characters", "level": "error",
+        })
+
+    # Validate shell_process_name
+    shell_process_name = str(body.get("shell_process_name", "pwsh.exe"))
+    if not _SHELL_PROCESS_RE.match(shell_process_name):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Shell process name must match name.exe format", "level": "error",
+        })
+    if shell_process_name.lower() in _SHELL_DENY_LIST:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": f"Shell process '{shell_process_name}' is not allowed", "level": "error",
+        })
+
+    # Validate helper_runner
+    helper_runner = str(body.get("helper_runner", "pwsh"))
+    if helper_runner not in _HELPER_ALLOW_LIST:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Helper runner must be 'pwsh' or 'pwsh.exe'", "level": "error",
+        })
+
+    # Validate attach_timeout_ms
+    try:
+        attach_timeout_ms = int(body.get("attach_timeout_ms", 4500))
+    except (TypeError, ValueError):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Attach timeout must be a number", "level": "error",
+        })
+    if attach_timeout_ms < 500 or attach_timeout_ms > 30000:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Attach timeout must be 500-30000 ms", "level": "error",
+        })
+
+    # Validate helper_timeout_ms
+    try:
+        helper_timeout_ms = int(body.get("helper_timeout_ms", 8000))
+    except (TypeError, ValueError):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Helper timeout must be a number", "level": "error",
+        })
+    if helper_timeout_ms < 1000 or helper_timeout_ms > 60000:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Helper timeout must be 1000-60000 ms", "level": "error",
+        })
+    if helper_timeout_ms < attach_timeout_ms + 1000:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Helper timeout must be at least attach timeout + 1000 ms", "level": "error",
+        })
+
+    # Validate mcp_safe_enabled
+    mcp_safe_enabled = bool(body.get("mcp_safe_enabled", True))
+
+    # Build the validated profile
+    new_profile = LaunchProfile(
+        id=profile_id,
+        name=name,
+        terminal_command=terminal_command,
+        wt_profile=wt_profile or "PowerShell",
+        shell_process_name=shell_process_name,
+        helper_runner=helper_runner,
+        attach_timeout_ms=attach_timeout_ms,
+        helper_timeout_ms=helper_timeout_ms,
+        mcp_safe_enabled=mcp_safe_enabled,
+    )
+
+    # Check if updating existing or creating new
+    existing_idx = next((i for i, p in enumerate(config.launch_profiles) if p.id == profile_id), None)
+    if existing_idx is not None:
+        config.launch_profiles[existing_idx] = new_profile
+    elif is_new:
+        # Check for duplicate ID (shouldn't happen with generated IDs but be safe)
+        if any(p.id == profile_id for p in config.launch_profiles):
+            return templates.TemplateResponse(request, "partials/toast.html", {
+                "message": "Duplicate profile ID", "level": "error",
+            })
+        config.launch_profiles.append(new_profile)
+    else:
+        # New ID that doesn't exist yet — create
+        config.launch_profiles.append(new_profile)
+
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Profile saved", "level": "success",
+    })
+
+
+@app.post("/api/launch-profile/delete", response_class=HTMLResponse)
+async def delete_launch_profile(request: Request):
+    body = await request.json()
+    profile_id = body.get("id", "")
+    config = load_config()
+
+    # Reject deleting the last profile
+    if len(config.launch_profiles) <= 1:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Cannot delete the last profile", "level": "error",
+        })
+
+    # Check profile exists
+    if not any(p.id == profile_id for p in config.launch_profiles):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Profile not found", "level": "error",
+        })
+
+    # Remove the profile
+    config.launch_profiles = [p for p in config.launch_profiles if p.id != profile_id]
+
+    # Reassign active if deleted was active
+    if config.active_launch_profile == profile_id:
+        config.active_launch_profile = config.launch_profiles[0].id
+
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Profile deleted", "level": "success",
+    })
+
+
 _SETTING_TYPES: dict[str, type] = {
     "port": int,
     "peek_hotkey": str,
-    "terminal_command": str,
     "pinned_folders": list,
     "pinned_sessions": list,
 }
@@ -604,17 +801,7 @@ async def save_setting(request: Request):
         if value != 0 and not (1024 <= value <= 65535):
             return {"ok": False, "error": "Port must be 0 (random) or 1024\u201365535"}
     config = load_config()
-    if key == "terminal_command":
-        # terminal_command lives in the active launch profile, not on Config directly
-        for profile in config.launch_profiles:
-            if profile.id == config.active_launch_profile:
-                profile.terminal_command = value
-                break
-        else:
-            if config.launch_profiles:
-                config.launch_profiles[0].terminal_command = value
-    else:
-        setattr(config, key, value)
+    setattr(config, key, value)
     save_config(config)
     return {"ok": True}
 
@@ -717,9 +904,17 @@ async def api_launch(request: Request):
         default_args=default_args,
         launch_profile=get_active_launch_profile(config),
     )
-    level = "success" if result.success else "error"
-    msg = "Session launched" if result.success else result.error
-    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+    if not result.success:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.error, "level": "error",
+        })
+    if result.warning:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.warning, "level": "warning", "persistent": True,
+        })
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Session launched", "level": "success",
+    })
 
 
 @app.post("/api/launch-batch", response_class=HTMLResponse)
@@ -733,9 +928,15 @@ async def api_launch_batch(request: Request):
     )
     ok = sum(1 for r in results if r.success)
     failed = len(results) - ok
+    warnings = [r.warning for r in results if r.success and r.warning]
     msg = f"Launched {ok} session{'s' if ok != 1 else ''}"
     if failed:
         msg += f", {failed} failed"
+    if warnings and not failed:
+        msg = f"{len(warnings)} launch{'es' if len(warnings) != 1 else ''} used fallback: {warnings[0]}"
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": msg, "level": "warning", "persistent": True,
+        })
     level = "success" if not failed else ("warning" if ok else "error")
     return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
@@ -753,9 +954,17 @@ async def api_new_session(request: Request):
         default_args=default_args,
         launch_profile=get_active_launch_profile(config),
     )
-    level = "success" if result.success else "error"
-    msg = "New session launched" if result.success else result.error
-    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+    if not result.success:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.error, "level": "error",
+        })
+    if result.warning:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.warning, "level": "warning", "persistent": True,
+        })
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "New session launched", "level": "success",
+    })
 
 
 async def _render_pinned_sessions(request, config, provider: str = "all") -> str:
@@ -973,9 +1182,17 @@ async def launcher_run(request: Request):
         launch_profile=get_active_launch_profile(config),
         use_terminal=use_terminal,
     )
-    level = "success" if result.success else "error"
-    msg = "Launcher started" if result.success else result.error
-    return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
+    if not result.success:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.error, "level": "error",
+        })
+    if result.warning:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.warning, "level": "warning", "persistent": True,
+        })
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Launcher started", "level": "success",
+    })
 
 
 @app.post("/api/launcher/run-batch", response_class=HTMLResponse)
@@ -999,9 +1216,15 @@ async def launcher_run_batch(request: Request):
     )
     ok = sum(1 for r in results if r.success)
     failed = len(results) - ok
+    warnings = [r.warning for r in results if r.success and r.warning]
     msg = f"Launched {ok} instance{'s' if ok != 1 else ''}"
     if failed:
         msg += f", {failed} failed"
+    if warnings and not failed:
+        msg = f"{len(warnings)} launch{'es' if len(warnings) != 1 else ''} used fallback: {warnings[0]}"
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": msg, "level": "warning", "persistent": True,
+        })
     level = "success" if not failed else ("warning" if ok else "error")
     return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
