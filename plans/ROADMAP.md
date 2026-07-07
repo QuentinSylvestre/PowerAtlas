@@ -32,3 +32,6 @@
 
 - **Keyboard-driven navigation** — vim-style j/k movement, space to select, enter to launch
 - **Multi-machine session sync** — see WSL kiro-cli sessions alongside Windows ones in the same UI
+
+## To sort
+- Hide workspaces (and see hidden workspaces)
