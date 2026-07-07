@@ -518,6 +518,23 @@ async def api_last_refresh():
     return {"last_refresh": data.session_cache.last_refresh}
 
 
+@app.get("/api/settings")
+async def api_settings():
+    config = load_config()
+    try:
+        autostart_enabled = autostart.is_enabled()
+    except Exception:
+        autostart_enabled = False
+    return {
+        "terminal_command": config.terminal_command,
+        "peek_hotkey": config.peek_hotkey,
+        "port": config.port,
+        "provider_settings": config.provider_settings,
+        "custom_launchers": config.custom_launchers,
+        "autostart": autostart_enabled,
+    }
+
+
 @app.get("/api/available-providers")
 async def api_available_providers():
     """Return list of available (enabled) providers with display names and colors."""

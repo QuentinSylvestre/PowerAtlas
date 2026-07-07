@@ -1030,3 +1030,64 @@ def test_resume_button_terminal_provider_tooltip(mock_discover, mock_providers, 
     assert resp.status_code == 200
     assert 'title="Resume session"' in resp.text
     assert 'aria-label="Resume"' in resp.text
+
+
+# --- /api/settings endpoint tests ---
+
+
+@patch("power_atlas.web.autostart.is_enabled")
+@patch("power_atlas.web.load_config")
+def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
+    """GET /api/settings returns 200 with all 6 expected keys."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    mock_autostart.return_value = False
+
+    resp = client.get("/api/settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    expected_keys = {"terminal_command", "peek_hotkey", "port", "provider_settings", "custom_launchers", "autostart"}
+    assert set(body.keys()) == expected_keys
+    assert body["autostart"] is False
+
+
+@patch("power_atlas.web.autostart.is_enabled")
+@patch("power_atlas.web.load_config")
+def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
+    """GET /api/settings reflects pre-populated config values."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(
+        terminal_command="wt.exe",
+        peek_hotkey="ctrl+shift+z",
+        port=8080,
+        provider_settings={
+            "kiro-cli": {"default_args": "-a", "color": "#ff0000", "enabled": True},
+        },
+        custom_launchers=[{"name": "my-launcher", "command": "echo hi"}],
+    )
+    mock_autostart.return_value = True
+
+    resp = client.get("/api/settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["terminal_command"] == "wt.exe"
+    assert body["peek_hotkey"] == "ctrl+shift+z"
+    assert body["port"] == 8080
+    assert body["provider_settings"]["kiro-cli"]["default_args"] == "-a"
+    assert body["provider_settings"]["kiro-cli"]["color"] == "#ff0000"
+    assert body["custom_launchers"] == [{"name": "my-launcher", "command": "echo hi"}]
+    assert body["autostart"] is True
+
+
+@patch("power_atlas.web.autostart.is_enabled")
+@patch("power_atlas.web.load_config")
+def test_api_settings_autostart_exception_returns_false(mock_load, mock_autostart, client):
+    """GET /api/settings returns autostart=False when is_enabled() raises."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    mock_autostart.side_effect = RuntimeError("registry unavailable")
+
+    resp = client.get("/api/settings")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["autostart"] is False
