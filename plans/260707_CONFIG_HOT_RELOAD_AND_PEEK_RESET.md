@@ -155,6 +155,10 @@ Note: `refreshExpandedSessions()` is removed from this handler because `refreshC
 
 Also call `refreshSettings()` inside `doRefresh()` (the peek window's on-show entry point) so the peek window picks up config changes on every invocation. Since `doRefresh()` already calls `refreshCards(true)`, the launcher tiles will refresh via that path — `refreshSettings()` skips the redundant `/partials/launchers` fetch when called from `doRefresh()` by design (the fetch inside `refreshSettings` serves the visibilitychange path where `refreshCards` handles workspace panels but not the launcher grid).
 
+#### Implementation (2026-07-07, code: 47f458f)
+
+Added `refreshSettings()` function to `index.html` that fetches `/api/settings` and patches DOM inputs (terminal select with custom fallback, peek hotkey input) and JS state vars (`_providerSettings`, `_launchers`). Guards against open modal to avoid overwriting in-flight edits. Refreshes launcher tiles with `htmx.process()`. Wired into `visibilitychange` (replacing `refreshExpandedSessions()`) and into `doRefresh()`. Includes `.catch(function(){})` for silent failure handling.
+
 ### 3. Add `resetOverlays()` and wire to peek hide [QA]
 
 **Covers**: SC-3
@@ -300,3 +304,14 @@ Implementation health: Green.
 QA verification: PASS (1 API surface verified, 3 probes executed via pytest).
 
 No findings — implementation matches plan specification exactly. Endpoint returns all 6 keys, autostart exception is handled, tests cover all specified scenarios.
+
+### 2026-07-07 — Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+QA verification: PASS (1 GUI/JS surface verified via code wiring check + test regression suite).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Double `refreshSettings()` on peek show (doRefresh + visibilitychange both fire). | User: accepted — plan review finding #5 acknowledged this; extra GET is idempotent. |
+| 2 | Low | Autostart toggle class not refreshed by `refreshSettings()`. | User: accepted — autostart is rare, not in plan scope; backend state is correct, next load syncs UI. |
