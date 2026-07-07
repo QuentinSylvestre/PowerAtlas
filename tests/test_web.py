@@ -1194,6 +1194,8 @@ class TestSameOriginGuard:
             "/api/launch",
             "/api/provider/save",
             "/api/launch-profile/activate",
+            "/api/launch-profile/save",
+            "/api/launch-profile/delete",
         ]
         for endpoint in endpoints:
             resp = raw_client.post(endpoint, json={},
@@ -1462,3 +1464,30 @@ def test_single_launch_warning_persistent(mock_load, mock_launch, client, tmp_pa
     assert "MCP-safe failed" in resp.text
     assert "toast-persistent" in resp.text
     assert "toast-warning" in resp.text
+
+
+# --- Phase 3 (Launch Profiles): Metacharacter profile name round-trip ---
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_profile_metacharacter_name_roundtrip(mock_load, mock_save, client):
+    """Profile with HTML metacharacters in name survives save round-trip."""
+    from power_atlas.config import Config, LaunchProfile
+    mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
+    xss_name = '<script>alert(1)</script>'
+    resp = client.post("/api/launch-profile/save", json={
+        "id": "__new__",
+        "name": xss_name,
+        "terminal_command": "",
+        "wt_profile": "PowerShell",
+        "shell_process_name": "pwsh.exe",
+        "helper_runner": "pwsh",
+        "attach_timeout_ms": 4500,
+        "helper_timeout_ms": 8000,
+        "mcp_safe_enabled": True,
+    })
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert len(saved.launch_profiles) == 2
+    assert saved.launch_profiles[1].name == xss_name

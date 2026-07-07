@@ -930,9 +930,11 @@ async def api_launch_batch(request: Request):
     failed = len(results) - ok
     warnings = [r.warning for r in results if r.success and r.warning]
     msg = f"Launched {ok} session{'s' if ok != 1 else ''}"
-    if failed:
+    if failed and warnings:
+        msg = f"Launched {ok} ({len(warnings)} via fallback), {failed} failed"
+    elif failed:
         msg += f", {failed} failed"
-    if warnings and not failed:
+    elif warnings:
         msg = f"{len(warnings)} launch{'es' if len(warnings) != 1 else ''} used fallback: {warnings[0]}"
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": msg, "level": "warning", "persistent": True,
@@ -1218,9 +1220,11 @@ async def launcher_run_batch(request: Request):
     failed = len(results) - ok
     warnings = [r.warning for r in results if r.success and r.warning]
     msg = f"Launched {ok} instance{'s' if ok != 1 else ''}"
-    if failed:
+    if failed and warnings:
+        msg = f"Launched {ok} ({len(warnings)} via fallback), {failed} failed"
+    elif failed:
         msg += f", {failed} failed"
-    if warnings and not failed:
+    elif warnings:
         msg = f"{len(warnings)} launch{'es' if len(warnings) != 1 else ''} used fallback: {warnings[0]}"
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": msg, "level": "warning", "persistent": True,

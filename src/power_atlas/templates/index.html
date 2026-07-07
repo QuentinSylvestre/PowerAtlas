@@ -178,7 +178,7 @@ document.getElementById('launcherColorPicker').addEventListener('click',function
 {% include "partials/launch_profile_modal.html" %}
 <script>
 var _launchProfiles={{launch_profiles|tojson}};
-var _activeLaunchProfile='{{active_launch_profile.id}}';
+var _activeLaunchProfile={{active_launch_profile.id|tojson}};
 function openProfileModal(){var m=document.getElementById('profileModal');renderProfileList();document.getElementById('profileForm').style.display='none';m.showModal()}
 function renderProfileList(){var list=document.getElementById('profileList');var html='';_launchProfiles.forEach(function(p){var isActive=p.id===_activeLaunchProfile;var cls='profile-item'+(isActive?' active':'');html+='<div class="'+cls+'" data-id="'+p.id+'">';html+='<span class="profile-item-name"></span>';html+='<span class="profile-item-actions">';if(!isActive)html+='<button type="button" class="btn-sm" onclick="activateProfile(\''+p.id+'\')">Activate</button>';html+=' <button type="button" class="btn-sm" onclick="editProfile(\''+p.id+'\')">Edit</button>';html+='</span></div>'});list.innerHTML=html;list.querySelectorAll('.profile-item-name').forEach(function(el,i){el.textContent=_launchProfiles[i].name})}
 function activateProfile(id){fetch('/api/launch-profile/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){_activeLaunchProfile=id;renderProfileList();var btn=document.querySelector('.topbar-profile-btn');var p=_launchProfiles.find(function(x){return x.id===id});if(btn&&p)btn.textContent='\u2699\ufe0f '+p.name}}).catch(function(){})}
