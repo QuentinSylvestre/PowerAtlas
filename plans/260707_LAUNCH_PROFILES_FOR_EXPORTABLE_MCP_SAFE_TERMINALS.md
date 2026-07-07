@@ -332,12 +332,19 @@ if ($bak) {
 - Keep historical `plans/tests` artifacts unchanged unless implementation turns them into active test contracts.
 
 **Exit criteria**:
-- [ ] README feature list describes launch profiles instead of a settings page terminal preference.
-- [ ] README config sample shows `active_launch_profile` and `[[launch_profiles]]` with Windows MCP-safe fields.
-- [ ] README states MCP-safe helper is for PowerShell-compatible Windows Terminal profiles and falls back to direct WT launch on helper failure.
-- [ ] Rollback criteria and restore commands are recorded in the plan implementation notes or README if user-facing.
-- [ ] The local backup is kept until verification passes, or deletion is explicitly approved and recorded.
-- [ ] No new documentation file is created.
+- [x] README feature list describes launch profiles instead of a settings page terminal preference.
+- [x] README config sample shows `active_launch_profile` and `[[launch_profiles]]` with Windows MCP-safe fields.
+- [x] README states MCP-safe helper is for PowerShell-compatible Windows Terminal profiles and falls back to direct WT launch on helper failure.
+- [x] Rollback criteria and restore commands are recorded in the plan implementation notes or README if user-facing.
+- [x] The local backup is kept until verification passes, or deletion is explicitly approved and recorded.
+- [x] No new documentation file is created.
+
+Implementation (2026-07-07, code: 32e150e)
+Updated README.md: features section now describes global launch profiles with MCP-safe configuration and launch-profile management (gear icon in topbar). Configuration sample shows full `[[launch_profiles]]` TOML table with all MCP-safe fields. MCP-safe explanation clarifies PowerShell tab-typing mechanism, helper fallback behavior, and per-profile configurability. No new documentation files created.
+
+Per-phase review deferred to Step 9: docs-only phase with no executable code; meets skip rule criteria (single-file prose edit ≤30 LOC of rendered content).
+
+Rollback criteria (recorded here, not user-facing): restore pre-migration backup if PowerAtlas fails to start, profile UI cannot save, or normal launches fail. Restore command: `Copy-Item (Get-ChildItem "$env:LOCALAPPDATA\power-atlas" -Filter 'config.toml.pre-launch-profiles.*.bak' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName "$env:LOCALAPPDATA\power-atlas\config.toml" -Force`. Backup kept until Phase 5 manual verification passes.
 
 ### Phase 5: Final Integration Verification and Cleanup
 **Goal**: Run focused and runtime verification, remove stale active references, and record implementation divergences.
@@ -428,7 +435,7 @@ rg -n "terminal_command|terminal_override|PowerShell|MCP-safe|launch_profiles|ac
 | 1 | Pre-migrate local config and add launch-profile schema | Complete | Foundation and backup guard for all later phases. |
 | 2 | Make launcher runtime profile-driven | Complete | Depends on Phase 1 active-profile contract. |
 | 3 | Wire profiles through Web API and settings UI | Complete | Depends on Phases 1-2. |
-| 4 | README and migration rollback/cleanup | Pending | Documents user-visible behavior and backup restore path. |
+| 4 | README and migration rollback/cleanup | Complete | Documents user-visible behavior and backup restore path. |
 | 5 | Final integration verification and cleanup | Pending | Runs after all code/docs/migration work. |
 
 ## Dependency Graph
