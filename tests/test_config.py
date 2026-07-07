@@ -604,8 +604,26 @@ def test_profile_id_too_long_regenerated(tmp_path):
     assert cfg.launch_profiles[0].id == "imported-1"
 
 
-def test_non_dict_profiles_skipped(tmp_path):
-    """Non-dict entries in launch_profiles are skipped."""
+def test_name_whitespace_only_defaults(tmp_path):
+    """Profile name of all whitespace normalizes to 'Default'."""
+    _write_toml(tmp_path, {
+        "launch_profiles": [{"id": "t1", "name": "   "}],
+    })
+    cfg = load_config()
+    assert cfg.launch_profiles[0].name == "Default"
+
+
+def test_name_control_chars_stripped(tmp_path):
+    """Control characters in profile name are stripped before further processing."""
+    _write_toml(tmp_path, {
+        "launch_profiles": [{"id": "t1", "name": "\x01Evil"}],
+    })
+    cfg = load_config()
+    assert cfg.launch_profiles[0].name == "Evil"
+
+
+def test_non_dict_profile_entries_guarded(tmp_path):
+    """Non-dict entries in launch_profiles are guarded (fires for programmatically constructed data; TOML cannot produce mixed-type arrays)."""
     # TOML arrays of mixed types aren't valid, but raw strings/ints could sneak through
     # Write a valid TOML with profiles being dicts, plus test empty dict
     _write_toml(tmp_path, {

@@ -90,7 +90,7 @@ def _normalize_launch_profile(raw: dict, index: int, seen_ids: dict[str, str], i
 
     # --- name ---
     name = str(raw.get("name", "Default")) if raw.get("name") is not None else "Default"
-    name = name.strip()[:128] or "Default"
+    name = _strip_control_chars(name).strip()[:80] or "Default"
 
     # --- terminal_command ---
     tc = str(raw.get("terminal_command", "")) if raw.get("terminal_command") is not None else ""
@@ -227,7 +227,7 @@ def save_config(config: Config) -> None:
         try:
             data = asdict(config)
             data.pop("trust_all_tools", None)  # never write legacy key
-            data.pop("terminal_command", None)  # never write legacy key
+            data.pop("terminal_command", None)  # defensive: field removed from Config but guard legacy
             with open(tmp, "wb") as f:
                 tomli_w.dump(data, f)
                 f.flush()
