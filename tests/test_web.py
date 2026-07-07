@@ -1055,9 +1055,9 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
 @patch("power_atlas.web.load_config")
 def test_api_settings_reflects_config_values(mock_load, mock_autostart, client):
     """GET /api/settings reflects pre-populated config values."""
-    from power_atlas.config import Config
+    from power_atlas.config import Config, LaunchProfile
     mock_load.return_value = Config(
-        terminal_command="wt.exe",
+        launch_profiles=[LaunchProfile(terminal_command="wt.exe")],
         peek_hotkey="ctrl+shift+z",
         port=8080,
         provider_settings={

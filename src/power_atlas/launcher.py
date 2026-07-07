@@ -10,6 +10,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from power_atlas.config import LaunchProfile
+
 
 @dataclass
 class LaunchResult:
@@ -17,6 +19,8 @@ class LaunchResult:
     session_id: str | None
     workspace: str
     error: str = ""
+    warning: str = ""
+    used_fallback: bool = False
 
 
 _SESSION_ID_RE = re.compile(r"^[\w\-]+$")
@@ -33,10 +37,10 @@ _LINUX_TERMINALS: dict[str, tuple[str | None, str | None, str | None]] = {
 _LINUX_PROBE_ORDER = ("kitty", "alacritty", "gnome-terminal", "konsole", "xterm")
 
 
-def detect_terminal(config_override: str = "") -> str | None:
+def detect_terminal(terminal_command: str = "") -> str | None:
     """Detect terminal. Priority: config > platform-specific probe order."""
-    if config_override:
-        return config_override
+    if terminal_command:
+        return terminal_command
     if sys.platform == "win32":
         candidates = ("wt", "pwsh", "cmd")
     else:
@@ -48,19 +52,12 @@ def detect_terminal(config_override: str = "") -> str | None:
     return None
 
 
-_terminal_cache: list[tuple[str, str]] | None = None
-
-
 def available_terminals() -> list[tuple[str, str]]:
     """Return (value, label) pairs of detected terminals for the current platform.
 
-    Cached for process lifetime (terminals don't change at runtime).
+    Recomputes each call — safe when profile changes occur.
     Always includes ("" , "Auto-detect (...)") first and ("custom", "Custom") last.
     """
-    global _terminal_cache
-    if _terminal_cache is not None:
-        return list(_terminal_cache)
-
     if sys.platform == "win32":
         candidates = [("wt", "Windows Terminal"), ("pwsh", "PowerShell"), ("cmd", "Command Prompt")]
     else:
@@ -83,8 +80,7 @@ def available_terminals() -> list[tuple[str, str]]:
     result = [("", auto_label)]
     result.extend(found)
     result.append(("custom", "Custom"))
-    _terminal_cache = result
-    return list(result)
+    return result
 
 
 _PROVIDER_DISPLAY = {
@@ -106,14 +102,16 @@ _PROVIDER_TERMINAL = {
 }
 
 _MCP_SAFE_WT_PROVIDERS = {"kiro-cli", "claude-code"}
-_MCP_SAFE_WT_TIMEOUT_SECONDS = 8
 
 _MCP_SAFE_WT_HELPER = r"""
 param(
     [Parameter(Mandatory=$true)][string]$Wt,
     [Parameter(Mandatory=$true)][string]$Title,
     [Parameter(Mandatory=$true)][string]$Cwd,
-    [Parameter(Mandatory=$true)][string]$Command
+    [Parameter(Mandatory=$true)][string]$Command,
+    [Parameter(Mandatory=$true)][string]$WtProfile,
+    [Parameter(Mandatory=$true)][string]$ShellProcessName,
+    [Parameter(Mandatory=$true)][int]$AttachTimeoutMs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -191,7 +189,7 @@ function New-KeyRecord {
 }
 
 $beforePwsh = @{}
-Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'" | ForEach-Object {
+Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $ShellProcessName } | ForEach-Object {
     $beforePwsh[[int]$_.ProcessId] = $true
 }
 
@@ -199,18 +197,18 @@ $wtArgs = @('new-tab')
 if ($Title) {
     $wtArgs += @('--title', $Title)
 }
-$wtArgs += @('-p', 'PowerShell', '-d', $Cwd)
+$wtArgs += @('-p', $WtProfile, '-d', $Cwd)
 & $Wt @wtArgs | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw "Windows Terminal exited with code $LASTEXITCODE."
 }
 
 $target = $null
-$deadline = (Get-Date).AddMilliseconds(4500)
+$deadline = (Get-Date).AddMilliseconds($AttachTimeoutMs)
 do {
     Start-Sleep -Milliseconds 100
     $candidates = @()
-    $pwshProcesses = Get-CimInstance Win32_Process -Filter "Name = 'pwsh.exe'"
+    $pwshProcesses = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $ShellProcessName }
     foreach ($process in $pwshProcesses) {
         $processId = [int]$process.ProcessId
         if ($beforePwsh.ContainsKey($processId)) {
@@ -231,7 +229,7 @@ do {
 } while ((Get-Date) -lt $deadline)
 
 if (-not $target) {
-    throw "Could not find a new Windows Terminal pwsh.exe process."
+    throw "Could not find a new Windows Terminal $ShellProcessName process."
 }
 
 $attached = $false
@@ -312,16 +310,20 @@ def _write_mcp_safe_wt_helper() -> Path:
         return Path(handle.name)
 
 
-def _launch_mcp_safe_wt(terminal: str, cwd: str, typed_command: str, title: str) -> bool:
-    """Launch a WT PowerShell profile tab, attach to its console, and type the command."""
-    pwsh = shutil.which("pwsh")
-    if not pwsh:
+def _launch_mcp_safe_wt(
+    terminal: str, cwd: str, typed_command: str, title: str,
+    wt_profile: str, shell_process_name: str, helper_runner: str,
+    attach_timeout_ms: int, helper_timeout_ms: int,
+) -> bool:
+    """Launch a WT profile tab, attach to its console, and type the command."""
+    runner = shutil.which(helper_runner)
+    if not runner:
         return False
 
     script_path = _write_mcp_safe_wt_helper()
     try:
         cmd = [
-            pwsh,
+            runner,
             "-NoLogo",
             "-NoProfile",
             "-ExecutionPolicy",
@@ -336,6 +338,12 @@ def _launch_mcp_safe_wt(terminal: str, cwd: str, typed_command: str, title: str)
             cwd,
             "-Command",
             typed_command,
+            "-WtProfile",
+            wt_profile,
+            "-ShellProcessName",
+            shell_process_name,
+            "-AttachTimeoutMs",
+            str(attach_timeout_ms),
         ]
         kwargs: dict = {}
         if sys.platform == "win32":
@@ -345,7 +353,7 @@ def _launch_mcp_safe_wt(terminal: str, cwd: str, typed_command: str, title: str)
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=_MCP_SAFE_WT_TIMEOUT_SECONDS,
+            timeout=helper_timeout_ms / 1000,
             **kwargs,
         )
         return completed.returncode == 0
@@ -358,10 +366,11 @@ def _launch_mcp_safe_wt(terminal: str, cwd: str, typed_command: str, title: str)
             pass
 
 
-def _should_use_mcp_safe_wt(provider: str, terminal: str) -> bool:
+def _should_use_mcp_safe_wt(provider: str, terminal: str, mcp_safe_enabled: bool) -> bool:
     """Use the MCP-safe path only for supported Windows CLI providers in WT."""
     return (
         sys.platform == "win32"
+        and mcp_safe_enabled
         and provider in _MCP_SAFE_WT_PROVIDERS
         and _is_windows_terminal(terminal)
     )
@@ -372,9 +381,10 @@ def launch_session(
     session_id: str | None = None,
     provider: str = "kiro-cli",
     default_args: str = "",
-    terminal_override: str = "",
+    launch_profile: LaunchProfile | None = None,
 ) -> LaunchResult:
     """Launch a provider session in a terminal (or directly for non-terminal providers). Returns result, never raises."""
+    profile = launch_profile or LaunchProfile()
     binary = _PROVIDER_BINARY.get(provider, provider)
     display = _PROVIDER_DISPLAY.get(provider, provider)
 
@@ -414,7 +424,7 @@ def launch_session(
             return LaunchResult(False, session_id, cwd, error=str(e))
 
     # Terminal-based providers
-    terminal = detect_terminal(terminal_override)
+    terminal = detect_terminal(profile.terminal_command)
     if not terminal:
         if sys.platform == "win32":
             msg = "No terminal found. Configure one in Settings."
@@ -427,12 +437,39 @@ def launch_session(
         cli_args += shlex.split(default_args)
 
     title = f"{display} - {Path(cwd).name}"
-    if _should_use_mcp_safe_wt(provider, terminal):
+    if _should_use_mcp_safe_wt(provider, terminal, profile.mcp_safe_enabled):
         typed_command = _build_powershell_invocation(cli_args)
-        if _launch_mcp_safe_wt(terminal, cwd, typed_command, title):
+        if _launch_mcp_safe_wt(
+            terminal, cwd, typed_command, title,
+            wt_profile=profile.wt_profile,
+            shell_process_name=profile.shell_process_name,
+            helper_runner=profile.helper_runner,
+            attach_timeout_ms=profile.attach_timeout_ms,
+            helper_timeout_ms=profile.helper_timeout_ms,
+        ):
             return LaunchResult(True, session_id, cwd)
+        # Helper failed — try direct fallback
+        cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
+        if cmd is None:
+            return LaunchResult(
+                False, session_id, cwd,
+                error="MCP-safe helper failed. Direct fallback also failed: path contains shell metacharacters unsafe for cmd.exe",
+            )
+        try:
+            fb_kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
+            subprocess.Popen(cmd, **fb_kwargs)
+            return LaunchResult(
+                True, session_id, cwd,
+                warning="MCP-safe helper failed; launched via direct Windows Terminal tab.",
+                used_fallback=True,
+            )
+        except OSError as e:
+            return LaunchResult(
+                False, session_id, cwd,
+                error=f"MCP-safe helper failed. Direct fallback also failed: {e}",
+            )
 
-    cmd = _build_command(terminal, cwd, cli_args, title=title)
+    cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
     if cmd is None:
         return LaunchResult(False, session_id, cwd, error="Path contains shell metacharacters unsafe for cmd.exe")
 
@@ -447,7 +484,7 @@ def launch_session(
 def launch_batch(
     sessions: list[dict],
     default_args: str = "",
-    terminal_override: str = "",
+    launch_profile: LaunchProfile | None = None,
     provider_settings: dict[str, dict] | None = None,
 ) -> list[LaunchResult]:
     """Launch multiple sessions. Never aborts on single failure.
@@ -471,7 +508,7 @@ def launch_batch(
             session_id=s.get("session_id"),
             provider=provider,
             default_args=args,
-            terminal_override=terminal_override,
+            launch_profile=launch_profile,
         ))
     return results
 
@@ -544,7 +581,7 @@ def _build_linux_command(terminal: str, cwd: str, kiro_args: list[str], title: s
     return cmd
 
 
-def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "") -> list[str] | None:
+def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "", wt_profile: str = "PowerShell") -> list[str] | None:
     """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
@@ -555,7 +592,7 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
         cmd = [terminal]
         if title:
             cmd += ["--title", _sanitize_title(title)]
-        cmd += ["-p", "PowerShell", "-d", cwd, "--", *kiro_args]
+        cmd += ["-p", wt_profile, "-d", cwd, "--", *kiro_args]
         return cmd
     if t == "pwsh":
         escaped_cwd = cwd.replace("'", "''")
@@ -587,7 +624,7 @@ def launch_custom_batch(
     custom_args: str = "",
     workspaces: list[str] | None = None,
     env: dict[str, str] | None = None,
-    terminal_override: str = "",
+    launch_profile: LaunchProfile | None = None,
     use_terminal: bool = True,
     pass_workspace_arg: bool = False,
 ) -> list[LaunchResult]:
@@ -597,14 +634,15 @@ def launch_custom_batch(
         cwd = ws or str(Path.home())
         results.append(launch_custom(
             name=name, command=command, custom_args=custom_args,
-            cwd=cwd, env=env, terminal_override=terminal_override,
+            cwd=cwd, env=env, launch_profile=launch_profile,
             use_terminal=use_terminal, pass_workspace_arg=pass_workspace_arg,
         ))
     return results
 
 
-def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, terminal_override: str = "", use_terminal: bool = True, pass_workspace_arg: bool = False) -> LaunchResult:
-    """Launch a custom command, optionally in a terminal."""
+def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "", env: dict[str, str] | None = None, launch_profile: LaunchProfile | None = None, use_terminal: bool = True, pass_workspace_arg: bool = False) -> LaunchResult:
+    """Launch a custom command, optionally in a terminal. Never uses MCP-safe helper."""
+    profile = launch_profile or LaunchProfile()
     work_dir = cwd or "."
     if not Path(work_dir).exists():
         return LaunchResult(False, None, work_dir, error=f"Folder not found: {work_dir}")
@@ -635,15 +673,15 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
         except OSError as e:
             return LaunchResult(False, None, work_dir, error=str(e))
 
-    terminal = detect_terminal(terminal_override)
+    terminal = detect_terminal(profile.terminal_command)
     if not terminal:
         if sys.platform == "win32":
             msg = "No terminal found. Configure one in Settings."
         else:
-            msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm — or configure a custom terminal in Settings."
+            msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm \u2014 or configure a custom terminal in Settings."
         return LaunchResult(False, None, work_dir, error=msg)
     title = _sanitize_title(f"{Path(command).stem} - {Path(work_dir).name}")
-    cmd = _build_custom_command(terminal, work_dir, full_cmd_str, title)
+    cmd = _build_custom_command(terminal, work_dir, full_cmd_str, title, wt_profile=profile.wt_profile)
     if cmd is None:
         return LaunchResult(False, None, work_dir, error="Path contains unsafe characters for this terminal")
     try:
@@ -653,11 +691,11 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
         return LaunchResult(False, None, work_dir, error=str(e))
 
 
-def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str) -> list[str] | None:
+def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str, wt_profile: str = "PowerShell") -> list[str] | None:
     """Build terminal-specific command for custom launcher. Returns None if unsafe."""
     t = Path(terminal).stem.lower()
     if t == "wt":
-        return [terminal, "--title", title, "-p", "PowerShell", "-d", cwd, "--", "cmd", "/c", cmd_str]
+        return [terminal, "--title", title, "-p", wt_profile, "-d", cwd, "--", "cmd", "/c", cmd_str]
     if t == "pwsh":
         escaped_cwd = cwd.replace("'", "''")
         escaped_title = title.replace("'", "''")

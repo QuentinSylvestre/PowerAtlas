@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import load_config, save_config
+from .config import load_config, save_config, get_active_launch_profile
 from . import autostart, data, icons, launcher
 from .launcher import available_terminals
 
@@ -159,9 +159,10 @@ def _terminal_context() -> dict:
 async def index(request: Request):
     config = load_config()
     ctx = _terminal_context()
+    profile = get_active_launch_profile(config)
     return templates.TemplateResponse(request, "index.html", {
         "port": config.port,
-        "terminal_command": config.terminal_command,
+        "terminal_command": profile.terminal_command,
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
         "peek_hotkey": config.peek_hotkey,
@@ -525,8 +526,9 @@ async def api_settings():
         autostart_enabled = autostart.is_enabled()
     except Exception:
         autostart_enabled = False
+    profile = get_active_launch_profile(config)
     return {
-        "terminal_command": config.terminal_command,
+        "terminal_command": profile.terminal_command,
         "peek_hotkey": config.peek_hotkey,
         "port": config.port,
         "provider_settings": config.provider_settings,
@@ -602,7 +604,17 @@ async def save_setting(request: Request):
         if value != 0 and not (1024 <= value <= 65535):
             return {"ok": False, "error": "Port must be 0 (random) or 1024\u201365535"}
     config = load_config()
-    setattr(config, key, value)
+    if key == "terminal_command":
+        # terminal_command lives in the active launch profile, not on Config directly
+        for profile in config.launch_profiles:
+            if profile.id == config.active_launch_profile:
+                profile.terminal_command = value
+                break
+        else:
+            if config.launch_profiles:
+                config.launch_profiles[0].terminal_command = value
+    else:
+        setattr(config, key, value)
     save_config(config)
     return {"ok": True}
 
@@ -703,7 +715,7 @@ async def api_launch(request: Request):
         session_id=body.get("session_id"),
         provider=provider,
         default_args=default_args,
-        terminal_override=config.terminal_command,
+        launch_profile=get_active_launch_profile(config),
     )
     level = "success" if result.success else "error"
     msg = "Session launched" if result.success else result.error
@@ -716,7 +728,7 @@ async def api_launch_batch(request: Request):
     config = load_config()
     results = launcher.launch_batch(
         sessions=body["sessions"],
-        terminal_override=config.terminal_command,
+        launch_profile=get_active_launch_profile(config),
         provider_settings=config.provider_settings,
     )
     ok = sum(1 for r in results if r.success)
@@ -739,7 +751,7 @@ async def api_new_session(request: Request):
         session_id=None,
         provider=provider,
         default_args=default_args,
-        terminal_override=config.terminal_command,
+        launch_profile=get_active_launch_profile(config),
     )
     level = "success" if result.success else "error"
     msg = "New session launched" if result.success else result.error
@@ -958,7 +970,7 @@ async def launcher_run(request: Request):
         custom_args=body.get("custom_args", ""),
         cwd=body.get("cwd", ""),
         env=body.get("env"),
-        terminal_override=config.terminal_command,
+        launch_profile=get_active_launch_profile(config),
         use_terminal=use_terminal,
     )
     level = "success" if result.success else "error"
@@ -981,7 +993,7 @@ async def launcher_run_batch(request: Request):
         custom_args=entry.get("custom_args", ""),
         workspaces=workspaces,
         env=entry.get("env"),
-        terminal_override=config.terminal_command,
+        launch_profile=get_active_launch_profile(config),
         use_terminal=entry.get("terminal", True),
         pass_workspace_arg=not entry.get("terminal", True) and entry.get("use_selected_workspaces", False),
     )
