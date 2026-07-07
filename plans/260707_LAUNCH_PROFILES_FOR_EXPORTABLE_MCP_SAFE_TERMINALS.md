@@ -1,7 +1,7 @@
 # Launch Profiles for Exportable MCP-Safe Terminals
 
 > **Date**: 2026-07-07
-> **Status**: Draft  <!-- Exploring -> Draft -> In Progress -> Complete -->
+> **Status**: In Progress  <!-- Exploring -> Draft -> In Progress -> Complete -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Redesign PowerAtlas terminal-launch configuration around global launch profiles so MCP-safe Windows Terminal launches can work across machines with different profiles, shells, and process names.
 > **Estimated effort**: ~2-4 days (5 phases; persisted config shape + launcher and Web UI integration)
@@ -169,15 +169,20 @@ def get_active_launch_profile(config: Config) -> LaunchProfile:
 - Update `tests/test_config.py` in place: old `terminal_command` round-trip assertions become launch-profile assertions; add malformed profile, duplicate ID, empty list, missing active ID, one-shot legacy read, timeout bounds, process-name grammar, helper-runner allowlist, and save round-trip coverage.
 
 **Exit criteria**:
-- [ ] Local `%LOCALAPPDATA%\power-atlas\config.toml` is backed up to a timestamped file before any implementation step can run PowerAtlas with the new schema, or explicitly recorded as absent/default.
-- [ ] `Config()` has `active_launch_profile == "default"` and one default launch profile matching current Windows behavior defaults.
-- [ ] Old top-level `terminal_command` is preserved into the default profile only when no valid `launch_profiles` exist, and `save_config()` never re-emits it.
-- [ ] Invalid nested launch-profile values are sanitized/rejected with field-specific rules and do not corrupt unrelated config fields.
-- [ ] Duplicate profile IDs keep the first profile, regenerate later duplicates on load, remap duplicate-active references to the first profile, and are rejected on API save.
-- [ ] Tests cover persisted-load normalization and API-save rejection for zero, booleans, strings, huge values, and `helper_timeout_ms < attach_timeout_ms + 1000`.
-- [ ] `get_active_launch_profile()` returns a copy and falls back deterministically when the configured active ID is missing.
-- [ ] `tests/test_config.py` covers default, round-trip, malformed profile, duplicate IDs, legacy read, timeout bounds, process-name validation, helper-runner validation, empty profile list, and active-profile fallback.
-- [ ] `python -m pytest tests/test_config.py` passes.
+- [x] Local `%LOCALAPPDATA%\power-atlas\config.toml` is backed up to a timestamped file before any implementation step can run PowerAtlas with the new schema, or explicitly recorded as absent/default.
+- [x] `Config()` has `active_launch_profile == "default"` and one default launch profile matching current Windows behavior defaults.
+- [x] Old top-level `terminal_command` is preserved into the default profile only when no valid `launch_profiles` exist, and `save_config()` never re-emits it.
+- [x] Invalid nested launch-profile values are sanitized/rejected with field-specific rules and do not corrupt unrelated config fields.
+- [x] Duplicate profile IDs keep the first profile, regenerate later duplicates on load, remap duplicate-active references to the first profile, and are rejected on API save.
+- [x] Tests cover persisted-load normalization and API-save rejection for zero, booleans, strings, huge values, and `helper_timeout_ms < attach_timeout_ms + 1000`.
+- [x] `get_active_launch_profile()` returns a copy and falls back deterministically when the configured active ID is missing.
+- [x] `tests/test_config.py` covers default, round-trip, malformed profile, duplicate IDs, legacy read, timeout bounds, process-name validation, helper-runner validation, empty profile list, and active-profile fallback.
+- [x] `python -m pytest tests/test_config.py` passes.
+
+Implementation (2026-07-07, code: 2aa7d5c, fix: bbf3746)
+Added a `LaunchProfile` dataclass with fields for terminal command, Windows Terminal profile name, shell process name, helper runner, attach/helper timeouts, and MCP-safe enable flag — all defaulting to current Windows behavior. Replaced the top-level `terminal_command` field in `Config` with `active_launch_profile: str` and `launch_profiles: list[LaunchProfile]`. Implemented `get_active_launch_profile()` returning a defensive copy with deterministic fallback. Updated `load_config()` with field-specific validation (regex-based ID/process-name grammar, deny-lists, timeout clamping, helper-timeout-relationship enforcement, control-char stripping), duplicate-ID deduplication with `imported-<n>` regeneration, active-ID remapping, empty-list normalization, and a one-shot legacy migration that preserves non-empty `terminal_command` into the default profile. Updated `save_config()` to never emit the legacy `terminal_command` key. Rewrote `tests/test_config.py` with 54 tests covering defaults, round-trips, legacy migration, malformed fields, duplicate IDs, timeout bounds/relationships, deny-lists, allowlists, copy semantics, and all existing functionality preservation.
+
+QA verification: PASS — library exports verified by 54 unit tests; no HTTP/CLI/UI surface in this phase.
 
 ### Phase 2: Make Launcher Runtime Profile-Driven [QA]
 **Goal**: Route provider and custom terminal launches through a `LaunchProfile`, parameterize WT/MCP-safe behavior, and preserve fallback diagnostics.
@@ -410,7 +415,7 @@ rg -n "terminal_command|terminal_override|PowerShell|MCP-safe|launch_profiles|ac
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 1 | Pre-migrate local config and add launch-profile schema | Pending | Foundation and backup guard for all later phases. |
+| 1 | Pre-migrate local config and add launch-profile schema | Complete | Foundation and backup guard for all later phases. |
 | 2 | Make launcher runtime profile-driven | Pending | Depends on Phase 1 active-profile contract. |
 | 3 | Wire profiles through Web API and settings UI | Pending | Depends on Phases 1-2. |
 | 4 | README and migration rollback/cleanup | Pending | Documents user-visible behavior and backup restore path. |
@@ -530,7 +535,24 @@ Phase 1 (immutable backup + config schema)
 | 26 | Low | No keyboard shortcut to reach profile modal; relies on single button. | Noted -- tooltip/aria-label added to topbar profile display for discoverability. |
 | 27 | Low | Custom-launcher command validation (`/api/launcher/create`) is out of scope but pre-exists. | Noted -- documented as deferred; TODO comment suggested for source. |
 | 28 | Low | API breaking change (`terminal_command` removed from `/api/settings`) not documented as breaking. | Noted -- README update in Phase 4 covers the change; no external consumers beyond the self-contained UI. |
+
+### 2026-07-07 -- Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+6 findings (0 High, 3 Medium, 3 Low).
+Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical (control-char stripping, truncation length per plan spec, comment addition, test rename).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `name` field missing `_strip_control_chars()` call. | Fixed — added control-char stripping and reduced to 80-char plan spec (bbf3746). |
+| 2 | Medium | Name truncation was 128 chars; plan specifies 80. | Fixed — combined with finding 1 (bbf3746). |
+| 3 | Medium | `default_args` validation listed in Phase 1 text but targets `web.py` (Phase 3 file scope). | Escalated — deferred to Phase 3 where `/api/provider/save` is reworked; recorded as divergence. |
+| 4 | Low | Dead `terminal_command` pop in `save_config` — defensive but no-op. | Fixed — added clarifying comment (bbf3746). |
+| 5 | Low | No test for whitespace-only or control-char profile names. | Fixed — added two tests (bbf3746). |
+| 6 | Low | Test `test_non_dict_profiles_skipped` has misleading name/docstring. | Fixed — renamed to `test_non_dict_profile_entries_guarded` with updated docstring (bbf3746). |
+
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation>
+
+- **`default_args` validation deferred to Phase 3**: The plan lists `default_args` validation (max 256 chars, no control/shell metacharacters) under Phase 1's detailed changes, but the `/api/provider/save` endpoint it targets is in `web.py` — explicitly Phase 3's file scope. Implementing it in Phase 1 would violate file-scope boundaries. Deferred to Phase 3 where the web endpoint is being reworked. The pre-existing gap remains until then.
 
 
