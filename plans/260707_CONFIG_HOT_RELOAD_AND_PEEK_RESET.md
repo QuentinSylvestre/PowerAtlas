@@ -249,6 +249,10 @@ document.querySelector('.panels-container').addEventListener('htmx:configRequest
 
 The `_activeProvider` tracking already works via `switchProvider()` setting it directly.
 
+#### Implementation (2026-07-07, code: 204bb25)
+
+Replaced `htmx.ajax('GET','/partials/launchers','#launcher-tiles')` calls in the custom-launcher branch of `saveLauncher()` and in `deleteLauncher()` with the proven `fetch('/partials/launchers').then(r=>r.text()).then(html=>{el.innerHTML=html;htmx.process(el)})` pattern. Removed the dead `htmx:configRequest` event listener from the `DOMContentLoaded` block. Provider-save branch left for Phase 5.
+
 ### 5. Same-view instant feedback for provider settings save [QA]
 
 **Covers**: SC-1, SC-4
@@ -329,3 +333,9 @@ QA verification: PASS (2 test probes: happy path + exception non-propagation).
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
 | 1 | Low | Test does not assert call ordering (evaluate_js before toggle_fullscreen). | User: accepted — code is simple, ordering documented in comment. |
+
+### 2026-07-07 — Implementation Review (after Phase 4, persona: Senior engineer)
+
+Implementation health: Green.
+0 findings.
+QA verification: PASS (launcher endpoint tests all pass, htmx.ajax calls confirmed replaced).
