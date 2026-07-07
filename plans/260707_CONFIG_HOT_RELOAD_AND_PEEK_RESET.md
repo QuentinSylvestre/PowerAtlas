@@ -205,6 +205,10 @@ def _hide(self) -> None:
 
 The `try/except` prevents unhandled exceptions on the pynput listener thread during rapid show/hide cycling. The `evaluate_js` call runs while the window is still visible (before `toggle_fullscreen`/`hide`), ensuring DOM manipulation executes on an active webview.
 
+#### Implementation (2026-07-07, code: 704942c)
+
+Added `resetOverlays()` JS function that closes open dialogs, hides emoji picker, hides tooltip slots, and removes toasts older than 1s. Added `dataset.ts` timestamp to `showToast()` for toast aging. In `peek.py`, `_hide()` now calls `evaluate_js("if(typeof resetOverlays==='function') resetOverlays()")` wrapped in try/except before `toggle_fullscreen()`/`hide()`. Two tests added verifying evaluate_js is called and exceptions don't propagate.
+
 ### 4. Fix htmx.ajax calls and remove dead listener [QA]
 
 **Covers**: SC-4, SC-5
@@ -315,3 +319,13 @@ QA verification: PASS (1 GUI/JS surface verified via code wiring check + test re
 |---|---|---|---|
 | 1 | Low | Double `refreshSettings()` on peek show (doRefresh + visibilitychange both fire). | User: accepted — plan review finding #5 acknowledged this; extra GET is idempotent. |
 | 2 | Low | Autostart toggle class not refreshed by `refreshSettings()`. | User: accepted — autostart is rare, not in plan scope; backend state is correct, next load syncs UI. |
+
+### 2026-07-07 — Implementation Review (after Phase 3, persona: Senior engineer)
+
+Implementation health: Green.
+1 finding (0 High, 0 Medium, 1 Low).
+QA verification: PASS (2 test probes: happy path + exception non-propagation).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Test does not assert call ordering (evaluate_js before toggle_fullscreen). | User: accepted — code is simple, ordering documented in comment. |
