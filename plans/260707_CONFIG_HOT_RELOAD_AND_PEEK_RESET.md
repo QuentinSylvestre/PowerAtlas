@@ -1,7 +1,7 @@
 # Config Hot-Reload Across Views and Peek Window State Reset
 
 > **Date**: 2026-07-07
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Done  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Same-view instant config feedback, cross-view on-visibility reload, peek window overlay reset on hide, htmx.ajax fix
 
 ---
@@ -353,3 +353,20 @@ QA verification: PASS (92/93 tests pass, 1 pre-existing failure; zero htmx.ajax 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
 | 1 | Low | `_providerSettings[key]=payload` stores extra `provider` key not in canonical shape. | User: accepted — self-healing on next refreshSettings(); no consumer reads `.provider` from this dict. |
+
+### 2026-07-07 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate.
+7 findings (0 High, 2 Medium, 5 Low).
+QA verification: PASS (271 tests pass, 3 surface types verified: API, GUI/JS, Peek window).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | [End-user] saveLauncher/deleteLauncher had no `.catch()` — network error leaves user stuck. | Fixed — added `.catch()` with error toast to all 3 fetch chains (commit 3e80fef). |
+| 2 | Medium | [End-user] Autostart toggle not synced by refreshSettings(). | User: accepted — intentional plan scope exclusion (per-phase review Phase 2 finding #2); backend state is always correct, cosmetic only. |
+| 3 | Low | [Senior] `refreshExpandedSessions()` definition remains but role narrowed (still called by timer). | No action — not dead code, still has a live consumer. |
+| 4 | Low | [Senior] `_providerSettings[key]=payload` stores extra `provider` key. | User: accepted — self-heals on next refreshSettings(). |
+| 5 | Low | [End-user] Port field sent from /api/settings but not used in refreshSettings(). | No action — port is explicitly non-hot-reloadable per plan non-goals. |
+| 6 | Low | [End-user] Toast aging threshold (>1s) could remove toasts mid-read on fast hide. | No action — acceptable UX trade-off; toasts auto-dismiss after 4s anyway. |
+| 7 | Low | [End-user] Double refreshSettings() on peek show (doRefresh + visibilitychange). | User: accepted — previously noted in Phase 2 review; idempotent, minimal cost. |
