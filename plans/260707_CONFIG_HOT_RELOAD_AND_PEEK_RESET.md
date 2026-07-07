@@ -1,7 +1,7 @@
 # Config Hot-Reload Across Views and Peek Window State Reset
 
 > **Date**: 2026-07-07
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Same-view instant config feedback, cross-view on-visibility reload, peek window overlay reset on hide, htmx.ajax fix
 
 ---
@@ -91,6 +91,10 @@ async def api_settings():
 ```
 
 Add a test in `test_web.py` verifying the endpoint returns expected keys and types, including a case with pre-populated config (custom launchers, provider settings).
+
+#### Implementation (2026-07-07, code: dca2e5a)
+
+Added a `GET /api/settings` endpoint to `web.py` that reads fresh config from disk via `load_config()`, wraps `autostart.is_enabled()` in a try/except defaulting to False, and returns a JSON dict with 6 keys: `terminal_command`, `peek_hotkey`, `port`, `provider_settings`, `custom_launchers`, and `autostart`. Added 3 tests in `test_web.py` verifying the endpoint returns correct keys, reflects pre-populated config values, and gracefully handles autostart exceptions. All new tests pass.
 
 ### 2. Add `refreshSettings()` JS function and wire to visibilitychange [QA]
 
@@ -288,3 +292,11 @@ This ensures the provider tile immediately reflects color/enabled changes withou
 | 9 | Medium | `autostart.is_enabled()` in `/api/settings` could throw and 500 the endpoint. | Resolved — wrapped in try/except, defaults to False. |
 | 10 | Low | `_activeProvider` not synced across views. | Noted — acceptable; provider filter is a transient UI preference, not a persisted config value. |
 | 11 | Low | No aria-live for launcher tile refresh after settings change. | Noted — can be added later; no existing ARIA patterns for dynamic content in this codebase. |
+
+### 2026-07-07 — Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+0 findings.
+QA verification: PASS (1 API surface verified, 3 probes executed via pytest).
+
+No findings — implementation matches plan specification exactly. Endpoint returns all 6 keys, autostart exception is handled, tests cover all specified scenarios.
