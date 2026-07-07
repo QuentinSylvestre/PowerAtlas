@@ -52,36 +52,6 @@ def detect_terminal(terminal_command: str = "") -> str | None:
     return None
 
 
-# TODO: Phase 3 — remove if not needed for profile-creation dropdown
-def available_terminals() -> list[tuple[str, str]]:
-    """Return (value, label) pairs of detected terminals for the current platform.
-
-    Recomputes each call — safe when profile changes occur.
-    Always includes ("" , "Auto-detect (...)") first and ("custom", "Custom") last.
-    """
-    if sys.platform == "win32":
-        candidates = [("wt", "Windows Terminal"), ("pwsh", "PowerShell"), ("cmd", "Command Prompt")]
-    else:
-        candidates = [
-            ("kitty", "kitty"),
-            ("alacritty", "Alacritty"),
-            ("gnome-terminal", "GNOME Terminal"),
-            ("konsole", "Konsole"),
-            ("xterm", "xterm"),
-        ]
-
-    found = [(val, label) for val, label in candidates if shutil.which(val)]
-
-    # Build auto-detect label from found terminals
-    if found:
-        auto_label = "Auto-detect (" + " \u203a ".join(label for _, label in found) + ")"
-    else:
-        auto_label = "Auto-detect (none found)"
-
-    result = [("", auto_label)]
-    result.extend(found)
-    result.append(("custom", "Custom"))
-    return result
 
 
 _PROVIDER_DISPLAY = {

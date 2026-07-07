@@ -6,7 +6,6 @@ from unittest.mock import patch
 
 from power_atlas.config import LaunchProfile
 from power_atlas.launcher import (
-    available_terminals,
     detect_terminal,
     launch_batch,
     launch_custom,
@@ -20,7 +19,6 @@ from power_atlas.launcher import (
     _sanitize_title,
 )
 from power_atlas.icons import _resolve_cmd_to_exe
-import power_atlas.launcher as launcher_mod
 
 
 class TestDetectTerminal:
@@ -725,52 +723,6 @@ class TestBuildCustomCommandLinux:
         # konsole has no title flag, so title should not appear
         assert "--title" not in cmd
         assert "title" not in cmd[1:]  # first element is the terminal path
-
-
-class TestAvailableTerminals:
-    @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("shutil.which")
-    def test_windows_with_terminals_found(self, mock_which):
-        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe", "cmd": "C:\\cmd.exe"}.get(n)
-        result = available_terminals()
-        assert result[0][0] == ""  # auto-detect entry
-        assert "Windows Terminal" in result[0][1]
-        assert "Command Prompt" in result[0][1]
-        assert ("wt", "Windows Terminal") in result
-        assert ("cmd", "Command Prompt") in result
-        assert result[-1] == ("custom", "Custom")
-
-    @patch("power_atlas.launcher.sys.platform", "linux")
-    @patch("shutil.which")
-    def test_linux_with_terminals_found(self, mock_which):
-        mock_which.side_effect = lambda n: {"kitty": "/usr/bin/kitty", "alacritty": "/usr/bin/alacritty"}.get(n)
-        result = available_terminals()
-        assert result[0][0] == ""
-        assert "kitty" in result[0][1]
-        assert "Alacritty" in result[0][1]
-        assert ("kitty", "kitty") in result
-        assert ("alacritty", "Alacritty") in result
-        assert result[-1] == ("custom", "Custom")
-
-    @patch("power_atlas.launcher.sys.platform", "linux")
-    @patch("shutil.which", return_value=None)
-    def test_no_terminals_found(self, _):
-        result = available_terminals()
-        assert result[0] == ("", "Auto-detect (none found)")
-        assert len(result) == 2  # only auto-detect + custom
-        assert result[-1] == ("custom", "Custom")
-
-    @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("shutil.which")
-    def test_recomputes_each_call(self, mock_which):
-        """available_terminals() recomputes each call (no cache)."""
-        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe"}.get(n)
-        result1 = available_terminals()
-        assert ("wt", "Windows Terminal") in result1
-        # Change the which response — next call should reflect it
-        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe", "cmd": "C:\\cmd.exe"}.get(n)
-        result2 = available_terminals()
-        assert ("cmd", "Command Prompt") in result2
 
 
 class TestLaunchCustomBatch:
