@@ -1,7 +1,8 @@
 # Config Hot-Reload Across Views and Peek Window State Reset
 
 > **Date**: 2026-07-07
-> **Status**: Done  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-07 12:58
 > **Scope**: Same-view instant config feedback, cross-view on-visibility reload, peek window overlay reset on hide, htmx.ajax fix
 
 ---
