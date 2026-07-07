@@ -41,11 +41,12 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 - Pin folders and sessions for quick access
 - Search across all workspaces and sessions
 - Custom launchers with inline args editing and one-click execution
-- Settings page for terminal preference, window mode, autostart
+- Global launch profiles with configurable Windows Terminal profile, MCP-safe settings, and terminal command
+- Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
 - Platform-aware terminal detection:
   - Windows: Windows Terminal › PowerShell › cmd
   - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm
-- On Windows, Kiro CLI and Claude Code launches through Windows Terminal use an MCP-safe PowerShell profile tab: PowerAtlas opens a normal PowerShell tab, then writes the provider command into that prompt. If that helper path fails, it falls back to the direct Windows Terminal launch.
+- On Windows, MCP-safe mode launches Kiro CLI and Claude Code through a PowerShell-compatible Windows Terminal profile tab: PowerAtlas opens a normal PowerShell tab and types the provider command into the prompt, preserving MCP server connections. If the helper fails, it falls back to a direct Windows Terminal tab launch (with a visible warning). MCP-safe settings are configurable per launch profile.
 
 ## Configuration
 
@@ -56,9 +57,9 @@ Config stored at:
 ```toml
 port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port
 peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
-terminal_command = ""  # empty = auto-detect (platform-specific)
 pinned_folders = []
 pinned_sessions = []
+active_launch_profile = "default"
 
 [provider_settings.kiro-cli]
 default_args = "-a"  # e.g. trust-all-tools
@@ -74,6 +75,17 @@ enabled = true
 default_args = ""
 color = ""
 enabled = true
+
+[[launch_profiles]]
+id = "default"
+name = "Default"
+terminal_command = ""  # empty = auto-detect
+wt_profile = "PowerShell"
+shell_process_name = "pwsh.exe"
+helper_runner = "pwsh"
+attach_timeout_ms = 4500
+helper_timeout_ms = 8000
+mcp_safe_enabled = true
 ```
 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).
