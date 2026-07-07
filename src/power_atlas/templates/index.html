@@ -57,7 +57,7 @@
 
 <main class="panels-container">
   <aside class="left-panel" id="left-panel">
-    <div class="section-label">Launchers <button class="launcher-add-btn" onclick="openNewLauncher()">+</button></div>
+    <div class="section-label"><span>Launchers</span> <button class="launcher-add-btn" onclick="openNewLauncher()">+</button></div>
     <div id="launcher-tiles" class="launcher-grid" hx-get="/partials/launchers" hx-trigger="load" hx-swap="innerHTML"></div>
     <div id="pinned-cards" hx-get="/partials/pinned-sessions?fresh=1" hx-trigger="load" hx-swap="innerHTML"
          hx-on::after-swap="loadExpandedCards()">
@@ -69,6 +69,7 @@
     </div>
   </div>
   <section class="right-panel" id="cards-area">
+    <div class="section-label">Workspaces</div>
     <div id="workspace-cards" aria-busy="true"
          hx-get="/partials/workspaces?fresh=1" hx-trigger="load" hx-swap="innerHTML"
          hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards();startPinnedPoll()">
