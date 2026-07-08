@@ -59,26 +59,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Cards grid */
 .panels-container { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.left-panel { width: 330px; min-width: 286px; max-width: 396px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+.left-panel { width: 280px; min-width: 240px; max-width: 340px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
 .left-panel::-webkit-scrollbar { width: 6px; }
 .left-panel::-webkit-scrollbar-track { background: transparent; }
 .left-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.center-panel { width: 418px; min-width: 352px; max-width: 484px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+.center-panel { flex: 1; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
 .center-panel::-webkit-scrollbar { width: 6px; }
 .center-panel::-webkit-scrollbar-track { background: transparent; }
 .center-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.right-panel { flex: 1; overflow-y: auto; padding: 16px 24px 80px; display: grid; grid-template-columns: repeat(auto-fill, minmax(500px, 1fr)); gap: 12px; align-content: start; }
+.right-panel { flex: 1; overflow-y: auto; padding: 16px 16px 80px; display: flex; flex-direction: column; gap: 12px; }
 .right-panel::-webkit-scrollbar { width: 6px; }
 .right-panel::-webkit-scrollbar-track { background: transparent; }
 .right-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-#workspace-cards { display: contents; }
-#pinned-workspaces { display: contents; }
+
+/* Load more button */
+.load-more-btn { display: block; width: 100%; padding: 12px; margin-top: 8px; background: var(--surface-hover); border: 1px solid var(--border); border-radius: 4px; color: var(--text); cursor: pointer; font-size: 13px; text-align: center; }
+.load-more-btn:hover { background: var(--card-bg); border-color: #3a4060; }
+.load-more-btn:disabled { opacity: 0.6; cursor: wait; }
+
 
 /* Workspace card */
 .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); padding: 8px 0 4px; display: flex; align-items: center; gap: 8px; }
-.right-panel .section-label { grid-column: 1 / -1; }
 .pinned-sessions-list { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; }
-.right-panel .pinned-sessions-list { grid-column: 1 / -1; max-width: 600px; }
 .workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; transition: border-color 0.2s; }
 .workspace-card:hover { border-color: #3a4060; }
 .card-header { display: flex; align-items: center; padding: 14px 16px; cursor: pointer; gap: 10px; user-select: none; transition: background 0.12s; position: relative; }
@@ -163,7 +165,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Empty state */
 .empty-state { padding: 3rem; text-align: center; color: var(--text-dim); font-size: 14px; }
-.right-panel .empty-state { grid-column: 1 / -1; }
 
 /* Skeleton */
 .skeleton-card { height: 60px; border-radius: 0; background: linear-gradient(90deg, var(--card-bg) 25%, var(--surface) 50%, var(--card-bg) 75%); background-size: 200%; animation: shimmer 1.5s infinite; }
