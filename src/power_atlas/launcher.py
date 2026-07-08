@@ -116,6 +116,20 @@ namespace NativeConsole
         public static extern IntPtr GetStdHandle(int nStdHandle);
 
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern IntPtr CreateFileW(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile
+        );
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern bool WriteConsoleInput(
             IntPtr hConsoleInput,
             INPUT_RECORD[] lpBuffer,
@@ -234,9 +248,26 @@ try {
     # Brief pause to let the console input buffer initialize after attach
     Start-Sleep -Milliseconds 200
 
-    $inputHandle = [NativeConsole.Kernel32]::GetStdHandle(-10)
+    # Use CreateFileW("CONIN$") instead of GetStdHandle(-10).
+    # GetStdHandle returns our process's stdin pipe which is invalid after
+    # AttachConsole to a ConPTY-hosted process (Windows Terminal uses ConPTY).
+    # CreateFileW("CONIN$") opens a direct handle to the attached console's
+    # input buffer, which works regardless of ConPTY.
+    $GENERIC_READ_WRITE = 0xC0000000  # GENERIC_READ | GENERIC_WRITE
+    $FILE_SHARE_READ = 0x1
+    $OPEN_EXISTING = 3
+    $inputHandle = [NativeConsole.Kernel32]::CreateFileW(
+        "CONIN$",
+        $GENERIC_READ_WRITE,
+        $FILE_SHARE_READ,
+        [IntPtr]::Zero,
+        $OPEN_EXISTING,
+        0,
+        [IntPtr]::Zero
+    )
     if ($inputHandle -eq [IntPtr]::Zero -or $inputHandle.ToInt64() -eq -1) {
-        [Console]::Error.WriteLine("GetStdHandle(STD_INPUT_HANDLE) failed.")
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        [Console]::Error.WriteLine("CreateFileW(CONIN$) failed with Win32 error $errorCode.")
         exit 2
     }
 
@@ -261,6 +292,9 @@ try {
         exit 2
     }
 } finally {
+    if ($inputHandle -and $inputHandle -ne [IntPtr]::Zero -and $inputHandle.ToInt64() -ne -1) {
+        [NativeConsole.Kernel32]::CloseHandle($inputHandle) | Out-Null
+    }
     if ($attached) {
         [NativeConsole.Kernel32]::FreeConsole() | Out-Null
     }
