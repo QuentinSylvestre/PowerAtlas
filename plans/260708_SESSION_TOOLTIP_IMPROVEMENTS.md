@@ -1,7 +1,7 @@
 # Session Tooltip Improvements
 
 > **Date**: 2026-07-08
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Enrich session hover tooltip with title/workspace, improve content separation, fix card preview, viewport-aware sizing, and peek window scroll
 
 ---
@@ -194,6 +194,12 @@ Note: `session_cache.get(cwd, provider)` normalizes the path internally — do N
 - `@patch("power_atlas.web.data.session_cache")` with `.get.return_value` returning a mock Session list
 
 Assert: response HTML contains `tail-header`, `tail-workspace`, `tail-label`, and message content.
+
+#### Implementation (2026-07-08, code: 3a69261, fix: ee1c02f)
+
+Modified the `/partials/session-tail` endpoint in `web.py` to look up the session title from `data.session_cache.get(cwd, provider)` by iterating cached sessions to find a match on `session_id`, and derives the workspace name via `Path(cwd).name`. Both values are passed to the template context with graceful degradation (empty strings when cache unavailable). Rewrote `session_tail.html` to display a header section (workspace name + session title) and labeled User:/Agent: sections instead of the previous flat list with `<hr>` separator. Added 6 new CSS rules for `.tail-header`, `.tail-workspace`, `.tail-title`, `.tail-section`, `.tail-agent-section`, and `.tail-label`. Updated both session-tail tests to include the required `get_first_prompt` and `session_cache` mocks and assert the new template structure elements. Review fix: removed dead `.tail-separator` CSS rule, added graceful degradation test (cache miss path).
+
+QA verification: PASS — tooltip renders workspace name, session title, User:/Agent: labels at runtime.
 
 ### 2. Fix card preview (last_reply_tail) [QA]
 
@@ -411,3 +417,13 @@ None — README does not document tooltip behavior or card content format. The t
 | 10 | Low | Card "Last:" switching from tail to head may reduce info density | Noted — deliberate user decision from exploration Q3 |
 | 11 | Low | CSS fallback 80vh can exceed viewport | Resolved — kept conservative 400px fallback |
 | 12 | Low | 150px minimum too small for enriched tooltip | Resolved — raised to 200px |
+
+### 2026-07-08 -- Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low). Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Dead CSS rule `.tail-separator` remains after template removed the `<hr>` element | Fixed — removed dead rule (ee1c02f) |
+| 2 | Low | No test for graceful degradation (cwd present but session not in cache) | Fixed — added `test_session_tail_graceful_no_cache` (ee1c02f) |
