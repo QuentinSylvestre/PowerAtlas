@@ -44,11 +44,6 @@ def test_default_config_has_launch_profile():
     assert p.name == "Default"
     assert p.terminal_command == ""
     assert p.wt_profile == "PowerShell"
-    assert p.shell_process_name == "pwsh.exe"
-    assert p.helper_runner == "pwsh"
-    assert p.attach_timeout_ms == 4500
-    assert p.helper_timeout_ms == 8000
-    assert p.mcp_safe_enabled is True
 
 
 # --- Round-trip ---
@@ -58,9 +53,7 @@ def test_round_trip_with_profiles():
     """Save with profiles, load gets same profiles back."""
     profiles = [
         LaunchProfile(id="custom", name="Custom", terminal_command="wt.exe",
-                      wt_profile="Git Bash", shell_process_name="bash.exe",
-                      helper_runner="pwsh", attach_timeout_ms=2000,
-                      helper_timeout_ms=5000, mcp_safe_enabled=False),
+                      wt_profile="Git Bash"),
         LaunchProfile(id="default", name="Default"),
     ]
     cfg = Config(active_launch_profile="custom", launch_profiles=profiles, pinned_folders=["/a", "/b"])
@@ -71,7 +64,6 @@ def test_round_trip_with_profiles():
     assert loaded.launch_profiles[0].id == "custom"
     assert loaded.launch_profiles[0].terminal_command == "wt.exe"
     assert loaded.launch_profiles[0].wt_profile == "Git Bash"
-    assert loaded.launch_profiles[0].mcp_safe_enabled is False
     assert loaded.launch_profiles[1].id == "default"
     assert loaded.pinned_folders == ["/a", "/b"]
     assert loaded.pinned_sessions == []
@@ -84,11 +76,6 @@ def test_round_trip_preserves_all_profile_fields():
         name="Test Profile",
         terminal_command="alacritty.exe",
         wt_profile="Ubuntu",
-        shell_process_name="pwsh.exe",
-        helper_runner="pwsh.exe",
-        attach_timeout_ms=1000,
-        helper_timeout_ms=5000,
-        mcp_safe_enabled=False,
     )
     cfg = Config(active_launch_profile="test-prof", launch_profiles=[p])
     save_config(cfg)
@@ -98,11 +85,6 @@ def test_round_trip_preserves_all_profile_fields():
     assert lp.name == "Test Profile"
     assert lp.terminal_command == "alacritty.exe"
     assert lp.wt_profile == "Ubuntu"
-    assert lp.shell_process_name == "pwsh.exe"
-    assert lp.helper_runner == "pwsh.exe"
-    assert lp.attach_timeout_ms == 1000
-    assert lp.helper_timeout_ms == 5000
-    assert lp.mcp_safe_enabled is False
 
 
 # --- Legacy Migration ---
@@ -147,90 +129,6 @@ def test_malformed_profile_id_regenerated(tmp_path):
     })
     cfg = load_config()
     assert cfg.launch_profiles[0].id == "imported-1"
-
-
-def test_malformed_shell_process_name_defaults(tmp_path):
-    """Invalid shell_process_name gets default."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "shell_process_name": "../evil.exe"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].shell_process_name == "pwsh.exe"
-
-
-def test_shell_process_name_deny_list(tmp_path):
-    """Deny-listed shell_process_name gets default."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "shell_process_name": "cmd.exe"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].shell_process_name == "pwsh.exe"
-
-
-def test_shell_process_name_deny_list_case_insensitive(tmp_path):
-    """Deny-list is case insensitive."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "shell_process_name": "CMD.EXE"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].shell_process_name == "pwsh.exe"
-
-
-def test_malformed_helper_runner_defaults(tmp_path):
-    """Invalid helper_runner gets default."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "helper_runner": "powershell"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].helper_runner == "pwsh"
-
-
-def test_helper_runner_allowlist_accepts_pwsh_exe(tmp_path):
-    """pwsh.exe is valid helper_runner."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "helper_runner": "pwsh.exe"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].helper_runner == "pwsh.exe"
-
-
-def test_malformed_timeouts_clamped(tmp_path):
-    """Out-of-range timeouts are clamped."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "attach_timeout_ms": 100, "helper_timeout_ms": 99999}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].attach_timeout_ms == 500  # clamped min
-    assert cfg.launch_profiles[0].helper_timeout_ms == 60000  # clamped max
-
-
-def test_timeout_relationship_enforced(tmp_path):
-    """helper_timeout_ms is raised to at least attach_timeout_ms + 1000."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "attach_timeout_ms": 5000, "helper_timeout_ms": 5500}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].attach_timeout_ms == 5000
-    assert cfg.launch_profiles[0].helper_timeout_ms == 6000  # 5000 + 1000
-
-
-def test_timeout_relationship_with_huge_attach(tmp_path):
-    """When attach is at max (30000), helper becomes 31000 (within 60000 max)."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "attach_timeout_ms": 30000, "helper_timeout_ms": 1000}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].attach_timeout_ms == 30000
-    assert cfg.launch_profiles[0].helper_timeout_ms == 31000
-
-
-def test_mcp_safe_non_bool_defaults_true(tmp_path):
-    """Non-bool mcp_safe_enabled defaults to True."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "mcp_safe_enabled": "yes"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].mcp_safe_enabled is True
 
 
 def test_terminal_command_control_chars_stripped(tmp_path):
@@ -567,45 +465,6 @@ def test_port_bool_in_toml_rejected(tmp_path):
 # --- Additional edge cases ---
 
 
-def test_timeout_zero_attach_clamped(tmp_path):
-    """attach_timeout_ms of 0 clamps to 500."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "attach_timeout_ms": 0}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].attach_timeout_ms == 500
-    # helper also raised: 500 + 1000 = 1500
-    assert cfg.launch_profiles[0].helper_timeout_ms >= 1500
-
-
-def test_timeout_bool_values_get_defaults(tmp_path):
-    """Boolean values for timeout fields get defaults."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "attach_timeout_ms": True, "helper_timeout_ms": False}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].attach_timeout_ms == 4500
-    assert cfg.launch_profiles[0].helper_timeout_ms == 8000
-
-
-def test_shell_process_name_with_path_separator_rejected(tmp_path):
-    """shell_process_name with path separator is rejected."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "shell_process_name": "C:\\Windows\\pwsh.exe"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].shell_process_name == "pwsh.exe"
-
-
-def test_shell_process_name_no_exe_extension_rejected(tmp_path):
-    """shell_process_name without .exe is rejected."""
-    _write_toml(tmp_path, {
-        "launch_profiles": [{"id": "t1", "shell_process_name": "pwsh"}],
-    })
-    cfg = load_config()
-    assert cfg.launch_profiles[0].shell_process_name == "pwsh.exe"
-
-
 def test_profile_id_too_long_regenerated(tmp_path):
     """Profile ID > 64 chars gets regenerated."""
     long_id = "a" * 65
@@ -644,7 +503,6 @@ def test_non_dict_profile_entries_guarded(tmp_path):
     cfg = load_config()
     assert len(cfg.launch_profiles) == 1
     assert cfg.launch_profiles[0].id == "valid"
-
 
 
 # --- Phase 2: Defensive config ---

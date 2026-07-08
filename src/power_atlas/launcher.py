@@ -71,8 +71,6 @@ _PROVIDER_TERMINAL = {
     "kiro-ide": False,
 }
 
-_MCP_SAFE_WT_PROVIDERS = {"kiro-cli", "claude-code"}
-
 
 def _build_provider_args(provider: str, binary: str, session_id: str | None) -> list[str]:
     """Build CLI args for a given provider."""
@@ -104,65 +102,6 @@ def _is_windows_terminal(terminal: str) -> bool:
     if "{cwd}" in terminal or "{cmd}" in terminal:
         return False
     return Path(terminal).stem.lower() == "wt"
-
-
-def _launch_mcp_safe_wt(
-    terminal: str, cwd: str, typed_command: str, title: str,
-    wt_profile: str, shell_process_name: str, helper_runner: str,
-    attach_timeout_ms: int, helper_timeout_ms: int,
-) -> tuple[bool, bool, str]:
-    """Launch a WT profile tab that runs the provider command inside a shell session.
-
-    Uses 'wt new-tab -p <profile> -d <cwd> -- pwsh -NoExit -Command <cmd>'
-    which starts a PowerShell session (profile loads, environment inherited)
-    and executes the provider command within it. -NoExit keeps the tab open
-    after the provider exits.
-
-    This approach preserves MCP server connections because the provider runs
-    inside a full PowerShell session, not as a bare process.
-
-    Returns (success, tab_opened, error_message):
-      - (True, True, '')    = tab launched successfully
-      - (False, False, msg) = failed to launch (no orphan tab)
-    """
-    runner = shutil.which(helper_runner)
-    if not runner:
-        return (False, False, f"{helper_runner} not found on PATH")
-
-    # Build: wt new-tab --title <title> -p <profile> -d <cwd> -- pwsh -NoExit -Command <typed_command>
-    wt_cmd: list[str] = [terminal, "new-tab"]
-    if title:
-        wt_cmd += ["--title", _sanitize_title(title)]
-    wt_cmd += ["-p", wt_profile, "-d", cwd, "--", runner, "-NoExit", "-Command", typed_command]
-
-    try:
-        kwargs: dict = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        completed = subprocess.run(
-            wt_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=helper_timeout_ms / 1000,
-            **kwargs,
-        )
-        if completed.returncode == 0:
-            return (True, True, "")
-        error_msg = completed.stderr.strip() or f"wt exited with code {completed.returncode}"
-        return (False, False, error_msg)
-    except (OSError, subprocess.SubprocessError) as e:
-        return (False, False, str(e))
-
-
-def _should_use_mcp_safe_wt(provider: str, terminal: str, mcp_safe_enabled: bool) -> bool:
-    """Use the MCP-safe path only for supported Windows CLI providers in WT."""
-    return (
-        sys.platform == "win32"
-        and mcp_safe_enabled
-        and provider in _MCP_SAFE_WT_PROVIDERS
-        and _is_windows_terminal(terminal)
-    )
 
 
 def launch_session(
@@ -232,47 +171,6 @@ def launch_session(
         cli_args += extra_args
 
     title = f"{display} - {Path(cwd).name}"
-    if _should_use_mcp_safe_wt(provider, terminal, profile.mcp_safe_enabled):
-        typed_command = _build_powershell_invocation(cli_args)
-        helper_ok, tab_opened, helper_error = _launch_mcp_safe_wt(
-            terminal, cwd, typed_command, title,
-            wt_profile=profile.wt_profile,
-            shell_process_name=profile.shell_process_name,
-            helper_runner=profile.helper_runner,
-            attach_timeout_ms=profile.attach_timeout_ms,
-            helper_timeout_ms=profile.helper_timeout_ms,
-        )
-        if helper_ok:
-            return LaunchResult(True, session_id, cwd)
-        if tab_opened:
-            # Tab exists but command wasn't typed — do NOT open a second tab.
-            # The orphan tab has a shell prompt; user can type the command manually.
-            return LaunchResult(
-                False, session_id, cwd,
-                error=f"MCP-safe: tab opened but command typing failed ({helper_error}). "
-                      f"A PowerShell tab is open in the target folder — type the command manually or close it and retry.",
-            )
-        # Tab was never opened — safe to fall back to direct WT launch
-        cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
-        if cmd is None:
-            return LaunchResult(
-                False, session_id, cwd,
-                error=f"MCP-safe helper failed: {helper_error}. Direct fallback also failed: path contains shell metacharacters unsafe for cmd.exe",
-            )
-        try:
-            fb_kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
-            subprocess.Popen(cmd, **fb_kwargs)
-            return LaunchResult(
-                True, session_id, cwd,
-                warning=f"MCP-safe helper failed ({helper_error}); launched via direct Windows Terminal tab.",
-                used_fallback=True,
-            )
-        except OSError as e:
-            direct_error = str(e)
-            return LaunchResult(
-                False, session_id, cwd,
-                error=f"MCP-safe helper failed: {helper_error}. Direct fallback also failed: {direct_error}.",
-            )
 
     cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
     if cmd is None:
@@ -397,7 +295,15 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
         cmd = [terminal]
         if title:
             cmd += ["--title", _sanitize_title(title)]
-        cmd += ["-p", wt_profile, "-d", cwd, "--", *kiro_args]
+        cmd += ["-p", wt_profile, "-d", cwd]
+        # Use pwsh -NoExit -Command to preserve MCP server connections
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            ps_command = _build_powershell_invocation(kiro_args)
+            cmd += ["--", pwsh, "-NoExit", "-Command", ps_command]
+        else:
+            # pwsh not found — fall back to direct args
+            cmd += ["--", *kiro_args]
         return cmd
     if t == "pwsh":
         escaped_cwd = cwd.replace("'", "''")

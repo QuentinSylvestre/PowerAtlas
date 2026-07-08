@@ -602,9 +602,6 @@ async def save_provider_settings(request: Request):
 
 # --- Launch profile validation constants ---
 _PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_SHELL_PROCESS_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}\.exe$")
-_SHELL_DENY_LIST = frozenset({"cmd.exe", "conhost.exe", "explorer.exe", "svchost.exe"})
-_HELPER_ALLOW_LIST = frozenset({"pwsh", "pwsh.exe"})
 
 
 def _has_control_chars(s: str) -> bool:
@@ -672,66 +669,12 @@ async def save_launch_profile(request: Request):
             "message": "WT Profile contains invalid control characters", "level": "error",
         })
 
-    # Validate shell_process_name
-    shell_process_name = str(body.get("shell_process_name", "pwsh.exe"))
-    if not _SHELL_PROCESS_RE.match(shell_process_name):
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Shell process name must match name.exe format", "level": "error",
-        })
-    if shell_process_name.lower() in _SHELL_DENY_LIST:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": f"Shell process '{shell_process_name}' is not allowed", "level": "error",
-        })
-
-    # Validate helper_runner
-    helper_runner = str(body.get("helper_runner", "pwsh"))
-    if helper_runner not in _HELPER_ALLOW_LIST:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Helper runner must be 'pwsh' or 'pwsh.exe'", "level": "error",
-        })
-
-    # Validate attach_timeout_ms
-    try:
-        attach_timeout_ms = int(body.get("attach_timeout_ms", 4500))
-    except (TypeError, ValueError):
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Attach timeout must be a number", "level": "error",
-        })
-    if attach_timeout_ms < 500 or attach_timeout_ms > 30000:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Attach timeout must be 500-30000 ms", "level": "error",
-        })
-
-    # Validate helper_timeout_ms
-    try:
-        helper_timeout_ms = int(body.get("helper_timeout_ms", 8000))
-    except (TypeError, ValueError):
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Helper timeout must be a number", "level": "error",
-        })
-    if helper_timeout_ms < 1000 or helper_timeout_ms > 60000:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Helper timeout must be 1000-60000 ms", "level": "error",
-        })
-    if helper_timeout_ms < attach_timeout_ms + 1000:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Helper timeout must be at least attach timeout + 1000 ms", "level": "error",
-        })
-
-    # Validate mcp_safe_enabled
-    mcp_safe_enabled = bool(body.get("mcp_safe_enabled", True))
-
     # Build the validated profile
     new_profile = LaunchProfile(
         id=profile_id,
         name=name,
         terminal_command=terminal_command,
         wt_profile=wt_profile or "PowerShell",
-        shell_process_name=shell_process_name,
-        helper_runner=helper_runner,
-        attach_timeout_ms=attach_timeout_ms,
-        helper_timeout_ms=helper_timeout_ms,
-        mcp_safe_enabled=mcp_safe_enabled,
     )
 
     # Check if updating existing or creating new

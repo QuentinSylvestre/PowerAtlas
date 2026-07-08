@@ -14,34 +14,12 @@
       <label class="form-label">Name
         <input type="text" id="profileName" maxlength="80" required>
       </label>
-      <label class="form-label">Terminal command <span class="form-hint">(empty = auto-detect)</span>
-        <input type="text" id="profileTerminal" maxlength="512" placeholder="e.g. wt.exe">
+      <label class="form-label">Terminal command <span class="form-hint">(empty = auto-detect. Use {cwd}, {cmd}, {title}, {wt_profile} for templates.)</span>
+        <input type="text" id="profileTerminal" maxlength="512" placeholder="Empty = auto-detect">
       </label>
-      <details class="profile-advanced">
-        <summary>Advanced: MCP-Safe Settings</summary>
-        <label class="form-label">WT Profile
-          <input type="text" id="profileWtProfile" maxlength="128" placeholder="PowerShell">
-        </label>
-        <label class="form-label">Shell Process Name
-          <input type="text" id="profileShellProcess" maxlength="128" placeholder="pwsh.exe">
-        </label>
-        <label class="form-label">Helper Runner
-          <select id="profileHelperRunner">
-            <option value="pwsh">pwsh</option>
-            <option value="pwsh.exe">pwsh.exe</option>
-          </select>
-        </label>
-        <label class="form-label">Attach Timeout (seconds)
-          <input type="number" id="profileAttachTimeout" min="0.5" max="30" step="0.5" placeholder="4.5">
-        </label>
-        <label class="form-label">Helper Timeout (seconds)
-          <input type="number" id="profileHelperTimeout" min="1" max="60" step="0.5" placeholder="8">
-        </label>
-        <label class="form-label form-checkbox">
-          <input type="checkbox" id="profileMcpSafe" checked>
-          MCP-Safe mode enabled
-        </label>
-      </details>
+      <label class="form-label">WT Profile
+        <input type="text" id="profileWtProfile" maxlength="128" placeholder="PowerShell">
+      </label>
       <div class="profile-actions">
         <button type="button" class="btn-primary" onclick="saveProfile()">Save</button>
         <button type="button" class="btn-danger" id="profileDeleteBtn" onclick="deleteProfile()" style="display:none;">Delete</button>

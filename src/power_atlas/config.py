@@ -30,22 +30,14 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 _lock = threading.Lock()
 
 _PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_SHELL_PROCESS_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}\.exe$")
-_SHELL_DENY_LIST = frozenset({"cmd.exe", "conhost.exe", "explorer.exe", "svchost.exe"})
-_HELPER_ALLOW_LIST = frozenset({"pwsh", "pwsh.exe"})
 
 
 @dataclass
 class LaunchProfile:
     id: str = "default"
     name: str = "Default"
-    terminal_command: str = ""
+    terminal_command: str = ""  # empty = auto-detect; or a template with {title}/{wt_profile}/{cwd}/{cmd}
     wt_profile: str = "PowerShell"
-    shell_process_name: str = "pwsh.exe"
-    helper_runner: str = "pwsh"
-    attach_timeout_ms: int = 4500
-    helper_timeout_ms: int = 8000
-    mcp_safe_enabled: bool = True
 
 
 @dataclass
@@ -106,46 +98,11 @@ def _normalize_launch_profile(raw: dict, index: int, seen_ids: dict[str, str], i
     if not wt:
         wt = "PowerShell"
 
-    # --- shell_process_name ---
-    spn = str(raw.get("shell_process_name", "")) if raw.get("shell_process_name") is not None else ""
-    if not _SHELL_PROCESS_RE.match(spn) or spn.lower() in _SHELL_DENY_LIST:
-        spn = "pwsh.exe"
-
-    # --- helper_runner ---
-    hr = str(raw.get("helper_runner", "")) if raw.get("helper_runner") is not None else ""
-    if hr not in _HELPER_ALLOW_LIST:
-        hr = "pwsh"
-
-    # --- attach_timeout_ms ---
-    atm = raw.get("attach_timeout_ms", 4500)
-    if not isinstance(atm, int) or isinstance(atm, bool):
-        atm = 4500
-    atm = max(500, min(30000, atm))
-
-    # --- helper_timeout_ms ---
-    htm = raw.get("helper_timeout_ms", 8000)
-    if not isinstance(htm, int) or isinstance(htm, bool):
-        htm = 8000
-    htm = max(1000, min(60000, htm))
-    # Ensure helper >= attach + 1000
-    if htm < atm + 1000:
-        htm = atm + 1000
-
-    # --- mcp_safe_enabled ---
-    mse = raw.get("mcp_safe_enabled", True)
-    if not isinstance(mse, bool):
-        mse = True
-
     return LaunchProfile(
         id=raw_id,
         name=name,
         terminal_command=tc,
         wt_profile=wt,
-        shell_process_name=spn,
-        helper_runner=hr,
-        attach_timeout_ms=atm,
-        helper_timeout_ms=htm,
-        mcp_safe_enabled=mse,
     )
 
 

@@ -156,186 +156,92 @@ class TestLaunchSession:
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_windows_kiro_wt_uses_mcp_safe_helper(self, mock_which, mock_run, mock_popen, tmp_path):
+    def test_windows_wt_uses_pwsh_noexit_by_default(self, mock_which, mock_popen, tmp_path):
+        """WT launches use pwsh -NoExit -Command format by default."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         cwd = str(tmp_path)
 
         result = launch_session(cwd, provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
 
         assert result.success is True
-        mock_run.assert_called_once()
-        mock_popen.assert_not_called()
-        wt_cmd = mock_run.call_args[0][0]
-        # New approach: wt new-tab --title ... -p PowerShell -d <cwd> -- pwsh -NoExit -Command <typed>
-        assert wt_cmd[0] == "C:\\wt.exe"
-        assert "new-tab" in wt_cmd
-        assert "-p" in wt_cmd
-        assert wt_cmd[wt_cmd.index("-p") + 1] == "PowerShell"
+        mock_popen.assert_called_once()
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[0] == "C:\\wt.exe"
+        assert "-p" in cmd
+        assert cmd[cmd.index("-p") + 1] == "PowerShell"
+        # Should use pwsh -NoExit -Command
+        assert "C:\\pwsh.exe" in cmd
+        assert "-NoExit" in cmd
+        assert "-Command" in cmd
         # The command should contain kiro-cli invocation
-        command_idx = wt_cmd.index("-Command") + 1
-        assert "kiro-cli" in wt_cmd[command_idx]
-        assert "'chat'" in wt_cmd[command_idx]
+        command_idx = cmd.index("-Command") + 1
+        assert "kiro-cli" in cmd[command_idx]
+        assert "'chat'" in cmd[command_idx]
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_windows_kiro_wt_helper_uses_custom_profile(self, mock_which, mock_run, mock_popen, tmp_path):
-        """Helper receives custom profile values (wt_profile, helper_runner, timeout)."""
+    def test_windows_wt_custom_profile_used(self, mock_which, mock_popen, tmp_path):
+        """Custom wt_profile is passed to the WT command."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         cwd = str(tmp_path)
         profile = LaunchProfile(
             terminal_command="C:\\wt.exe",
             wt_profile="MyCustomProfile",
-            shell_process_name="powershell.exe",
-            helper_runner="pwsh",
-            attach_timeout_ms=6000,
-            helper_timeout_ms=12000,
         )
 
         result = launch_session(cwd, provider="kiro-cli", launch_profile=profile)
 
         assert result.success is True
-        wt_cmd = mock_run.call_args[0][0]
-        # Profile name used in -p argument
-        assert wt_cmd[wt_cmd.index("-p") + 1] == "MyCustomProfile"
-        # helper_timeout_ms / 1000 = 12.0 seconds timeout for subprocess.run
-        assert mock_run.call_args[1]["timeout"] == 12.0
-        # helper_runner resolved via which is used as the shell executable
-        assert "C:\\pwsh.exe" in wt_cmd
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[cmd.index("-p") + 1] == "MyCustomProfile"
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_windows_claude_wt_uses_mcp_safe_helper(self, mock_which, mock_run, mock_popen, tmp_path):
+    def test_windows_claude_wt_uses_pwsh_noexit(self, mock_which, mock_popen, tmp_path):
+        """Claude Code also uses pwsh -NoExit -Command format in WT."""
         mock_which.side_effect = lambda n: {"claude": "C:\\claude.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         cwd = str(tmp_path)
 
         result = launch_session(cwd, session_id="sess-abc", provider="claude-code", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
 
         assert result.success is True
-        mock_run.assert_called_once()
-        mock_popen.assert_not_called()
-        helper_cmd = mock_run.call_args[0][0]
-        typed_command = helper_cmd[helper_cmd.index("-Command") + 1]
-        assert typed_command == "& 'claude' '--resume' 'sess-abc'"
-
-    @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("subprocess.Popen")
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    def test_windows_wt_helper_failure_falls_back_to_direct_launch(self, mock_which, mock_run, mock_popen, tmp_path):
-        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="some error detail")
-        cwd = str(tmp_path)
-
-        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
-
-        assert result.success is True
-        assert result.used_fallback is True
-        assert result.warning != ""
-        assert "MCP-safe helper failed" in result.warning
-        assert "some error detail" in result.warning
-        mock_run.assert_called_once()
-        mock_popen.assert_called_once()
-        fallback_cmd = mock_popen.call_args[0][0]
-        assert fallback_cmd[:2] == ["C:\\wt.exe", "--title"]
-        assert fallback_cmd[-4:] == ["kiro-cli", "chat", "--resume-id", "sess-1"]
-
-    @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("subprocess.Popen")
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    def test_windows_wt_helper_and_direct_both_fail(self, mock_which, mock_run, mock_popen, tmp_path):
-        """When both MCP-safe helper and direct fallback fail, returns error with both reasons."""
-        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="helper broke")
-        mock_popen.side_effect = OSError("Cannot start process")
-        cwd = str(tmp_path)
-
-        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
-
-        assert result.success is False
-        assert "MCP-safe helper failed: helper broke" in result.error
-        assert "Direct fallback also failed" in result.error
-        assert "Cannot start process" in result.error
-
-    @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("subprocess.Popen")
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    def test_windows_wt_mcp_safe_failure_falls_back_to_direct(self, mock_which, mock_run, mock_popen, tmp_path):
-        """When MCP-safe wt command fails, falls back to direct WT launch with warning."""
-        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="profile not found")
-        cwd = str(tmp_path)
-
-        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
-
-        assert result.success is True
-        assert result.used_fallback is True
-        assert "MCP-safe helper failed" in result.warning
-        assert "profile not found" in result.warning
-        # Direct fallback via Popen
-        mock_popen.assert_called_once()
-
-    @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("subprocess.Popen")
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    def test_mcp_safe_disabled_uses_direct_launch(self, mock_which, mock_run, mock_popen, tmp_path):
-        """mcp_safe_enabled=False bypasses helper entirely."""
-        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        cwd = str(tmp_path)
-        profile = LaunchProfile(terminal_command="C:\\wt.exe", mcp_safe_enabled=False)
-
-        result = launch_session(cwd, provider="kiro-cli", launch_profile=profile)
-
-        assert result.success is True
-        mock_run.assert_not_called()  # Helper never invoked
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
-        assert cmd[0] == "C:\\wt.exe"
+        command_idx = cmd.index("-Command") + 1
+        assert cmd[command_idx] == "& 'claude' '--resume' 'sess-abc'"
 
     @patch("power_atlas.launcher.sys.platform", "win32")
-    @patch("power_atlas.launcher._build_command", return_value=None)
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_metachar_cwd_double_failure(self, mock_which, mock_run, mock_popen, mock_build_cmd, tmp_path):
-        """When helper fails and _build_command returns None (e.g. metachar cwd), double failure reported."""
-        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="some error")
-        # Use a cwd with shell metacharacters
-        bad_dir = tmp_path / "a&b"
-        bad_dir.mkdir()
-        cwd = str(bad_dir)
+    def test_windows_wt_no_pwsh_falls_back_to_direct(self, mock_which, mock_popen, tmp_path):
+        """When pwsh not found, WT falls back to direct args (no pwsh -NoExit wrapper)."""
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe"}.get(n)
+        cwd = str(tmp_path)
 
-        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        result = launch_session(cwd, provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
 
-        assert result.success is False
-        assert "MCP-safe helper failed: some error" in result.error
-        assert "metacharacters" in result.error.lower()
-        mock_popen.assert_not_called()
+        assert result.success is True
+        cmd = mock_popen.call_args[0][0]
+        # Should NOT have pwsh wrapper
+        assert "-NoExit" not in cmd
+        assert "-Command" not in cmd
+        # Should have direct args
+        assert "kiro-cli" in cmd
+        assert "chat" in cmd
 
     @patch("power_atlas.launcher.sys.platform", "linux")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_non_windows_launch_uses_existing_builder(self, mock_which, mock_run, mock_popen, tmp_path):
+    def test_non_windows_launch_uses_existing_builder(self, mock_which, mock_popen, tmp_path):
         mock_which.side_effect = lambda n: {"kiro-cli": "/usr/bin/kiro-cli"}.get(n)
         cwd = str(tmp_path)
 
         result = launch_session(cwd, provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="/usr/bin/kitty"))
 
         assert result.success is True
-        mock_run.assert_not_called()
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "/usr/bin/kitty"
@@ -343,9 +249,8 @@ class TestLaunchSession:
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_custom_terminal_template_bypasses_mcp_safe_helper(self, mock_which, mock_run, mock_popen, tmp_path):
+    def test_custom_terminal_template_uses_direct_launch(self, mock_which, mock_popen, tmp_path):
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
         cwd = str(tmp_path)
         template = "myterm --dir {cwd} --exec {cmd}"
@@ -353,7 +258,6 @@ class TestLaunchSession:
         result = launch_session(cwd, provider="kiro-cli", launch_profile=LaunchProfile(terminal_command=template))
 
         assert result.success is True
-        mock_run.assert_not_called()
         mock_popen.assert_called_once()
         cmd = mock_popen.call_args[0][0]
         assert cmd == ["myterm", "--dir", cwd, "--exec", "kiro-cli", "chat"]
@@ -511,22 +415,20 @@ class TestLaunchBatch:
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which")
-    def test_launch_batch_propagates_profile(self, mock_which, mock_run, mock_popen, tmp_path):
+    def test_launch_batch_propagates_profile(self, mock_which, mock_popen, tmp_path):
         """launch_batch propagates launch_profile to each launch_session call."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         cwd = str(tmp_path)
-        profile = LaunchProfile(terminal_command="C:\\wt.exe", wt_profile="CustomTab", attach_timeout_ms=3000)
+        profile = LaunchProfile(terminal_command="C:\\wt.exe", wt_profile="CustomTab")
         sessions = [
             {"session_id": "s1", "workspace": cwd, "provider": "kiro-cli"},
         ]
         results = launch_batch(sessions, launch_profile=profile)
         assert results[0].success is True
         # Profile's wt_profile should be in the wt command
-        wt_cmd = mock_run.call_args[0][0]
-        assert wt_cmd[wt_cmd.index("-p") + 1] == "CustomTab"
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[cmd.index("-p") + 1] == "CustomTab"
 
 
 
@@ -539,13 +441,15 @@ class TestTabTitle:
         assert _sanitize_title("kiro-cli - proj") == "kiro-cli - proj"
 
     def test_wt_includes_title(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj", wt_profile="PowerShell")
+        with patch("shutil.which", return_value="C:\\pwsh.exe"):
+            cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="kiro-cli - proj", wt_profile="PowerShell")
         assert "--title" in cmd
         idx = cmd.index("--title")
         assert cmd[idx + 1] == "kiro-cli - proj"
 
     def test_wt_omits_title_when_empty(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="", wt_profile="PowerShell")
+        with patch("shutil.which", return_value="C:\\pwsh.exe"):
+            cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="", wt_profile="PowerShell")
         assert "--title" not in cmd
 
     def test_pwsh_includes_title(self):
@@ -562,12 +466,14 @@ class TestTabTitle:
         assert "kiro-cli - proj" not in " ".join(cmd)
 
     def test_wt_uses_custom_wt_profile(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="t", wt_profile="MyProfile")
+        with patch("shutil.which", return_value="C:\\pwsh.exe"):
+            cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="t", wt_profile="MyProfile")
         idx = cmd.index("-p")
         assert cmd[idx + 1] == "MyProfile"
 
     def test_wt_default_profile_is_powershell(self):
-        cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="t", wt_profile="PowerShell")
+        with patch("shutil.which", return_value="C:\\pwsh.exe"):
+            cmd = _build_command("C:\\wt.exe", "C:\\proj", ["kiro-cli", "chat"], title="t", wt_profile="PowerShell")
         idx = cmd.index("-p")
         assert cmd[idx + 1] == "PowerShell"
 class TestBuildCustomCommand:
@@ -623,14 +529,12 @@ class TestLaunchCustom:
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
-    @patch("subprocess.run")
     @patch("shutil.which", return_value="C:\\wt.exe")
-    def test_custom_wt_uses_profile_wt_profile_not_mcp_safe(self, _, mock_run, mock_popen, tmp_path):
-        """Custom launcher in WT uses profile's wt_profile but never invokes MCP-safe helper."""
+    def test_custom_wt_uses_profile_wt_profile(self, _, mock_popen, tmp_path):
+        """Custom launcher in WT uses profile's wt_profile."""
         profile = LaunchProfile(terminal_command="C:\\wt.exe", wt_profile="Git Bash")
         result = launch_custom("test", "npm", custom_args="start", cwd=str(tmp_path), launch_profile=profile)
         assert result.success is True
-        mock_run.assert_not_called()  # MCP-safe helper never invoked for custom
         cmd = mock_popen.call_args[0][0]
         assert "-p" in cmd
         assert cmd[cmd.index("-p") + 1] == "Git Bash"

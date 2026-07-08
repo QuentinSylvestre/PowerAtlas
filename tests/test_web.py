@@ -1239,11 +1239,6 @@ class TestLaunchProfileEndpoints:
             "name": "My Custom Profile",
             "terminal_command": "wt.exe",
             "wt_profile": "PowerShell",
-            "shell_process_name": "pwsh.exe",
-            "helper_runner": "pwsh",
-            "attach_timeout_ms": 4500,
-            "helper_timeout_ms": 8000,
-            "mcp_safe_enabled": True,
         })
         assert resp.status_code == 200
         assert "saved" in resp.text.lower()
@@ -1261,11 +1256,6 @@ class TestLaunchProfileEndpoints:
             "name": "Renamed",
             "terminal_command": "",
             "wt_profile": "PowerShell",
-            "shell_process_name": "pwsh.exe",
-            "helper_runner": "pwsh",
-            "attach_timeout_ms": 4500,
-            "helper_timeout_ms": 8000,
-            "mcp_safe_enabled": True,
         })
         assert resp.status_code == 200
         assert "saved" in resp.text.lower()
@@ -1279,51 +1269,10 @@ class TestLaunchProfileEndpoints:
         mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
         resp = client.post("/api/launch-profile/save", json={
             "id": "__new__", "name": "", "terminal_command": "",
-            "wt_profile": "PowerShell", "shell_process_name": "pwsh.exe",
-            "helper_runner": "pwsh", "attach_timeout_ms": 4500,
-            "helper_timeout_ms": 8000, "mcp_safe_enabled": True,
+            "wt_profile": "PowerShell",
         })
         assert resp.status_code == 200
         assert "1-80" in resp.text
-
-    @patch("power_atlas.web.load_config")
-    def test_save_invalid_shell_process(self, mock_load, client):
-        from power_atlas.config import Config, LaunchProfile
-        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
-        resp = client.post("/api/launch-profile/save", json={
-            "id": "__new__", "name": "Test", "terminal_command": "",
-            "wt_profile": "PowerShell", "shell_process_name": "not-valid",
-            "helper_runner": "pwsh", "attach_timeout_ms": 4500,
-            "helper_timeout_ms": 8000, "mcp_safe_enabled": True,
-        })
-        assert resp.status_code == 200
-        assert "name.exe" in resp.text
-
-    @patch("power_atlas.web.load_config")
-    def test_save_invalid_helper_timeout(self, mock_load, client):
-        from power_atlas.config import Config, LaunchProfile
-        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
-        resp = client.post("/api/launch-profile/save", json={
-            "id": "__new__", "name": "Test", "terminal_command": "",
-            "wt_profile": "PowerShell", "shell_process_name": "pwsh.exe",
-            "helper_runner": "pwsh", "attach_timeout_ms": 5000,
-            "helper_timeout_ms": 5500, "mcp_safe_enabled": True,
-        })
-        assert resp.status_code == 200
-        assert "attach timeout + 1000" in resp.text
-
-    @patch("power_atlas.web.load_config")
-    def test_save_denied_shell_process(self, mock_load, client):
-        from power_atlas.config import Config, LaunchProfile
-        mock_load.return_value = Config(launch_profiles=[LaunchProfile()])
-        resp = client.post("/api/launch-profile/save", json={
-            "id": "__new__", "name": "Test", "terminal_command": "",
-            "wt_profile": "PowerShell", "shell_process_name": "cmd.exe",
-            "helper_runner": "pwsh", "attach_timeout_ms": 4500,
-            "helper_timeout_ms": 8000, "mcp_safe_enabled": True,
-        })
-        assert resp.status_code == 200
-        assert "not allowed" in resp.text
 
     @patch("power_atlas.web.save_config")
     @patch("power_atlas.web.load_config")
@@ -1481,11 +1430,6 @@ def test_profile_metacharacter_name_roundtrip(mock_load, mock_save, client):
         "name": xss_name,
         "terminal_command": "",
         "wt_profile": "PowerShell",
-        "shell_process_name": "pwsh.exe",
-        "helper_runner": "pwsh",
-        "attach_timeout_ms": 4500,
-        "helper_timeout_ms": 8000,
-        "mcp_safe_enabled": True,
     })
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
