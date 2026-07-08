@@ -269,6 +269,28 @@ class TestLaunchSession:
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("shutil.which")
+    def test_windows_wt_helper_tab_opened_but_typing_failed_no_fallback(self, mock_which, mock_run, mock_popen, tmp_path):
+        """Exit code 2 means tab opened but typing failed — do NOT open a second tab."""
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=2, stdout="", stderr="WriteConsoleInputW failed with Win32 error 6."
+        )
+        cwd = str(tmp_path)
+
+        result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+
+        assert result.success is False
+        assert "tab opened but command typing failed" in result.error
+        assert "WriteConsoleInputW failed" in result.error
+        assert "type the command manually" in result.error
+        # Critical: no fallback tab opened
+        mock_popen.assert_not_called()
+        assert result.used_fallback is False
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("subprocess.run")
+    @patch("shutil.which")
     def test_mcp_safe_disabled_uses_direct_launch(self, mock_which, mock_run, mock_popen, tmp_path):
         """mcp_safe_enabled=False bypasses helper entirely."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)

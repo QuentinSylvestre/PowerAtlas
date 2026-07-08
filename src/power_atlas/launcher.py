@@ -85,7 +85,15 @@ param(
     [Parameter(Mandatory=$true)][int]$AttachTimeoutMs
 )
 
+# Exit codes:
+#   0 = success (command typed into the new tab)
+#   1 = failed BEFORE the WT tab was opened (no orphan tab exists)
+#   2 = failed AFTER the WT tab was opened (orphan tab exists, do NOT open another)
+
 $ErrorActionPreference = 'Stop'
+$tabOpened = $false
+
+try {
 
 Add-Type -TypeDefinition @"
 using System;
@@ -159,6 +167,8 @@ function New-KeyRecord {
     return $record
 }
 
+# --- PRE-TAB PHASE (exit 1 on failure) ---
+
 $beforePwsh = @{}
 Get-CimInstance Win32_Process | Where-Object { $_.Name -eq $ShellProcessName } | ForEach-Object {
     $beforePwsh[[int]$_.ProcessId] = $true
@@ -171,8 +181,12 @@ if ($Title) {
 $wtArgs += @('-p', $WtProfile, '-d', $Cwd)
 & $Wt @wtArgs | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    throw "Windows Terminal exited with code $LASTEXITCODE."
+    Write-Error "Windows Terminal exited with code $LASTEXITCODE."
+    exit 1
 }
+
+# --- POST-TAB PHASE (exit 2 on failure — orphan tab exists) ---
+$tabOpened = $true
 
 $target = $null
 $deadline = (Get-Date).AddMilliseconds($AttachTimeoutMs)
@@ -200,7 +214,8 @@ do {
 } while ((Get-Date) -lt $deadline)
 
 if (-not $target) {
-    throw "Could not find a new Windows Terminal $ShellProcessName process."
+    Write-Error "Could not find a new Windows Terminal $ShellProcessName process within ${AttachTimeoutMs}ms."
+    exit 2
 }
 
 $attached = $false
@@ -208,13 +223,18 @@ try {
     [NativeConsole.Kernel32]::FreeConsole() | Out-Null
     if (-not [NativeConsole.Kernel32]::AttachConsole([uint32]$target.ProcessId)) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "AttachConsole failed with Win32 error $errorCode."
+        Write-Error "AttachConsole failed with Win32 error $errorCode."
+        exit 2
     }
     $attached = $true
 
+    # Brief pause to let the console input buffer initialize after attach
+    Start-Sleep -Milliseconds 150
+
     $inputHandle = [NativeConsole.Kernel32]::GetStdHandle(-10)
     if ($inputHandle -eq [IntPtr]::Zero -or $inputHandle.ToInt64() -eq -1) {
-        throw "GetStdHandle(STD_INPUT_HANDLE) failed."
+        Write-Error "GetStdHandle(STD_INPUT_HANDLE) failed."
+        exit 2
     }
 
     $text = $Command + [string][char]13
@@ -230,15 +250,25 @@ try {
     [uint32]$written = 0
     if (-not [NativeConsole.Kernel32]::WriteConsoleInput($inputHandle, $records, [uint32]$records.Length, [ref]$written)) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        throw "WriteConsoleInputW failed with Win32 error $errorCode."
+        Write-Error "WriteConsoleInputW failed with Win32 error $errorCode."
+        exit 2
     }
     if ($written -ne $records.Length) {
-        throw "WriteConsoleInputW wrote $written of $($records.Length) input records."
+        Write-Error "WriteConsoleInputW wrote $written of $($records.Length) input records."
+        exit 2
     }
 } finally {
     if ($attached) {
         [NativeConsole.Kernel32]::FreeConsole() | Out-Null
     }
+}
+
+exit 0
+
+} catch {
+    # Unhandled exception — use $tabOpened to determine the right exit code
+    Write-Error $_.Exception.Message
+    if ($tabOpened) { exit 2 } else { exit 1 }
 }
 """
 
@@ -285,14 +315,17 @@ def _launch_mcp_safe_wt(
     terminal: str, cwd: str, typed_command: str, title: str,
     wt_profile: str, shell_process_name: str, helper_runner: str,
     attach_timeout_ms: int, helper_timeout_ms: int,
-) -> tuple[bool, str]:
+) -> tuple[bool, bool, str]:
     """Launch a WT profile tab, attach to its console, and type the command.
 
-    Returns (success, error_message). On success error_message is empty.
+    Returns (success, tab_opened, error_message):
+      - (True, True, '')    = command typed successfully
+      - (False, False, msg) = failed before opening tab (safe to fallback)
+      - (False, True, msg)  = tab opened but typing failed (orphan exists)
     """
     runner = shutil.which(helper_runner)
     if not runner:
-        return (False, f"{helper_runner} not found on PATH")
+        return (False, False, f"{helper_runner} not found on PATH")
 
     script_path = _write_mcp_safe_wt_helper()
     try:
@@ -331,10 +364,15 @@ def _launch_mcp_safe_wt(
             **kwargs,
         )
         if completed.returncode == 0:
-            return (True, "")
-        return (False, completed.stderr.strip() or "helper exited with non-zero status")
+            return (True, True, "")
+        # Exit 2 = tab opened but typing failed (orphan exists)
+        # Exit 1 = failed before tab opened (no orphan)
+        tab_opened = completed.returncode == 2
+        error_msg = completed.stderr.strip() or "helper exited with non-zero status"
+        return (False, tab_opened, error_msg)
     except (OSError, subprocess.SubprocessError) as e:
-        return (False, str(e))
+        # If the subprocess itself failed to launch, no tab was opened
+        return (False, False, str(e))
     finally:
         try:
             script_path.unlink(missing_ok=True)
@@ -421,7 +459,7 @@ def launch_session(
     title = f"{display} - {Path(cwd).name}"
     if _should_use_mcp_safe_wt(provider, terminal, profile.mcp_safe_enabled):
         typed_command = _build_powershell_invocation(cli_args)
-        helper_ok, helper_error = _launch_mcp_safe_wt(
+        helper_ok, tab_opened, helper_error = _launch_mcp_safe_wt(
             terminal, cwd, typed_command, title,
             wt_profile=profile.wt_profile,
             shell_process_name=profile.shell_process_name,
@@ -431,7 +469,15 @@ def launch_session(
         )
         if helper_ok:
             return LaunchResult(True, session_id, cwd)
-        # Helper failed — try direct fallback
+        if tab_opened:
+            # Tab exists but command wasn't typed — do NOT open a second tab.
+            # The orphan tab has a shell prompt; user can type the command manually.
+            return LaunchResult(
+                False, session_id, cwd,
+                error=f"MCP-safe: tab opened but command typing failed ({helper_error}). "
+                      f"A PowerShell tab is open in the target folder — type the command manually or close it and retry.",
+            )
+        # Tab was never opened — safe to fall back to direct WT launch
         cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
         if cmd is None:
             return LaunchResult(
