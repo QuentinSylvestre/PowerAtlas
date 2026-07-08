@@ -2,6 +2,7 @@
 
 > **Date**: 2026-07-08
 > **Status**: Complete
+> **Last Updated**: 2026-07-08 12:28
 > **Scope**: Add global and per-provider default directory settings so providers can launch without workspace selection
 
 ---
