@@ -240,6 +240,13 @@ last_reply_tail = text[:100]
 
 **Tests**: The existing test at `test_data.py` (`assert s.last_reply_tail == "Hi there, how can I help?"`) will continue passing since the test message is <100 chars. The search test at `test_web.py` uses `"final answer"` which is also short — unaffected.
 
+#### Implementation (2026-07-08, code: 0924547)
+
+Changed all `last_reply_tail` assignments across the three provider data modules from `[-100:]` (tail/end of message) to `[:100]` (head/beginning of message). This affects 4 sites total: 1 in `data_kiro.py`, 2 in `data_claude.py` (string content branch + list content branch), and 1 in `data_kiro_ide.py`. Card preview tooltips now show the beginning of the last agent reply rather than the end, which is more informative for users scanning their workspaces.
+
+Per-phase review deferred to Step 9: mechanical parity edit (identical transformation across all providers, 4 LOC, no logic change).
+QA verification: PASS — card "Last:" preview shows beginning of message content at runtime.
+
 ### 3. Viewport clamping + dynamic sizing [QA]
 
 **Goal**: Tooltip stays within viewport bounds and expands to fill available space.
