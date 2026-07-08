@@ -1,7 +1,7 @@
 # PowerAtlas — qtest Findings Fixes (hardening)
 
 > **Date**: 2026-07-07
-> **Status**: In Progress  <!-- Exploring → Draft → In Progress → Complete -->
+> **Status**: Complete  <!-- Exploring → Draft → In Progress → Complete -->
 > **Scope**: Fix the still-valid Medium/Low findings from the `260701_POWERATLAS` qtest run. The High data-loss cluster was already resolved by `260707_CONFIG_HOT_RELOAD_AND_PEEK_RESET`; this project covers the remaining ~22 correctness/robustness/perf findings + one dead-code cleanup.
 > **Estimated effort**: ~1.5–3 days (6 phases; no High-severity work remaining)
 > **Anchors RE-ANCHORED against HEAD**: `bb843f2` (code `c0ca17a`, 2026-07-07) — **after `260707_LAUNCH_PROFILES_FOR_EXPORTABLE_MCP_SAFE_TERMINALS` landed** (it rewrote config/launcher/web/index + tests). §1 Current State holds the current anchors; §5 phase snippets keep pre-LAUNCH_PROFILES line refs (use §1 + `git diff bb843f2 -- <file>`). Scope changes from the rework: CSRF (#2) is now RESOLVED by LAUNCH_PROFILES's `same_origin_guard` middleware; all other findings survived at new line numbers; data/icons/lifecycle files were untouched.
@@ -433,6 +433,23 @@ Parallel group [2,3,4,5] reviewed per-phase; 374 tests pass, 1 pre-existing fail
 | P5-2 | Low | `_SAFE_COLOR_RE` accepts unbounded-length alpha strings from own config. | Accepted — local trust boundary; no external attacker vector. |
 
 Per-phase review deferred to Step 9: Phase 6 — dead CSS removal (≤30 LOC, no executable code).
+
+### 2026-07-08 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer, Maintainability reviewer.
+4 findings (0 High, 0 Medium, 4 Low).
+QA verification: PASS (13 SC-specific tests + 361 full suite pass).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | cmd-metachar error message says "path contains..." not "args contain..." — slightly misleading. | Accepted — cosmetic; error correctly identifies the failure context. |
+| 2 | Low | `refreshCards()` pinned-sections fetch doesn't call `updateActionBar()` post-swap. | Accepted — edge within an edge; primary SC15 scenario fixed. |
+| 3 | Low | `config._extra` as monkey-patched instance attr is fragile for fresh `Config()` callers. | Accepted — documented with comment + test; all current callers use load→mutate→save. |
+| 4 | Low | Cache access style inconsistency between kiro tail_cache (index) and first_prompt_cache (destructured). | Accepted — pre-existing inherited style; not a regression from this plan. |
+
+Invoked on fully-executed plan; performed standalone holistic review with high effort (4 personas).
+Cycle 2 skipped — all findings Low + no auto-fixes needed.
 
 ## Harness Improvement Opportunities
 - Exploration output went stale across a multi-day gap because findings were anchored to `file:line` and the code was reworked in between — suggested change: when `/qexplore` output will be handed to a *deferred* `/qplan`, record the HEAD commit SHA the anchors were verified against, so `/qplan` can cheaply detect drift (git diff since that SHA) before trusting them. *(Adopted in this plan's header; propose promoting to the `/qexplore` Step 3 persist-intent rule.)*
