@@ -1180,3 +1180,220 @@ class TestDiscoverSingleFlight:
         assert call_count == 1, f"Expected 1 scan, got {call_count}"
         # All callers get the same result
         assert all(r == results[0] for r in results)
+
+
+# --- get_all_sessions_paginated tests ---
+
+from power_atlas.data import get_all_sessions_paginated
+
+
+class TestGetAllSessionsPaginated:
+    def test_basic_pagination_page1(self, mock_sessions, monkeypatch):
+        """25 sessions: page 1 returns 20, has_more=True."""
+        for i in range(25):
+            _write_session(
+                mock_sessions,
+                f"pag-{i:02d}",
+                "C:\\Projects\\Paginate",
+                updated_at=f"2026-06-{i+1:02d}T00:00:00Z",
+            )
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\Paginate", 25, "2026-06-25T00:00:00Z", "kiro-cli"),
+            ],
+        )
+
+        results, has_more = get_all_sessions_paginated(
+            page=1, page_size=20, enabled_providers={"kiro-cli"},
+        )
+        assert len(results) == 20
+        assert has_more is True
+
+    def test_basic_pagination_page2(self, mock_sessions, monkeypatch):
+        """25 sessions: page 2 returns 5, has_more=False."""
+        for i in range(25):
+            _write_session(
+                mock_sessions,
+                f"pag-{i:02d}",
+                "C:\\Projects\\Paginate",
+                updated_at=f"2026-06-{i+1:02d}T00:00:00Z",
+            )
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\Paginate", 25, "2026-06-25T00:00:00Z", "kiro-cli"),
+            ],
+        )
+
+        results, has_more = get_all_sessions_paginated(
+            page=2, page_size=20, enabled_providers={"kiro-cli"},
+        )
+        assert len(results) == 5
+        assert has_more is False
+
+    def test_pinned_at_top(self, mock_sessions, monkeypatch):
+        """Pinned sessions appear first regardless of page."""
+        for i in range(10):
+            _write_session(
+                mock_sessions,
+                f"pin-{i:02d}",
+                "C:\\Projects\\Pin",
+                updated_at=f"2026-06-{i+1:02d}T00:00:00Z",
+            )
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\Pin", 10, "2026-06-10T00:00:00Z", "kiro-cli"),
+            ],
+        )
+
+        # Pin the 2 oldest sessions
+        pinned_ids = ["pin-00", "pin-01"]
+        results, has_more = get_all_sessions_paginated(
+            page=1, page_size=20,
+            pinned_sessions=pinned_ids,
+            enabled_providers={"kiro-cli"},
+        )
+
+        # Pinned sessions should be at the top
+        pinned_results = [(s, p) for s, p in results if s.session_id in pinned_ids]
+        non_pinned_results = [(s, p) for s, p in results if s.session_id not in pinned_ids]
+
+        # Pinned come first in the list
+        for i, (s, _p) in enumerate(pinned_results):
+            assert results[i] == (s, _p)
+
+        assert len(pinned_results) == 2
+        assert len(non_pinned_results) == 8
+        assert has_more is False
+
+    def test_provider_filtering(self, mock_sessions, monkeypatch):
+        """Filter to a specific provider returns only that provider's sessions."""
+        # Create kiro-cli sessions via mock_sessions (the standard fixture)
+        _write_session(mock_sessions, "kiro-1", "C:\\Projects\\Multi", updated_at="2026-06-01T00:00:00Z")
+        _write_session(mock_sessions, "kiro-2", "C:\\Projects\\Multi", updated_at="2026-06-02T00:00:00Z")
+        session_cache.clear()
+
+        # Mock claude-code to return its own sessions
+        claude_session = Session(
+            "claude-1", "Claude Session", "C:\\Projects\\Multi",
+            "2026-06-03T00:00:00Z", "2026-06-03T00:00:00Z",
+            "hello", "last", "reply",
+        )
+
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\Multi", 2, "2026-06-02T00:00:00Z", "kiro-cli"),
+                ("C:\\Projects\\Multi", 1, "2026-06-03T00:00:00Z", "claude-code"),
+            ],
+        )
+
+        # Pre-populate cache for both providers
+        session_cache.put(
+            "C:\\Projects\\Multi",
+            [claude_session],
+            {},
+            provider="claude-code",
+        )
+
+        # Filter to claude-code only
+        results, has_more = get_all_sessions_paginated(
+            page=1, page_size=20, provider="claude-code",
+        )
+        assert len(results) == 1
+        assert results[0][0].session_id == "claude-1"
+        assert results[0][1] == "claude-code"
+        assert has_more is False
+
+    def test_empty_state(self, mock_sessions, monkeypatch):
+        """No sessions available → returns ([], False)."""
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [],
+        )
+
+        results, has_more = get_all_sessions_paginated(
+            page=1, page_size=20, enabled_providers={"kiro-cli"},
+        )
+        assert results == []
+        assert has_more is False
+
+    def test_deduplication(self, mock_sessions, monkeypatch):
+        """Same session visible from multiple cache paths → only one entry."""
+        # Write a session
+        _write_session(mock_sessions, "dup-1", "C:\\Projects\\Dup", updated_at="2026-06-01T00:00:00Z")
+        session_cache.clear()
+
+        # Load it into cache under kiro-cli
+        sessions = get_sessions("C:\\Projects\\Dup", "kiro-cli")
+        assert len(sessions) == 1
+
+        # Manually put the same session_id into cache under a different normalized path
+        # (simulating it being visible from two cache paths)
+        dup_session = Session(
+            "dup-1", "Duplicate", "C:\\Projects\\Dup",
+            "2026-06-01T00:00:00Z", "2026-06-01T00:00:00Z",
+            "hello", "last", "reply",
+        )
+        session_cache.put("C:\\Projects\\Dup\\Sub", [dup_session], {}, provider="kiro-cli")
+
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\Dup", 1, "2026-06-01T00:00:00Z", "kiro-cli"),
+                ("C:\\Projects\\Dup\\Sub", 1, "2026-06-01T00:00:00Z", "kiro-cli"),
+            ],
+        )
+
+        results, has_more = get_all_sessions_paginated(
+            page=1, page_size=20, enabled_providers={"kiro-cli"},
+        )
+        # Should have only 1 entry despite being in two cache paths
+        session_ids = [s.session_id for s, _ in results]
+        assert session_ids.count("dup-1") == 1
+        assert has_more is False
+
+    def test_enabled_providers_filter(self, mock_sessions, monkeypatch):
+        """Only sessions from enabled providers are returned."""
+        _write_session(mock_sessions, "en-1", "C:\\Projects\\En", updated_at="2026-06-01T00:00:00Z")
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\En", 1, "2026-06-01T00:00:00Z", "kiro-cli"),
+            ],
+        )
+
+        # kiro-cli sessions exist but we disable kiro-cli
+        results, has_more = get_all_sessions_paginated(
+            page=1, page_size=20,
+            enabled_providers={"claude-code"},
+        )
+        # kiro-cli sessions excluded since it's not in enabled_providers
+        kiro_sessions = [s for s, p in results if p == "kiro-cli"]
+        assert len(kiro_sessions) == 0
+
+    def test_sort_order_by_updated_at(self, mock_sessions, monkeypatch):
+        """Sessions are sorted by updated_at descending."""
+        _write_session(mock_sessions, "sort-old", "C:\\Projects\\Sort", updated_at="2026-01-01T00:00:00Z")
+        _write_session(mock_sessions, "sort-new", "C:\\Projects\\Sort", updated_at="2026-06-15T00:00:00Z")
+        _write_session(mock_sessions, "sort-mid", "C:\\Projects\\Sort", updated_at="2026-03-01T00:00:00Z")
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\Sort", 3, "2026-06-15T00:00:00Z", "kiro-cli"),
+            ],
+        )
+
+        results, _ = get_all_sessions_paginated(
+            page=1, page_size=20, enabled_providers={"kiro-cli"},
+        )
+        ids = [s.session_id for s, _ in results]
+        assert ids == ["sort-new", "sort-mid", "sort-old"]

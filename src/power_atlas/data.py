@@ -300,3 +300,109 @@ def get_first_prompt(session_id: str, provider: str = "kiro-cli", cwd: str = "")
     if mod is None:
         return ""
     return mod.get_first_prompt(session_id, cwd)
+
+
+def get_all_sessions_paginated(
+    page: int = 1,
+    page_size: int = 20,
+    provider: str | None = None,
+    pinned_sessions: list[str] | None = None,
+    enabled_providers: set[str] | None = None,
+) -> tuple[list[tuple[Session, str]], bool]:
+    """Return sessions across all workspaces, interleaved by updated_at.
+
+    Uses early-stopping: loads workspaces by recency until enough sessions
+    are collected for the requested page, avoiding loading ALL workspaces.
+
+    Args:
+        page: 1-based page number (applies to non-pinned sessions only)
+        page_size: number of non-pinned sessions per page
+        provider: filter to specific provider, None = all
+        pinned_sessions: session IDs to sort to top (always returned in full)
+        enabled_providers: set of enabled provider names to include
+
+    Returns:
+        ([(session, provider_name), ...], has_more)
+        Pinned sessions first (all of them), then paginated non-pinned.
+    """
+    page = max(1, page)
+    page_size = max(1, page_size)
+    pinned_set = set(pinned_sessions) if pinned_sessions else set()
+    target_count = page * page_size
+
+    # Determine which providers to check
+    if provider is not None:
+        providers_to_check = {provider: PROVIDERS[provider]} if provider in PROVIDERS else {}
+    else:
+        providers_to_check = dict(PROVIDERS)
+
+    # Filter by enabled_providers if specified
+    if enabled_providers is not None:
+        providers_to_check = {
+            name: mod for name, mod in providers_to_check.items()
+            if name in enabled_providers
+        }
+
+    # Collect all sessions with deduplication
+    seen: set[str] = set()
+    all_sessions: list[tuple[Session, str]] = []
+
+    def _collect(sessions: list[Session], prov_name: str) -> None:
+        for s in sessions:
+            if s.session_id not in seen:
+                seen.add(s.session_id)
+                all_sessions.append((s, prov_name))
+
+    # Pass 1: cache-only (no disk IO)
+    # NOTE: pinned sessions are found here because warmup_all() pre-loads their
+    # workspaces into the cache at app startup.
+    for prov_name in providers_to_check:
+        for norm_cwd in session_cache.get_loaded_cwds(prov_name):
+            cached = session_cache.get(norm_cwd, prov_name)
+            if cached:
+                _collect(cached, prov_name)
+
+    # Pass 2: load uncached by recency, early stop
+    workspace_data = discover_workspaces_with_counts(provider=None)
+    loaded_cwds_by_provider: dict[str, set[str]] = {
+        prov_name: session_cache.get_loaded_cwds(prov_name)
+        for prov_name in providers_to_check
+    }
+
+    for cwd, _count, _updated_at, ws_provider in workspace_data:
+        if ws_provider not in providers_to_check:
+            continue
+        norm_cwd = _normalize_path(cwd)
+        if norm_cwd in loaded_cwds_by_provider[ws_provider]:
+            continue  # already collected in Pass 1
+
+        # Load from disk
+        sessions = get_sessions(cwd, ws_provider)
+        _collect(sessions, ws_provider)
+
+        # Early stop: count non-pinned sessions collected so far
+        non_pinned_count = sum(1 for s, _ in all_sessions if s.session_id not in pinned_set)
+        if non_pinned_count >= target_count + page_size:
+            break
+
+    # Sort all collected sessions by updated_at desc
+    # Normalize 'Z' to '+00:00' for consistent string comparison
+    def _sort_key(item: tuple[Session, str]) -> str:
+        ua = item[0].updated_at
+        if ua.endswith("Z"):
+            ua = ua[:-1] + "+00:00"
+        return ua
+
+    all_sessions.sort(key=_sort_key, reverse=True)
+
+    # Split into pinned and non-pinned
+    pinned_items = [(s, p) for s, p in all_sessions if s.session_id in pinned_set]
+    non_pinned = [(s, p) for s, p in all_sessions if s.session_id not in pinned_set]
+
+    # Paginate non-pinned
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = non_pinned[start:end]
+    has_more = end < len(non_pinned)
+
+    return (pinned_items + page_items, has_more)
