@@ -334,11 +334,11 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
             msg = obj.get("message", {})
             content = msg.get("content", "")
             if isinstance(content, str) and content:
-                last_reply_tail = content[-100:]
+                last_reply_tail = content[:100]
             elif isinstance(content, list):
                 text = _extract_text_from_content(content)
                 if text:
-                    last_reply_tail = text[-100:]
+                    last_reply_tail = text[:100]
 
         elif obj_type == "user" and not last_prompt:
             # Skip meta/command messages

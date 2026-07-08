@@ -235,7 +235,7 @@ def _extract_from_history(history: list) -> tuple[str, str, str]:
         elif role == "assistant":
             text = _extract_assistant_text(content)
             if text:
-                last_reply_tail = text[-100:]
+                last_reply_tail = text[:100]
 
     return first_prompt, last_prompt, last_reply_tail
 

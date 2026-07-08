@@ -179,7 +179,7 @@ def _extract_prompts(jsonl_path: Path) -> tuple[str, str, str]:
         if not last_reply_tail:
             text = _extract_content(line, "AssistantMessage")
             if text:
-                last_reply_tail = text[-100:]
+                last_reply_tail = text[:100]
         if not last_prompt:
             text = _extract_content(line, "Prompt")
             if text:
