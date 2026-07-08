@@ -5,6 +5,7 @@ as PNGs in CONFIG_DIR/icons/<launcher_id>.png. Falls back to bundled
 default icons (terminal for CLI tools, generic app for GUI).
 """
 
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 from .config import CONFIG_DIR
 
 ICONS_DIR = CONFIG_DIR / "icons"
+
+_SAFE_COLOR_RE = re.compile(r'^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$|^[a-zA-Z]+$')
 
 # Bundled fallback icons are SVG data URIs served inline (no file needed)
 _TERMINAL_ICON = (
@@ -68,7 +71,7 @@ def remove_icon(launcher_id: str) -> None:
 def default_icon_svg(is_terminal: bool, color: str = "") -> str:
     """Return the appropriate default SVG icon markup, optionally colored."""
     svg = _TERMINAL_ICON if is_terminal else _APP_ICON
-    if color:
+    if color and _SAFE_COLOR_RE.match(color):
         svg = svg.replace('stroke="currentColor"', f'stroke="{color}"')
     return svg
 
@@ -96,7 +99,7 @@ def _resolve_cmd_to_exe(cmd_path: Path) -> Path | None:
     # Pattern 1: %~dp0-relative paths (Electron/scoop shim pattern)
     # Matches both quoted and unquoted: "%~dp0..\app.exe" or %~dp0..\app.exe
     for match in _re.finditer(r'["\']?%~dp0([^"\s\r\n]+\.exe)["\']?', content, _re.IGNORECASE):
-        rel = match.group(1)
+        rel = match.group(1).lstrip("\\/")
         candidate = (cmd_dir / rel).resolve()
         if candidate.is_file():
             return candidate
@@ -139,6 +142,11 @@ def _resolve_binary(command: str) -> Path | None:
     found = shutil.which(token)
     if found:
         return Path(found)
+    # Try progressively-shorter prefixes to resolve space-containing paths with args
+    for i in range(len(parts), 1, -1):
+        p = Path(" ".join(parts[:i]))
+        if p.is_file():
+            return p
     return None
 
 

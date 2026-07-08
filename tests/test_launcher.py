@@ -974,3 +974,140 @@ class TestMalformedInputCrashes:
         assert result[0] == "--foo"
         # posix=False retains the quotes as part of the token
         assert "bar baz" in result[1]
+
+
+class TestCmdMetacharInArgs:
+    """SC16: cmd fallback rejects args containing metacharacters."""
+
+    def test_cmd_rejects_metacharacters_in_args(self):
+        """Verify cmd fallback returns None when args contain & or other metacharacters."""
+        # The cmd path uses the terminal stem "cmd"
+        result = _build_command("C:\\cmd.exe", "C:\\safe_path", ["kiro-cli", "chat", "--label", "a&b"], wt_profile="PowerShell")
+        assert result is None
+
+    def test_cmd_rejects_pipe_in_args(self):
+        result = _build_command("C:\\cmd.exe", "C:\\safe_path", ["kiro-cli", "chat", "|", "evil"], wt_profile="PowerShell")
+        assert result is None
+
+    def test_cmd_allows_safe_args(self):
+        result = _build_command("C:\\cmd.exe", "C:\\safe_path", ["kiro-cli", "chat", "--resume-id", "sess_abc-123"], wt_profile="PowerShell")
+        assert result is not None
+
+
+class TestSessionIdLengthBound:
+    """SC18: session_id > 128 chars is rejected."""
+
+    @patch("shutil.which", return_value="C:\\kiro-cli.exe")
+    def test_session_id_length_bound(self, _, tmp_path):
+        cwd = str(tmp_path)
+        long_id = "a" * 129
+        result = launch_session(cwd, session_id=long_id, launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is False
+        assert "Invalid session ID" in result.error
+
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_session_id_at_128_is_valid(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        ok_id = "a" * 128
+        result = launch_session(cwd, session_id=ok_id, launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is True
+
+
+class TestSanitizeTitleExtended:
+    """SC19: title sanitizer strips ;, $, backtick."""
+
+    def test_sanitize_title_strips_extended(self):
+        assert _sanitize_title("hello;world") == "helloworld"
+        assert _sanitize_title("cost$100") == "cost100"
+        assert _sanitize_title("run`cmd`") == "runcmd"
+        assert _sanitize_title("a;b$c`d&e|f") == "abcdef"
+        # Existing chars still stripped
+        assert _sanitize_title('he"llo') == "hello"
+        assert _sanitize_title("it's") == "its"
+
+
+class TestDefaultIconSvgColorValidation:
+    """SC20: invalid color strings must not be injected into SVG."""
+
+    def test_default_icon_svg_rejects_invalid_color(self):
+        from power_atlas.icons import default_icon_svg
+        malicious = '"><script>alert(1)</script>'
+        svg = default_icon_svg(True, color=malicious)
+        assert malicious not in svg
+        assert 'stroke="currentColor"' in svg
+
+    def test_default_icon_svg_accepts_valid_hex_color(self):
+        from power_atlas.icons import default_icon_svg
+        svg = default_icon_svg(True, color="#ff5500")
+        assert 'stroke="#ff5500"' in svg
+
+    def test_default_icon_svg_accepts_named_color(self):
+        from power_atlas.icons import default_icon_svg
+        svg = default_icon_svg(False, color="red")
+        assert 'stroke="red"' in svg
+
+    def test_default_icon_svg_rejects_color_with_parens(self):
+        from power_atlas.icons import default_icon_svg
+        svg = default_icon_svg(True, color="url(evil)")
+        assert "url(evil)" not in svg
+        assert 'stroke="currentColor"' in svg
+
+
+class TestResolveBinarySpacedPath:
+    """SC21: resolve binary when path contains spaces and has trailing args."""
+
+    def test_resolve_binary_spaced_path_with_args(self, tmp_path):
+        from power_atlas.icons import _resolve_binary
+        # Create a file at a space-containing path
+        spaced_dir = tmp_path / "path with spaces"
+        spaced_dir.mkdir()
+        app = spaced_dir / "app.exe"
+        app.write_text("fake")
+        # Command string: "path with spaces/app.exe --flag"
+        cmd = f"{app} --flag"
+        result = _resolve_binary(cmd)
+        assert result is not None
+        assert result.name == "app.exe"
+
+    def test_resolve_binary_spaced_path_no_file(self, tmp_path):
+        from power_atlas.icons import _resolve_binary
+        # Non-existent spaced path should return None
+        cmd = "C:\\nonexistent path\\app.exe --flag"
+        result = _resolve_binary(cmd)
+        assert result is None
+
+
+class TestResolveCmdToExeDp0LeadingBackslash:
+    """I4: %~dp0\\node.exe resolves correctly (leading backslash stripped)."""
+
+    def test_resolve_cmd_to_exe_dp0_leading_backslash(self, tmp_path):
+        # Create: shim_dir/kiro.cmd referencing %~dp0\Kiro.exe (leading backslash)
+        shim_dir = tmp_path / "shim"
+        shim_dir.mkdir()
+        exe = shim_dir / "Kiro.exe"
+        exe.write_text("fake exe")
+
+        cmd_file = shim_dir / "kiro.cmd"
+        # Note the leading backslash after %~dp0 — this is what the fix handles
+        cmd_file.write_text('@"%~dp0\\Kiro.exe" %*\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is not None
+        assert result.name == "Kiro.exe"
+        assert result.is_file()
+
+    def test_resolve_cmd_to_exe_dp0_leading_forward_slash(self, tmp_path):
+        """Also handles forward slash: %~dp0/Kiro.exe"""
+        shim_dir = tmp_path / "shim"
+        shim_dir.mkdir()
+        exe = shim_dir / "Kiro.exe"
+        exe.write_text("fake exe")
+
+        cmd_file = shim_dir / "kiro.cmd"
+        cmd_file.write_text('@"%~dp0/Kiro.exe" %*\n')
+
+        result = _resolve_cmd_to_exe(cmd_file)
+        assert result is not None
+        assert result.name == "Kiro.exe"

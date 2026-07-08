@@ -373,7 +373,7 @@ def launch_session(
     if cwd and cwd != "." and not Path(cwd).exists():
         return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
 
-    if session_id and not _SESSION_ID_RE.match(session_id):
+    if session_id and (len(session_id) > 128 or not _SESSION_ID_RE.match(session_id)):
         return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
 
     # Parse default_args once (before both terminal and non-terminal branches)
@@ -498,7 +498,7 @@ def launch_batch(
 
 
 _CMD_METACHAR_RE = re.compile(r'[&|<>^%"]')
-_TITLE_UNSAFE_RE = re.compile(r'["\'&|]')
+_TITLE_UNSAFE_RE = re.compile(r'[\"\'&|;$`]')
 
 
 def _sanitize_title(title: str) -> str:
@@ -584,7 +584,8 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
         if title:
             safe = _sanitize_title(title).replace("'", "''")
             script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
-        script += f"Set-Location -LiteralPath '{escaped_cwd}'; & {' '.join(kiro_args)}"
+        invocation = " ".join("'" + a.replace("'", "''") + "'" for a in kiro_args)
+        script += f"Set-Location -LiteralPath '{escaped_cwd}'; & {invocation}"
         return [terminal, "-NoExit", "-Command", script]
 
     # Linux terminals via dispatch table
@@ -597,6 +598,9 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
     if _CMD_METACHAR_RE.search(cwd):
         return None
     kiro_cmd = " ".join(kiro_args)
+    # _CMD_METACHAR_RE is cmd.exe-specific; reject args containing its metacharacters
+    if _CMD_METACHAR_RE.search(kiro_cmd):
+        return None
     prefix = f"title {_sanitize_title(title)}&& " if title else ""
     return [terminal, "/k", f'{prefix}cd /d "{cwd}" && {kiro_cmd}']
 

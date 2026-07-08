@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 
 import uvicorn
 
@@ -323,11 +324,12 @@ def main() -> None:
         "-f", "--foreground", action="store_true",
         help="Run in this terminal instead of detaching to the background",
     )
-    parser.add_argument(
+    action_group = parser.add_mutually_exclusive_group()
+    action_group.add_argument(
         "--stop", action="store_true",
         help="Stop the running PowerAtlas instance",
     )
-    parser.add_argument(
+    action_group.add_argument(
         "--restart", action="store_true",
         help="Restart the running PowerAtlas instance",
     )
@@ -338,9 +340,14 @@ def main() -> None:
         return
 
     if args.restart:
+        old_pid = _read_pid()
         _stop_running()
-        import time
-        time.sleep(0.5)
+        deadline = time.monotonic() + 5.0
+        while old_pid and _pid_alive(old_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if old_pid and _pid_alive(old_pid):
+            print("Old instance still running after 5s; not restarting.", file=sys.stderr)
+            return
         # Fall through to start a new instance
         _single_instance_guard()
         _relaunch_detached()
