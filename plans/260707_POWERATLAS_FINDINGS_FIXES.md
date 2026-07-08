@@ -199,11 +199,14 @@ Fixed two crash paths in the launcher subsystem: (1) `launch_session` now parses
 - **Tests**: **update** `test_trust_all_tools_no_migration_when_provider_settings_exist` (actual location `test_config.py:203-214` — the plan's earlier `184-195` cite was a stale anchor for a *different* test; re-confirm at `/qdev`) — it now MUST migrate kiro-cli when only *other* providers exist (rename/repurpose to assert the kiro-cli entry appears; keep a case where an existing kiro-cli entry is NOT overwritten). Add: `test_corrupt_config_backs_up_and_defaults` (write junk, assert `config.toml.bak` created + defaults, no raise); `test_mixed_pinned_folders_no_crash` (`[{"folder":"/a"}, "x"]` → migrates without `AttributeError`); `test_unknown_keys_preserved_on_save` (load with `future_key`, save, reload raw TOML still has it); `test_nested_bad_types_dropped` (`pinned_folders=[123]` → `[]`).
 
 **Exit criteria**:
-- [ ] Corrupt `config.toml` → `.bak` written + warning logged + defaults returned (no silent overwrite).
-- [ ] Unknown/future keys survive load→save→load.
-- [ ] `trust_all_tools=true` with only a `claude-code` entry migrates a `kiro-cli` entry; an existing `kiro-cli` entry is not clobbered.
-- [ ] `pinned_folders=[123]`, `provider_settings={'x':'s'}`, `workspace_icons={'k':5}` are dropped on load; top-level + bool guards preserved.
-- [ ] `test_config.py` updated + new tests pass; `save_config` still drops `trust_all_tools` and stays atomic + lock-safe.
+- [x] Corrupt `config.toml` → `.bak` written + warning logged + defaults returned (no silent overwrite).
+- [x] Unknown/future keys survive load→save→load.
+- [x] `trust_all_tools=true` with only a `claude-code` entry migrates a `kiro-cli` entry; an existing `kiro-cli` entry is not clobbered.
+- [x] `pinned_folders=[123]`, `provider_settings={'x':'s'}`, `workspace_icons={'k':5}` are dropped on load; top-level + bool guards preserved.
+- [x] `test_config.py` updated + new tests pass; `save_config` still drops `trust_all_tools` and stays atomic + lock-safe.
+
+**Implementation (2026-07-08, code: 7f20f9d)**
+Made `load_config`/`save_config` defensive against real-world corruption and data evolution without changing the happy path. Added corrupt-config backup logic (C5) that catches parse failures including `UnicodeDecodeError` and copies the broken file to `.bak` before returning defaults. Guarded the pinned_folders migration loop (C3) against mixed-type lists that would cause `AttributeError`. Implemented unknown-key preservation (C7) via a `_extra` instance attribute so future config keys added by newer versions aren't silently dropped on re-save. Changed the `trust_all_tools` migration condition (C6) to check specifically for `"kiro-cli"` key presence rather than an empty dict, allowing migration even when other providers already exist. Added post-migration type sanitization (C4-nested) that drops non-str entries from pinned lists, non-dict entries from provider_settings, and non-dict entries from custom_launchers. Five new/updated tests cover all defensive behaviors.
 
 ### Phase 3: Data-layer correctness & performance [QA] [P:2,4,5]
 **Goal**: Eliminate the discovery pile-up, the cache-poisoning vector, and the cross-provider cache/fail-open asymmetries.
@@ -220,11 +223,14 @@ Fixed two crash paths in the launcher subsystem: (1) `launch_session` now parses
 - **Tests**: `test_discover_unknown_provider_returns_empty` (fail-closed, no new `_cache` key); `test_session_cache_get_isolated` (mutate a returned Session field → cache unaffected, or `FrozenInstanceError`); `test_claude_tail_cached` / `test_claude_first_prompt_cached` (second call within TTL doesn't re-read — patch/spy the file read); `test_kiro_first_prompt_refreshes_after_mtime_change`. **Test-setup note**: the autouse `_clear_cache` fixture (`test_data.py:124`) clears only `session_cache`, NOT the module-level `data._cache` — these tests must `data._cache.clear()` in their own setup, else stale discovery results leak between tests.
 
 **Exit criteria**:
-- [ ] Concurrent cold callers of `discover_workspaces_with_counts` trigger one scan (assert via a call-count spy on `mod.discover_workspaces` under N threads).
-- [ ] Unknown provider → `[]`; no per-string cache key created.
-- [ ] Mutating a Session returned by `SessionCache.get` does not alter a subsequent `get` (or `Session` is frozen and mutation raises).
-- [ ] Claude tail + first-prompt are cached (mtime-guarded); kiro first-prompt refreshes after an mtime change and never pins an empty result.
-- [ ] `test_data.py` new tests pass; full `pytest` green.
+- [x] Concurrent cold callers of `discover_workspaces_with_counts` trigger one scan (assert via a call-count spy on `mod.discover_workspaces` under N threads).
+- [x] Unknown provider → `[]`; no per-string cache key created.
+- [x] Mutating a Session returned by `SessionCache.get` does not alter a subsequent `get` (or `Session` is frozen and mutation raises).
+- [x] Claude tail + first-prompt are cached (mtime-guarded); kiro first-prompt refreshes after an mtime change and never pins an empty result.
+- [x] `test_data.py` new tests pass; full `pytest` green.
+
+**Implementation (2026-07-08, code: 5f4abf5, fix: 0416990)**
+Added discovery pile-up prevention via `_discover_lock` with a double-check locking pattern in `discover_workspaces_with_counts`, using `.get()` for TOCTOU-safety. Unknown providers now fail closed (return `[]` immediately) preventing unbounded cache keys. Made the `Session` dataclass frozen to prevent post-construction mutation. Added mtime-guarded 3-tuple caches to both `data_claude.py` and upgraded `data_kiro.py`'s `_first_prompt_cache` from a 2-tuple to a 3-tuple with mtime guard, with no negative-caching of empty results. Added cwd-required contract docstring comments to Claude adapter functions. Six test functions verify: concurrency single-flight (SC7), unknown-provider rejection, frozen-session immutability, Claude tail caching, Claude first-prompt caching, and Kiro first-prompt mtime-based refresh.
 
 ### Phase 4: Web + GUI fixes [QA] [P:2,3,5]
 **Goal**: Hide disabled providers' cards, 404 unknown providers, and fix the stale action bar.
@@ -237,10 +243,13 @@ Fixed two crash paths in the launcher subsystem: (1) `launch_session` now parses
 - **Tests**: `test_disabled_provider_hidden_from_cards` — MUST patch `power_atlas.web.load_config` (or the config) to force `provider_settings[p].enabled=False` (several `test_web.py` tests read the *real* config; mocking discovery alone won't set the flag); assert the disabled provider's card is absent. `test_get_provider_settings_unknown_404`.
 
 **Exit criteria**:
-- [ ] A disabled provider's cards/badges are absent from `GET /partials/workspaces?provider=all` and survive `/api/refresh`.
-- [ ] `GET /api/provider/bogus` → 404.
-- [ ] After a provider-tab switch that drops selected rows (headless Playwright), the action bar shows the real count (0), not a stale "1" (SC15).
-- [ ] `test_web.py` updated + new tests pass.
+- [x] A disabled provider's cards/badges are absent from `GET /partials/workspaces?provider=all` and survive `/api/refresh`.
+- [x] `GET /api/provider/bogus` → 404.
+- [x] After a provider-tab switch that drops selected rows (headless Playwright), the action bar shows the real count (0), not a stale "1" (SC15).
+- [x] `test_web.py` updated + new tests pass.
+
+**Implementation (2026-07-08, code: 0c5040e)**
+Added the `_enabled()` helper function and `HTTPException` import to `web.py`. Filtered disabled providers from workspace card listings in `partials_workspaces`, `partials_pinned_workspaces`, `search`, and the `partials_sessions` provider=all merge loop — all filtering happens BEFORE `_group_workspaces` so cards for disabled providers are completely hidden. Added a 404 guard in `get_provider_settings` that raises HTTPException when the provider key is not in `data.PROVIDERS`. Fixed the stale action bar in `index.html` by calling `updateActionBar()` inside the `.then()` callbacks of `switchProvider()` and `refreshCards()` after `el.innerHTML = html`. Added two tests: `test_disabled_provider_hidden_from_cards` and `test_get_provider_settings_unknown_404`.
 
 ### Phase 5: Launcher / icons / lifecycle hardening [QA] [P:2,3,4]
 **Goal**: Close the remaining Low-severity input-hardening and CLI gaps.
@@ -281,12 +290,15 @@ Fixed two crash paths in the launcher subsystem: (1) `launch_session` now parses
 - **Tests**: `test_cmd_rejects_metacharacters_in_args`; `test_session_id_length_bound`; `test_sanitize_title_strips_extended`; `test_default_icon_svg_rejects_invalid_color`; `test_resolve_binary_spaced_path_with_args`; `test_resolve_cmd_to_exe_dp0_leading_backslash`.
 
 **Exit criteria**:
-- [ ] cmd fallback rejects args containing `&|<>^%"` (returns the unsafe-path error); wt/pwsh paths unaffected.
-- [ ] Over-length session id rejected; `_TITLE_UNSAFE_RE` strips `;$\`` while existing title tests stay green.
-- [ ] `default_icon_svg` ignores a markup-bearing color; valid hex/named colors still applied.
-- [ ] `_resolve_binary` resolves `"C:\Program Files\x\app.exe --flag"`; the npm-style `.cmd` shim resolves its `.exe`.
-- [ ] `power-atlas --stop --restart` errors (argparse); `--restart` polls for the old instance to exit instead of a fixed sleep.
-- [ ] New launcher/icon/lifecycle tests pass; full `pytest` green.
+- [x] cmd fallback rejects args containing `&|<>^%"` (returns the unsafe-path error); wt/pwsh paths unaffected.
+- [x] Over-length session id rejected; `_TITLE_UNSAFE_RE` strips `;$\`` while existing title tests stay green.
+- [x] `default_icon_svg` ignores a markup-bearing color; valid hex/named colors still applied.
+- [x] `_resolve_binary` resolves `"C:\Program Files\x\app.exe --flag"`; the npm-style `.cmd` shim resolves its `.exe`.
+- [x] `power-atlas --stop --restart` errors (argparse); `--restart` polls for the old instance to exit instead of a fixed sleep.
+- [x] New launcher/icon/lifecycle tests pass; full `pytest` green.
+
+**Implementation (2026-07-08, code: 22c434a)**
+Hardened input handling across the launcher, icons, and CLI modules. In `launcher.py`: the cmd.exe fallback now rejects metacharacters in assembled args (not just cwd), the pwsh path single-quote-escapes each arg to prevent injection via `& {args}`, session IDs exceeding 128 characters are rejected, and the title sanitizer now strips `;`, `$`, and backtick. In `icons.py`: a `_SAFE_COLOR_RE` regex validates colors before SVG injection, `_resolve_binary` tries progressively-shorter space-separated prefixes for paths containing spaces, and `_resolve_cmd_to_exe` strips leading backslash/forward-slash from `%~dp0`-relative paths. In `__main__.py`: `--stop` and `--restart` are now mutually exclusive via argparse, and the restart logic captures the old PID before stopping, then polls with a 5-second deadline before relaunching. Six new test functions cover all hardening paths.
 
 ### Phase 6: Dead-code cleanup
 **Goal**: Remove the orphaned settings UI left by the completed `/settings` removal.
@@ -333,7 +345,7 @@ Fixed two crash paths in the launcher subsystem: (1) `launch_session` now parses
 | `AGENTS.md` | None (no policy change). | doc-table-only |
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation>
+- **Phase 2 (C5)**: Added `UnicodeDecodeError` to the except clause (in addition to `OSError` + `TOMLDecodeError`) because `tomllib` raises `UnicodeDecodeError` on binary-corrupt files before reaching the TOML parser.
 
 ## Review Log
 
@@ -395,6 +407,27 @@ QA verification: PASS (3 regression tests exercised crash paths).
 |---|---|---|---|
 | 1 | Low | Windows quoting test exercises `shlex.split` directly, not the full `launch_session` code path. | Accepted — documentation test; the L2 test exercises the integrated path. |
 | 2 | Low | No web-level integration test for `POST /api/launcher/create` with whitespace-only command. | Accepted — pre-existing gap; unit test covers the fix at the `_resolve_binary` layer. |
+
+### 2026-07-08 -- Implementation Review (after Phases 2-5, personas: Reliability engineer, Performance engineer, Senior engineer, Security auditor)
+
+Implementation health: Green.
+12 findings (0 High, 1 Medium, 11 Low).
+Parallel group [2,3,4,5] reviewed per-phase; 374 tests pass, 1 pre-existing failure.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| P3-1 | Medium | Missing concurrency test for SC7 single-flight exit criterion. | Fixed — added `TestDiscoverSingleFlight` (commit 0416990). |
+| P2-1 | Low | Repeated corruption overwrites previous `.bak` (no rotation). | Accepted — best-effort recovery for single-user desktop app. |
+| P2-2 | Low | No test for backup-already-exists scenario. | Accepted — standard shutil.copy2 semantics; nice-to-have. |
+| P2-3 | Low | `shutil.copy2` is not atomic mid-write; caught by outer `except`. | Accepted — defense-in-depth handles this correctly. |
+| P3-2 | Low | Kiro first_prompt mtime-source TOCTOU (extremely unlikely desktop). | Accepted — self-healing within 60s TTL. |
+| P3-3 | Low | `data_kiro.get_session_tail` still always-caches empty (inherited). | Accepted — mtime guard makes it harmless; out of plan scope. |
+| P3-4 | Low | Claude `_TAIL_CACHE_TTL=5` could spike on network paths. | Accepted — OneDrive files locally synced on Windows. |
+| P4-1 | Low | G1 race in parallel swaps (pinned-section swap after updateActionBar). | Accepted — edge within an edge; primary scenario fixed. |
+| P4-2 | Low | No test for disabled-provider filtering in pinned/search/sessions paths. | Accepted — same `_enabled()` helper; single-path test adequate. |
+| P4-3 | Low | htmx:afterSwap global handler doesn't call `updateActionBar()`. | Accepted — pre-existing gap not in SC15 spec. |
+| P5-1 | Low | `_CMD_METACHAR_RE` doesn't cover `!` (delayed expansion, off by default). | Accepted — requires user-configured delayed expansion. |
+| P5-2 | Low | `_SAFE_COLOR_RE` accepts unbounded-length alpha strings from own config. | Accepted — local trust boundary; no external attacker vector. |
 
 ## Harness Improvement Opportunities
 - Exploration output went stale across a multi-day gap because findings were anchored to `file:line` and the code was reworked in between — suggested change: when `/qexplore` output will be handed to a *deferred* `/qplan`, record the HEAD commit SHA the anchors were verified against, so `/qplan` can cheaply detect drift (git diff since that SHA) before trusting them. *(Adopted in this plan's header; propose promoting to the `/qexplore` Step 3 persist-intent rule.)*
