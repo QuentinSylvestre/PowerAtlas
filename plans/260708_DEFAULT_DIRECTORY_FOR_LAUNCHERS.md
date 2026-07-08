@@ -1,7 +1,7 @@
 # Default Directory for Launchers
 
 > **Date**: 2026-07-08
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete
 > **Scope**: Add global and per-provider default directory settings so providers can launch without workspace selection
 
 ---
@@ -485,3 +485,53 @@ default_directory = ""  # Per-provider override (empty = use global)
 | 8 | Low | Profile modal discoverability of "default directory" may confuse users | Noted — hint text already included in the HTML label; acceptable for v1 |
 
 Personas: Senior engineer, Architect, Reliability engineer, End-user advocate.
+
+
+
+---
+
+## Implementation Notes
+
+Implementation (2026-07-08)
+
+All 7 plan steps implemented in one pass:
+1. Config.py: Added `default_directory: str = ""` to Config dataclass with sanitization (strip control chars + trim whitespace) in `load_config()`.
+2. Web.py: Updated GET `/api/provider/{key}` to return `default_directory` (with `setdefault` for legacy entries), POST `/api/provider/save` to validate and store it (max 512 chars, no control chars), GET `/api/settings` to include it, `_SETTING_TYPES` whitelist expanded, and `save_setting` gained string-specific validation for all str-typed settings.
+3. Index.html: Added `_globalDefaultDirectory` JS variable from template context, made `launcherCwd` editable for providers in `openProviderLauncherModal`, included `default_directory` with `.trim()` in `saveLauncher` payload, implemented fallback chain in `runLauncherById` (per-provider > global > non-terminal '.' > error), updated `refreshSettings` to sync `_globalDefaultDirectory`, and updated `editProfile`/`saveProfile` for global default_directory field in profile modal.
+4. Launch profile modal: Added "Default directory" input with maxlength=512 and hint text.
+5. Tests: 4 new config tests (round-trip, default empty, control chars sanitized, whitespace stripped) + 9 new web tests (provider save/get with default_directory, settings includes it, save-setting works, validation rejects too-long and control chars). 1 existing test updated (expected keys set).
+6. README: Config example updated with `default_directory` at global and per-provider levels.
+
+Auto-fixes applied from review:
+- Fixed race condition in `saveProfile` (sequenced saves with `.then()` chain)
+- Added client-side `.trim()` on provider `default_directory` before sending/caching
+- Added `maxlength="512"` to `launcherCwd` input in launcher modal
+- Added missing test for control chars in provider directory save
+
+## Implementation Divergences from Plan
+
+None — implementation follows the plan exactly.
+
+## Review Log
+
+### 2026-07-08 -- Implementation Review (after Phase 1, personas: Senior engineer, End-user advocate, Reliability engineer, Security auditor)
+
+Implementation health: Green.
+10 findings (0 High, 2 Medium, 6 Low, 2 Info). High-effort review (4 personas).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `saveProfile` fires default_directory save concurrently causing race with settings refresh | Fixed — sequenced saves with `.then()` chain before fetching settings |
+| 2 | Medium | JS cache stores raw form values; untrimmed paths used verbatim by fallback chain | Fixed — added `.trim()` on `launcherCwd` value before sending |
+| 3 | Low | No test for control characters in per-provider `default_directory` save endpoint | Fixed — added `test_save_provider_directory_control_chars` |
+| 4 | Low | `launcherCwd` input has no `maxlength` attribute (backend enforces 512 but no client feedback) | Fixed — added `maxlength="512"` to the input |
+| 5 | Low | No hint text on `launcherCwd` for provider use explaining the field's purpose | Noted — label text "Working directory" is sufficient for power-user audience |
+| 6 | Low | Error message "click gear" ambiguous about which gear icon to click | Noted — acceptable for v1; both gears lead to relevant settings |
+| 7 | Low | `profileDefaultDir` shows same global value regardless of which profile is edited | Noted — by-design per plan; hint text clarifies |
+| 8 | Low | No observability for which directory was chosen in fallback chain | Noted — low priority for personal desktop tool |
+| 9 | Low | `refreshSettings` uses `!==undefined` check; `!=null` would be more robust | Noted — no bug due to `||''` in consumer; cosmetic |
+| 10 | Info | XSS/CSRF/path-traversal protections adequate for local desktop app | No action needed |
+
+Cycle 2 skipped — remaining findings all Low + auto-fixes purely mechanical.
+
+QA verification: PASS (6 API surfaces verified, 10 HTML output checks passed).
