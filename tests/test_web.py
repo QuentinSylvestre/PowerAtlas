@@ -1491,3 +1491,38 @@ def test_profile_metacharacter_name_roundtrip(mock_load, mock_save, client):
     saved = mock_save.call_args[0][0]
     assert len(saved.launch_profiles) == 2
     assert saved.launch_profiles[1].name == xss_name
+
+
+
+# --- Phase 4 (findings fixes): disabled provider cards and unknown provider 404 ---
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_disabled_provider_hidden_from_cards(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Disabling a provider hides its workspace cards from the main listing."""
+    from power_atlas.config import Config
+    ws_kiro = str(tmp_path / "kiro-proj")
+    ws_claude = str(tmp_path / "claude-proj")
+    mock_config.return_value = Config(provider_settings={
+        "claude-code": {"default_args": "", "color": "", "enabled": False},
+    })
+    mock_discover.return_value = [
+        (ws_kiro, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (ws_claude, 3, "2026-01-01T00:00:00Z", "claude-code"),
+    ]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # kiro workspace should be visible
+    assert "kiro-proj" in resp.text
+    # claude workspace should be hidden because its only provider is disabled
+    assert "claude-proj" not in resp.text
+
+
+def test_get_provider_settings_unknown_404(client):
+    """GET /api/provider/bogus returns 404 for unknown providers."""
+    resp = client.get("/api/provider/bogus")
+    assert resp.status_code == 404

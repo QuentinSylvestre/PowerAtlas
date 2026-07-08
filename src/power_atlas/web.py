@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -44,6 +44,12 @@ def _get_provider_color(provider: str, config) -> str:
     """Return user-configured color for a provider, falling back to PROVIDER_COLORS."""
     user_color = config.provider_settings.get(provider, {}).get("color", "")
     return user_color or PROVIDER_COLORS.get(provider, "#888")
+
+
+def _enabled(config, prov: str) -> bool:
+    """Return whether a provider is enabled in the config."""
+    return config.provider_settings.get(prov, {}).get("enabled", True)
+
 
 def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -> list[dict]:
     """Group flat (cwd, count, updated_at, provider) rows into one entry per workspace.
@@ -299,6 +305,8 @@ async def partials_pinned_workspaces(request: Request, provider: str = "all", fr
                 all_existing_norms.add(_normalize_path(folder))
         # Filter to pinned paths only
         pinned_data = [(c, n, u, p) for c, n, u, p in all_workspace_data if _normalize_path(c) in pinned_norm_paths]
+        # Filter out disabled providers
+        pinned_data = [(c, n, u, p) for c, n, u, p in pinned_data if _enabled(config, p)]
         # Group by normalized path
         grouped = _group_workspaces(pinned_data, config)
 
@@ -365,6 +373,9 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     # Filter to non-pinned workspaces only (by normalized path)
     other_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_norm_paths]
 
+    # Filter out disabled providers
+    other_data = [(c, n, u, p) for c, n, u, p in other_data if _enabled(config, p)]
+
     # Group by normalized path
     grouped = _group_workspaces(other_data, config)
 
@@ -423,6 +434,8 @@ async def search(request: Request, q: str = ""):
 
     config = load_config()
     matched = [(c, n, u, p) for c, n, u, p in workspace_data if query in c.lower()]
+    # Filter out disabled providers
+    matched = [(c, n, u, p) for c, n, u, p in matched if _enabled(config, p)]
 
     # Search pinned sessions by title across all providers
     pinned_rows = ""
@@ -550,6 +563,8 @@ async def api_available_providers():
 
 @app.get("/api/provider/{key}")
 async def get_provider_settings(key: str):
+    if key not in data.PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown provider")
     config = load_config()
     settings = config.provider_settings.get(key, {"default_args": "", "color": "", "enabled": True})
     return {"provider": key, **settings}
@@ -832,6 +847,8 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
         all_sessions = []
         for prov_name, mod in data.PROVIDERS.items():
             if not mod.is_available():
+                continue
+            if not _enabled(config, prov_name):
                 continue
             if fresh:
                 try:
