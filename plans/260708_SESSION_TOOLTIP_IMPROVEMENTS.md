@@ -325,6 +325,12 @@ Key changes from current implementation:
 
 The 400px CSS fallback is conservative — if JS fails to set the inline style, the tooltip scrolls at 400px rather than potentially overflowing the viewport.
 
+#### Implementation (2026-07-08, code: d21605e, fix: 234c90d)
+
+Replaced the `loadTail`/`hideTail` functions in `index.html` with viewport-aware positioning logic. The tooltip now measures available space above the hovered session row and sets a dynamic `maxHeight` (minimum 200px). If the tooltip would overflow the viewport top, it clamps to `top: 4px` and reduces `maxHeight` accordingly, with a 100px minimum floor (tooltip suppressed entirely below that threshold). Error handling added (fetch failures hide the tooltip), `htmx.process(slot)` called after innerHTML per project conventions, and `hideTail` clears inline `maxHeight` to prevent stale values. Review fix: added `pointer-events: none` on tooltip slot CSS to prevent hover flicker, and enforced minimum visible height guard in the overflow branch.
+
+QA verification: PASS — tooltip renders with dynamic sizing, positioned correctly above rows, workspace/title/labels all present.
+
 ### 4. Peek window scroll fix [QA]
 
 **Goal**: Scroll works in the peek window overlay.
@@ -434,3 +440,15 @@ Implementation health: Green.
 |---|---|---|---|
 | 1 | Low | Dead CSS rule `.tail-separator` remains after template removed the `<hr>` element | Fixed — removed dead rule (ee1c02f) |
 | 2 | Low | No test for graceful degradation (cwd present but session not in cache) | Fixed — added `test_session_tail_graceful_no_cache` (ee1c02f) |
+
+### 2026-07-08 -- Implementation Review (after Phase 3, persona: End-user advocate)
+
+Implementation health: Yellow (downgraded to Green after fixes).
+4 findings (0 High, 2 Medium, 2 Low). Cycle 2 skipped — all fixes purely mechanical (min-height guard, pointer-events CSS).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Overflow branch could produce 0px maxHeight for rows at viewport top | Fixed — enforced Math.max(100) floor, suppress tooltip below 100px (234c90d) |
+| 2 | Medium | Tooltip overlay could steal hover causing flicker loop | Fixed — added pointer-events: none on .session-tooltip-slot (234c90d) |
+| 3 | Low | CSS 400px fallback insufficient if JS fails | Accepted — JS failure unlikely; 400px is conservative enough |
+| 4 | Low | No minimum visible height floor in overflow branch | Fixed — combined with finding #1 fix (234c90d) |
