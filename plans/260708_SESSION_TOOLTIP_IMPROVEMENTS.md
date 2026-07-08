@@ -397,6 +397,12 @@ win.evaluate_js("document.documentElement.focus(); window.scrollTo(0,0)")
 
 **Tests**: The existing `test_peek.py` unit tests mock pywebview internals — they test the state machine logic (press/release/trigger), not the webview rendering. The platform-guard branches should be exercised with a new test that mocks `sys.platform`.
 
+#### Implementation (2026-07-08, code: 2ef7746)
+
+Replaced `toggle_fullscreen()` with explicit `ctypes.windll.user32.GetSystemMetrics()` sizing in the peek window's `_show` method on Windows (Approach A from plan). On `_hide`, the `toggle_fullscreen()` call is skipped on Windows since the window was never put into fullscreen mode. Linux continues using `toggle_fullscreen()` unchanged. Updated test_peek.py to make toggle_fullscreen assertions platform-aware (divergence: test was asserting Windows-incompatible behavior).
+
+QA verification: SKIP — peek window scroll requires full app startup with pywebview + pynput (not exercisable via browser automation). Structural correctness confirmed by 28/28 tests passing and reliability review. Empirical verification deferred to user manual testing.
+
 ## Verification
 
 1. `pytest tests/test_web.py tests/test_data.py -v` — all existing tests pass, updated tests pass
@@ -452,3 +458,15 @@ Implementation health: Yellow (downgraded to Green after fixes).
 | 2 | Medium | Tooltip overlay could steal hover causing flicker loop | Fixed — added pointer-events: none on .session-tooltip-slot (234c90d) |
 | 3 | Low | CSS 400px fallback insufficient if JS fails | Accepted — JS failure unlikely; 400px is conservative enough |
 | 4 | Low | No minimum visible height floor in overflow branch | Fixed — combined with finding #1 fix (234c90d) |
+
+### 2026-07-08 -- Implementation Review (after Phase 4, persona: Reliability engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low). No auto-fix needed.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | No error handling around ctypes GetSystemMetrics (returns 0 on failure) | Accepted — GetSystemMetrics for SM_CXSCREEN never fails on functioning Windows |
+| 2 | Low | `import ctypes` repeated inside method body on each call | Accepted — Python module cache makes this ~50ns, cosmetic only |
+
+Reliability assessment: Thread safety confirmed (GetSystemMetrics is read-only, pywebview dispatches to GUI thread internally). Window state idempotent across show/hide cycles. No new race conditions introduced.
