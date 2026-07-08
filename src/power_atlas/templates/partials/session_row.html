@@ -2,6 +2,7 @@
   <div class="session-check"></div>
   <div class="session-content" onmouseenter="loadTail(this)" onmouseleave="hideTail(this)">
     <div class="session-title-row">
+      {% if session.session_id in pinned_sessions %}<span class="pinned-indicator" title="Pinned">📌</span>{% endif %}
       <span class="session-title">{{ session.title or 'untitled' }}</span>
       <span class="session-time">{{ session.updated_at[5:16] | replace('T', ' ') if session.updated_at else '' }}</span>
     </div>

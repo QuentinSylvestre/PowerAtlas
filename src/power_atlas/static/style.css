@@ -123,6 +123,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-title-row { display: flex; align-items: center; gap: 8px; }
 .session-title { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-time { font-size: 11px; color: #d4a054; white-space: nowrap; margin-left: auto; }
+.pinned-indicator { font-size: 11px; margin-right: 4px; opacity: 0.8; flex-shrink: 0; }
 .session-preview { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-workspace { font-size: 11px; color: var(--accent); opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
