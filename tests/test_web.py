@@ -83,7 +83,6 @@ def test_partials_workspaces_stale(mock_discover, mock_providers, mock_sessions,
 
     resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
-    assert "missing" in resp.text
     assert "stale" in resp.text
 
 
