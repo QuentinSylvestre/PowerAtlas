@@ -121,12 +121,17 @@ def _resolve_binary(command: str) -> Path | None:
     if not command:
         return None
     cmd = command.strip().strip('"').strip("'")
+    if not cmd:
+        return None
     # First, try the entire command as a path (handles paths with spaces)
     path = Path(cmd)
     if path.is_file():
         return path
     # Try the first token (handles "binary.exe --args")
-    token = cmd.split()[0]
+    parts = cmd.split()
+    if not parts:
+        return None
+    token = parts[0]
     path = Path(token)
     if path.is_file():
         return path

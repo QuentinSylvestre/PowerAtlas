@@ -933,3 +933,44 @@ class TestResolveCmdToExe:
         """Returns None when .cmd file can't be read."""
         result = _resolve_cmd_to_exe(tmp_path / "nonexistent.cmd")
         assert result is None
+
+
+class TestMalformedInputCrashes:
+    """Regression tests for SC1/L2, SC2/I3, SC17/L3: malformed input must not crash."""
+
+    @patch("power_atlas.launcher.shutil.which", return_value="C:\\kiro-cli.exe")
+    def test_launch_session_malformed_default_args_returns_error(self, _, tmp_path):
+        """Unbalanced quotes in default_args returns LaunchResult error, never raises."""
+        cwd = str(tmp_path)
+        # Non-terminal provider path
+        result = launch_session(cwd, provider="kiro-ide", default_args='"')
+        assert result.success is False
+        assert "Invalid" in result.error
+
+        # Terminal provider path (needs a terminal to be detected)
+        with patch("power_atlas.launcher.detect_terminal", return_value="C:\\wt.exe"):
+            result = launch_session(cwd, provider="kiro-cli", default_args='"')
+        assert result.success is False
+        assert "Invalid" in result.error
+
+    def test_resolve_binary_whitespace_command_returns_none(self):
+        """Whitespace-only command returns None, never raises IndexError."""
+        from power_atlas.icons import _resolve_binary
+        assert _resolve_binary("   ") is None
+        assert _resolve_binary("  \t\n  ") is None
+        assert _resolve_binary('  " "  ') is None
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    def test_default_args_windows_quoting(self):
+        """posix=False preserves Windows backslash paths and retains quotes around spaced args."""
+        import shlex
+        # Backslash path preserved intact
+        result = shlex.split(r'C:\Users\me\proj', posix=False)
+        assert result == [r'C:\Users\me\proj']
+
+        # Quoted-spaces arg: posix=False retains the quotes in the token
+        result = shlex.split('--foo "bar baz"', posix=False)
+        assert len(result) == 2
+        assert result[0] == "--foo"
+        # posix=False retains the quotes as part of the token
+        assert "bar baz" in result[1]

@@ -376,11 +376,17 @@ def launch_session(
     if session_id and not _SESSION_ID_RE.match(session_id):
         return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
 
+    # Parse default_args once (before both terminal and non-terminal branches)
+    try:
+        extra_args = shlex.split(default_args, posix=(sys.platform != "win32")) if default_args else []
+    except ValueError as e:
+        return LaunchResult(False, session_id, cwd, error=f"Invalid launch arguments: {e}")
+
     # Non-terminal providers: launch directly without a terminal
     if not _PROVIDER_TERMINAL.get(provider, True):
         cli_args = _build_provider_args(provider, binary, session_id)
         if default_args:
-            cli_args += shlex.split(default_args)
+            cli_args += extra_args
         # Append workspace path if a real workspace was specified
         if cwd and cwd != "." and Path(cwd).exists():
             cli_args.append(cwd)
@@ -410,7 +416,7 @@ def launch_session(
 
     cli_args = _build_provider_args(provider, binary, session_id)
     if default_args:
-        cli_args += shlex.split(default_args)
+        cli_args += extra_args
 
     title = f"{display} - {Path(cwd).name}"
     if _should_use_mcp_safe_wt(provider, terminal, profile.mcp_safe_enabled):
