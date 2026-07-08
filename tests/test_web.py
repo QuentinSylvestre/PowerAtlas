@@ -238,8 +238,9 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_p
     mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli"]
     mock_sessions.return_value = []
-    resp = client.get("/partials/pinned-workspaces")
+    resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
+    # Pinned workspace appears even though not in discovery results (0 sessions)
     assert pinned in resp.text or "my-pinned-workspace" in resp.text
 
 
@@ -247,7 +248,7 @@ def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_p
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_partials_pinned_workspaces_provider_filter(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Provider filter on partials_pinned_workspaces shows only matching pinned workspaces."""
+    """Provider filter on unified workspaces panel shows only matching pinned workspaces."""
     from power_atlas.config import Config
     ws_kiro = str(tmp_path / "kiro-proj")
     ws_claude = str(tmp_path / "claude-proj")
@@ -259,19 +260,19 @@ def test_partials_pinned_workspaces_provider_filter(mock_discover, mock_provider
     mock_providers.return_value = ["kiro-cli", "claude-code"]
 
     # Filter by kiro-cli — only kiro workspace should appear
-    resp = client.get("/partials/pinned-workspaces?provider=kiro-cli")
+    resp = client.get("/partials/workspaces?provider=kiro-cli")
     assert resp.status_code == 200
     assert "kiro-proj" in resp.text
     assert "claude-proj" not in resp.text
 
     # Filter by claude-code — only claude workspace should appear
-    resp = client.get("/partials/pinned-workspaces?provider=claude-code")
+    resp = client.get("/partials/workspaces?provider=claude-code")
     assert resp.status_code == 200
     assert "claude-proj" in resp.text
     assert "kiro-proj" not in resp.text
 
     # No filter (all) — both should appear
-    resp = client.get("/partials/pinned-workspaces?provider=all")
+    resp = client.get("/partials/workspaces?provider=all")
     assert resp.status_code == 200
     assert "kiro-proj" in resp.text
     assert "claude-proj" in resp.text
@@ -1651,3 +1652,138 @@ def test_save_provider_directory_control_chars(mock_load, mock_save, client):
     assert resp.status_code == 200
     assert "control characters" in resp.text.lower()
     mock_save.assert_not_called()
+
+
+# --- Phase 3 (panel restructure): All-sessions endpoint ---
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_basic(mock_paginated, mock_config, client, tmp_path):
+    """Basic /partials/all-sessions returns session rows with workspace name."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_paginated.return_value = (
+        [(_make_session(cwd=workspace, title="My Session"), "kiro-cli")],
+        False,
+    )
+    resp = client.get("/partials/all-sessions")
+    assert resp.status_code == 200
+    assert "My Session" in resp.text
+    assert tmp_path.name in resp.text  # workspace_name shown
+    assert "session-row" in resp.text
+    assert "load-more-btn" not in resp.text  # has_more=False
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_pagination(mock_paginated, mock_config, client, tmp_path):
+    """Load more button rendered when has_more=True."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_paginated.return_value = (
+        [(_make_session(cwd=workspace, title="Page 1 Session"), "kiro-cli")],
+        True,
+    )
+    resp = client.get("/partials/all-sessions?page=1")
+    assert resp.status_code == 200
+    assert "Page 1 Session" in resp.text
+    assert "load-more-btn" in resp.text
+    assert "loadMoreSessions(2)" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_provider_filter(mock_paginated, mock_config, client, tmp_path):
+    """Provider filter is passed through to data layer."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_paginated.return_value = (
+        [(_make_session(cwd=workspace, title="Claude Only"), "claude-code")],
+        False,
+    )
+    resp = client.get("/partials/all-sessions?provider=claude-code")
+    assert resp.status_code == 200
+    assert "Claude Only" in resp.text
+    # Verify provider filter was passed
+    call_kwargs = mock_paginated.call_args[1]
+    assert call_kwargs["provider"] == "claude-code"
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_search(mock_paginated, mock_config, client, tmp_path):
+    """Search filter on all-sessions filters by title/prompt/cwd."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=workspace, session_id="s1", title="matching title"), "kiro-cli"),
+            (_make_session(cwd=workspace, session_id="s2", title="other session"), "kiro-cli"),
+        ],
+        False,
+    )
+    resp = client.get("/partials/all-sessions?q=matching")
+    assert resp.status_code == 200
+    assert "matching title" in resp.text
+    assert "other session" not in resp.text
+    assert "load-more-btn" not in resp.text  # Search disables pagination
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_empty(mock_paginated, mock_config, client):
+    """Empty state when no sessions found."""
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    mock_paginated.return_value = ([], False)
+    resp = client.get("/partials/all-sessions")
+    assert resp.status_code == 200
+    assert "No sessions found" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_pinned_at_top(mock_paginated, mock_config, client, tmp_path):
+    """Pinned sessions appear at top with pin icon."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(pinned_sessions=["pinned-sess"])
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=workspace, session_id="pinned-sess", title="Pinned One"), "kiro-cli"),
+            (_make_session(cwd=workspace, session_id="other-sess", title="Regular One"), "kiro-cli"),
+        ],
+        False,
+    )
+    resp = client.get("/partials/all-sessions")
+    assert resp.status_code == 200
+    assert "Pinned One" in resp.text
+    assert "Regular One" in resp.text
+    # Pinned session has pin indicator
+    assert "pinned-indicator" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspaces_includes_pinned_at_top(mock_discover, mock_config, client, tmp_path):
+    """Unified workspaces endpoint shows pinned workspaces at top, non-pinned below."""
+    from power_atlas.config import Config
+    ws_pinned = str(tmp_path / "pinned-proj")
+    ws_other = str(tmp_path / "other-proj")
+    mock_config.return_value = Config(pinned_folders=[ws_pinned])
+    mock_discover.return_value = [
+        (ws_pinned, 3, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (ws_other, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
+    ]
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # Both workspaces appear
+    assert "pinned-proj" in resp.text
+    assert "other-proj" in resp.text
+    # Pinned workspace appears before non-pinned
+    assert resp.text.index("pinned-proj") < resp.text.index("other-proj")

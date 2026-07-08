@@ -248,99 +248,12 @@ async def unpin_session(request: Request):
     return {"ok": True}
 
 
-@app.get("/partials/pinned-sessions", response_class=HTMLResponse)
-async def partials_pinned_sessions(request: Request, provider: str = "all", fresh: int = 0):
-    """Render pinned sessions for the left panel."""
-    import asyncio
-    if fresh:
-        data._cache.pop("workspaces_with_counts:all", None)
 
-    config = load_config()
-    cards_html = ""
-
-    if config.pinned_sessions:
-        # Only run full warmup on fresh requests (initial load / manual refresh)
-        if fresh:
-            await asyncio.to_thread(data.warmup_all, [], config.pinned_sessions)
-        pinned_rows = await _render_pinned_sessions(request, config, provider=provider)
-        if pinned_rows:
-            cards_html += '<div class="section-label">Pinned sessions</div>'
-            cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
-
-    if not cards_html:
-        cards_html = '<div class="empty-state">No pinned sessions.</div>'
-
-    return HTMLResponse(cards_html)
-
-
-@app.get("/partials/pinned-workspaces", response_class=HTMLResponse)
-async def partials_pinned_workspaces(request: Request, provider: str = "all", fresh: int = 0):
-    """Render pinned workspaces for the center panel."""
-    import asyncio
-    import time
-    t0 = time.perf_counter()
-    if fresh:
-        data._cache.pop("workspaces_with_counts:all", None)
-
-    config = load_config()
-    from .data import _normalize_path
-    norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
-
-    cards_html = ""
-
-    # Build pinned set by normalized path only (workspace-level, not provider-specific)
-    pinned_norm_paths: set[str] = set()
-    for folder in config.pinned_folders:
-        pinned_norm_paths.add(_normalize_path(folder))
-
-    if pinned_norm_paths:
-        try:
-            all_workspace_data = list(await asyncio.to_thread(data.discover_workspaces_with_counts, provider=None))
-        except Exception:
-            all_workspace_data = []
-        # Merge pinned folders not found in discovery results
-        all_existing_norms = {_normalize_path(c) for c, _, _, _ in all_workspace_data}
-        for folder in config.pinned_folders:
-            if _normalize_path(folder) not in all_existing_norms:
-                all_workspace_data.append((folder, 0, "", ""))
-                all_existing_norms.add(_normalize_path(folder))
-        # Filter to pinned paths only
-        pinned_data = [(c, n, u, p) for c, n, u, p in all_workspace_data if _normalize_path(c) in pinned_norm_paths]
-        # Filter out disabled providers
-        pinned_data = [(c, n, u, p) for c, n, u, p in pinned_data if _enabled(config, p)]
-        # Group by normalized path
-        grouped = _group_workspaces(pinned_data, config)
-
-        # If filtering by a specific provider, only show groups that include that provider
-        if provider != "all":
-            grouped = [g for g in grouped if any(prov["name"] == provider for prov in g["providers"])]
-
-        # Sort pinned by folder name
-        grouped.sort(key=lambda x: x["folder_name"].lower())
-        if grouped:
-            cards_html += '<div class="section-label">Pinned workspaces</div>'
-            for group in grouped:
-                cwd = group["cwd"]
-                stale = not Path(cwd).exists()
-                cards_html += templates.get_template("partials/workspace_card.html").render(
-                    request=request, cwd=cwd, sessions=[], stale=stale,
-                    pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                    session_count=group["total_count"], is_pinned=True,
-                    last_updated=group["latest_updated"],
-                    icon=norm_icons.get(_normalize_path(cwd), ""),
-                    providers=group["providers"],
-                )
-
-    if not cards_html:
-        cards_html = '<div class="empty-state">No pinned workspaces. Pin a workspace to see it here.</div>'
-
-    log.info("Rendered pinned workspaces in %.2fs", time.perf_counter() - t0)
-    return HTMLResponse(cards_html)
 
 
 @app.get("/partials/workspaces", response_class=HTMLResponse)
 async def partials_workspaces(request: Request, provider: str = "all", fresh: int = 0):
-    """Render non-pinned workspaces with provider tabs for the right panel."""
+    """Render all workspaces: pinned at top (alphabetical), non-pinned below (by recency)."""
     import asyncio
     import time
     t0 = time.perf_counter()
@@ -371,39 +284,48 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     for folder in config.pinned_folders:
         pinned_norm_paths.add(_normalize_path(folder))
 
-    # Filter to non-pinned workspaces only (by normalized path)
-    other_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_norm_paths]
-
-    # Filter out disabled providers
-    other_data = [(c, n, u, p) for c, n, u, p in other_data if _enabled(config, p)]
-
-    # Group by normalized path
-    grouped = _group_workspaces(other_data, config)
-
-    # If filtering by a specific provider, only show groups that include that provider
+    # --- Pinned workspaces (at top, sorted alphabetically) ---
+    pinned_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_norm_paths]
+    # Add pinned folders not found in discovery results (so they show even with 0 sessions)
+    all_existing_norms = {_normalize_path(c) for c, _, _, _ in workspace_data}
+    for folder in config.pinned_folders:
+        if _normalize_path(folder) not in all_existing_norms:
+            pinned_data.append((folder, 0, "", ""))
+    # Filter out disabled providers (keep entries with empty provider for zero-session pinned folders)
+    pinned_data = [(c, n, u, p) for c, n, u, p in pinned_data if not p or _enabled(config, p)]
+    pinned_grouped = _group_workspaces(pinned_data, config)
     if provider != "all":
-        grouped = [g for g in grouped if any(prov["name"] == provider for prov in g["providers"])]
+        pinned_grouped = [g for g in pinned_grouped if any(prov["name"] == provider for prov in g["providers"])]
+    pinned_grouped.sort(key=lambda x: x["folder_name"].lower())
 
-    if not grouped:
-        if provider != "all" and provider:
-            empty_msgs = {
-                "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
-                "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
-                "kiro-ide": "No Kiro IDE sessions found \u2014 open a folder in Kiro IDE and start a conversation to see it here.",
-            }
-            msg = empty_msgs.get(provider, f"No {provider} sessions found.")
-            cards_html += f'<div class="empty-state">{msg}</div>'
-        else:
-            cards_html += '<div class="empty-state">No workspaces found yet.</div>'
-        return HTMLResponse(cards_html)
-
-    for group in grouped:
+    for group in pinned_grouped:
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
-        # Filter-aware count: show provider-specific count when filtered, total when "all"
         if provider != "all":
-            prov_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
-            session_count = prov_count
+            session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
+        else:
+            session_count = group["total_count"]
+        cards_html += templates.get_template("partials/workspace_card.html").render(
+            request=request, cwd=cwd, sessions=[], stale=stale,
+            pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
+            session_count=session_count, is_pinned=True,
+            last_updated=group["latest_updated"],
+            icon=norm_icons.get(_normalize_path(cwd), ""),
+            providers=group["providers"],
+        )
+
+    # --- Non-pinned workspaces (by recency) ---
+    other_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_norm_paths]
+    other_data = [(c, n, u, p) for c, n, u, p in other_data if _enabled(config, p)]
+    other_grouped = _group_workspaces(other_data, config)
+    if provider != "all":
+        other_grouped = [g for g in other_grouped if any(prov["name"] == provider for prov in g["providers"])]
+
+    for group in other_grouped:
+        cwd = group["cwd"]
+        stale = not Path(cwd).exists()
+        if provider != "all":
+            session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
         else:
             session_count = group["total_count"]
         cards_html += templates.get_template("partials/workspace_card.html").render(
@@ -414,15 +336,78 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             icon=norm_icons.get(_normalize_path(cwd), ""),
             providers=group["providers"],
         )
-    log.info("Rendered %d workspace cards in %.2fs total", len(grouped), time.perf_counter() - t0)
+
+    if not cards_html:
+        if provider != "all" and provider:
+            empty_msgs = {
+                "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
+                "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
+                "kiro-ide": "No Kiro IDE sessions found \u2014 open a folder in Kiro IDE and start a conversation to see it here.",
+            }
+            msg = empty_msgs.get(provider, f"No {provider} sessions found.")
+            cards_html += f'<div class="empty-state">{msg}</div>'
+        else:
+            cards_html += '<div class="empty-state">No workspaces found yet.</div>'
+
+    log.info("Rendered workspace cards in %.2fs total", time.perf_counter() - t0)
     return HTMLResponse(cards_html)
 
 
+@app.get("/partials/all-sessions", response_class=HTMLResponse)
+async def partials_all_sessions(request: Request, page: int = 1, provider: str = "all", q: str = ""):
+    """Render paginated all-sessions panel. Pinned at top, then by updated_at."""
+    config = load_config()
+
+    enabled = {p for p in data.PROVIDERS if _enabled(config, p)}
+    prov_filter = None if provider == "all" else provider
+
+    sessions_with_prov, has_more = await asyncio.to_thread(
+        data.get_all_sessions_paginated,
+        page=page,
+        page_size=20,
+        provider=prov_filter,
+        pinned_sessions=config.pinned_sessions,
+        enabled_providers=enabled,
+    )
+
+    # Apply search filter if q provided
+    if q:
+        query = q.strip().lower()
+        sessions_with_prov = [
+            (s, p) for s, p in sessions_with_prov
+            if query in (s.title or "").lower()
+            or query in (s.first_prompt or "").lower()
+            or query in (s.cwd or "").lower()
+        ]
+        has_more = False  # Search disables pagination
+
+    html = ""
+    for session, prov_name in sessions_with_prov:
+        html += templates.get_template("partials/session_row.html").render(
+            request=request, session=session, cwd=session.cwd,
+            stale=not Path(session.cwd).exists(),
+            pinned_sessions=config.pinned_sessions,
+            provider_name=prov_name,
+            provider_color=_get_provider_color(prov_name, config),
+            show_workspace=True,
+            workspace_name=Path(session.cwd).name if session.cwd else "",
+        )
+
+    if not html:
+        html = '<div class="empty-state">No sessions found.</div>'
+
+    if has_more:
+        next_page = page + 1
+        html += f'<button class="load-more-btn" onclick="loadMoreSessions({next_page})">Load more</button>'
+
+    return HTMLResponse(html)
+
+
 @app.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str = ""):
+async def search(request: Request, q: str = "", provider: str = "all"):
     query = q.strip().lower()
     if not query:
-        return await partials_workspaces(request)
+        return await partials_workspaces(request, provider=provider)
 
     import asyncio
     try:
@@ -438,64 +423,10 @@ async def search(request: Request, q: str = ""):
     # Filter out disabled providers
     matched = [(c, n, u, p) for c, n, u, p in matched if _enabled(config, p)]
 
-    # Search pinned sessions by title across all providers
-    pinned_rows = ""
-    if config.pinned_sessions:
-        pinned_set = set(config.pinned_sessions)
-        # Check cache first for pinned session titles
-        for prov_name in data.PROVIDERS:
-            for norm_cwd in data.session_cache.get_loaded_cwds(prov_name):
-                cached = data.session_cache.get(norm_cwd, prov_name)
-                if not cached:
-                    continue
-                for session in cached:
-                    if session.session_id in pinned_set and query in (session.title or "").lower():
-                        cwd = session.cwd
-                        pinned_rows += templates.get_template("partials/session_row.html").render(
-                            request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-                            pinned_sessions=config.pinned_sessions, folder_name=Path(cwd).name or cwd,
-                            provider_name=prov_name,
-                            show_workspace=True,
-                            workspace_name=Path(cwd).name if cwd else "",
-                        )
-                        pinned_set.discard(session.session_id)
-        # Fallback: scan all providers for remaining pinned sessions not in cache
-        if pinned_set:
-            for sid in list(pinned_set):
-                result = data._find_pinned_session_workspace(sid)
-                if not result:
-                    continue
-                cwd_found, prov_found = result
-                try:
-                    sessions = data.get_sessions(cwd_found, prov_found)
-                except OSError:
-                    continue
-                for session in sessions:
-                    if session.session_id == sid:
-                        title = session.title or ""
-                        if query in title.lower():
-                            provider_color = _get_provider_color(prov_found, config)
-                            pinned_rows += templates.get_template("partials/session_row.html").render(
-                                request=request, session=session, cwd=cwd_found,
-                                stale=not Path(cwd_found).exists(),
-                                pinned_sessions=config.pinned_sessions,
-                                folder_name=Path(cwd_found).name or cwd_found,
-                                provider_name=prov_found, provider_color=provider_color,
-                                show_workspace=True,
-                                workspace_name=Path(cwd_found).name if cwd_found else "",
-                            )
-                        pinned_set.discard(sid)
-                        break
-
-    if not matched and not pinned_rows:
+    if not matched:
         return templates.TemplateResponse(request, "partials/empty_state.html", {
             "message": f'No results for "{q}"',
         })
-
-    cards_html = ""
-    if pinned_rows:
-        cards_html += '<div class="section-label">Pinned sessions</div>'
-        cards_html += '<div class="pinned-sessions-list">' + pinned_rows + '</div>'
 
     from .data import _normalize_path
     config_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
@@ -503,8 +434,16 @@ async def search(request: Request, q: str = ""):
     for folder in config.pinned_folders:
         pinned_norm_paths.add(_normalize_path(folder))
 
+    # Filter by provider if specified
+    if provider != "all":
+        matched = [(c, n, u, p) for c, n, u, p in matched if p == provider]
+
     # Group matched workspaces
     grouped = _group_workspaces(matched, config)
+    if provider != "all":
+        grouped = [g for g in grouped if any(prov["name"] == provider for prov in g["providers"])]
+
+    cards_html = ""
     for group in grouped:
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
@@ -516,6 +455,12 @@ async def search(request: Request, q: str = ""):
             icon=config_icons.get(_normalize_path(cwd), ""),
             providers=group["providers"],
         )
+
+    if not cards_html:
+        return templates.TemplateResponse(request, "partials/empty_state.html", {
+            "message": f'No results for "{q}"',
+        })
+
     return HTMLResponse(cards_html)
 
 
@@ -960,72 +905,6 @@ async def api_new_session(request: Request):
     return templates.TemplateResponse(request, "partials/toast.html", {
         "message": "New session launched", "level": "success",
     })
-
-
-async def _render_pinned_sessions(request, config, provider: str = "all") -> str:
-    """Render pinned sessions as flat rows. Uses cache when available for full prompts.
-
-    Args:
-        provider: Filter to only show sessions from this provider. "all" shows all.
-    """
-    from .data import _normalize_path
-
-    pinned_ids = set(config.pinned_sessions)
-    html = ""
-
-    # Try cache first: find pinned sessions in any cached workspace
-    found_ids: set[str] = set()
-    providers_to_check = [provider] if provider != "all" else list(data.PROVIDERS.keys())
-    for prov_name in providers_to_check:
-        if prov_name not in data.PROVIDERS:
-            continue
-        for norm_cwd in data.session_cache.get_loaded_cwds(prov_name):
-            cached = data.session_cache.get(norm_cwd, prov_name)
-            if not cached:
-                continue
-            for session in cached:
-                if session.session_id in pinned_ids and session.session_id not in found_ids:
-                    found_ids.add(session.session_id)
-                    cwd = session.cwd
-                    html += templates.get_template("partials/session_row.html").render(
-                        request=request, session=session, cwd=cwd, stale=not Path(cwd).exists(),
-                        pinned_sessions=config.pinned_sessions,
-                        provider_color=PROVIDER_COLORS.get(prov_name, ""),
-                        provider_name=prov_name,
-                        show_workspace=True,
-                        workspace_name=Path(cwd).name if cwd else "",
-                    )
-
-    # Fallback: pinned sessions not found in cache — use generic resolution
-    remaining = pinned_ids - found_ids
-    if remaining:
-        for sid in list(remaining):
-            result = data._find_pinned_session_workspace(sid)
-            if result:
-                cwd_found, prov_found = result
-                # Check provider filter
-                if provider != "all" and prov_found != provider:
-                    remaining.discard(sid)
-                    continue
-                try:
-                    sessions = data.get_sessions(cwd_found, prov_found)
-                except Exception:
-                    sessions = []
-                for s in sessions:
-                    if s.session_id == sid:
-                        found_ids.add(sid)
-                        html += templates.get_template("partials/session_row.html").render(
-                            request=request, session=s, cwd=s.cwd,
-                            stale=not Path(s.cwd).exists(),
-                            pinned_sessions=config.pinned_sessions,
-                            provider_color=PROVIDER_COLORS.get(prov_found, ""),
-                            provider_name=prov_found,
-                            show_workspace=True,
-                            workspace_name=Path(s.cwd).name if s.cwd else "",
-                        )
-                        break
-                remaining.discard(sid)
-    return html
 
 
 def _sort_pinned_first(sessions: list[data.Session], pinned: list[str]) -> list[data.Session]:
