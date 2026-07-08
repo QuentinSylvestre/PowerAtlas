@@ -381,6 +381,11 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
         ]
         has_more = False  # Search disables pagination
 
+    # Exclude pinned items on page > 1 (they are already rendered on page 1)
+    if page > 1:
+        pinned_set = set(config.pinned_sessions)
+        sessions_with_prov = [(s, p) for s, p in sessions_with_prov if s.session_id not in pinned_set]
+
     html = ""
     for session, prov_name in sessions_with_prov:
         html += templates.get_template("partials/session_row.html").render(
