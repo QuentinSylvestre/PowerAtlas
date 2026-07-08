@@ -80,7 +80,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Workspace card */
 .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); padding: 8px 0 4px; display: flex; align-items: center; gap: 8px; }
-.pinned-sessions-list { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; }
 .workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; transition: border-color 0.2s; }
 .workspace-card:hover { border-color: #3a4060; }
 .card-header { display: flex; align-items: center; padding: 14px 16px; cursor: pointer; gap: 10px; user-select: none; transition: background 0.12s; position: relative; }
