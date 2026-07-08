@@ -2,7 +2,7 @@
 
 > **Date**: 2026-07-07
 > **Status**: Complete  <!-- Exploring -> Draft -> In Progress -> Complete -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-07-08 12:35
 > **Scope**: Redesign PowerAtlas terminal-launch configuration around global launch profiles so MCP-safe Windows Terminal launches can work across machines with different profiles, shells, and process names.
 > **Estimated effort**: ~2-4 days (5 phases; persisted config shape + launcher and Web UI integration)
 
