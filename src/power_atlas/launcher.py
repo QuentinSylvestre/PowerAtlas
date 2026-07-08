@@ -90,7 +90,10 @@ param(
 #   1 = failed BEFORE the WT tab was opened (no orphan tab exists)
 #   2 = failed AFTER the WT tab was opened (orphan tab exists, do NOT open another)
 
-$ErrorActionPreference = 'Stop'
+# Do NOT use $ErrorActionPreference = 'Stop' — it makes Write-Error
+# and Write-Host terminating, which prevents explicit exit codes from running.
+# Instead, use try/catch around individual operations.
+
 $tabOpened = $false
 
 try {
@@ -181,7 +184,7 @@ if ($Title) {
 $wtArgs += @('-p', $WtProfile, '-d', $Cwd)
 & $Wt @wtArgs | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Windows Terminal exited with code $LASTEXITCODE."
+    [Console]::Error.WriteLine("Windows Terminal exited with code $LASTEXITCODE.")
     exit 1
 }
 
@@ -214,7 +217,7 @@ do {
 } while ((Get-Date) -lt $deadline)
 
 if (-not $target) {
-    Write-Error "Could not find a new Windows Terminal $ShellProcessName process within ${AttachTimeoutMs}ms."
+    [Console]::Error.WriteLine("Could not find a new Windows Terminal $ShellProcessName process within ${AttachTimeoutMs}ms.")
     exit 2
 }
 
@@ -223,17 +226,17 @@ try {
     [NativeConsole.Kernel32]::FreeConsole() | Out-Null
     if (-not [NativeConsole.Kernel32]::AttachConsole([uint32]$target.ProcessId)) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        Write-Error "AttachConsole failed with Win32 error $errorCode."
+        [Console]::Error.WriteLine("AttachConsole failed with Win32 error $errorCode.")
         exit 2
     }
     $attached = $true
 
     # Brief pause to let the console input buffer initialize after attach
-    Start-Sleep -Milliseconds 150
+    Start-Sleep -Milliseconds 200
 
     $inputHandle = [NativeConsole.Kernel32]::GetStdHandle(-10)
     if ($inputHandle -eq [IntPtr]::Zero -or $inputHandle.ToInt64() -eq -1) {
-        Write-Error "GetStdHandle(STD_INPUT_HANDLE) failed."
+        [Console]::Error.WriteLine("GetStdHandle(STD_INPUT_HANDLE) failed.")
         exit 2
     }
 
@@ -250,11 +253,11 @@ try {
     [uint32]$written = 0
     if (-not [NativeConsole.Kernel32]::WriteConsoleInput($inputHandle, $records, [uint32]$records.Length, [ref]$written)) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        Write-Error "WriteConsoleInputW failed with Win32 error $errorCode."
+        [Console]::Error.WriteLine("WriteConsoleInputW failed with Win32 error $errorCode.")
         exit 2
     }
     if ($written -ne $records.Length) {
-        Write-Error "WriteConsoleInputW wrote $written of $($records.Length) input records."
+        [Console]::Error.WriteLine("WriteConsoleInputW wrote $written of $($records.Length) input records.")
         exit 2
     }
 } finally {
@@ -267,7 +270,7 @@ exit 0
 
 } catch {
     # Unhandled exception — use $tabOpened to determine the right exit code
-    Write-Error $_.Exception.Message
+    [Console]::Error.WriteLine($_.Exception.Message)
     if ($tabOpened) { exit 2 } else { exit 1 }
 }
 """
