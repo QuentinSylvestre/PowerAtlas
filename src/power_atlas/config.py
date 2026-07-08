@@ -94,6 +94,8 @@ def _normalize_launch_profile(raw: dict, index: int, seen_ids: dict[str, str], i
     # --- terminal_command ---
     tc = str(raw.get("terminal_command", "")) if raw.get("terminal_command") is not None else ""
     tc = _strip_control_chars(tc)[:512]
+    if not tc:
+        tc = _DEFAULT_TERMINAL_COMMAND
 
     # --- wt_profile ---
     wt = str(raw.get("wt_profile", "")) if raw.get("wt_profile") is not None else ""
