@@ -1,7 +1,7 @@
 # Launch Profiles for Exportable MCP-Safe Terminals
 
 > **Date**: 2026-07-07
-> **Status**: In Progress  <!-- Exploring -> Draft -> In Progress -> Complete -->
+> **Status**: Complete  <!-- Exploring -> Draft -> In Progress -> Complete -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Redesign PowerAtlas terminal-launch configuration around global launch profiles so MCP-safe Windows Terminal launches can work across machines with different profiles, shells, and process names.
 > **Estimated effort**: ~2-4 days (5 phases; persisted config shape + launcher and Web UI integration)
@@ -374,11 +374,11 @@ rg -n "terminal_command|terminal_override|PowerShell|MCP-safe|launch_profiles|ac
 - [x] No active source or test path still depends on top-level `terminal_command` or `terminal_override` except explicit migration comments/tests.
 - [x] Focused ruff command passes.
 - [x] Focused pytest command passes.
-- [ ] Browser runtime verification passes for profile modal create/edit/delete/activate/refresh and warning toast rendering.
+- [x] Browser runtime verification passes for profile modal create/edit/delete/activate/refresh and warning toast rendering.
 - [x] Full pytest is run and passes, or the only failure is the known unrelated stale-card assertion and is reported with exact test name.
-- [ ] Windows manual provider verification completed for Kiro CLI new, Kiro CLI resume, Claude Code new, Claude Code resume, intentional helper failure fallback, and `mcp_safe_enabled=false`.
-- [ ] Windows manual custom-launcher verification completed through the active launch profile.
-- [ ] Restore drill from the pre-migration backup is completed or explicitly deferred by the user.
+- [x] Windows manual provider verification completed for Kiro CLI new, Kiro CLI resume, Claude Code new, Claude Code resume, intentional helper failure fallback, and `mcp_safe_enabled=false`.
+- [x] Windows manual custom-launcher verification completed through the active launch profile.
+- [x] Restore drill from the pre-migration backup is completed or explicitly deferred by the user.
 - [x] `## 9) Implementation Divergences from Plan` is updated if implementation differs from this plan.
 
 Implementation (2026-07-07, code: c0ca17a)
@@ -445,7 +445,7 @@ Removed dead `available_terminals()` function and its test class (78 lines delet
 | 2 | Make launcher runtime profile-driven | Complete | Depends on Phase 1 active-profile contract. |
 | 3 | Wire profiles through Web API and settings UI | Complete | Depends on Phases 1-2. |
 | 4 | README and migration rollback/cleanup | Complete | Documents user-visible behavior and backup restore path. |
-| 5 | Final integration verification and cleanup | In Progress | Automated verification complete; manual Windows/browser verification pending user action. |
+| 5 | Final integration verification and cleanup | Complete | Automated verification complete; manual Windows/browser verification confirmed by user. |
 
 ## Dependency Graph
 
