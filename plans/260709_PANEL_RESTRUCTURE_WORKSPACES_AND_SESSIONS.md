@@ -652,20 +652,23 @@ function loadMoreSessions(page) {
 ```
 
 **Exit criteria**:
-- [ ] Launchers panel is leftmost, unchanged behavior
-- [ ] Workspaces panel (center) shows pinned at top + non-pinned below
-- [ ] Sessions panel (right) shows paginated sessions with workspace names
-- [ ] "Load more" button loads next page with loading state
-- [ ] Provider filter re-fetches both panels and resets page to 1
-- [ ] Search filters both panels; clearing search restores paginated state
-- [ ] `hx-get`/`hx-trigger` removed from search input (JS handler replaces htmx)
-- [ ] `refreshCards()` refreshes both panels and preserves expanded-card state
-- [ ] `pinSession()` rewritten to refresh both panels (no reference to removed endpoints)
-- [ ] `startPinnedPoll()` replaced with new polling function targeting new endpoints
-- [ ] `aria-busy` set/cleared during panel refreshes
-- [ ] `htmx.process()` called after all innerHTML swaps
-- [ ] Action bar selection works across both panels
-- [ ] Update `README.md` Features list to reflect new panel layout
+- [x] Launchers panel is leftmost, unchanged behavior
+- [x] Workspaces panel (center) shows pinned at top + non-pinned below
+- [x] Sessions panel (right) shows paginated sessions with workspace names
+- [x] "Load more" button loads next page with loading state
+- [x] Provider filter re-fetches both panels and resets page to 1
+- [x] Search filters both panels; clearing search restores paginated state
+- [x] `hx-get`/`hx-trigger` removed from search input (JS handler replaces htmx)
+- [x] `refreshCards()` refreshes both panels and preserves expanded-card state
+- [x] `pinSession()` rewritten to refresh both panels (no reference to removed endpoints)
+- [x] `startPinnedPoll()` replaced with new polling function targeting new endpoints
+- [x] `aria-busy` set/cleared during panel refreshes
+- [x] `htmx.process()` called after all innerHTML swaps
+- [x] Action bar selection works across both panels
+- [x] Update `README.md` Features list to reflect new panel layout
+
+**Implementation (2026-07-09, code: 06eecc1, fix: e297ecf)**
+Restructured the frontend panel layout from the old three-panel structure (launchers+pinned-sessions | pinned-workspaces | workspaces) to the new unified layout (launchers | workspaces | sessions). The left panel now contains only the launcher grid (narrower at 280px), the center panel shows all workspaces with flex:1, and the right panel is a new sessions panel fetching `/partials/all-sessions?page=1&fresh=1`. Replaced htmx-driven search with a JS debounced dual-panel search handler, rewrote `refreshCards()` and `switchProvider()` to fetch both panels, replaced the old `startPinnedPoll()`/`startSessionRefresh()` with a unified `startPolling()` function, added `loadMoreSessions(page)` for pagination, updated `pinSession()` to use `refreshCards(true)`, and updated CSS to remove grid layout from the right panel and add `.load-more-btn` styles. Review auto-fix added `htmx.process()` to all expanded-card innerHTML swaps and removed dead `refreshExpandedSessions` function and dead `.pinned-sessions-list` CSS rule. README updated to reflect new filter behavior.
 
 ## 6) Risk Assessment
 
@@ -749,3 +752,17 @@ Implementation health: Green.
 | 3 | Low | New `provider` param on `/search` has no dedicated test. | Noted — logic simple and consistent with existing patterns; Phase 4 exercises it. |
 | 4 | Low | Frontend still references removed endpoints (temporarily broken between phases). | Noted — expected; Phase 4 handles frontend updates. |
 | 5 | Low | Redundant double provider-filter in `/search`. | Noted — harmless defensive code, consistent with `partials_workspaces` pattern. |
+
+### 2026-07-09 -- Implementation Review (after Phase 4, persona: Senior engineer)
+
+Implementation health: Green.
+4 findings (0 High, 1 Medium, 3 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Expanded-card `body.innerHTML=h` in refreshCards/toggleCard/loadExpandedCards lacked `htmx.process(body)`. | Fixed — added `htmx.process(body)` to all 3 innerHTML swaps (fix: e297ecf). |
+| 2 | Low | `refreshExpandedSessions()` is dead code after `startSessionRefresh` removal. | Fixed — removed dead function. |
+| 3 | Low | `.pinned-sessions-list` CSS rule is dead after template changes. | Fixed — removed dead CSS rule. |
+| 4 | Low | Polling burst/steady timers overlap at 30/60/90/120s causing doubled refreshes. | Noted — harmless, matches plan spec. |
+
+Cycle 2 skipped — cycle 1 auto-fixes were purely mechanical (htmx.process calls + dead code removal).
