@@ -611,10 +611,29 @@ Cycle 2 skipped — auto-fixes purely mechanical (message format string, Jinja f
 
 Security auditor positive notes: same-origin guard correctly unconditional; shell_process_name regex + deny-list prevents CIM injection; helper_runner allow-list prevents arbitrary binary resolution; timeouts bounded against DoS; no `| safe` filter anywhere; textContent for all user data in JS.
 
+### 2026-07-08 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer, Architect.
+6 findings (0 High, 2 Medium, 4 Low).
+QA verification: PASS (manual Windows verification confirmed by user; 371 automated tests pass).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | MCP-safe helper removal and LaunchProfile simplification (4 fields vs plan's 9) undocumented in divergences | Fixed — added to Implementation Divergences section |
+| 2 | Medium | `LaunchResult.warning` and `used_fallback` are dead infrastructure; silent pwsh-fallback not surfaced | Noted — retained as forward-looking for potential future helper reintroduction |
+| 3 | Low | `_DEFAULT_TERMINAL_COMMAND` duplicated between config.py and editProfile() JS | Noted — low drift risk; single source of truth via API is a future option |
+| 4 | Low | Phase 2 exit criteria show [x] for MCP-safe fields that don't exist in final code | Noted — plan archived; historical rewrite cost not justified |
+| 5 | Low | `detect_terminal` probes shutil.which() on every call (no cache) | Noted — acceptable for typical batch sizes; cache reintroduction if perf degrades |
+| 6 | Low | `profileDefaultDir` in profile modal saves to global Config, visual placement implies per-profile | Noted — intentional UX convenience per sibling plan's design |
+
+Invoked on fully-executed plan; performed standalone holistic review post-archival.
+
 ## 9) Implementation Divergences from Plan
 
 - **`default_args` validation deferred to Phase 3**: The plan lists `default_args` validation (max 256 chars, no control/shell metacharacters) under Phase 1's detailed changes, but the `/api/provider/save` endpoint it targets is in `web.py` — explicitly Phase 3's file scope. Implementing it in Phase 1 would violate file-scope boundaries. Deferred to Phase 3 where the web endpoint is being reworked. The pre-existing gap remains until then.
 - **web.py and test_web.py updated in Phase 2** (outside declared file scope): Phase 1 removed `Config.terminal_command` but `web.py` still referenced it at multiple sites (template context, API settings response, save-setting handler, launch endpoints). This caused test failures. Phase 2 fixed these to use `get_active_launch_profile()` as a transitional bridge until Phase 3 replaces them with dedicated profile endpoints.
 - **Migration toast uses `localStorage` instead of config flag**: Plan specified `migration_toast_shown` in config; implementation uses `localStorage.getItem('pa_profile_toast')`. This avoids config pollution and survives config restores (the toast is purely informational). The toast fires unconditionally on first browser load, not only for migrated users — acceptable since all users see the new UI.
+- **MCP-safe P/Invoke helper removed; LaunchProfile simplified to 4 fields**: The plan specified a 9-field `LaunchProfile` with `shell_process_name`, `helper_runner`, `attach_timeout_ms`, `helper_timeout_ms`, and `mcp_safe_enabled` — all driving a P/Invoke process-tree-attach helper. During implementation, the MCP-safe approach was replaced with `pwsh -NoExit -Command` (template-driven terminal command), eliminating the helper entirely. The final `LaunchProfile` has 4 fields (`id`, `name`, `terminal_command`, `wt_profile`). This is architecturally superior: fewer moving parts, no CIM queries, no process-tree attachment, same MCP-safe outcome. The plan's Phase 2 exit criteria for helper parameterization were satisfied by the simpler mechanism. `LaunchResult.warning` and `used_fallback` fields remain as dead forward-looking infrastructure.
 
 
