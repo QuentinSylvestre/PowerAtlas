@@ -48,8 +48,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .topbar-profile-btn:hover { border-color: var(--accent); color: var(--text); }
 .trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s; }
 .trust-toggle.active .trust-dot, .topbar-toggle.active .trust-dot { background: var(--success); }
-.settings-btn { width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; transition: all 0.2s; text-decoration: none; }
-.settings-btn:hover { border-color: var(--accent); color: var(--text); }
 
 /* Search */
 .search-area { display: flex; gap: 12px; align-items: center; padding: 8px 16px; flex-shrink: 0; }
@@ -175,19 +173,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 script { display: none; }
 
 
-/* Settings */
-.settings-page { padding: 24px; max-width: 560px; }
-.settings-form { display: flex; flex-direction: column; gap: 24px; }
-.settings-group { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 16px; }
-.settings-group-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 12px; }
-.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
-.settings-row label { font-size: 13px; color: var(--text-muted); }
-.settings-select, .settings-input { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); padding: 6px 10px; font-size: 13px; outline: none; }
-.settings-select:focus, .settings-input:focus { border-color: var(--accent); }
-.settings-btn { padding: 6px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); font-size: 13px; cursor: pointer; }
-.settings-btn:hover { border-color: var(--accent); color: var(--text); }
-.settings-btn.primary { background: var(--accent); border-color: var(--accent); color: white; width: 100%; padding: 10px; }
-.settings-btn.primary:hover { background: var(--accent-hover); }
 .toggle { position: relative; display: inline-block; width: 36px; height: 20px; cursor: pointer; }
 .toggle input { opacity: 0; width: 0; height: 0; }
 .toggle-slider { position: absolute; inset: 0; background: var(--border); border-radius: 10px; transition: 0.2s; }
