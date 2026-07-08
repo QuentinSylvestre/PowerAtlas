@@ -47,6 +47,7 @@ class LaunchProfile:
 class Config:
     port: int = 0  # 0 = random (OS-assigned), >0 = static port
     peek_hotkey: str = "ctrl+shift+z"
+    default_directory: str = ""  # Global fallback for provider launches without workspace selection
     active_launch_profile: str = "default"
     launch_profiles: list[LaunchProfile] = field(default_factory=lambda: [LaunchProfile()])
     pinned_folders: list[str] = field(default_factory=list)  # paths only
@@ -196,6 +197,11 @@ def load_config() -> Config:
         config.workspace_icons = {k: v for k, v in config.workspace_icons.items() if isinstance(k, str) and isinstance(v, str)}
         config.custom_launchers = [x for x in config.custom_launchers if isinstance(x, dict)]
         config.provider_settings = {k: v for k, v in config.provider_settings.items() if isinstance(v, dict)}
+
+        # Sanitize default_directory: must be string, strip control chars
+        if not isinstance(config.default_directory, str):
+            config.default_directory = ""
+        config.default_directory = _strip_control_chars(config.default_directory).strip()
 
         # Platform-aware terminal_command default: fill on Windows, leave empty on Linux (auto-detect)
         if sys.platform == "win32":

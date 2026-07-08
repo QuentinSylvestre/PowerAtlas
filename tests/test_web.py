@@ -1077,7 +1077,7 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     body = resp.json()
-    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "provider_settings", "custom_launchers", "autostart"}
+    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart"}
     assert set(body.keys()) == expected_keys
     assert body["autostart"] is False
     assert "terminal_command" not in body
@@ -1469,3 +1469,158 @@ def test_get_provider_settings_unknown_404(client):
     """GET /api/provider/bogus returns 404 for unknown providers."""
     resp = client.get("/api/provider/bogus")
     assert resp.status_code == 404
+
+
+# --- default_directory ---
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_provider_settings_with_default_directory(mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/provider/save", json={
+        "provider": "kiro-cli",
+        "default_args": "-a",
+        "color": "#ff0000",
+        "enabled": True,
+        "default_directory": "/home/user/work",
+    }, headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+    assert "saved" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    assert saved.provider_settings["kiro-cli"]["default_directory"] == "/home/user/work"
+
+
+@patch("power_atlas.web.load_config")
+def test_get_provider_settings_includes_default_directory(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.get("/api/provider/kiro-cli")
+    data = resp.json()
+    assert "default_directory" in data
+    assert data["default_directory"] == ""
+
+
+@patch("power_atlas.web.load_config")
+def test_get_provider_settings_returns_saved_default_directory(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(provider_settings={
+        "kiro-cli": {"default_args": "-a", "color": "", "enabled": True, "default_directory": "/my/path"},
+    })
+
+    resp = client.get("/api/provider/kiro-cli")
+    data = resp.json()
+    assert data["default_directory"] == "/my/path"
+
+
+@patch("power_atlas.web.load_config")
+def test_get_provider_settings_legacy_entry_gets_default_directory(mock_load, client):
+    """Legacy provider settings without default_directory still return the field."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(provider_settings={
+        "kiro-cli": {"default_args": "-a", "color": "", "enabled": True},
+    })
+
+    resp = client.get("/api/provider/kiro-cli")
+    data = resp.json()
+    assert "default_directory" in data
+    assert data["default_directory"] == ""
+
+
+@patch("power_atlas.web.load_config")
+def test_settings_includes_default_directory(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(default_directory="/global/path")
+
+    resp = client.get("/api/settings")
+    data = resp.json()
+    assert "default_directory" in data
+    assert data["default_directory"] == "/global/path"
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_default_directory(mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/save-setting", json={
+        "key": "default_directory",
+        "value": "/new/default/path",
+    }, headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    saved = mock_save.call_args[0][0]
+    assert saved.default_directory == "/new/default/path"
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_default_directory_too_long(mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/save-setting", json={
+        "key": "default_directory",
+        "value": "x" * 513,
+    }, headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "too long" in body["error"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_setting_default_directory_control_chars(mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/save-setting", json={
+        "key": "default_directory",
+        "value": "/path/\x01bad",
+    }, headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "control characters" in body["error"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_provider_directory_too_long(mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/provider/save", json={
+        "provider": "kiro-cli",
+        "default_args": "",
+        "color": "",
+        "enabled": True,
+        "default_directory": "x" * 513,
+    }, headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+    assert "too long" in resp.text.lower()
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_save_provider_directory_control_chars(mock_load, mock_save, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/provider/save", json={
+        "provider": "kiro-cli",
+        "default_args": "",
+        "color": "",
+        "enabled": True,
+        "default_directory": "/path/\x01bad",
+    }, headers={"Origin": "http://testserver"})
+    assert resp.status_code == 200
+    assert "control characters" in resp.text.lower()
+    mock_save.assert_not_called()

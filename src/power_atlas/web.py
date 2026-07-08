@@ -174,6 +174,7 @@ async def index(request: Request):
         "autostart": autostart.is_enabled(),
         "launchers": config.custom_launchers,
         "peek_hotkey": config.peek_hotkey,
+        "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
     })
@@ -546,6 +547,7 @@ async def api_settings():
         "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "peek_hotkey": config.peek_hotkey,
         "port": config.port,
+        "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
         "custom_launchers": config.custom_launchers,
         "autostart": autostart_enabled,
@@ -566,7 +568,8 @@ async def get_provider_settings(key: str):
     if key not in data.PROVIDERS:
         raise HTTPException(status_code=404, detail="Unknown provider")
     config = load_config()
-    settings = config.provider_settings.get(key, {"default_args": "", "color": "", "enabled": True})
+    settings = config.provider_settings.get(key, {"default_args": "", "color": "", "enabled": True, "default_directory": ""})
+    settings.setdefault("default_directory", "")
     return {"provider": key, **settings}
 
 
@@ -588,11 +591,22 @@ async def save_provider_settings(request: Request):
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Default args contains invalid control characters", "level": "error",
         })
+    # Validate default_directory: max 512 chars, no control characters
+    default_directory = body.get("default_directory", "")
+    if len(default_directory) > 512:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Working directory too long (max 512 chars)", "level": "error",
+        })
+    if any(ord(ch) < 0x20 for ch in default_directory):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Working directory contains invalid control characters", "level": "error",
+        })
     config = load_config()
     config.provider_settings[provider] = {
         "default_args": default_args,
         "color": body.get("color", ""),
         "enabled": body.get("enabled", True),
+        "default_directory": default_directory,
     }
     save_config(config)
     return templates.TemplateResponse(request, "partials/toast.html", {
@@ -732,6 +746,7 @@ async def delete_launch_profile(request: Request):
 _SETTING_TYPES: dict[str, type] = {
     "port": int,
     "peek_hotkey": str,
+    "default_directory": str,
     "pinned_folders": list,
     "pinned_sessions": list,
 }
@@ -758,6 +773,12 @@ async def save_setting(request: Request):
     if key == "port":
         if value != 0 and not (1024 <= value <= 65535):
             return {"ok": False, "error": "Port must be 0 (random) or 1024\u201365535"}
+    # String-specific validation (applies to peek_hotkey, default_directory)
+    if expected_type is str:
+        if len(value) > 512:
+            return {"ok": False, "error": f"{key} too long (max 512 chars)"}
+        if any(ord(ch) < 0x20 for ch in value):
+            return {"ok": False, "error": f"{key} contains invalid control characters"}
     config = load_config()
     setattr(config, key, value)
     save_config(config)

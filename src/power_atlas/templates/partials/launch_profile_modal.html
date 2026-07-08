@@ -20,6 +20,9 @@
       <label class="form-label">WT Profile
         <input type="text" id="profileWtProfile" maxlength="128" placeholder="PowerShell">
       </label>
+      <label class="form-label">Default directory <span class="form-hint">(Fallback when no workspace is selected. Per-provider overrides this.)</span>
+        <input type="text" id="profileDefaultDir" maxlength="512">
+      </label>
       <div class="profile-actions">
         <button type="button" class="btn-primary" onclick="saveProfile()">Save</button>
         <button type="button" class="btn-danger" id="profileDeleteBtn" onclick="deleteProfile()" style="display:none;">Delete</button>

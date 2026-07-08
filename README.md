@@ -57,6 +57,7 @@ Config stored at:
 ```toml
 port = 0  # 0 = random (default), or set e.g. 8080 for a fixed port
 peek_hotkey = "ctrl+shift+z"  # global overlay hotkey (modifier+key format)
+default_directory = ""  # Global fallback directory for provider launches without workspace selection
 pinned_folders = []
 pinned_sessions = []
 active_launch_profile = "default"
@@ -65,16 +66,19 @@ active_launch_profile = "default"
 default_args = "-a"  # e.g. trust-all-tools
 color = ""
 enabled = true
+default_directory = ""  # Per-provider override (empty = use global)
 
 [provider_settings.claude-code]
 default_args = ""
 color = ""
 enabled = true
+default_directory = ""
 
 [provider_settings.kiro-ide]
 default_args = ""
 color = ""
 enabled = true
+default_directory = ""
 
 [[launch_profiles]]
 id = "default"

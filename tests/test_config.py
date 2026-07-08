@@ -583,3 +583,34 @@ def test_nested_bad_types_dropped(tmp_path):
     assert cfg.provider_settings == {"y": {"default_args": "", "color": "", "enabled": True}}
     # custom_launchers: non-dict entries dropped
     assert cfg.custom_launchers == [{"id": "ok"}]
+
+
+# --- default_directory ---
+
+
+def test_default_directory_round_trip():
+    """default_directory persists through save/load cycle."""
+    cfg = Config(default_directory="/home/user/projects")
+    save_config(cfg)
+    loaded = load_config()
+    assert loaded.default_directory == "/home/user/projects"
+
+
+def test_default_directory_default_empty():
+    """Config without default_directory defaults to empty string."""
+    cfg = load_config()
+    assert cfg.default_directory == ""
+
+
+def test_default_directory_control_chars_sanitized(tmp_path):
+    """Control characters in default_directory are stripped on load."""
+    _write_toml(tmp_path, {"default_directory": "/home/\x01user/\tprojects"})
+    cfg = load_config()
+    assert cfg.default_directory == "/home/user/projects"
+
+
+def test_default_directory_whitespace_stripped(tmp_path):
+    """Leading/trailing whitespace in default_directory is stripped on load."""
+    _write_toml(tmp_path, {"default_directory": "  /home/user/projects  "})
+    cfg = load_config()
+    assert cfg.default_directory == "/home/user/projects"
