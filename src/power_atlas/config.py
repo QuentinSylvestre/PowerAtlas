@@ -1,7 +1,9 @@
 """Thread-safe config persistence via TOML."""
 
+import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import tomllib
@@ -9,6 +11,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import tomli_w
+
+log = logging.getLogger(__name__)
 
 
 def _config_dir() -> Path:
@@ -153,7 +157,12 @@ def load_config() -> Config:
         try:
             with open(CONFIG_PATH, "rb") as f:
                 data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError):
+        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+            try:
+                shutil.copy2(CONFIG_PATH, CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
+                log.warning("Corrupt config backed up to %s; using defaults", CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak"))
+            except Exception:
+                log.warning("Corrupt config; using defaults (backup failed)")
             return Config()
         defaults = Config()
         fields = {f.name for f in Config.__dataclass_fields__.values()}
@@ -168,7 +177,12 @@ def load_config() -> Config:
             if isinstance(v, expected):
                 kwargs[k] = v
             # else: skip — default will fill in via dataclass
+        # Preserve unknown keys so future config additions aren't lost on re-save
+        extra = {k: v for k, v in data.items() if k not in fields and k != "trust_all_tools"}
         config = Config(**kwargs)
+        # Store as instance attr (not a dataclass field) — object identity constraint:
+        # the same Config instance returned by load must be passed to save for extras to persist.
+        config._extra = extra
 
         # --- Launch profile normalization ---
         has_launch_profiles_in_toml = "launch_profiles" in data and isinstance(data.get("launch_profiles"), list)
@@ -203,19 +217,25 @@ def load_config() -> Config:
             seen = set()
             paths = []
             for entry in config.pinned_folders:
-                folder = entry.get("folder", "")
+                folder = entry.get("folder", "") if isinstance(entry, dict) else (entry if isinstance(entry, str) else "")
                 if folder and folder not in seen:
                     seen.add(folder)
                     paths.append(folder)
             config.pinned_folders = paths
         # Already list[str] — no migration needed
         # Migration: trust_all_tools=true → provider_settings["kiro-cli"].default_args = "-a"
-        if data.get("trust_all_tools") is True and not config.provider_settings:
+        if data.get("trust_all_tools") is True and "kiro-cli" not in config.provider_settings:
             config.provider_settings["kiro-cli"] = {
                 "default_args": "-a",
                 "color": "",
                 "enabled": True,
             }
+        # Sanitize nested types: drop entries that aren't the expected type
+        config.pinned_folders = [x for x in config.pinned_folders if isinstance(x, str)]
+        config.pinned_sessions = [x for x in config.pinned_sessions if isinstance(x, str)]
+        config.workspace_icons = {k: v for k, v in config.workspace_icons.items() if isinstance(k, str) and isinstance(v, str)}
+        config.custom_launchers = [x for x in config.custom_launchers if isinstance(x, dict)]
+        config.provider_settings = {k: v for k, v in config.provider_settings.items() if isinstance(v, dict)}
         return config
 
 
@@ -228,6 +248,9 @@ def save_config(config: Config) -> None:
             data = asdict(config)
             data.pop("trust_all_tools", None)  # never write legacy key
             data.pop("terminal_command", None)  # defensive: field removed from Config but guard legacy
+            # Restore unknown keys preserved at load time (object-identity constraint:
+            # caller must pass the same Config instance returned by load_config).
+            data.update(getattr(config, "_extra", {}) or {})
             with open(tmp, "wb") as f:
                 tomli_w.dump(data, f)
                 f.flush()

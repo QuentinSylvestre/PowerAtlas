@@ -507,11 +507,23 @@ def test_trust_all_tools_migration(tmp_path):
 
 
 def test_trust_all_tools_no_migration_when_provider_settings_exist(tmp_path):
-    """trust_all_tools=true does NOT migrate if provider_settings already exist."""
+    """trust_all_tools=true adds kiro-cli when only OTHER providers exist, but NOT when kiro-cli already exists."""
+    # Case 1: Other providers exist but no kiro-cli → kiro-cli IS added
     existing = {"claude-code": {"default_args": "--dangerously-skip-permissions", "color": "", "enabled": True}}
     _write_toml(tmp_path, {"trust_all_tools": True, "provider_settings": existing})
     cfg = load_config()
-    assert cfg.provider_settings == existing
+    assert "kiro-cli" in cfg.provider_settings
+    assert cfg.provider_settings["kiro-cli"]["default_args"] == "-a"
+    assert cfg.provider_settings["claude-code"] == existing["claude-code"]
+
+    # Case 2: kiro-cli already exists → NOT overwritten
+    existing_with_kiro = {
+        "kiro-cli": {"default_args": "--custom", "color": "#111", "enabled": True},
+        "claude-code": {"default_args": "", "color": "", "enabled": True},
+    }
+    _write_toml(tmp_path, {"trust_all_tools": True, "provider_settings": existing_with_kiro})
+    cfg = load_config()
+    assert cfg.provider_settings["kiro-cli"]["default_args"] == "--custom"
 
 
 def test_trust_all_tools_false_no_migration(tmp_path):
@@ -632,3 +644,70 @@ def test_non_dict_profile_entries_guarded(tmp_path):
     cfg = load_config()
     assert len(cfg.launch_profiles) == 1
     assert cfg.launch_profiles[0].id == "valid"
+
+
+
+# --- Phase 2: Defensive config ---
+
+
+def test_corrupt_config_backs_up_and_defaults(tmp_path):
+    """Corrupt TOML triggers backup and returns defaults, no raise."""
+    from power_atlas.config import CONFIG_PATH
+    CONFIG_PATH.write_bytes(b"\x00\xff\xfe junk not valid toml \x01\x02")
+    cfg = load_config()
+    # Should return defaults
+    assert cfg == Config()
+    # .bak file should exist with the corrupt content
+    bak = CONFIG_PATH.with_name(CONFIG_PATH.name + ".bak")
+    assert bak.exists()
+    assert bak.read_bytes() == b"\x00\xff\xfe junk not valid toml \x01\x02"
+
+
+def test_mixed_pinned_folders_no_crash(tmp_path):
+    """Mixed list [dict, str] pinned_folders loads without AttributeError and migrates."""
+    _write_toml(tmp_path, {
+        "pinned_folders": [{"folder": "/a"}, "x"],
+    })
+    # Should not raise AttributeError
+    cfg = load_config()
+    # The dict entry migrates to "/a", the str "x" is kept as-is
+    assert "/a" in cfg.pinned_folders
+    assert "x" in cfg.pinned_folders
+
+
+def test_unknown_keys_preserved_on_save(tmp_path):
+    """Unknown keys in TOML are preserved through load/modify/save cycle."""
+    from power_atlas.config import CONFIG_PATH
+    _write_toml(tmp_path, {"future_key": "hello", "peek_hotkey": "alt+z"})
+    cfg = load_config()
+    # Modify a known field
+    cfg.peek_hotkey = "ctrl+p"
+    save_config(cfg)
+    # Reload raw TOML and assert future_key is still present
+    with open(CONFIG_PATH, "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["future_key"] == "hello"
+    assert raw["peek_hotkey"] == "ctrl+p"
+
+
+def test_nested_bad_types_dropped(tmp_path):
+    """Invalid nested types are sanitized: non-str in lists, non-dict in provider_settings."""
+    _write_toml(tmp_path, {
+        "pinned_folders": [123, "valid"],
+        "pinned_sessions": [True, "sess1"],
+        "workspace_icons": {"good": "icon1"},
+        "provider_settings": {"x": "notadict", "y": {"default_args": "", "color": "", "enabled": True}},
+        "custom_launchers": ["notadict", {"id": "ok"}],
+    })
+    cfg = load_config()
+    # Non-str entries dropped from pinned_folders
+    assert cfg.pinned_folders == ["valid"]
+    # Non-str entries dropped from pinned_sessions (bool is not str)
+    assert cfg.pinned_sessions == ["sess1"]
+    # workspace_icons with valid str keys+values preserved
+    assert cfg.workspace_icons == {"good": "icon1"}
+    # provider_settings with non-dict values dropped
+    assert "x" not in cfg.provider_settings
+    assert cfg.provider_settings == {"y": {"default_args": "", "color": "", "enabled": True}}
+    # custom_launchers: non-dict entries dropped
+    assert cfg.custom_launchers == [{"id": "ok"}]
