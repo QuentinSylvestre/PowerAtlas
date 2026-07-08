@@ -1,5 +1,6 @@
 """Tests for power_atlas.peek — works without pywebview/pynput installed."""
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -373,6 +374,9 @@ class TestHideCallsResetOverlays:
         pw = peek_mod.PeekWindow("http://localhost:8000")
         # Should not raise
         pw._hide()
-        # toggle_fullscreen and hide should still be called
-        pw._window.toggle_fullscreen.assert_called_once()
+        # toggle_fullscreen is skipped on Windows (no fullscreen to undo); hide should still be called
+        if sys.platform == "win32":
+            pw._window.toggle_fullscreen.assert_not_called()
+        else:
+            pw._window.toggle_fullscreen.assert_called_once()
         pw._window.hide.assert_called_once()

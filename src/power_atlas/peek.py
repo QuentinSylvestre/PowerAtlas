@@ -175,8 +175,17 @@ class PeekWindow:
         if win and not self._visible and self._webview_ok:
             self._visible = True
             log.debug("Peek show")
-            win.show()
-            win.toggle_fullscreen()
+            if sys.platform == "win32":
+                import ctypes
+                user32 = ctypes.windll.user32
+                w = user32.GetSystemMetrics(0)
+                h = user32.GetSystemMetrics(1)
+                win.show()
+                win.resize(w, h)
+                win.move(0, 0)
+            else:
+                win.show()
+                win.toggle_fullscreen()
             win.evaluate_js("if(typeof doRefresh==='function') doRefresh()")
 
     def _hide(self) -> None:
@@ -188,7 +197,8 @@ class PeekWindow:
                 win.evaluate_js("if(typeof resetOverlays==='function') resetOverlays()")
             except Exception:
                 pass  # defensive — rapid hotkey toggling can race with webview teardown
-            win.toggle_fullscreen()
+            if sys.platform != "win32":
+                win.toggle_fullscreen()
             win.hide()
 
     def _on_press(self, key) -> None:
