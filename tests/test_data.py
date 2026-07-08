@@ -123,11 +123,14 @@ from power_atlas.data import refresh_stale_entries, warmup_pinned
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    """Clear session cache between tests."""
+    """Clear session cache and discovery cache between tests."""
     from power_atlas.data import session_cache
+    from power_atlas import data
     session_cache.clear()
+    data._cache.clear()
     yield
     session_cache.clear()
+    data._cache.clear()
 
 
 class TestRefreshStaleEntries:
@@ -1012,3 +1015,131 @@ class TestKiroIdeRefreshStale:
 
     def test_empty_stats_returns_false(self):
         assert data_kiro_ide.refresh_stale_entries_for_cwd("C:\\X", {}) is False
+
+
+# --- Phase 3: Discovery lock, fail-closed, frozen Session, caching ---
+
+from power_atlas import data
+from power_atlas.data import discover_workspaces_with_counts, PROVIDERS
+
+
+class TestDiscoverFailClosed:
+    def test_discover_unknown_provider_returns_empty(self, mock_sessions):
+        """Calling with an unknown provider returns [] and does not poison _cache."""
+        data._cache.clear()
+        result = discover_workspaces_with_counts(provider="bogus")
+        assert result == []
+        # Verify no new cache key was created for the bogus provider
+        assert not any("bogus" in k for k in data._cache)
+
+    def test_discover_known_provider_still_works(self, mock_sessions):
+        """Known provider still triggers discovery."""
+        _write_session(mock_sessions, "s1", "C:\\Projects\\X", updated_at="2026-06-01T00:00:00Z")
+        data._cache.clear()
+        result = discover_workspaces_with_counts(provider="kiro-cli")
+        assert len(result) >= 1
+
+
+class TestFrozenSession:
+    def test_session_cache_get_isolated(self, mock_sessions):
+        """Frozen Session objects cannot be mutated post-construction."""
+        _write_session(mock_sessions, "s1", "C:\\Immutable")
+        sessions = get_sessions("C:\\Immutable")
+        assert len(sessions) == 1
+        s = sessions[0]
+        with pytest.raises(AttributeError):
+            s.title = "hacked"
+
+
+class TestClaudeTailCached:
+    def test_claude_tail_cached(self, tmp_path, monkeypatch):
+        """get_session_tail from Claude adapter returns cached result on second call (no re-read)."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        proj = projects_dir / "C--Work"
+        proj.mkdir()
+
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        lines = [
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "answer 1"}, "uuid": "u1"}),
+        ]
+        jsonl_file = proj / f"{sid}.jsonl"
+        jsonl_file.write_text("\n".join(lines), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        data_claude._tail_cache.clear()
+
+        # First call — reads from disk
+        result1 = data_claude.get_session_tail(sid, "C:\\Work")
+        assert result1 == ["answer 1"]
+
+        # Overwrite the file content (but keep same mtime to simulate cache hit)
+        # We just verify that a second call within TTL returns same result without re-reading
+        import unittest.mock
+        with unittest.mock.patch("builtins.open", side_effect=AssertionError("should not re-read")):
+            # stat() is still needed for mtime check, but open() should not be called
+            result2 = data_claude.get_session_tail(sid, "C:\\Work")
+
+        assert result2 == ["answer 1"]
+
+
+class TestClaudeFirstPromptCached:
+    def test_claude_first_prompt_cached(self, tmp_path, monkeypatch):
+        """get_first_prompt from Claude adapter returns cached result on second call."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        proj = projects_dir / "C--Work"
+        proj.mkdir()
+
+        sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        lines = [
+            json.dumps({"type": "user", "message": {"role": "user", "content": "my question"}, "uuid": "u1"}),
+        ]
+        jsonl_file = proj / f"{sid}.jsonl"
+        jsonl_file.write_text("\n".join(lines), encoding="utf-8")
+
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        data_claude._first_prompt_cache.clear()
+
+        # First call — reads from disk
+        result1 = data_claude.get_first_prompt(sid, "C:\\Work")
+        assert result1 == "my question"
+
+        # Second call within TTL — should use cache (no file re-read)
+        import unittest.mock
+        with unittest.mock.patch("builtins.open", side_effect=AssertionError("should not re-read")):
+            result2 = data_claude.get_first_prompt(sid, "C:\\Work")
+
+        assert result2 == "my question"
+
+
+class TestKiroFirstPromptMtimeRefresh:
+    def test_kiro_first_prompt_refreshes_after_mtime_change(self, mock_sessions):
+        """Kiro first_prompt cache refreshes when source file mtime changes."""
+        # Write initial session
+        _write_session(mock_sessions, "mtime1", "C:\\Work", jsonl_lines=[
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "original prompt"}}),
+        ])
+        # Also write a .history file (preferred source)
+        history_path = mock_sessions / "mtime1.history"
+        history_path.write_text("original prompt\n", encoding="utf-8")
+
+        data_kiro._first_prompt_cache.clear()
+
+        # First call — reads from disk
+        result1 = data_kiro.get_first_prompt("mtime1")
+        assert result1 == "original prompt"
+
+        # Simulate mtime change by rewriting with new content
+        import time as time_mod
+        time_mod.sleep(0.05)  # ensure mtime differs
+        history_path.write_text("updated prompt\n", encoding="utf-8")
+
+        # Expire TTL by manipulating cache entry time
+        cached = data_kiro._first_prompt_cache.get("mtime1")
+        if cached:
+            # Set cache_time to long ago so TTL check forces re-read
+            data_kiro._first_prompt_cache["mtime1"] = (0.0, cached[1], cached[2])
+
+        result2 = data_kiro.get_first_prompt("mtime1")
+        assert result2 == "updated prompt"

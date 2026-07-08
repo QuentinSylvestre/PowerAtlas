@@ -307,34 +307,46 @@ def get_session_tail(session_id: str, cwd: str = "", max_lines: int = 15) -> lis
     return list(messages)
 
 
-_first_prompt_cache: dict[str, tuple[float, str]] = {}  # sid -> (time, prompt)
+_first_prompt_cache: dict[str, tuple[float, float, str]] = {}  # sid -> (time, mtime, prompt)
 _FIRST_PROMPT_TTL = 60  # seconds
 
 
 def get_first_prompt(session_id: str, cwd: str = "") -> str:
     """Extract first_prompt for tooltip display. Uses .history file (preserves newlines)."""
+    # Determine which file will supply the value and its mtime
+    history_path = SESSION_DIR / f"{session_id}.history"
+    jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
+
+    # Resolve source file for mtime tracking (.history preferred, fallback to .jsonl)
+    source_path = history_path if history_path.exists() else jsonl_path
+    try:
+        st = source_path.stat()
+        current_mtime = st.st_mtime
+    except OSError:
+        return ""
+
+    # Mtime-guarded cache check
     cached = _first_prompt_cache.get(session_id)
-    if cached and (time.time() - cached[0] < _FIRST_PROMPT_TTL):
-        return cached[1]
+    if cached is not None:
+        cache_time, cached_mtime, cached_result = cached
+        if time.time() - cache_time < _FIRST_PROMPT_TTL and cached_mtime == current_mtime:
+            return cached_result
 
     # .history file stores original user input with escaped newlines
-    history_path = SESSION_DIR / f"{session_id}.history"
     if history_path.exists():
         try:
             first_line = history_path.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
             if first_line:
                 text = first_line.replace("\\n", "\n")
                 result = _cap_text(text)
-                _first_prompt_cache[session_id] = (time.time(), result)
+                _first_prompt_cache[session_id] = (time.time(), current_mtime, result)
                 return result
         except OSError:
             pass
 
     # Fallback to jsonl extraction
-    jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
     if not jsonl_path.exists():
-        _first_prompt_cache[session_id] = (time.time(), "")
-        return ""
+        return ""  # Don't negative-cache empty strings
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
@@ -343,9 +355,8 @@ def get_first_prompt(session_id: str, cwd: str = "") -> str:
                 text = _extract_content(line, "Prompt")
                 if text:
                     result = _cap_text(text)
-                    _first_prompt_cache[session_id] = (time.time(), result)
+                    _first_prompt_cache[session_id] = (time.time(), current_mtime, result)
                     return result
     except OSError:
         pass
-    _first_prompt_cache[session_id] = (time.time(), "")
-    return ""
+    return ""  # Don't negative-cache empty strings

@@ -15,8 +15,11 @@ from pathlib import Path
 _cache: dict[str, tuple[float, object]] = {}
 _CACHE_TTL = 30  # seconds
 
+# Serialize concurrent discover_workspaces_with_counts calls to prevent pile-up
+_discover_lock = threading.Lock()
 
-@dataclass
+
+@dataclass(frozen=True)
 class Session:
     session_id: str
     title: str
@@ -151,32 +154,48 @@ def discover_workspaces_with_counts(provider: str | None = None) -> list[tuple[s
     Returns:
         List of (cwd, session_count, updated_at, provider_name) tuples sorted by updated_at desc.
     """
+    # Fail closed: reject unknown providers to prevent unbounded cache keys
+    if provider is not None and provider not in PROVIDERS:
+        return []
+
     cache_key = f"workspaces_with_counts:{provider or 'all'}"
-    if cache_key in _cache:
-        ts, result = _cache[cache_key]
+
+    # Fast path (lock-free, TOCTOU-safe via .get)
+    entry = _cache.get(cache_key)
+    if entry is not None:
+        ts, result = entry
         if time.time() - ts < _CACHE_TTL:
             return list(result)
 
-    results: list[tuple[str, int, str, str]] = []
+    # Slow path: serialize discovery to prevent pile-up
+    with _discover_lock:
+        # Double-check after acquiring lock
+        entry = _cache.get(cache_key)
+        if entry is not None:
+            ts, result = entry
+            if time.time() - ts < _CACHE_TTL:
+                return list(result)
 
-    providers_to_query = (
-        {provider: PROVIDERS[provider]} if provider and provider in PROVIDERS
-        else PROVIDERS
-    )
+        results: list[tuple[str, int, str, str]] = []
 
-    for prov_name, mod in providers_to_query.items():
-        if not mod.is_available():
-            continue
-        try:
-            workspace_data = mod.discover_workspaces()
-            for cwd, count, updated_at in workspace_data:
-                results.append((cwd, count, updated_at, prov_name))
-        except Exception:
-            continue
+        providers_to_query = (
+            {provider: PROVIDERS[provider]} if provider and provider in PROVIDERS
+            else PROVIDERS
+        )
 
-    results.sort(key=lambda x: x[2], reverse=True)
-    _cache[cache_key] = (time.time(), results)
-    return list(results)
+        for prov_name, mod in providers_to_query.items():
+            if not mod.is_available():
+                continue
+            try:
+                workspace_data = mod.discover_workspaces()
+                for cwd, count, updated_at in workspace_data:
+                    results.append((cwd, count, updated_at, prov_name))
+            except Exception:
+                continue
+
+        results.sort(key=lambda x: x[2], reverse=True)
+        _cache[cache_key] = (time.time(), results)
+        return list(results)
 
 
 def get_sessions(cwd: str, provider: str = "kiro-cli") -> list[Session]:

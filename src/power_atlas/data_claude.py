@@ -375,14 +375,38 @@ def _extract_text_from_content(content: list) -> str:
     return " ".join(parts)
 
 
+# --- Per-session caches (mtime-guarded) ---
+
+_tail_cache: dict[str, tuple[float, float, list]] = {}  # jsonl_path -> (time, mtime, lines)
+_TAIL_CACHE_TTL = 5  # seconds
+_first_prompt_cache: dict[str, tuple[float, float, str]] = {}  # jsonl_path -> (time, mtime, prompt)
+_FIRST_PROMPT_TTL = 60  # seconds
+
+
 def get_session_tail(session_id: str, cwd: str, max_lines: int = 15) -> list[str]:
-    """Extract last N assistant message texts from a Claude Code session."""
+    """Extract last N assistant message texts from a Claude Code session.
+
+    Requires cwd to locate the project folder (Claude Code keys sessions by project path).
+    """
     folder = _get_project_folder(cwd)
     if folder is None:
         return []
     jsonl_path = folder / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return []
+
+    try:
+        st = jsonl_path.stat()
+    except OSError:
+        return []
+
+    # Mtime-guarded cache: (cache_time, file_mtime, result)
+    cache_key = str(jsonl_path)
+    cached = _tail_cache.get(cache_key)
+    if cached is not None:
+        cache_time, cached_mtime, cached_result = cached
+        if time.time() - cache_time < _TAIL_CACHE_TTL and cached_mtime == st.st_mtime:
+            return list(cached_result)
 
     try:
         with open(jsonl_path, "rb") as fh:
@@ -420,17 +444,35 @@ def get_session_tail(session_id: str, cwd: str, max_lines: int = 15) -> list[str
             break
 
     messages.reverse()
+    if messages:  # Don't cache empty results
+        _tail_cache[cache_key] = (time.time(), st.st_mtime, messages)
     return messages
 
 
 def get_first_prompt(session_id: str, cwd: str) -> str:
-    """Extract first user message from a Claude Code session."""
+    """Extract first user message from a Claude Code session.
+
+    Requires cwd to locate the project folder (Claude Code keys sessions by project path).
+    """
     folder = _get_project_folder(cwd)
     if folder is None:
         return ""
     jsonl_path = folder / f"{session_id}.jsonl"
     if not jsonl_path.exists():
         return ""
+
+    try:
+        st = jsonl_path.stat()
+    except OSError:
+        return ""
+
+    # Mtime-guarded cache: (cache_time, file_mtime, result)
+    cache_key = str(jsonl_path)
+    cached = _first_prompt_cache.get(cache_key)
+    if cached is not None:
+        cache_time, cached_mtime, cached_result = cached
+        if time.time() - cache_time < _FIRST_PROMPT_TTL and cached_mtime == st.st_mtime:
+            return cached_result
 
     try:
         with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
@@ -453,13 +495,18 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
                     if isinstance(content, str) and content:
                         cleaned = _strip_command_xml(content)
                         if cleaned:
-                            return _cap_text(cleaned)
+                            result = _cap_text(cleaned)
+                            _first_prompt_cache[cache_key] = (time.time(), st.st_mtime, result)
+                            return result
                     elif isinstance(content, list):
                         text = _extract_text_from_content(content)
                         if text:
-                            return _cap_text(text)
+                            result = _cap_text(text)
+                            _first_prompt_cache[cache_key] = (time.time(), st.st_mtime, result)
+                            return result
     except OSError:
         pass
+    # Don't negative-cache empty results
     return ""
 
 
