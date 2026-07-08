@@ -2,6 +2,7 @@
 
 > **Date**: 2026-07-08
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-08 16:23
 > **Scope**: Enrich session hover tooltip with title/workspace, improve content separation, fix card preview, viewport-aware sizing, and peek window scroll
 
 ---
