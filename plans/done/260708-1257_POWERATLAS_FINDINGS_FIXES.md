@@ -2,9 +2,16 @@
 
 > **Date**: 2026-07-07
 > **Status**: Complete  <!-- Exploring → Draft → In Progress → Complete -->
+> **Last Updated**: 2026-07-08 12:57
 > **Scope**: Fix the still-valid Medium/Low findings from the `260701_POWERATLAS` qtest run. The High data-loss cluster was already resolved by `260707_CONFIG_HOT_RELOAD_AND_PEEK_RESET`; this project covers the remaining ~22 correctness/robustness/perf findings + one dead-code cleanup.
 > **Estimated effort**: ~1.5–3 days (6 phases; no High-severity work remaining)
 > **Anchors RE-ANCHORED against HEAD**: `bb843f2` (code `c0ca17a`, 2026-07-07) — **after `260707_LAUNCH_PROFILES_FOR_EXPORTABLE_MCP_SAFE_TERMINALS` landed** (it rewrote config/launcher/web/index + tests). §1 Current State holds the current anchors; §5 phase snippets keep pre-LAUNCH_PROFILES line refs (use §1 + `git diff bb843f2 -- <file>`). Scope changes from the rework: CSRF (#2) is now RESOLVED by LAUNCH_PROFILES's `same_origin_guard` middleware; all other findings survived at new line numbers; data/icons/lifecycle files were untouched.
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- `Accepted (harness opportunity)`: Exploration output went stale across a multi-day gap because findings were anchored to `file:line` and the code was reworked in between — suggested change: when `/qexplore` output will be handed to a *deferred* `/qplan`, record the HEAD commit SHA the anchors were verified against, so `/qplan` can cheaply detect drift (git diff since that SHA) before trusting them.
 
 ---
 
