@@ -310,9 +310,12 @@ Hardened input handling across the launcher, icons, and CLI modules. In `launche
 - Grep `tests/` for `settings.html` references only; delete any lingering dead test.
 
 **Exit criteria**:
-- [ ] `settings.html` gone; no `.settings-` CSS classes remain in `style.css` (`grep -n "\.settings-" src/power_atlas/static/style.css` empty).
-- [ ] `GET /api/settings` still present + functional (regression guard — `grep -n "api/settings" src/power_atlas/web.py` still matches; `refreshSettings()` still works).
-- [ ] App loads (`GET /` 200) and `pytest` green after removal.
+- [x] `settings.html` gone; no `.settings-` CSS classes remain in `style.css` (`grep -n "\.settings-" src/power_atlas/static/style.css` empty).
+- [x] `GET /api/settings` still present + functional (regression guard — `grep -n "api/settings" src/power_atlas/web.py` still matches; `refreshSettings()` still works).
+- [x] App loads (`GET /` 200) and `pytest` green after removal.
+
+**Implementation (2026-07-08, code: 2979bcd)**
+Removed all dead `.settings-*` CSS rules from `style.css`: the `/* Settings */` block (lines 178-190: `.settings-page`, `.settings-form`, `.settings-group`, `.settings-group-title`, `.settings-row`, `.settings-select`, `.settings-input`, `.settings-btn`, `.settings-btn.primary`) and the earlier topbar `.settings-btn` rules (lines 51-52). The `settings.html` template had already been removed by `260705_CONFIGURABLE_PORT` Phase 4. Confirmed: no `.settings-` references exist in any HTML template or Python source; `GET /api/settings` endpoint remains at web.py:537; `refreshSettings()` in index.html still works. 15 lines of dead CSS removed.
 
 ## 6) Risk Assessment
 
@@ -428,6 +431,8 @@ Parallel group [2,3,4,5] reviewed per-phase; 374 tests pass, 1 pre-existing fail
 | P4-3 | Low | htmx:afterSwap global handler doesn't call `updateActionBar()`. | Accepted — pre-existing gap not in SC15 spec. |
 | P5-1 | Low | `_CMD_METACHAR_RE` doesn't cover `!` (delayed expansion, off by default). | Accepted — requires user-configured delayed expansion. |
 | P5-2 | Low | `_SAFE_COLOR_RE` accepts unbounded-length alpha strings from own config. | Accepted — local trust boundary; no external attacker vector. |
+
+Per-phase review deferred to Step 9: Phase 6 — dead CSS removal (≤30 LOC, no executable code).
 
 ## Harness Improvement Opportunities
 - Exploration output went stale across a multi-day gap because findings were anchored to `file:line` and the code was reworked in between — suggested change: when `/qexplore` output will be handed to a *deferred* `/qplan`, record the HEAD commit SHA the anchors were verified against, so `/qplan` can cheaply detect drift (git diff since that SHA) before trusting them. *(Adopted in this plan's header; propose promoting to the `/qexplore` Step 3 persist-intent rule.)*
