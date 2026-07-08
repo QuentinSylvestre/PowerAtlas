@@ -7,13 +7,13 @@
   {% endif %}
   {% if first_prompt %}
   <div class="tail-section">
-    <span class="tail-label">User:</span>
+    <span class="tail-label">User original message:</span>
     <div class="tail-line tail-first-prompt">{{ first_prompt }}</div>
   </div>
   {% endif %}
   {% if messages %}
   <div class="tail-section tail-agent-section">
-    <span class="tail-label">Agent:</span>
+    <span class="tail-label">Agent last message:</span>
     {% for msg in messages %}
     <div class="tail-line">{{ msg }}</div>
     {% endfor %}
