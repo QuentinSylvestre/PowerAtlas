@@ -209,7 +209,6 @@ script { display: none; }
 .session-tail-tooltip { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; max-width: 800px; min-width: 200px; max-height: 400px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
 .tail-line { font-size: 11px; color: var(--text-muted); padding: 2px 0; font-family: monospace; white-space: pre-wrap; word-break: break-word; }
 .tail-line.tail-first-prompt { color: var(--accent); font-weight: 500; }
-.tail-separator { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 .tail-line + .tail-line { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 4px; }
 .tail-header { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
 .tail-workspace { font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }

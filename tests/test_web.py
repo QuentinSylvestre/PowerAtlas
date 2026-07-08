@@ -546,6 +546,21 @@ def test_session_tail_returns_messages(mock_tail, mock_first, mock_cache, client
     assert "My Session" in resp.text
 
 
+@patch("power_atlas.web.data.session_cache")
+@patch("power_atlas.web.data.get_first_prompt", return_value="hello user")
+@patch("power_atlas.web.data.get_session_tail")
+def test_session_tail_graceful_no_cache(mock_tail, mock_first, mock_cache, client):
+    """When session is not in cache, title is empty but tooltip still renders."""
+    mock_tail.return_value = ["agent reply"]
+    mock_cache.get.return_value = None  # Cache miss
+    resp = client.get("/partials/session-tail?sid=sess-1&cwd=C%3A%5CProjects%5Cmyapp")
+    assert resp.status_code == 200
+    assert "agent reply" in resp.text
+    assert "tail-workspace" in resp.text  # workspace name from Path(cwd).name still shows
+    assert "myapp" in resp.text
+    assert "tail-title" not in resp.text  # no title when not in cache
+
+
 @patch("power_atlas.web.data.get_first_prompt", return_value="")
 @patch("power_atlas.web.data.get_session_tail")
 def test_session_tail_empty(mock_tail, mock_first, client):
