@@ -168,23 +168,23 @@ class TestLaunchSession:
         assert result.success is True
         mock_run.assert_called_once()
         mock_popen.assert_not_called()
-        helper_cmd = mock_run.call_args[0][0]
-        typed_command = helper_cmd[helper_cmd.index("-Command") + 1]
-        assert typed_command == "& 'kiro-cli' 'chat'"
-        # Verify profile parameters are passed to helper
-        assert "-WtProfile" in helper_cmd
-        assert helper_cmd[helper_cmd.index("-WtProfile") + 1] == "PowerShell"
-        assert "-ShellProcessName" in helper_cmd
-        assert helper_cmd[helper_cmd.index("-ShellProcessName") + 1] == "pwsh.exe"
-        assert "-AttachTimeoutMs" in helper_cmd
-        assert helper_cmd[helper_cmd.index("-AttachTimeoutMs") + 1] == "4500"
+        wt_cmd = mock_run.call_args[0][0]
+        # New approach: wt new-tab --title ... -p PowerShell -d <cwd> -- pwsh -NoExit -Command <typed>
+        assert wt_cmd[0] == "C:\\wt.exe"
+        assert "new-tab" in wt_cmd
+        assert "-p" in wt_cmd
+        assert wt_cmd[wt_cmd.index("-p") + 1] == "PowerShell"
+        # The command should contain kiro-cli invocation
+        command_idx = wt_cmd.index("-Command") + 1
+        assert "kiro-cli" in wt_cmd[command_idx]
+        assert "'chat'" in wt_cmd[command_idx]
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("shutil.which")
     def test_windows_kiro_wt_helper_uses_custom_profile(self, mock_which, mock_run, mock_popen, tmp_path):
-        """Helper receives custom profile values (shell, timeout, wt_profile)."""
+        """Helper receives custom profile values (wt_profile, helper_runner, timeout)."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0)
         cwd = str(tmp_path)
@@ -200,12 +200,13 @@ class TestLaunchSession:
         result = launch_session(cwd, provider="kiro-cli", launch_profile=profile)
 
         assert result.success is True
-        helper_cmd = mock_run.call_args[0][0]
-        assert helper_cmd[helper_cmd.index("-WtProfile") + 1] == "MyCustomProfile"
-        assert helper_cmd[helper_cmd.index("-ShellProcessName") + 1] == "powershell.exe"
-        assert helper_cmd[helper_cmd.index("-AttachTimeoutMs") + 1] == "6000"
+        wt_cmd = mock_run.call_args[0][0]
+        # Profile name used in -p argument
+        assert wt_cmd[wt_cmd.index("-p") + 1] == "MyCustomProfile"
         # helper_timeout_ms / 1000 = 12.0 seconds timeout for subprocess.run
         assert mock_run.call_args[1]["timeout"] == 12.0
+        # helper_runner resolved via which is used as the shell executable
+        assert "C:\\pwsh.exe" in wt_cmd
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
@@ -269,23 +270,20 @@ class TestLaunchSession:
     @patch("subprocess.Popen")
     @patch("subprocess.run")
     @patch("shutil.which")
-    def test_windows_wt_helper_tab_opened_but_typing_failed_no_fallback(self, mock_which, mock_run, mock_popen, tmp_path):
-        """Exit code 2 means tab opened but typing failed — do NOT open a second tab."""
+    def test_windows_wt_mcp_safe_failure_falls_back_to_direct(self, mock_which, mock_run, mock_popen, tmp_path):
+        """When MCP-safe wt command fails, falls back to direct WT launch with warning."""
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "pwsh": "C:\\pwsh.exe"}.get(n)
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=2, stdout="", stderr="WriteConsoleInputW failed with Win32 error 6."
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="profile not found")
         cwd = str(tmp_path)
 
         result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
 
-        assert result.success is False
-        assert "tab opened but command typing failed" in result.error
-        assert "WriteConsoleInputW failed" in result.error
-        assert "type the command manually" in result.error
-        # Critical: no fallback tab opened
-        mock_popen.assert_not_called()
-        assert result.used_fallback is False
+        assert result.success is True
+        assert result.used_fallback is True
+        assert "MCP-safe helper failed" in result.warning
+        assert "profile not found" in result.warning
+        # Direct fallback via Popen
+        mock_popen.assert_called_once()
 
     @patch("power_atlas.launcher.sys.platform", "win32")
     @patch("subprocess.Popen")
@@ -526,10 +524,9 @@ class TestLaunchBatch:
         ]
         results = launch_batch(sessions, launch_profile=profile)
         assert results[0].success is True
-        # Profile's attach_timeout_ms should propagate to helper
-        helper_cmd = mock_run.call_args[0][0]
-        assert helper_cmd[helper_cmd.index("-AttachTimeoutMs") + 1] == "3000"
-        assert helper_cmd[helper_cmd.index("-WtProfile") + 1] == "CustomTab"
+        # Profile's wt_profile should be in the wt command
+        wt_cmd = mock_run.call_args[0][0]
+        assert wt_cmd[wt_cmd.index("-p") + 1] == "CustomTab"
 
 
 
