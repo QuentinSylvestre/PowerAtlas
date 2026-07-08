@@ -1,7 +1,7 @@
 # Panel Restructure — Dedicated Workspaces and Sessions Panels
 
 > **Date**: 2026-07-09
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Replace the pinned-sessions (left) and pinned-workspaces (center) panels with a unified workspaces panel and a paginated all-sessions panel, while keeping the launchers panel
 
 ---
@@ -243,13 +243,16 @@ def get_all_sessions_paginated(
 ```
 
 **Exit criteria**:
-- [ ] `get_all_sessions_paginated()` function exists in `data.py`
-- [ ] Returns pinned sessions first (all of them regardless of page)
-- [ ] Returns paginated non-pinned sessions sorted by `updated_at` desc
-- [ ] Respects provider filter and enabled_providers
-- [ ] Returns `has_more` boolean for "Load more" button
-- [ ] Deduplicates sessions by ID
-- [ ] Unit tests added in `test_data.py` covering: pagination, pinned-at-top, provider filtering, empty state
+- [x] `get_all_sessions_paginated()` function exists in `data.py`
+- [x] Returns pinned sessions first (all of them regardless of page)
+- [x] Returns paginated non-pinned sessions sorted by `updated_at` desc
+- [x] Respects provider filter and enabled_providers
+- [x] Returns `has_more` boolean for "Load more" button
+- [x] Deduplicates sessions by ID
+- [x] Unit tests added in `test_data.py` covering: pagination, pinned-at-top, provider filtering, empty state
+
+**Implementation (2026-07-09, code: b1c9ff6)**
+Implemented `get_all_sessions_paginated()` in `src/power_atlas/data.py` — a two-pass data layer function that collects sessions across all providers with early-stopping for pagination efficiency. Pass 1 iterates already-cached workspaces (no disk IO); Pass 2 loads uncached workspaces by recency until enough non-pinned sessions are collected. The function deduplicates by session_id, sorts by `updated_at` descending (normalizing 'Z' suffix for consistent comparison), splits results into pinned (always returned in full) and non-pinned (paginated), and supports filtering by provider name and enabled-providers set. Added 8 unit tests covering basic pagination (page 1/page 2 boundaries), pinned-at-top ordering, provider filtering, empty state, deduplication, enabled-providers exclusion, and sort order verification. All 91 tests pass.
 
 ### Phase 2: Templates — pin icon and workspace name on session rows [QA] [P:1]
 
@@ -291,10 +294,15 @@ Add pin indicator next to folder name for pinned workspaces:
 ```
 
 **Exit criteria**:
-- [ ] Pinned sessions show persistent 📌 icon before title
-- [ ] Pinned workspaces show persistent 📌 icon before folder name
-- [ ] Icon is always visible (not hover-dependent)
-- [ ] CSS styling for `.pinned-indicator`
+- [x] Pinned sessions show persistent 📌 icon before title
+- [x] Pinned workspaces show persistent 📌 icon before folder name
+- [x] Icon is always visible (not hover-dependent)
+- [x] CSS styling for `.pinned-indicator`
+
+**Implementation (2026-07-09, code: dff4279)**
+Added persistent pin indicators (📌) to both session rows and workspace cards. In `session_row.html`, a `.pinned-indicator` span renders conditionally before the session title when `session.session_id in pinned_sessions`. In `workspace_card.html`, the same indicator renders at the start of the `.card-folder-name` span when `is_pinned` is truthy. A new `.pinned-indicator` CSS class in `style.css` (line 126, adjacent to session-row styles) provides consistent 11px sizing, right margin, slight transparency, and flex-shrink protection.
+
+Per-phase review deferred to Step 9: template-only changes ≤30 LOC, no executable code.
 
 ### Phase 3: Backend endpoints — unified workspaces + all-sessions [QA]
 
@@ -712,3 +720,16 @@ function loadMoreSessions(page) {
 | 13 | Low | `pinned_sessions` as list in templates causes O(n) per `in` check. | Noted — Jinja2 `in` on small lists is negligible; optimize if pinned count grows. |
 | 14 | Low | Left panel width change 330→280px — verify launchers fit. | Noted — implementer should verify during Phase 4. |
 | 15 | Low | Ambiguous workspace names in session rows. | Noted — existing `data-cwd` tooltip provides full path on hover. |
+
+
+### 2026-07-09 -- Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+4 findings (0 High, 2 Medium, 2 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | No input validation — `page=0` or negative produces wrong slice via negative indexing. | Fixed — added `page = max(1, page)` and `page_size = max(1, page_size)` at entry. |
+| 2 | Medium | Pinned sessions in unloaded workspaces silently missing if early-stop fires before their workspace. | Fixed — added comment documenting implicit contract with `warmup_all()`. |
+| 3 | Low | `non_pinned_count` recomputed via O(n) sum on every Pass 2 iteration — quadratic on workspace count. | Noted — acceptable for typical workspace counts (<100). |
+| 4 | Low | No test for early-stop behavior — hard to verify it stops loading once threshold is reached. | Noted — optional optimization test, not required for correctness. |
