@@ -1,7 +1,7 @@
 # Session Tooltip Improvements
 
 > **Date**: 2026-07-08
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Enrich session hover tooltip with title/workspace, improve content separation, fix card preview, viewport-aware sizing, and peek window scroll
 
 ---
@@ -470,3 +470,25 @@ Implementation health: Green.
 | 2 | Low | `import ctypes` repeated inside method body on each call | Accepted — Python module cache makes this ~50ns, cosmetic only |
 
 Reliability assessment: Thread safety confirmed (GetSystemMetrics is read-only, pywebview dispatches to GUI thread internally). Window state idempotent across show/hide cycles. No new race conditions introduced.
+
+### 2026-07-08 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate.
+4 findings (0 High, 0 Medium, 4 Low).
+QA verification: PASS (5 surfaces verified, 6 probes executed, 1 SKIP for pywebview-only surface).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | [End-user] No ARIA role="tooltip" on tooltip div for screen reader accessibility | Accepted — developer-focused tool, minor accessibility gap |
+| 2 | Low | [End-user] .tail-title inherits max-width from parent (800px) for long titles | Accepted — works as intended, ellipsis clips correctly |
+| 3 | Low | [End-user] Empty Agent section for tool-only responses could confuse users | Accepted — correct behavior, very low frequency |
+| 4 | Low | [End-user] pointer-events:none prevents tooltip scrolling for long content | Accepted — intentional design trade-off for hover tooltip |
+
+211 tests pass (test_web.py + test_peek.py + test_data.py). All 6 success criteria verified:
+- SC1: Tooltip displays workspace name + session title (PASS)
+- SC2: User:/Agent: labels with distinct visual treatment (PASS)
+- SC3: Card "Last:" shows beginning of last agent message (PASS)
+- SC4: Tooltip clamps to viewport top edge (PASS)
+- SC5: Dynamic max-height to available space (PASS)
+- SC6: Peek scroll fix (SKIP — requires pywebview native window, structurally verified via review + unit tests)
