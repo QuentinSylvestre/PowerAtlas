@@ -1,7 +1,7 @@
 # PowerAtlas — qtest Findings Fixes (hardening)
 
 > **Date**: 2026-07-07
-> **Status**: Draft  <!-- Exploring → Draft → In Progress → Complete -->
+> **Status**: In Progress  <!-- Exploring → Draft → In Progress → Complete -->
 > **Scope**: Fix the still-valid Medium/Low findings from the `260701_POWERATLAS` qtest run. The High data-loss cluster was already resolved by `260707_CONFIG_HOT_RELOAD_AND_PEEK_RESET`; this project covers the remaining ~22 correctness/robustness/perf findings + one dead-code cleanup.
 > **Estimated effort**: ~1.5–3 days (6 phases; no High-severity work remaining)
 > **Anchors RE-ANCHORED against HEAD**: `bb843f2` (code `c0ca17a`, 2026-07-07) — **after `260707_LAUNCH_PROFILES_FOR_EXPORTABLE_MCP_SAFE_TERMINALS` landed** (it rewrote config/launcher/web/index + tests). §1 Current State holds the current anchors; §5 phase snippets keep pre-LAUNCH_PROFILES line refs (use §1 + `git diff bb843f2 -- <file>`). Scope changes from the rework: CSRF (#2) is now RESOLVED by LAUNCH_PROFILES's `same_origin_guard` middleware; all other findings survived at new line numbers; data/icons/lifecycle files were untouched.
@@ -161,10 +161,13 @@ None — code-only, no infra/CI/IAM/third-party/data-layout changes. Playwright 
 - **Tests** (regression functions per `AGENTS.md` no-new-file rule): `test_launch_session_malformed_default_args_returns_error` — MUST `@patch("power_atlas.launcher.shutil.which")` to return a fake path AND pass an existing `tmp_path` cwd, else it short-circuits at the binary/folder guards (`launcher.py:134,140`) before reaching the `shlex` parse; assert `.success is False` and `"Invalid" in .error`, no raise. `test_resolve_binary_whitespace_command_returns_none` (import `_resolve_binary`, assert `is None`, no `IndexError`). `test_default_args_windows_quoting` — with `sys.platform` patched to win32, assert a backslash path (`C:\Users\me\proj`) round-trips intact and a quoted-spaces arg (`--foo "bar baz"`) is handled acceptably under `posix=False` (documents the quote-retention tradeoff of L3).
 
 **Exit criteria**:
-- [ ] `launch_session` with `default_args='"'` returns a `LaunchResult` error (both provider paths); no `ValueError` escapes.
-- [ ] `_resolve_binary("   ")` returns `None`; `POST /api/launcher/create` with `command="   "` returns 200 (SVG fallback), not 500.
-- [ ] Backslash path in `default_args` is preserved on Windows (`posix=False`) (SC17/L3).
-- [ ] New regression tests pass; full `pytest` green.
+- [x] `launch_session` with `default_args='"'` returns a `LaunchResult` error (both provider paths); no `ValueError` escapes.
+- [x] `_resolve_binary("   ")` returns `None`; `POST /api/launcher/create` with `command="   "` returns 200 (SVG fallback), not 500.
+- [x] Backslash path in `default_args` is preserved on Windows (`posix=False`) (SC17/L3).
+- [x] New regression tests pass; full `pytest` green.
+
+**Implementation (2026-07-08, code: 0b9cae2)**
+Fixed two crash paths in the launcher subsystem: (1) `launch_session` now parses `default_args` with `shlex.split(..., posix=False)` on Windows once before both the terminal and non-terminal branches, catching `ValueError` from malformed quotes and returning a structured `LaunchResult` error instead of letting it propagate as HTTP 500; (2) `_resolve_binary` in icons.py now guards against whitespace-only `command` strings that would cause `IndexError` on `cmd.split()[0]`. Three regression tests were added to the existing `tests/test_launcher.py`: one exercising the malformed-args path through both provider branches, one confirming whitespace-only commands return `None`, and one documenting the `posix=False` behavior that preserves Windows backslash paths.
 
 ### Phase 2: Config robustness — backup + preserve + validate [QA] [P:3,4,5]
 **Goal**: Make `load_config`/`save_config` defensive without changing the happy path.
@@ -381,6 +384,17 @@ None — code-only, no infra/CI/IAM/third-party/data-layout changes. Playwright 
 | `LaunchResult` gained `warning`/`used_fallback` | New fields (LAUNCH_PROFILES) | Noted so launcher fixes don't disturb them. |
 
 Net: 1 finding dropped (CSRF, done elsewhere), the rest re-anchored; no new findings; scope otherwise unchanged. §1 Current State is the authoritative anchor source going forward; §5 phase snippets retain their pre-LAUNCH_PROFILES line refs.
+
+### 2026-07-08 -- Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+QA verification: PASS (3 regression tests exercised crash paths).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Windows quoting test exercises `shlex.split` directly, not the full `launch_session` code path. | Accepted — documentation test; the L2 test exercises the integrated path. |
+| 2 | Low | No web-level integration test for `POST /api/launcher/create` with whitespace-only command. | Accepted — pre-existing gap; unit test covers the fix at the `_resolve_binary` layer. |
 
 ## Harness Improvement Opportunities
 - Exploration output went stale across a multi-day gap because findings were anchored to `file:line` and the code was reworked in between — suggested change: when `/qexplore` output will be handed to a *deferred* `/qplan`, record the HEAD commit SHA the anchors were verified against, so `/qplan` can cheaply detect drift (git diff since that SHA) before trusting them. *(Adopted in this plan's header; propose promoting to the `/qexplore` Step 3 persist-intent rule.)*
