@@ -32,11 +32,14 @@ _lock = threading.Lock()
 _PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+_DEFAULT_TERMINAL_COMMAND = "wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}"
+
+
 @dataclass
 class LaunchProfile:
     id: str = "default"
     name: str = "Default"
-    terminal_command: str = ""  # empty = auto-detect; or a template with {title}/{wt_profile}/{cwd}/{cmd}
+    terminal_command: str = _DEFAULT_TERMINAL_COMMAND
     wt_profile: str = "PowerShell"
 
 

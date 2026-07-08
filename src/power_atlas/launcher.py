@@ -99,7 +99,7 @@ def _build_powershell_invocation(args: list[str]) -> str:
 
 def _is_windows_terminal(terminal: str) -> bool:
     """Return true for Windows Terminal executables, excluding user templates."""
-    if "{cwd}" in terminal or "{cmd}" in terminal:
+    if "{cwd}" in terminal or "{cmd}" in terminal or "{pscmd}" in terminal or "{title}" in terminal or "{wt_profile}" in terminal:
         return False
     return Path(terminal).stem.lower() == "wt"
 
@@ -225,19 +225,32 @@ def _sanitize_title(title: str) -> str:
     return _TITLE_UNSAFE_RE.sub("", title)
 
 
-def _build_template_command(template: str, cwd: str, kiro_args: list[str]) -> list[str]:
-    """Build command from user template with {cwd}/{cmd} placeholders.
+def _build_template_command(template: str, cwd: str, kiro_args: list[str], title: str = "", wt_profile: str = "PowerShell") -> list[str]:
+    """Build command from user template with {cwd}/{cmd}/{pscmd}/{title}/{wt_profile} placeholders.
+
+    Placeholders:
+      {cwd}        - workspace directory (single element)
+      {cmd}        - provider args as discrete elements (kiro-cli chat --resume-id x)
+      {pscmd}      - provider args as a single PowerShell invocation string (& 'kiro-cli' 'chat')
+      {title}      - sanitized window title (single element)
+      {wt_profile} - Windows Terminal profile name (single element)
 
     Handles paths with spaces by splitting the template around placeholders
     and inserting values as discrete elements.
     """
-    parts = re.split(r"(\{cwd\}|\{cmd\})", template)
+    parts = re.split(r"(\{cwd\}|\{cmd\}|\{pscmd\}|\{title\}|\{wt_profile\})", template)
     result: list[str] = []
     for part in parts:
         if part == "{cwd}":
             result.append(cwd)
         elif part == "{cmd}":
             result.extend(kiro_args)
+        elif part == "{pscmd}":
+            result.append(_build_powershell_invocation(kiro_args))
+        elif part == "{title}":
+            result.append(_sanitize_title(title) if title else "")
+        elif part == "{wt_profile}":
+            result.append(wt_profile)
         else:
             result.extend(p for p in part.split() if p)
     return result
@@ -288,8 +301,8 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
     """Build terminal-specific command list. Returns None if cwd is unsafe for cmd."""
     t = Path(terminal).stem.lower()
 
-    if "{cwd}" in terminal or "{cmd}" in terminal:
-        return _build_template_command(terminal, cwd, kiro_args)
+    if "{cwd}" in terminal or "{cmd}" in terminal or "{pscmd}" in terminal or "{title}" in terminal or "{wt_profile}" in terminal:
+        return _build_template_command(terminal, cwd, kiro_args, title=title, wt_profile=wt_profile)
 
     if t == "wt":
         cmd = [terminal]
@@ -388,7 +401,9 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
         except OSError as e:
             return LaunchResult(False, None, work_dir, error=str(e))
 
-    terminal = detect_terminal(profile.terminal_command)
+    # Custom launchers use auto-detect when profile has a template (templates are for provider launches)
+    tc = profile.terminal_command if "{" not in profile.terminal_command else ""
+    terminal = detect_terminal(tc)
     if not terminal:
         if sys.platform == "win32":
             msg = "No terminal found. Configure one in Settings."

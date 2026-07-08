@@ -42,7 +42,7 @@ def test_default_config_has_launch_profile():
     p = cfg.launch_profiles[0]
     assert p.id == "default"
     assert p.name == "Default"
-    assert p.terminal_command == ""
+    assert p.terminal_command == "wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}"
     assert p.wt_profile == "PowerShell"
 
 
@@ -104,7 +104,7 @@ def test_legacy_empty_terminal_command_no_modification(tmp_path):
     _write_toml(tmp_path, {"terminal_command": ""})
     cfg = load_config()
     assert len(cfg.launch_profiles) == 1
-    assert cfg.launch_profiles[0].terminal_command == ""
+    # Empty legacy value produces a default profile (with the default template)
     assert cfg.launch_profiles[0] == LaunchProfile()
 
 

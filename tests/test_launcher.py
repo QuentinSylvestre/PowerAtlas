@@ -288,9 +288,9 @@ class TestLaunchSession:
 
     @patch("shutil.which")
     def test_no_terminal(self, mock_which, tmp_path):
-        # Binary found but no terminal
+        # Binary found but no terminal (empty terminal_command triggers auto-detect)
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe"}.get(n)
-        result = launch_session(str(tmp_path))
+        result = launch_session(str(tmp_path), launch_profile=LaunchProfile(terminal_command=""))
         assert result.success is False
         assert "no terminal" in result.error.lower()
 

@@ -79,7 +79,7 @@ enabled = true
 [[launch_profiles]]
 id = "default"
 name = "Default"
-terminal_command = ""  # empty = auto-detect
+terminal_command = "wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}"
 wt_profile = "PowerShell"
 ```
 
