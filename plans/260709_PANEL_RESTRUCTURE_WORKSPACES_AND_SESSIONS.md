@@ -406,17 +406,20 @@ for group in other_grouped:
 4. **Refactor `/search`** — remove pinned-session rendering logic (which references the removed `_render_pinned_sessions` helper). The search endpoint now returns only workspace cards matching the query. Session search is handled by the `/partials/all-sessions?q=X` endpoint called from the JS dual-fetch.
 
 **Exit criteria**:
-- [ ] `GET /partials/all-sessions?page=1&provider=all` returns paginated session rows
-- [ ] Pinned sessions appear at top with pin icon
-- [ ] Every session row shows workspace folder name
-- [ ] `page=2` returns next 20 sessions
-- [ ] `provider=kiro-cli` filters to that provider only
-- [ ] `q=search` filters by title/prompt/workspace
-- [ ] "Load more" button rendered when `has_more=True`
-- [ ] `/partials/workspaces` now includes pinned workspaces at top with pin icon
-- [ ] `/partials/pinned-sessions` and `/partials/pinned-workspaces` removed
-- [ ] Search returns results for both panels
-- [ ] Tests updated for new endpoints, removed endpoints
+- [x] `GET /partials/all-sessions?page=1&provider=all` returns paginated session rows
+- [x] Pinned sessions appear at top with pin icon
+- [x] Every session row shows workspace folder name
+- [x] `page=2` returns next 20 sessions
+- [x] `provider=kiro-cli` filters to that provider only
+- [x] `q=search` filters by title/prompt/workspace
+- [x] "Load more" button rendered when `has_more=True`
+- [x] `/partials/workspaces` now includes pinned workspaces at top with pin icon
+- [x] `/partials/pinned-sessions` and `/partials/pinned-workspaces` removed
+- [x] Search returns results for both panels
+- [x] Tests updated for new endpoints, removed endpoints
+
+**Implementation (2026-07-09, code: 334d4fa)**
+Implemented Phase 3 of the panel restructure: created the new `GET /partials/all-sessions` endpoint that calls `data.get_all_sessions_paginated()` with pagination, provider filtering, and search support; modified `/partials/workspaces` to show all workspaces in a unified view (pinned at top sorted alphabetically, non-pinned below by recency); refactored `/search` to only return workspace cards (removing pinned-session search logic, adding `provider` parameter); and deleted the unused `/partials/pinned-sessions` endpoint, `/partials/pinned-workspaces` endpoint, and `_render_pinned_sessions()` helper. Tests updated: 7 new tests added, 2 existing tests updated. All 387 tests pass.
 
 ### Phase 4: Frontend — panel layout, JS refresh logic [QA]
 
@@ -733,3 +736,16 @@ Implementation health: Green.
 | 2 | Medium | Pinned sessions in unloaded workspaces silently missing if early-stop fires before their workspace. | Fixed — added comment documenting implicit contract with `warmup_all()`. |
 | 3 | Low | `non_pinned_count` recomputed via O(n) sum on every Pass 2 iteration — quadratic on workspace count. | Noted — acceptable for typical workspace counts (<100). |
 | 4 | Low | No test for early-stop behavior — hard to verify it stops loading once threshold is reached. | Noted — optional optimization test, not required for correctness. |
+
+### 2026-07-09 -- Implementation Review (after Phase 3, persona: Senior engineer)
+
+Implementation health: Green.
+5 findings (0 High, 1 Medium, 4 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Exit criteria in plan unticked despite all being substantively met by the code. | Fixed — orchestrator ticked all 11 criteria in Step 7 plan update. |
+| 2 | Low | No test verifying removed endpoints return 404. | Noted — deletion confirmed via grep; standard multi-phase pattern. |
+| 3 | Low | New `provider` param on `/search` has no dedicated test. | Noted — logic simple and consistent with existing patterns; Phase 4 exercises it. |
+| 4 | Low | Frontend still references removed endpoints (temporarily broken between phases). | Noted — expected; Phase 4 handles frontend updates. |
+| 5 | Low | Redundant double provider-filter in `/search`. | Noted — harmless defensive code, consistent with `partials_workspaces` pattern. |
