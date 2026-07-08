@@ -1143,3 +1143,40 @@ class TestKiroFirstPromptMtimeRefresh:
 
         result2 = data_kiro.get_first_prompt("mtime1")
         assert result2 == "updated prompt"
+
+
+class TestDiscoverSingleFlight:
+    def test_concurrent_cold_callers_trigger_single_scan(self, mock_sessions, monkeypatch):
+        """SC7: N concurrent cold callers trigger one scan, not N."""
+        import concurrent.futures
+        call_count = 0
+
+        _write_session(mock_sessions, "s1", "C:\\Project", updated_at="2026-07-01T00:00:00Z")
+
+        original_discover = data_kiro.discover_workspaces
+
+        def counting_discover():
+            nonlocal call_count
+            call_count += 1
+            import time as t
+            t.sleep(0.05)  # simulate slow discovery
+            return original_discover()
+
+        monkeypatch.setattr("power_atlas.data_kiro.discover_workspaces", counting_discover)
+        data._cache.clear()
+
+        n_threads = 8
+        barrier = threading.Barrier(n_threads)
+
+        def call_discover():
+            barrier.wait()
+            return discover_workspaces_with_counts(provider="kiro-cli")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as pool:
+            futures = [pool.submit(call_discover) for _ in range(n_threads)]
+            results = [f.result() for f in futures]
+
+        # Single-flight: only 1 scan should have occurred
+        assert call_count == 1, f"Expected 1 scan, got {call_count}"
+        # All callers get the same result
+        assert all(r == results[0] for r in results)
