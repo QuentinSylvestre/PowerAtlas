@@ -39,7 +39,7 @@ _DEFAULT_TERMINAL_COMMAND = "wt new-tab --title {title} -p {wt_profile} -d {cwd}
 class LaunchProfile:
     id: str = "default"
     name: str = "Default"
-    terminal_command: str = _DEFAULT_TERMINAL_COMMAND
+    terminal_command: str = ""
     wt_profile: str = "PowerShell"
 
 
@@ -94,8 +94,6 @@ def _normalize_launch_profile(raw: dict, index: int, seen_ids: dict[str, str], i
     # --- terminal_command ---
     tc = str(raw.get("terminal_command", "")) if raw.get("terminal_command") is not None else ""
     tc = _strip_control_chars(tc)[:512]
-    if not tc:
-        tc = _DEFAULT_TERMINAL_COMMAND
 
     # --- wt_profile ---
     wt = str(raw.get("wt_profile", "")) if raw.get("wt_profile") is not None else ""
@@ -198,6 +196,13 @@ def load_config() -> Config:
         config.workspace_icons = {k: v for k, v in config.workspace_icons.items() if isinstance(k, str) and isinstance(v, str)}
         config.custom_launchers = [x for x in config.custom_launchers if isinstance(x, dict)]
         config.provider_settings = {k: v for k, v in config.provider_settings.items() if isinstance(v, dict)}
+
+        # Platform-aware terminal_command default: fill on Windows, leave empty on Linux (auto-detect)
+        if sys.platform == "win32":
+            for profile in config.launch_profiles:
+                if not profile.terminal_command:
+                    profile.terminal_command = _DEFAULT_TERMINAL_COMMAND
+
         return config
 
 

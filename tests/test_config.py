@@ -42,7 +42,7 @@ def test_default_config_has_launch_profile():
     p = cfg.launch_profiles[0]
     assert p.id == "default"
     assert p.name == "Default"
-    assert p.terminal_command == "wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}"
+    assert p.terminal_command == ""  # Raw dataclass default; load_config fills platform-specific
     assert p.wt_profile == "PowerShell"
 
 
@@ -100,12 +100,19 @@ def test_legacy_terminal_command_migrates_to_profile(tmp_path):
 
 
 def test_legacy_empty_terminal_command_no_modification(tmp_path):
-    """Empty terminal_command does NOT create a modified default profile."""
+    """Empty terminal_command produces default profile with platform-appropriate terminal_command."""
     _write_toml(tmp_path, {"terminal_command": ""})
     cfg = load_config()
     assert len(cfg.launch_profiles) == 1
-    # Empty legacy value produces a default profile (with the default template)
-    assert cfg.launch_profiles[0] == LaunchProfile()
+    p = cfg.launch_profiles[0]
+    assert p.id == "default"
+    assert p.name == "Default"
+    assert p.wt_profile == "PowerShell"
+    import sys
+    if sys.platform == "win32":
+        assert "wt new-tab" in p.terminal_command
+    else:
+        assert p.terminal_command == ""
 
 
 def test_legacy_migration_skipped_when_profiles_exist(tmp_path):
@@ -207,11 +214,18 @@ def test_active_id_pointing_to_nonexistent_remaps(tmp_path):
 
 
 def test_empty_profiles_list_normalizes(tmp_path):
-    """Empty launch_profiles list normalizes to [LaunchProfile()]."""
+    """Empty launch_profiles list normalizes to a default profile."""
     _write_toml(tmp_path, {"launch_profiles": []})
     cfg = load_config()
     assert len(cfg.launch_profiles) == 1
-    assert cfg.launch_profiles[0] == LaunchProfile()
+    p = cfg.launch_profiles[0]
+    assert p.id == "default"
+    assert p.wt_profile == "PowerShell"
+    import sys
+    if sys.platform == "win32":
+        assert "wt new-tab" in p.terminal_command
+    else:
+        assert p.terminal_command == ""
 
 
 # --- get_active_launch_profile ---
