@@ -211,6 +211,12 @@ script { display: none; }
 .tail-line.tail-first-prompt { color: var(--accent); font-weight: 500; }
 .tail-separator { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
 .tail-line + .tail-line { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 4px; }
+.tail-header { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
+.tail-workspace { font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }
+.tail-title { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tail-section { margin-top: 4px; }
+.tail-agent-section { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
+.tail-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; font-weight: 500; display: block; margin-bottom: 2px; }
 .tail-empty { font-size: 11px; color: var(--text-dim); padding: 4px 8px; font-style: italic; }
 
 

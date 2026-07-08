@@ -1,9 +1,22 @@
 <div class="session-tail-tooltip">
-  {% if first_prompt %}
-  <div class="tail-line tail-first-prompt">{{ first_prompt }}</div>
+  {% if workspace_name or session_title %}
+  <div class="tail-header">
+    {% if workspace_name %}<div class="tail-workspace">{{ workspace_name }}</div>{% endif %}
+    {% if session_title %}<div class="tail-title" title="{{ session_title }}">{{ session_title }}</div>{% endif %}
+  </div>
   {% endif %}
-  {% if first_prompt and messages %}<hr class="tail-separator">{% endif %}
-  {% for msg in messages %}
-  <div class="tail-line">{{ msg }}</div>
-  {% endfor %}
+  {% if first_prompt %}
+  <div class="tail-section">
+    <span class="tail-label">User:</span>
+    <div class="tail-line tail-first-prompt">{{ first_prompt }}</div>
+  </div>
+  {% endif %}
+  {% if messages %}
+  <div class="tail-section tail-agent-section">
+    <span class="tail-label">Agent:</span>
+    {% for msg in messages %}
+    <div class="tail-line">{{ msg }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>

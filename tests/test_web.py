@@ -525,18 +525,30 @@ def test_set_workspace_icon_reset(mock_load, mock_save, client):
 # --- Phase 4: session-tail endpoint ---
 
 
+@patch("power_atlas.web.data.session_cache")
+@patch("power_atlas.web.data.get_first_prompt", return_value="hello user")
 @patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_returns_messages(mock_tail, client):
+def test_session_tail_returns_messages(mock_tail, mock_first, mock_cache, client):
     mock_tail.return_value = ["message one", "message two"]
-    resp = client.get("/partials/session-tail?sid=sess-1")
+    mock_cache.get.return_value = [
+        Session(session_id="sess-1", title="My Session", cwd="C:\\Projects\\myapp",
+                created_at="", updated_at="", first_prompt="", last_prompt="", last_reply_tail=""),
+    ]
+    resp = client.get("/partials/session-tail?sid=sess-1&cwd=C%3A%5CProjects%5Cmyapp")
     assert resp.status_code == 200
     assert "message one" in resp.text
     assert "message two" in resp.text
     assert "tail-line" in resp.text
+    assert "tail-header" in resp.text
+    assert "tail-workspace" in resp.text
+    assert "myapp" in resp.text
+    assert "tail-label" in resp.text
+    assert "My Session" in resp.text
 
 
+@patch("power_atlas.web.data.get_first_prompt", return_value="")
 @patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_empty(mock_tail, client):
+def test_session_tail_empty(mock_tail, mock_first, client):
     mock_tail.return_value = []
     resp = client.get("/partials/session-tail?sid=sess-1")
     assert resp.status_code == 200

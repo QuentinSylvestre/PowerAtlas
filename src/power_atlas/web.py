@@ -791,9 +791,21 @@ async def partials_session_tail(request: Request, sid: str = "", provider: str =
     first_prompt = await asyncio.to_thread(data.get_first_prompt, sid, provider, cwd)
     if not messages and not first_prompt:
         return HTMLResponse('<div class="tail-empty">No recent output</div>')
+    # Look up session title from cache
+    session_title = ""
+    cached_sessions = data.session_cache.get(cwd, provider)
+    if cached_sessions:
+        for s in cached_sessions:
+            if s.session_id == sid:
+                session_title = s.title
+                break
+    # Derive workspace name from cwd
+    workspace_name = Path(cwd).name if cwd else ""
     return templates.TemplateResponse(request, "partials/session_tail.html", {
         "first_prompt": first_prompt,
         "messages": messages,
+        "session_title": session_title,
+        "workspace_name": workspace_name,
     })
 
 
