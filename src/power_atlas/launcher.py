@@ -253,16 +253,16 @@ try {
     # AttachConsole to a ConPTY-hosted process (Windows Terminal uses ConPTY).
     # CreateFileW("CONIN$") opens a direct handle to the attached console's
     # input buffer, which works regardless of ConPTY.
-    $GENERIC_READ_WRITE = 0xC0000000  # GENERIC_READ | GENERIC_WRITE
-    $FILE_SHARE_READ = 0x1
-    $OPEN_EXISTING = 3
+    $GENERIC_READ_WRITE = [uint32]0xC0000000  # GENERIC_READ | GENERIC_WRITE
+    $FILE_SHARE_READ = [uint32]0x1
+    $OPEN_EXISTING = [uint32]3
     $inputHandle = [NativeConsole.Kernel32]::CreateFileW(
         "CONIN$",
         $GENERIC_READ_WRITE,
         $FILE_SHARE_READ,
         [IntPtr]::Zero,
         $OPEN_EXISTING,
-        0,
+        [uint32]0,
         [IntPtr]::Zero
     )
     if ($inputHandle -eq [IntPtr]::Zero -or $inputHandle.ToInt64() -eq -1) {
