@@ -374,10 +374,14 @@ Modify `workspace_card.html` — when `workspace_color` is set, override the pro
 ```
 
 **Exit criteria**:
-- [ ] Workspace with explicit color shows that color as accent bar
-- [ ] Workspace with no color but tagged with colored tag shows tag's color
-- [ ] Workspace with no color and no colored tags shows provider gradient (existing behavior)
-- [ ] Test: `_resolve_workspace_color()` precedence chain verified
+- [x] Workspace with explicit color shows that color as accent bar
+- [x] Workspace with no color but tagged with colored tag shows tag's color
+- [x] Workspace with no color and no colored tags shows provider gradient (existing behavior)
+- [x] Test: `_resolve_workspace_color()` precedence chain verified
+
+#### Implementation (2026-07-09, code: 6bf0a50)
+
+Added `_resolve_workspace_color()` helper implementing the 3-level color precedence chain: workspace explicit color > first tag with a defined color in tag_settings > empty string (preserves existing provider gradient). Modified all three template render loops (pinned workspaces, non-pinned workspaces, and search results) to pass `workspace_color`. Updated workspace_card.html to check `workspace_color` first. Nine tests (6 unit + 3 integration) verify precedence at each level. Divergence: also updated search endpoint render loop for completeness (template requires the variable).
 
 ### Phase 4: Pinned gap CSS [QA] [P:1]
 
@@ -700,3 +704,8 @@ Implementation health: Green.
 | 5 | Low | No aria-live region on tag chips container for screen reader feedback. | Accepted — desktop power-user app; improvement deferred to follow-up. |
 | 6 | Low | Gear button uses emoji — minor rendering variation across font stacks. | Accepted — renders reliably on Windows 10+ with Segoe UI Emoji. |
 | 7 | Low | No test for keyboard contract (JS-only, not API-testable in Python). | Accepted — browser-level testing scope; API layer fully tested. |
+
+### 2026-07-09 -- Implementation Review (after Phase 3, persona: Senior engineer, End-user advocate, Reliability engineer, Performance engineer)
+
+Implementation health: Green.
+0 findings.
