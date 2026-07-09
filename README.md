@@ -39,6 +39,8 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 - Multi-select and batch launch sessions
 - Per-provider settings with default args (e.g. trust-all-tools)
 - Pin folders and sessions for quick access
+- Quick actions on workspace cards: click folder icon to open in file explorer, hover to reveal terminal button
+- Built-in terminal launcher tile opens a shell at selected workspaces or default directory
 - Search across all workspaces and sessions
 - Custom launchers with inline args editing and one-click execution
 - Global launch profiles with configurable Windows Terminal profile and terminal command

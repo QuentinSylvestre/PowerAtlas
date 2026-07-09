@@ -190,21 +190,6 @@ script { display: none; }
 .card-icon { cursor: pointer; font-size: 16px; line-height: 1; flex-shrink: 0; transition: transform 0.12s; }
 .card-icon:hover { transform: scale(1.2); }
 
-/* Emoji picker */
-.emoji-picker { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; width: 280px; z-index: 150; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
-.emoji-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
-.emoji-tab { background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 11px; padding: 4px 8px; cursor: pointer; }
-.emoji-tab.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
-.emoji-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 8px; }
-.emoji-grid button { background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); font-size: 18px; padding: 6px; cursor: pointer; transition: background 0.1s; }
-.emoji-grid button:hover { background: var(--surface-hover); border-color: var(--border); }
-.emoji-custom { margin-bottom: 8px; }
-.emoji-custom input { width: 100%; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; outline: none; }
-.emoji-custom input:focus { border-color: var(--accent); }
-.emoji-picker-footer { display: flex; justify-content: flex-end; gap: 8px; }
-.emoji-picker-footer button { background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 12px; padding: 4px 10px; cursor: pointer; }
-.emoji-picker-footer button:hover { border-color: var(--accent); color: var(--text); }
-
 /* Session tail tooltip */
 .session-tooltip-slot { display: none; position: fixed; z-index: 1000; pointer-events: none; }
 .session-tail-tooltip { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; max-width: 800px; min-width: 200px; max-height: 400px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
