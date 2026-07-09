@@ -116,6 +116,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .tag-add-input::placeholder { color: var(--text-muted); }
 .tag-add-btn { background: var(--accent); color: white; border: none; border-radius: var(--radius-sm); padding: 4px 10px; cursor: pointer; font-size: 14px; font-weight: 600; }
 .tag-add-btn:hover { opacity: 0.85; }
+.tag-delete-btn:focus-visible, .tag-add-btn:focus-visible, .tag-mini-swatch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .group-heading { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); padding: 10px 8px 4px; border-bottom: 1px solid var(--border); margin-top: 4px; }
 .workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; transition: border-color 0.2s; }
 .workspace-card:hover { border-color: #3a4060; }
