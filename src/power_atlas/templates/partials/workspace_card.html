@@ -15,6 +15,7 @@
         <img src="/api/launcher-icon/provider--{{ p.name }}" class="card-new-icon" alt="" onerror="this.outerHTML='&gt;_'">
       </button>
       {% endfor %}
+      <button class="card-settings-btn" onclick="event.stopPropagation();openWorkspaceSettings(this)" aria-label="Workspace settings" title="Settings">&#x2699;&#xfe0f;</button>
       <button class="card-pin-btn{% if is_pinned %} pinned{% endif %}" onclick="event.stopPropagation();pinWorkspace(this)" aria-label="Pin workspace">📌</button>
     </div>
   </div>

@@ -1970,3 +1970,139 @@ def test_session_pinned_separator_absent_no_pinned(mock_paginated, mock_config, 
     resp = client.get("/partials/all-sessions?page=1")
     assert resp.status_code == 200
     assert 'class="pinned-separator"' not in resp.text
+
+
+
+# --- Phase 2 (Workspace Tags): Workspace settings API ---
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_save_roundtrip(mock_load, mock_save, client, tmp_path):
+    """POST /api/workspace-settings/save persists tags and color to config."""
+    from power_atlas.config import Config
+    cwd = str(tmp_path)
+    mock_load.return_value = Config()
+    resp = client.post("/api/workspace-settings/save", json={
+        "cwd": cwd,
+        "tags": ["frontend", "active"],
+        "color": "#3b82f6",
+    })
+    assert resp.status_code == 200
+    assert "saved" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    assert saved.workspace_settings[cwd]["tags"] == ["frontend", "active"]
+    assert saved.workspace_settings[cwd]["color"] == "#3b82f6"
+
+
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_save_empty_cwd_rejected(mock_load, client):
+    """Empty cwd is rejected with error toast."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/workspace-settings/save", json={
+        "cwd": "",
+        "tags": ["test"],
+        "color": "",
+    })
+    assert resp.status_code == 200
+    assert "invalid" in resp.text.lower() or "error" in resp.text.lower()
+
+
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_save_too_many_tags(mock_load, client, tmp_path):
+    """More than 10 tags is rejected."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/workspace-settings/save", json={
+        "cwd": str(tmp_path),
+        "tags": ["t" + str(i) for i in range(11)],
+        "color": "",
+    })
+    assert resp.status_code == 200
+    assert "max 10" in resp.text.lower()
+
+
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_save_tag_too_long(mock_load, client, tmp_path):
+    """Tag over 64 chars is rejected."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/workspace-settings/save", json={
+        "cwd": str(tmp_path),
+        "tags": ["x" * 65],
+        "color": "",
+    })
+    assert resp.status_code == 200
+    assert "invalid tag" in resp.text.lower()
+
+
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_save_tag_control_chars(mock_load, client, tmp_path):
+    """Tag with control characters is rejected."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/workspace-settings/save", json={
+        "cwd": str(tmp_path),
+        "tags": ["bad\x01tag"],
+        "color": "",
+    })
+    assert resp.status_code == 200
+    assert "invalid tag" in resp.text.lower()
+
+
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_get_returns_defaults(mock_load, client, tmp_path):
+    """GET /api/workspace-settings returns empty defaults for unknown workspace."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.get("/api/workspace-settings", params={"cwd": str(tmp_path)})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["settings"]["tags"] == []
+    assert body["settings"]["color"] == ""
+    assert body["all_tags"] == []
+
+
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_get_returns_saved_data(mock_load, client, tmp_path):
+    """GET /api/workspace-settings returns previously saved tags and color."""
+    from power_atlas.config import Config
+    cwd = str(tmp_path)
+    mock_load.return_value = Config(
+        workspace_settings={cwd: {"tags": ["dev", "active"], "color": "#ef4444"}},
+        tag_settings={"archived": {"color": "#64748b"}},
+    )
+    resp = client.get("/api/workspace-settings", params={"cwd": cwd})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["settings"]["tags"] == ["dev", "active"]
+    assert body["settings"]["color"] == "#ef4444"
+    # all_tags includes both workspace tags and tag_settings keys
+    assert "dev" in body["all_tags"]
+    assert "active" in body["all_tags"]
+    assert "archived" in body["all_tags"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_workspace_settings_save_deduplicates_normalized_path(mock_load, mock_save, client, tmp_path):
+    """Saving settings deduplicates paths that normalize to the same value."""
+    from power_atlas.config import Config
+    cwd_lower = str(tmp_path).lower()
+    cwd_upper = str(tmp_path).upper()
+    mock_load.return_value = Config(
+        workspace_settings={cwd_lower: {"tags": ["old"], "color": ""}},
+    )
+    resp = client.post("/api/workspace-settings/save", json={
+        "cwd": cwd_upper,
+        "tags": ["new"],
+        "color": "#22c55e",
+    })
+    assert resp.status_code == 200
+    assert "saved" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    # Old key should be removed, new key used
+    assert cwd_lower not in saved.workspace_settings
+    assert saved.workspace_settings[cwd_upper]["tags"] == ["new"]
+    assert saved.workspace_settings[cwd_upper]["color"] == "#22c55e"

@@ -1,0 +1,39 @@
+<dialog class="workspace-settings-modal" id="workspaceSettingsModal">
+  <form method="dialog" onsubmit="saveWorkspaceSettings(event)">
+    <h3 id="wsSettingsTitle">Workspace Settings</h3>
+    <input type="hidden" id="wsSettingsCwd" value="">
+    <input type="hidden" id="wsSettingsColor" value="">
+    <div class="ws-tags-field">
+      <span class="ws-tags-label">Tags</span>
+      <div class="ws-tags-container" id="wsTagsContainer">
+        <div class="ws-tags-chips" id="wsTagsChips"></div>
+        <div class="ws-tags-input-wrap">
+          <input type="text" id="wsTagsInput" class="ws-tags-input" placeholder="Add tag..." autocomplete="off" aria-label="Add tag">
+          <div class="ws-tags-autocomplete" id="wsTagsAutocomplete"></div>
+        </div>
+      </div>
+    </div>
+    <div class="color-picker-field">
+      <span class="color-picker-label">Card color</span>
+      <div class="color-picker-swatches" id="wsColorPicker">
+        <button type="button" class="color-swatch" data-color="#ef4444" style="background:#ef4444" aria-label="Red"></button>
+        <button type="button" class="color-swatch" data-color="#f97316" style="background:#f97316" aria-label="Orange"></button>
+        <button type="button" class="color-swatch" data-color="#eab308" style="background:#eab308" aria-label="Yellow"></button>
+        <button type="button" class="color-swatch" data-color="#22c55e" style="background:#22c55e" aria-label="Green"></button>
+        <button type="button" class="color-swatch" data-color="#14b8a6" style="background:#14b8a6" aria-label="Teal"></button>
+        <button type="button" class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" aria-label="Cyan"></button>
+        <button type="button" class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" aria-label="Blue"></button>
+        <button type="button" class="color-swatch" data-color="#6366f1" style="background:#6366f1" aria-label="Indigo"></button>
+        <button type="button" class="color-swatch" data-color="#8b5cf6" style="background:#8b5cf6" aria-label="Violet"></button>
+        <button type="button" class="color-swatch" data-color="#d946ef" style="background:#d946ef" aria-label="Fuchsia"></button>
+        <button type="button" class="color-swatch" data-color="#ec4899" style="background:#ec4899" aria-label="Pink"></button>
+        <button type="button" class="color-swatch" data-color="#64748b" style="background:#64748b" aria-label="Slate"></button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <span class="topbar-spacer"></span>
+      <button type="button" class="modal-cancel-btn" onclick="document.getElementById('workspaceSettingsModal').close()">Cancel</button>
+      <button type="submit" class="action-btn launch">Save</button>
+    </div>
+  </form>
+</dialog>

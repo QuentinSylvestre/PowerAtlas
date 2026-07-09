@@ -1202,6 +1202,57 @@ async def launcher_run_batch(request: Request):
     return templates.TemplateResponse(request, "partials/toast.html", {"message": msg, "level": level})
 
 
+@app.get("/api/workspace-settings")
+async def get_workspace_settings_api(cwd: str = ""):
+    """Return workspace settings for a given cwd."""
+    config = load_config()
+    from .config import get_workspace_settings
+    settings = get_workspace_settings(config, cwd)
+    # Also return all known tags for autocomplete
+    all_tags = set()
+    for ws in config.workspace_settings.values():
+        all_tags.update(ws.get("tags", []))
+    all_tags.update(config.tag_settings.keys())
+    return {"settings": settings, "all_tags": sorted(all_tags)}
+
+
+@app.post("/api/workspace-settings/save", response_class=HTMLResponse)
+async def save_workspace_settings_api(request: Request):
+    """Save workspace settings (tags, color) for a workspace path."""
+    body = await request.json()
+    cwd = body.get("cwd", "")
+    tags = body.get("tags", [])
+    color = body.get("color", "")
+    # Validation: path
+    if not cwd or len(cwd) > 512 or any(ord(ch) < 0x20 for ch in cwd):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid workspace path", "level": "error"})
+    # Validation: tags (max 10, each 1-64 chars, no control chars)
+    if not isinstance(tags, list) or len(tags) > 10:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Max 10 tags per workspace", "level": "error"})
+    for t in tags:
+        if not isinstance(t, str) or not t or len(t) > 64 or any(ord(ch) < 0x20 for ch in t):
+            return templates.TemplateResponse(request, "partials/toast.html", {
+                "message": "Invalid tag: 1-64 chars, no control chars", "level": "error"})
+    # Validation: color (hex format or empty)
+    if color and (len(color) > 20 or any(ord(ch) < 0x20 for ch in color)):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid color value", "level": "error"})
+    config = load_config()
+    # Normalize key at save time to prevent duplicate entries for same path
+    from .data import _normalize_path
+    norm_cwd = _normalize_path(cwd)
+    for existing_key in list(config.workspace_settings.keys()):
+        if _normalize_path(existing_key) == norm_cwd and existing_key != cwd:
+            del config.workspace_settings[existing_key]
+    config.workspace_settings[cwd] = {"tags": tags, "color": color}
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Workspace settings saved", "level": "success",
+    })
+
+
 @app.post("/api/restart")
 async def api_restart():
     """Trigger restart via the tray mechanism."""
