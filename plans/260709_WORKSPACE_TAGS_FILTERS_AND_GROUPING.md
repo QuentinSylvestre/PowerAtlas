@@ -323,13 +323,17 @@ JS in `index.html`:
 - Tag chip input logic (add on Enter/comma, remove on click/backspace)
 
 **Exit criteria**:
-- [ ] Gear icon visible on workspace card hover (alongside existing action buttons)
-- [ ] Modal opens with current tags and color for the workspace
-- [ ] Tags can be added (typed + Enter) and removed (click X on chip)
-- [ ] Tag autocomplete suggests existing tags from all workspaces
-- [ ] Color picker works (same swatch grid as provider/launcher modals)
-- [ ] Save persists to config; toast confirms
-- [ ] Test: `POST /api/workspace-settings/save` round-trips through config
+- [x] Gear icon visible on workspace card hover (alongside existing action buttons)
+- [x] Modal opens with current tags and color for the workspace
+- [x] Tags can be added (typed + Enter) and removed (click X on chip)
+- [x] Tag autocomplete suggests existing tags from all workspaces
+- [x] Color picker works (same swatch grid as provider/launcher modals)
+- [x] Save persists to config; toast confirms
+- [x] Test: `POST /api/workspace-settings/save` round-trips through config
+
+#### Implementation (2026-07-09, code: 2e71915)
+
+Implemented the workspace settings modal and API endpoints. Added `GET /api/workspace-settings` (returns tags, color, and all known tags for autocomplete) and `POST /api/workspace-settings/save` (validates and persists tags and color with path normalization to prevent duplicates). Created a new `workspace_settings_modal.html` template using the existing `<dialog>` pattern with tag chip input (add on Enter/comma, remove on click/backspace, arrow-key autocomplete navigation, full tag list shown on focus) and the same 12-swatch color picker used elsewhere. Added a gear button to workspace card actions. Eight tests cover save round-trip, validation, GET defaults, GET with data, all_tags aggregation, and path deduplication.
 
 ### Phase 3: Color precedence integration [QA]
 
@@ -681,3 +685,18 @@ Implementation health: Green.
 | 4 | Low | aria-hidden="true" on decorative spacer is good accessibility practice. | No action needed (positive note). |
 
 Cycle 2 skipped — all auto-fixes purely mechanical (added tests, moved variable declaration).
+
+### 2026-07-09 -- Implementation Review (after Phase 2, persona: Senior engineer, Security auditor, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+7 findings (0 High, 2 Medium, 5 Low). No auto-fix needed.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Color validation accepts any string ≤20 chars — no hex format check. | Accepted — UI offers only preset swatches; API misuse stores inert garbage. |
+| 2 | Medium | Autocomplete renders all matching tags without item cap at extreme scale. | Accepted — CSS max-height mitigates; max ~10 tags/workspace limits practical count. |
+| 3 | Low | Modal title extraction uses fragile childNodes indexing. | Accepted — fallback to "Workspace" exists; data-attr improvement deferred. |
+| 4 | Low | Comma in tag text produces "ab" not "a"+"b" — intentional but undiscoverable. | Accepted — comma triggers submit; one-at-a-time entry is the designed flow. |
+| 5 | Low | No aria-live region on tag chips container for screen reader feedback. | Accepted — desktop power-user app; improvement deferred to follow-up. |
+| 6 | Low | Gear button uses emoji — minor rendering variation across font stacks. | Accepted — renders reliably on Windows 10+ with Segoe UI Emoji. |
+| 7 | Low | No test for keyboard contract (JS-only, not API-testable in Python). | Accepted — browser-level testing scope; API layer fully tested. |
