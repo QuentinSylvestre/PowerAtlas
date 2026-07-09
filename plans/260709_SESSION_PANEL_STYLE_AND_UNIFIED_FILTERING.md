@@ -470,18 +470,21 @@ fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()+'&q='+encodeURICompon
 **Covers**: SC-4, SC-5, SC-6, SC-7, SC-8, SC-9, SC-10, SC-11
 
 **Exit criteria**:
-- [ ] Sessions panel renders time-grouped (Today/Yesterday/This week/Older headings)
-- [ ] Pinned sessions render above time-group headings with separator
-- [ ] Tag filter hides sessions from non-matching workspaces
-- [ ] Time filter shows only matching time-group bucket
-- [ ] Hidden-workspace sessions excluded by default
-- [ ] Provider filter applies to sessions (already did, confirm no regression)
-- [ ] Search filters sessions within time groups
-- [ ] "Load more" appends next page with appropriate group headings
-- [ ] Empty time-group headings not rendered
-- [ ] All filters (tag, time, provider) can hide pinned sessions
-- [ ] Update `tests/test_web.py` with tests for new `tag`/`time_filter` params on `/partials/all-sessions`
-- [ ] Update `README.md` Features section to reflect permanent time grouping and unified filtering
+- [x] Sessions panel renders time-grouped (Today/Yesterday/This week/Older headings)
+- [x] Pinned sessions render above time-group headings with separator
+- [x] Tag filter hides sessions from non-matching workspaces
+- [x] Time filter shows only matching time-group bucket
+- [x] Hidden-workspace sessions excluded by default
+- [x] Provider filter applies to sessions (already did, confirm no regression)
+- [x] Search filters sessions within time groups
+- [x] "Load more" appends next page with appropriate group headings
+- [x] Empty time-group headings not rendered
+- [x] All filters (tag, time, provider) can hide pinned sessions
+- [x] Update `tests/test_web.py` with tests for new `tag`/`time_filter` params on `/partials/all-sessions`
+- [x] Update `README.md` Features section to reflect permanent time grouping and unified filtering
+
+Implementation (2026-07-09, code: bc0421b)
+Added unified filtering (tag, time_filter, provider) and permanent time-grouped rendering to the `/partials/all-sessions` endpoint. The sessions panel now renders pinned sessions at the top with a separator, followed by non-pinned sessions grouped under Today/Yesterday/This week/Older headings (empty groups omitted). Tag filtering excludes sessions from non-matching workspaces, hidden-workspace sessions are excluded by default, and time filtering restricts to a single bucket. All JS fetch calls for the sessions panel (`refreshCards`, `switchProvider`, `loadMoreSessions`, search handler) now pass the full filter state via `_buildWorkspaceQs()`. Seven new tests cover the filtering and grouping behavior, and the README features section was updated to reflect permanent time grouping with unified filtering across both panels.
 
 ---
 
@@ -519,6 +522,18 @@ fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()+'&q='+encodeURICompon
 <Reserved -- filled during implementation>
 
 ## Review Log
+
+### 2026-07-09 -- Implementation Review (after Phase 3, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+Cycle 2 skipped — cycle 1 findings all Low + no fixes needed (informational only).
+QA verification: PASS (time-grouped sessions verified, unified filtering confirmed across both panels, pagination disabled under filter).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | Duplicate group headings on "Load more" page 2+ (plan-acknowledged benign UX). | Accepted — explicitly addressed in Risk Assessment. |
+| 2 | Low | No test for `tag=hidden` on `/partials/all-sessions` endpoint. | Accepted — non-blocking, code logic verified by tracing. |
 
 ### 2026-07-09 -- Implementation Review (after Phase 2, persona: Senior engineer)
 
