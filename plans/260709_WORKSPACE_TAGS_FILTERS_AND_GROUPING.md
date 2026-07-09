@@ -602,12 +602,16 @@ JS in tag filter dropdown:
 - On color selection: POST to `/api/tag/save`, update dropdown display, refresh workspace cards (colors may have changed)
 
 **Exit criteria**:
-- [ ] Tag dropdown shows color indicator per tag
-- [ ] Clicking color indicator opens swatch picker
-- [ ] Saving color persists to `tag_settings` in config
-- [ ] Workspace cards reflect new tag color immediately after save (where applicable per precedence)
-- [ ] Test: `POST /api/tag/save` persists color; tag with color appears in `/api/tags` response
-- [ ] Update README.md with workspace tags and filtering feature description
+- [x] Tag dropdown shows color indicator per tag
+- [x] Clicking color indicator opens swatch picker
+- [x] Saving color persists to `tag_settings` in config
+- [x] Workspace cards reflect new tag color immediately after save (where applicable per precedence)
+- [x] Test: `POST /api/tag/save` persists color; tag with color appears in `/api/tags` response
+- [x] Update README.md with workspace tags and filtering feature description
+
+#### Implementation (2026-07-09, code: 2d653d2)
+
+Added `POST /api/tag/save` endpoint with validation (tag name 1-64 chars, no control chars; color max 20 chars). Frontend: palette button next to tag filter opens a popover listing all tags with mini color swatches (same 12-color palette). Selecting a swatch POSTs, then refreshes filters and cards. CSS for popover, tag rows, and mini swatches. Eight tests. README updated with workspace tags feature and configuration examples.
 
 ## 6) Risk Assessment
 
@@ -728,3 +732,8 @@ Implementation health: Green.
 | 5 | Low | No test for positive UTC offset timestamps in _time_bucket. | Accepted — .astimezone().date() handles correctly; lock-in test deferred. |
 | 6 | Low | "this_week" uses ISO Monday-start semantics, surprising for US locale. | Accepted — documented as assumption per plan. |
 | 7 | Low | Group-by-tag mode loses pinned-first ordering within sections. | Accepted — grouping inherently flattens pin distinction. |
+
+### 2026-07-09 -- Implementation Review (after Phase 6, persona: Senior engineer, Security auditor, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+0 findings.
