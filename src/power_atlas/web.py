@@ -1,6 +1,7 @@
 """FastAPI web application with htmx-powered UI."""
 
 import asyncio
+import html as html_mod
 import logging
 import os
 import re
@@ -434,7 +435,7 @@ async def partials_workspaces(
                 for t in ws_tags:
                     tag_groups.setdefault(t, []).append(ws)
         for tag_name in sorted(tag_groups.keys()):
-            cards_html += f'<div class="group-heading">{tag_name}</div>'
+            cards_html += f'<div class="group-heading">{html_mod.escape(tag_name)}</div>'
             for group in tag_groups[tag_name]:
                 cwd = group["cwd"]
                 stale = not Path(cwd).exists()
@@ -520,7 +521,7 @@ async def partials_workspaces(
 
     if not cards_html:
         if tag:
-            cards_html += f'<div class="empty-state">No workspaces with tag &quot;{tag}&quot;</div>'
+            cards_html += f'<div class="empty-state">No workspaces with tag &quot;{html_mod.escape(tag)}&quot;</div>'
         elif time_filter:
             cards_html += f'<div class="empty-state">No workspaces active {time_filter.replace("_", " ")}</div>'
         elif provider != "all" and provider:
@@ -666,7 +667,7 @@ async def search(request: Request, q: str = "", provider: str = "all",
                 for t in ws_tags:
                     tag_groups.setdefault(t, []).append(ws)
         for tag_name in sorted(tag_groups.keys()):
-            cards_html += f'<div class="group-heading">{tag_name}</div>'
+            cards_html += f'<div class="group-heading">{html_mod.escape(tag_name)}</div>'
             for group in tag_groups[tag_name]:
                 cwd = group["cwd"]
                 stale = not Path(cwd).exists()
