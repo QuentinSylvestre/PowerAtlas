@@ -59,6 +59,27 @@ class Config:
     pinned_sessions: list[str] = field(default_factory=list)
     custom_launchers: list[dict] = field(default_factory=list)
     provider_settings: dict[str, dict] = field(default_factory=dict)
+    workspace_settings: dict[str, dict] = field(default_factory=dict)
+    tag_settings: dict[str, dict] = field(default_factory=dict)
+
+
+def get_workspace_settings(config: Config, cwd: str) -> dict:
+    """Return workspace settings for a path, normalizing for lookup.
+
+    Uses a pre-built normalized lookup dict (cached on the Config instance
+    at load time) for O(1) access instead of linear scan.
+    Returns a shallow copy to prevent callers from mutating cached state.
+    """
+    from .data import _normalize_path
+
+    norm_map = getattr(config, "_ws_norm_map", None)
+    if norm_map is None:
+        norm_map = {_normalize_path(k): v for k, v in config.workspace_settings.items()}
+        config._ws_norm_map = norm_map
+    found = norm_map.get(_normalize_path(cwd))
+    if found is None:
+        return {"tags": [], "color": ""}
+    return {"tags": list(found["tags"]), "color": found["color"]}
 
 
 def get_active_launch_profile(config: Config) -> LaunchProfile:
@@ -201,6 +222,30 @@ def load_config() -> Config:
         config.custom_launchers = [x for x in config.custom_launchers if isinstance(x, dict)]
         config.provider_settings = {k: v for k, v in config.provider_settings.items() if isinstance(v, dict)}
 
+        # Sanitize workspace_settings: drop non-dict values, validate keys, normalize inner fields
+        config.workspace_settings = {
+            _strip_control_chars(k)[:1024]: v
+            for k, v in config.workspace_settings.items()
+            if isinstance(v, dict) and isinstance(k, str) and len(k) <= 1024
+        }
+        for path, ws in list(config.workspace_settings.items()):
+            ws.setdefault("tags", [])
+            ws.setdefault("color", "")
+            ws["tags"] = [t for t in ws["tags"] if isinstance(t, str)]
+            if not isinstance(ws.get("color"), str):
+                ws["color"] = ""
+
+        # Sanitize tag_settings: drop non-dict values, validate keys, normalize inner fields
+        config.tag_settings = {
+            _strip_control_chars(k)[:64]: v
+            for k, v in config.tag_settings.items()
+            if isinstance(v, dict) and isinstance(k, str) and len(k) <= 64
+        }
+        for tag_name, ts in list(config.tag_settings.items()):
+            ts.setdefault("color", "")
+            if not isinstance(ts.get("color"), str):
+                ts["color"] = ""
+
         # Sanitize default_directory: must be string, strip control chars
         if not isinstance(config.default_directory, str):
             config.default_directory = ""
@@ -211,6 +256,10 @@ def load_config() -> Config:
             for profile in config.launch_profiles:
                 if not profile.terminal_command:
                     profile.terminal_command = _DEFAULT_TERMINAL_COMMAND
+
+        # Build normalized workspace-settings lookup map for O(1) access
+        from .data import _normalize_path
+        config._ws_norm_map = {_normalize_path(k): v for k, v in config.workspace_settings.items()}
 
         return config
 

@@ -602,3 +602,146 @@ def test_default_directory_whitespace_stripped(tmp_path):
     _write_toml(tmp_path, {"default_directory": "  /home/user/projects  "})
     cfg = load_config()
     assert cfg.default_directory == "/home/user/projects"
+
+
+# --- workspace_settings & tag_settings ---
+
+
+def test_workspace_settings_round_trip_windows_paths():
+    """workspace_settings with Windows backslash paths survive TOML round-trip."""
+    ws = {
+        "C:\\Users\\dev\\project-a": {"tags": ["web", "prod"], "color": "#ff0000"},
+        "C:\\Users\\dev\\project-b": {"tags": ["backend"], "color": ""},
+    }
+    cfg = Config(workspace_settings=ws)
+    save_config(cfg)
+    loaded = load_config()
+    assert "C:\\Users\\dev\\project-a" in loaded.workspace_settings
+    assert loaded.workspace_settings["C:\\Users\\dev\\project-a"]["tags"] == ["web", "prod"]
+    assert loaded.workspace_settings["C:\\Users\\dev\\project-a"]["color"] == "#ff0000"
+    assert loaded.workspace_settings["C:\\Users\\dev\\project-b"]["tags"] == ["backend"]
+    assert loaded.workspace_settings["C:\\Users\\dev\\project-b"]["color"] == ""
+
+
+def test_tag_settings_round_trip():
+    """tag_settings persist through save/load cycle."""
+    tags = {
+        "web": {"color": "#3b82f6"},
+        "backend": {"color": "#10b981"},
+    }
+    cfg = Config(tag_settings=tags)
+    save_config(cfg)
+    loaded = load_config()
+    assert loaded.tag_settings == tags
+
+
+def test_tag_settings_sanitization_invalid_color(tmp_path):
+    """tag_settings with non-string color gets sanitized to empty string."""
+    _write_toml(tmp_path, {
+        "tag_settings": {
+            "web": {"color": 123},
+            "valid": {"color": "#abc"},
+        },
+    })
+    cfg = load_config()
+    assert cfg.tag_settings["web"]["color"] == ""
+    assert cfg.tag_settings["valid"]["color"] == "#abc"
+
+
+def test_workspace_settings_sanitization_invalid_tags(tmp_path):
+    """workspace_settings with non-list tags or non-string entries are sanitized."""
+    _write_toml(tmp_path, {
+        "workspace_settings": {
+            "C:\\proj": {"tags": [123, "valid", True], "color": "#aaa"},
+        },
+    })
+    cfg = load_config()
+    # Only string entries kept
+    assert cfg.workspace_settings["C:\\proj"]["tags"] == ["valid"]
+    assert cfg.workspace_settings["C:\\proj"]["color"] == "#aaa"
+
+
+def test_workspace_settings_sanitization_invalid_color(tmp_path):
+    """workspace_settings with non-string color gets sanitized to empty string."""
+    _write_toml(tmp_path, {
+        "workspace_settings": {
+            "/home/user/proj": {"tags": ["ok"], "color": 42},
+        },
+    })
+    cfg = load_config()
+    assert cfg.workspace_settings["/home/user/proj"]["color"] == ""
+    assert cfg.workspace_settings["/home/user/proj"]["tags"] == ["ok"]
+
+
+def test_workspace_settings_non_dict_entries_dropped(tmp_path):
+    """workspace_settings entries that aren't dicts are dropped."""
+    _write_toml(tmp_path, {
+        "workspace_settings": {
+            "valid": {"tags": [], "color": ""},
+            "bad": "not a dict",
+        },
+    })
+    cfg = load_config()
+    assert "valid" in cfg.workspace_settings
+    assert "bad" not in cfg.workspace_settings
+
+
+def test_workspace_settings_defaults_missing_fields(tmp_path):
+    """workspace_settings entries without tags/color get defaults on load."""
+    _write_toml(tmp_path, {
+        "workspace_settings": {
+            "C:\\proj": {},
+        },
+    })
+    cfg = load_config()
+    assert cfg.workspace_settings["C:\\proj"]["tags"] == []
+    assert cfg.workspace_settings["C:\\proj"]["color"] == ""
+
+
+def test_get_workspace_settings_normalized_lookup(tmp_path):
+    """get_workspace_settings matches case-insensitively on Windows."""
+    from power_atlas.config import get_workspace_settings
+    import sys
+
+    _write_toml(tmp_path, {
+        "workspace_settings": {
+            "C:\\Users\\Dev\\Project": {"tags": ["web"], "color": "#f00"},
+        },
+    })
+    cfg = load_config()
+
+    if sys.platform == "win32":
+        # Case-insensitive match
+        result = get_workspace_settings(cfg, "c:\\users\\dev\\project")
+        assert result["tags"] == ["web"]
+        assert result["color"] == "#f00"
+
+        # Forward-slash variant also matches
+        result2 = get_workspace_settings(cfg, "C:/Users/Dev/Project")
+        assert result2["tags"] == ["web"]
+    else:
+        # On Linux, exact match only
+        result = get_workspace_settings(cfg, "C:\\Users\\Dev\\Project")
+        assert result["tags"] == ["web"]
+
+
+def test_get_workspace_settings_missing_returns_default():
+    """get_workspace_settings returns empty defaults for unknown paths."""
+    from power_atlas.config import get_workspace_settings
+
+    cfg = Config()
+    result = get_workspace_settings(cfg, "/nonexistent")
+    assert result == {"tags": [], "color": ""}
+
+
+def test_get_workspace_settings_lazy_builds_norm_map():
+    """get_workspace_settings lazy-builds _ws_norm_map if not present."""
+    from power_atlas.config import get_workspace_settings
+
+    cfg = Config(workspace_settings={"/proj": {"tags": ["x"], "color": "#000"}})
+    # Remove the _ws_norm_map if it exists (simulates a Config not from load_config)
+    if hasattr(cfg, "_ws_norm_map"):
+        delattr(cfg, "_ws_norm_map")
+    result = get_workspace_settings(cfg, "/proj")
+    assert result["tags"] == ["x"]
+    assert hasattr(cfg, "_ws_norm_map")
