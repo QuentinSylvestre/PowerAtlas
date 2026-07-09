@@ -408,6 +408,10 @@ Added built-in terminal launcher tile in partials_launchers() (web.py) with `bui
 - Add test for `launch_terminal()` in `test_launcher.py`
 - Verify `partials_launchers` response includes the terminal tile
 
+#### Implementation (2026-07-09, code: 2ca1814)
+
+Added 18 tests total: 8 in test_web.py (open-folder valid/invalid/OSError/empty, launch-terminal success/no-dir/failure, launchers terminal tile) and 10 in test_launcher.py (launch_terminal valid/invalid/OSError/no-terminal/empty-cwd, _build_terminal_only_command for wt/pwsh/kitty/xterm/cmd-metachar). Review fixes (662aa34) added error-path coverage identified by 4-persona review. All 406 tests pass.
+
 ## Verification
 
 ```bash
@@ -497,3 +501,19 @@ Implementation health: Green.
 | 6 | Low | Multi-workspace selection spawns N parallel toasts | Accepted — matches existing batch launch behavior for providers |
 | 7 | Low | No test for builtin--terminal icon endpoint | Expected — Phase 5 scope |
 | 8 | Low | `builtin--` prefix convention undocumented | Accepted — single built-in; document if pattern grows |
+
+### 2026-07-09 -- Implementation Review (after Phase 5, personas: Senior engineer, Security auditor, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green.
+8 findings (0 High, 5 Medium, 3 Low). High-effort review (4 personas).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `test_open_folder_valid_directory` never asserts mock was actually called | Fixed — added `assert_called_once_with(folder)` (662aa34) |
+| 2 | Medium | No test for `launch_terminal` OSError from Popen | Fixed — added `test_popen_oserror` (662aa34) |
+| 3 | Medium | No web test for `/api/open-folder` OSError path | Fixed — added `test_open_folder_oserror` (662aa34) |
+| 4 | Medium | No web test for `/api/launch-terminal` failure result | Fixed — added `test_launch_terminal_failure_result` (662aa34) |
+| 5 | Medium | No test for cmd metachar rejection returning None | Fixed — added `test_cmd_metachar_returns_none` (662aa34) |
+| 6 | Low | No test for empty folder path in open-folder | Fixed — added `test_open_folder_empty_path` (662aa34) |
+| 7 | Low | No test for no-terminal-detected error path | Fixed — added `test_no_terminal_detected` (662aa34) |
+| 8 | Low | No test for empty cwd in launch_terminal | Fixed — added `test_empty_cwd` (662aa34) |
