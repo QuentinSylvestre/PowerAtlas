@@ -1513,9 +1513,9 @@ async def save_workspace_settings_bulk_api(request: Request):
 
     # Validation: tags_add / tags_remove are lists of valid tag strings
     for tag_list, label in [(tags_add, "tags_add"), (tags_remove, "tags_remove")]:
-        if not isinstance(tag_list, list):
+        if not isinstance(tag_list, list) or len(tag_list) > 20:
             return templates.TemplateResponse(request, "partials/toast.html", {
-                "message": f"{label} must be a list", "level": "error"})
+                "message": f"{label} must be a list (max 20)", "level": "error"})
         for t in tag_list:
             if not isinstance(t, str) or not t or len(t) > 64 or any(ord(ch) < 0x20 for ch in t):
                 return templates.TemplateResponse(request, "partials/toast.html", {
@@ -1534,24 +1534,29 @@ async def save_workspace_settings_bulk_api(request: Request):
 
     config = load_config()
     from .data import _normalize_path
-    from .config import get_workspace_settings
+
+    # Pre-build normalized path lookup for O(1) access
+    norm_key_map = {_normalize_path(k): k for k in config.workspace_settings}
+    tags_remove_set = set(tags_remove)
 
     modified = 0
     skipped = 0
 
     for cwd in cwds:
+        if not isinstance(cwd, str) or not cwd or len(cwd) > 512 or any(ord(ch) < 0x20 for ch in cwd):
+            continue
         norm_cwd = _normalize_path(cwd)
         # Find existing key or use the raw cwd
-        existing_key = None
-        for k in config.workspace_settings:
-            if _normalize_path(k) == norm_cwd:
-                existing_key = k
-                break
-        key = existing_key or cwd
+        key = norm_key_map.get(norm_cwd, cwd)
         ws = config.workspace_settings.get(key, {"tags": [], "color": ""})
 
+        changed = False
         # Remove tags
-        ws_tags = [t for t in ws.get("tags", []) if t not in tags_remove]
+        ws_tags = ws.get("tags", [])
+        new_tags = [t for t in ws_tags if t not in tags_remove_set]
+        if len(new_tags) != len(ws_tags):
+            changed = True
+        ws_tags = new_tags
 
         # Add tags (respect 10-tag limit)
         hit_limit = False
@@ -1561,25 +1566,30 @@ async def save_workspace_settings_bulk_api(request: Request):
                     hit_limit = True
                 else:
                     ws_tags.append(t)
+                    changed = True
 
         if hit_limit:
             skipped += 1
 
         # Set color if specified
         ws_color = color if color is not None else ws.get("color", "")
+        if ws_color != ws.get("color", ""):
+            changed = True
 
-        config.workspace_settings[key] = {"tags": ws_tags, "color": ws_color}
-        modified += 1
+        if changed:
+            config.workspace_settings[key] = {"tags": ws_tags, "color": ws_color}
+            modified += 1
 
     # Auto-create tags in tag_settings for any new tags
     for t in tags_add:
         if t not in config.tag_settings:
             config.tag_settings[t] = {"color": ""}
 
-    save_config(config)
+    if modified > 0:
+        save_config(config)
 
     if skipped > 0:
-        msg = f"Updated {modified} workspace(s) ({skipped} workspace(s) hit 10-tag limit)"
+        msg = f"Updated {modified} workspace(s) ({skipped} hit 10-tag limit)"
         level = "warning"
     else:
         msg = f"Updated {modified} workspace(s)"
@@ -1603,7 +1613,8 @@ async def get_workspace_settings_bulk_api(request: Request):
 
     workspaces = {}
     for cwd in cwds:
-        workspaces[cwd] = get_workspace_settings(config, cwd)
+        if isinstance(cwd, str) and cwd and len(cwd) <= 512:
+            workspaces[cwd] = get_workspace_settings(config, cwd)
 
     # all_tags: union of all workspace tags + all tag_settings keys
     all_tags = set()

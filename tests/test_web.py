@@ -2943,7 +2943,7 @@ def test_bulk_save_partial_success_10_tag_limit(mock_load, mock_save, client, tm
     })
     assert resp.status_code == 200
     assert "warning" in resp.text.lower() or "10-tag limit" in resp.text.lower()
-    assert "1 workspace(s) hit 10-tag limit" in resp.text
+    assert "1 hit 10-tag limit" in resp.text
     saved = mock_save.call_args[0][0]
     # Full workspace should NOT have the new tag
     assert "overflow" not in saved.workspace_settings[ws_full]["tags"]
