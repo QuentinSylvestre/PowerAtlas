@@ -13,10 +13,6 @@
 - **Chained launches** — "when session X exits, auto-launch session Y in folder Z" (pipeline mode)
 - **Plan-file shortcuts** — detect plan files in `plans/` and offer one-click "/qdev on this plan" buttons
 
-## Custom Launch Section
-
-- **WSL support** — launch commands inside WSL from the orchestrator
-
 ## Workspace Intelligence
 
 - **Session health indicators** — detect stale sessions (started /qdev but never completed, sessions with unanswered blockers), surface as "needs attention" badges
@@ -27,11 +23,6 @@
 ## Platform
 
 - **kiro-cli v3 session support** — scan `~/.kiro/sessions/<workspace-hash>/sess_*/` alongside v2 `cli/` directory; handle new message format, subagent detection via `sub-executions/` dir
-
-## Quality of Life
-
-- **Keyboard-driven navigation** — vim-style j/k movement, space to select, enter to launch
-- **Multi-machine session sync** — see WSL kiro-cli sessions alongside Windows ones in the same UI
 
 ## To sort
 - Hide workspaces (and see hidden workspaces)
