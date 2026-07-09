@@ -1132,3 +1132,50 @@ class TestBuildTerminalOnlyCommand:
         assert cmd[cmd.index("--directory") + 1] == "/home/user/proj"
         # No exec separator (--) or command appended for terminal-only
         assert "--" not in cmd
+
+
+
+    @patch("sys.platform", "win32")
+    def test_cmd_metachar_returns_none(self):
+        """cmd fallback returns None when cwd contains metacharacters."""
+        cmd = _build_terminal_only_command("C:\\cmd.exe", "C:\\my&project", title="Terminal")
+        assert cmd is None
+
+    @patch("sys.platform", "linux")
+    def test_xterm_shell_wrapper(self):
+        """xterm uses shell wrapper with SHELL fallback since it has no cwd flag."""
+        cmd = _build_terminal_only_command("/usr/bin/xterm", "/home/user/proj", title="Terminal")
+        assert cmd[0] == "/usr/bin/xterm"
+        assert "-e" in cmd
+        assert "sh" in cmd
+        # Verify SHELL fallback is present
+        shell_cmd = cmd[-1]
+        assert "${SHELL:-/bin/sh}" in shell_cmd
+        assert "/home/user/proj" in shell_cmd
+
+
+class TestLaunchTerminalErrors:
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_popen_oserror(self, mock_which, mock_popen, tmp_path):
+        """launch_terminal returns error when Popen raises OSError."""
+        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe"}.get(n)
+        mock_popen.side_effect = OSError("Permission denied")
+        cwd = str(tmp_path)
+        result = launch_terminal(cwd, launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is False
+        assert "Permission denied" in result.error
+
+    @patch("shutil.which", return_value=None)
+    def test_no_terminal_detected(self, mock_which, tmp_path):
+        """launch_terminal returns error when no terminal can be found."""
+        cwd = str(tmp_path)
+        result = launch_terminal(cwd, launch_profile=LaunchProfile(terminal_command=""))
+        assert result.success is False
+        assert "No terminal found" in result.error
+
+    def test_empty_cwd(self):
+        """launch_terminal with empty cwd returns error."""
+        result = launch_terminal("", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is False
+        assert "No directory" in result.error

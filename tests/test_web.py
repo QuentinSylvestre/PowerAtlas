@@ -1790,6 +1790,7 @@ def test_open_folder_valid_directory(mock_startfile, mock_sys, client, tmp_path)
     assert "Opened" in resp.text
     assert tmp_path.name in resp.text
     assert "success" in resp.text
+    mock_startfile.assert_called_once_with(folder)
 
 
 def test_open_folder_nonexistent_path(client):
@@ -1837,3 +1838,38 @@ def test_partials_launchers_includes_terminal_tile(mock_load, mock_providers, cl
     resp = client.get("/partials/launchers")
     assert resp.status_code == 200
     assert 'data-id="builtin--terminal"' in resp.text
+
+
+@patch("power_atlas.web.sys")
+@patch("power_atlas.web.os.startfile", create=True)
+def test_open_folder_oserror(mock_startfile, mock_sys, client, tmp_path):
+    """POST /api/open-folder returns error toast when os.startfile raises OSError."""
+    mock_sys.platform = "win32"
+    mock_startfile.side_effect = OSError("Permission denied")
+    folder = str(tmp_path)
+    resp = client.post("/api/open-folder", json={"folder": folder})
+    assert resp.status_code == 200
+    assert "Could not open folder" in resp.text
+    assert "error" in resp.text
+
+
+def test_open_folder_empty_path(client):
+    """POST /api/open-folder with empty folder returns error toast."""
+    resp = client.post("/api/open-folder", json={"folder": ""})
+    assert resp.status_code == 200
+    assert "not found" in resp.text.lower() or "error" in resp.text.lower()
+
+
+@patch("power_atlas.web.launcher.launch_terminal")
+@patch("power_atlas.web.load_config")
+def test_launch_terminal_failure_result(mock_config, mock_launch, client, tmp_path):
+    """POST /api/launch-terminal returns error toast when launcher returns failure."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    cwd = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_launch.return_value = LaunchResult(False, None, cwd, error="No terminal found")
+    resp = client.post("/api/launch-terminal", json={"workspace": cwd})
+    assert resp.status_code == 200
+    assert "No terminal found" in resp.text
+    assert "error" in resp.text
