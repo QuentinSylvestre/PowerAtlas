@@ -107,7 +107,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-row:hover .pin-btn { opacity: 0.5; }
 .pin-btn:hover { opacity: 1 !important; background: var(--accent); border-color: var(--accent); color: white; }
 .pin-btn.pinned { opacity: 1 !important; color: var(--accent); border-color: var(--accent); }
-.card-body { border-top: 1px solid var(--card-border); max-height: 195px; overflow-y: auto; }
+.card-body { border-top: 1px solid var(--card-border); max-height: 195px; overflow-y: auto; padding-left: 16px; }
 .workspace-card.collapsed .card-body { display: none; }
 .workspace-card.stale { opacity: 0.6; }
 
