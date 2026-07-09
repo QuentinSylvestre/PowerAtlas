@@ -394,6 +394,10 @@ if launcher_id == "builtin--terminal":
     return Response(content=svg, media_type="image/svg+xml")
 ```
 
+#### Implementation (2026-07-09, code: 9d275a1)
+
+Added built-in terminal launcher tile in partials_launchers() (web.py) with `builtin--terminal` id placed after provider tiles and before custom launchers. Extended runLauncherById() with selection-aware terminal launch (iterates selected workspaces or falls back to default_directory). Added editLauncher() early-exit for the terminal tile. Added builtin--terminal icon handling in the launcher_icon endpoint. All with .catch() error handling matching Phase 2/3 patterns.
+
 ### 5. Update tests
 
 **Goal**: Ensure existing tests pass and new features have coverage.
@@ -477,3 +481,19 @@ Implementation health: Green.
 | 6 | Low | Variable `t` inconsistent with `stem` in module | Fixed — renamed to `stem` (f33fbcb) |
 | 7 | Low | Template branch is dead code (detect_terminal returns resolved path) | Accepted — defensive future-proofing |
 | 8 | Low | xterm shell wrapper diverges from plan (more correct than plan) | Accepted — plan's approach would open at HOME |
+
+### 2026-07-09 -- Implementation Review (after Phase 4, personas: Senior engineer, Security auditor, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+8 findings (0 High, 2 Medium, 6 Low). High-effort review (4 personas).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `#6b7280` hardcoded in tile dict and icon endpoint — no constant | Accepted — only 2 references, near each other; not worth a constant |
+| 2 | Medium | Test for terminal tile ordering not added | Expected — Phase 5 covers all test additions |
+| 3 | Low | `is_provider: True` semantically misleading for non-provider tile | Accepted — functional meaning is "shows lock, prevents editing" |
+| 4 | Low | Gear button renders but is inert (editLauncher no-ops) | Accepted — plan review finding #13; no user confusion |
+| 5 | Low | Tooltip shows "Command: terminal" — slightly misleading | Accepted — consistent with provider tiles showing binary name |
+| 6 | Low | Multi-workspace selection spawns N parallel toasts | Accepted — matches existing batch launch behavior for providers |
+| 7 | Low | No test for builtin--terminal icon endpoint | Expected — Phase 5 scope |
+| 8 | Low | `builtin--` prefix convention undocumented | Accepted — single built-in; document if pattern grows |
