@@ -661,18 +661,26 @@ if (_wsColorChanged) { payload.color = document.getElementById('wsSettingsColor'
 11. **Accessibility**: Add `aria-label` attributes to delete buttons, add input, and partial-state chips. Add `title` on partial chips showing "Applied to N of M selected workspaces".
 
 **Exit criteria**:
-- [ ] Gear icon on a selected card (with multi-selection) opens joint modal with "Settings — N workspaces" title
-- [ ] Gear icon on unselected card with other cards selected includes clicked card in bulk set
-- [ ] Full tags shown as solid chips, partial tags as dimmed/dashed chips with `title` showing count
-- [ ] Info messages displayed explaining the state and behavior
-- [ ] Adding a tag in bulk mode queues it for the bulk save (no client-side 10-tag check)
-- [ ] Removing a tag queues removal for all selected workspaces
-- [ ] Save in bulk mode POSTs to `/api/workspace-settings/save-bulk` with `color` only when changed
-- [ ] Single-workspace behavior unchanged when no multi-selection active
-- [ ] Modal close event resets all bulk state (`_wsBulkMode`, `_wsTagsToAdd`, `_wsTagsToRemove`, `_wsColorChanged`)
-- [ ] Accessibility: `aria-label` on delete buttons, partial chips, add input
-- [ ] Error handling: `.catch()` on bulk fetch with error toast
-- [ ] `README.md` updated with unified tag management and bulk assignment feature description
+- [x] Gear icon on a selected card (with multi-selection) opens joint modal with "Settings — N workspaces" title
+- [x] Gear icon on unselected card with other cards selected includes clicked card in bulk set
+- [x] Full tags shown as solid chips, partial tags as dimmed/dashed chips with `title` showing count
+- [x] Info messages displayed explaining the state and behavior
+- [x] Adding a tag in bulk mode queues it for the bulk save (no client-side 10-tag check)
+- [x] Removing a tag queues removal for all selected workspaces
+- [x] Save in bulk mode POSTs to `/api/workspace-settings/save-bulk` with `color` only when changed
+- [x] Single-workspace behavior unchanged when no multi-selection active
+- [x] Modal close event resets all bulk state (`_wsBulkMode`, `_wsTagsToAdd`, `_wsTagsToRemove`, `_wsColorChanged`)
+- [x] Accessibility: `aria-label` on delete buttons, partial chips, add input
+- [x] Error handling: `.catch()` on bulk fetch with error toast
+- [x] `README.md` updated with unified tag management and bulk assignment feature description
+
+#### Implementation (2026-07-09, code: 96038a9)
+
+Implemented the multi-workspace bulk settings modal for Phase 4. The `openWorkspaceSettings` function now detects multi-selection via `getSelectedWorkspaceCwds()` and dispatches to either `openSingleWorkspaceSettings(cwd)` (extracted existing behavior) or the new `openBulkWorkspaceSettings(cwds)` which POSTs to `/api/workspace-settings-bulk`, computes full/partial tag membership, and renders three-state chips via `renderBulkWsTags()`. Tags present in all workspaces render solid, tags in some render dimmed/dashed with a title showing count, and newly-added tags render accent-colored. The `addWsTag` and `showWsAutocomplete` functions are bulk-mode-aware, and `saveWorkspaceSettings` branches to POST `tags_add`/`tags_remove` diffs to `/api/workspace-settings/save-bulk` (with color only when changed). A modal `close` event resets all bulk state. Accessibility: aria-labels on all remove buttons and partial-tag chips; `aria-labelledby` on dialog element. README updated.
+
+Review auto-fix (15c1934): Added `!_wsBulkMode` guard on Backspace handler to prevent state corruption in bulk mode; added `border: 1px solid transparent` to base `.ws-tag-chip` and visible `border-color` on `.ws-tag-partial` so dashed border renders; added `aria-labelledby="wsSettingsTitle"` to dialog element; added trailing newline to style.css.
+
+Divergence: Single-workspace title uses `cwd.split(/[\\/]/).pop()` (path basename) instead of DOM traversal — simpler, avoids fragile childNodes indexing.
 
 ## 6) Risk Assessment
 |---|---|---|
@@ -701,7 +709,7 @@ if (_wsColorChanged) { payload.color = document.getElementById('wsSettingsColor'
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved -- filled during implementation>
+- Phase 4: Single-workspace title uses `cwd.split(/[\\/]/).pop()` (path basename) instead of DOM traversal of `card-folder-name` element — simpler implementation, avoids fragile childNodes indexing.
 
 ## Review Log
 
@@ -776,3 +784,24 @@ Implementation health: Green.
 | 9 | Low | Duplicate cwds cause double-processing | Accepted — bounded by 50-item cap; cosmetic |
 
 QA verification: PASS (TestClient HTTP stack, 6 endpoint scenarios verified).
+
+### 2026-07-09 -- Implementation Review (after Phase 4, personas: Senior engineer, End-user advocate, Maintainability reviewer, Security auditor)
+
+Implementation health: Green.
+11 findings (0 High, 4 Medium, 7 Low). Auto-fixed: 4 (backspace guard, visible border, aria-labelledby, trailing newline). Cycle 2 skipped — Medium fixes purely mechanical (CSS property, JS guard, HTML attribute).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Backspace handler pops `_wsTags` in bulk mode — corrupts single-mode state | Fixed — added `!_wsBulkMode` guard in keydown handler (15c1934) |
+| 2 | Medium | `.ws-tag-partial` dashed border invisible — base chip has no border property | Fixed — added `border: 1px solid transparent` to base chip + `border-color` on partial (15c1934) |
+| 3 | Medium | `.ws-tag-new` border-color has no effect without base border | Fixed — same base chip border fix resolves this (15c1934) |
+| 4 | Medium | Dialog lacks `aria-labelledby` — screen readers don't announce dynamic title | Fixed — added `aria-labelledby="wsSettingsTitle"` to dialog element (15c1934) |
+| 5 | Low | `_wsTagsPartial` stores objects while `_wsTagsFull` stores strings — inconsistent shape | Accepted — functional, minor cognitive overhead |
+| 6 | Low | Re-adding removed partial tag doesn't restore it | Accepted — edge case; user can close and reopen modal |
+| 7 | Low | `splice(i,1)` in forEach captures loop index by reference | Accepted — re-render immediately follows, no stale state |
+| 8 | Low | Missing trailing newline in style.css | Fixed — added (15c1934) |
+| 9 | Low | Info text "Filled" is developer jargon | Accepted — "Filled" vs "Solid" is cosmetic; clear in context |
+| 10 | Low | No `role="note"` on info div | Accepted — minor accessibility enhancement for future iteration |
+| 11 | Low | Workspace cards not deselected after bulk save | Accepted — matches existing behavior; selection persists for further actions |
+
+QA verification: PASS (code review confirmed DOM construction, event handling, state management correct; backend APIs verified in Phases 1+3).
