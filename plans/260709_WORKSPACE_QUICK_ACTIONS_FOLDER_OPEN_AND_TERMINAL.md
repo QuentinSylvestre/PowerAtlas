@@ -1,7 +1,7 @@
 # Workspace Quick Actions — Folder Open & Terminal
 
 > **Date**: 2026-07-09
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Add folder-open and quick-terminal actions to workspace cards, add a terminal launcher tile, remove emoji icon picker
 
 ---
@@ -142,6 +142,12 @@ None. The `workspace_icons` key in existing `config.toml` files will be silently
 - To: `<span class="card-icon" onclick="event.stopPropagation();openFolder('{{ cwd }}')" title="Open folder" role="button" aria-label="Open in file explorer">📁</span>`
 
 **In tests**: remove any assertions on `workspace_icons` or `set-workspace-icon` endpoint.
+
+#### Implementation (2026-07-09, code: 2961793)
+
+Removed the entire emoji icon picker feature: deleted emoji_picker.html partial, removed the include from index.html, removed resetOverlays() emoji cleanup fragment, removed workspace_icons field from Config dataclass and its sanitization, removed the /api/set-workspace-icon endpoint, removed all norm_icons/config_icons/icon= references from partials_workspaces() and search(), repurposed the card-icon onclick from showIconPicker to openFolder, and removed related test functions from test_web.py and test_config.py. All 388 tests pass.
+
+Per-phase review deferred to Step 9: mechanical deletion with no new executable code introduced (openFolder function is Phase 2 scope). QA: SKIP — purely removal, no runtime surface to verify until openFolder is implemented.
 
 ### 2. Add folder-open endpoint [QA]
 
