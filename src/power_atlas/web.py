@@ -205,25 +205,33 @@ async def toggle_autostart():
     return {"enabled": autostart.is_enabled()}
 
 
-@app.post("/api/open-folder")
+@app.post("/api/open-folder", response_class=HTMLResponse)
 async def api_open_folder(request: Request):
     body = await request.json()
     folder = body.get("folder", "")
-    if not folder or not Path(folder).is_dir():
+    try:
+        is_dir = bool(folder) and Path(folder).is_dir()
+    except (OSError, ValueError):
+        is_dir = False
+    if not is_dir:
         return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": f"Folder not found: {folder}", "level": "error",
+            "message": f"Folder not found: {Path(folder).name if folder else '(empty)'}", "level": "error",
         })
     try:
         if sys.platform == "win32":
             os.startfile(folder)
         else:
-            subprocess.Popen(["xdg-open", folder])
+            subprocess.Popen(
+                ["xdg-open", folder],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
     except OSError as e:
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": f"Could not open folder: {e}", "level": "error",
         })
     return templates.TemplateResponse(request, "partials/toast.html", {
-        "message": "Folder opened", "level": "success",
+        "message": f"Opened: {Path(folder).name}", "level": "success",
     })
 
 
