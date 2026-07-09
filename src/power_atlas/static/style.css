@@ -415,3 +415,7 @@ script { display: none; }
 .ws-tags-autocomplete { display: none; position: absolute; left: 0; top: 100%; width: 200px; max-height: 160px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
 .ws-ac-item { padding: 6px 10px; font-size: 12px; cursor: pointer; }
 .ws-ac-item:hover, .ws-ac-item.highlighted { background: var(--accent-dim); }
+.ws-tag-chip.ws-tag-partial { opacity: 0.5; border-style: dashed; }
+.ws-tag-chip.ws-tag-new { background: var(--accent); color: white; border-color: var(--accent); }
+.ws-tags-info { font-size: 11px; color: var(--text-muted); padding: 4px 0 6px; line-height: 1.5; }
+.ws-info-line { display: block; }
