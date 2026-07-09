@@ -556,15 +556,19 @@ UI layout in panel header:
 ```
 
 **Exit criteria**:
-- [ ] Tag filter dropdown shows all known tags with colors and counts
-- [ ] Selecting a tag filters workspace panel to only matching workspaces
-- [ ] "hidden" tag excluded by default; selecting "hidden" tag reveals hidden workspaces
-- [ ] Time filter (today/yesterday/this week/before) filters by `latest_updated`
-- [ ] Group-by tag shows workspaces under section headings per tag (with duplication)
-- [ ] Group-by time shows workspaces under "Today"/"Yesterday"/"This week"/"Older" headings
-- [ ] Filters compose with provider filter (AND logic)
-- [ ] Sessions panel unaffected by tag/time/group-by controls
-- [ ] Tests: hidden exclusion, tag filter, time bucketing, group-by sections in HTML
+- [x] Tag filter dropdown shows all known tags with colors and counts
+- [x] Selecting a tag filters workspace panel to only matching workspaces
+- [x] "hidden" tag excluded by default; selecting "hidden" tag reveals hidden workspaces
+- [x] Time filter (today/yesterday/this week/before) filters by `latest_updated`
+- [x] Group-by tag shows workspaces under section headings per tag (with duplication)
+- [x] Group-by time shows workspaces under "Today"/"Yesterday"/"This week"/"Older" headings
+- [x] Filters compose with provider filter (AND logic)
+- [x] Sessions panel unaffected by tag/time/group-by controls
+- [x] Tests: hidden exclusion, tag filter, time bucketing, group-by sections in HTML
+
+#### Implementation (2026-07-09, code: f2ac708)
+
+Implemented tag/time filters and group-by functionality for the workspaces panel. Server-side: added `_time_bucket()` helper; extended `partials_workspaces()` with `tag`, `time_filter`, and `group_by` query params applying uniform filtering to both pinned and non-pinned workspaces; added group-by rendering with section headings; added `/api/tags` endpoint; extended `/search` with same filter params. Client-side: added `_buildWorkspaceQs()` composing state, updated all fetch callsites, added `initWorkspaceFilters()` rendering filter UI inline with "Workspaces" label. 23 new tests. Review fix (f108c47): added `html.escape()` for tag names in server-side f-strings, `_escHtml()` for client-side option rendering, and `initWorkspaceFilters()` refresh on visibility change and after save.
 
 ### Phase 6: Tag management — inline color editing [QA]
 
@@ -709,3 +713,18 @@ Implementation health: Green.
 
 Implementation health: Green.
 0 findings.
+
+### 2026-07-09 -- Implementation Review (after Phase 5, persona: Senior engineer, Reliability engineer, End-user advocate, Performance engineer)
+
+Implementation health: Green.
+7 findings (0 High, 4 Medium, 3 Low). 4 auto-fixed in cycle 1.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | XSS via unescaped tag names in server-side group-heading f-strings. | Fixed — added html.escape() in all 3 locations. |
+| 2 | Medium | XSS via unescaped tag names in client-side JS option construction. | Fixed — added _escHtml() helper and applied to tag names/colors. |
+| 3 | Medium | Tag filter dropdown stale after adding/removing tags until page reload. | Fixed — initWorkspaceFilters() called on visibilitychange and after save. |
+| 4 | Medium | Empty state for tag filter uses unescaped user input. | Fixed — applied html.escape() to tag value in empty state message. |
+| 5 | Low | No test for positive UTC offset timestamps in _time_bucket. | Accepted — .astimezone().date() handles correctly; lock-in test deferred. |
+| 6 | Low | "this_week" uses ISO Monday-start semantics, surprising for US locale. | Accepted — documented as assumption per plan. |
+| 7 | Low | Group-by-tag mode loses pinned-first ordering within sections. | Accepted — grouping inherently flattens pin distinction. |
