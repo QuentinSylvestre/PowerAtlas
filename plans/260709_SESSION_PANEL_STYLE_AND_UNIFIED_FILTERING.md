@@ -523,6 +523,20 @@ Added unified filtering (tag, time_filter, provider) and permanent time-grouped 
 
 ## Review Log
 
+### 2026-07-09 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate.
+4 findings (0 High, 0 Medium, 4 Low).
+QA verification: PASS (all 12 success criteria verified on live instance, unified filtering confirmed across both panels).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | Combined filter empty state shows only one cause, not both active filters. | Accepted — polish-level, current messages are adequate. |
+| 2 | Low | Sessions panel lacks provider-specific empty state hints (workspace panel has them). | Accepted — follows workspaces as the primary discovery panel. |
+| 3 | Low | Group-heading divs lack ARIA `role="heading"` for screen reader navigation. | Accepted — existing pattern, not a regression from this plan. |
+| 4 | Low | Empty-state divs lack `role="status"` for assistive tech announcement. | Accepted — existing pattern, not a regression from this plan. |
+
 ### 2026-07-09 -- Implementation Review (after Phase 3, persona: Senior engineer)
 
 Implementation health: Green.
