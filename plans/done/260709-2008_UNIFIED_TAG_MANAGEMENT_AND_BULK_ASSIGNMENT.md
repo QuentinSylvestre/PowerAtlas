@@ -2,6 +2,7 @@
 
 > **Date**: 2026-07-09
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-09T20:07
 > **Scope**: Rework tag feature into unified management popover (add/delete/color) and multi-workspace tag assignment via selection
 > **Estimated effort**: ~1-2 days
 
