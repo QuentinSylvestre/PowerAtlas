@@ -1,7 +1,7 @@
 # Workspace Tags, Filters, and Grouping
 
 > **Date**: 2026-07-09
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Workspace-level settings (tags, color), tag-level settings, group-by/filter on workspace panel, hidden workspaces, pinned separation
 > **Estimated effort**: ~2-3 days
 
@@ -737,3 +737,17 @@ Implementation health: Green.
 
 Implementation health: Green.
 0 findings.
+
+### 2026-07-09 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, End-user advocate, Reliability engineer.
+4 findings (0 High, 1 Medium, 3 Low).
+QA verification: PASS (468 tests, all HTTP surfaces verified; browser UI structurally verified via HTML assertions).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Reflected XSS via unescaped time_filter in empty-state HTML. | Fixed — applied html_mod.escape() (commit 10acfd6). |
+| 2 | Low | Near-duplicate rendering logic between /partials/workspaces and /search. | Accepted — refactoring desirable but non-blocking for this plan. |
+| 3 | Low | Tag colors popover does not close on Escape key. | Accepted — cosmetic UX gap, outside-click works. |
+| 4 | Low | No test for /search with group_by or time_filter params. | Accepted — code paths same as /partials/workspaces which has full coverage. |
