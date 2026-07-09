@@ -2231,3 +2231,432 @@ def test_workspace_card_falls_through_to_provider_gradient(mock_discover, mock_p
     assert resp.status_code == 200
     # Provider color is used (kiro-cli default)
     assert "#7138cc" in resp.text
+
+
+
+# --- Phase 5 (Workspace Tags): Filters, time bucketing, group-by, /api/tags ---
+
+
+class TestTimeBucket:
+    """Unit tests for the _time_bucket helper."""
+
+    def test_empty_string_returns_before(self):
+        from power_atlas.web import _time_bucket
+        assert _time_bucket("") == "before"
+
+    def test_invalid_iso_returns_before(self):
+        from power_atlas.web import _time_bucket
+        assert _time_bucket("not-a-date") == "before"
+
+    def test_today_timestamp(self):
+        from datetime import datetime, timezone
+        from power_atlas.web import _time_bucket
+        now = datetime.now(timezone.utc).isoformat()
+        assert _time_bucket(now) == "today"
+
+    def test_yesterday_timestamp(self):
+        from datetime import datetime, timezone, timedelta
+        from power_atlas.web import _time_bucket
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        assert _time_bucket(yesterday) == "yesterday"
+
+    def test_this_week_timestamp(self):
+        from datetime import datetime, timezone, timedelta, date
+        from power_atlas.web import _time_bucket
+        today = date.today()
+        # Monday of this week
+        monday = today - timedelta(days=today.weekday())
+        if monday == today or monday == today - timedelta(days=1):
+            # If today is Monday or Tuesday, skip — Monday/Tuesday map to today/yesterday
+            pytest.skip("Can't test this_week on Mon/Tue without hitting today/yesterday")
+        monday_dt = datetime(monday.year, monday.month, monday.day, 12, 0, 0, tzinfo=timezone.utc)
+        assert _time_bucket(monday_dt.isoformat()) == "this_week"
+
+    def test_old_timestamp_returns_before(self):
+        from power_atlas.web import _time_bucket
+        assert _time_bucket("2020-01-01T00:00:00Z") == "before"
+
+    def test_z_suffix_handled(self):
+        from datetime import datetime, timezone
+        from power_atlas.web import _time_bucket
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert _time_bucket(now) == "today"
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_hidden_tag_excluded_by_default(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Workspaces tagged 'hidden' are excluded from default view."""
+    from power_atlas.config import Config
+    visible_ws = str(tmp_path / "visible-proj")
+    hidden_ws = str(tmp_path / "hidden-proj")
+    mock_config.return_value = Config(
+        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
+    )
+    mock_discover.return_value = [
+        (visible_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "visible-proj" in resp.text
+    assert "hidden-proj" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_hidden_tag_filter_reveals_hidden(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Selecting 'hidden' tag filter reveals only hidden workspaces."""
+    from power_atlas.config import Config
+    visible_ws = str(tmp_path / "visible-proj")
+    hidden_ws = str(tmp_path / "hidden-proj")
+    mock_config.return_value = Config(
+        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
+    )
+    mock_discover.return_value = [
+        (visible_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?tag=hidden")
+    assert resp.status_code == 200
+    assert "hidden-proj" in resp.text
+    assert "visible-proj" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_tag_filter_shows_matching_workspaces(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Tag filter shows only workspaces that have the selected tag."""
+    from power_atlas.config import Config
+    frontend_ws = str(tmp_path / "frontend-proj")
+    backend_ws = str(tmp_path / "backend-proj")
+    mock_config.return_value = Config(
+        workspace_settings={
+            frontend_ws: {"tags": ["frontend"], "color": ""},
+            backend_ws: {"tags": ["backend"], "color": ""},
+        },
+    )
+    mock_discover.return_value = [
+        (frontend_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (backend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?tag=frontend")
+    assert resp.status_code == 200
+    assert "frontend-proj" in resp.text
+    assert "backend-proj" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_time_filter_today(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Time filter 'today' shows only workspaces updated today."""
+    from datetime import datetime, timezone
+    from power_atlas.config import Config
+    today_ws = str(tmp_path / "today-proj")
+    old_ws = str(tmp_path / "old-proj")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    mock_config.return_value = Config()
+    mock_discover.return_value = [
+        (today_ws, 1, now_iso, "kiro-cli"),
+        (old_ws, 1, "2020-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?time_filter=today")
+    assert resp.status_code == 200
+    assert "today-proj" in resp.text
+    assert "old-proj" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_tag_filter_empty_state(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Tag filter with no matches shows appropriate empty state."""
+    from power_atlas.config import Config
+    ws = str(tmp_path / "proj")
+    mock_config.return_value = Config(
+        workspace_settings={ws: {"tags": ["backend"], "color": ""}},
+    )
+    mock_discover.return_value = [(ws, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?tag=nonexistent")
+    assert resp.status_code == 200
+    assert "No workspaces with tag" in resp.text
+    assert "nonexistent" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_time_filter_empty_state(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Time filter with no matches shows appropriate empty state."""
+    from power_atlas.config import Config
+    ws = str(tmp_path / "proj")
+    mock_config.return_value = Config()
+    mock_discover.return_value = [(ws, 1, "2020-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?time_filter=today")
+    assert resp.status_code == 200
+    assert "No workspaces active" in resp.text
+    assert "today" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_group_by_tag_renders_headings(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Group-by tag renders section headings per tag."""
+    from power_atlas.config import Config
+    frontend_ws = str(tmp_path / "frontend-proj")
+    backend_ws = str(tmp_path / "backend-proj")
+    mock_config.return_value = Config(
+        workspace_settings={
+            frontend_ws: {"tags": ["frontend"], "color": ""},
+            backend_ws: {"tags": ["backend"], "color": ""},
+        },
+    )
+    mock_discover.return_value = [
+        (frontend_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (backend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?group_by=tag")
+    assert resp.status_code == 200
+    assert 'class="group-heading"' in resp.text
+    assert "frontend" in resp.text
+    assert "backend" in resp.text
+    assert "frontend-proj" in resp.text
+    assert "backend-proj" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_group_by_tag_untagged_section(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Group-by tag places untagged workspaces under '(untagged)' heading."""
+    from power_atlas.config import Config
+    tagged_ws = str(tmp_path / "tagged-proj")
+    untagged_ws = str(tmp_path / "untagged-proj")
+    mock_config.return_value = Config(
+        workspace_settings={
+            tagged_ws: {"tags": ["myproject"], "color": ""},
+        },
+    )
+    mock_discover.return_value = [
+        (tagged_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (untagged_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?group_by=tag")
+    assert resp.status_code == 200
+    assert "(untagged)" in resp.text
+    assert "myproject" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_group_by_tag_duplicates_multi_tag_workspace(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Workspace with multiple tags appears under each tag's section."""
+    from power_atlas.config import Config
+    ws = str(tmp_path / "multi-proj")
+    mock_config.return_value = Config(
+        workspace_settings={
+            ws: {"tags": ["alpha", "beta"], "color": ""},
+        },
+    )
+    mock_discover.return_value = [(ws, 1, "2026-01-02T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?group_by=tag")
+    assert resp.status_code == 200
+    assert "alpha" in resp.text
+    assert "beta" in resp.text
+    # The workspace card should appear twice (once per tag)
+    assert resp.text.count("multi-proj") >= 2
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_group_by_time_renders_headings(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Group-by time renders Today/Yesterday/This week/Older headings."""
+    from datetime import datetime, timezone, timedelta
+    from power_atlas.config import Config
+    today_ws = str(tmp_path / "today-proj")
+    old_ws = str(tmp_path / "old-proj")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    mock_config.return_value = Config()
+    mock_discover.return_value = [
+        (today_ws, 1, now_iso, "kiro-cli"),
+        (old_ws, 1, "2020-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces?group_by=time")
+    assert resp.status_code == 200
+    assert 'class="group-heading"' in resp.text
+    assert "Today" in resp.text
+    assert "Older" in resp.text
+    assert "today-proj" in resp.text
+    assert "old-proj" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_filters_compose_with_provider(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Tag filter composes with provider filter (AND logic)."""
+    from power_atlas.config import Config
+    kiro_ws = str(tmp_path / "kiro-proj")
+    claude_ws = str(tmp_path / "claude-proj")
+    mock_config.return_value = Config(
+        workspace_settings={
+            kiro_ws: {"tags": ["active"], "color": ""},
+            claude_ws: {"tags": ["active"], "color": ""},
+        },
+    )
+    mock_discover.return_value = [
+        (kiro_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (claude_ws, 1, "2026-01-01T00:00:00Z", "claude-code"),
+    ]
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+
+    # Tag=active AND provider=kiro-cli — only kiro workspace
+    resp = client.get("/partials/workspaces?tag=active&provider=kiro-cli")
+    assert resp.status_code == 200
+    assert "kiro-proj" in resp.text
+    assert "claude-proj" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_hidden_filter_applies_to_pinned(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Pinned workspaces tagged 'hidden' are also excluded from default view."""
+    from power_atlas.config import Config
+    hidden_pinned_ws = str(tmp_path / "hidden-pinned")
+    visible_ws = str(tmp_path / "visible-proj")
+    mock_config.return_value = Config(
+        pinned_folders=[hidden_pinned_ws],
+        workspace_settings={hidden_pinned_ws: {"tags": ["hidden"], "color": ""}},
+    )
+    mock_discover.return_value = [
+        (hidden_pinned_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (visible_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "hidden-pinned" not in resp.text
+    assert "visible-proj" in resp.text
+
+
+# --- /api/tags endpoint ---
+
+
+@patch("power_atlas.web.load_config")
+def test_api_tags_returns_tag_list(mock_load, client, tmp_path):
+    """GET /api/tags returns all tags with colors and counts."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "proj1")
+    ws2 = str(tmp_path / "proj2")
+    mock_load.return_value = Config(
+        workspace_settings={
+            ws1: {"tags": ["frontend", "active"], "color": ""},
+            ws2: {"tags": ["frontend", "backend"], "color": ""},
+        },
+        tag_settings={
+            "frontend": {"color": "#3b82f6"},
+            "archived": {"color": "#64748b"},
+        },
+    )
+    resp = client.get("/api/tags")
+    assert resp.status_code == 200
+    tags = resp.json()
+    tag_map = {t["name"]: t for t in tags}
+    assert "frontend" in tag_map
+    assert tag_map["frontend"]["count"] == 2
+    assert tag_map["frontend"]["color"] == "#3b82f6"
+    assert "active" in tag_map
+    assert tag_map["active"]["count"] == 1
+    assert tag_map["active"]["color"] == ""
+    assert "backend" in tag_map
+    assert tag_map["backend"]["count"] == 1
+    # tag_settings tag with 0 workspaces still appears
+    assert "archived" in tag_map
+    assert tag_map["archived"]["count"] == 0
+    assert tag_map["archived"]["color"] == "#64748b"
+
+
+@patch("power_atlas.web.load_config")
+def test_api_tags_empty_when_no_tags(mock_load, client):
+    """GET /api/tags returns empty list when no tags configured."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.get("/api/tags")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+# --- Search endpoint with filters ---
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_excludes_hidden_by_default(mock_discover, mock_config, client, tmp_path):
+    """Search results exclude hidden workspaces by default."""
+    from power_atlas.config import Config
+    hidden_ws = str(tmp_path / "hidden-proj")
+    visible_ws = str(tmp_path / "visible-proj")
+    mock_config.return_value = Config(
+        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
+    )
+    mock_discover.return_value = [
+        (hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (visible_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    # Search for "proj" which matches both
+    resp = client.get(f"/search?q=proj")
+    assert resp.status_code == 200
+    assert "visible-proj" in resp.text
+    assert "hidden-proj" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_with_tag_filter(mock_discover, mock_config, client, tmp_path):
+    """Search results respect tag filter."""
+    from power_atlas.config import Config
+    frontend_ws = str(tmp_path / "frontend-proj")
+    backend_ws = str(tmp_path / "backend-proj")
+    mock_config.return_value = Config(
+        workspace_settings={
+            frontend_ws: {"tags": ["frontend"], "color": ""},
+            backend_ws: {"tags": ["backend"], "color": ""},
+        },
+    )
+    mock_discover.return_value = [
+        (frontend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (backend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    resp = client.get("/search?q=proj&tag=frontend")
+    assert resp.status_code == 200
+    assert "frontend-proj" in resp.text
+    assert "backend-proj" not in resp.text
