@@ -2890,6 +2890,5 @@ def test_tag_delete_nonexistent_succeeds(mock_load, mock_save, client):
 
     resp = client.post("/api/tag/delete", json={"tag": "nonexistent"})
     assert resp.status_code == 200
-    assert "deleted" in resp.text
-    assert "0 workspace" in resp.text
-    mock_save.assert_called_once()
+    assert "not found" in resp.text
+    mock_save.assert_not_called()

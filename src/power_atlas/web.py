@@ -801,20 +801,23 @@ async def delete_tag(request: Request):
     """Globally delete a tag from tag_settings and all workspace assignments."""
     body = await request.json()
     tag_name = body.get("tag", "")
-    if not tag_name:
+    if not isinstance(tag_name, str) or not tag_name or len(tag_name) > 64 or any(ord(ch) < 0x20 for ch in tag_name):
         return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Missing tag name", "level": "error"})
+            "message": "Invalid tag name", "level": "error"})
     if tag_name == "hidden":
         return templates.TemplateResponse(request, "partials/toast.html", {
             "message": "Cannot delete the 'hidden' tag", "level": "error"})
     config = load_config()
-    config.tag_settings.pop(tag_name, None)
+    removed_from_settings = config.tag_settings.pop(tag_name, None) is not None
     affected = 0
-    for ws_path, ws in config.workspace_settings.items():
+    for ws in config.workspace_settings.values():
         tags = ws.get("tags", [])
         if tag_name in tags:
             ws["tags"] = [t for t in tags if t != tag_name]
             affected += 1
+    if not removed_from_settings and affected == 0:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": f"Tag '{tag_name}' not found", "level": "success"})
     save_config(config)
     return templates.TemplateResponse(request, "partials/toast.html", {
         "message": f"Tag '{tag_name}' deleted from {affected} workspace(s)",
