@@ -380,6 +380,9 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     if provider != "all":
         other_grouped = [g for g in other_grouped if any(prov["name"] == provider for prov in g["providers"])]
 
+    if pinned_grouped and other_grouped:
+        cards_html += '<div class="pinned-separator" aria-hidden="true"></div>'
+
     for group in other_grouped:
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
@@ -441,12 +444,19 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
         has_more = False  # Search disables pagination
 
     # Exclude pinned items on page > 1 (they are already rendered on page 1)
+    pinned_set = set(config.pinned_sessions)
     if page > 1:
-        pinned_set = set(config.pinned_sessions)
         sessions_with_prov = [(s, p) for s, p in sessions_with_prov if s.session_id not in pinned_set]
 
     html = ""
+    separator_inserted = False
     for session, prov_name in sessions_with_prov:
+        # On page 1, insert separator at boundary between pinned and non-pinned
+        if page == 1 and not separator_inserted and session.session_id not in pinned_set:
+            # Only insert if there were pinned items before this point
+            if html:
+                html += '<div class="pinned-separator" aria-hidden="true"></div>'
+            separator_inserted = True
         html += templates.get_template("partials/session_row.html").render(
             request=request, session=session, cwd=session.cwd,
             stale=not Path(session.cwd).exists(),

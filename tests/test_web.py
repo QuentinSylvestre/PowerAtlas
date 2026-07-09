@@ -1878,3 +1878,95 @@ def test_launch_terminal_failure_result(mock_config, mock_launch, client, tmp_pa
     assert resp.status_code == 200
     assert "No terminal found" in resp.text
     assert "error" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_pinned_separator_present_when_both_groups(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Separator div appears between pinned and non-pinned workspace cards."""
+    from power_atlas.config import Config
+    pinned_ws = str(tmp_path / "pinned-proj")
+    other_ws = str(tmp_path / "other-proj")
+    mock_config.return_value = Config(pinned_folders=[pinned_ws])
+    mock_discover.return_value = [
+        (pinned_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+        (other_ws, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert 'class="pinned-separator"' in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_pinned_separator_absent_when_only_pinned(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """No separator when all workspaces are pinned (no non-pinned group)."""
+    from power_atlas.config import Config
+    pinned_ws = str(tmp_path / "pinned-proj")
+    mock_config.return_value = Config(pinned_folders=[pinned_ws])
+    mock_discover.return_value = [
+        (pinned_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert 'class="pinned-separator"' not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_pinned_separator_absent_when_no_pinned(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """No separator when no workspaces are pinned."""
+    from power_atlas.config import Config
+    other_ws = str(tmp_path / "other-proj")
+    mock_config.return_value = Config(pinned_folders=[])
+    mock_discover.return_value = [
+        (other_ws, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert 'class="pinned-separator"' not in resp.text
+
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_session_pinned_separator_present(mock_paginated, mock_config, client, tmp_path):
+    """Separator div appears between pinned and non-pinned sessions on page 1."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    pinned_session = _make_session(session_id="pinned-1", title="Pinned", cwd=workspace)
+    other_session = _make_session(session_id="other-1", title="Other", cwd=workspace)
+    mock_config.return_value = Config(pinned_sessions=["pinned-1"])
+    mock_paginated.return_value = (
+        [(pinned_session, "kiro-cli"), (other_session, "kiro-cli")],
+        False,
+    )
+    resp = client.get("/partials/all-sessions?page=1")
+    assert resp.status_code == 200
+    assert 'class="pinned-separator"' in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_session_pinned_separator_absent_no_pinned(mock_paginated, mock_config, client, tmp_path):
+    """No separator when no sessions are pinned."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    session = _make_session(session_id="s1", title="Regular", cwd=workspace)
+    mock_config.return_value = Config(pinned_sessions=[])
+    mock_paginated.return_value = (
+        [(session, "kiro-cli")],
+        False,
+    )
+    resp = client.get("/partials/all-sessions?page=1")
+    assert resp.status_code == 200
+    assert 'class="pinned-separator"' not in resp.text

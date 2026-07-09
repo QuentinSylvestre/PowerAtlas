@@ -345,3 +345,9 @@ script { display: none; }
   height: 16px;
   vertical-align: middle;
 }
+
+/* Pinned/non-pinned separator */
+.pinned-separator {
+  height: 12px;
+  flex-shrink: 0;
+}
