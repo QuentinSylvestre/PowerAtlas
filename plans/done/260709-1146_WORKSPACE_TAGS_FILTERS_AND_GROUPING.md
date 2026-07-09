@@ -2,6 +2,7 @@
 
 > **Date**: 2026-07-09
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-09T11:46
 > **Scope**: Workspace-level settings (tags, color), tag-level settings, group-by/filter on workspace panel, hidden workspaces, pinned separation
 > **Estimated effort**: ~2-3 days
 
