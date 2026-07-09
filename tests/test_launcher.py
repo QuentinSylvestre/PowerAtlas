@@ -11,11 +11,13 @@ from power_atlas.launcher import (
     launch_custom,
     launch_custom_batch,
     launch_session,
+    launch_terminal,
     _build_command,
     _build_custom_command,
     _build_powershell_invocation,
     _build_provider_args,
     _build_template_command,
+    _build_terminal_only_command,
     _sanitize_title,
 )
 from power_atlas.icons import _resolve_cmd_to_exe
@@ -1071,3 +1073,62 @@ class TestResolveCmdToExeDp0LeadingBackslash:
         result = _resolve_cmd_to_exe(cmd_file)
         assert result is not None
         assert result.name == "Kiro.exe"
+
+
+# --- Phase 5: launch_terminal and _build_terminal_only_command ---
+
+
+class TestLaunchTerminal:
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_success_valid_cwd(self, mock_which, mock_popen, tmp_path):
+        """launch_terminal with valid cwd returns LaunchResult(success=True)."""
+        mock_which.side_effect = lambda n: {"wt": "C:\\wt.exe"}.get(n)
+        cwd = str(tmp_path)
+        result = launch_terminal(cwd, launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is True
+        assert result.workspace == cwd
+        mock_popen.assert_called_once()
+
+    def test_nonexistent_cwd_returns_error(self):
+        """launch_terminal with non-existent cwd returns LaunchResult(success=False)."""
+        result = launch_terminal("C:\\nonexistent\\bogus\\path", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
+        assert result.success is False
+        assert "not found" in result.error.lower() or "Folder not found" in result.error
+
+
+class TestBuildTerminalOnlyCommand:
+    def test_wt_terminal_args(self):
+        """WT terminal builds correct args with -p, -d, and optional --title."""
+        cmd = _build_terminal_only_command("C:\\wt.exe", "C:\\my\\project", title="Terminal - project", wt_profile="PowerShell")
+        assert cmd[0] == "C:\\wt.exe"
+        assert "--title" in cmd
+        assert cmd[cmd.index("--title") + 1] == "Terminal - project"
+        assert "-p" in cmd
+        assert cmd[cmd.index("-p") + 1] == "PowerShell"
+        assert "-d" in cmd
+        assert cmd[cmd.index("-d") + 1] == "C:\\my\\project"
+
+    def test_pwsh_terminal_set_location(self):
+        """pwsh terminal builds -NoExit -Command with Set-Location."""
+        cmd = _build_terminal_only_command("C:\\pwsh.exe", "C:\\my\\project", title="Terminal - project")
+        assert cmd[0] == "C:\\pwsh.exe"
+        assert cmd[1] == "-NoExit"
+        assert cmd[2] == "-Command"
+        script = cmd[3]
+        assert "Set-Location" in script
+        assert "C:\\my\\project" in script
+        assert "WindowTitle" in script
+        assert "Terminal - project" in script
+
+    @patch("sys.platform", "linux")
+    def test_kitty_terminal_directory_flag(self):
+        """Linux kitty uses --directory and no exec_sep is appended (terminal-only)."""
+        cmd = _build_terminal_only_command("/usr/bin/kitty", "/home/user/proj", title="Terminal - proj")
+        assert cmd[0] == "/usr/bin/kitty"
+        assert "--title" in cmd
+        assert cmd[cmd.index("--title") + 1] == "Terminal - proj"
+        assert "--directory" in cmd
+        assert cmd[cmd.index("--directory") + 1] == "/home/user/proj"
+        # No exec separator (--) or command appended for terminal-only
+        assert "--" not in cmd

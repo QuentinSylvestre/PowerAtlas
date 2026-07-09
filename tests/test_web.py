@@ -1774,3 +1774,66 @@ def test_workspaces_includes_pinned_at_top(mock_discover, mock_config, client, t
     assert "other-proj" in resp.text
     # Pinned workspace appears before non-pinned
     assert resp.text.index("pinned-proj") < resp.text.index("other-proj")
+
+
+# --- Phase 5: open-folder, launch-terminal, terminal tile ---
+
+
+@patch("power_atlas.web.sys")
+@patch("power_atlas.web.os.startfile", create=True)
+def test_open_folder_valid_directory(mock_startfile, mock_sys, client, tmp_path):
+    """POST /api/open-folder with valid dir returns success toast."""
+    mock_sys.platform = "win32"
+    folder = str(tmp_path)
+    resp = client.post("/api/open-folder", json={"folder": folder})
+    assert resp.status_code == 200
+    assert "Opened" in resp.text
+    assert tmp_path.name in resp.text
+    assert "success" in resp.text
+
+
+def test_open_folder_nonexistent_path(client):
+    """POST /api/open-folder with non-existent path returns error toast."""
+    resp = client.post("/api/open-folder", json={"folder": "C:\\nonexistent\\xyz\\bogus"})
+    assert resp.status_code == 200
+    assert "not found" in resp.text.lower() or "error" in resp.text.lower()
+
+
+@patch("power_atlas.web.launcher.launch_terminal")
+@patch("power_atlas.web.load_config")
+def test_launch_terminal_success(mock_config, mock_launch, client, tmp_path):
+    """POST /api/launch-terminal with valid workspace returns success toast."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    cwd = str(tmp_path)
+    mock_config.return_value = Config()
+    mock_launch.return_value = LaunchResult(True, None, cwd)
+    resp = client.post("/api/launch-terminal", json={"workspace": cwd})
+    assert resp.status_code == 200
+    assert "Terminal opened" in resp.text
+    assert tmp_path.name in resp.text
+    assert "success" in resp.text
+    mock_launch.assert_called_once()
+
+
+@patch("power_atlas.web.load_config")
+def test_launch_terminal_no_workspace_no_default(mock_config, client):
+    """POST /api/launch-terminal with no workspace and no default_directory returns error toast."""
+    from power_atlas.config import Config
+    mock_config.return_value = Config(default_directory="")
+    resp = client.post("/api/launch-terminal", json={})
+    assert resp.status_code == 200
+    assert "No directory" in resp.text
+    assert "error" in resp.text
+
+
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.load_config")
+def test_partials_launchers_includes_terminal_tile(mock_load, mock_providers, client):
+    """Launcher grid includes the builtin terminal tile."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    mock_providers.return_value = ["kiro-cli"]
+    resp = client.get("/partials/launchers")
+    assert resp.status_code == 200
+    assert 'data-id="builtin--terminal"' in resp.text
