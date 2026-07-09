@@ -1,7 +1,7 @@
 # Unified Tag Management and Bulk Assignment
 
 > **Date**: 2026-07-09
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Rework tag feature into unified management popover (add/delete/color) and multi-workspace tag assignment via selection
 > **Estimated effort**: ~1-2 days
 
@@ -198,11 +198,17 @@ async def delete_tag(request: Request):
 3. **Tests**: Add `test_tag_delete_removes_globally`, `test_tag_delete_hidden_protected`, `test_tag_delete_nonexistent_succeeds`, `test_orphan_pruning_removed`.
 
 **Exit criteria**:
-- [ ] Orphan pruning block removed from `load_config()`
-- [ ] Tags persist in `tag_settings` after config reload even when not assigned to any workspace
-- [ ] `POST /api/tag/delete` removes tag from `tag_settings` + all workspace assignments
-- [ ] Deleting "hidden" returns error toast
-- [ ] Tests pass for new endpoint and pruning removal
+- [x] Orphan pruning block removed from `load_config()`
+- [x] Tags persist in `tag_settings` after config reload even when not assigned to any workspace
+- [x] `POST /api/tag/delete` removes tag from `tag_settings` + all workspace assignments
+- [x] Deleting "hidden" returns error toast
+- [x] Tests pass for new endpoint and pruning removal
+
+#### Implementation (2026-07-09, code: 159f571)
+
+Removed the orphan tag pruning block from `load_config()` in config.py — tags now persist in `tag_settings` regardless of workspace assignments. Added a `POST /api/tag/delete` endpoint to web.py that globally removes a tag from `tag_settings` and all workspace assignments using list comprehension (per review finding #9), with protection against deleting the "hidden" system tag. Updated `test_tag_settings_round_trip` to no longer require workspace assignments for tag persistence, added `test_orphan_pruning_removed` in test_config.py, and added three new tests in test_web.py covering global deletion, hidden-tag protection, and nonexistent-tag graceful handling.
+
+Review auto-fix (391fe53): Added input validation (type check, length, control chars) consistent with sibling endpoints, switched loop to `.values()`, added early-return when tag doesn't exist anywhere (avoids unnecessary disk write).
 
 ### Phase 2: Frontend — unified tag management popover [QA]
 
@@ -707,3 +713,18 @@ if (_wsColorChanged) { payload.color = document.getElementById('wsSettingsColor'
 | 12 | Low | Stale tag filter after delete (active filter matches deleted tag) | Noted — implementation should reset active filter if deleted tag was selected |
 | 13 | Low | Popover delete handler calls `pop.remove()` regardless of fetch success | Noted — implementation should check response before closing |
 | 14 | Low | Add-tag in popover doesn't check for duplicate tag name client-side | Noted — implementation should check `_tagColorData` before posting |
+
+
+### 2026-07-09 -- Implementation Review (after Phase 1, personas: Senior engineer, Reliability engineer, Security auditor, Maintainability reviewer)
+
+Implementation health: Green.
+4 findings (0 High, 0 Medium, 4 Low). Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | `delete_tag` lacked length/control-char validation present in sibling endpoints | Fixed — added matching isinstance+length+control-char guard (391fe53) |
+| 2 | Low | Unused loop variable `ws_path` in workspace iteration | Fixed — switched to `.values()` (391fe53) |
+| 3 | Low | Nonexistent tag delete called `save_config` (disk write) when nothing changed | Fixed — added early-return when tag not found anywhere (391fe53) |
+| 4 | Low | No type check on `body.get("tag")` — non-string could bypass empty check | Fixed — added `isinstance(tag_name, str)` in the combined validation guard (391fe53) |
+
+QA verification: PASS (TestClient HTTP stack, 3 endpoint scenarios verified).
