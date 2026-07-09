@@ -624,19 +624,32 @@ def test_workspace_settings_round_trip_windows_paths():
 
 
 def test_tag_settings_round_trip():
-    """tag_settings persist through save/load cycle."""
+    """tag_settings persist through save/load cycle even without workspace assignments."""
     tags = {
         "web": {"color": "#3b82f6"},
         "backend": {"color": "#10b981"},
     }
-    cfg = Config(
-        tag_settings=tags,
-        workspace_settings={"C:\\project": {"tags": ["web", "backend"], "color": ""}},
-    )
+    cfg = Config(tag_settings=tags)
     save_config(cfg)
     loaded = load_config()
-    # "hidden" is always added; original tags persist because they have workspace assignments
+    # "hidden" is always added; tags persist regardless of workspace assignments
     assert loaded.tag_settings == {**tags, "hidden": {"color": ""}}
+
+
+def test_orphan_pruning_removed(tmp_path):
+    """Tags persist in tag_settings even when not assigned to any workspace."""
+    _write_toml(tmp_path, {
+        "tag_settings": {
+            "orphan-tag": {"color": "#ff0000"},
+            "another": {"color": "#00ff00"},
+        },
+        "workspace_settings": {},
+    })
+    cfg = load_config()
+    assert "orphan-tag" in cfg.tag_settings
+    assert "another" in cfg.tag_settings
+    assert cfg.tag_settings["orphan-tag"]["color"] == "#ff0000"
+    assert cfg.tag_settings["another"]["color"] == "#00ff00"
 
 
 def test_tag_settings_sanitization_invalid_color(tmp_path):

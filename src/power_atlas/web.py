@@ -796,6 +796,32 @@ async def save_tag_settings(request: Request):
     })
 
 
+@app.post("/api/tag/delete", response_class=HTMLResponse)
+async def delete_tag(request: Request):
+    """Globally delete a tag from tag_settings and all workspace assignments."""
+    body = await request.json()
+    tag_name = body.get("tag", "")
+    if not tag_name:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Missing tag name", "level": "error"})
+    if tag_name == "hidden":
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Cannot delete the 'hidden' tag", "level": "error"})
+    config = load_config()
+    config.tag_settings.pop(tag_name, None)
+    affected = 0
+    for ws_path, ws in config.workspace_settings.items():
+        tags = ws.get("tags", [])
+        if tag_name in tags:
+            ws["tags"] = [t for t in tags if t != tag_name]
+            affected += 1
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": f"Tag '{tag_name}' deleted from {affected} workspace(s)",
+        "level": "success",
+    })
+
+
 @app.get("/api/provider/{key}")
 async def get_provider_settings(key: str):
     if key not in data.PROVIDERS:

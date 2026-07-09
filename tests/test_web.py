@@ -2836,3 +2836,60 @@ def test_tag_save_appears_in_api_tags(mock_load, mock_save, client, tmp_path):
     tags = resp.json()
     tag_map = {t["name"]: t for t in tags}
     assert tag_map["frontend"]["color"] == "#3b82f6"
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_tag_delete_removes_globally(mock_load, mock_save, client, tmp_path):
+    """POST /api/tag/delete removes tag from tag_settings and all workspace assignments."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "proj1")
+    ws2 = str(tmp_path / "proj2")
+    config = Config(
+        tag_settings={"frontend": {"color": "#3b82f6"}, "backend": {"color": "#10b981"}},
+        workspace_settings={
+            ws1: {"tags": ["frontend", "backend"], "color": ""},
+            ws2: {"tags": ["frontend"], "color": ""},
+        },
+    )
+    mock_load.return_value = config
+
+    resp = client.post("/api/tag/delete", json={"tag": "frontend"})
+    assert resp.status_code == 200
+    assert "deleted" in resp.text
+    assert "2 workspace" in resp.text
+
+    saved = mock_save.call_args[0][0]
+    assert "frontend" not in saved.tag_settings
+    assert "backend" in saved.tag_settings
+    assert "frontend" not in saved.workspace_settings[ws1]["tags"]
+    assert "backend" in saved.workspace_settings[ws1]["tags"]
+    assert "frontend" not in saved.workspace_settings[ws2]["tags"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_tag_delete_hidden_protected(mock_load, mock_save, client):
+    """POST /api/tag/delete rejects deletion of the 'hidden' tag."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(tag_settings={"hidden": {"color": ""}})
+
+    resp = client.post("/api/tag/delete", json={"tag": "hidden"})
+    assert resp.status_code == 200
+    assert "Cannot delete" in resp.text
+    mock_save.assert_not_called()
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_tag_delete_nonexistent_succeeds(mock_load, mock_save, client):
+    """POST /api/tag/delete succeeds gracefully for a tag that doesn't exist."""
+    from power_atlas.config import Config
+    config = Config(tag_settings={"existing": {"color": "#fff"}})
+    mock_load.return_value = config
+
+    resp = client.post("/api/tag/delete", json={"tag": "nonexistent"})
+    assert resp.status_code == 200
+    assert "deleted" in resp.text
+    assert "0 workspace" in resp.text
+    mock_save.assert_called_once()
