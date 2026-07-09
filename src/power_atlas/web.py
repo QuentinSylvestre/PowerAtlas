@@ -235,6 +235,28 @@ async def api_open_folder(request: Request):
     })
 
 
+@app.post("/api/launch-terminal", response_class=HTMLResponse)
+async def api_launch_terminal(request: Request):
+    body = await request.json()
+    config = load_config()
+    cwd = body.get("workspace", "")
+    if not cwd:
+        cwd = config.default_directory or ""
+    if not cwd:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "No directory available for terminal launch", "level": "error",
+        })
+    profile = get_active_launch_profile(config)
+    result = launcher.launch_terminal(cwd, launch_profile=profile)
+    if not result.success:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": result.error, "level": "error",
+        })
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": f"Terminal opened: {Path(cwd).name}", "level": "success",
+    })
+
+
 @app.post("/api/pin-session")
 async def pin_session(request: Request):
     body = await request.json()

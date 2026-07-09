@@ -463,3 +463,112 @@ def _build_custom_command(terminal: str, cwd: str, cmd_str: str, title: str, *, 
         return None
     safe_title = _sanitize_title(title)
     return [terminal, "/k", f'title {safe_title}&& cd /d "{cwd}" && {cmd_str}']
+
+
+def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_profile: str = "PowerShell") -> list[str] | None:
+    """Build command to open a terminal at cwd with no provider command.
+
+    Returns None if the path is unsafe for the detected terminal.
+    """
+    t = Path(terminal).stem.lower()
+
+    # User template — substitute {cwd}/{title}/{wt_profile}, skip {cmd}/{pscmd}
+    if "{cwd}" in terminal or "{title}" in terminal or "{wt_profile}" in terminal:
+        parts = re.split(r"(\{cwd\}|\{cmd\}|\{pscmd\}|\{title\}|\{wt_profile\})", terminal)
+        result: list[str] = []
+        for part in parts:
+            if part == "{cwd}":
+                result.append(cwd)
+            elif part in ("{cmd}", "{pscmd}"):
+                continue  # no command to inject
+            elif part == "{title}":
+                result.append(_sanitize_title(title) if title else "")
+            elif part == "{wt_profile}":
+                result.append(wt_profile)
+            else:
+                result.extend(p for p in part.split() if p)
+        return result
+
+    if t == "wt":
+        cmd = [terminal]
+        if title:
+            cmd += ["--title", _sanitize_title(title)]
+        cmd += ["-p", wt_profile, "-d", cwd]
+        return cmd
+
+    if t == "pwsh":
+        escaped_cwd = cwd.replace("'", "''")
+        script = ""
+        if title:
+            safe = _sanitize_title(title).replace("'", "''")
+            script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
+        script += f"Set-Location -LiteralPath '{escaped_cwd}'"
+        return [terminal, "-NoExit", "-Command", script]
+
+    # Linux terminals via dispatch table
+    if t in _LINUX_TERMINALS:
+        title_flag, cwd_flag, _exec_sep = _LINUX_TERMINALS[t]
+        cmd: list[str] = [terminal]
+
+        if title and title_flag:
+            if title_flag.endswith("="):
+                cmd.append(f"{title_flag}{_sanitize_title(title)}")
+            else:
+                cmd += [title_flag, _sanitize_title(title)]
+
+        if cwd_flag:
+            if cwd_flag.endswith("="):
+                cmd.append(f"{cwd_flag}{cwd}")
+            else:
+                cmd += [cwd_flag, cwd]
+        else:
+            # xterm: no cwd_flag, wrap in shell
+            cmd += ["-e", "sh", "-c", f'cd {shlex.quote(cwd)} && exec $SHELL']
+
+        return cmd
+
+    # cmd fallback (Windows only)
+    if sys.platform != "win32":
+        return None
+    if _CMD_METACHAR_RE.search(cwd):
+        return None
+    prefix = f"title {_sanitize_title(title)}&& " if title else ""
+    return [terminal, "/k", f'{prefix}cd /d "{cwd}"']
+
+
+def launch_terminal(
+    cwd: str,
+    launch_profile: LaunchProfile | None = None,
+) -> LaunchResult:
+    """Open a terminal at a directory with no provider command. Never raises."""
+    profile = launch_profile or LaunchProfile()
+
+    if cwd:
+        try:
+            cwd_exists = Path(cwd).exists()
+        except (OSError, ValueError):
+            return LaunchResult(False, None, cwd, error=f"Invalid folder path: {cwd}")
+        if not cwd_exists:
+            return LaunchResult(False, None, cwd, error=f"Folder not found: {cwd}")
+    else:
+        return LaunchResult(False, None, cwd, error="No directory specified")
+
+    terminal = detect_terminal(profile.terminal_command if "{" not in profile.terminal_command else "")
+    if not terminal:
+        if sys.platform == "win32":
+            msg = "No terminal found. Configure one in Settings."
+        else:
+            msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm — or configure a custom terminal in Settings."
+        return LaunchResult(False, None, cwd, error=msg)
+
+    title = f"Terminal - {Path(cwd).name}"
+    cmd = _build_terminal_only_command(terminal, cwd, title=title, wt_profile=profile.wt_profile)
+    if cmd is None:
+        return LaunchResult(False, None, cwd, error="Path contains characters unsafe for this terminal")
+
+    try:
+        kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
+        subprocess.Popen(cmd, **kwargs)
+        return LaunchResult(True, None, cwd)
+    except OSError as e:
+        return LaunchResult(False, None, cwd, error=str(e))

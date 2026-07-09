@@ -9,6 +9,7 @@
     <span class="card-count">{{ session_count }}</span>
     {% if last_updated %}<span class="card-last-active">{{ last_updated[5:16] | replace('T', ' ') }}</span>{% endif %}
     <div class="card-actions">
+      <button class="card-terminal-btn" onclick="event.stopPropagation();openTerminal(this)" aria-label="Open terminal" title="Open terminal">&gt;_</button>
       {% for p in providers %}
       <button class="card-new-btn" onclick="event.stopPropagation();launchNew(this,'{{ p.name }}')" aria-label="New {{ p.display }} session" title="New {{ p.display }} session">
         <img src="/api/launcher-icon/provider--{{ p.name }}" class="card-new-icon" alt="" onerror="this.outerHTML='&gt;_'">
