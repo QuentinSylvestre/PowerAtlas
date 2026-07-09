@@ -130,10 +130,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .workspace-card.stale { opacity: 0.6; }
 
 /* Session row */
-.session-row { display: grid; grid-template-columns: 28px 1fr; align-items: center; padding: 10px 16px; gap: 10px; cursor: pointer; transition: background 0.1s; position: relative; }
+.session-row { display: grid; grid-template-columns: 28px 1fr; align-items: center; padding: 10px 16px; gap: 10px; cursor: pointer; transition: background 0.1s; position: relative; background: var(--card-bg); border: 1px solid var(--card-border); }
 .session-row:hover { background: var(--surface-hover); }
 .session-row.selected { background: var(--surface-selected); }
-.session-row + .session-row { border-top: 1px solid rgba(45,50,68,0.4); }
+.session-row + .session-row { border-top: none; margin-top: -1px; }
 .session-check { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; transition: all 0.12s; flex-shrink: 0; }
 .session-row:hover .session-check { border-color: var(--text-muted); }
 .session-row.selected .session-check { border-color: var(--accent); background: var(--accent); }
