@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 
 from power_atlas.data import Session
 from power_atlas.web import app
+from power_atlas import launcher
 
 
 @pytest.fixture
@@ -1819,13 +1820,17 @@ def test_launch_terminal_success(mock_config, mock_launch, client, tmp_path):
 
 @patch("power_atlas.web.load_config")
 def test_launch_terminal_no_workspace_no_default(mock_config, client):
-    """POST /api/launch-terminal with no workspace and no default_directory returns error toast."""
+    """POST /api/launch-terminal with no workspace and no default_directory falls back to home dir."""
     from power_atlas.config import Config
     mock_config.return_value = Config(default_directory="")
-    resp = client.post("/api/launch-terminal", json={})
-    assert resp.status_code == 200
-    assert "No directory" in resp.text
-    assert "error" in resp.text
+    with patch("power_atlas.web.launcher.launch_terminal") as mock_launch:
+        mock_launch.return_value = launcher.LaunchResult(True, None, str(Path.home()))
+        resp = client.post("/api/launch-terminal", json={})
+        assert resp.status_code == 200
+        assert "success" in resp.text
+        # Verify it was called with the home directory
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args[0][0] == str(Path.home())
 
 
 @patch("power_atlas.web.data.available_providers")

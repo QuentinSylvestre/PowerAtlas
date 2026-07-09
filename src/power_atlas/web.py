@@ -42,6 +42,19 @@ _PROVIDER_BINARY_DISPLAY = {
 }
 
 
+def _resolve_launch_cwd(workspace: str, config, provider: str = "") -> str:
+    """Resolve working directory for a launch: workspace → per-provider default → global default → ~."""
+    if workspace:
+        return workspace
+    if provider:
+        per_provider = config.provider_settings.get(provider, {}).get("default_directory", "")
+        if per_provider:
+            return per_provider
+    if config.default_directory:
+        return config.default_directory
+    return str(Path.home())
+
+
 def _get_provider_color(provider: str, config) -> str:
     """Return user-configured color for a provider, falling back to PROVIDER_COLORS."""
     user_color = config.provider_settings.get(provider, {}).get("color", "")
@@ -239,13 +252,7 @@ async def api_open_folder(request: Request):
 async def api_launch_terminal(request: Request):
     body = await request.json()
     config = load_config()
-    cwd = body.get("workspace", "")
-    if not cwd:
-        cwd = config.default_directory or ""
-    if not cwd:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "No directory available for terminal launch", "level": "error",
-        })
+    cwd = _resolve_launch_cwd(body.get("workspace", ""), config)
     profile = get_active_launch_profile(config)
     result = launcher.launch_terminal(cwd, launch_profile=profile)
     if not result.success:
@@ -890,9 +897,10 @@ async def api_launch(request: Request):
     body = await request.json()
     config = load_config()
     provider = body.get("provider") or "kiro-cli"
+    cwd = _resolve_launch_cwd(body.get("workspace", ""), config, provider)
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
-        cwd=body["workspace"],
+        cwd=cwd,
         session_id=body.get("session_id"),
         provider=provider,
         default_args=default_args,
@@ -915,8 +923,13 @@ async def api_launch(request: Request):
 async def api_launch_batch(request: Request):
     body = await request.json()
     config = load_config()
+    # Resolve empty workspaces through the fallback chain before passing to launcher
+    sessions = body["sessions"]
+    for s in sessions:
+        if not s.get("workspace"):
+            s["workspace"] = _resolve_launch_cwd("", config, s.get("provider", "kiro-cli"))
     results = launcher.launch_batch(
-        sessions=body["sessions"],
+        sessions=sessions,
         launch_profile=get_active_launch_profile(config),
         provider_settings=config.provider_settings,
     )
@@ -942,9 +955,10 @@ async def api_new_session(request: Request):
     body = await request.json()
     config = load_config()
     provider = body.get("provider") or "kiro-cli"
+    cwd = _resolve_launch_cwd(body.get("workspace", ""), config, provider)
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
-        cwd=body["workspace"],
+        cwd=cwd,
         session_id=None,
         provider=provider,
         default_args=default_args,
