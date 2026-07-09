@@ -1497,6 +1497,123 @@ async def save_workspace_settings_api(request: Request):
     })
 
 
+@app.post("/api/workspace-settings/save-bulk", response_class=HTMLResponse)
+async def save_workspace_settings_bulk_api(request: Request):
+    """Bulk-apply tag additions/removals and color to multiple workspaces."""
+    body = await request.json()
+    cwds = body.get("cwds", [])
+    tags_add = body.get("tags_add", [])
+    tags_remove = body.get("tags_remove", [])
+    color = body.get("color")  # None means don't change; "" means clear
+
+    # Validation: cwds
+    if not isinstance(cwds, list) or len(cwds) < 1 or len(cwds) > 50:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "cwds must be a list of 1-50 paths", "level": "error"})
+
+    # Validation: tags_add / tags_remove are lists of valid tag strings
+    for tag_list, label in [(tags_add, "tags_add"), (tags_remove, "tags_remove")]:
+        if not isinstance(tag_list, list):
+            return templates.TemplateResponse(request, "partials/toast.html", {
+                "message": f"{label} must be a list", "level": "error"})
+        for t in tag_list:
+            if not isinstance(t, str) or not t or len(t) > 64 or any(ord(ch) < 0x20 for ch in t):
+                return templates.TemplateResponse(request, "partials/toast.html", {
+                    "message": "Invalid tag: 1-64 chars, no control chars", "level": "error"})
+
+    # Validation: no overlap between add and remove
+    if set(tags_add) & set(tags_remove):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "tags_add and tags_remove must not overlap", "level": "error"})
+
+    # Validation: color (if present)
+    if color is not None:
+        if not isinstance(color, str) or len(color) > 20 or any(ord(ch) < 0x20 for ch in color):
+            return templates.TemplateResponse(request, "partials/toast.html", {
+                "message": "Invalid color value", "level": "error"})
+
+    config = load_config()
+    from .data import _normalize_path
+    from .config import get_workspace_settings
+
+    modified = 0
+    skipped = 0
+
+    for cwd in cwds:
+        norm_cwd = _normalize_path(cwd)
+        # Find existing key or use the raw cwd
+        existing_key = None
+        for k in config.workspace_settings:
+            if _normalize_path(k) == norm_cwd:
+                existing_key = k
+                break
+        key = existing_key or cwd
+        ws = config.workspace_settings.get(key, {"tags": [], "color": ""})
+
+        # Remove tags
+        ws_tags = [t for t in ws.get("tags", []) if t not in tags_remove]
+
+        # Add tags (respect 10-tag limit)
+        hit_limit = False
+        for t in tags_add:
+            if t not in ws_tags:
+                if len(ws_tags) >= 10:
+                    hit_limit = True
+                else:
+                    ws_tags.append(t)
+
+        if hit_limit:
+            skipped += 1
+
+        # Set color if specified
+        ws_color = color if color is not None else ws.get("color", "")
+
+        config.workspace_settings[key] = {"tags": ws_tags, "color": ws_color}
+        modified += 1
+
+    # Auto-create tags in tag_settings for any new tags
+    for t in tags_add:
+        if t not in config.tag_settings:
+            config.tag_settings[t] = {"color": ""}
+
+    save_config(config)
+
+    if skipped > 0:
+        msg = f"Updated {modified} workspace(s) ({skipped} workspace(s) hit 10-tag limit)"
+        level = "warning"
+    else:
+        msg = f"Updated {modified} workspace(s)"
+        level = "success"
+
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": msg, "level": level})
+
+
+@app.post("/api/workspace-settings-bulk")
+async def get_workspace_settings_bulk_api(request: Request):
+    """Return workspace settings for multiple cwds."""
+    body = await request.json()
+    cwds = body.get("cwds", [])
+
+    if not isinstance(cwds, list) or len(cwds) < 1 or len(cwds) > 50:
+        raise HTTPException(status_code=400, detail="cwds must be a list of 1-50 paths")
+
+    config = load_config()
+    from .config import get_workspace_settings
+
+    workspaces = {}
+    for cwd in cwds:
+        workspaces[cwd] = get_workspace_settings(config, cwd)
+
+    # all_tags: union of all workspace tags + all tag_settings keys
+    all_tags = set()
+    for ws in workspaces.values():
+        all_tags.update(ws.get("tags", []))
+    all_tags.update(config.tag_settings.keys())
+
+    return {"workspaces": workspaces, "all_tags": sorted(all_tags)}
+
+
 @app.post("/api/restart")
 async def api_restart():
     """Trigger restart via the tray mechanism."""

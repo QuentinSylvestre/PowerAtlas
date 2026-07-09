@@ -2892,3 +2892,152 @@ def test_tag_delete_nonexistent_succeeds(mock_load, mock_save, client):
     assert resp.status_code == 200
     assert "not found" in resp.text
     mock_save.assert_not_called()
+
+
+# --- Bulk workspace settings tests ---
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_bulk_save_adds_tags_to_multiple(mock_load, mock_save, client, tmp_path):
+    """POST /api/workspace-settings/save-bulk adds a tag to multiple workspaces."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "project1")
+    ws2 = str(tmp_path / "project2")
+    mock_load.return_value = Config(
+        workspace_settings={
+            ws1: {"tags": ["existing"], "color": ""},
+            ws2: {"tags": [], "color": "#aaa"},
+        },
+    )
+    resp = client.post("/api/workspace-settings/save-bulk", json={
+        "cwds": [ws1, ws2],
+        "tags_add": ["new-tag"],
+        "tags_remove": [],
+    })
+    assert resp.status_code == 200
+    assert "updated 2 workspace" in resp.text.lower()
+    saved = mock_save.call_args[0][0]
+    assert "new-tag" in saved.workspace_settings[ws1]["tags"]
+    assert "existing" in saved.workspace_settings[ws1]["tags"]
+    assert "new-tag" in saved.workspace_settings[ws2]["tags"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_bulk_save_partial_success_10_tag_limit(mock_load, mock_save, client, tmp_path):
+    """Bulk add returns warning when a workspace hits the 10-tag limit."""
+    from power_atlas.config import Config
+    ws_full = str(tmp_path / "full")
+    ws_empty = str(tmp_path / "empty")
+    mock_load.return_value = Config(
+        workspace_settings={
+            ws_full: {"tags": [f"t{i}" for i in range(10)], "color": ""},
+            ws_empty: {"tags": [], "color": ""},
+        },
+    )
+    resp = client.post("/api/workspace-settings/save-bulk", json={
+        "cwds": [ws_full, ws_empty],
+        "tags_add": ["overflow"],
+        "tags_remove": [],
+    })
+    assert resp.status_code == 200
+    assert "warning" in resp.text.lower() or "10-tag limit" in resp.text.lower()
+    assert "1 workspace(s) hit 10-tag limit" in resp.text
+    saved = mock_save.call_args[0][0]
+    # Full workspace should NOT have the new tag
+    assert "overflow" not in saved.workspace_settings[ws_full]["tags"]
+    # Empty workspace should have it
+    assert "overflow" in saved.workspace_settings[ws_empty]["tags"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_bulk_save_removes_tags(mock_load, mock_save, client, tmp_path):
+    """Bulk remove strips a tag from multiple workspaces."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "a")
+    ws2 = str(tmp_path / "b")
+    mock_load.return_value = Config(
+        workspace_settings={
+            ws1: {"tags": ["old", "keep"], "color": ""},
+            ws2: {"tags": ["old"], "color": ""},
+        },
+    )
+    resp = client.post("/api/workspace-settings/save-bulk", json={
+        "cwds": [ws1, ws2],
+        "tags_add": [],
+        "tags_remove": ["old"],
+    })
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert "old" not in saved.workspace_settings[ws1]["tags"]
+    assert "keep" in saved.workspace_settings[ws1]["tags"]
+    assert "old" not in saved.workspace_settings[ws2]["tags"]
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_bulk_save_color_applies_to_all(mock_load, mock_save, client, tmp_path):
+    """Bulk save sets color on all specified workspaces."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "x")
+    ws2 = str(tmp_path / "y")
+    mock_load.return_value = Config(
+        workspace_settings={
+            ws1: {"tags": [], "color": ""},
+            ws2: {"tags": [], "color": "#old"},
+        },
+    )
+    resp = client.post("/api/workspace-settings/save-bulk", json={
+        "cwds": [ws1, ws2],
+        "tags_add": [],
+        "tags_remove": [],
+        "color": "#new123",
+    })
+    assert resp.status_code == 200
+    saved = mock_save.call_args[0][0]
+    assert saved.workspace_settings[ws1]["color"] == "#new123"
+    assert saved.workspace_settings[ws2]["color"] == "#new123"
+
+
+@patch("power_atlas.web.load_config")
+def test_bulk_save_add_remove_overlap_rejected(mock_load, client, tmp_path):
+    """Overlapping tags_add and tags_remove returns error toast."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+    resp = client.post("/api/workspace-settings/save-bulk", json={
+        "cwds": [str(tmp_path)],
+        "tags_add": ["conflict"],
+        "tags_remove": ["conflict"],
+    })
+    assert resp.status_code == 200
+    assert "must not overlap" in resp.text.lower()
+
+
+@patch("power_atlas.web.load_config")
+def test_bulk_get_returns_multiple(mock_load, client, tmp_path):
+    """POST /api/workspace-settings-bulk returns settings for multiple cwds."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "proj1")
+    ws2 = str(tmp_path / "proj2")
+    mock_load.return_value = Config(
+        workspace_settings={
+            ws1: {"tags": ["frontend"], "color": "#111"},
+            ws2: {"tags": ["backend"], "color": "#222"},
+        },
+        tag_settings={"archived": {"color": "#999"}},
+    )
+    resp = client.post("/api/workspace-settings-bulk", json={
+        "cwds": [ws1, ws2],
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["workspaces"][ws1]["tags"] == ["frontend"]
+    assert body["workspaces"][ws1]["color"] == "#111"
+    assert body["workspaces"][ws2]["tags"] == ["backend"]
+    assert body["workspaces"][ws2]["color"] == "#222"
+    # all_tags includes workspace tags + tag_settings keys
+    assert "frontend" in body["all_tags"]
+    assert "backend" in body["all_tags"]
+    assert "archived" in body["all_tags"]
