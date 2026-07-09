@@ -567,7 +567,7 @@ def test_nested_bad_types_dropped(tmp_path):
     _write_toml(tmp_path, {
         "pinned_folders": [123, "valid"],
         "pinned_sessions": [True, "sess1"],
-        "workspace_icons": {"good": "icon1"},
+        "workspace_icons": {"good": "icon1", "bad": 5},
         "provider_settings": {"x": "notadict", "y": {"default_args": "", "color": "", "enabled": True}},
         "custom_launchers": ["notadict", {"id": "ok"}],
     })
@@ -576,7 +576,7 @@ def test_nested_bad_types_dropped(tmp_path):
     assert cfg.pinned_folders == ["valid"]
     # Non-str entries dropped from pinned_sessions (bool is not str)
     assert cfg.pinned_sessions == ["sess1"]
-    # workspace_icons with valid str keys+values preserved
+    # workspace_icons: valid str key+value kept; non-str value ({'bad': 5}) dropped
     assert cfg.workspace_icons == {"good": "icon1"}
     # provider_settings with non-dict values dropped
     assert "x" not in cfg.provider_settings

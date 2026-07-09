@@ -103,6 +103,7 @@ def _single_instance_guard() -> None:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         _mutex_handle = kernel32.CreateMutexW(None, False, "PowerAtlasMutex")
         if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            print("PowerAtlas is already running.")
             os._exit(0)
     else:
         import fcntl
@@ -112,6 +113,7 @@ def _single_instance_guard() -> None:
         try:
             fcntl.flock(_mutex_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            print("PowerAtlas is already running.")
             os._exit(0)
 
 

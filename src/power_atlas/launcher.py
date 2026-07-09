@@ -122,8 +122,14 @@ def launch_session(
             error=f"'{binary}' not found on PATH. Install {display} or check your PATH.",
         )
 
-    if cwd and cwd != "." and not Path(cwd).exists():
-        return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
+    if cwd and cwd != ".":
+        try:
+            cwd_exists = Path(cwd).exists()
+        except (OSError, ValueError):
+            # e.g. an embedded null byte makes Path.exists() raise; honor "never raises"
+            return LaunchResult(False, session_id, cwd, error=f"Invalid folder path: {cwd}")
+        if not cwd_exists:
+            return LaunchResult(False, session_id, cwd, error=f"Folder not found: {cwd}")
 
     if session_id and (len(session_id) > 128 or not _SESSION_ID_RE.match(session_id)):
         return LaunchResult(False, session_id, cwd, error="Invalid session ID format")
@@ -149,6 +155,11 @@ def launch_session(
                 # .cmd/.bat files need shell=True on Windows to execute properly
                 resolved = shutil.which(binary) or binary
                 if resolved.lower().endswith((".cmd", ".bat")):
+                    # shell=True routes through cmd.exe, which interprets metacharacters
+                    # in the joined command line (list2cmdline does not escape them).
+                    # Reject unsafe default_args / cwd, mirroring the terminal cmd path.
+                    if any(a and _CMD_METACHAR_RE.search(a) for a in (*extra_args, cwd)):
+                        return LaunchResult(False, session_id, cwd, error="Launch arguments contain characters unsafe for cmd.exe")
                     kwargs["shell"] = True
             else:
                 kwargs["start_new_session"] = True
@@ -324,8 +335,7 @@ def _build_command(terminal: str, cwd: str, kiro_args: list[str], title: str = "
         if title:
             safe = _sanitize_title(title).replace("'", "''")
             script = f"$Host.UI.RawUI.WindowTitle = '{safe}'; "
-        invocation = " ".join("'" + a.replace("'", "''") + "'" for a in kiro_args)
-        script += f"Set-Location -LiteralPath '{escaped_cwd}'; & {invocation}"
+        script += f"Set-Location -LiteralPath '{escaped_cwd}'; {_build_powershell_invocation(kiro_args)}"
         return [terminal, "-NoExit", "-Command", script]
 
     # Linux terminals via dispatch table
@@ -372,7 +382,11 @@ def launch_custom(name: str, command: str, custom_args: str = "", cwd: str = "",
     """Launch a custom command, optionally in a terminal. Never uses MCP-safe helper."""
     profile = launch_profile or LaunchProfile()
     work_dir = cwd or "."
-    if not Path(work_dir).exists():
+    try:
+        work_dir_exists = Path(work_dir).exists()
+    except (OSError, ValueError):
+        return LaunchResult(False, None, work_dir, error=f"Invalid folder path: {work_dir}")
+    if not work_dir_exists:
         return LaunchResult(False, None, work_dir, error=f"Folder not found: {work_dir}")
     full_cmd_str = f"{command} {custom_args}".strip() if custom_args else command
 

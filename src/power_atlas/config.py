@@ -34,6 +34,11 @@ _PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _DEFAULT_TERMINAL_COMMAND = "wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}"
 
+# Legacy top-level keys migrated into structured fields on load. They must be
+# excluded from unknown-key preservation (else they'd defeat the save-time drop
+# below and linger in config.toml forever) and always dropped on save.
+_LEGACY_KEYS = frozenset({"trust_all_tools", "terminal_command"})
+
 
 @dataclass
 class LaunchProfile:
@@ -139,7 +144,7 @@ def load_config() -> Config:
                 kwargs[k] = v
             # else: skip — default will fill in via dataclass
         # Preserve unknown keys so future config additions aren't lost on re-save
-        extra = {k: v for k, v in data.items() if k not in fields and k != "trust_all_tools"}
+        extra = {k: v for k, v in data.items() if k not in fields and k not in _LEGACY_KEYS}
         config = Config(**kwargs)
         # Store as instance attr (not a dataclass field) — object identity constraint:
         # the same Config instance returned by load must be passed to save for extras to persist.
@@ -219,8 +224,8 @@ def save_config(config: Config) -> None:
         tmp = CONFIG_PATH.with_suffix(".tmp")
         try:
             data = asdict(config)
-            data.pop("trust_all_tools", None)  # never write legacy key
-            data.pop("terminal_command", None)  # defensive: field removed from Config but guard legacy
+            for legacy in _LEGACY_KEYS:
+                data.pop(legacy, None)  # never write migrated legacy keys
             # Restore unknown keys preserved at load time (object-identity constraint:
             # caller must pass the same Config instance returned by load_config).
             data.update(getattr(config, "_extra", {}) or {})

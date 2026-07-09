@@ -917,6 +917,43 @@ class TestCmdMetacharInArgs:
         assert result is not None
 
 
+class TestNonTerminalCmdShimMetacharGuard:
+    """Non-terminal (kiro-ide) launches via a .cmd/.bat shim use shell=True on
+    Windows; default_args with cmd metacharacters must be rejected, not executed."""
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_cmd_shim_rejects_metachar_default_args(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro": "C:\\tools\\kiro.cmd"}.get(n)
+        result = launch_session(str(tmp_path), provider="kiro-ide", default_args="x & calc.exe")
+        assert result.success is False
+        assert "unsafe" in result.error.lower()
+        mock_popen.assert_not_called()
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_cmd_shim_allows_safe_default_args(self, mock_which, mock_popen, tmp_path):
+        mock_which.side_effect = lambda n: {"kiro": "C:\\tools\\kiro.cmd"}.get(n)
+        result = launch_session(str(tmp_path), provider="kiro-ide", default_args="--model opus")
+        assert result.success is True
+        mock_popen.assert_called_once()
+        assert mock_popen.call_args[1].get("shell") is True
+
+    @patch("power_atlas.launcher.sys.platform", "win32")
+    @patch("subprocess.Popen")
+    @patch("shutil.which")
+    def test_exe_binary_not_shell_so_metachars_allowed(self, mock_which, mock_popen, tmp_path):
+        # A real .exe launches without shell=True, so its argv is not shell-interpreted
+        # and metachar args are safe — the guard must not over-reject this path.
+        mock_which.side_effect = lambda n: {"kiro": "C:\\tools\\kiro.exe"}.get(n)
+        result = launch_session(str(tmp_path), provider="kiro-ide", default_args="a & b")
+        assert result.success is True
+        mock_popen.assert_called_once()
+        assert mock_popen.call_args[1].get("shell") is not True
+
+
 class TestSessionIdLengthBound:
     """SC18: session_id > 128 chars is rejected."""
 

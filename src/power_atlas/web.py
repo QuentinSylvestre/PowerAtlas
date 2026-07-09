@@ -142,10 +142,24 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
+# Loopback host names the server is legitimately reached by. Validating the Host
+# header against this allowlist blocks DNS rebinding: a rebinding attack arrives
+# with the attacker's Host (e.g. evil.com), which would otherwise make the
+# reflected same-origin check below trust the attacker's origin. "testserver" is
+# Starlette's TestClient default Host — not publicly resolvable, so inert as an
+# attack vector.
+_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+
+
 @app.middleware("http")
 async def same_origin_guard(request: Request, call_next):
-    """Reject cross-origin POST requests to prevent CSRF."""
+    """Reject cross-origin, non-loopback, or CSRF-suspect POST requests."""
     if request.method == "POST":
+        # DNS-rebinding defense: the Host must be a loopback name, else an
+        # attacker-controlled Host would make the same-origin check below reflect
+        # the attacker's origin.
+        if (request.url.hostname or "").lower() not in _ALLOWED_HOSTS:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         origin = request.headers.get("origin")
         referer = request.headers.get("referer")
         if origin == "null":
@@ -509,7 +523,7 @@ async def api_available_providers():
     """Return list of available (enabled) providers with display names and colors."""
     providers = sorted(data.available_providers())
     config = load_config()
-    providers = [p for p in providers if config.provider_settings.get(p, {}).get("enabled", True)]
+    providers = [p for p in providers if _enabled(config, p)]
     return [{"name": p, "display": PROVIDER_DISPLAY_NAMES.get(p, p), "color": _get_provider_color(p, config)} for p in providers]
 
 
@@ -941,7 +955,7 @@ async def partials_launchers(request: Request):
         providers = []
     for p in providers:
         settings = config.provider_settings.get(p, {})
-        if not settings.get("enabled", True):
+        if not _enabled(config, p):
             continue
         provider_launcher = {
             "id": f"provider--{p}",

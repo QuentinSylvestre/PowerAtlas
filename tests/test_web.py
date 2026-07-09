@@ -26,6 +26,18 @@ def client():
     return c
 
 
+def test_post_rejected_for_non_loopback_host():
+    """DNS-rebinding defense: a POST arriving with a non-loopback Host is refused (403),
+    even when the Origin matches the (attacker-controlled) Host."""
+    rebind_client = TestClient(app, base_url="http://evil.com")
+    resp = rebind_client.post(
+        "/api/pin-folder",
+        json={"folder": "C:\\projects\\myapp"},
+        headers={"Origin": "http://evil.com"},
+    )
+    assert resp.status_code == 403
+
+
 def _make_session(title="test session", cwd="C:\\projects\\myapp", **kwargs):
     defaults = dict(
         session_id="sess-1", title=title, cwd=cwd,

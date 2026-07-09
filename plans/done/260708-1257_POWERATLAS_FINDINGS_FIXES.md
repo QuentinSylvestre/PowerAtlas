@@ -356,6 +356,8 @@ Removed all dead `.settings-*` CSS rules from `style.css`: the `/* Settings */` 
 
 ## 9) Implementation Divergences from Plan
 - **Phase 2 (C5)**: Added `UnicodeDecodeError` to the except clause (in addition to `OSError` + `TOMLDecodeError`) because `tomllib` raises `UnicodeDecodeError` on binary-corrupt files before reaching the TOML parser.
+- **Phase 6 (SC24)**: deleted no template — `settings.html` was already removed by `260705_CONFIGURABLE_PORT` Phase 4 before this plan's re-anchor (`bb843f2`). Phase 6 removed only the orphaned `.settings-*` CSS. §1/SC24/Phase-6 scope described deleting the template; the end state (file absent) is correct, so the template deletion was a no-op.
+- **Phase 5 (Lc1/SC22)**: `-f/--foreground` was deliberately kept OUT of the argparse mutually-exclusive group (only `--stop`/`--restart` are mutual). The plan text implied `--stop -f`/`--restart -f` would also error; they do not — `-f` composes with neither action path (both `return` before consulting it), which is the intended behavior.
 
 ## Review Log
 
@@ -457,6 +459,23 @@ QA verification: PASS (13 SC-specific tests + 361 full suite pass).
 
 Invoked on fully-executed plan; performed standalone holistic review with high effort (4 personas).
 Cycle 2 skipped — all findings Low + no auto-fixes needed.
+
+### 2026-07-09 — Post-archival /qreview follow-up (4 personas, fixes applied)
+
+A standalone `/qreview` of this archived plan (Architect, Senior engineer, Security auditor, Reliability engineer), grounded against the shipped code, surfaced 12 findings (1 Medium, 11 Low). Fixes applied directly on 2026-07-09:
+
+| Finding (persona) | Fix |
+|---|---|
+| **Security (Medium)** — `same_origin_guard` reflected the `Host` header, so DNS rebinding bypassed the CSRF check and reached the `/api/launcher/run` `shell=True` sink | Added a loopback Host allowlist (`_ALLOWED_HOSTS`) check to the guard (`web.py`); regression test `test_post_rejected_for_non_loopback_host`. **Supersedes the earlier "CSRF fully resolved" claim (§7 open items, Risk row) — the same-origin guard now also hardens against DNS rebinding.** |
+| **Security (Low)** — non-terminal kiro-ide `.cmd`/`.bat` launch passed unescaped `default_args` through `shell=True` (`cmd /c`) | Guard `extra_args` + `cwd` with `_CMD_METACHAR_RE` before setting `shell=True` (`launcher.py`); tests in `TestNonTerminalCmdShimMetacharGuard`. |
+| Architect (Low) — `_extra` re-emitted legacy `terminal_command`, defeating the save-time pop | Excluded both legacy keys via a shared `_LEGACY_KEYS` constant used by load and save (`config.py`). |
+| Architect (Low) — pwsh arg-escaping duplicated `_build_powershell_invocation` | Routed the pwsh terminal branch through the shared helper (`launcher.py`). |
+| Architect (Low) — `_enabled()` bypassed by two inline copies | Routed `api_available_providers` and `partials_launchers` through `_enabled()` (`web.py`). |
+| Reliability (Low) — `_single_instance_guard` `os._exit(0)`d silently (both the double-launch and restart-sibling paths) | Print "PowerAtlas is already running." before exit (`__main__.py`). |
+| Reliability (Low) — `launch_session`/`launch_custom` "never raises" hole: a null-byte `cwd` made `Path.exists()` raise | Wrapped the existence checks; return a `LaunchResult` error instead (`launcher.py`). |
+| Senior (Low) — two undocumented plan-vs-code divergences (`settings.html`, `-f`) | Recorded in §9 above. |
+| Senior (Low) — SC6 `workspace_icons={'k':5}` drop case untested | Added the drop assertion to `test_nested_bad_types_dropped` (`test_config.py`). |
+| Reliability (Low) — H8 PID-reuse-within-5s edge; kiro `.history`/`.jsonl` mtime-source mismatch | **Accepted (no change).** PID-reuse is a near-impossible desktop race now made non-silent by the `_single_instance_guard` print; the mtime-source mismatch self-heals within the 60s TTL (reviewer: no change needed). |
 
 ## Harness Improvement Opportunities
 - Exploration output went stale across a multi-day gap because findings were anchored to `file:line` and the code was reworked in between — suggested change: when `/qexplore` output will be handed to a *deferred* `/qplan`, record the HEAD commit SHA the anchors were verified against, so `/qplan` can cheaply detect drift (git diff since that SHA) before trusting them. *(Adopted in this plan's header; propose promoting to the `/qexplore` Step 3 persist-intent rule.)*
