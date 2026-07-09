@@ -3,39 +3,54 @@
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
   <div class="topbar-spacer"></div>
-  <button class="topbar-profile-btn" onclick="openProfileModal()" title="Click to manage launch profiles" aria-label="Click to manage launch profiles">
-    ⚙️ {{ active_launch_profile.name }}
-  </button>
-  <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})">
-    <span class="trust-dot"></span>Autostart
+  <div class="topbar-cluster">
+    <button class="topbar-profile-btn" onclick="openProfileModal()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
+      ⚙️ {{ active_launch_profile.name }}
+    </button>
+    <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
+      <span class="trust-dot"></span>Autostart
+    </div>
+    <div class="refresh-group" title="Last data refresh time">
+      <span class="refresh-time" id="refreshTime"></span>
+      <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions" title="Refresh all sessions now">↻</button>
+    </div>
   </div>
-  <div class="refresh-group">
-    <span class="refresh-time" id="refreshTime"></span>
-    <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions">↻</button>
+  <span class="topbar-separator" aria-hidden="true"></span>
+  <div class="topbar-cluster">
+    <div class="peek-hotkey-group" title="Global hotkey to show/hide the peek overlay window">
+      <label class="peek-label" for="peekHotkey">Peek</label>
+      <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
+        <span class="hotkey-icon">⌨</span>
+        <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
+               onfocus="this.parentElement.classList.add('focused')"
+               onblur="this.parentElement.classList.remove('focused')"
+               onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})})">
+      </div>
+    </div>
   </div>
-  <div class="peek-hotkey-group">
-    <label class="peek-label" for="peekHotkey">Peek</label>
-    <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="ctrl+shift+z"
-           onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})})">
-  </div>
-  <div class="port-group">
-    <label class="port-label" for="portMode">Port</label>
-    <select class="port-mode" id="portMode" onchange="togglePortInput(this.value)">
-      <option value="random" {% if not port %}selected{% endif %}>Random</option>
-      <option value="static" {% if port %}selected{% endif %}>Static</option>
-    </select>
-    <input type="number" id="portValue" class="port-input" min="1024" max="65535"
-           aria-label="Port number"
-           value="{{ port if port else '' }}"
-           style="display:{% if port %}inline-block{% else %}none{% endif %}"
-           placeholder="e.g. 49152"
-           onkeydown="if(event.key==='Enter')savePort()">
-    <button class="port-randomize" id="portRandomize" onclick="randomizePort()"
-            aria-label="Randomize port"
-            style="display:{% if port %}inline-block{% else %}none{% endif %}"
-            title="Pick a random port">&#x1f504;</button>
-    <button class="port-save-btn" id="portSave" onclick="savePort()"
-            style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
+  <span class="topbar-separator" aria-hidden="true"></span>
+  <div class="topbar-cluster">
+    <div class="port-group">
+      <label class="port-label" for="portMode">Port</label>
+      <select class="port-mode" id="portMode" onchange="togglePortInput(this.value);markPortDirty()">
+        <option value="random" {% if not port %}selected{% endif %}>Random</option>
+        <option value="static" {% if port %}selected{% endif %}>Static</option>
+      </select>
+      <input type="number" id="portValue" class="port-input" min="1024" max="65535"
+             aria-label="Port number"
+             value="{{ port if port else '' }}"
+             style="display:{% if port %}inline-block{% else %}none{% endif %}"
+             placeholder="e.g. 49152"
+             oninput="markPortDirty()"
+             onkeydown="if(event.key==='Enter')savePort()">
+      <button class="port-randomize" id="portRandomize" onclick="randomizePort()"
+              aria-label="Randomize port"
+              style="display:{% if port %}inline-block{% else %}none{% endif %}"
+              title="Pick a random port">&#x1f504;</button>
+      <button class="port-save-btn" id="portSave" onclick="savePort()"
+              title="Apply port change (restarts server)"
+              style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
+    </div>
   </div>
 </div>
 
@@ -81,6 +96,14 @@
   <button class="action-btn launch" onclick="launchSelected()">▶ Launch selected</button>
 </div>
 <script>
+function markPortDirty() {
+  var btn = document.getElementById('portSave');
+  btn.classList.add('dirty');
+  btn.style.display = 'inline-block';
+}
+function clearPortDirty() {
+  document.getElementById('portSave').classList.remove('dirty');
+}
 function togglePortInput(mode) {
   var show = mode === 'static';
   document.getElementById('portValue').style.display = show ? 'inline-block' : 'none';
@@ -94,11 +117,12 @@ function togglePortInput(mode) {
 function randomizePort() {
   var port = 49152 + Math.floor(Math.random() * (65535 - 49152 + 1));
   document.getElementById('portValue').value = port;
-  document.getElementById('portSave').style.display = 'inline-block';
+  markPortDirty();
 }
 function savePort() {
   var v = parseInt(document.getElementById('portValue').value, 10);
   if (!v || v < 1024 || v > 65535) { showToast('<div class="toast toast-error">Port must be 1024\u201365535<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>'); return; }
+  clearPortDirty();
   savePortAndRestart(v);
 }
 function savePortAndRestart(portValue) {
