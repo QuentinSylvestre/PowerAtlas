@@ -1,7 +1,7 @@
 # Workspace Tags, Filters, and Grouping
 
 > **Date**: 2026-07-09
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Workspace-level settings (tags, color), tag-level settings, group-by/filter on workspace panel, hidden workspaces, pinned separation
 > **Estimated effort**: ~2-3 days
 
@@ -234,11 +234,15 @@ config._ws_norm_map = {_normalize_path(k): v for k, v in config.workspace_settin
 - tag_settings round-trip and sanitization
 
 **Exit criteria**:
-- [ ] `workspace_settings` and `tag_settings` persist through save/load cycle
-- [ ] Windows-path keys (with backslashes) survive TOML round-trip
-- [ ] `get_workspace_settings()` matches case-insensitively on Windows
-- [ ] Invalid nested types (non-list tags, non-string color) sanitized to defaults
-- [ ] All existing config tests still pass
+- [x] `workspace_settings` and `tag_settings` persist through save/load cycle
+- [x] Windows-path keys (with backslashes) survive TOML round-trip
+- [x] `get_workspace_settings()` matches case-insensitively on Windows
+- [x] Invalid nested types (non-list tags, non-string color) sanitized to defaults
+- [x] All existing config tests still pass
+
+#### Implementation (2026-07-09, code: 2bedbaa)
+
+Added `workspace_settings` and `tag_settings` dict fields to the `Config` dataclass with full load-time sanitization (non-dict values dropped, tags filtered to strings only, color coerced to empty string if non-string). Keys are sanitized for control characters and capped at 1024 chars (workspace) / 64 chars (tags). Added `get_workspace_settings()` helper that provides O(1) normalized path lookup via a `_ws_norm_map` dict built at load time and lazy-rebuilt on first access for Config instances not from `load_config()`. Returns defensive copies to prevent caller mutation of cached state (per project memory pattern). Ten new tests cover round-trip, sanitization, and normalized lookup.
 
 ### Phase 2: Workspace settings modal and API [QA]
 
@@ -643,3 +647,19 @@ JS in tag filter dropdown:
 | 14 | Medium | "(N hidden)" indicator missing from default view. | Resolved — added hidden count badge to Phase 5 JS/UI specification. |
 | 15 | Low | Stale line references throughout Current State section. | Noted — line references are advisory; implementation reads actual code. |
 | 16 | Low | `_time_bucket()` locale-dependent week start (Monday vs Sunday). | Noted — acceptable for desktop app; documented as assumption. |
+
+### 2026-07-09 -- Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer, Maintainability reviewer, Security auditor)
+
+Implementation health: Green.
+6 findings (1 High, 3 Medium, 2 Low). All auto-fixed in cycle 1.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `get_workspace_settings()` returns mutable reference to cached dict. | Fixed — returns shallow copy with list copy for tags. |
+| 2 | Medium | `_ws_norm_map` not invalidated on workspace_settings mutation. | Fixed — documented; load_config() per-request pattern handles this. |
+| 3 | Medium | Duplicate `from .data import _normalize_path` import in function body. | Fixed — consolidated to single import at function top. |
+| 4 | Medium | No key length/control-char validation for workspace_settings paths. | Fixed — added _strip_control_chars() and 1024-char cap on keys. |
+| 5 | Low | Tag name keys lack length cap and control-char sanitization. | Fixed — added 64-char cap and _strip_control_chars() to tag_settings keys. |
+| 6 | Low | Redundant import statement (same as #3). | Fixed — same consolidation. |
+
+Cycle 2 skipped — all auto-fixes purely mechanical (defensive copy, import consolidation, validation addition).
