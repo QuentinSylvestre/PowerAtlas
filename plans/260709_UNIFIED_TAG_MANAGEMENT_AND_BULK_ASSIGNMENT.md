@@ -1,7 +1,7 @@
 # Unified Tag Management and Bulk Assignment
 
 > **Date**: 2026-07-09
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Rework tag feature into unified management popover (add/delete/color) and multi-workspace tag assignment via selection
 > **Estimated effort**: ~1-2 days
 
@@ -805,3 +805,31 @@ Implementation health: Green.
 | 11 | Low | Workspace cards not deselected after bulk save | Accepted — matches existing behavior; selection persists for further actions |
 
 QA verification: PASS (code review confirmed DOM construction, event handling, state management correct; backend APIs verified in Phases 1+3).
+
+### 2026-07-09 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer.
+7 findings (0 High, 0 Medium, 7 Low).
+QA verification: PASS (238 tests via TestClient; UI verified via high-effort code review across 4 phases).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Backend — remove orphan pruning + tag delete | pass | PASS | 232 tests (5 new) |
+| 2: Frontend — unified tag management popover | pass | PASS | No new tests (frontend JS) |
+| 3: Backend — bulk workspace settings endpoint | pass | PASS | 238 tests (6 new) |
+| 4: Frontend — multi-workspace settings modal | pass | PASS | No new tests (frontend JS + README) |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | Control-char validation pattern duplicated 13 times in web.py | Accepted — matches pre-existing codebase pattern; future consolidation opportunity |
+| 2 | Low | `_wsTagsPartial` stores objects while `_wsTagsFull` stores strings | Accepted — intentional (count needed for partial tooltips only) |
+| 3 | Low | Bulk save silently skips invalid cwds with no per-item feedback | Accepted — client deduplicates; cosmetic only |
+| 4 | Low | Popover lacks `role="dialog"` for screen readers | Accepted — standard non-modal popover pattern; dimisses on outside click |
+| 5 | Low | No test for bulk save zero-change path (`modified == 0`) | Accepted — minor gap; core paths covered |
+| 6 | Low | `confirm()` for tag deletion inconsistent with app's custom modal UX | Accepted — reliable, accessible, no custom implementation needed |
+| 7 | Low | `_normalize_path` imported locally in 4 function bodies | Accepted — matches pre-existing circular-import-avoidance pattern |
+
+All 10 success criteria verified as PASS. Implementation complete with no remaining blockers.
