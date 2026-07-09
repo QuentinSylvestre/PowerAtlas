@@ -2106,3 +2106,128 @@ def test_workspace_settings_save_deduplicates_normalized_path(mock_load, mock_sa
     assert cwd_lower not in saved.workspace_settings
     assert saved.workspace_settings[cwd_upper]["tags"] == ["new"]
     assert saved.workspace_settings[cwd_upper]["color"] == "#22c55e"
+
+
+
+# --- Phase 3 (Workspace Tags): Color precedence ---
+
+
+class TestResolveWorkspaceColor:
+    """Test _resolve_workspace_color precedence: explicit > tag color > empty."""
+
+    def test_explicit_workspace_color_wins(self):
+        """Workspace with explicit color returns that color regardless of tags."""
+        from power_atlas.config import Config
+        from power_atlas.web import _resolve_workspace_color
+        config = Config(
+            workspace_settings={"C:\\proj": {"tags": ["active"], "color": "#ff0000"}},
+            tag_settings={"active": {"color": "#00ff00"}},
+        )
+        assert _resolve_workspace_color("C:\\proj", config) == "#ff0000"
+
+    def test_tag_color_used_when_no_explicit_color(self):
+        """Workspace with no explicit color but tagged with colored tag uses tag's color."""
+        from power_atlas.config import Config
+        from power_atlas.web import _resolve_workspace_color
+        config = Config(
+            workspace_settings={"C:\\proj": {"tags": ["frontend", "active"], "color": ""}},
+            tag_settings={"frontend": {"color": "#3b82f6"}, "active": {"color": "#22c55e"}},
+        )
+        # First tag's color wins
+        assert _resolve_workspace_color("C:\\proj", config) == "#3b82f6"
+
+    def test_empty_when_no_color_and_no_colored_tags(self):
+        """Workspace with no color and uncolored tags returns empty (provider gradient)."""
+        from power_atlas.config import Config
+        from power_atlas.web import _resolve_workspace_color
+        config = Config(
+            workspace_settings={"C:\\proj": {"tags": ["uncolored"], "color": ""}},
+            tag_settings={"uncolored": {"color": ""}},
+        )
+        assert _resolve_workspace_color("C:\\proj", config) == ""
+
+    def test_empty_when_no_workspace_settings(self):
+        """Unknown workspace returns empty (provider gradient)."""
+        from power_atlas.config import Config
+        from power_atlas.web import _resolve_workspace_color
+        config = Config()
+        assert _resolve_workspace_color("C:\\unknown", config) == ""
+
+    def test_skips_uncolored_tags_uses_first_colored(self):
+        """Skips tags without color, uses first tag that has a color."""
+        from power_atlas.config import Config
+        from power_atlas.web import _resolve_workspace_color
+        config = Config(
+            workspace_settings={"C:\\proj": {"tags": ["nocolor", "hascolor"], "color": ""}},
+            tag_settings={"nocolor": {"color": ""}, "hascolor": {"color": "#ef4444"}},
+        )
+        assert _resolve_workspace_color("C:\\proj", config) == "#ef4444"
+
+    def test_tag_not_in_tag_settings_skipped(self):
+        """Tags not defined in tag_settings are skipped gracefully."""
+        from power_atlas.config import Config
+        from power_atlas.web import _resolve_workspace_color
+        config = Config(
+            workspace_settings={"C:\\proj": {"tags": ["undefined-tag", "defined"], "color": ""}},
+            tag_settings={"defined": {"color": "#abc123"}},
+        )
+        assert _resolve_workspace_color("C:\\proj", config) == "#abc123"
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspace_card_uses_workspace_color_over_provider(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Workspace with explicit color renders that color instead of provider gradient."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(
+        workspace_settings={workspace: {"tags": [], "color": "#e11d48"}},
+    )
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # Workspace color is used instead of provider default
+    assert "#e11d48" in resp.text
+    assert "provider-gradient" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspace_card_uses_tag_color_when_no_explicit(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Workspace with no explicit color but colored tag uses tag's color."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(
+        workspace_settings={workspace: {"tags": ["frontend"], "color": ""}},
+        tag_settings={"frontend": {"color": "#3b82f6"}},
+    )
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    assert "#3b82f6" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspace_card_falls_through_to_provider_gradient(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Workspace with no color and no colored tags shows provider gradient."""
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    mock_config.return_value = Config(
+        workspace_settings={workspace: {"tags": ["plain"], "color": ""}},
+        tag_settings={"plain": {"color": ""}},
+    )
+    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_providers.return_value = ["kiro-cli"]
+
+    resp = client.get("/partials/workspaces")
+    assert resp.status_code == 200
+    # Provider color is used (kiro-cli default)
+    assert "#7138cc" in resp.text

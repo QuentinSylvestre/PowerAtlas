@@ -55,6 +55,19 @@ def _resolve_launch_cwd(workspace: str, config, provider: str = "") -> str:
     return str(Path.home())
 
 
+def _resolve_workspace_color(cwd: str, config) -> str:
+    """Resolve accent color: workspace explicit > first tag color > empty (use provider gradient)."""
+    from .config import get_workspace_settings
+    ws = get_workspace_settings(config, cwd)
+    if ws["color"]:
+        return ws["color"]
+    for tag in ws["tags"]:
+        tag_color = config.tag_settings.get(tag, {}).get("color", "")
+        if tag_color:
+            return tag_color
+    return ""
+
+
 def _get_provider_color(provider: str, config) -> str:
     """Return user-configured color for a provider, falling back to PROVIDER_COLORS."""
     user_color = config.provider_settings.get(provider, {}).get("color", "")
@@ -364,12 +377,13 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
         else:
             session_count = group["total_count"]
+        workspace_color = _resolve_workspace_color(cwd, config)
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
             session_count=session_count, is_pinned=True,
             last_updated=group["latest_updated"],
-
+            workspace_color=workspace_color,
             providers=group["providers"],
         )
 
@@ -390,12 +404,13 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
         else:
             session_count = group["total_count"]
+        workspace_color = _resolve_workspace_color(cwd, config)
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
             session_count=session_count, is_pinned=False,
             last_updated=group["latest_updated"],
-
+            workspace_color=workspace_color,
             providers=group["providers"],
         )
 
@@ -520,12 +535,13 @@ async def search(request: Request, q: str = "", provider: str = "all"):
     for group in grouped:
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
+        workspace_color = _resolve_workspace_color(cwd, config)
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
             session_count=group["total_count"], last_updated=group["latest_updated"],
             is_pinned=_normalize_path(cwd) in pinned_norm_paths,
-
+            workspace_color=workspace_color,
             providers=group["providers"],
         )
 
