@@ -203,21 +203,6 @@ async def toggle_autostart():
     return {"enabled": autostart.is_enabled()}
 
 
-@app.post("/api/set-workspace-icon")
-async def set_workspace_icon(request: Request):
-    body = await request.json()
-    config = load_config()
-    from .data import _normalize_path
-    workspace = _normalize_path(body["workspace"])
-    icon = body.get("icon", "")
-    if icon:
-        config.workspace_icons[workspace] = icon
-    else:
-        config.workspace_icons.pop(workspace, None)
-    save_config(config)
-    return {"ok": True}
-
-
 @app.post("/api/pin-session")
 async def pin_session(request: Request):
     body = await request.json()
@@ -289,7 +274,6 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
     config = load_config()
 
     from .data import _normalize_path
-    norm_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
     workspace_data = list(workspace_data)
 
     cards_html = ""
@@ -324,7 +308,7 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
             session_count=session_count, is_pinned=True,
             last_updated=group["latest_updated"],
-            icon=norm_icons.get(_normalize_path(cwd), ""),
+
             providers=group["providers"],
         )
 
@@ -347,7 +331,7 @@ async def partials_workspaces(request: Request, provider: str = "all", fresh: in
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
             session_count=session_count, is_pinned=False,
             last_updated=group["latest_updated"],
-            icon=norm_icons.get(_normalize_path(cwd), ""),
+
             providers=group["providers"],
         )
 
@@ -448,7 +432,6 @@ async def search(request: Request, q: str = "", provider: str = "all"):
         })
 
     from .data import _normalize_path
-    config_icons = {_normalize_path(k): v for k, v in config.workspace_icons.items()}
     pinned_norm_paths: set[str] = set()
     for folder in config.pinned_folders:
         pinned_norm_paths.add(_normalize_path(folder))
@@ -471,7 +454,7 @@ async def search(request: Request, q: str = "", provider: str = "all"):
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
             session_count=group["total_count"], last_updated=group["latest_updated"],
             is_pinned=_normalize_path(cwd) in pinned_norm_paths,
-            icon=config_icons.get(_normalize_path(cwd), ""),
+
             providers=group["providers"],
         )
 

@@ -57,7 +57,6 @@ class Config:
     launch_profiles: list[LaunchProfile] = field(default_factory=lambda: [LaunchProfile()])
     pinned_folders: list[str] = field(default_factory=list)  # paths only
     pinned_sessions: list[str] = field(default_factory=list)
-    workspace_icons: dict[str, str] = field(default_factory=dict)
     custom_launchers: list[dict] = field(default_factory=list)
     provider_settings: dict[str, dict] = field(default_factory=dict)
 
@@ -199,7 +198,6 @@ def load_config() -> Config:
         # Sanitize nested types: drop entries that aren't the expected type
         config.pinned_folders = [x for x in config.pinned_folders if isinstance(x, str)]
         config.pinned_sessions = [x for x in config.pinned_sessions if isinstance(x, str)]
-        config.workspace_icons = {k: v for k, v in config.workspace_icons.items() if isinstance(k, str) and isinstance(v, str)}
         config.custom_launchers = [x for x in config.custom_launchers if isinstance(x, dict)]
         config.provider_settings = {k: v for k, v in config.provider_settings.items() if isinstance(v, dict)}
 

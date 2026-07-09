@@ -510,31 +510,6 @@ def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
     assert resp.json()["ok"] is True
 
 
-@patch("power_atlas.web.save_config")
-@patch("power_atlas.web.load_config")
-def test_set_workspace_icon(mock_load, mock_save, client):
-    from power_atlas.config import Config
-    mock_load.return_value = Config()
-    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": "\U0001f680"}, headers={"Origin": "http://testserver"})
-    assert resp.status_code == 200
-    assert resp.json()["ok"] is True
-    saved = mock_save.call_args[0][0]
-    # Check icon was set (normalized path)
-    assert any(v == "🚀" for v in saved.workspace_icons.values())
-
-
-@patch("power_atlas.web.save_config")
-@patch("power_atlas.web.load_config")
-def test_set_workspace_icon_reset(mock_load, mock_save, client):
-    from power_atlas.config import Config
-    mock_load.return_value = Config(workspace_icons={"c:\\projects\\app": "🚀"})
-    resp = client.post("/api/set-workspace-icon", json={"workspace": "C:\\projects\\app", "icon": ""},
-                       headers={"Origin": "http://testserver"})
-    assert resp.status_code == 200
-    saved = mock_save.call_args[0][0]
-    assert "🚀" not in saved.workspace_icons.values()
-
-
 # --- Phase 4: session-tail endpoint ---
 
 

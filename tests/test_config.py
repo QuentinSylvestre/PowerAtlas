@@ -370,15 +370,6 @@ def test_wrong_type_list_gets_default(tmp_path):
     assert cfg.pinned_folders == []
 
 
-def test_workspace_icons_round_trip():
-    """workspace_icons dict persists through save/load cycle."""
-    icons = {"C:\\projects\\app": "rocket", "C:\\work\\lib": "books"}
-    cfg = Config(workspace_icons=icons)
-    save_config(cfg)
-    loaded = load_config()
-    assert loaded.workspace_icons == icons
-
-
 def test_custom_launchers_round_trip():
     """custom_launchers list[dict] persists through save/load cycle."""
     launchers = [
@@ -567,7 +558,6 @@ def test_nested_bad_types_dropped(tmp_path):
     _write_toml(tmp_path, {
         "pinned_folders": [123, "valid"],
         "pinned_sessions": [True, "sess1"],
-        "workspace_icons": {"good": "icon1", "bad": 5},
         "provider_settings": {"x": "notadict", "y": {"default_args": "", "color": "", "enabled": True}},
         "custom_launchers": ["notadict", {"id": "ok"}],
     })
@@ -576,8 +566,6 @@ def test_nested_bad_types_dropped(tmp_path):
     assert cfg.pinned_folders == ["valid"]
     # Non-str entries dropped from pinned_sessions (bool is not str)
     assert cfg.pinned_sessions == ["sess1"]
-    # workspace_icons: valid str key+value kept; non-str value ({'bad': 5}) dropped
-    assert cfg.workspace_icons == {"good": "icon1"}
     # provider_settings with non-dict values dropped
     assert "x" not in cfg.provider_settings
     assert cfg.provider_settings == {"y": {"default_args": "", "color": "", "enabled": True}}
