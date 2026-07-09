@@ -1,7 +1,8 @@
 # Workspace Quick Actions — Folder Open & Terminal
 
 > **Date**: 2026-07-09
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-09T09:55
 > **Scope**: Add folder-open and quick-terminal actions to workspace cards, add a terminal launcher tile, remove emoji icon picker
 
 ---
