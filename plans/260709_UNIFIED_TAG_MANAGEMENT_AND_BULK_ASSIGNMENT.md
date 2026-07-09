@@ -427,11 +427,17 @@ async def get_workspace_settings_bulk(request: Request):
 3. **Tests**: `test_bulk_save_adds_tags_to_multiple`, `test_bulk_save_partial_success_10_tag_limit`, `test_bulk_save_removes_tags`, `test_bulk_save_color_applies_to_all`, `test_bulk_get_returns_multiple`.
 
 **Exit criteria**:
-- [ ] `POST /api/workspace-settings/save-bulk` adds/removes tags and sets color across multiple workspaces
-- [ ] Partial success returns warning-level toast with skip count
-- [ ] `GET /api/workspace-settings-bulk` returns settings for multiple cwds
-- [ ] Added tags auto-created in `tag_settings` if not present
-- [ ] Tests pass for bulk endpoints
+- [x] `POST /api/workspace-settings/save-bulk` adds/removes tags and sets color across multiple workspaces
+- [x] Partial success returns warning-level toast with skip count
+- [x] `GET /api/workspace-settings-bulk` returns settings for multiple cwds
+- [x] Added tags auto-created in `tag_settings` if not present
+- [x] Tests pass for bulk endpoints
+
+#### Implementation (2026-07-09, code: 4e865b2)
+
+Added two bulk workspace settings endpoints to `web.py`: `POST /api/workspace-settings/save-bulk` applies tag additions/removals and color changes across 1-50 workspaces with partial-success semantics (returns warning-level toast when workspaces hit the 10-tag limit), and `POST /api/workspace-settings-bulk` returns settings for multiple workspaces plus a sorted `all_tags` list. Both endpoints validate inputs (tag format, overlap detection, color constraints) and the bulk save auto-creates new tags in `tag_settings`. Six tests added to `test_web.py` covering the core scenarios: multi-workspace add, 10-tag limit partial success, bulk remove, bulk color, overlap rejection, and bulk get.
+
+Review auto-fix (27c57da): Added per-item cwd validation (type, length, control chars), pre-built normalized path map for O(1) lookup, proper change tracking (skip save_config when nothing changed), converted tags_remove to set for O(1) membership, added size cap (20) on tags_add/tags_remove lists.
 
 ### Phase 4: Frontend — multi-workspace settings modal [QA]
 
@@ -751,3 +757,22 @@ Implementation health: Green.
 | 7 | Low | Add input at popover bottom may be hidden below scroll fold with many tags | Accepted — acceptable given typical tag count (< 20) |
 
 QA verification: PASS (code review confirmed DOM construction, event handling, fetch chaining correct; backend API verified in Phase 1).
+
+### 2026-07-09 -- Implementation Review (after Phase 3, personas: Senior engineer, Reliability engineer, Security auditor, Performance engineer)
+
+Implementation health: Green.
+9 findings (0 High, 4 Medium, 5 Low). All auto-fixed. Cycle 2 skipped — all fixes purely mechanical (validation guards, data structure optimization, change tracking).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Individual cwds items not validated — non-string crashes `_normalize_path` | Fixed — added per-item isinstance/length/control-char guard with continue (27c57da) |
+| 2 | Medium | Linear scan per cwd with repeated `_normalize_path` calls — O(N*M) | Fixed — pre-built normalized path map for O(1) lookup (27c57da) |
+| 3 | Medium | `modified` counter always increments even when nothing changed | Fixed — tracked actual change per workspace, skip save_config when modified==0 (27c57da) |
+| 4 | Medium | Unused `from .config import get_workspace_settings` import in save endpoint | Fixed — removed dead import (27c57da) |
+| 5 | Low | Bulk GET passes unvalidated cwds to `get_workspace_settings` | Fixed — added isinstance/length guard (27c57da) |
+| 6 | Low | `tags_remove` used as list for membership test — O(R) per check | Fixed — converted to set before loop (27c57da) |
+| 7 | Low | No size cap on tags_add/tags_remove lists | Fixed — added max 20 limit (27c57da) |
+| 8 | Low | No tests for validation rejection paths | Accepted — adequate for desktop app; future enhancement |
+| 9 | Low | Duplicate cwds cause double-processing | Accepted — bounded by 50-item cap; cosmetic |
+
+QA verification: PASS (TestClient HTTP stack, 6 endpoint scenarios verified).
