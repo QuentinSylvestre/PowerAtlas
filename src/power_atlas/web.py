@@ -351,7 +351,6 @@ async def partials_workspaces(
     provider: str = "all",
     tag: str = "",
     time_filter: str = "",
-    group_by: str = "",
     fresh: int = 0,
 ):
     """Render all workspaces: pinned at top (alphabetical), non-pinned below (by recency)."""
@@ -423,20 +422,37 @@ async def partials_workspaces(
         pinned_grouped = [g for g in pinned_grouped if _time_bucket(g["latest_updated"]) == time_filter]
         other_grouped = [g for g in other_grouped if _time_bucket(g["latest_updated"]) == time_filter]
 
-    # --- Render cards based on group_by mode ---
-    if group_by == "tag":
-        all_visible = pinned_grouped + other_grouped
-        tag_groups: dict[str, list[dict]] = {}
-        for ws in all_visible:
-            ws_tags = get_workspace_settings(config, ws["cwd"])["tags"]
-            if not ws_tags:
-                tag_groups.setdefault("(untagged)", []).append(ws)
-            else:
-                for t in ws_tags:
-                    tag_groups.setdefault(t, []).append(ws)
-        for tag_name in sorted(tag_groups.keys()):
-            cards_html += f'<div class="group-heading">{html_mod.escape(tag_name)}</div>'
-            for group in tag_groups[tag_name]:
+    # --- Render: pinned first, then time-grouped non-pinned ---
+    for group in pinned_grouped:
+        cwd = group["cwd"]
+        stale = not Path(cwd).exists()
+        if provider != "all":
+            session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
+        else:
+            session_count = group["total_count"]
+        workspace_color = _resolve_workspace_color(cwd, config)
+        cards_html += templates.get_template("partials/workspace_card.html").render(
+            request=request, cwd=cwd, sessions=[], stale=stale,
+            pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
+            session_count=session_count, is_pinned=True,
+            last_updated=group["latest_updated"],
+            workspace_color=workspace_color,
+            providers=group["providers"],
+        )
+
+    if pinned_grouped and other_grouped:
+        cards_html += '<div class="pinned-separator" aria-hidden="true"></div>'
+
+    # Time-group non-pinned workspaces
+    time_groups: dict[str, list[dict]] = {"today": [], "yesterday": [], "this_week": [], "before": []}
+    for ws in other_grouped:
+        bucket = _time_bucket(ws["latest_updated"])
+        time_groups[bucket].append(ws)
+    time_labels = {"today": "Today", "yesterday": "Yesterday", "this_week": "This week", "before": "Older"}
+    for key in ["today", "yesterday", "this_week", "before"]:
+        if time_groups[key]:
+            cards_html += f'<div class="group-heading">{time_labels[key]}</div>'
+            for group in time_groups[key]:
                 cwd = group["cwd"]
                 stale = not Path(cwd).exists()
                 if provider != "all":
@@ -444,80 +460,14 @@ async def partials_workspaces(
                 else:
                     session_count = group["total_count"]
                 workspace_color = _resolve_workspace_color(cwd, config)
-                is_pinned = _normalize_path(cwd) in pinned_norm_paths
                 cards_html += templates.get_template("partials/workspace_card.html").render(
                     request=request, cwd=cwd, sessions=[], stale=stale,
                     pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                    session_count=session_count, is_pinned=is_pinned,
+                    session_count=session_count, is_pinned=False,
                     last_updated=group["latest_updated"],
                     workspace_color=workspace_color,
                     providers=group["providers"],
                 )
-    elif group_by == "time":
-        all_visible = pinned_grouped + other_grouped
-        time_groups: dict[str, list[dict]] = {"today": [], "yesterday": [], "this_week": [], "before": []}
-        for ws in all_visible:
-            bucket = _time_bucket(ws["latest_updated"])
-            time_groups[bucket].append(ws)
-        time_labels = {"today": "Today", "yesterday": "Yesterday", "this_week": "This week", "before": "Older"}
-        for key in ["today", "yesterday", "this_week", "before"]:
-            if time_groups[key]:
-                cards_html += f'<div class="group-heading">{time_labels[key]}</div>'
-                for group in time_groups[key]:
-                    cwd = group["cwd"]
-                    stale = not Path(cwd).exists()
-                    if provider != "all":
-                        session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
-                    else:
-                        session_count = group["total_count"]
-                    workspace_color = _resolve_workspace_color(cwd, config)
-                    is_pinned = _normalize_path(cwd) in pinned_norm_paths
-                    cards_html += templates.get_template("partials/workspace_card.html").render(
-                        request=request, cwd=cwd, sessions=[], stale=stale,
-                        pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                        session_count=session_count, is_pinned=is_pinned,
-                        last_updated=group["latest_updated"],
-                        workspace_color=workspace_color,
-                        providers=group["providers"],
-                    )
-    else:
-        # Flat rendering: pinned first, then by recency
-        for group in pinned_grouped:
-            cwd = group["cwd"]
-            stale = not Path(cwd).exists()
-            if provider != "all":
-                session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
-            else:
-                session_count = group["total_count"]
-            workspace_color = _resolve_workspace_color(cwd, config)
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=stale,
-                pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                session_count=session_count, is_pinned=True,
-                last_updated=group["latest_updated"],
-                workspace_color=workspace_color,
-                providers=group["providers"],
-            )
-
-        if pinned_grouped and other_grouped:
-            cards_html += '<div class="pinned-separator" aria-hidden="true"></div>'
-
-        for group in other_grouped:
-            cwd = group["cwd"]
-            stale = not Path(cwd).exists()
-            if provider != "all":
-                session_count = sum(p["count"] for p in group["providers"] if p["name"] == provider)
-            else:
-                session_count = group["total_count"]
-            workspace_color = _resolve_workspace_color(cwd, config)
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=stale,
-                pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                session_count=session_count, is_pinned=False,
-                last_updated=group["latest_updated"],
-                workspace_color=workspace_color,
-                providers=group["providers"],
-            )
 
     if not cards_html:
         if tag:
@@ -603,11 +553,11 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
 
 @app.get("/search", response_class=HTMLResponse)
 async def search(request: Request, q: str = "", provider: str = "all",
-                 tag: str = "", time_filter: str = "", group_by: str = ""):
+                 tag: str = "", time_filter: str = ""):
     query = q.strip().lower()
     if not query:
         return await partials_workspaces(request, provider=provider, tag=tag,
-                                         time_filter=time_filter, group_by=group_by)
+                                         time_filter=time_filter)
 
     import asyncio
     try:
@@ -657,18 +607,37 @@ async def search(request: Request, q: str = "", provider: str = "all",
 
     cards_html = ""
 
-    if group_by == "tag":
-        tag_groups: dict[str, list[dict]] = {}
-        for ws in grouped:
-            ws_tags = get_workspace_settings(config, ws["cwd"])["tags"]
-            if not ws_tags:
-                tag_groups.setdefault("(untagged)", []).append(ws)
-            else:
-                for t in ws_tags:
-                    tag_groups.setdefault(t, []).append(ws)
-        for tag_name in sorted(tag_groups.keys()):
-            cards_html += f'<div class="group-heading">{html_mod.escape(tag_name)}</div>'
-            for group in tag_groups[tag_name]:
+    # Separate pinned from non-pinned results
+    pinned_results = [g for g in grouped if _normalize_path(g["cwd"]) in pinned_norm_paths]
+    other_results = [g for g in grouped if _normalize_path(g["cwd"]) not in pinned_norm_paths]
+
+    # Render pinned results at top
+    for group in pinned_results:
+        cwd = group["cwd"]
+        stale = not Path(cwd).exists()
+        workspace_color = _resolve_workspace_color(cwd, config)
+        cards_html += templates.get_template("partials/workspace_card.html").render(
+            request=request, cwd=cwd, sessions=[], stale=stale,
+            pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
+            session_count=group["total_count"], last_updated=group["latest_updated"],
+            is_pinned=True,
+            workspace_color=workspace_color,
+            providers=group["providers"],
+        )
+
+    if pinned_results and other_results:
+        cards_html += '<div class="pinned-separator" aria-hidden="true"></div>'
+
+    # Time-group non-pinned results
+    time_groups: dict[str, list[dict]] = {"today": [], "yesterday": [], "this_week": [], "before": []}
+    for ws in other_results:
+        bucket = _time_bucket(ws["latest_updated"])
+        time_groups[bucket].append(ws)
+    time_labels = {"today": "Today", "yesterday": "Yesterday", "this_week": "This week", "before": "Older"}
+    for key in ["today", "yesterday", "this_week", "before"]:
+        if time_groups[key]:
+            cards_html += f'<div class="group-heading">{time_labels[key]}</div>'
+            for group in time_groups[key]:
                 cwd = group["cwd"]
                 stale = not Path(cwd).exists()
                 workspace_color = _resolve_workspace_color(cwd, config)
@@ -676,44 +645,10 @@ async def search(request: Request, q: str = "", provider: str = "all",
                     request=request, cwd=cwd, sessions=[], stale=stale,
                     pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
                     session_count=group["total_count"], last_updated=group["latest_updated"],
-                    is_pinned=_normalize_path(cwd) in pinned_norm_paths,
+                    is_pinned=False,
                     workspace_color=workspace_color,
                     providers=group["providers"],
                 )
-    elif group_by == "time":
-        time_groups: dict[str, list[dict]] = {"today": [], "yesterday": [], "this_week": [], "before": []}
-        for ws in grouped:
-            bucket = _time_bucket(ws["latest_updated"])
-            time_groups[bucket].append(ws)
-        time_labels = {"today": "Today", "yesterday": "Yesterday", "this_week": "This week", "before": "Older"}
-        for key in ["today", "yesterday", "this_week", "before"]:
-            if time_groups[key]:
-                cards_html += f'<div class="group-heading">{time_labels[key]}</div>'
-                for group in time_groups[key]:
-                    cwd = group["cwd"]
-                    stale = not Path(cwd).exists()
-                    workspace_color = _resolve_workspace_color(cwd, config)
-                    cards_html += templates.get_template("partials/workspace_card.html").render(
-                        request=request, cwd=cwd, sessions=[], stale=stale,
-                        pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                        session_count=group["total_count"], last_updated=group["latest_updated"],
-                        is_pinned=_normalize_path(cwd) in pinned_norm_paths,
-                        workspace_color=workspace_color,
-                        providers=group["providers"],
-                    )
-    else:
-        for group in grouped:
-            cwd = group["cwd"]
-            stale = not Path(cwd).exists()
-            workspace_color = _resolve_workspace_color(cwd, config)
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=stale,
-                pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                session_count=group["total_count"], last_updated=group["latest_updated"],
-                is_pinned=_normalize_path(cwd) in pinned_norm_paths,
-                workspace_color=workspace_color,
-                providers=group["providers"],
-            )
 
     if not cards_html:
         return templates.TemplateResponse(request, "partials/empty_state.html", {

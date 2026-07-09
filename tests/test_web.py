@@ -2417,85 +2417,8 @@ def test_time_filter_empty_state(mock_discover, mock_providers, mock_config, cli
 @patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_group_by_tag_renders_headings(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Group-by tag renders section headings per tag."""
-    from power_atlas.config import Config
-    frontend_ws = str(tmp_path / "frontend-proj")
-    backend_ws = str(tmp_path / "backend-proj")
-    mock_config.return_value = Config(
-        workspace_settings={
-            frontend_ws: {"tags": ["frontend"], "color": ""},
-            backend_ws: {"tags": ["backend"], "color": ""},
-        },
-    )
-    mock_discover.return_value = [
-        (frontend_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (backend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?group_by=tag")
-    assert resp.status_code == 200
-    assert 'class="group-heading"' in resp.text
-    assert "frontend" in resp.text
-    assert "backend" in resp.text
-    assert "frontend-proj" in resp.text
-    assert "backend-proj" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_group_by_tag_untagged_section(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Group-by tag places untagged workspaces under '(untagged)' heading."""
-    from power_atlas.config import Config
-    tagged_ws = str(tmp_path / "tagged-proj")
-    untagged_ws = str(tmp_path / "untagged-proj")
-    mock_config.return_value = Config(
-        workspace_settings={
-            tagged_ws: {"tags": ["myproject"], "color": ""},
-        },
-    )
-    mock_discover.return_value = [
-        (tagged_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (untagged_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?group_by=tag")
-    assert resp.status_code == 200
-    assert "(untagged)" in resp.text
-    assert "myproject" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_group_by_tag_duplicates_multi_tag_workspace(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Workspace with multiple tags appears under each tag's section."""
-    from power_atlas.config import Config
-    ws = str(tmp_path / "multi-proj")
-    mock_config.return_value = Config(
-        workspace_settings={
-            ws: {"tags": ["alpha", "beta"], "color": ""},
-        },
-    )
-    mock_discover.return_value = [(ws, 1, "2026-01-02T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?group_by=tag")
-    assert resp.status_code == 200
-    assert "alpha" in resp.text
-    assert "beta" in resp.text
-    # The workspace card should appear twice (once per tag)
-    assert resp.text.count("multi-proj") >= 2
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_group_by_time_renders_headings(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Group-by time renders Today/Yesterday/This week/Older headings."""
+def test_default_time_grouping_renders_headings(mock_discover, mock_providers, mock_config, client, tmp_path):
+    """Default rendering always time-groups with Today/Yesterday/This week/Older headings."""
     from datetime import datetime, timezone, timedelta
     from power_atlas.config import Config
     today_ws = str(tmp_path / "today-proj")
@@ -2508,7 +2431,7 @@ def test_group_by_time_renders_headings(mock_discover, mock_providers, mock_conf
     ]
     mock_providers.return_value = ["kiro-cli"]
 
-    resp = client.get("/partials/workspaces?group_by=time")
+    resp = client.get("/partials/workspaces")
     assert resp.status_code == 200
     assert 'class="group-heading"' in resp.text
     assert "Today" in resp.text
