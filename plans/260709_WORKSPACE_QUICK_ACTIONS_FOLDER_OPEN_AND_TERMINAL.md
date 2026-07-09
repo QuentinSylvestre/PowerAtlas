@@ -187,6 +187,10 @@ function openFolder(cwd) {
 }
 ```
 
+#### Implementation (2026-07-09, code: 1b33c4f)
+
+Added /api/open-folder endpoint to web.py with os.startfile (Windows) and xdg-open (Linux) support, including Path.is_dir() validation and OSError handling returning toast responses. Added openFolder() JS function in index.html that POSTs to the endpoint with the workspace cwd. Added os and subprocess imports to web.py.
+
 ### 3. Add plain terminal launch [QA]
 
 **Goal**: Open a terminal at a directory with no provider command.
@@ -436,3 +440,20 @@ Manual checks:
 | 11 | Low | Missing CSS for `.card-terminal-btn` | Resolved — added `style.css` to files-to-modify |
 | 12 | Low | pwsh single-quote escaping for paths | Resolved — added `replace("'", "''")`  |
 | 13 | Low | Gear button inert for terminal tile (undocumented) | Noted — gear hidden by early-exit in editLauncher |
+
+### 2026-07-09 -- Implementation Review (after Phase 2, personas: Senior engineer, Security auditor, Reliability engineer, End-user advocate)
+
+Implementation health: Green.
+9 findings (0 High, 5 Medium, 4 Low). High-effort review (4 personas).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Inline `'{{ cwd }}'` in onclick breaks if path contains quotes on Linux | Fixed — switched to `dataset.cwd` DOM read pattern (d35bf71) |
+| 2 | Medium | No `.catch()` on fetch — network failure silently drops user feedback | Fixed — added .catch with error toast (d35bf71) |
+| 3 | Medium | Missing `response_class=HTMLResponse` on endpoint decorator | Fixed — added to decorator (d35bf71) |
+| 4 | Medium | `subprocess.Popen` on Linux missing DEVNULL + start_new_session | Fixed — added both kwargs (d35bf71) |
+| 5 | Medium | `Path(folder).is_dir()` can raise OSError/ValueError on malformed paths | Fixed — wrapped in try/except (d35bf71) |
+| 6 | Low | Success toast shows "Folder opened" without identifying which folder | Fixed — now shows folder basename (d35bf71) |
+| 7 | Low | TOCTOU race between is_dir check and os.startfile | Accepted — OS-level error handling covers it |
+| 8 | Low | Tests deferred to Phase 5 | Expected — plan groups tests in Phase 5 |
+| 9 | Low | UNC paths could trigger NTLM hash disclosure via Explorer | Accepted — localhost-only tool, cwd from session discovery |
