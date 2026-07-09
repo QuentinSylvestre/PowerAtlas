@@ -1005,6 +1005,18 @@ async def partials_launchers(request: Request):
             "is_provider": True,
         }
         html += templates.get_template("partials/launcher_tile.html").render(request=request, launcher=provider_launcher)
+    # Built-in terminal tile
+    terminal_tile = {
+        "id": "builtin--terminal",
+        "name": "Terminal",
+        "command": "terminal",
+        "custom_args": "",
+        "color": "#6b7280",
+        "terminal": True,
+        "use_selected_workspaces": True,
+        "is_provider": True,  # shows lock icon + prevents editing
+    }
+    html += templates.get_template("partials/launcher_tile.html").render(request=request, launcher=terminal_tile)
     # Custom launchers after
     for l in config.custom_launchers:
         html += templates.get_template("partials/launcher_tile.html").render(request=request, launcher=l)
@@ -1068,6 +1080,11 @@ async def launcher_delete(request: Request):
 @app.get("/api/launcher-icon/{launcher_id}")
 async def launcher_icon(launcher_id: str):
     from fastapi.responses import FileResponse, Response
+
+    # Handle built-in terminal icon
+    if launcher_id == "builtin--terminal":
+        svg = icons.default_icon_svg(True, "#6b7280")
+        return Response(content=svg, media_type="image/svg+xml")
 
     # Handle provider launcher icons
     if launcher_id.startswith("provider--"):
