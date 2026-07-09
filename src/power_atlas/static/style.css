@@ -87,6 +87,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .ws-clear-filters { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 2px 8px; font-size: 11px; cursor: pointer; transition: all 0.2s; }
 .ws-clear-filters:hover { border-color: var(--accent); color: var(--accent); }
 .ws-hidden-badge { font-size: 10px; color: var(--text-dim); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1px 6px; }
+.ws-tag-colors-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 2px 6px; font-size: 12px; cursor: pointer; transition: all 0.2s; line-height: 1; }
+.ws-tag-colors-btn:hover { border-color: var(--accent); color: var(--accent); }
+.tag-colors-popover { position: absolute; top: 100%; left: 0; z-index: 1000; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; min-width: 260px; max-height: 300px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3); margin-top: 4px; }
+.tag-colors-title { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+.tag-color-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.tag-color-name { font-size: 12px; color: var(--text); min-width: 60px; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-color-swatches { display: flex; gap: 3px; flex-wrap: wrap; }
+.tag-mini-swatch { width: 16px; height: 16px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; transition: border-color 0.15s, transform 0.15s; }
+.tag-mini-swatch:hover { transform: scale(1.2); }
+.tag-mini-swatch.selected { border-color: white; box-shadow: 0 0 0 1px var(--accent); }
 .group-heading { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent); padding: 10px 8px 4px; border-bottom: 1px solid var(--border); margin-top: 4px; }
 .workspace-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; transition: border-color 0.2s; }
 .workspace-card:hover { border-color: #3a4060; }

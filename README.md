@@ -35,6 +35,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
 - Unified provider-launcher system with extracted icons and configurable colors
 - Inline provider filter next to search bar — filters workspaces and sessions panels simultaneously
+- Workspace tags with configurable colors, tag/time filtering, group-by modes (tag, time), and hidden workspaces
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Multi-select and batch launch sessions
 - Per-provider settings with default args (e.g. trust-all-tools)
@@ -87,6 +88,16 @@ id = "default"
 name = "Default"
 terminal_command = "wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}"
 wt_profile = "PowerShell"
+
+[workspace_settings."C:\\path\\to\\project"]
+tags = ["frontend", "active"]
+color = "#3b82f6"  # explicit card accent color (overrides tag color)
+
+[tag_settings.frontend]
+color = "#06b6d4"  # tag color (used as card accent when no explicit workspace color)
+
+[tag_settings.archived]
+color = "#64748b"
 ```
 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).

@@ -2660,3 +2660,102 @@ def test_search_with_tag_filter(mock_discover, mock_config, client, tmp_path):
     assert resp.status_code == 200
     assert "frontend-proj" in resp.text
     assert "backend-proj" not in resp.text
+
+
+
+# --- Phase 6 (Tag Color Management): /api/tag/save ---
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_tag_save_persists_color(mock_load, mock_save, client, tmp_path):
+    """POST /api/tag/save persists color to tag_settings in config."""
+    from power_atlas.config import Config
+    config = Config(tag_settings={})
+    mock_load.return_value = config
+
+    resp = client.post("/api/tag/save", json={"tag": "frontend", "color": "#3b82f6"})
+    assert resp.status_code == 200
+    assert "Tag color saved" in resp.text
+
+    saved = mock_save.call_args[0][0]
+    assert saved.tag_settings["frontend"] == {"color": "#3b82f6"}
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_tag_save_empty_color_clears(mock_load, mock_save, client):
+    """POST /api/tag/save with empty color clears the tag's color."""
+    from power_atlas.config import Config
+    config = Config(tag_settings={"frontend": {"color": "#3b82f6"}})
+    mock_load.return_value = config
+
+    resp = client.post("/api/tag/save", json={"tag": "frontend", "color": ""})
+    assert resp.status_code == 200
+    assert "Tag color saved" in resp.text
+
+    saved = mock_save.call_args[0][0]
+    assert saved.tag_settings["frontend"] == {"color": ""}
+
+
+@patch("power_atlas.web.load_config")
+def test_tag_save_rejects_empty_name(mock_load, client):
+    """POST /api/tag/save rejects empty tag name."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/tag/save", json={"tag": "", "color": "#ff0000"})
+    assert resp.status_code == 200
+    assert "Invalid tag name" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+def test_tag_save_rejects_long_name(mock_load, client):
+    """POST /api/tag/save rejects tag name > 64 chars."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/tag/save", json={"tag": "a" * 65, "color": "#ff0000"})
+    assert resp.status_code == 200
+    assert "Invalid tag name" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+def test_tag_save_rejects_control_chars_in_name(mock_load, client):
+    """POST /api/tag/save rejects tag name with control characters."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/tag/save", json={"tag": "bad\x01tag", "color": "#ff0000"})
+    assert resp.status_code == 200
+    assert "Invalid tag name" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+def test_tag_save_rejects_invalid_color(mock_load, client):
+    """POST /api/tag/save rejects color with control characters."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config()
+
+    resp = client.post("/api/tag/save", json={"tag": "frontend", "color": "\x01red"})
+    assert resp.status_code == 200
+    assert "Invalid color value" in resp.text
+
+
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_tag_save_appears_in_api_tags(mock_load, mock_save, client, tmp_path):
+    """Saved tag color is reflected in subsequent /api/tags response."""
+    from power_atlas.config import Config
+    ws1 = str(tmp_path / "proj1")
+    config = Config(
+        workspace_settings={ws1: {"tags": ["frontend"], "color": ""}},
+        tag_settings={"frontend": {"color": "#3b82f6"}},
+    )
+    mock_load.return_value = config
+
+    resp = client.get("/api/tags")
+    assert resp.status_code == 200
+    tags = resp.json()
+    tag_map = {t["name"]: t for t in tags}
+    assert tag_map["frontend"]["color"] == "#3b82f6"

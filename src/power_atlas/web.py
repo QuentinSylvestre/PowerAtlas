@@ -783,6 +783,27 @@ async def api_tags():
     ]
 
 
+@app.post("/api/tag/save", response_class=HTMLResponse)
+async def save_tag_settings(request: Request):
+    """Save tag color settings."""
+    body = await request.json()
+    tag_name = body.get("tag", "")
+    color = body.get("color", "")
+    # Validation: tag_name max 64 chars, no control chars
+    if not tag_name or len(tag_name) > 64 or any(ord(ch) < 0x20 for ch in tag_name):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid tag name", "level": "error"})
+    if color and (len(color) > 20 or any(ord(ch) < 0x20 for ch in color)):
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": "Invalid color value", "level": "error"})
+    config = load_config()
+    config.tag_settings[tag_name] = {"color": color}
+    save_config(config)
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Tag color saved", "level": "success",
+    })
+
+
 @app.get("/api/provider/{key}")
 async def get_provider_settings(key: str):
     if key not in data.PROVIDERS:
