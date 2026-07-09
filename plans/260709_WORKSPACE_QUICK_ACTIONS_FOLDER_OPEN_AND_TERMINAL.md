@@ -334,6 +334,10 @@ function openTerminal(btn) {
 }
 ```
 
+#### Implementation (2026-07-09, code: 8dc3508)
+
+Added plain terminal launch capability: `_build_terminal_only_command()` builds terminal-specific commands (wt, pwsh, cmd, Linux terminals, user templates) that open a shell at the workspace directory without running any provider; `launch_terminal()` validates the path with is_dir, detects the terminal, and spawns the process; `/api/launch-terminal` endpoint reads the workspace from the request body (falling back to config.default_directory); the workspace card template gains a `>_` button before the provider launch buttons; `openTerminal()` JS function POSTs to the endpoint with error handling matching `openFolder()`; and `.card-terminal-btn` CSS shares selector with `.card-new-btn`. Review fixes (f33fbcb): xterm uses `${SHELL:-/bin/sh}` fallback, validation uses `is_dir()` not `exists()`, variable renamed to `stem`, CSS deduplicated.
+
 ### 4. Add built-in terminal launcher tile [QA]
 
 **Goal**: Terminal tile in Launchers panel, selection-aware.
@@ -457,3 +461,19 @@ Implementation health: Green.
 | 7 | Low | TOCTOU race between is_dir check and os.startfile | Accepted — OS-level error handling covers it |
 | 8 | Low | Tests deferred to Phase 5 | Expected — plan groups tests in Phase 5 |
 | 9 | Low | UNC paths could trigger NTLM hash disclosure via Explorer | Accepted — localhost-only tool, cwd from session discovery |
+
+### 2026-07-09 -- Implementation Review (after Phase 3, personas: Senior engineer, Security auditor, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green.
+8 findings (0 High, 4 Medium, 4 Low). High-effort review (4 personas).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Linux logic inlines code already in `_linux_base_cmd()` — duplication | Accepted — refactoring shared helper exceeds phase scope |
+| 2 | Medium | CSS byte-identical to `.card-new-btn` | Fixed — combined selectors (f33fbcb) |
+| 3 | Medium | xterm `exec $SHELL` fails if env unset — terminal closes | Fixed — uses `${SHELL:-/bin/sh}` fallback (f33fbcb) |
+| 4 | Medium | Tests deferred to Phase 5 | Expected — plan groups tests separately |
+| 5 | Low | Uses `exists()` not `is_dir()` — file path passes validation | Fixed — switched to `is_dir()` (f33fbcb) |
+| 6 | Low | Variable `t` inconsistent with `stem` in module | Fixed — renamed to `stem` (f33fbcb) |
+| 7 | Low | Template branch is dead code (detect_terminal returns resolved path) | Accepted — defensive future-proofing |
+| 8 | Low | xterm shell wrapper diverges from plan (more correct than plan) | Accepted — plan's approach would open at HOME |
