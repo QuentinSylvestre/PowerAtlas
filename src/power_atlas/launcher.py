@@ -470,7 +470,7 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
 
     Returns None if the path is unsafe for the detected terminal.
     """
-    t = Path(terminal).stem.lower()
+    stem = Path(terminal).stem.lower()
 
     # User template — substitute {cwd}/{title}/{wt_profile}, skip {cmd}/{pscmd}
     if "{cwd}" in terminal or "{title}" in terminal or "{wt_profile}" in terminal:
@@ -489,14 +489,14 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
                 result.extend(p for p in part.split() if p)
         return result
 
-    if t == "wt":
+    if stem == "wt":
         cmd = [terminal]
         if title:
             cmd += ["--title", _sanitize_title(title)]
         cmd += ["-p", wt_profile, "-d", cwd]
         return cmd
 
-    if t == "pwsh":
+    if stem == "pwsh":
         escaped_cwd = cwd.replace("'", "''")
         script = ""
         if title:
@@ -506,8 +506,8 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
         return [terminal, "-NoExit", "-Command", script]
 
     # Linux terminals via dispatch table
-    if t in _LINUX_TERMINALS:
-        title_flag, cwd_flag, _exec_sep = _LINUX_TERMINALS[t]
+    if stem in _LINUX_TERMINALS:
+        title_flag, cwd_flag, _exec_sep = _LINUX_TERMINALS[stem]
         cmd: list[str] = [terminal]
 
         if title and title_flag:
@@ -522,8 +522,8 @@ def _build_terminal_only_command(terminal: str, cwd: str, title: str = "", wt_pr
             else:
                 cmd += [cwd_flag, cwd]
         else:
-            # xterm: no cwd_flag, wrap in shell
-            cmd += ["-e", "sh", "-c", f'cd {shlex.quote(cwd)} && exec $SHELL']
+            # xterm: no cwd_flag, wrap in shell with SHELL fallback
+            cmd += ["-e", "sh", "-c", f'cd {shlex.quote(cwd)} && exec ${{SHELL:-/bin/sh}}']
 
         return cmd
 
@@ -545,10 +545,10 @@ def launch_terminal(
 
     if cwd:
         try:
-            cwd_exists = Path(cwd).exists()
+            cwd_valid = Path(cwd).is_dir()
         except (OSError, ValueError):
             return LaunchResult(False, None, cwd, error=f"Invalid folder path: {cwd}")
-        if not cwd_exists:
+        if not cwd_valid:
             return LaunchResult(False, None, cwd, error=f"Folder not found: {cwd}")
     else:
         return LaunchResult(False, None, cwd, error="No directory specified")
