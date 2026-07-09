@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+import os
 import re
+import subprocess
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -201,6 +203,28 @@ async def toggle_autostart():
     else:
         autostart.enable()
     return {"enabled": autostart.is_enabled()}
+
+
+@app.post("/api/open-folder")
+async def api_open_folder(request: Request):
+    body = await request.json()
+    folder = body.get("folder", "")
+    if not folder or not Path(folder).is_dir():
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": f"Folder not found: {folder}", "level": "error",
+        })
+    try:
+        if sys.platform == "win32":
+            os.startfile(folder)
+        else:
+            subprocess.Popen(["xdg-open", folder])
+    except OSError as e:
+        return templates.TemplateResponse(request, "partials/toast.html", {
+            "message": f"Could not open folder: {e}", "level": "error",
+        })
+    return templates.TemplateResponse(request, "partials/toast.html", {
+        "message": "Folder opened", "level": "success",
+    })
 
 
 @app.post("/api/pin-session")
