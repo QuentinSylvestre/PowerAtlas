@@ -275,17 +275,20 @@ function _buildWorkspaceQs(){
 **Covers**: SC-2, SC-3, SC-8, SC-10, SC-12
 
 **Exit criteria**:
-- [ ] Workspace panel always renders time-grouped (Today/Yesterday/This week/Older headings)
-- [ ] No group-by dropdown visible in workspace filters area
-- [ ] Pinned workspaces render above all time-group headings
-- [ ] Empty time-group headings are not rendered
-- [ ] Tag and time filters still work correctly
-- [ ] Search results are time-grouped with pinned at top
-- [ ] `_activeGroupBy` and `setGroupBy` no longer exist in JS
-- [ ] `_updateFilterUI()` updated to remove `_activeGroupBy` from active-filter check
-- [ ] `clearWorkspaceFilters()` updated to remove `_activeGroupBy` and `groupSel` references
-- [ ] Existing `group_by` tests in `test_web.py` updated or removed (test_group_by_tag_*, test_group_by_time_*)
-- [ ] `/search` endpoint uses pinned-first extraction before time-grouped rendering
+- [x] Workspace panel always renders time-grouped (Today/Yesterday/This week/Older headings)
+- [x] No group-by dropdown visible in workspace filters area
+- [x] Pinned workspaces render above all time-group headings
+- [x] Empty time-group headings are not rendered
+- [x] Tag and time filters still work correctly
+- [x] Search results are time-grouped with pinned at top
+- [x] `_activeGroupBy` and `setGroupBy` no longer exist in JS
+- [x] `_updateFilterUI()` updated to remove `_activeGroupBy` from active-filter check
+- [x] `clearWorkspaceFilters()` updated to remove `_activeGroupBy` and `groupSel` references
+- [x] Existing `group_by` tests in `test_web.py` updated or removed (test_group_by_tag_*, test_group_by_time_*)
+- [x] `/search` endpoint uses pinned-first extraction before time-grouped rendering
+
+Implementation (2026-07-09, code: e20ac1b)
+Removed `group_by` parameter from `partials_workspaces` and `/search` endpoints. Replaced the 3-way branching (tag/time/flat) with permanent time-grouping: pinned workspaces render first (sorted alphabetically), then a separator, then non-pinned bucketed into Today/Yesterday/This week/Older with headings. In JS, removed `_activeGroupBy` variable, group-by `<select>` dropdown from `initWorkspaceFilters()`, `setGroupBy()` function, and all related references in `clearWorkspaceFilters()` and `_updateFilterUI()`. Removed 3 tag-grouping tests and renamed the time-grouping test to `test_default_time_grouping_renders_headings` (no `group_by` param). 163 tests pass.
 
 ---
 
@@ -516,6 +519,12 @@ fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()+'&q='+encodeURICompon
 <Reserved -- filled during implementation>
 
 ## Review Log
+
+### 2026-07-09 -- Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+0 findings.
+QA verification: PASS (time-group headings, pinned separator, no group-by dropdown verified in live instance).
 
 ### 2026-07-09 -- Implementation Review (after Phase 1, persona: End-user advocate)
 
