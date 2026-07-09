@@ -205,7 +205,8 @@ script { display: none; }
 .pinned-remove:hover { color: #f87171; }
 
 /* Card icon */
-.card-icon { cursor: pointer; font-size: 16px; line-height: 1; flex-shrink: 0; transition: transform 0.12s; }
+.card-icon { cursor: pointer; font-size: 16px; line-height: 1; flex-shrink: 0; transition: transform 0.12s; border-radius: 4px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
+.card-icon-colored { filter: grayscale(1) brightness(2); }
 .card-icon:hover { transform: scale(1.2); }
 
 /* Session tail tooltip */
