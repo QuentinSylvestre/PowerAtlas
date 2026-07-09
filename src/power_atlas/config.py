@@ -246,6 +246,19 @@ def load_config() -> Config:
             if not isinstance(ts.get("color"), str):
                 ts["color"] = ""
 
+        # Ensure "hidden" tag always exists in tag_settings
+        config.tag_settings.setdefault("hidden", {"color": ""})
+
+        # Prune orphan tags: remove tag_settings entries (except "hidden")
+        # that have no workspace assignment
+        assigned_tags: set[str] = set()
+        for ws in config.workspace_settings.values():
+            assigned_tags.update(ws.get("tags", []))
+        config.tag_settings = {
+            k: v for k, v in config.tag_settings.items()
+            if k == "hidden" or k in assigned_tags
+        }
+
         # Sanitize default_directory: must be string, strip control chars
         if not isinstance(config.default_directory, str):
             config.default_directory = ""

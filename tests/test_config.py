@@ -629,10 +629,14 @@ def test_tag_settings_round_trip():
         "web": {"color": "#3b82f6"},
         "backend": {"color": "#10b981"},
     }
-    cfg = Config(tag_settings=tags)
+    cfg = Config(
+        tag_settings=tags,
+        workspace_settings={"C:\\project": {"tags": ["web", "backend"], "color": ""}},
+    )
     save_config(cfg)
     loaded = load_config()
-    assert loaded.tag_settings == tags
+    # "hidden" is always added; original tags persist because they have workspace assignments
+    assert loaded.tag_settings == {**tags, "hidden": {"color": ""}}
 
 
 def test_tag_settings_sanitization_invalid_color(tmp_path):
@@ -641,6 +645,9 @@ def test_tag_settings_sanitization_invalid_color(tmp_path):
         "tag_settings": {
             "web": {"color": 123},
             "valid": {"color": "#abc"},
+        },
+        "workspace_settings": {
+            "C:\\proj": {"tags": ["web", "valid"], "color": ""},
         },
     })
     cfg = load_config()
