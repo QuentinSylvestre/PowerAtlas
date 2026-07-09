@@ -407,10 +407,14 @@ CSS in `style.css`:
 ```
 
 **Exit criteria**:
-- [ ] Visual gap visible between pinned and non-pinned workspace cards
-- [ ] Visual gap visible between pinned and non-pinned sessions
-- [ ] No gap when there are no pinned items or no non-pinned items
-- [ ] Test: separator div present in HTML when both pinned and non-pinned exist
+- [x] Visual gap visible between pinned and non-pinned workspace cards
+- [x] Visual gap visible between pinned and non-pinned sessions
+- [x] No gap when there are no pinned items or no non-pinned items
+- [x] Test: separator div present in HTML when both pinned and non-pinned exist
+
+#### Implementation (2026-07-09, code: a11c576)
+
+Added subtle visual separation between pinned and non-pinned items in both the workspaces panel and the all-sessions panel. In `partials_workspaces()`, a `<div class="pinned-separator" aria-hidden="true">` is inserted between the pinned workspace cards and non-pinned cards when both groups have content. In `partials_all_sessions()`, the same separator is inserted on page 1 at the boundary between pinned sessions and non-pinned sessions, detected by tracking when the first non-pinned session ID is encountered. The CSS rule provides a 12px vertical gap with `flex-shrink: 0`. Five tests verify: separator present when both groups exist, absent when only pinned, absent when no pinned, and two session-panel tests.
 
 ### Phase 5: Tag and time filter UI + server-side filtering [QA]
 
@@ -663,3 +667,17 @@ Implementation health: Green.
 | 6 | Low | Redundant import statement (same as #3). | Fixed — same consolidation. |
 
 Cycle 2 skipped — all auto-fixes purely mechanical (defensive copy, import consolidation, validation addition).
+
+### 2026-07-09 -- Implementation Review (after Phase 4, persona: Senior engineer, End-user advocate, Maintainability reviewer, Reliability engineer)
+
+Implementation health: Green.
+4 findings (0 High, 1 Medium, 3 Low). All auto-fixed in cycle 1.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | No test coverage for session-panel separator boundary logic. | Fixed — added 2 tests for /partials/all-sessions separator. |
+| 2 | Low | Redundant pinned_set construction (built twice on page > 1). | Fixed — moved to single construction before the if-block. |
+| 3 | Low | CSS gap is spatial-only with no visible indicator beyond whitespace. | No action — plan explicitly specifies "CSS gap only, no visible divider element." |
+| 4 | Low | aria-hidden="true" on decorative spacer is good accessibility practice. | No action needed (positive note). |
+
+Cycle 2 skipped — all auto-fixes purely mechanical (added tests, moved variable declaration).
