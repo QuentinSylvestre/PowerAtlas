@@ -35,7 +35,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
 - Unified provider-launcher system with extracted icons and configurable colors
 - Inline provider filter next to search bar — filters workspaces and sessions panels simultaneously
-- Workspace tags with configurable colors, tag/time filtering, group-by modes (tag, time), and hidden workspaces
+- Workspace tags with configurable colors, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Multi-select and batch launch sessions
 - Per-provider settings with default args (e.g. trust-all-tools)

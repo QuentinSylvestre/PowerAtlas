@@ -490,8 +490,11 @@ async def partials_workspaces(
 
 
 @app.get("/partials/all-sessions", response_class=HTMLResponse)
-async def partials_all_sessions(request: Request, page: int = 1, provider: str = "all", q: str = ""):
-    """Render paginated all-sessions panel. Pinned at top, then by updated_at."""
+async def partials_all_sessions(request: Request, page: int = 1, provider: str = "all",
+                                q: str = "", tag: str = "", time_filter: str = ""):
+    """Render paginated all-sessions panel. Pinned at top, then time-grouped."""
+    from .config import get_workspace_settings
+
     config = load_config()
 
     enabled = {p for p in data.PROVIDERS if _enabled(config, p)}
@@ -517,20 +520,47 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
         ]
         has_more = False  # Search disables pagination
 
-    # Exclude pinned items on page > 1 (they are already rendered on page 1)
+    # Tag filtering — build workspace-tags lookup
+    cwd_tags_cache: dict[str, list[str]] = {}
+
+    def _get_ws_tags(cwd: str) -> list[str]:
+        if not cwd:
+            return []
+        if cwd not in cwd_tags_cache:
+            cwd_tags_cache[cwd] = get_workspace_settings(config, cwd)["tags"]
+        return cwd_tags_cache[cwd]
+
+    if tag:
+        if tag == "hidden":
+            sessions_with_prov = [(s, p) for s, p in sessions_with_prov if "hidden" in _get_ws_tags(s.cwd)]
+        else:
+            sessions_with_prov = [(s, p) for s, p in sessions_with_prov if tag in _get_ws_tags(s.cwd)]
+        has_more = False
+    else:
+        # Default: exclude sessions from hidden workspaces
+        sessions_with_prov = [(s, p) for s, p in sessions_with_prov if "hidden" not in _get_ws_tags(s.cwd)]
+
+    # Time filter
+    if time_filter:
+        sessions_with_prov = [
+            (s, p) for s, p in sessions_with_prov
+            if _time_bucket(s.updated_at) == time_filter
+        ]
+        has_more = False
+
+    # Split pinned from non-pinned
     pinned_set = set(config.pinned_sessions)
+    pinned_items = [(s, p) for s, p in sessions_with_prov if s.session_id in pinned_set]
+    non_pinned = [(s, p) for s, p in sessions_with_prov if s.session_id not in pinned_set]
+
+    # Exclude pinned from page > 1 (already shown on page 1)
     if page > 1:
-        sessions_with_prov = [(s, p) for s, p in sessions_with_prov if s.session_id not in pinned_set]
+        pinned_items = []
 
     html = ""
-    separator_inserted = False
-    for session, prov_name in sessions_with_prov:
-        # On page 1, insert separator at boundary between pinned and non-pinned
-        if page == 1 and not separator_inserted and session.session_id not in pinned_set:
-            # Only insert if there were pinned items before this point
-            if html:
-                html += '<div class="pinned-separator" aria-hidden="true"></div>'
-            separator_inserted = True
+
+    # Render pinned section
+    for session, prov_name in pinned_items:
         html += templates.get_template("partials/session_row.html").render(
             request=request, session=session, cwd=session.cwd,
             stale=not Path(session.cwd).exists(),
@@ -540,9 +570,36 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
             show_workspace=True,
             workspace_name=Path(session.cwd).name if session.cwd else "",
         )
+    if pinned_items and non_pinned:
+        html += '<div class="pinned-separator" aria-hidden="true"></div>'
+
+    # Render time-grouped non-pinned
+    time_groups: dict[str, list] = {"today": [], "yesterday": [], "this_week": [], "before": []}
+    for s, p in non_pinned:
+        bucket = _time_bucket(s.updated_at)
+        time_groups[bucket].append((s, p))
+    time_labels = {"today": "Today", "yesterday": "Yesterday", "this_week": "This week", "before": "Older"}
+    for key in ["today", "yesterday", "this_week", "before"]:
+        if time_groups[key]:
+            html += f'<div class="group-heading">{time_labels[key]}</div>'
+            for session, prov_name in time_groups[key]:
+                html += templates.get_template("partials/session_row.html").render(
+                    request=request, session=session, cwd=session.cwd,
+                    stale=not Path(session.cwd).exists(),
+                    pinned_sessions=config.pinned_sessions,
+                    provider_name=prov_name,
+                    provider_color=_get_provider_color(prov_name, config),
+                    show_workspace=True,
+                    workspace_name=Path(session.cwd).name if session.cwd else "",
+                )
 
     if not html:
-        html = '<div class="empty-state">No sessions found.</div>'
+        if tag:
+            html = f'<div class="empty-state">No sessions in workspaces tagged &quot;{html_mod.escape(tag)}&quot;</div>'
+        elif time_filter:
+            html = f'<div class="empty-state">No sessions active {html_mod.escape(time_filter.replace("_", " "))}</div>'
+        else:
+            html = '<div class="empty-state">No sessions found.</div>'
 
     if has_more:
         next_page = page + 1

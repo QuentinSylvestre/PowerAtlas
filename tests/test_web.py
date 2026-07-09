@@ -1757,6 +1757,160 @@ def test_partials_all_sessions_pinned_at_top(mock_paginated, mock_config, client
 
 
 @patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_tag_filter(mock_paginated, mock_config, client, tmp_path):
+    """Tag filter returns only sessions from matching workspaces."""
+    from power_atlas.config import Config
+    ws_tagged = str(tmp_path / "tagged-proj")
+    ws_other = str(tmp_path / "other-proj")
+    (tmp_path / "tagged-proj").mkdir()
+    (tmp_path / "other-proj").mkdir()
+    mock_config.return_value = Config(
+        workspace_settings={ws_tagged: {"tags": ["frontend"], "color": ""}}
+    )
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=ws_tagged, session_id="s1", title="Tagged Session"), "kiro-cli"),
+            (_make_session(cwd=ws_other, session_id="s2", title="Other Session"), "kiro-cli"),
+        ],
+        True,
+    )
+    resp = client.get("/partials/all-sessions?tag=frontend")
+    assert resp.status_code == 200
+    assert "Tagged Session" in resp.text
+    assert "Other Session" not in resp.text
+    assert "load-more-btn" not in resp.text  # tag filter disables pagination
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_hidden_excluded_by_default(mock_paginated, mock_config, client, tmp_path):
+    """Sessions from hidden workspaces are excluded by default."""
+    from power_atlas.config import Config
+    ws_hidden = str(tmp_path / "hidden-proj")
+    ws_normal = str(tmp_path / "normal-proj")
+    (tmp_path / "hidden-proj").mkdir()
+    (tmp_path / "normal-proj").mkdir()
+    mock_config.return_value = Config(
+        workspace_settings={ws_hidden: {"tags": ["hidden"], "color": ""}}
+    )
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=ws_hidden, session_id="s1", title="Hidden Session"), "kiro-cli"),
+            (_make_session(cwd=ws_normal, session_id="s2", title="Normal Session"), "kiro-cli"),
+        ],
+        False,
+    )
+    resp = client.get("/partials/all-sessions")
+    assert resp.status_code == 200
+    assert "Hidden Session" not in resp.text
+    assert "Normal Session" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_time_filter(mock_paginated, mock_config, client, tmp_path):
+    """Time filter returns only sessions from matching time bucket."""
+    from power_atlas.config import Config
+    from datetime import datetime, timedelta
+    workspace = str(tmp_path)
+    today_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    old_iso = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+    mock_config.return_value = Config()
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=workspace, session_id="s1", title="Today Session", updated_at=today_iso), "kiro-cli"),
+            (_make_session(cwd=workspace, session_id="s2", title="Old Session", updated_at=old_iso), "kiro-cli"),
+        ],
+        True,
+    )
+    resp = client.get("/partials/all-sessions?time_filter=today")
+    assert resp.status_code == 200
+    assert "Today Session" in resp.text
+    assert "Old Session" not in resp.text
+    assert "load-more-btn" not in resp.text  # time filter disables pagination
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_time_grouped(mock_paginated, mock_config, client, tmp_path):
+    """Sessions panel renders time-group headings."""
+    from power_atlas.config import Config
+    from datetime import datetime, timedelta
+    workspace = str(tmp_path)
+    today_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    old_iso = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+    mock_config.return_value = Config()
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=workspace, session_id="s1", title="Today Session", updated_at=today_iso), "kiro-cli"),
+            (_make_session(cwd=workspace, session_id="s2", title="Old Session", updated_at=old_iso), "kiro-cli"),
+        ],
+        False,
+    )
+    resp = client.get("/partials/all-sessions")
+    assert resp.status_code == 200
+    assert "group-heading" in resp.text
+    assert "Today" in resp.text
+    assert "Older" in resp.text
+    # Empty group headings not rendered
+    assert "Yesterday" not in resp.text
+    assert "This week" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_pinned_above_time_groups(mock_paginated, mock_config, client, tmp_path):
+    """Pinned sessions render above time-group headings with separator."""
+    from power_atlas.config import Config
+    from datetime import datetime
+    workspace = str(tmp_path)
+    today_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    mock_config.return_value = Config(pinned_sessions=["pinned-sess"])
+    mock_paginated.return_value = (
+        [
+            (_make_session(cwd=workspace, session_id="pinned-sess", title="Pinned One", updated_at=today_iso), "kiro-cli"),
+            (_make_session(cwd=workspace, session_id="other-sess", title="Regular One", updated_at=today_iso), "kiro-cli"),
+        ],
+        False,
+    )
+    resp = client.get("/partials/all-sessions")
+    assert resp.status_code == 200
+    # Pinned appears before time group headings
+    pinned_pos = resp.text.index("Pinned One")
+    sep_pos = resp.text.index("pinned-separator")
+    heading_pos = resp.text.index("group-heading")
+    regular_pos = resp.text.index("Regular One")
+    assert pinned_pos < sep_pos < heading_pos < regular_pos
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_tag_empty_state(mock_paginated, mock_config, client, tmp_path):
+    """Empty state shows tag-specific message."""
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    mock_paginated.return_value = ([], False)
+    resp = client.get("/partials/all-sessions?tag=frontend")
+    assert resp.status_code == 200
+    assert "No sessions in workspaces tagged" in resp.text
+    assert "frontend" in resp.text
+
+
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+def test_partials_all_sessions_time_filter_empty_state(mock_paginated, mock_config, client, tmp_path):
+    """Empty state shows time-specific message."""
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    mock_paginated.return_value = ([], False)
+    resp = client.get("/partials/all-sessions?time_filter=today")
+    assert resp.status_code == 200
+    assert "No sessions active" in resp.text
+    assert "today" in resp.text
+
+
+@patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
 def test_workspaces_includes_pinned_at_top(mock_discover, mock_config, client, tmp_path):
     """Unified workspaces endpoint shows pinned workspaces at top, non-pinned below."""
