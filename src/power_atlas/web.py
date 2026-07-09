@@ -523,7 +523,7 @@ async def partials_workspaces(
         if tag:
             cards_html += f'<div class="empty-state">No workspaces with tag &quot;{html_mod.escape(tag)}&quot;</div>'
         elif time_filter:
-            cards_html += f'<div class="empty-state">No workspaces active {time_filter.replace("_", " ")}</div>'
+            cards_html += f'<div class="empty-state">No workspaces active {html_mod.escape(time_filter.replace("_", " "))}</div>'
         elif provider != "all" and provider:
             empty_msgs = {
                 "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
