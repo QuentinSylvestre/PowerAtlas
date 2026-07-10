@@ -29,7 +29,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 /* Top bar */
 .topbar { display: flex; align-items: center; padding: 0 16px 0 0; height: 48px; border-bottom: 1px solid var(--border); gap: 10px; flex-shrink: 0; background: var(--topbar-bg); }
 .topbar-title { font-weight: 600; font-size: 14px; letter-spacing: -0.3px; }
-.topbar-banner { height: 100%; object-fit: contain; object-position: left center; max-width: 220px; flex-shrink: 1; min-width: 100px; }
+.topbar-banner { height: 47px; width: auto; flex-shrink: 0; }
 .topbar-spacer { flex: 1; }
 .topbar-cluster { display: flex; align-items: center; gap: 8px; }
 .topbar-separator { width: 1px; height: 28px; background: var(--border); opacity: 0.6; flex-shrink: 0; }
