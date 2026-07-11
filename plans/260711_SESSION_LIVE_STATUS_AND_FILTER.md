@@ -115,3 +115,33 @@ The ~60s threshold is tuned to the 30s refresh so a session doesn't flicker Work
 **Phase 4 — Status filter.** Add the `All / Live / Working / Waiting / Closed` dropdown to the Sessions panel; add `_activeStatus` state; wire into `_buildWorkspaceQs()` and the filter/clear/refresh JS. Server: filter session rows by status; filter workspace cards to those containing a matching-status session (no card hint). Handle `htmx.process()` after swaps.
 
 **Phase 5 — Tests + docs.** Presence classification tests, partial-annotation tests, both-panel filter tests. Update README "Features" (live status + filter) and remove the corresponding "Session health indicators" bullet from ROADMAP.
+
+---
+
+## Post-implementation: deferred items & how to verify them in a real workspace
+
+Shipped in commit `feat(session-status)`. Code review (`/code-review high`) raised 6 findings; two were fixed in the same commit (HTML-escape the `status` value in empty-state messages; offload the `psutil` scan via `asyncio.to_thread`). The rest were consciously deferred and are listed here so they can be exercised against live sessions.
+
+### Things to confirm work as intended (happy path)
+
+1. **Resumed session shows a dot.** In a real workspace, resume a Claude Code (or Kiro CLI) session from PowerAtlas (or run `claude --resume <id>` / `kiro-cli chat --resume-id <id>` in a terminal). Its row should show 🟢 **Working** while the agent is producing output, flipping to 🟡 **Waiting** ~60s after it stops. Closing the terminal drops the dot within one refresh (~30s).
+2. **Status filter narrows both panels.** Set the Sessions-panel filter to **Live** → only running sessions remain, and the Workspaces panel collapses to folders that contain a live session. **Closed** → the historical list.
+
+### Deferred item 1 — Kiro CLI timestamp timezone (review finding #3)
+
+- **Risk:** `_age_seconds` treats a naive `updated_at` as *local* time. Claude's is UTC-aware (safe); Kiro CLI's comes straight from its DB with unconfirmed tz semantics. If Kiro stores naive **UTC**, the working/waiting split is off by the host's UTC offset.
+- **How to check:** actively use a Kiro CLI session and watch its dot. If it sits on 🟡 **Waiting** even while the agent is clearly producing output (while a Claude session under identical activity shows 🟢 **Working**), the tz assumption is wrong for Kiro. Fix would be to normalize Kiro's `updated_at` at the source in `data_kiro.py`.
+
+### Deferred item 2 — status filter only scans the first page (review finding #4)
+
+- **Risk:** `/partials/all-sessions` paginates 20-by-recency, and the status filter runs over the loaded page only (`has_more` forced False). A live session ranked beyond the 20 most-recent by `updated_at` won't appear under a Live/Working/Waiting filter.
+- **How to check:** with >20 total sessions, resume an **old** session (so it's live but not in the recent 20) and set the filter to **Live**. If it doesn't show, the limitation is confirmed. Live sessions are usually recent, so this rarely bites; a real fix would filter server-side before paginating.
+
+### Deferred item 3 — fresh (non-resumed) in-terminal sessions get no dot (documented limitation)
+
+- **Behavior:** liveness is matched by the session id on the process command line. A session started fresh (`claude` with no `--resume`) has no id in argv, so it won't get a row-level dot. The **workspace** card can still read as live (cwd match), which is why row dots and card filtering use different signals.
+- **How to check:** start a brand-new `claude`/`kiro-cli` (no resume) in a workspace terminal. Expected: no row dot for that session; the workspace may still appear under the **Live** filter. If detecting these matters, a future enhancement can attribute cwd-level liveness to the most-recently-updated session in that folder.
+
+### Deferred item 4 — `Snapshot.is_live` carries an unused `cwd` arg (review finding #6, code-only)
+
+- Not user-visible. Kept as a seam for a future stronger match (cross-check the process cwd against the session workspace). No workspace check needed.
