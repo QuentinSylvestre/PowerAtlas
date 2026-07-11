@@ -19,8 +19,9 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from datetime import timezone
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
-from . import autostart, data, icons, launcher
+from . import autostart, data, icons, launcher, presence
 
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
@@ -98,6 +99,62 @@ def _time_bucket(iso_str: str) -> str:
     if d >= today - timedelta(days=today.weekday()):  # Monday of this week
         return "this_week"
     return "before"
+
+
+# A live session counts as "working" if its transcript was touched within this
+# window, else "waiting". Tuned above the ~30s refresh cadence to avoid flicker.
+_WORKING_WINDOW_SECONDS = 60
+
+# Session statuses that count as "live" (a process is running for them).
+_LIVE_STATUSES = ("working", "waiting")
+
+
+def _age_seconds(iso_str: str) -> float | None:
+    """Seconds since an ISO-8601 timestamp, or None if unparseable.
+
+    Normalizes both aware (Claude: mtime→UTC) and naive (Kiro: raw DB value,
+    assumed local) timestamps to UTC before comparing.
+    """
+    if not iso_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    except (ValueError, OSError):
+        return None
+    dt = dt.astimezone(timezone.utc)  # naive is interpreted as local time
+    return (datetime.now(timezone.utc) - dt).total_seconds()
+
+
+def _live_status_from_age(age: float | None) -> str:
+    """Map a recency age to working/waiting for an already-confirmed-live session."""
+    if age is not None and age <= _WORKING_WINDOW_SECONDS:
+        return "working"
+    return "waiting"
+
+
+def _session_status(snapshot, session, provider: str) -> str:
+    """Return 'working' | 'waiting' | 'closed' for a session row."""
+    if not snapshot.is_live(provider, session.cwd, session.session_id):
+        return "closed"
+    return _live_status_from_age(_age_seconds(session.updated_at))
+
+
+def _workspace_status(snapshot, cwd: str, latest_updated: str,
+                      providers: set[str] | None) -> str:
+    """Coarse status for a workspace card (cwd-level liveness, no session load)."""
+    from .data import _normalize_path
+    if _normalize_path(cwd) not in snapshot.live_cwds(providers):
+        return "closed"
+    return _live_status_from_age(_age_seconds(latest_updated))
+
+
+def _status_matches(status_filter: str, status: str) -> bool:
+    """True if a computed status passes the requested filter value."""
+    if not status_filter or status_filter == "all":
+        return True
+    if status_filter == "live":
+        return status in _LIVE_STATUSES
+    return status == status_filter
 
 
 def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -> list[dict]:
@@ -351,6 +408,7 @@ async def partials_workspaces(
     provider: str = "all",
     tag: str = "",
     time_filter: str = "",
+    status: str = "",
     fresh: int = 0,
 ):
     """Render all workspaces: pinned at top (alphabetical), non-pinned below (by recency)."""
@@ -422,6 +480,18 @@ async def partials_workspaces(
         pinned_grouped = [g for g in pinned_grouped if _time_bucket(g["latest_updated"]) == time_filter]
         other_grouped = [g for g in other_grouped if _time_bucket(g["latest_updated"]) == time_filter]
 
+    # --- Live-status filter (cwd-level; shows cards containing matching activity) ---
+    if status and status != "all":
+        snap = await asyncio.to_thread(presence.get_snapshot)
+        prov_names = None if provider == "all" else {provider}
+
+        def _ws_status_keep(g):
+            return _status_matches(status, _workspace_status(
+                snap, g["cwd"], g["latest_updated"], prov_names))
+
+        pinned_grouped = [g for g in pinned_grouped if _ws_status_keep(g)]
+        other_grouped = [g for g in other_grouped if _ws_status_keep(g)]
+
     # --- Render: pinned first, then time-grouped non-pinned ---
     for group in pinned_grouped:
         cwd = group["cwd"]
@@ -470,7 +540,9 @@ async def partials_workspaces(
                 )
 
     if not cards_html:
-        if tag:
+        if status and status != "all":
+            cards_html += f'<div class="empty-state">No {html_mod.escape(status)} workspaces right now.</div>'
+        elif tag:
             cards_html += f'<div class="empty-state">No workspaces with tag &quot;{html_mod.escape(tag)}&quot;</div>'
         elif time_filter:
             cards_html += f'<div class="empty-state">No workspaces active {html_mod.escape(time_filter.replace("_", " "))}</div>'
@@ -491,7 +563,7 @@ async def partials_workspaces(
 
 @app.get("/partials/all-sessions", response_class=HTMLResponse)
 async def partials_all_sessions(request: Request, page: int = 1, provider: str = "all",
-                                q: str = "", tag: str = "", time_filter: str = ""):
+                                q: str = "", tag: str = "", time_filter: str = "", status: str = ""):
     """Render paginated all-sessions panel. Pinned at top, then time-grouped."""
     from .config import get_workspace_settings
 
@@ -548,6 +620,16 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
         ]
         has_more = False
 
+    # Live-status: annotate every row (for dots) and optionally filter.
+    snap = await asyncio.to_thread(presence.get_snapshot)
+    row_status = {(s.session_id, p): _session_status(snap, s, p) for s, p in sessions_with_prov}
+    if status and status != "all":
+        sessions_with_prov = [
+            (s, p) for s, p in sessions_with_prov
+            if _status_matches(status, row_status[(s.session_id, p)])
+        ]
+        has_more = False  # status filter operates on the loaded page only
+
     # Split pinned from non-pinned
     pinned_set = set(config.pinned_sessions)
     pinned_items = [(s, p) for s, p in sessions_with_prov if s.session_id in pinned_set]
@@ -569,6 +651,7 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
             provider_color=_get_provider_color(prov_name, config),
             show_workspace=True,
             workspace_name=Path(session.cwd).name if session.cwd else "",
+            status=row_status.get((session.session_id, prov_name), "closed"),
         )
     if pinned_items and non_pinned:
         html += '<div class="pinned-separator" aria-hidden="true"></div>'
@@ -591,10 +674,13 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
                     provider_color=_get_provider_color(prov_name, config),
                     show_workspace=True,
                     workspace_name=Path(session.cwd).name if session.cwd else "",
+                    status=row_status.get((session.session_id, prov_name), "closed"),
                 )
 
     if not html:
-        if tag:
+        if status and status != "all":
+            html = f'<div class="empty-state">No {html_mod.escape(status)} sessions right now.</div>'
+        elif tag:
             html = f'<div class="empty-state">No sessions in workspaces tagged &quot;{html_mod.escape(tag)}&quot;</div>'
         elif time_filter:
             html = f'<div class="empty-state">No sessions active {html_mod.escape(time_filter.replace("_", " "))}</div>'
@@ -610,11 +696,11 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
 
 @app.get("/search", response_class=HTMLResponse)
 async def search(request: Request, q: str = "", provider: str = "all",
-                 tag: str = "", time_filter: str = ""):
+                 tag: str = "", time_filter: str = "", status: str = ""):
     query = q.strip().lower()
     if not query:
         return await partials_workspaces(request, provider=provider, tag=tag,
-                                         time_filter=time_filter)
+                                         time_filter=time_filter, status=status)
 
     import asyncio
     try:
@@ -661,6 +747,13 @@ async def search(request: Request, q: str = "", provider: str = "all",
     # Apply time filter
     if time_filter:
         grouped = [g for g in grouped if _time_bucket(g["latest_updated"]) == time_filter]
+
+    # Apply live-status filter
+    if status and status != "all":
+        snap = await asyncio.to_thread(presence.get_snapshot)
+        prov_names = None if provider == "all" else {provider}
+        grouped = [g for g in grouped if _status_matches(
+            status, _workspace_status(snap, g["cwd"], g["latest_updated"], prov_names))]
 
     cards_html = ""
 
@@ -1072,7 +1165,8 @@ async def partials_session_tail(request: Request, sid: str = "", provider: str =
 
 
 @app.get("/partials/sessions", response_class=HTMLResponse)
-async def partials_sessions(request: Request, cwd: str = "", provider: str = "all", fresh: int = 0):
+async def partials_sessions(request: Request, cwd: str = "", provider: str = "all",
+                            status: str = "", fresh: int = 0):
     """Lazy-load sessions for a workspace card. provider=all merges all providers."""
     import asyncio
     import time
@@ -1134,15 +1228,22 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
     if not flat_sessions:
         return HTMLResponse('<div class="new-session-inline">+ New session</div>')
     stale = not Path(cwd).exists()
+    snap = await asyncio.to_thread(presence.get_snapshot)
     html = ""
     for session in flat_sessions:
         prov_name = prov_map.get(id(session), provider if provider != "all" else "kiro-cli")
+        sess_status = _session_status(snap, session, prov_name)
+        if status and status != "all" and not _status_matches(status, sess_status):
+            continue
         html += templates.get_template("partials/session_row.html").render(
             request=request, session=session, cwd=cwd, stale=stale,
             pinned_sessions=config.pinned_sessions,
             provider_name=prov_name,
             provider_color=_get_provider_color(prov_name, config),
+            status=sess_status,
         )
+    if not html:
+        return HTMLResponse('<div class="new-session-inline">No matching sessions</div>')
     return HTMLResponse(html)
 
 

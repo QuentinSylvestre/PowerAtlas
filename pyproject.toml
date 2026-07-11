@@ -18,6 +18,7 @@ dependencies = [
     "tomli-w>=1.0",
     "pywebview>=5.0",
     "pynput>=1.7",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]

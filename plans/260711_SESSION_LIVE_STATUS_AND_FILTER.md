@@ -1,8 +1,8 @@
 # Live Session Status and Status Filter
 
 > **Date**: 2026-07-11
-> **Status**: Planned  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: 2026-07-11T07:03
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-11T07:20
 > **Scope**: Show which discovered sessions are currently alive (🟢 Working / 🟡 Waiting) via live-only dots on session rows, plus a status filter dropdown that acts on both the Sessions and Workspaces panels
 > **Estimated effort**: ~1-2 days
 

@@ -3041,3 +3041,144 @@ def test_bulk_get_returns_multiple(mock_load, client, tmp_path):
     assert "frontend" in body["all_tags"]
     assert "backend" in body["all_tags"]
     assert "archived" in body["all_tags"]
+
+
+# --- Live-session status: helpers, filtering, dots ---
+
+from datetime import datetime, timezone, timedelta
+from power_atlas import presence
+from power_atlas.web import _age_seconds, _session_status, _workspace_status, _status_matches
+from power_atlas.data import _normalize_path
+
+
+def _recent_iso(secs=5):
+    return (datetime.now(timezone.utc) - timedelta(seconds=secs)).isoformat()
+
+
+def _old_iso(mins=10):
+    return (datetime.now(timezone.utc) - timedelta(minutes=mins)).isoformat()
+
+
+def _snapshot(live_sids=(), live_cwds=()):
+    return presence.Snapshot(set(live_sids), set(live_cwds))
+
+
+def test_age_seconds_parses_and_degrades():
+    assert _age_seconds(_recent_iso()) < 30
+    assert _age_seconds("") is None
+    assert _age_seconds("not-a-date") is None
+    # Naive timestamp (Kiro-style) is interpreted, not rejected.
+    naive = (datetime.now() - timedelta(seconds=3)).replace(microsecond=0).isoformat()
+    assert _age_seconds(naive) is not None
+
+
+def test_status_matches_semantics():
+    assert _status_matches("", "closed") is True          # no filter
+    assert _status_matches("all", "waiting") is True
+    assert _status_matches("live", "working") is True
+    assert _status_matches("live", "waiting") is True
+    assert _status_matches("live", "closed") is False
+    assert _status_matches("working", "working") is True
+    assert _status_matches("working", "waiting") is False
+
+
+def test_session_status_working_waiting_closed():
+    live = _snapshot(live_sids={("claude-code", "s1")})
+    working = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    waiting = _make_session(session_id="s1", cwd="/w", updated_at=_old_iso())
+    closed = _make_session(session_id="s2", cwd="/w", updated_at=_recent_iso())
+    assert _session_status(live, working, "claude-code") == "working"
+    assert _session_status(live, waiting, "claude-code") == "waiting"
+    assert _session_status(live, closed, "claude-code") == "closed"
+
+
+def test_workspace_status_cwd_and_provider_scoped():
+    snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
+    assert _workspace_status(snap, "/w", _recent_iso(), {"claude-code"}) == "working"
+    assert _workspace_status(snap, "/w", _old_iso(), {"claude-code"}) == "waiting"
+    # provider filter excludes the live claude process
+    assert _workspace_status(snap, "/w", _recent_iso(), {"kiro-cli"}) == "closed"
+    # different folder is closed
+    assert _workspace_status(snap, "/other", _recent_iso(), None) == "closed"
+
+
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+@patch("power_atlas.web.load_config")
+def test_all_sessions_dot_and_status_filter(mock_config, mock_paginated, mock_snap, client, tmp_path):
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    ws = str(tmp_path)
+    live_s = _make_session(session_id="live1", cwd=ws, updated_at=_recent_iso())
+    dead_s = _make_session(session_id="dead1", cwd=ws, updated_at=_recent_iso())
+    mock_paginated.return_value = ([(live_s, "claude-code"), (dead_s, "claude-code")], False)
+    mock_snap.return_value = _snapshot(live_sids={("claude-code", "live1")})
+
+    # No filter: both rows render, exactly one live-only dot (on live1).
+    resp = client.get("/partials/all-sessions?page=1")
+    assert resp.status_code == 200
+    assert 'data-sid="live1"' in resp.text and 'data-sid="dead1"' in resp.text
+    assert resp.text.count("session-status") == 1
+    assert "status-working" in resp.text
+
+    # status=live keeps only the live row.
+    resp2 = client.get("/partials/all-sessions?page=1&status=live")
+    assert 'data-sid="live1"' in resp2.text
+    assert 'data-sid="dead1"' not in resp2.text
+
+    # status=closed keeps only the non-live row.
+    resp3 = client.get("/partials/all-sessions?page=1&status=closed")
+    assert 'data-sid="dead1"' in resp3.text
+    assert 'data-sid="live1"' not in resp3.text
+
+
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspaces_status_filter_hides_dead_folders(mock_discover, mock_providers, mock_sessions, mock_snap, client, tmp_path):
+    live_dir = tmp_path / "liveproj"; live_dir.mkdir()
+    dead_dir = tmp_path / "deadproj"; dead_dir.mkdir()
+    recent = _recent_iso()
+    mock_discover.return_value = [
+        (str(live_dir), 1, recent, "claude-code"),
+        (str(dead_dir), 1, recent, "claude-code"),
+    ]
+    mock_providers.return_value = ["claude-code"]
+    mock_sessions.return_value = [_make_session(cwd=str(live_dir))]
+    mock_snap.return_value = _snapshot(live_cwds={("claude-code", _normalize_path(str(live_dir)))})
+
+    resp = client.get("/partials/workspaces?status=live")
+    assert resp.status_code == 200
+    assert "liveproj" in resp.text
+    assert "deadproj" not in resp.text
+
+
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.data.get_all_sessions_paginated")
+@patch("power_atlas.web.load_config")
+def test_all_sessions_status_empty_state_escapes_input(mock_config, mock_paginated, mock_snap, client):
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    mock_paginated.return_value = ([], False)
+    mock_snap.return_value = _snapshot()
+    resp = client.get("/partials/all-sessions", params={"page": 1, "status": "<img src=x onerror=alert(1)>"})
+    assert resp.status_code == 200
+    assert "<img src=x" not in resp.text          # raw tag must not be reflected
+    assert "&lt;img" in resp.text                  # escaped instead
+
+
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_workspaces_status_empty_state_escapes_input(mock_discover, mock_providers, mock_sessions, mock_snap, client, tmp_path):
+    d = tmp_path / "proj"; d.mkdir()
+    mock_discover.return_value = [(str(d), 1, _recent_iso(), "claude-code")]
+    mock_providers.return_value = ["claude-code"]
+    mock_sessions.return_value = [_make_session(cwd=str(d))]
+    mock_snap.return_value = _snapshot()  # nothing live -> status=working filters all out
+    resp = client.get("/partials/workspaces", params={"status": "<b>x</b>"})
+    assert resp.status_code == 200
+    assert "<b>x</b>" not in resp.text
+    assert "&lt;b&gt;x" in resp.text

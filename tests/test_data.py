@@ -1397,3 +1397,85 @@ class TestGetAllSessionsPaginated:
         )
         ids = [s.session_id for s, _ in results]
         assert ids == ["sort-new", "sort-mid", "sort-old"]
+
+
+# --- Live-session presence detection (presence.py) ---
+
+class _FakeProc:
+    """Minimal psutil.Process stand-in for presence scan tests."""
+
+    def __init__(self, name, cmdline, cwd=None, cwd_error=False):
+        self.info = {"name": name, "cmdline": cmdline}
+        self._cwd = cwd
+        self._cwd_error = cwd_error
+
+    def cwd(self):
+        if self._cwd_error:
+            raise RuntimeError("access denied")
+        return self._cwd
+
+
+def _scan_with(procs):
+    """Run presence._scan() with a faked process table."""
+    from power_atlas import presence
+    with patch.object(presence, "_AVAILABLE", True), \
+         patch.object(presence.psutil, "process_iter", return_value=procs):
+        return presence._scan()
+
+
+def test_presence_matches_claude_resume_id():
+    snap = _scan_with([
+        _FakeProc("claude", ["claude", "--resume", "abc123"], cwd="/home/u/proj"),
+    ])
+    assert snap.is_live("claude-code", "/home/u/proj", "abc123") is True
+    assert snap.is_live("claude-code", "/home/u/proj", "other") is False
+    assert "/home/u/proj" in snap.live_cwds({"claude-code"})
+
+
+def test_presence_matches_kiro_resume_id_flag():
+    snap = _scan_with([
+        _FakeProc("kiro-cli", ["kiro-cli", "chat", "--resume-id", "kx"], cwd="/w"),
+    ])
+    assert snap.is_live("kiro-cli", "/w", "kx") is True
+    # The claude flag prefix must not cross-match kiro's --resume-id.
+    assert snap.is_live("claude-code", "/w", "kx") is False
+
+
+def test_presence_resume_equals_form():
+    snap = _scan_with([
+        _FakeProc("claude", ["claude", "--resume=eqid"], cwd="/w"),
+    ])
+    assert snap.is_live("claude-code", "/w", "eqid") is True
+
+
+def test_presence_kiro_ide_never_live():
+    # A kiro (IDE) process must never be treated as a resumable session.
+    snap = _scan_with([_FakeProc("kiro", ["kiro", "/some/folder"], cwd="/some/folder")])
+    assert snap.is_live("kiro-ide", "/some/folder", "anything") is False
+    assert snap.live_cwds() == set()
+
+
+def test_presence_cwd_access_denied_is_tolerated():
+    snap = _scan_with([
+        _FakeProc("claude", ["claude", "--resume", "id1"], cwd_error=True),
+    ])
+    # sid still matched even though cwd() raised
+    assert snap.is_live("claude-code", "/whatever", "id1") is True
+    assert snap.live_cwds() == set()
+
+
+def test_presence_ignores_unrelated_processes():
+    snap = _scan_with([
+        _FakeProc("bash", ["bash", "-c", "sleep 1"], cwd="/w"),
+        _FakeProc("python", ["python", "app.py"], cwd="/w"),
+    ])
+    assert snap.live_cwds() == set()
+    assert snap.is_live("claude-code", "/w", "id") is False
+
+
+def test_presence_unavailable_returns_empty():
+    from power_atlas import presence
+    with patch.object(presence, "_AVAILABLE", False):
+        snap = presence._scan()
+    assert snap.live_cwds() == set()
+    assert snap.is_live("claude-code", "/w", "id") is False
