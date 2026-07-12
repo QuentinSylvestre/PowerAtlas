@@ -51,6 +51,14 @@
 **How to apply**: In `_group_workspaces`, track seen providers per workspace with a set, merge counts on duplicates, and sort the provider list alphabetically before returning. Also sort the launchers grid and filter tabs.
 **Source**: `plans/done/260706-1653_KIRO_IDE_PROVIDER.md` — post-implementation duplicate icon fix | **Verified**: 2026-07-06
 
+
+### CSS image sizing requires understanding aspect ratio math before iterating — calculate first, style second
+
+**Why**: Agent made 8 CSS change attempts to fix banner sizing (object-fit, max-width, padding, explicit height) before diagnosing that a 1920x219 image in a 48px-high container with max-width:220px needed simple aspect-ratio math. The user explicitly complained "didn't work. image ratio changed now it looks horrible" and "keep iterating and check the results yourself before handing over."
+**How to apply**: When a CSS image sizing issue is reported, first check the image's intrinsic dimensions, calculate the needed container dimensions from the aspect ratio, then apply the single correct CSS change. Don't iterate on CSS properties without understanding the math first.
+**Source**: Session 52f28138 — banner sizing back-and-forth (8+ turns) | **Verified**: 2026-07-10
+
+
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
@@ -58,3 +66,9 @@
 **Why**: In session 57a3df8b, the user corrected: 'My screenshot was a claude code session!' - the agent analyzed a screenshot but assumed kiro-cli. Claude Code and kiro-cli have visually distinct UI patterns.
 **How to apply**: When the user shares a screenshot of a session or terminal output, identify the provider (kiro-cli vs Claude Code vs Kiro IDE) from visual cues before analyzing content. Ask if uncertain rather than assuming kiro-cli as default.
 **Source**: Session 57a3df8b (2026-07-03) - session title hot-reload fix | **Verified**: 2026-07-05
+
+### PowerAtlas UI features cluster into multi-plan sequences — scope early or defer split
+
+**Why**: The July 5-9 sprint shows clustering: workspace cards → Kiro IDE provider → panel restructure → workspace tags → session panel style. Each plan builds on the previous. The tag feature required a follow-up to extend filtering to sessions panel.
+**How to apply**: When exploring a PowerAtlas UI feature that touches panel structure, filtering, or workspace metadata, explicitly ask during /qexplore whether downstream panels/views should also be scoped in. Avoids the pattern of plan N+1 being 'extend plan N's feature to the other panel'.
+**Source**: Plan cluster analysis: 260709-1146 (tags) followed by 260709-1352 (unified filtering) | **Verified**: 2026-07-09

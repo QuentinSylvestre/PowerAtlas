@@ -18,11 +18,13 @@
 - ~~**Session health indicators** — live 🟢 Working / 🟡 Waiting status dots + status filter~~ — shipped (`260711_SESSION_LIVE_STATUS_AND_FILTER`); future extension: distinguish blocked-on-approval vs asked-a-question, "stale /qdev never completed" heuristics, and detecting fresh (non-resumed) in-terminal sessions
 - **Plan progress overlay** — parse plan files to show phase completion status on workspace cards (e.g., "Phase 3/5")
 - **kiro-cli usage stats** — dashboard with session counts, durations, tool usage patterns over time
-- **Workspace tags/groups** — group workspaces by purpose (personal, work, playbook) with color coding
 
 ## Platform
 
 - **kiro-cli v3 session support** — scan `~/.kiro/sessions/<workspace-hash>/sess_*/` alongside v2 `cli/` directory; handle new message format, subagent detection via `sub-executions/` dir
 
-## To sort
-- Hide workspaces (and see hidden workspaces)
+##Misc
+- Identify opened sessions
+- Focus on opened sessions
+- Visualize/interact with opened sessions from PowerAtlas
+- Local network access to mimic claude code remote control in semi-remote fashion
