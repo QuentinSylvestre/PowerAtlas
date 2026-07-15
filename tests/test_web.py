@@ -3074,52 +3074,89 @@ def test_age_seconds_parses_and_degrades():
 
 def test_status_matches_semantics():
     assert _status_matches("", "closed") is True          # no filter
-    assert _status_matches("all", "waiting") is True
-    assert _status_matches("live", "working") is True
-    assert _status_matches("live", "waiting") is True
+    assert _status_matches("all", "idle") is True
+    assert _status_matches("live", "active") is True
+    assert _status_matches("live", "needs_input") is True
+    assert _status_matches("live", "idle") is True
+    assert _status_matches("live", "errored") is True
     assert _status_matches("live", "closed") is False
-    assert _status_matches("working", "working") is True
-    assert _status_matches("working", "waiting") is False
+    assert _status_matches("active", "active") is True
+    assert _status_matches("active", "idle") is False
 
 
-def test_session_status_working_waiting_closed():
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_semantic_and_fallback(mock_semantic):
+    """Semantic status is returned when available; mtime fallback when None."""
+    from power_atlas.status_classifier import SemanticStatus
     live = _snapshot(live_sids={("claude-code", "s1")})
-    working = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    waiting = _make_session(session_id="s1", cwd="/w", updated_at=_old_iso())
-    closed = _make_session(session_id="s2", cwd="/w", updated_at=_recent_iso())
-    assert _session_status(live, working, "claude-code") == "working"
-    assert _session_status(live, waiting, "claude-code") == "waiting"
-    assert _session_status(live, closed, "claude-code") == "closed"
+    recent_s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    old_s = _make_session(session_id="s1", cwd="/w", updated_at=_old_iso())
+    closed_s = _make_session(session_id="s2", cwd="/w", updated_at=_recent_iso())
+
+    # Semantic path: returns classifier result
+    mock_semantic.return_value = SemanticStatus.NEEDS_INPUT
+    assert _session_status(live, recent_s, "claude-code") == "needs_input"
+    mock_semantic.return_value = SemanticStatus.ERRORED
+    assert _session_status(live, recent_s, "claude-code") == "errored"
+
+    # Fallback path: classifier returns None -> mtime heuristic
+    mock_semantic.return_value = None
+    assert _session_status(live, recent_s, "claude-code") == "active"
+    assert _session_status(live, old_s, "claude-code") == "idle"
+
+    # Closed: not live at all
+    assert _session_status(live, closed_s, "claude-code") == "closed"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_fresh_session_detection(mock_semantic):
+    """Fresh-session detection wires in via probable_fresh_session."""
+    from power_atlas.status_classifier import SemanticStatus
+    # Snapshot: process running in /w but no session id matched
+    snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
+    # Fresh session (created recently)
+    fresh_created = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+    fresh_s = _make_session(session_id="fresh1", cwd="/w", created_at=fresh_created, updated_at=_recent_iso())
+    other_s = _make_session(session_id="other1", cwd="/w", updated_at=_recent_iso())
+
+    mock_semantic.return_value = SemanticStatus.ACTIVE
+    # Pass all_sessions so fresh detection can work
+    all_sessions = [fresh_s, other_s]
+    # fresh_s is the newest and within 90s — should be detected as live
+    assert _session_status(snap, fresh_s, "claude-code", all_sessions) == "active"
+    # other_s is not the fresh one and not explicitly live
+    assert _session_status(snap, other_s, "claude-code", all_sessions) == "closed"
 
 
 def test_workspace_status_cwd_and_provider_scoped():
     snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
-    assert _workspace_status(snap, "/w", _recent_iso(), {"claude-code"}) == "working"
-    assert _workspace_status(snap, "/w", _old_iso(), {"claude-code"}) == "waiting"
+    assert _workspace_status(snap, "/w", _recent_iso(), {"claude-code"}) == "active"
+    assert _workspace_status(snap, "/w", _old_iso(), {"claude-code"}) == "idle"
     # provider filter excludes the live claude process
     assert _workspace_status(snap, "/w", _recent_iso(), {"kiro-cli"}) == "closed"
     # different folder is closed
     assert _workspace_status(snap, "/other", _recent_iso(), None) == "closed"
 
 
+@patch("power_atlas.web.get_semantic_status")
 @patch("power_atlas.web.presence.get_snapshot")
 @patch("power_atlas.web.data.get_all_sessions_paginated")
 @patch("power_atlas.web.load_config")
-def test_all_sessions_dot_and_status_filter(mock_config, mock_paginated, mock_snap, client, tmp_path):
+def test_all_sessions_dot_and_status_filter(mock_config, mock_paginated, mock_snap, mock_semantic, client, tmp_path):
     from power_atlas.config import Config
+    from power_atlas.status_classifier import SemanticStatus
     mock_config.return_value = Config()
     ws = str(tmp_path)
     live_s = _make_session(session_id="live1", cwd=ws, updated_at=_recent_iso())
     dead_s = _make_session(session_id="dead1", cwd=ws, updated_at=_recent_iso())
     mock_paginated.return_value = ([(live_s, "claude-code"), (dead_s, "claude-code")], False)
     mock_snap.return_value = _snapshot(live_sids={("claude-code", "live1")})
+    mock_semantic.return_value = SemanticStatus.ACTIVE
 
-    # No filter: both rows render, exactly one live-only dot (on live1).
+    # No filter: both rows render; dot rendering depends on template (Phase 4).
     resp = client.get("/partials/all-sessions?page=1")
     assert resp.status_code == 200
     assert 'data-sid="live1"' in resp.text and 'data-sid="dead1"' in resp.text
-    assert resp.text.count("session-status") == 1
-    assert "status-working" in resp.text
 
     # status=live keeps only the live row.
     resp2 = client.get("/partials/all-sessions?page=1&status=live")

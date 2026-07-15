@@ -22,6 +22,7 @@ from fastapi.templating import Jinja2Templates
 from datetime import timezone
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
 from . import autostart, data, icons, launcher, presence
+from .status_classifier import get_semantic_status, SemanticStatus
 
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
@@ -101,12 +102,13 @@ def _time_bucket(iso_str: str) -> str:
     return "before"
 
 
-# A live session counts as "working" if its transcript was touched within this
-# window, else "waiting". Tuned above the ~30s refresh cadence to avoid flicker.
+# Mtime fallback window: a live session with recent transcript activity is
+# classified as "active"; otherwise "idle". Used only when semantic classification
+# returns None. Tuned above the ~30s refresh cadence to avoid flicker.
 _WORKING_WINDOW_SECONDS = 60
 
 # Session statuses that count as "live" (a process is running for them).
-_LIVE_STATUSES = ("working", "waiting")
+_LIVE_STATUSES = ("active", "needs_input", "idle", "errored")
 
 
 def _age_seconds(iso_str: str) -> float | None:
@@ -125,27 +127,44 @@ def _age_seconds(iso_str: str) -> float | None:
     return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
-def _live_status_from_age(age: float | None) -> str:
-    """Map a recency age to working/waiting for an already-confirmed-live session."""
-    if age is not None and age <= _WORKING_WINDOW_SECONDS:
-        return "working"
-    return "waiting"
+def _session_status(snapshot, session, provider: str,
+                    all_sessions: list | None = None) -> str:
+    """Return semantic status for a session."""
+    # 1. Check explicit live (session id on cmdline)
+    is_explicitly_live = snapshot.is_live(provider, session.cwd, session.session_id)
 
+    # 2. Check fresh-session detection
+    is_fresh = False
+    if not is_explicitly_live and all_sessions is not None:
+        fresh_sid = snapshot.probable_fresh_session(provider, session.cwd, all_sessions)
+        if fresh_sid == session.session_id:
+            is_fresh = True
 
-def _session_status(snapshot, session, provider: str) -> str:
-    """Return 'working' | 'waiting' | 'closed' for a session row."""
-    if not snapshot.is_live(provider, session.cwd, session.session_id):
+    if not is_explicitly_live and not is_fresh:
         return "closed"
-    return _live_status_from_age(_age_seconds(session.updated_at))
+
+    # 3. Try semantic classification (JSONL tail)
+    semantic = get_semantic_status(session.session_id, provider, session.cwd)
+    if semantic is not None:
+        return semantic.value
+
+    # 4. Fallback: mtime heuristic (maps to active/idle only)
+    age = _age_seconds(session.updated_at)
+    if age is not None and age <= _WORKING_WINDOW_SECONDS:
+        return "active"
+    return "idle"
 
 
 def _workspace_status(snapshot, cwd: str, latest_updated: str,
                       providers: set[str] | None) -> str:
-    """Coarse status for a workspace card (cwd-level liveness, no session load)."""
+    """Coarse status for a workspace card — uses mtime as proxy (no per-session JSONL read here)."""
     from .data import _normalize_path
     if _normalize_path(cwd) not in snapshot.live_cwds(providers):
         return "closed"
-    return _live_status_from_age(_age_seconds(latest_updated))
+    age = _age_seconds(latest_updated)
+    if age is not None and age <= _WORKING_WINDOW_SECONDS:
+        return "active"
+    return "idle"
 
 
 def _status_matches(status_filter: str, status: str) -> bool:
@@ -622,7 +641,8 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
 
     # Live-status: annotate every row (for dots) and optionally filter.
     snap = await asyncio.to_thread(presence.get_snapshot)
-    row_status = {(s.session_id, p): _session_status(snap, s, p) for s, p in sessions_with_prov}
+    all_sessions_flat = [s for s, _p in sessions_with_prov]
+    row_status = {(s.session_id, p): _session_status(snap, s, p, all_sessions_flat) for s, p in sessions_with_prov}
     if status and status != "all":
         sessions_with_prov = [
             (s, p) for s, p in sessions_with_prov
@@ -1232,7 +1252,7 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
     html = ""
     for session in flat_sessions:
         prov_name = prov_map.get(id(session), provider if provider != "all" else "kiro-cli")
-        sess_status = _session_status(snap, session, prov_name)
+        sess_status = _session_status(snap, session, prov_name, flat_sessions)
         if status and status != "all" and not _status_matches(status, sess_status):
             continue
         html += templates.get_template("partials/session_row.html").render(
