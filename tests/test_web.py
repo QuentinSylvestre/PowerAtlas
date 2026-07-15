@@ -3182,3 +3182,282 @@ def test_workspaces_status_empty_state_escapes_input(mock_discover, mock_provide
     assert resp.status_code == 200
     assert "<b>x</b>" not in resp.text
     assert "&lt;b&gt;x" in resp.text
+
+
+# --- Status classifier tests ---
+
+import json as _json
+import time as _time
+from unittest.mock import patch as _patch, MagicMock
+
+from power_atlas.status_classifier import (
+    SemanticStatus,
+    _read_tail_lines,
+    _resolve_jsonl_path,
+    _status_cache,
+    classify_claude,
+    classify_kiro_v2,
+    classify_kiro_v3,
+    get_semantic_status,
+)
+
+
+class TestSemanticStatusEnum:
+    def test_enum_has_five_values(self):
+        assert len(SemanticStatus) == 5
+        assert SemanticStatus.ACTIVE == "active"
+        assert SemanticStatus.NEEDS_INPUT == "needs_input"
+        assert SemanticStatus.IDLE == "idle"
+        assert SemanticStatus.ERRORED == "errored"
+        assert SemanticStatus.CLOSED == "closed"
+
+
+class TestResolveJsonlPath:
+    def test_kiro_v2_returns_none_for_nonexistent(self, tmp_path):
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path):
+            result = _resolve_jsonl_path("nonexistent-id", "kiro-cli", "C:\\proj")
+            assert result is None
+
+    def test_kiro_v2_returns_path_when_exists(self, tmp_path):
+        session_file = tmp_path / "my-session.jsonl"
+        session_file.write_text("")
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path):
+            result = _resolve_jsonl_path("my-session", "kiro-cli", "C:\\proj")
+            assert result == session_file
+
+    def test_claude_code_returns_none_when_no_project_folder(self):
+        with _patch("power_atlas.status_classifier._get_project_folder", return_value=None):
+            result = _resolve_jsonl_path("sess-1", "claude-code", "C:\\proj")
+            assert result is None
+
+    def test_claude_code_returns_path_when_exists(self, tmp_path):
+        session_file = tmp_path / "sess-1.jsonl"
+        session_file.write_text("")
+        with _patch("power_atlas.status_classifier._get_project_folder", return_value=tmp_path):
+            result = _resolve_jsonl_path("sess-1", "claude-code", "C:\\proj")
+            assert result == session_file
+
+    def test_unknown_provider_returns_none(self):
+        result = _resolve_jsonl_path("sess-1", "unknown-provider", "C:\\proj")
+        assert result is None
+
+
+class TestReadTailLines:
+    def test_small_file_returns_all_lines(self, tmp_path):
+        f = tmp_path / "small.jsonl"
+        f.write_text("line1\nline2\nline3\n")
+        lines = _read_tail_lines(f, max_bytes=4096)
+        assert lines == ["line1", "line2", "line3"]
+
+    def test_large_file_discards_first_partial_line(self, tmp_path):
+        f = tmp_path / "large.jsonl"
+        # Write content larger than max_bytes so seek happens
+        padding = "A" * 100 + "\n"  # 101 bytes per line
+        # Write 50 lines = 5050 bytes (> 4096)
+        content = padding * 50 + "last_complete_line\n"
+        f.write_text(content)
+        lines = _read_tail_lines(f, max_bytes=200)
+        # First line should NOT be a partial 'AAA...' line
+        # It should start with a complete line
+        assert lines[0].startswith("A" * 100) or lines[0] == "last_complete_line"
+        # The key invariant: we don't get a partial line at the start
+        # (the seek lands mid-line, that partial is discarded)
+        for line in lines:
+            # Every line is either full padding or the last line
+            assert line == "A" * 100 or line == "last_complete_line"
+
+    def test_exact_boundary_no_discard(self, tmp_path):
+        """When file is exactly max_bytes, no seek past start → no discard."""
+        f = tmp_path / "exact.jsonl"
+        content = "line1\nline2\n"
+        f.write_bytes(content.encode("utf-8"))
+        lines = _read_tail_lines(f, max_bytes=len(content.encode("utf-8")) + 1)
+        assert "line1" in lines
+        assert "line2" in lines
+
+
+class TestClassifyKiroV2:
+    def _make_line(self, kind, data=None):
+        return _json.dumps({"version": "v1", "kind": kind, "data": data or {}})
+
+    def test_prompt_returns_active(self):
+        lines = [self._make_line("Prompt", {"content": "hello"})]
+        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+
+    def test_tool_results_returns_active(self):
+        lines = [self._make_line("ToolResults", {"results": []})]
+        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+
+    def test_assistant_with_tool_use_returns_active(self):
+        data = {"content": [{"kind": "toolUse", "data": {"name": "fs_read"}}]}
+        lines = [self._make_line("AssistantMessage", data)]
+        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+
+    def test_assistant_without_tool_use_returns_idle(self):
+        data = {"content": [{"kind": "text", "data": {"text": "Done."}}]}
+        lines = [self._make_line("AssistantMessage", data)]
+        assert classify_kiro_v2(lines) == SemanticStatus.IDLE
+
+    def test_last_message_wins_reverse_order(self):
+        """When multiple messages exist, the last (most recent) one determines status."""
+        lines = [
+            self._make_line("Prompt", {"content": "hello"}),
+            self._make_line("AssistantMessage", {"content": [{"kind": "text", "data": {}}]}),
+        ]
+        # Last line is AssistantMessage without toolUse → IDLE
+        assert classify_kiro_v2(lines) == SemanticStatus.IDLE
+
+    def test_empty_lines_returns_none(self):
+        assert classify_kiro_v2([]) is None
+
+    def test_invalid_json_returns_none(self):
+        assert classify_kiro_v2(["not json at all", "{broken"]) is None
+
+    def test_skips_unparseable_finds_valid(self):
+        """Skips garbage lines and classifies from the last valid one."""
+        lines = [
+            self._make_line("Prompt", {"content": "hello"}),
+            "garbage line",
+        ]
+        # Reverse walk: skip garbage, find Prompt → ACTIVE
+        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+
+
+class TestClassifyClaude:
+    def test_tool_result_returns_active(self):
+        lines = [_json.dumps({"type": "tool_result", "content": "output"})]
+        assert classify_claude(lines) == SemanticStatus.ACTIVE
+
+    def test_tool_use_returns_active(self):
+        lines = [_json.dumps({"type": "tool_use", "name": "read_file"})]
+        assert classify_claude(lines) == SemanticStatus.ACTIVE
+
+    def test_user_message_returns_active(self):
+        lines = [_json.dumps({"type": "user", "content": "do something"})]
+        assert classify_claude(lines) == SemanticStatus.ACTIVE
+
+    def test_human_role_returns_active(self):
+        """Legacy role-based format with 'human' role."""
+        lines = [_json.dumps({"role": "human", "content": "hello"})]
+        assert classify_claude(lines) == SemanticStatus.ACTIVE
+
+    def test_assistant_without_error_returns_idle(self):
+        lines = [_json.dumps({"type": "assistant", "content": "Done."})]
+        assert classify_claude(lines) == SemanticStatus.IDLE
+
+    def test_assistant_with_is_error_block_returns_errored(self):
+        lines = [_json.dumps({
+            "type": "assistant",
+            "content": [{"type": "text", "text": "failed", "is_error": True}],
+        })]
+        assert classify_claude(lines) == SemanticStatus.ERRORED
+
+    def test_assistant_with_top_level_is_error_returns_errored(self):
+        lines = [_json.dumps({
+            "type": "assistant",
+            "content": "something failed",
+            "is_error": True,
+        })]
+        assert classify_claude(lines) == SemanticStatus.ERRORED
+
+    def test_empty_lines_returns_none(self):
+        assert classify_claude([]) is None
+
+    def test_invalid_json_returns_none(self):
+        assert classify_claude(["not json", "{{"]) is None
+
+    def test_last_message_wins(self):
+        lines = [
+            _json.dumps({"type": "user", "content": "hi"}),
+            _json.dumps({"type": "assistant", "content": "Done."}),
+        ]
+        # Last line is assistant without error → IDLE
+        assert classify_claude(lines) == SemanticStatus.IDLE
+
+
+class TestClassifyKiroV3:
+    def test_returns_none_placeholder(self):
+        lines = [_json.dumps({"id": "x", "timestamp": "2026-01-01", "payload": {"type": "user"}})]
+        assert classify_kiro_v3(lines) is None
+
+    def test_empty_returns_none(self):
+        assert classify_kiro_v3([]) is None
+
+
+class TestGetSemanticStatus:
+    def setup_method(self):
+        """Clear cache between tests."""
+        _status_cache.clear()
+
+    def test_returns_none_for_missing_file(self):
+        with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=None):
+            result = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
+            assert result is None
+
+    def test_caches_result_and_returns_on_same_mtime(self, tmp_path):
+        session_file = tmp_path / "sess-1.jsonl"
+        line = _json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "hi"}})
+        session_file.write_text(line + "\n")
+
+        with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=session_file):
+            # First call — classifies
+            result1 = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
+            assert result1 == SemanticStatus.ACTIVE
+
+            # Second call — hits cache (same mtime)
+            result2 = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
+            assert result2 == SemanticStatus.ACTIVE
+
+            # Verify cache was populated
+            assert ("kiro-cli", "sess-1") in _status_cache
+
+    def test_cache_invalidated_on_mtime_change(self, tmp_path):
+        session_file = tmp_path / "sess-2.jsonl"
+        # Write initial content -> ACTIVE
+        line_active = _json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "hi"}})
+        session_file.write_text(line_active + "\n")
+
+        # Use a controlled monotonic clock so we can expire the TTL
+        call_count = [0]
+        base_time = 1000.0
+
+        def fake_monotonic():
+            # First few calls: time=1000 (within TTL)
+            # After we bump: time=1010 (beyond 5s TTL)
+            return base_time + (10.0 if call_count[0] > 2 else 0.0)
+
+        with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=session_file), \
+             _patch("power_atlas.status_classifier.time.monotonic", side_effect=fake_monotonic):
+            result1 = get_semantic_status("sess-2", "kiro-cli", "C:\\proj")
+            assert result1 == SemanticStatus.ACTIVE
+
+            # Write new content (IDLE) and force a different mtime
+            line_idle = _json.dumps({
+                "version": "v1", "kind": "AssistantMessage",
+                "data": {"content": [{"kind": "text", "data": {"text": "Done."}}]},
+            })
+            session_file.write_text(line_idle + "\n")
+            import os as _os
+            stat = _os.stat(session_file)
+            _os.utime(session_file, (stat.st_atime, stat.st_mtime + 10))
+
+            # Advance the clock beyond TTL
+            call_count[0] = 10
+
+            # Next call: TTL expired + mtime changed -> reclassifies
+            result2 = get_semantic_status("sess-2", "kiro-cli", "C:\\proj")
+            assert result2 == SemanticStatus.IDLE
+
+    def test_returns_none_on_stat_failure(self, tmp_path):
+        fake_path = tmp_path / "gone.jsonl"
+        # File doesn't exist, but _resolve_jsonl_path returns it
+        # (simulates race condition)
+        with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=fake_path):
+            result = get_semantic_status("sess-3", "kiro-cli", "C:\\proj")
+            assert result is None
+
+    def test_never_raises(self):
+        """get_semantic_status swallows all exceptions."""
+        with _patch("power_atlas.status_classifier._resolve_jsonl_path", side_effect=RuntimeError("boom")):
+            result = get_semantic_status("sess-4", "kiro-cli", "C:\\proj")
+            assert result is None
