@@ -566,18 +566,21 @@ enabled = false
 Wire into `web.py` — call `check_and_notify()` after computing each session's status. Call `notifications.mark_initialized()` after the first complete render pass to establish baseline without firing.
 
 **Exit criteria**:
-- [ ] Toast fires on Active→Idle, Active→Needs-input, Active→Errored transitions
-- [ ] First render pass establishes baseline without firing (prevents startup notification burst)
-- [ ] 1-minute cooldown per session prevents notification spam
-- [ ] `_session_states` bounded to 100 entries with LRU eviction of closed sessions
-- [ ] Config `[notifications] enabled = false` by default (opt-in), uses TOML table namespace
-- [ ] Windows: toast via PowerShell WinRT API with `-EncodedCommand` (no string injection from session titles)
-- [ ] Linux: `notify-send` subprocess with `shutil.which()` availability check (no new pip dependency)
-- [ ] `close_fds=True` on all subprocess.Popen calls (prevent fd leakage)
-- [ ] Notification failure is silently logged, never crashes the app
-- [ ] Unit tests in `tests/test_web.py`: transition detection, cooldown enforcement, disabled state, startup no-notify
-- [ ] README.md updated: feature description, config example, notification mention
-- [ ] ROADMAP.md updated: strike implemented items from future-extension list
+- [x] Toast fires on Active→Idle, Active→Needs-input, Active→Errored transitions
+- [x] First render pass establishes baseline without firing (prevents startup notification burst)
+- [x] 1-minute cooldown per session prevents notification spam
+- [x] `_session_states` bounded to 100 entries with LRU eviction of closed sessions
+- [x] Config `[notifications] enabled = false` by default (opt-in), uses TOML table namespace
+- [x] Windows: toast via PowerShell WinRT API with `-EncodedCommand` (no string injection from session titles)
+- [x] Linux: `notify-send` subprocess with `shutil.which()` availability check (no new pip dependency)
+- [x] `close_fds=True` on all subprocess.Popen calls (prevent fd leakage)
+- [x] Notification failure is silently logged, never crashes the app
+- [x] Unit tests in `tests/test_web.py`: transition detection, cooldown enforcement, disabled state, startup no-notify
+- [x] README.md updated: feature description, config example, notification mention
+- [x] ROADMAP.md updated: strike implemented items from future-extension list
+
+Implementation (2026-07-15, code: 19acae9)
+Implemented opt-in toast notifications for session status transitions. Created `src/power_atlas/notifications.py` with an LRU-bounded state tracker (100 entries max via OrderedDict), 60-second per-session cooldown, and platform-specific dispatch (Windows: PowerShell WinRT API with `-EncodedCommand` + `html.escape` for defense-in-depth against injection; Linux: `notify-send` with `shutil.which()` availability check). Integrated into `web.py` by adding a `notifications_enabled` parameter to `_session_status()` and calling `mark_initialized()` after the first render pass to prevent startup burst. Added `notifications: dict` field to the `Config` dataclass defaulting to `{"enabled": False}`. Updated README with notification feature description and config example. Updated ROADMAP.md. 11 unit tests in `test_web.py` cover all transition types, cooldown enforcement, disabled state, startup suppression, and LRU eviction.
 
 ## 6) Risk Assessment
 
@@ -621,6 +624,20 @@ Wire into `web.py` — call `check_and_notify()` after computing each session's 
 <Reserved — filled during implementation>
 
 ## Review Log
+
+### 2026-07-15 — Implementation Review (after Phase 5, personas: Senior engineer, Security auditor)
+
+Implementation health: Green.
+1 sub-agent dispatched (combined personas). 4 findings (0 High, 1 Medium downgraded to informational, 3 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | PS double-quoted strings allow `$var` expansion in titles — theoretical info disclosure | User: accepted — session titles not attacker-controlled in desktop app threat model |
+| 2 | Low | Tests in test_web.py instead of plan-specified test_notifications.py | User: accepted — per AGENTS.md, consolidate in existing test file |
+| 3 | Low | Module-level mutable state without lock (GIL-protected in CPython) | User: accepted — single-user desktop app, CPython GIL sufficient |
+| 4 | Low | `notify-send` title starting with `-` could be a flag | User: accepted — title always starts with `"PowerAtlas — "` prefix |
+
+All 12 exit criteria verified as satisfied. Security deep-dive confirms `-EncodedCommand` + `html.escape` defense chain is sound.
 
 ### 2026-07-15 — Implementation Review (after Phase 3, personas: Senior engineer, Reliability engineer, Performance engineer, Maintainability reviewer)
 
