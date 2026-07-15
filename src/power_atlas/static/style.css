@@ -164,10 +164,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-time { font-size: 11px; color: #d4a054; white-space: nowrap; margin-left: auto; }
 .pinned-indicator { font-size: 11px; margin-right: 4px; opacity: 0.8; flex-shrink: 0; }
 .session-status { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
-.session-status.status-working { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22); animation: status-pulse 2s ease-in-out infinite; }
-.session-status.status-waiting { background: #eab308; box-shadow: 0 0 0 2px rgba(234, 179, 8, 0.22); }
+.session-status.status-active { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22); animation: status-pulse 2s ease-in-out infinite; }
+.session-status.status-needs-input { background: #eab308; box-shadow: 0 0 0 2px rgba(234, 179, 8, 0.22); }
+.session-status.status-idle { background: #94a3b8; box-shadow: 0 0 0 2px rgba(148, 163, 184, 0.15); }
+.session-status.status-errored { background: #ef4444; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.22); }
 @keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-@media (prefers-reduced-motion: reduce) { .session-status.status-working { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .session-status.status-active { animation: none; } }
 .session-preview { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-workspace { font-size: 11px; color: var(--accent); opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
