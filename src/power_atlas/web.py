@@ -105,7 +105,7 @@ def _time_bucket(iso_str: str) -> str:
 # Mtime fallback window: a live session with recent transcript activity is
 # classified as "active"; otherwise "idle". Used only when semantic classification
 # returns None. Tuned above the ~30s refresh cadence to avoid flicker.
-_WORKING_WINDOW_SECONDS = 60
+_ACTIVE_WINDOW_SECONDS = 60
 
 # Session statuses that count as "live" (a process is running for them).
 _LIVE_STATUSES = ("active", "needs_input", "idle", "errored")
@@ -150,7 +150,7 @@ def _session_status(snapshot, session, provider: str,
 
     # 4. Fallback: mtime heuristic (maps to active/idle only)
     age = _age_seconds(session.updated_at)
-    if age is not None and age <= _WORKING_WINDOW_SECONDS:
+    if age is not None and age <= _ACTIVE_WINDOW_SECONDS:
         return "active"
     return "idle"
 
@@ -162,7 +162,7 @@ def _workspace_status(snapshot, cwd: str, latest_updated: str,
     if _normalize_path(cwd) not in snapshot.live_cwds(providers):
         return "closed"
     age = _age_seconds(latest_updated)
-    if age is not None and age <= _WORKING_WINDOW_SECONDS:
+    if age is not None and age <= _ACTIVE_WINDOW_SECONDS:
         return "active"
     return "idle"
 
