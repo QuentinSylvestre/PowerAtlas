@@ -441,12 +441,17 @@ Update filter dropdown (`index.html`):
 ```
 
 **Exit criteria**:
-- [ ] All 4 live status dots render with correct colors and animations
-- [ ] Non-color differentiator for accessibility: distinct title text on dots (already present) + consider adding subtle shape variation (filled vs ring) or an icon overlay for Errored state
-- [ ] Filter dropdown shows new vocabulary and filters correctly
-- [ ] Accessibility: `aria-label` and `title` on all dot variants (already planned)
-- [ ] `@media (prefers-reduced-motion)` disables pulse animation (existing pattern)
-- [ ] No dot rendered for "closed" status (unchanged)
+- [x] All 4 live status dots render with correct colors and animations
+- [x] Non-color differentiator for accessibility: distinct title text on dots (already present) + consider adding subtle shape variation (filled vs ring) or an icon overlay for Errored state
+- [x] Filter dropdown shows new vocabulary and filters correctly
+- [x] Accessibility: `aria-label` and `title` on all dot variants (already planned)
+- [x] `@media (prefers-reduced-motion)` disables pulse animation (existing pattern)
+- [x] No dot rendered for "closed" status (unchanged)
+
+Implementation (2026-07-15, code: 9ace490)
+Implemented the 4 semantic session status dots (active, needs_input, idle, errored) replacing the former 2-state working/waiting system. CSS provides visually distinct colors: green with pulse animation for active, yellow for needs_input, slate-gray for idle, and red for errored. Each dot carries distinct `title` and `aria-label` text for accessibility (non-color differentiator). The `@media (prefers-reduced-motion)` rule disables the pulse on the active dot. The filter dropdown in index.html now exposes all 4 new statuses alongside the existing "Live" (meta-filter) and "Closed" options. No dot rendered for closed sessions.
+
+Per-phase review deferred to Step 9: CSS/HTML-only changes, no new executable code, 3 files modified with ~15 LOC total.
 
 ### Phase 5: Toast notifications on status transitions [QA]
 
