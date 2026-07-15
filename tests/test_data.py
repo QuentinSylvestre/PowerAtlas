@@ -1479,3 +1479,183 @@ def test_presence_unavailable_returns_empty():
         snap = presence._scan()
     assert snap.live_cwds() == set()
     assert snap.is_live("claude-code", "/w", "id") is False
+
+
+# --- Phase 2: Fresh session detection (probable_fresh_session) ---
+
+from types import SimpleNamespace
+from datetime import datetime, timezone, timedelta
+from power_atlas.presence import Snapshot
+
+
+class TestProbableFreshSession:
+    def _make_session(self, session_id: str, created_at: str, cwd: str = "C:\\Work"):
+        """Create a mock Session-like object."""
+        return SimpleNamespace(session_id=session_id, created_at=created_at, cwd=cwd)
+
+    def _now_iso(self, offset_seconds: int = 0) -> str:
+        """Return ISO-8601 timestamp offset from now by given seconds."""
+        dt = datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)
+        return dt.isoformat()
+
+    def test_fresh_session_matched(self):
+        """Process in cwd, newest session <90s old → returns session_id."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\Fresh"
+        norm = _normalize_path(cwd)
+
+        # Simulate a live process in this cwd but no explicit session id match
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        recent_ts = self._now_iso(-30)  # 30 seconds ago
+        sessions = [self._make_session("sess-new", recent_ts, cwd)]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result == "sess-new"
+
+    def test_old_session_not_matched(self):
+        """Process in cwd, newest session >90s old → returns None."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\Old"
+        norm = _normalize_path(cwd)
+
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        old_ts = self._now_iso(-200)  # 200 seconds ago
+        sessions = [self._make_session("sess-old", old_ts, cwd)]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result is None
+
+    def test_explicit_match_takes_precedence(self):
+        """Session id already in _live_sids → returns None (no double-detect)."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\Explicit"
+        norm = _normalize_path(cwd)
+
+        recent_ts = self._now_iso(-10)  # 10 seconds ago
+        snap = Snapshot(
+            live_sids={("kiro-cli", "sess-explicit")},
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        sessions = [self._make_session("sess-explicit", recent_ts, cwd)]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result is None
+
+    def test_no_process_in_cwd(self):
+        """No provider process running in this cwd → returns None."""
+        cwd = "C:\\Projects\\NoProcess"
+
+        # live_cwds is empty — no process detected
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds=set(),
+        )
+
+        recent_ts = self._now_iso(-5)
+        sessions = [self._make_session("sess-noproc", recent_ts, cwd)]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result is None
+
+    def test_multiple_sessions_only_newest_considered(self):
+        """Multiple sessions — only the newest one is evaluated for freshness."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\Multi"
+        norm = _normalize_path(cwd)
+
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("claude-code", norm)},
+        )
+
+        # Newest is fresh (20s ago), older ones are stale
+        sessions = [
+            self._make_session("sess-old1", "2026-01-01T00:00:00Z", cwd),
+            self._make_session("sess-old2", "2026-06-01T00:00:00Z", cwd),
+            self._make_session("sess-newest", self._now_iso(-20), cwd),
+        ]
+
+        result = snap.probable_fresh_session("claude-code", cwd, sessions)
+        assert result == "sess-newest"
+
+    def test_multiple_sessions_newest_is_old(self):
+        """Multiple sessions, all old — even the newest is >90s → returns None."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\AllOld"
+        norm = _normalize_path(cwd)
+
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        sessions = [
+            self._make_session("sess-a", "2026-01-01T00:00:00Z", cwd),
+            self._make_session("sess-b", "2026-06-01T00:00:00Z", cwd),
+            self._make_session("sess-c", self._now_iso(-120), cwd),  # 120s ago
+        ]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result is None
+
+    def test_empty_sessions_list(self):
+        """Empty sessions list → returns None."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\Empty"
+        norm = _normalize_path(cwd)
+
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, [])
+        assert result is None
+
+    def test_z_suffix_timestamp_parsed(self):
+        """ISO-8601 timestamps with 'Z' suffix are correctly parsed."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\Zulu"
+        norm = _normalize_path(cwd)
+
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        # Create a timestamp with Z suffix that's fresh
+        now = datetime.now(timezone.utc) - timedelta(seconds=10)
+        z_ts = now.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        sessions = [self._make_session("sess-z", z_ts, cwd)]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result == "sess-z"
+
+    def test_two_fresh_sessions_same_cwd_only_newest(self):
+        """Two sessions both <90s old — only the newest one is returned."""
+        from power_atlas.data import _normalize_path
+        cwd = "C:\\Projects\\TwoFresh"
+        norm = _normalize_path(cwd)
+
+        snap = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-cli", norm)},
+        )
+
+        # Both are fresh but one is newer
+        sessions = [
+            self._make_session("sess-older-fresh", self._now_iso(-60), cwd),
+            self._make_session("sess-newer-fresh", self._now_iso(-10), cwd),
+        ]
+
+        result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
+        assert result == "sess-newer-fresh"

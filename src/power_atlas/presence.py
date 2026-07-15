@@ -21,11 +21,34 @@ even when the exact session id could not be matched.
 
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .data import _normalize_path
 
 log = logging.getLogger("power_atlas.presence")
+
+
+def _parse_created_at(ts: str) -> datetime:
+    """Parse ISO-8601 timestamp, handling 'Z' suffix and timezone.
+
+    Returns datetime.min (UTC) on parse failure so max()/sorting never crashes.
+    """
+    if not ts:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    # Replace trailing 'Z' with +00:00 for fromisoformat compatibility
+    if ts.endswith("Z"):
+        cleaned = ts[:-1] + "+00:00"
+    else:
+        cleaned = ts
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    # Ensure timezone-aware (assume UTC if naive)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 try:
     import psutil
@@ -75,6 +98,44 @@ class Snapshot:
         if providers is None:
             return {c for _p, c in self._live_cwds}
         return {c for p, c in self._live_cwds if p in providers}
+
+    def probable_fresh_session(self, provider: str, cwd: str,
+                               sessions: list) -> str | None:
+        """If a provider process runs in cwd but no session id was matched,
+        return the session_id of the newest session (created within 90s).
+
+        Args:
+            provider: provider name (e.g. 'kiro-cli', 'claude-code')
+            cwd: workspace directory path (will be normalized)
+            sessions: list of Session objects for this workspace/provider
+
+        Returns:
+            session_id of the probable fresh session, or None
+        """
+        if not sessions:
+            return None
+
+        norm_cwd = _normalize_path(cwd)
+
+        # Step 1: Check if a provider process is running in this cwd
+        if norm_cwd not in self.live_cwds({provider}):
+            return None
+
+        # Step 2: If any session in this cwd already has an explicit match, skip
+        for s in sessions:
+            if (provider, s.session_id) in self._live_sids:
+                return None
+
+        # Step 3: Find the newest session by created_at
+        newest = max(sessions, key=lambda s: _parse_created_at(s.created_at))
+        created = _parse_created_at(newest.created_at)
+        now = datetime.now(timezone.utc)
+
+        # Step 4: Only match if created within 90 seconds
+        age = (now - created).total_seconds()
+        if age <= 90:
+            return newest.session_id
+        return None
 
 
 _EMPTY = Snapshot(set(), set())
