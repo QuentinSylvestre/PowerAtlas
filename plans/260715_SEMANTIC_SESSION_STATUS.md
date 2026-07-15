@@ -625,6 +625,34 @@ Implemented opt-in toast notifications for session status transitions. Created `
 
 ## Review Log
 
+### 2026-07-15 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer.
+6 findings (1 High, 1 Medium, 4 Low).
+QA verification: SKIP (runtime requires full desktop app launch with system tray, native window, and real session files — not exercisable via Playwright without the app running).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Status classifier | pass | SKIP | Unit tests cover all classifier paths; QA deferred to integrated Step 9b |
+| 2: Fresh session detection | pass | SKIP | Unit tests cover; runtime needs live process to verify |
+| 3: Pipeline integration | pass | SKIP | Unit tests cover status pipeline; template not exercisable standalone |
+| 4: UI dots/CSS/dropdown | not_run | SKIP | CSS/HTML-only, no executable code |
+| 5: Toast notifications | pass | SKIP | Unit tests cover transition logic; toast dispatch is platform subprocess |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `get_semantic_status()` sync I/O on async event loop — could stall with 20+ live sessions | User: accepted — same finding as Phase 3 #1; single-user desktop app, ≤3 live sessions, 5s cache |
+| 2 | Medium | README line 40 had stale Working/Waiting filter vocabulary | Fixed — updated to Active/Needs-input/Idle/Errored/Closed |
+| 3 | Low | `classify_session()` is dead code (unreferenced standalone wrapper) | User: accepted — useful cache-bypass API for future testing |
+| 4 | Low | `SemanticStatus.CLOSED` enum value never returned by classifiers | User: accepted — used as sentinel in web.py string comparisons; classifiers return None instead |
+| 5 | Low | Module-level mutable dicts without threading locks (GIL-protected) | User: accepted — same finding as per-phase; CPython GIL sufficient for desktop app |
+| 6 | Low | Silent accuracy degradation when all JSONL reads fail (falls to mtime) | User: accepted — fallback chain by design; debug logging exists for diagnosis |
+
+Step 9b QA: SKIP — app requires pywebview + system tray + native window to launch. Browser verification structurally blocked without full desktop environment. 550 unit tests cover all logic paths including classifier, integration, filtering, and notifications.
+
 ### 2026-07-15 — Implementation Review (after Phase 5, personas: Senior engineer, Security auditor)
 
 Implementation health: Green.
