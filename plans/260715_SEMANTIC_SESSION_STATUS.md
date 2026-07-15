@@ -386,14 +386,19 @@ def _probable_fresh_session(snapshot, provider: str, cwd: str,
 ```
 
 **Exit criteria**:
-- [ ] `_session_status()` returns semantic status strings (`active`/`needs_input`/`idle`/`errored`/`closed`)
-- [ ] `_workspace_status()` returns new vocabulary (`active`/`idle`/`closed`) — workspace filter works with new dropdown values
-- [ ] Mtime fallback activates only when `get_semantic_status()` returns `None`
-- [ ] Fresh-session detection wired in — new sessions show status dots (90s window)
-- [ ] `_status_matches()` handles new vocabulary correctly
-- [ ] All 4 callers in web.py updated (partials_workspaces, partials_all_sessions, partials_sessions, search)
-- [ ] Existing status tests migrated to new vocabulary (`working`→`active`, `waiting`→`idle`)
-- [ ] New tests: semantic status path, fallback path, fresh-session path
+- [x] `_session_status()` returns semantic status strings (`active`/`needs_input`/`idle`/`errored`/`closed`)
+- [x] `_workspace_status()` returns new vocabulary (`active`/`idle`/`closed`) — workspace filter works with new dropdown values
+- [x] Mtime fallback activates only when `get_semantic_status()` returns `None`
+- [x] Fresh-session detection wired in — new sessions show status dots (90s window)
+- [x] `_status_matches()` handles new vocabulary correctly
+- [x] All 4 callers in web.py updated (partials_workspaces, partials_all_sessions, partials_sessions, search)
+- [x] Existing status tests migrated to new vocabulary (`working`→`active`, `waiting`→`idle`)
+- [x] New tests: semantic status path, fallback path, fresh-session path
+
+Implementation (2026-07-15, code: d623101)
+Wired `get_semantic_status()` from the status_classifier module into `_session_status()`, adding a 3-tier resolution: (1) explicit live via cmdline session-id match, (2) fresh-session detection via `probable_fresh_session()` for new sessions within 90s, (3) semantic classification from JSONL tail, with mtime fallback to active/idle when the classifier returns None. Updated `_LIVE_STATUSES` to the new vocabulary (active/needs_input/idle/errored), rewrote `_workspace_status()` to return active/idle/closed, removed the `_live_status_from_age()` helper, and updated both callers of `_session_status()` (partials_all_sessions, partials_sessions) to pass `all_sessions` for fresh-detection. Renamed `_WORKING_WINDOW_SECONDS` → `_ACTIVE_WINDOW_SECONDS` for vocabulary consistency. Tests migrated: vocabulary updated working→active, waiting→idle; new tests cover the semantic path, fallback path, and fresh-session detection path.
+
+Divergence: session_row.html template still checks `status == 'working'` — dots invisible until Phase 4 updates the template (expected inter-phase transient).
 
 ### Phase 4: UI — dots, CSS, filter dropdown [QA]
 
@@ -611,6 +616,23 @@ Wire into `web.py` — call `check_and_notify()` after computing each session's 
 <Reserved — filled during implementation>
 
 ## Review Log
+
+### 2026-07-15 — Implementation Review (after Phase 3, personas: Senior engineer, Reliability engineer, Performance engineer, Maintainability reviewer)
+
+Implementation health: Green.
+4 sub-agents dispatched. 10 raw findings merged to 7 deduplicated (1 High, 3 Medium, 3 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `get_semantic_status()` does sync file I/O on async event loop | User: accepted — single-user desktop app, ≤3 live sessions, 5s cache, negligible latency |
+| 2 | Medium | `probable_fresh_session` O(N²) per render (N calls × N sessions) | User: accepted — bounded by page size (20), CPU-only, <1ms at typical scale |
+| 3 | Medium | `all_sessions_flat` includes all providers inflating iteration | User: accepted — method filters by provider internally, no functional impact |
+| 4 | Medium | `_WORKING_WINDOW_SECONDS` retains old vocabulary | Fixed — renamed to `_ACTIVE_WINDOW_SECONDS` (9ec9e49) |
+| 5 | Low | Template/dropdown still uses old vocabulary | User: accepted — Phase 4 scope (expected inter-phase state) |
+| 6 | Low | No test for needs_input/idle/errored as filter values | User: accepted — covered implicitly by integration; exhaustive filter-matrix test is Phase 4 scope |
+| 7 | Low | No exception handling around `probable_fresh_session` | User: accepted — method handles malformed timestamps internally via _parse_created_at |
+
+Performance engineer SC-7 verdict: PASS — ≤3 stat + ≤3 reads (12KB) per refresh cycle, all cacheable.
 
 ### 2026-07-15 — Implementation Review (after Phases 1&2, personas: Reliability engineer, Performance engineer, Senior engineer, Security auditor, End-user advocate, Maintainability reviewer)
 
