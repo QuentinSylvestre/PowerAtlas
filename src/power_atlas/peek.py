@@ -180,6 +180,11 @@ class PeekWindow:
                 user32 = ctypes.windll.user32
                 w = user32.GetSystemMetrics(0)
                 h = user32.GetSystemMetrics(1)
+                # Hide from taskbar — must Invoke on UI thread to avoid COM exception
+                native = getattr(win, 'native', None)
+                if native and native.ShowInTaskbar:
+                    import System.Windows.Forms as WinForms  # type: ignore[import]
+                    native.Invoke(WinForms.MethodInvoker(lambda: setattr(native, 'ShowInTaskbar', False)))
                 win.show()
                 win.resize(w, h)
                 win.move(0, 0)
