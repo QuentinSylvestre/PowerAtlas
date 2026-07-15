@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from datetime import timezone
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
-from . import autostart, data, icons, launcher, presence
+from . import autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
 PROVIDER_COLORS = {
@@ -110,6 +110,9 @@ _ACTIVE_WINDOW_SECONDS = 60
 # Session statuses that count as "live" (a process is running for them).
 _LIVE_STATUSES = ("active", "needs_input", "idle", "errored")
 
+# Tracks whether the first render has completed (for notification initialization)
+_first_render_done = False
+
 
 def _age_seconds(iso_str: str) -> float | None:
     """Seconds since an ISO-8601 timestamp, or None if unparseable.
@@ -128,7 +131,8 @@ def _age_seconds(iso_str: str) -> float | None:
 
 
 def _session_status(snapshot, session, provider: str,
-                    all_sessions: list | None = None) -> str:
+                    all_sessions: list | None = None,
+                    notifications_enabled: bool = False) -> str:
     """Return semantic status for a session."""
     # 1. Check explicit live (session id on cmdline)
     is_explicitly_live = snapshot.is_live(provider, session.cwd, session.session_id)
@@ -141,18 +145,24 @@ def _session_status(snapshot, session, provider: str,
             is_fresh = True
 
     if not is_explicitly_live and not is_fresh:
-        return "closed"
+        status_value = "closed"
+    elif (semantic := get_semantic_status(session.session_id, provider, session.cwd)) is not None:
+        # 3. Try semantic classification (JSONL tail)
+        status_value = semantic.value
+    else:
+        # 4. Fallback: mtime heuristic (maps to active/idle only)
+        age = _age_seconds(session.updated_at)
+        if age is not None and age <= _ACTIVE_WINDOW_SECONDS:
+            status_value = "active"
+        else:
+            status_value = "idle"
 
-    # 3. Try semantic classification (JSONL tail)
-    semantic = get_semantic_status(session.session_id, provider, session.cwd)
-    if semantic is not None:
-        return semantic.value
-
-    # 4. Fallback: mtime heuristic (maps to active/idle only)
-    age = _age_seconds(session.updated_at)
-    if age is not None and age <= _ACTIVE_WINDOW_SECONDS:
-        return "active"
-    return "idle"
+    # Notify on transition
+    notifications.check_and_notify(
+        session.session_id, session.title or "untitled",
+        status_value, notifications_enabled
+    )
+    return status_value
 
 
 def _workspace_status(snapshot, cwd: str, latest_updated: str,
@@ -642,7 +652,8 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
     # Live-status: annotate every row (for dots) and optionally filter.
     snap = await asyncio.to_thread(presence.get_snapshot)
     all_sessions_flat = [s for s, _p in sessions_with_prov]
-    row_status = {(s.session_id, p): _session_status(snap, s, p, all_sessions_flat) for s, p in sessions_with_prov}
+    _notif_enabled = config.notifications.get("enabled", False)
+    row_status = {(s.session_id, p): _session_status(snap, s, p, all_sessions_flat, _notif_enabled) for s, p in sessions_with_prov}
     if status and status != "all":
         sessions_with_prov = [
             (s, p) for s, p in sessions_with_prov
@@ -710,6 +721,12 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
     if has_more:
         next_page = page + 1
         html += f'<button class="load-more-btn" onclick="loadMoreSessions({next_page})">Load more</button>'
+
+    # Mark initialization after first render (prevents startup notification burst)
+    global _first_render_done
+    if not _first_render_done:
+        _first_render_done = True
+        notifications.mark_initialized()
 
     return HTMLResponse(html)
 
@@ -1249,10 +1266,11 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
         return HTMLResponse('<div class="new-session-inline">+ New session</div>')
     stale = not Path(cwd).exists()
     snap = await asyncio.to_thread(presence.get_snapshot)
+    _notif_enabled = config.notifications.get("enabled", False)
     html = ""
     for session in flat_sessions:
         prov_name = prov_map.get(id(session), provider if provider != "all" else "kiro-cli")
-        sess_status = _session_status(snap, session, prov_name, flat_sessions)
+        sess_status = _session_status(snap, session, prov_name, flat_sessions, _notif_enabled)
         if status and status != "all" and not _status_matches(status, sess_status):
             continue
         html += templates.get_template("partials/session_row.html").render(

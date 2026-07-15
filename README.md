@@ -37,7 +37,7 @@ The app starts as a system tray icon. Click to open the dashboard UI.
 - Inline provider filter next to search bar — filters workspaces and sessions panels simultaneously
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
 - Resume sessions with one click (opens terminal with `--resume-id`)
-- Live session status — sessions currently running in a terminal show a 🟢 Working (active) or 🟡 Waiting (stopped, needs you) dot; a status filter (All / Live / Working / Waiting / Closed) in the Sessions panel narrows both the sessions and workspaces panels. Detected by correlating the session id in running `claude` / `kiro-cli` processes; updates on the normal refresh cycle
+- Live session status — sessions currently running in a terminal show a 🟢 Working (active) or 🟡 Waiting (stopped, needs you) dot; a status filter (All / Live / Working / Waiting / Closed) in the Sessions panel narrows both the sessions and workspaces panels. Detected by correlating the session id in running `claude` / `kiro-cli` processes; updates on the normal refresh cycle. Opt-in toast notifications fire when a session transitions from Active to Idle/Needs-input/Errored (Windows toast via WinRT, Linux via notify-send)
 - Multi-select and batch launch sessions
 - Per-provider settings with default args (e.g. trust-all-tools)
 - Pin folders and sessions for quick access
@@ -99,6 +99,9 @@ color = "#06b6d4"  # tag color (used as card accent when no explicit workspace c
 
 [tag_settings.archived]
 color = "#64748b"
+
+[notifications]
+enabled = false  # opt-in: fire OS toast on Active→Idle/Needs-input/Errored transitions
 ```
 
 Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hotkey listener requires X11 (Wayland is not supported).

@@ -15,7 +15,7 @@
 
 ## Workspace Intelligence
 
-- ~~**Session health indicators** — live 🟢 Working / 🟡 Waiting status dots + status filter~~ — shipped (`260711_SESSION_LIVE_STATUS_AND_FILTER`); future extension: distinguish blocked-on-approval vs asked-a-question, "stale /qdev never completed" heuristics, and detecting fresh (non-resumed) in-terminal sessions
+- ~~**Session health indicators** — live 🟢 Working / 🟡 Waiting status dots + status filter~~ — shipped (`260711_SESSION_LIVE_STATUS_AND_FILTER`); semantic status (Active/Needs-input/Idle/Errored) + toast notifications shipped (`260715_SEMANTIC_SESSION_STATUS`); future extension: distinguish blocked-on-approval vs asked-a-question, "stale /qdev never completed" heuristics, sound/chime notifications, and detecting fresh (non-resumed) in-terminal sessions
 - **Plan progress overlay** — parse plan files to show phase completion status on workspace cards (e.g., "Phase 3/5")
 - **kiro-cli usage stats** — dashboard with session counts, durations, tool usage patterns over time
 

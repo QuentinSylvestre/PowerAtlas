@@ -61,6 +61,7 @@ class Config:
     provider_settings: dict[str, dict] = field(default_factory=dict)
     workspace_settings: dict[str, dict] = field(default_factory=dict)
     tag_settings: dict[str, dict] = field(default_factory=dict)
+    notifications: dict = field(default_factory=lambda: {"enabled": False})
 
 
 def get_workspace_settings(config: Config, cwd: str) -> dict:

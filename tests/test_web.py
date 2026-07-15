@@ -3498,3 +3498,130 @@ class TestGetSemanticStatus:
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", side_effect=RuntimeError("boom")):
             result = get_semantic_status("sess-4", "kiro-cli", "C:\\proj")
             assert result is None
+
+
+# --- Toast notification tests ---
+
+
+class TestNotifications:
+    """Tests for the notifications module (session status transition toasts)."""
+
+    def setup_method(self):
+        """Reset module state between tests."""
+        from power_atlas import notifications
+        notifications._session_states.clear()
+        notifications._initialized = False
+
+    def test_notification_transition_fires(self):
+        """Active→Idle triggers a toast notification."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        # Establish active state
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        # Transition to idle should fire
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            mock_fire.assert_called_once_with("My Session", "idle")
+
+    def test_notification_active_to_needs_input_fires(self):
+        """Active→Needs-input triggers a toast notification."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "needs_input", True)
+            mock_fire.assert_called_once_with("My Session", "needs_input")
+
+    def test_notification_active_to_errored_fires(self):
+        """Active→Errored triggers a toast notification."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "errored", True)
+            mock_fire.assert_called_once_with("My Session", "errored")
+
+    def test_notification_non_active_transition_does_not_fire(self):
+        """Idle→Active does NOT trigger a notification."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        notifications.check_and_notify("sess-1", "My Session", "idle", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "active", True)
+            mock_fire.assert_not_called()
+
+    def test_notification_cooldown(self):
+        """Second transition within 60s is suppressed."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        # First: active → idle (fires)
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            mock_fire.assert_called_once()
+        # Go back to active then idle again — within cooldown
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            mock_fire.assert_not_called()  # suppressed by cooldown
+
+    def test_notification_cooldown_expires(self):
+        """After cooldown expires, notification fires again."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        with patch("power_atlas.notifications._fire_toast"):
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+        # Manually expire the cooldown
+        state = notifications._session_states["sess-1"]
+        state.last_notified_at -= 61.0
+        # Go back to active then idle
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            mock_fire.assert_called_once()
+
+    def test_notification_disabled(self):
+        """enabled=False prevents all notifications."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        notifications.check_and_notify("sess-1", "My Session", "active", False)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "idle", False)
+            mock_fire.assert_not_called()
+
+    def test_notification_startup_no_fire(self):
+        """Before mark_initialized(), no notifications fire."""
+        from power_atlas import notifications
+        # Do NOT call mark_initialized
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "active", True)
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            mock_fire.assert_not_called()
+
+    def test_notification_startup_tracks_state(self):
+        """Before mark_initialized(), state IS tracked (for baseline)."""
+        from power_atlas import notifications
+        # Establish state before init
+        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        # Now initialize
+        notifications.mark_initialized()
+        # Transition should work since state was already active
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            mock_fire.assert_called_once_with("My Session", "idle")
+
+    def test_notification_state_bounded(self):
+        """>100 entries triggers LRU eviction of oldest."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        # Add 100 entries
+        for i in range(100):
+            notifications.check_and_notify(f"sess-{i}", f"Session {i}", "active", True)
+        assert len(notifications._session_states) == 100
+        assert "sess-0" in notifications._session_states
+        # Add one more — should evict sess-0
+        notifications.check_and_notify("sess-100", "Session 100", "active", True)
+        assert len(notifications._session_states) == 100
+        assert "sess-0" not in notifications._session_states
+        assert "sess-100" in notifications._session_states
