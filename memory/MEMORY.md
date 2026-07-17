@@ -56,7 +56,14 @@
 
 **Why**: Agent made 8 CSS change attempts to fix banner sizing (object-fit, max-width, padding, explicit height) before diagnosing that a 1920x219 image in a 48px-high container with max-width:220px needed simple aspect-ratio math. The user explicitly complained "didn't work. image ratio changed now it looks horrible" and "keep iterating and check the results yourself before handing over."
 **How to apply**: When a CSS image sizing issue is reported, first check the image's intrinsic dimensions, calculate the needed container dimensions from the aspect ratio, then apply the single correct CSS change. Don't iterate on CSS properties without understanding the math first.
-**Source**: Session 52f28138 — banner sizing back-and-forth (8+ turns) | **Verified**: 2026-07-10
+**Source**: Session 52f28138 — banner sizing back-and-forth (8+ turns) | **Verified**: 2026-07-10 | **Outcome**: not-recurred 2026-07-16
+
+
+### test_presence_matches_claude_resume_id fails on Windows — known pre-existing platform failure, deselect rather than re-diagnose
+
+**Why**: The /qdev run for 260715_SEMANTIC_SESSION_STATUS spent multiple turns (both phase sub-agents plus an orchestrator check against main) confirming this failure was pre-existing rather than caused by the change. The test (tests/test_data.py:1426) still asserts Unix-style '/home/u/proj' while _normalize_path produces backslashed paths on Windows (grep-verified 2026-07-16), so every future Windows test run in this project will hit it and risk misattributing it to the current change.
+**How to apply**: When the PowerAtlas suite fails only on test_presence_matches_claude_resume_id on Windows, treat it as the known pre-existing platform failure and deselect it (as done in the 260715 run); fixing the path normalization belongs in its own task, not mid-plan.
+**Source**: Session c431d086 (2026-07-15) — /qdev phases 1-2 test run | **Verified**: 2026-07-16
 
 
 ## Feedback
@@ -72,3 +79,31 @@
 **Why**: The July 5-9 sprint shows clustering: workspace cards → Kiro IDE provider → panel restructure → workspace tags → session panel style. Each plan builds on the previous. The tag feature required a follow-up to extend filtering to sessions panel.
 **How to apply**: When exploring a PowerAtlas UI feature that touches panel structure, filtering, or workspace metadata, explicitly ask during /qexplore whether downstream panels/views should also be scoped in. Avoids the pattern of plan N+1 being 'extend plan N's feature to the other panel'.
 **Source**: Plan cluster analysis: 260709-1146 (tags) followed by 260709-1352 (unified filtering) | **Verified**: 2026-07-09
+
+### WinForms threading: UI property changes must be marshalled via Invoke from background threads
+
+**Why**: Agent made 5 attempts at fixing peek window taskbar icon before landing on the Invoke pattern. User reported failure 3 times and a COM exception crash. The WinForms Invoke pattern for cross-thread UI changes is the canonical solution for pywebview on Windows.
+**How to apply**: When modifying pywebview native window properties (ShowInTaskbar, window style, visibility) from a non-UI thread (pynput hotkey handler, event callback), always use native.Invoke(WinForms.MethodInvoker(lambda: ...)) to marshal the call to the UI thread. Never assign UI properties directly from background threads.
+**Source**: Session 2ec9143d (2026-07-15) — 5 implementation attempts before correct pattern | **Verified**: 2026-07-16
+
+### psutil must be installed in the runtime venv, not just listed in pyproject.toml
+
+**Why**: Live status feature appeared completely broken because psutil was in pyproject.toml but not pip-installed. The web server silently fell back to is_available()=False. Required runtime debugging to discover.
+**How to apply**: After adding a new dependency to pyproject.toml, verify it's actually installed in the active venv with `pip show <pkg>`. When live-testing features dependent on optional packages, check installation status FIRST before debugging behavior.
+**Source**: Session 4f376bb5 (2026-07-12) — silent fallback masked root cause | **Verified**: 2026-07-16
+
+### User expects agent to restart PowerAtlas itself during development iterations
+
+**Why**: After 5 iteration attempts on the peek window fix, user said 'restart it yourself from now on' — indicating frustration with manual restart cycles.
+**How to apply**: During PowerAtlas development iterations requiring runtime verification, kill the existing PowerAtlas process and restart it using the venv's Python before asking the user to test. Don't ask the user to restart manually.
+**Source**: Session 2ec9143d (2026-07-15) — user correction | **Verified**: 2026-07-16
+
+## Decision
+
+### Semantic session status uses 4-state vocabulary: Active, Needs-input, Idle, Errored
+
+**Why**: User explicitly merged executing/thinking into 1 Active status during exploration. Design deliberately avoids v3-specific features but abstracts for future v3 support.
+**How to apply**: When adding session status features or extending the classifier, use the 4-state vocabulary. Do not re-split Active into sub-states. v3 kiro-cli support is designed-for but deferred.
+**Source**: Plan 260715-1407_SEMANTIC_SESSION_STATUS — user decision during /qexplore | **Verified**: 2026-07-16
+
+## Declined
