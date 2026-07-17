@@ -18,6 +18,9 @@ _CACHE_TTL = 30  # seconds
 # Serialize concurrent discover_workspaces_with_counts calls to prevent pile-up
 _discover_lock = threading.Lock()
 
+# Signals that warmup_all() has finished populating caches
+warmup_done = threading.Event()
+
 
 @dataclass(frozen=True)
 class Session:
@@ -284,6 +287,7 @@ def warmup_all(pinned_folders: list[str], pinned_sessions: list[str] | None = No
                     except OSError:
                         pass
                     remaining.discard(sid)
+    warmup_done.set()
 
 
 def get_session_tail(session_id: str, provider: str = "kiro-cli", cwd: str = "", max_lines: int = 15) -> list[str]:

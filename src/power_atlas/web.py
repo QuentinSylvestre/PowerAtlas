@@ -861,6 +861,11 @@ async def api_last_refresh():
     return {"last_refresh": data.session_cache.last_refresh}
 
 
+@app.get("/api/warmup-status")
+async def api_warmup_status():
+    return {"ready": data.warmup_done.is_set()}
+
+
 @app.get("/api/settings")
 async def api_settings():
     config = load_config()
