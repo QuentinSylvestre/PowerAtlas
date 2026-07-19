@@ -2,6 +2,12 @@
 
 ## Pattern
 
+### Session-panel updates must be event-driven, not poll-gated (pin/unpin + startup warmup)
+
+**Why**: Pinned sessions took ~10s to move on pin/unpin (waiting for the next `refreshCards()` polling cycle) and ~20s to appear after restart (waiting for the warmup cache to fill on the 15-30s burst timer). The client relied on periodic polling instead of reacting to state changes and lifecycle events.
+**How to apply**: For user-initiated state changes (pin/unpin), move the DOM row immediately in JS (insert before/after `.pinned-separator`, manage the separator lifecycle) rather than waiting for the next `refreshCards()` cycle. For startup latency on cache-dependent UI, emit a `warmup_done` event in `data.py`, expose `/api/warmup-status`, and have the client short-poll (2s) to trigger `refreshCards(true)` the moment warmup finishes.
+**Source**: Session 1ecfaedc (2026-07-17) — pinned-session latency fix; verified `warmup_done` / `warmup-status` / `pinned-separator` present in web.py/data.py/index.html | **Verified**: 2026-07-18
+
 ### Cache getters must return copies, not references
 
 **Why**: The workspace-count cache returned a raw list reference. A downstream consumer (`partials_workspaces`) appended pinned folders to it, corrupting the cache across requests. The same class of bug was pre-emptively prevented in `SessionCache.get()` by returning `list(sessions)`.
