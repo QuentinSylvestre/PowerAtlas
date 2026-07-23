@@ -372,14 +372,23 @@ function pollActiveSessions(){
   // Stagger requests with 200ms offset to avoid lock contention
   targets.forEach(function(t,idx){
     setTimeout(function(){
+      // Re-query card to handle state changes during stagger window
+      var card=document.querySelector(_cardSelector(t.cwd));
+      if(!card||card.classList.contains('collapsed'))return;
+      var body=card.querySelector('.card-body');
+      if(!body)return;
       var provider=window._activeProvider||'all';
       var url='/partials/sessions?cwd='+encodeURIComponent(t.cwd)+'&provider='+encodeURIComponent(provider);
       fetch(url).then(function(r){return r.text()}).then(function(html){
-        // Preserve scroll position within card-body
-        var scrollTop=t.body.scrollTop;
-        t.body.innerHTML=html;
-        t.body.scrollTop=scrollTop;
-        if(window.htmx)htmx.process(t.body);
+        // Re-query again after fetch (card may have been collapsed during network round-trip)
+        var c2=document.querySelector(_cardSelector(t.cwd));
+        if(!c2||c2.classList.contains('collapsed'))return;
+        var b2=c2.querySelector('.card-body');
+        if(!b2)return;
+        var scrollTop=b2.scrollTop;
+        b2.innerHTML=html;
+        b2.scrollTop=scrollTop;
+        if(window.htmx)htmx.process(b2);
       }).catch(function(){/* retry on next cycle */});
     },idx*200);
   });
