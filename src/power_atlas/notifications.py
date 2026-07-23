@@ -15,9 +15,8 @@ _MAX_STATES = 100
 
 # Transitions that trigger notification
 _NOTIFY_TRANSITIONS = frozenset({
-    ("active", "idle"),
-    ("active", "needs_input"),
-    ("active", "errored"),
+    ("working", "waiting"),
+    ("working", "errored"),
 })
 
 
@@ -86,8 +85,7 @@ def check_and_notify(session_id: str, session_title: str,
 def _fire_toast(title: str, status: str) -> None:
     """Platform-specific toast notification."""
     messages = {
-        "idle": "Done \u2014 waiting for you",
-        "needs_input": "Needs your input",
+        "waiting": "Done \u2014 waiting for you",
         "errored": "Hit an error",
     }
     body = messages.get(status, status)
