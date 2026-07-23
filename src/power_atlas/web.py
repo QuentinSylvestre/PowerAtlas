@@ -198,23 +198,22 @@ def _workspace_status(snapshot, cwd: str,
                     best = s
                     best_pri = pri
     # Fallback: no explicit session IDs (chat -a without --resume-id).
-    # Classify the most recently updated session in this workspace.
+    # Classify all recently updated sessions in this workspace, take highest priority.
     if not found_any:
         from . import data
         for prov in (providers or {"kiro-cli", "claude-code"}):
             sessions = data.get_sessions(cwd=cwd, provider=prov)
-            if sessions:
-                # sessions are sorted by updated_at desc — take the first
-                recent = sessions[0]
+            for recent in sessions:
                 age = _age_seconds(recent.updated_at)
-                if age is not None and age <= 300:  # same 5-min recency gate
-                    semantic = get_semantic_status(recent.session_id, prov, cwd)
-                    if semantic is not None:
-                        s = semantic.value
-                        pri = _STATUS_PRIORITY.get(s, 0)
-                        if pri > best_pri:
-                            best = s
-                            best_pri = pri
+                if age is None or age > 300:  # stop at first stale session
+                    break
+                semantic = get_semantic_status(recent.session_id, prov, cwd)
+                if semantic is not None:
+                    s = semantic.value
+                    pri = _STATUS_PRIORITY.get(s, 0)
+                    if pri > best_pri:
+                        best = s
+                        best_pri = pri
     return best
 
 
