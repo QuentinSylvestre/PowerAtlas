@@ -3744,3 +3744,164 @@ class TestNotifications:
         assert len(notifications._session_states) == 100
         assert "sess-0" not in notifications._session_states
         assert "sess-100" in notifications._session_states
+
+
+# --- POST /api/session-status (lightweight status polling) ---
+
+
+class TestApiSessionStatus:
+    """Tests for the lightweight POST /api/session-status endpoint."""
+
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_empty_cwds_returns_empty_maps(self, mock_snap, client):
+        """Empty cwds list returns empty response immediately."""
+        resp = client.post(
+            "/api/session-status", json={"cwds": []},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"sessions": {}, "workspaces": {}, "active_cwds": []}
+        # Snapshot never called for empty input
+        mock_snap.assert_not_called()
+
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_inactive_cwd_short_circuits(self, mock_snap, mock_cache, client):
+        """CWDs without a live process return 'closed' without iterating sessions."""
+        from power_atlas.presence import Snapshot
+        # Snapshot with no live processes
+        mock_snap.return_value = Snapshot(set(), set(), {})
+
+        resp = client.post(
+            "/api/session-status",
+            json={"cwds": ["C:\\projects\\myapp", "C:\\other"]},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["workspaces"]["C:\\projects\\myapp"] == "closed"
+        assert body["workspaces"]["C:\\other"] == "closed"
+        assert body["active_cwds"] == []
+        assert body["sessions"] == {}
+        # session_cache.get should NOT be called (short-circuit)
+        mock_cache.get.assert_not_called()
+
+    @patch("power_atlas.web.notifications.check_and_notify")
+    @patch("power_atlas.web.get_semantic_status")
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_active_cwd_returns_session_status_no_notifications(
+        self, mock_snap, mock_cache, mock_semantic, mock_notify, client
+    ):
+        """Active CWDs return per-session status; notifications are NOT triggered."""
+        from power_atlas.presence import Snapshot
+        from power_atlas.data import _normalize_path
+
+        cwd = "C:\\projects\\myapp"
+        norm_cwd = _normalize_path(cwd)
+
+        # Snapshot shows kiro-cli running in this cwd
+        mock_snap.return_value = Snapshot(
+            live_sids={("kiro-cli", "sess-1")},
+            live_cwds={("kiro-cli", norm_cwd)},
+            sid_to_cwd={("kiro-cli", "sess-1"): norm_cwd},
+        )
+
+        # Session cache returns one session
+        sess = _make_session(session_id="sess-1", cwd=cwd)
+        mock_cache.get.return_value = [sess]
+
+        # Semantic status returns WAITING
+        from power_atlas.status_classifier import SemanticStatus
+        mock_semantic.return_value = SemanticStatus.WAITING
+
+        resp = client.post(
+            "/api/session-status",
+            json={"cwds": [cwd]},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # Session status returned
+        assert body["sessions"]["sess-1"] == "waiting"
+        # Workspace-level status
+        assert body["workspaces"][cwd] == "waiting"
+        # Active cwds includes this one
+        assert cwd in body["active_cwds"]
+        # Notifications NOT triggered
+        mock_notify.assert_not_called()
+
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_skips_kiro_ide_provider(self, mock_snap, mock_cache, client):
+        """kiro-ide sessions are never processed by this endpoint."""
+        from power_atlas.presence import Snapshot
+        from power_atlas.data import _normalize_path
+
+        cwd = "C:\\projects\\myapp"
+        norm_cwd = _normalize_path(cwd)
+
+        # Only kiro-ide is running in this cwd — endpoint should see no active process
+        mock_snap.return_value = Snapshot(
+            live_sids=set(),
+            live_cwds={("kiro-ide", norm_cwd)},
+            sid_to_cwd={},
+        )
+
+        resp = client.post(
+            "/api/session-status",
+            json={"cwds": [cwd]},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+
+        # CWD treated as inactive (kiro-ide excluded from poll_providers)
+        assert body["workspaces"][cwd] == "closed"
+        assert body["active_cwds"] == []
+        # session_cache never accessed
+        mock_cache.get.assert_not_called()
+
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_mixed_active_inactive_cwds(self, mock_snap, mock_cache, client):
+        """Mix of active and inactive cwds: only active are iterated."""
+        from power_atlas.presence import Snapshot
+        from power_atlas.data import _normalize_path
+
+        active_cwd = "C:\\projects\\active"
+        inactive_cwd = "C:\\projects\\idle"
+        norm_active = _normalize_path(active_cwd)
+
+        mock_snap.return_value = Snapshot(
+            live_sids=set(),
+            live_cwds={("claude-code", norm_active)},
+            sid_to_cwd={},
+        )
+        # Cache returns None for both (no cached sessions)
+        mock_cache.get.return_value = None
+
+        resp = client.post(
+            "/api/session-status",
+            json={"cwds": [active_cwd, inactive_cwd]},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["workspaces"][inactive_cwd] == "closed"
+        assert active_cwd in body["active_cwds"]
+        assert inactive_cwd not in body["active_cwds"]
+
+    def test_missing_cwds_key_returns_empty(self, client):
+        """Body without 'cwds' key returns empty response without error."""
+        resp = client.post(
+            "/api/session-status",
+            json={},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"sessions": {}, "workspaces": {}, "active_cwds": []}

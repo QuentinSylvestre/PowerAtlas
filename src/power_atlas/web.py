@@ -126,7 +126,8 @@ def _age_seconds(iso_str: str) -> float | None:
 
 
 def _session_status(snapshot, session, provider: str,
-                    notifications_enabled: bool = False) -> str:
+                    notifications_enabled: bool = False, *,
+                    notify: bool = True) -> str:
     """Return semantic status for a session.
 
     Detection gate: a session is live if either (a) its session_id is on a
@@ -134,6 +135,10 @@ def _session_status(snapshot, session, provider: str,
     the session's cwd AND the session was recently updated (within 5 min).
     Gate (b) uses recency to avoid false-positive dots on old sessions that
     happen to share a workspace with a running process.
+
+    Args:
+        notify: When False, skip the notification side-effect entirely.
+                Used by the lightweight status-polling endpoint to avoid toasts.
     """
     # 1. Check explicit live (session id on cmdline) — fast path
     is_explicitly_live = snapshot.is_live(provider, session.cwd, session.session_id)
@@ -175,11 +180,12 @@ def _session_status(snapshot, session, provider: str,
         # "Waiting" only comes from positive classifier identification.
         status_value = "working"
 
-    # Notify on transition
-    notifications.check_and_notify(
-        session.session_id, session.title or "untitled",
-        status_value, notifications_enabled
-    )
+    # Notify on transition (skip when caller opts out, e.g. status-poll endpoint)
+    if notify:
+        notifications.check_and_notify(
+            session.session_id, session.title or "untitled",
+            status_value, notifications_enabled
+        )
     return status_value
 
 
@@ -500,7 +506,64 @@ async def unpin_session(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/session-status")
+async def api_session_status(request: Request):
+    """Lightweight status endpoint for background polling.
 
+    Accepts {"cwds": [...]} and returns per-session and per-workspace status
+    without triggering notification side-effects. Skips kiro-ide entirely and
+    short-circuits cwds that have no live process.
+    """
+    body = await request.json()
+    cwds = body.get("cwds", [])
+    if not cwds:
+        return JSONResponse({"sessions": {}, "workspaces": {}, "active_cwds": []})
+
+    # Only process CLI providers (skip kiro-ide)
+    poll_providers = {"kiro-cli", "claude-code"}
+
+    # Get cached presence snapshot (3s TTL — very fast)
+    snapshot = await asyncio.to_thread(presence.get_snapshot)
+    active_norm_cwds = snapshot.live_cwds(poll_providers)
+
+    from .data import _normalize_path
+
+    sessions_map: dict[str, str] = {}
+    workspaces_map: dict[str, str] = {}
+    active_cwds: list[str] = []
+
+    for cwd in cwds:
+        norm = _normalize_path(cwd)
+        # Short-circuit: if no live process in this cwd, everything is closed
+        if norm not in active_norm_cwds:
+            workspaces_map[cwd] = "closed"
+            continue
+
+        try:
+            active_cwds.append(cwd)
+            # Compute per-session status (no notifications)
+            for provider in poll_providers:
+                cached_sessions = data.session_cache.get(cwd, provider)
+                if cached_sessions is None:
+                    continue
+                for session in cached_sessions:
+                    status = _session_status(
+                        snapshot, session, provider, notify=False
+                    )
+                    if status != "closed":
+                        sessions_map[session.session_id] = status
+
+            # Compute workspace-level aggregate status
+            workspaces_map[cwd] = _workspace_status(snapshot, cwd, poll_providers)
+        except Exception:
+            log.debug("Status poll failed for cwd %s", cwd)
+            workspaces_map[cwd] = "closed"
+
+    return JSONResponse({
+        "sessions": sessions_map,
+        "workspaces": workspaces_map,
+        "active_cwds": active_cwds,
+    })
 
 
 @app.get("/partials/workspaces", response_class=HTMLResponse)
@@ -611,6 +674,7 @@ async def partials_workspaces(
             workspace_color=workspace_color,
             providers=group["providers"],
             workspace_status=ws_status,
+            time_group="pinned",
         )
 
     if pinned_grouped and other_grouped:
@@ -642,6 +706,7 @@ async def partials_workspaces(
                     workspace_color=workspace_color,
                     providers=group["providers"],
                     workspace_status=ws_status,
+                    time_group=key,
                 )
 
     if not cards_html:
