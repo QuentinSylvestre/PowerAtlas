@@ -3105,25 +3105,34 @@ def test_session_status_semantic_and_fallback(mock_semantic):
     assert _session_status(live, closed_s, "claude-code") == "closed"
 
 
+@patch("power_atlas.status_classifier._resolve_jsonl_path")
 @patch("power_atlas.web.get_semantic_status")
-def test_session_status_cwd_based_no_resume_id(mock_semantic):
+def test_session_status_cwd_based_no_resume_id(mock_semantic, mock_resolve):
     """CWD-based detection: a process in the cwd is enough to classify as live."""
     from power_atlas.status_classifier import SemanticStatus
-    # Snapshot: process running in /w but no session id matched (no --resume-id)
-    snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
-    s = _make_session(session_id="sess1", cwd="/w", updated_at=_recent_iso())
+    import tempfile, os
+    # Create a temp file with recent mtime to pass the recency gate
+    tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+    tmp.close()
+    mock_resolve.return_value = tmp.name
+    try:
+        # Snapshot: process running in /w but no session id matched (no --resume-id)
+        snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
+        s = _make_session(session_id="sess1", cwd="/w", updated_at=_recent_iso())
 
-    # Semantic classifier returns WORKING
-    mock_semantic.return_value = SemanticStatus.WORKING
-    assert _session_status(snap, s, "claude-code") == "working"
+        # Semantic classifier returns WORKING
+        mock_semantic.return_value = SemanticStatus.WORKING
+        assert _session_status(snap, s, "claude-code") == "working"
 
-    # Semantic classifier returns WAITING
-    mock_semantic.return_value = SemanticStatus.WAITING
-    assert _session_status(snap, s, "claude-code") == "waiting"
+        # Semantic classifier returns WAITING
+        mock_semantic.return_value = SemanticStatus.WAITING
+        assert _session_status(snap, s, "claude-code") == "waiting"
 
-    # Semantic classifier returns None → fallback to "waiting"
-    mock_semantic.return_value = None
-    assert _session_status(snap, s, "claude-code") == "waiting"
+        # Semantic classifier returns None → fallback to "waiting"
+        mock_semantic.return_value = None
+        assert _session_status(snap, s, "claude-code") == "waiting"
+    finally:
+        os.unlink(tmp.name)
 
     # Different provider → no process in cwd → closed
     snap_kiro = _snapshot(live_cwds={("kiro-cli", _normalize_path("/w"))})

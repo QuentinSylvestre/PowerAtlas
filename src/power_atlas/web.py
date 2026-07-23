@@ -143,11 +143,23 @@ def _session_status(snapshot, session, provider: str,
     norm_cwd = _normalize_path(session.cwd)
     has_process = norm_cwd in snapshot.live_cwds({provider})
 
-    # 3. Recency gate: only classify via cwd if session was updated recently
+    # 3. Recency gate: only classify via cwd if session's JSONL was written recently
     #    (avoids false-positive dots on old sessions sharing the same workspace)
+    #    Uses JSONL file mtime (actual agent activity) not metadata updated_at
+    #    (which only reflects user interaction timestamps).
     if has_process and not is_explicitly_live:
-        age = _age_seconds(session.updated_at)
-        if age is not None and age > 300:  # 5 minutes
+        from .status_classifier import _resolve_jsonl_path
+        jsonl_path = _resolve_jsonl_path(session.session_id, provider, session.cwd)
+        if jsonl_path is not None:
+            import os, time as _time
+            try:
+                mtime_age = _time.time() - os.path.getmtime(jsonl_path)
+                if mtime_age > 300:  # 5 minutes since last JSONL write
+                    has_process = False
+            except OSError:
+                has_process = False
+        else:
+            # No JSONL file found — can't classify, treat as closed
             has_process = False
 
     if not is_explicitly_live and not has_process:
@@ -201,11 +213,19 @@ def _workspace_status(snapshot, cwd: str,
     # Classify all recently updated sessions in this workspace, take highest priority.
     if not found_any:
         from . import data
+        from .status_classifier import _resolve_jsonl_path
+        import os, time as _time
         for prov in (providers or {"kiro-cli", "claude-code"}):
             sessions = data.get_sessions(cwd=cwd, provider=prov)
             for recent in sessions:
-                age = _age_seconds(recent.updated_at)
-                if age is None or age > 300:  # stop at first stale session
+                jsonl_path = _resolve_jsonl_path(recent.session_id, prov, cwd)
+                if jsonl_path is None:
+                    continue
+                try:
+                    mtime_age = _time.time() - os.path.getmtime(jsonl_path)
+                except OSError:
+                    continue
+                if mtime_age > 300:  # stop at first stale session
                     break
                 semantic = get_semantic_status(recent.session_id, prov, cwd)
                 if semantic is not None:
