@@ -1,8 +1,9 @@
 # Live Session Status Redesign
 
 > **Date**: 2026-07-23
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Redesign live session detection and status indicators with cwd-based matching and simplified 4-state vocabulary
+> **Last Updated**: 2026-07-23T15:52Z
 
 ---
 
@@ -378,6 +379,20 @@ QA verification: PASS (4 surfaces verified via Playwright: filter dropdown, work
 | 6 | Low | [Reliability] Test gap: no test for workspace status aggregation path | Orchestrator: proposed-accept — pending user decision |
 
 Finding #1 detail: `_workspace_status()` calls `live_session_ids_for_cwd()` which only has entries for sessions with `--resume-id` on cmdline. For the primary use case (`kiro-cli chat -a`), no session ID is extractable from the process cmdline, so `sid_to_cwd` is empty and workspace dots always show "working" (green). Individual session rows still show correct status — only the workspace-level aggregation is limited. Fix would require architectural change (making workspace rendering aware of per-session classification results). Recommend accepting as known limitation for initial release; session rows provide correct status.
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- Accepted: Dead "live" filter path in `_status_matches` (Low — harmless backward compat for API consumers)
+- Accepted: Orphaned `probable_fresh_session` method (Low — deprecated, not called)
+- Accepted: Undocumented `_classify_from_path` unknown-provider fallback (Low — unreachable in normal flow)
+- Accepted: Missing `.catch()` on per-card session fetch in refreshCards (Low — card body stays empty on failure)
+- Accepted: Dead `loadExpandedCards()` call in refreshCards (Low — no-op after explicit expansion loop)
+- Accepted: Duplicate test `test_notification_transition_fires` vs `test_notification_working_to_waiting_fires` (Low — redundant coverage)
+- Accepted: `_workspace_status()` double-called when status filter active (Low — TTL cache makes second call cheap)
+- Accepted: Redundant inline import in `live_session_ids_for_cwd` (Low — harmless, module-level import exists)
+- Skipped (harness opportunity): "ask what specifically from an external URL applies before fetching" — too context-specific; general rule would over-constrain exploration
 
 ## Harness Improvement Opportunities
 
