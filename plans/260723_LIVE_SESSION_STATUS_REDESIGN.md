@@ -358,15 +358,15 @@ Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical afte
 Overall implementation health: Green.
 Personas: Senior engineer, Reliability engineer, End-user advocate, Performance engineer.
 6 findings (0 High, 2 Medium, 4 Low).
-QA verification: SKIP (live Playwright verification not run — would require PowerAtlas running with active kiro-cli sessions for status dot verification).
+QA verification: PASS (4 surfaces verified via Playwright: filter dropdown, workspace dots, pinned/time-group ordering, vocabulary consistency).
 
 #### Test execution summary
 
 | Phase | Tests | QA | Notes |
 |---|---|---|---|
-| 1: Core detection + classification | pass (348) | SKIP | Unit tests verify all status paths |
-| 2: UI vocabulary + workspace dots | pass (348) | SKIP | Template rendering verified |
-| 3: refreshCards + notifications | pass (348) | SKIP | Notification tests pass |
+| 1: Core detection + classification | pass (348) | PASS | cwd-based status verified live |
+| 2: UI vocabulary + workspace dots | pass (348) | PASS | Dots, filter dropdown, workspace cards verified |
+| 3: refreshCards + notifications | pass (348) | PASS | Ordering preserved on filter transitions |
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
