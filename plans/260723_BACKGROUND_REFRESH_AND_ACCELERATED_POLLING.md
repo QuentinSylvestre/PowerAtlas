@@ -1,7 +1,7 @@
 # Background Refresh and Accelerated Polling
 
 > **Date**: 2026-07-23
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Estimated effort**: ~1-2 days
 > **Scope**: Eliminate "Loading..." flicker on expanded workspace cards during refresh; accelerate session/status updates for active workspaces
 
@@ -239,13 +239,16 @@ def _session_status(snap, session, provider, notify=True):
 ```
 
 **Exit criteria**:
-- [ ] `POST /api/session-status` with JSON body `{"cwds": [...]}` returns correct status map
-- [ ] Endpoint does NOT trigger notification side-effects (no toasts from status poll)
-- [ ] Endpoint skips kiro-ide provider entirely
-- [ ] Endpoint short-circuits for cwds without a live process (no per-session iteration)
-- [ ] Response includes `active_cwds` list for client-side state tracking
-- [ ] Endpoint responds in <100ms for typical workloads (1-3 active workspaces)
-- [ ] Tests added for the endpoint
+- [x] `POST /api/session-status` with JSON body `{"cwds": [...]}` returns correct status map
+- [x] Endpoint does NOT trigger notification side-effects (no toasts from status poll)
+- [x] Endpoint skips kiro-ide provider entirely
+- [x] Endpoint short-circuits for cwds without a live process (no per-session iteration)
+- [x] Response includes `active_cwds` list for client-side state tracking
+- [x] Endpoint responds in <100ms for typical workloads (1-3 active workspaces)
+- [x] Tests added for the endpoint
+
+Implementation (2026-07-23, code: 0885428)
+Added POST /api/session-status endpoint to web.py that accepts {"cwds": [...]} and returns per-session and per-workspace status maps plus an active_cwds list. The endpoint uses the cached presence snapshot (3s TTL) to short-circuit inactive cwds immediately, processes only kiro-cli and claude-code providers, and calls _session_status() with notify=False to suppress notification side-effects. Refactored _session_status() to accept a keyword-only notify parameter (default True for backward compat). Added try-except per cwd for fault isolation. Added 6 tests covering empty input, inactive cwd short-circuit, active status with no-notification verification, kiro-ide exclusion, mixed active/inactive cwds, and missing key handling.
 
 ### Phase 2: Refactor `refreshCards()` to preserve expanded cards [QA] [P:1]
 
@@ -428,17 +431,20 @@ cards_html += templates.get_template("partials/workspace_card.html").render(
 For pinned cards, pass `time_group="pinned"`.
 
 **Exit criteria**:
-- [ ] Expanding a workspace card, waiting for sessions to load, then triggering a refresh — sessions remain visible throughout, no "Loading..." flash
-- [ ] Card-header metadata (session count, last-active, status dot) updates from server on each 30s refresh
-- [ ] After refresh, expanded cards appear in correct time-group position
-- [ ] Collapsed cards still render correctly via innerHTML replacement
-- [ ] Card selections are preserved across refresh
-- [ ] Scroll position within expanded card-bodies is preserved
-- [ ] On `visibilitychange` (tab return), expanded cards re-fetch session content with `fresh=1`
-- [ ] On fetch error, DOM remains intact (no detachment before response)
-- [ ] `htmx.process()` called on new content
-- [ ] `data-time-group` and `data-sort-key` attributes added to workspace card template
-- [ ] `time_group` passed from `partials_workspaces()` to card template
+- [x] Expanding a workspace card, waiting for sessions to load, then triggering a refresh — sessions remain visible throughout, no "Loading..." flash
+- [x] Card-header metadata (session count, last-active, status dot) updates from server on each 30s refresh
+- [x] After refresh, expanded cards appear in correct time-group position
+- [x] Collapsed cards still render correctly via innerHTML replacement
+- [x] Card selections are preserved across refresh
+- [x] Scroll position within expanded card-bodies is preserved
+- [x] On `visibilitychange` (tab return), expanded cards re-fetch session content with `fresh=1`
+- [x] On fetch error, DOM remains intact (no detachment before response)
+- [x] `htmx.process()` called on new content
+- [x] `data-time-group` and `data-sort-key` attributes added to workspace card template
+- [x] `time_group` passed from `partials_workspaces()` to card template
+
+Implementation (2026-07-23, code: 1382985)
+Refactored refreshCards() in index.html to preserve expanded workspace card DOM nodes across periodic 30s refreshes. The new implementation parses the server response into a temporary off-DOM container, updates only card-header metadata (session count, last-active, status dot) from the fresh render while preserving the live card-body with loaded sessions, then swaps the entire prepared container into #workspace-cards. Added _cardSelector() DRY helper, focus preservation on refresh (captures activeElement and restores focus to the card header after swap), tooltip cleanup before fresh-session innerHTML swap, scroll/selection state restoration, and clarifying comments. Added data-time-group and data-sort-key attributes to workspace_card.html template, and passed time_group from partials_workspaces() to both pinned and time-grouped render calls.
 
 ### Phase 3: Client-side 5s status poll [QA]
 
@@ -713,3 +719,23 @@ High-effort review (4 personas: Architect, Senior engineer, Performance engineer
 | 13 | Low | Error recovery appends cards at end instead of original position | Fixed — Phase 2 no longer detaches before fetch; DOM stays intact on error |
 | 14 | Low | Scroll position not preserved within card-body on 10s swap | Fixed — capture/restore `body.scrollTop` in both Phase 2 and Phase 4 |
 | 15 | Low | Three identical `CSS.escape(cwd)` patterns should be DRY | Fixed — extracted `_cardSelector(cwd)` helper in Phase 2 |
+
+### 2026-07-23 -- Implementation Review (after Phases 1&2, personas: Senior engineer, Reliability engineer, End-user advocate)
+
+Implementation health: Green.
+11 findings (0 High, 5 Medium, 6 Low).
+QA verification: PASS (2 surfaces verified — endpoint JSON response + expanded card DOM preservation).
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | No try-except around per-cwd loop in status endpoint | Fixed — wrapped loop body in try-except with log.debug fallback |
+| 2 | Medium | Focus not preserved during refresh (activeElement lost after DOM swap) | Fixed — capture/restore focus to card header by cwd |
+| 3 | Medium | Session tooltip visible during fresh path destroyed without cleanup | Fixed — clear tooltip slots before innerHTML swap |
+| 4 | Medium | loadExpandedCards() behavior for filtered-then-reappearing cards undocumented | Fixed — added clarifying comment |
+| 5 | Medium | _cardSelector CSS.escape safety undocumented | Fixed — added comment noting filesystem path safety |
+| 6 | Low | Test assertion loose (workspace status `in` tuple instead of `==`) | Fixed — tightened to `== "waiting"` |
+| 7 | Low | No test for missing 'cwds' key in request body | Fixed — added test_missing_cwds_key_returns_empty |
+| 8 | Low | `notify` parameter positional-capable, not keyword-only | Fixed — made keyword-only with `*` separator |
+| 9 | Low | `data-sort-key` populated but never consumed client-side | User: accepted — intentional for future Phase 4 use |
+| 10 | Low | `aria-busy` without visible loading indicator for AT users | User: accepted — aria-live region enhancement beyond scope |
+| 11 | Low | O(n) DOM operations for 50+ expanded cards could cause frame drop | User: accepted — acceptable for typical 5-15 card scenario |
