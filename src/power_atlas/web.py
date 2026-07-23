@@ -232,12 +232,12 @@ def _workspace_status(snapshot, cwd: str,
                 if mtime_age > 300:  # skip stale sessions
                     continue
                 semantic = get_semantic_status(recent.session_id, prov, cwd)
-                if semantic is not None:
-                    s = semantic.value
-                    pri = _STATUS_PRIORITY.get(s, 0)
-                    if pri > best_pri:
-                        best = s
-                        best_pri = pri
+                # None semantic + recent JSONL = process running but can't classify → waiting
+                s = semantic.value if semantic is not None else "waiting"
+                pri = _STATUS_PRIORITY.get(s, 0)
+                if pri > best_pri:
+                    best = s
+                    best_pri = pri
     return best
 
 
