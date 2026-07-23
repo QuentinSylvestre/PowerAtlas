@@ -1,7 +1,7 @@
 # Background Refresh and Accelerated Polling
 
 > **Date**: 2026-07-23
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Done  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Estimated effort**: ~1-2 days
 > **Scope**: Eliminate "Loading..." flicker on expanded workspace cards during refresh; accelerate session/status updates for active workspaces
 
@@ -769,3 +769,29 @@ QA verification: PASS (_activeSessionTimer running, expanded active card with 13
 |---|---|---|---|
 | 1 | Low | Stale body reference in setTimeout callback (card may be collapsed during stagger window) | Fixed — re-query card/body inside setTimeout and after fetch |
 | 2 | Low | No per-card in-flight guard (overlapping fetches possible under >10s latency) | Orchestrator: proposed-accept — last-write-wins is harmless |
+
+### 2026-07-23 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Performance engineer.
+7 findings (0 High, 2 Medium, 5 Low).
+QA verification: PASS (all 3 tiers verified live — 5s dots updating, 10s content refreshing, 30s full refresh preserving expanded cards; 63 workspace cards, 131 session rows, no Loading flash).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Lightweight status endpoint | pass | PASS | 6 tests; live endpoint verified via Playwright |
+| 2: Preserve expanded card DOM | pass | PASS | DOM preservation verified — no Loading flash |
+| 3: 5s status poll | pass | PASS | Dots updating in-place, timer active |
+| 4: 10s session content refresh | pass | PASS | Content refreshing for active expanded cards |
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | Redundant _workspace_status() call doubles classifier lookups in status endpoint | Fixed — derive workspace status from per-session statuses already computed in loop |
+| 2 | Medium | 30s _refreshTimer and burstTimer not stopped on tab hidden (pre-existing) | Orchestrator: proposed-accept — pre-existing behavior, not a regression; 2 reqs/30s is negligible |
+| 3 | Low | 10s poll omits status filter by plan design (Q8) | Orchestrator: proposed-accept — by design, 30s re-applies filter |
+| 4 | Low | Stagger pattern is serial (acceptable for ≤5 targets) | Orchestrator: proposed-accept — typical case is 1-2 active expanded cards |
+| 5 | Low | First status poll sends all visible cwds (cold-start, one-time) | Orchestrator: proposed-accept — acceptable one-time cost |
+| 6 | Low | _workspace_status fallback path has stat calls (bounded by 5s TTL cache) | Orchestrator: proposed-accept — mitigated by semantic_status cache |
+| 7 | Low | All 6 prior per-phase proposed-accept items are reasonable trade-offs | Orchestrator: proposed-accept — none affect correctness |
