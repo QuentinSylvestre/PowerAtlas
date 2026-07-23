@@ -71,7 +71,7 @@
     <div class="section-label"><span>Workspaces</span> <div class="workspace-filters" id="workspaceFilters"></div></div>
     <div id="workspace-cards" aria-busy="true"
          hx-get="/partials/workspaces?fresh=1" hx-trigger="load" hx-swap="innerHTML"
-         hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards();startPolling()">
+         hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards();startPolling();startStatusPoll()">
       <div class="skeleton-card"></div>
       <div class="skeleton-card"></div>
       <div class="skeleton-card"></div>
@@ -331,7 +331,7 @@ function loadExpandedCards(){document.querySelectorAll('.workspace-card:not(.col
 function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.querySelector('.topbar-profile-btn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){profileBtn.textContent='\u2699\ufe0f '+active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){document.addEventListener('htmx:afterSwap',function(){loadExpandedCards()});fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});initProviderFilter();initWorkspaceFilters();
 var searchInput=document.querySelector('input[name="q"]');if(searchInput){searchInput.addEventListener('input',debounce(function(e){var q=e.target.value.trim();var provQs=_buildWorkspaceQs();if(!q){refreshCards(false);return}fetch('/search?'+provQs+'&q='+encodeURIComponent(q)).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el)});fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()+'&q='+encodeURIComponent(q)).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el)})},300))}
-document.addEventListener('visibilitychange',function(){if(!document.hidden){refreshSettings();refreshCards(true);initWorkspaceFilters()}});
+document.addEventListener('visibilitychange',function(){if(document.hidden){stopStatusPoll()}else{refreshSettings();refreshCards(true);initWorkspaceFilters();startStatusPoll()}});
 (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);refreshCards(true)}}).catch(function(){clearInterval(t)})},2000)})();
 });
 function _escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
@@ -341,6 +341,103 @@ function initProviderFilter(){fetch('/api/available-providers').then(function(r)
 function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});var qs='?'+_buildWorkspaceQs();fetch('/partials/workspaces'+qs).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el);loadExpandedCards();updateActionBar()});fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el);updateActionBar()})}
 var _refreshTimer=null;
 function startPolling(){if(_refreshTimer)return;var burstCount=0;var burstTimer=setInterval(function(){burstCount++;if(burstCount>=8){clearInterval(burstTimer)}refreshCards(false)},15000);_refreshTimer=setInterval(function(){refreshCards(false)},30000)}
+// --- Status poll: lightweight 5s polling for session/workspace status dots ---
+window._activeCwds=[];
+var _statusTimer=null;
+var _statusFetching=false;
+function startStatusPoll(){if(_statusTimer)return;_statusTimer=setInterval(pollStatus,5000)}
+function stopStatusPoll(){if(_statusTimer){clearInterval(_statusTimer);_statusTimer=null}}
+function pollStatus(){
+  if(_statusFetching)return;
+  // On first call (empty _activeCwds), send all visible workspace cwds
+  var cwds=window._activeCwds.length?window._activeCwds:_getAllVisibleCwds();
+  if(!cwds.length)return;
+  _statusFetching=true;
+  fetch('/api/session-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwds:cwds})})
+    .then(function(r){return r.json()})
+    .then(function(data){
+      // Update tracked active workspaces from server response
+      window._activeCwds=data.active_cwds||[];
+      // Update workspace card status dots
+      var wsStatuses=data.workspaces||{};
+      Object.keys(wsStatuses).forEach(function(cwd){
+        var card=document.querySelector(_cardSelector(cwd));
+        if(card)_updateWorkspaceStatusDot(card,wsStatuses[cwd]);
+      });
+      // Also clear dots for workspaces we sent that have no status in response
+      cwds.forEach(function(cwd){
+        if(!wsStatuses[cwd]){
+          var card=document.querySelector(_cardSelector(cwd));
+          if(card)_updateWorkspaceStatusDot(card,'');
+        }
+      });
+      // Update session row status dots
+      var sessStatuses=data.sessions||{};
+      Object.keys(sessStatuses).forEach(function(sid){
+        var rows=document.querySelectorAll('.session-row[data-sid="'+CSS.escape(sid)+'"]');
+        rows.forEach(function(row){_updateSessionStatusDot(row,sessStatuses[sid])});
+      });
+    })
+    .catch(function(){/* retry on next cycle */})
+    .finally(function(){_statusFetching=false});
+}
+function _getAllVisibleCwds(){
+  var cwds=[];var seen={};
+  document.querySelectorAll('.workspace-card[data-cwd]').forEach(function(card){
+    var cwd=card.dataset.cwd;
+    var key=cwd.toLowerCase();
+    if(!seen[key]){seen[key]=1;cwds.push(cwd)}
+  });
+  return cwds;
+}
+function _updateWorkspaceStatusDot(card,newStatus){
+  var header=card.querySelector('.card-header');
+  if(!header)return;
+  var dot=header.querySelector('.ws-status');
+  if(!newStatus||newStatus==='closed'){
+    // Remove dot if status is empty/null/closed
+    if(dot)dot.remove();
+    return;
+  }
+  var cls='ws-status status-'+newStatus;
+  var titles={'working':'Agent working','waiting':'Session waiting for you','errored':'Session errored'};
+  var title=titles[newStatus]||newStatus;
+  if(dot){
+    // Update in-place — no DOM destruction
+    dot.className=cls;
+    dot.title=title;
+  }else{
+    // Create dot if workspace gained a status
+    dot=document.createElement('span');
+    dot.className=cls;
+    dot.title=title;
+    var insertBefore=header.querySelector('.card-last-active')||header.querySelector('.card-actions');
+    if(insertBefore)header.insertBefore(dot,insertBefore);
+    else header.appendChild(dot);
+  }
+}
+function _updateSessionStatusDot(row,newStatus){
+  var dot=row.querySelector('.session-status');
+  if(!newStatus||newStatus==='closed'){
+    if(dot)dot.remove();
+    return;
+  }
+  var cls='session-status status-'+newStatus;
+  var titles={'working':'Agent working','waiting':'Session waiting for you','errored':'Session errored'};
+  var title=titles[newStatus]||newStatus;
+  if(dot){
+    dot.className=cls;
+    dot.title=title;
+  }else{
+    dot=document.createElement('span');
+    dot.className=cls;
+    dot.title=title;
+    // Insert as first child of the row for consistent placement
+    var titleEl=row.querySelector('.session-title');
+    if(titleEl)titleEl.parentNode.insertBefore(dot,titleEl);
+    else row.prepend(dot);
+  }
+}
 function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.textContent='...';fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshSettings();refreshCards(true)}).finally(function(){btn.disabled=false;btn.textContent='\u21BB'})}
 function initWorkspaceFilters(){return fetch('/api/tags').then(function(r){return r.json()}).then(function(tags){var container=document.getElementById('workspaceFilters');if(!container)return;var hiddenCount=0;tags.forEach(function(t){if(t.name==='hidden')hiddenCount=t.count});var html='<select class="ws-filter-select" id="wsTagFilter" onchange="setTagFilter(this.value)" title="Filter by tag">';html+='<option value="">All tags</option>';if(!tags.length){html+='<option disabled>No tags yet \u2014 use gear on a workspace card to add one.</option>'}tags.forEach(function(t){var eName=_escHtml(t.name);html+='<option value="'+eName+'"'+(t.color?' style="border-left:3px solid '+_escHtml(t.color)+'"':'')+'>'+eName+' ('+t.count+')</option>'});html+='</select>';if(tags.length){html+=' <button class="ws-tag-colors-btn" id="wsTagColorsBtn" onclick="toggleTagColorsPopover()" title="Manage tags" aria-label="Manage tags">&#127991;&#65039;</button>'}html+=' <select class="ws-filter-select" id="wsTimeFilter" onchange="setTimeFilter(this.value)" title="Filter by time">';html+='<option value="">Any time</option>';html+='<option value="today">Today</option>';html+='<option value="yesterday">Yesterday</option>';html+='<option value="this_week">This week</option>';html+='<option value="before">Older</option>';html+='</select>';if(hiddenCount>0){html+=' <span class="ws-hidden-badge" title="'+hiddenCount+' hidden workspace(s)">('+hiddenCount+' hidden)</span>'}html+=' <button class="ws-clear-filters" id="wsClearFilters" onclick="clearWorkspaceFilters()" style="display:none" title="Clear all filters">\u00d7 Clear</button>';container.innerHTML=html;window._tagColorData=tags}).catch(function(){})}
 var _tagColorPalette=['#ef4444','#f97316','#eab308','#22c55e','#14b8a6','#06b6d4','#3b82f6','#6366f1','#8b5cf6','#d946ef','#ec4899','#64748b'];
