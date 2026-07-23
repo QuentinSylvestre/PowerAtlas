@@ -102,13 +102,8 @@ def _time_bucket(iso_str: str) -> str:
     return "before"
 
 
-# Mtime fallback window: a live session with recent transcript activity is
-# classified as "active"; otherwise "idle". Used only when semantic classification
-# returns None. Tuned above the ~30s refresh cadence to avoid flicker.
-_ACTIVE_WINDOW_SECONDS = 60
-
 # Session statuses that count as "live" (a process is running for them).
-_LIVE_STATUSES = ("active", "needs_input", "idle", "errored")
+_LIVE_STATUSES = ("working", "waiting", "errored")
 
 # Tracks whether the first render has completed (for notification initialization)
 _first_render_done = False
@@ -131,31 +126,28 @@ def _age_seconds(iso_str: str) -> float | None:
 
 
 def _session_status(snapshot, session, provider: str,
-                    all_sessions: list | None = None,
                     notifications_enabled: bool = False) -> str:
-    """Return semantic status for a session."""
-    # 1. Check explicit live (session id on cmdline)
+    """Return semantic status for a session.
+
+    Detection gate: a session is live if either (a) its session_id is on a
+    process cmdline (--resume-id), OR (b) a provider process is running in
+    the session's cwd. This removes the old is_fresh/mtime fallback.
+    """
+    # 1. Check explicit live (session id on cmdline) — fast path
     is_explicitly_live = snapshot.is_live(provider, session.cwd, session.session_id)
 
-    # 2. Check fresh-session detection
-    is_fresh = False
-    if not is_explicitly_live and all_sessions is not None:
-        fresh_sid = snapshot.probable_fresh_session(provider, session.cwd, all_sessions)
-        if fresh_sid == session.session_id:
-            is_fresh = True
+    # 2. Check if a provider process runs in this workspace's cwd
+    from .data import _normalize_path
+    norm_cwd = _normalize_path(session.cwd)
+    has_process = norm_cwd in snapshot.live_cwds({provider})
 
-    if not is_explicitly_live and not is_fresh:
+    if not is_explicitly_live and not has_process:
         status_value = "closed"
     elif (semantic := get_semantic_status(session.session_id, provider, session.cwd)) is not None:
-        # 3. Try semantic classification (JSONL tail)
         status_value = semantic.value
     else:
-        # 4. Fallback: mtime heuristic (maps to active/idle only)
-        age = _age_seconds(session.updated_at)
-        if age is not None and age <= _ACTIVE_WINDOW_SECONDS:
-            status_value = "active"
-        else:
-            status_value = "idle"
+        # Process running but can't classify → waiting (needs user input)
+        status_value = "waiting"
 
     # Notify on transition
     notifications.check_and_notify(
@@ -165,16 +157,34 @@ def _session_status(snapshot, session, provider: str,
     return status_value
 
 
-def _workspace_status(snapshot, cwd: str, latest_updated: str,
+# Priority ordering for workspace-level status aggregation
+_STATUS_PRIORITY = {"errored": 3, "waiting": 2, "working": 1, "closed": 0}
+
+
+def _workspace_status(snapshot, cwd: str,
                       providers: set[str] | None) -> str:
-    """Coarse status for a workspace card — uses mtime as proxy (no per-session JSONL read here)."""
+    """Aggregate status for a workspace card — highest-priority session status wins.
+
+    Priority: errored > waiting > working > closed (no dot).
+    """
     from .data import _normalize_path
     if _normalize_path(cwd) not in snapshot.live_cwds(providers):
         return "closed"
-    age = _age_seconds(latest_updated)
-    if age is not None and age <= _ACTIVE_WINDOW_SECONDS:
-        return "active"
-    return "idle"
+    # Check semantic status for recent sessions in this workspace
+    best = "working"  # at minimum, a process is running
+    best_pri = _STATUS_PRIORITY[best]
+    # Try to get semantic classification for sessions in this cwd
+    for prov in (providers or {"kiro-cli", "claude-code"}):
+        sids = snapshot.live_session_ids_for_cwd(prov, cwd)
+        for sid in sids:
+            semantic = get_semantic_status(sid, prov, cwd)
+            if semantic is not None:
+                s = semantic.value
+                pri = _STATUS_PRIORITY.get(s, 0)
+                if pri > best_pri:
+                    best = s
+                    best_pri = pri
+    return best
 
 
 def _status_matches(status_filter: str, status: str) -> bool:
@@ -510,13 +520,13 @@ async def partials_workspaces(
         other_grouped = [g for g in other_grouped if _time_bucket(g["latest_updated"]) == time_filter]
 
     # --- Live-status filter (cwd-level; shows cards containing matching activity) ---
-    if status and status != "all":
-        snap = await asyncio.to_thread(presence.get_snapshot)
-        prov_names = None if provider == "all" else {provider}
+    snap = await asyncio.to_thread(presence.get_snapshot)
+    prov_names = None if provider == "all" else {provider}
 
+    if status and status != "all":
         def _ws_status_keep(g):
             return _status_matches(status, _workspace_status(
-                snap, g["cwd"], g["latest_updated"], prov_names))
+                snap, g["cwd"], prov_names))
 
         pinned_grouped = [g for g in pinned_grouped if _ws_status_keep(g)]
         other_grouped = [g for g in other_grouped if _ws_status_keep(g)]
@@ -530,6 +540,7 @@ async def partials_workspaces(
         else:
             session_count = group["total_count"]
         workspace_color = _resolve_workspace_color(cwd, config)
+        ws_status = _workspace_status(snap, cwd, prov_names)
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
@@ -537,6 +548,7 @@ async def partials_workspaces(
             last_updated=group["latest_updated"],
             workspace_color=workspace_color,
             providers=group["providers"],
+            workspace_status=ws_status,
         )
 
     if pinned_grouped and other_grouped:
@@ -559,6 +571,7 @@ async def partials_workspaces(
                 else:
                     session_count = group["total_count"]
                 workspace_color = _resolve_workspace_color(cwd, config)
+                ws_status = _workspace_status(snap, cwd, prov_names)
                 cards_html += templates.get_template("partials/workspace_card.html").render(
                     request=request, cwd=cwd, sessions=[], stale=stale,
                     pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
@@ -566,6 +579,7 @@ async def partials_workspaces(
                     last_updated=group["latest_updated"],
                     workspace_color=workspace_color,
                     providers=group["providers"],
+                    workspace_status=ws_status,
                 )
 
     if not cards_html:
@@ -651,9 +665,8 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
 
     # Live-status: annotate every row (for dots) and optionally filter.
     snap = await asyncio.to_thread(presence.get_snapshot)
-    all_sessions_flat = [s for s, _p in sessions_with_prov]
     _notif_enabled = config.notifications.get("enabled", False)
-    row_status = {(s.session_id, p): _session_status(snap, s, p, all_sessions_flat, _notif_enabled) for s, p in sessions_with_prov}
+    row_status = {(s.session_id, p): _session_status(snap, s, p, _notif_enabled) for s, p in sessions_with_prov}
     if status and status != "all":
         sessions_with_prov = [
             (s, p) for s, p in sessions_with_prov
@@ -1275,7 +1288,7 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
     html = ""
     for session in flat_sessions:
         prov_name = prov_map.get(id(session), provider if provider != "all" else "kiro-cli")
-        sess_status = _session_status(snap, session, prov_name, flat_sessions, _notif_enabled)
+        sess_status = _session_status(snap, session, prov_name, _notif_enabled)
         if status and status != "all" and not _status_matches(status, sess_status):
             continue
         html += templates.get_template("partials/session_row.html").render(

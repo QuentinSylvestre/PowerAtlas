@@ -79,14 +79,11 @@
   </div>
   <section class="right-panel" id="sessions-panel">
     <div class="section-label"><span>Sessions</span> <div class="session-filters" id="sessionFilters">
-      <select class="ws-filter-select" id="statusFilter" onchange="setStatusFilter(this.value)" title="Filter by live status">
+      <select class="ws-filter-select" id="statusFilter" onchange="setStatusFilter(this.value)" title="Filter by status">
         <option value="">All status</option>
-        <option value="live">🟢 Live</option>
-        <option value="active">🟢 Active</option>
-        <option value="needs_input">🟡 Needs input</option>
-        <option value="idle">⚪ Idle</option>
+        <option value="working">🟢 Working</option>
+        <option value="waiting">🟡 Waiting</option>
         <option value="errored">🔴 Errored</option>
-        <option value="closed">⚫ Closed</option>
       </select>
     </div></div>
     <div id="all-sessions" aria-busy="true"
@@ -169,7 +166,74 @@ var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
 function updateActionBar(){var sessionCount=document.querySelectorAll('.session-row.selected').length;var workspaceCount=document.querySelectorAll('.workspace-card.selected').length;document.getElementById('selCount').textContent=sessionCount+workspaceCount;document.getElementById('actionBar').classList.toggle('visible',sessionCount>0||workspaceCount>0);var launchBtn=document.querySelector('.action-btn.launch');if(launchBtn){launchBtn.disabled=sessionCount===0;launchBtn.title=sessionCount===0?'Select sessions to launch (use launcher tiles for workspaces)':''}updateLauncherBadges()}
 function toggleCard(card){card.classList.toggle('collapsed');var header=card.querySelector('.card-header');if(header)header.setAttribute('aria-expanded',!card.classList.contains('collapsed'));var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;var provider=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)+'&provider='+encodeURIComponent(provider)+_statusQs()).then(function(r){return r.text()}).then(function(html){body.innerHTML=html;if(window.htmx)htmx.process(body)}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}
-function refreshCards(fresh){var qs=fresh?'&fresh=1':'';var expandedCards=[];document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(c){expandedCards.push(c.dataset.cwd)});var provQs=_buildWorkspaceQs();var wp=document.getElementById('workspace-cards');var sp=document.getElementById('all-sessions');if(wp)wp.setAttribute('aria-busy','true');if(sp)sp.setAttribute('aria-busy','true');fetch('/partials/workspaces?'+provQs+qs).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');var tmp=document.createElement('div');tmp.innerHTML=html;var newCards=tmp.querySelectorAll('.workspace-card');var oldCards=el.querySelectorAll('.workspace-card');var oldMap={};oldCards.forEach(function(c){oldMap[c.dataset.cwd]=c});var newMap={};newCards.forEach(function(c){newMap[c.dataset.cwd]=c});oldCards.forEach(function(c){if(!newMap[c.dataset.cwd])c.remove()});var refNode=null;for(var i=newCards.length-1;i>=0;i--){var nc=newCards[i];var key=nc.dataset.cwd;var existing=oldMap[key];if(existing){var oldHeader=existing.querySelector('.card-header');var newHeader=nc.querySelector('.card-header');if(oldHeader&&newHeader)oldHeader.innerHTML=newHeader.innerHTML;if(expandedCards.indexOf(key)!==-1){existing.classList.remove('collapsed');var eh=existing.querySelector('.card-header');if(eh)eh.setAttribute('aria-expanded','true');var body=existing.querySelector('.card-body');if(body&&body.dataset.loaded==='true'){var prov=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(key)+'&provider='+encodeURIComponent(prov)+_statusQs()+'&fresh=1').then((function(b){return function(r){return r.text().then(function(h){b.innerHTML=h;if(window.htmx)htmx.process(b)})}})(body))}}refNode=existing}else{if(expandedCards.indexOf(key)!==-1){nc.classList.remove('collapsed');var nh=nc.querySelector('.card-header');if(nh)nh.setAttribute('aria-expanded','true');var nb=nc.querySelector('.card-body');if(nb){nb.dataset.loaded='true';var prov2=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(key)+'&provider='+encodeURIComponent(prov2)+_statusQs()+'&fresh=1').then((function(b){return function(r){return r.text().then(function(h){b.innerHTML=h;if(window.htmx)htmx.process(b)})}})(nb))}}if(refNode){refNode.parentNode.insertBefore(nc,refNode)}else{el.insertBefore(nc,el.firstChild)}if(window.htmx)htmx.process(nc);refNode=nc}}el.removeAttribute('aria-busy');loadExpandedCards();updateActionBar()}).catch(function(){if(wp)wp.removeAttribute('aria-busy')});var sessQs=_buildWorkspaceQs();fetch('/partials/all-sessions?page=1&'+sessQs+qs).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el);el.removeAttribute('aria-busy');updateActionBar()}).catch(function(){if(sp)sp.removeAttribute('aria-busy')})}
+function refreshCards(fresh){
+  var qs = fresh ? '&fresh=1' : '';
+  var expandedCards = [];
+  var selectedCards = [];
+  document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(c){
+    expandedCards.push(c.dataset.cwd);
+  });
+  document.querySelectorAll('.workspace-card.selected').forEach(function(c){
+    selectedCards.push(c.dataset.cwd);
+  });
+  var provQs = _buildWorkspaceQs();
+  var wp = document.getElementById('workspace-cards');
+  var sp = document.getElementById('all-sessions');
+  if(wp) wp.setAttribute('aria-busy','true');
+  if(sp) sp.setAttribute('aria-busy','true');
+  // Workspace panel: full innerHTML replacement (fixes ordering on filter transitions)
+  fetch('/partials/workspaces?' + provQs + qs).then(function(r){
+    return r.text();
+  }).then(function(html){
+    var el = document.getElementById('workspace-cards');
+    el.innerHTML = html;
+    if(window.htmx) htmx.process(el);
+    // Re-expand previously expanded cards
+    expandedCards.forEach(function(cwd){
+      var card = el.querySelector('.workspace-card[data-cwd="' + CSS.escape(cwd) + '"]');
+      if(card){
+        card.classList.remove('collapsed');
+        var header = card.querySelector('.card-header');
+        if(header) header.setAttribute('aria-expanded','true');
+        // Re-fetch sessions for expanded cards
+        var body = card.querySelector('.card-body');
+        if(body){
+          body.dataset.loaded = 'true';
+          var prov = window._activeProvider || 'all';
+          fetch('/partials/sessions?cwd=' + encodeURIComponent(cwd) + '&provider=' + encodeURIComponent(prov) + _statusQs() + '&fresh=1').then(function(r){
+            return r.text();
+          }).then(function(h){
+            body.innerHTML = h;
+            if(window.htmx) htmx.process(body);
+          });
+        }
+      }
+    });
+    el.removeAttribute('aria-busy');
+    // Re-apply selection state
+    selectedCards.forEach(function(cwd){
+      var card = el.querySelector('.workspace-card[data-cwd="' + CSS.escape(cwd) + '"]');
+      if(card) card.classList.add('selected');
+    });
+    loadExpandedCards();
+    updateActionBar();
+  }).catch(function(){
+    if(wp) wp.removeAttribute('aria-busy');
+  });
+  // Sessions panel: full innerHTML (unchanged approach)
+  var sessQs = _buildWorkspaceQs();
+  fetch('/partials/all-sessions?page=1&' + sessQs + qs).then(function(r){
+    return r.text();
+  }).then(function(html){
+    var el = document.getElementById('all-sessions');
+    el.innerHTML = html;
+    if(window.htmx) htmx.process(el);
+    el.removeAttribute('aria-busy');
+    updateActionBar();
+  }).catch(function(){
+    if(sp) sp.removeAttribute('aria-busy');
+  });
+}
 function _refreshSessionsPanel(){var sessQs=_buildWorkspaceQs();fetch('/partials/all-sessions?page=1&'+sessQs+'&fresh=1').then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el);updateActionBar()})}
 function resetOverlays(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)modal.close();document.querySelectorAll('.session-tooltip-slot').forEach(function(s){s.style.display='none'});var toasts=document.getElementById('toastContainer');if(toasts){toasts.querySelectorAll('.toast').forEach(function(t){if(!t.dataset.ts||(Date.now()-parseInt(t.dataset.ts,10))>1000)t.remove()})}}
 function showToast(html){var c=document.getElementById('toastContainer');if(!c){c=document.createElement('div');c.id='toastContainer';c.className='toast-container';document.body.appendChild(c)}var d=document.createElement('div');d.innerHTML=html;var t=d.firstElementChild;if(!t){t=document.createElement('div');t.className='toast toast-success';t.textContent=html||'Done'}t.dataset.ts=Date.now();c.appendChild(t);if(!t.classList.contains('toast-persistent')){setTimeout(function(){t.remove()},4000)}}

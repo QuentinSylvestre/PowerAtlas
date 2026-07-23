@@ -3059,8 +3059,8 @@ def _old_iso(mins=10):
     return (datetime.now(timezone.utc) - timedelta(minutes=mins)).isoformat()
 
 
-def _snapshot(live_sids=(), live_cwds=()):
-    return presence.Snapshot(set(live_sids), set(live_cwds))
+def _snapshot(live_sids=(), live_cwds=(), sid_to_cwd=None):
+    return presence.Snapshot(set(live_sids), set(live_cwds), sid_to_cwd or {})
 
 
 def test_age_seconds_parses_and_degrades():
@@ -3074,68 +3074,127 @@ def test_age_seconds_parses_and_degrades():
 
 def test_status_matches_semantics():
     assert _status_matches("", "closed") is True          # no filter
-    assert _status_matches("all", "idle") is True
-    assert _status_matches("live", "active") is True
-    assert _status_matches("live", "needs_input") is True
-    assert _status_matches("live", "idle") is True
+    assert _status_matches("all", "waiting") is True
+    assert _status_matches("live", "working") is True
+    assert _status_matches("live", "waiting") is True
     assert _status_matches("live", "errored") is True
     assert _status_matches("live", "closed") is False
-    assert _status_matches("active", "active") is True
-    assert _status_matches("active", "idle") is False
+    assert _status_matches("working", "working") is True
+    assert _status_matches("working", "waiting") is False
 
 
 @patch("power_atlas.web.get_semantic_status")
 def test_session_status_semantic_and_fallback(mock_semantic):
-    """Semantic status is returned when available; mtime fallback when None."""
+    """Semantic status is returned when available; waiting fallback when None."""
     from power_atlas.status_classifier import SemanticStatus
     live = _snapshot(live_sids={("claude-code", "s1")})
     recent_s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    old_s = _make_session(session_id="s1", cwd="/w", updated_at=_old_iso())
     closed_s = _make_session(session_id="s2", cwd="/w", updated_at=_recent_iso())
 
     # Semantic path: returns classifier result
-    mock_semantic.return_value = SemanticStatus.NEEDS_INPUT
-    assert _session_status(live, recent_s, "claude-code") == "needs_input"
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _session_status(live, recent_s, "claude-code") == "waiting"
     mock_semantic.return_value = SemanticStatus.ERRORED
     assert _session_status(live, recent_s, "claude-code") == "errored"
 
-    # Fallback path: classifier returns None -> mtime heuristic
+    # Fallback path: classifier returns None -> waiting (process running but can't classify)
     mock_semantic.return_value = None
-    assert _session_status(live, recent_s, "claude-code") == "active"
-    assert _session_status(live, old_s, "claude-code") == "idle"
+    assert _session_status(live, recent_s, "claude-code") == "waiting"
 
     # Closed: not live at all
     assert _session_status(live, closed_s, "claude-code") == "closed"
 
 
 @patch("power_atlas.web.get_semantic_status")
-def test_session_status_fresh_session_detection(mock_semantic):
-    """Fresh-session detection wires in via probable_fresh_session."""
+def test_session_status_cwd_based_no_resume_id(mock_semantic):
+    """CWD-based detection: a process in the cwd is enough to classify as live."""
     from power_atlas.status_classifier import SemanticStatus
-    # Snapshot: process running in /w but no session id matched
+    # Snapshot: process running in /w but no session id matched (no --resume-id)
     snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
-    # Fresh session (created recently)
-    fresh_created = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
-    fresh_s = _make_session(session_id="fresh1", cwd="/w", created_at=fresh_created, updated_at=_recent_iso())
-    other_s = _make_session(session_id="other1", cwd="/w", updated_at=_recent_iso())
+    s = _make_session(session_id="sess1", cwd="/w", updated_at=_recent_iso())
 
-    mock_semantic.return_value = SemanticStatus.ACTIVE
-    # Pass all_sessions so fresh detection can work
-    all_sessions = [fresh_s, other_s]
-    # fresh_s is the newest and within 90s — should be detected as live
-    assert _session_status(snap, fresh_s, "claude-code", all_sessions) == "active"
-    # other_s is not the fresh one and not explicitly live
-    assert _session_status(snap, other_s, "claude-code", all_sessions) == "closed"
+    # Semantic classifier returns WORKING
+    mock_semantic.return_value = SemanticStatus.WORKING
+    assert _session_status(snap, s, "claude-code") == "working"
+
+    # Semantic classifier returns WAITING
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+    # Semantic classifier returns None → fallback to "waiting"
+    mock_semantic.return_value = None
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+    # Different provider → no process in cwd → closed
+    snap_kiro = _snapshot(live_cwds={("kiro-cli", _normalize_path("/w"))})
+    assert _session_status(snap_kiro, s, "claude-code") == "closed"
 
 
 def test_workspace_status_cwd_and_provider_scoped():
     snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
-    assert _workspace_status(snap, "/w", _recent_iso(), {"claude-code"}) == "active"
-    assert _workspace_status(snap, "/w", _old_iso(), {"claude-code"}) == "idle"
+    assert _workspace_status(snap, "/w", {"claude-code"}) == "working"
     # provider filter excludes the live claude process
-    assert _workspace_status(snap, "/w", _recent_iso(), {"kiro-cli"}) == "closed"
+    assert _workspace_status(snap, "/w", {"kiro-cli"}) == "closed"
     # different folder is closed
-    assert _workspace_status(snap, "/other", _recent_iso(), None) == "closed"
+    assert _workspace_status(snap, "/other", None) == "closed"
+
+
+def test_classify_kiro_v3_working():
+    """v3 classifier returns WORKING for tool_call and user messages."""
+    from power_atlas.status_classifier import classify_kiro_v3, SemanticStatus
+    # tool_call → working
+    lines_tool = [
+        '{"id":"1","timestamp":"2026-07-20T10:00:00Z","payload":{"type":"tool_call","toolName":"read_file","args":{},"status":"completed","kind":"read"}}',
+    ]
+    assert classify_kiro_v3(lines_tool) == SemanticStatus.WORKING
+
+    # user message → working
+    lines_user = [
+        '{"id":"2","timestamp":"2026-07-20T10:01:00Z","payload":{"type":"user","content":"fix the bug"}}',
+    ]
+    assert classify_kiro_v3(lines_user) == SemanticStatus.WORKING
+
+    # tool_result (skipped) then tool_call → working
+    lines_mixed = [
+        '{"id":"3","timestamp":"2026-07-20T10:00:00Z","payload":{"type":"tool_result","content":"file contents","success":true}}',
+        '{"id":"4","timestamp":"2026-07-20T10:01:00Z","payload":{"type":"tool_call","toolName":"fs_write","args":{},"status":"completed","kind":"edit"}}',
+    ]
+    assert classify_kiro_v3(lines_mixed) == SemanticStatus.WORKING
+
+
+def test_classify_kiro_v3_waiting():
+    """v3 classifier returns WAITING for assistant messages."""
+    from power_atlas.status_classifier import classify_kiro_v3, SemanticStatus
+    # assistant → waiting
+    lines = [
+        '{"id":"1","timestamp":"2026-07-20T10:00:00Z","payload":{"type":"tool_result","content":"ok","success":true}}',
+        '{"id":"2","timestamp":"2026-07-20T10:01:00Z","payload":{"type":"assistant","content":"Done. The file has been updated."}}',
+    ]
+    assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+
+def test_classify_kiro_v3_errored():
+    """v3 classifier returns ERRORED when multiple recent tool_results fail."""
+    from power_atlas.status_classifier import classify_kiro_v3, SemanticStatus
+    # Multiple failed tool_results → errored
+    lines = [
+        '{"id":"1","timestamp":"2026-07-20T10:00:00Z","payload":{"type":"tool_result","content":"error","success":false}}',
+        '{"id":"2","timestamp":"2026-07-20T10:00:01Z","payload":{"type":"tool_result","content":"error","success":false}}',
+        '{"id":"3","timestamp":"2026-07-20T10:00:02Z","payload":{"type":"assistant","content":"Failed."}}',
+    ]
+    assert classify_kiro_v3(lines) == SemanticStatus.ERRORED
+
+
+def test_classify_kiro_v3_skips_noise():
+    """v3 classifier skips non-meaningful message types."""
+    from power_atlas.status_classifier import classify_kiro_v3, SemanticStatus
+    lines = [
+        '{"id":"1","timestamp":"2026-07-20T10:00:00Z","payload":{"type":"user","content":"hello"}}',
+        '{"id":"2","timestamp":"2026-07-20T10:00:01Z","payload":{"type":"usage_summary","elapsedTime":5,"status":"ok"}}',
+        '{"id":"3","timestamp":"2026-07-20T10:00:02Z","payload":{"type":"session_metadata","key":"ctx","value":"100"}}',
+    ]
+    # Should skip usage_summary and session_metadata, find user → working
+    assert classify_kiro_v3(lines) == SemanticStatus.WORKING
 
 
 @patch("power_atlas.web.get_semantic_status")
@@ -3151,7 +3210,7 @@ def test_all_sessions_dot_and_status_filter(mock_config, mock_paginated, mock_sn
     dead_s = _make_session(session_id="dead1", cwd=ws, updated_at=_recent_iso())
     mock_paginated.return_value = ([(live_s, "claude-code"), (dead_s, "claude-code")], False)
     mock_snap.return_value = _snapshot(live_sids={("claude-code", "live1")})
-    mock_semantic.return_value = SemanticStatus.ACTIVE
+    mock_semantic.return_value = SemanticStatus.WORKING
 
     # No filter: both rows render; dot rendering depends on template (Phase 4).
     resp = client.get("/partials/all-sessions?page=1")
@@ -3240,18 +3299,18 @@ from power_atlas.status_classifier import (
 
 
 class TestSemanticStatusEnum:
-    def test_enum_has_five_values(self):
-        assert len(SemanticStatus) == 5
-        assert SemanticStatus.ACTIVE == "active"
-        assert SemanticStatus.NEEDS_INPUT == "needs_input"
-        assert SemanticStatus.IDLE == "idle"
+    def test_enum_has_four_values(self):
+        assert len(SemanticStatus) == 4
+        assert SemanticStatus.WORKING == "working"
+        assert SemanticStatus.WAITING == "waiting"
         assert SemanticStatus.ERRORED == "errored"
         assert SemanticStatus.CLOSED == "closed"
 
 
 class TestResolveJsonlPath:
     def test_kiro_v2_returns_none_for_nonexistent(self, tmp_path):
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path):
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path / "v3_empty"):
             result = _resolve_jsonl_path("nonexistent-id", "kiro-cli", "C:\\proj")
             assert result is None
 
@@ -3277,6 +3336,32 @@ class TestResolveJsonlPath:
     def test_unknown_provider_returns_none(self):
         result = _resolve_jsonl_path("sess-1", "unknown-provider", "C:\\proj")
         assert result is None
+
+    def test_kiro_v3_returns_path_when_exists(self, tmp_path):
+        """v3 session found under sessions/<hash>/sess_<id>/messages.jsonl."""
+        ws_hash_dir = tmp_path / "abc123"
+        ws_hash_dir.mkdir()
+        sess_dir = ws_hash_dir / "sess_my-session"
+        sess_dir.mkdir()
+        messages_file = sess_dir / "messages.jsonl"
+        messages_file.write_text("")
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            result = _resolve_jsonl_path("my-session", "kiro-cli", "C:\\proj")
+            assert result == messages_file
+
+    def test_kiro_v3_with_sess_prefix(self, tmp_path):
+        """v3 session_id already has sess_ prefix."""
+        ws_hash_dir = tmp_path / "abc123"
+        ws_hash_dir.mkdir()
+        sess_dir = ws_hash_dir / "sess_uuid-here"
+        sess_dir.mkdir()
+        messages_file = sess_dir / "messages.jsonl"
+        messages_file.write_text("")
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            result = _resolve_jsonl_path("sess_uuid-here", "kiro-cli", "C:\\proj")
+            assert result == messages_file
 
 
 class TestReadTailLines:
@@ -3319,21 +3404,21 @@ class TestClassifyKiroV2:
 
     def test_prompt_returns_active(self):
         lines = [self._make_line("Prompt", {"content": "hello"})]
-        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
 
     def test_tool_results_returns_active(self):
         lines = [self._make_line("ToolResults", {"results": []})]
-        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
 
     def test_assistant_with_tool_use_returns_active(self):
         data = {"content": [{"kind": "toolUse", "data": {"name": "fs_read"}}]}
         lines = [self._make_line("AssistantMessage", data)]
-        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
 
     def test_assistant_without_tool_use_returns_idle(self):
         data = {"content": [{"kind": "text", "data": {"text": "Done."}}]}
         lines = [self._make_line("AssistantMessage", data)]
-        assert classify_kiro_v2(lines) == SemanticStatus.IDLE
+        assert classify_kiro_v2(lines) == SemanticStatus.WAITING
 
     def test_last_message_wins_reverse_order(self):
         """When multiple messages exist, the last (most recent) one determines status."""
@@ -3342,7 +3427,7 @@ class TestClassifyKiroV2:
             self._make_line("AssistantMessage", {"content": [{"kind": "text", "data": {}}]}),
         ]
         # Last line is AssistantMessage without toolUse → IDLE
-        assert classify_kiro_v2(lines) == SemanticStatus.IDLE
+        assert classify_kiro_v2(lines) == SemanticStatus.WAITING
 
     def test_empty_lines_returns_none(self):
         assert classify_kiro_v2([]) is None
@@ -3357,30 +3442,30 @@ class TestClassifyKiroV2:
             "garbage line",
         ]
         # Reverse walk: skip garbage, find Prompt → ACTIVE
-        assert classify_kiro_v2(lines) == SemanticStatus.ACTIVE
+        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
 
 
 class TestClassifyClaude:
     def test_tool_result_returns_active(self):
         lines = [_json.dumps({"type": "tool_result", "content": "output"})]
-        assert classify_claude(lines) == SemanticStatus.ACTIVE
+        assert classify_claude(lines) == SemanticStatus.WORKING
 
     def test_tool_use_returns_active(self):
         lines = [_json.dumps({"type": "tool_use", "name": "read_file"})]
-        assert classify_claude(lines) == SemanticStatus.ACTIVE
+        assert classify_claude(lines) == SemanticStatus.WORKING
 
     def test_user_message_returns_active(self):
         lines = [_json.dumps({"type": "user", "content": "do something"})]
-        assert classify_claude(lines) == SemanticStatus.ACTIVE
+        assert classify_claude(lines) == SemanticStatus.WORKING
 
     def test_human_role_returns_active(self):
         """Legacy role-based format with 'human' role."""
         lines = [_json.dumps({"role": "human", "content": "hello"})]
-        assert classify_claude(lines) == SemanticStatus.ACTIVE
+        assert classify_claude(lines) == SemanticStatus.WORKING
 
     def test_assistant_without_error_returns_idle(self):
         lines = [_json.dumps({"type": "assistant", "content": "Done."})]
-        assert classify_claude(lines) == SemanticStatus.IDLE
+        assert classify_claude(lines) == SemanticStatus.WAITING
 
     def test_assistant_with_is_error_block_returns_errored(self):
         lines = [_json.dumps({
@@ -3409,16 +3494,32 @@ class TestClassifyClaude:
             _json.dumps({"type": "assistant", "content": "Done."}),
         ]
         # Last line is assistant without error → IDLE
-        assert classify_claude(lines) == SemanticStatus.IDLE
+        assert classify_claude(lines) == SemanticStatus.WAITING
 
 
 class TestClassifyKiroV3:
-    def test_returns_none_placeholder(self):
-        lines = [_json.dumps({"id": "x", "timestamp": "2026-01-01", "payload": {"type": "user"}})]
-        assert classify_kiro_v3(lines) is None
+    def test_user_returns_working(self):
+        lines = [_json.dumps({"id": "x", "timestamp": "2026-01-01", "payload": {"type": "user", "content": "hello"}})]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_tool_call_returns_working(self):
+        lines = [_json.dumps({"id": "x", "timestamp": "2026-01-01", "payload": {"type": "tool_call", "toolName": "read_file", "args": {}, "status": "completed", "kind": "read"}})]
+        assert classify_kiro_v3(lines) == SemanticStatus.WORKING
+
+    def test_assistant_returns_waiting(self):
+        lines = [_json.dumps({"id": "x", "timestamp": "2026-01-01", "payload": {"type": "assistant", "content": "Done."}})]
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
 
     def test_empty_returns_none(self):
         assert classify_kiro_v3([]) is None
+
+    def test_skips_tool_result_finds_assistant(self):
+        lines = [
+            _json.dumps({"id": "1", "timestamp": "2026-01-01", "payload": {"type": "assistant", "content": "ok"}}),
+            _json.dumps({"id": "2", "timestamp": "2026-01-01", "payload": {"type": "tool_result", "content": "output", "success": True}}),
+        ]
+        # tool_result is skipped; last meaningful is assistant → waiting
+        assert classify_kiro_v3(lines) == SemanticStatus.WAITING
 
 
 class TestGetSemanticStatus:
@@ -3439,11 +3540,11 @@ class TestGetSemanticStatus:
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=session_file):
             # First call — classifies
             result1 = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
-            assert result1 == SemanticStatus.ACTIVE
+            assert result1 == SemanticStatus.WORKING
 
             # Second call — hits cache (same mtime)
             result2 = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
-            assert result2 == SemanticStatus.ACTIVE
+            assert result2 == SemanticStatus.WORKING
 
             # Verify cache was populated
             assert ("kiro-cli", "sess-1") in _status_cache
@@ -3466,7 +3567,7 @@ class TestGetSemanticStatus:
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=session_file), \
              _patch("power_atlas.status_classifier.time.monotonic", side_effect=fake_monotonic):
             result1 = get_semantic_status("sess-2", "kiro-cli", "C:\\proj")
-            assert result1 == SemanticStatus.ACTIVE
+            assert result1 == SemanticStatus.WORKING
 
             # Write new content (IDLE) and force a different mtime
             line_idle = _json.dumps({
@@ -3483,7 +3584,7 @@ class TestGetSemanticStatus:
 
             # Next call: TTL expired + mtime changed -> reclassifies
             result2 = get_semantic_status("sess-2", "kiro-cli", "C:\\proj")
-            assert result2 == SemanticStatus.IDLE
+            assert result2 == SemanticStatus.WAITING
 
     def test_returns_none_on_stat_failure(self, tmp_path):
         fake_path = tmp_path / "gone.jsonl"
@@ -3513,81 +3614,90 @@ class TestNotifications:
         notifications._initialized = False
 
     def test_notification_transition_fires(self):
-        """Active→Idle triggers a toast notification."""
+        """Working→Waiting triggers a toast notification."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        # Establish active state
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
-        # Transition to idle should fire
+        # Establish working state
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
+        # Transition to waiting should fire
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
-            mock_fire.assert_called_once_with("My Session", "idle")
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
+            mock_fire.assert_called_once_with("My Session", "waiting")
 
-    def test_notification_active_to_needs_input_fires(self):
-        """Active→Needs-input triggers a toast notification."""
+    def test_notification_working_to_waiting_fires(self):
+        """Working→Waiting triggers a toast notification (explicit)."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "needs_input", True)
-            mock_fire.assert_called_once_with("My Session", "needs_input")
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
+            mock_fire.assert_called_once_with("My Session", "waiting")
 
-    def test_notification_active_to_errored_fires(self):
-        """Active→Errored triggers a toast notification."""
+    def test_notification_working_to_errored_fires(self):
+        """Working→Errored triggers a toast notification."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
             notifications.check_and_notify("sess-1", "My Session", "errored", True)
             mock_fire.assert_called_once_with("My Session", "errored")
 
     def test_notification_non_active_transition_does_not_fire(self):
-        """Idle→Active does NOT trigger a notification."""
+        """Waiting→Closed does NOT trigger a notification."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "idle", True)
+        notifications.check_and_notify("sess-1", "My Session", "waiting", True)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "active", True)
+            notifications.check_and_notify("sess-1", "My Session", "closed", True)
+            mock_fire.assert_not_called()
+
+    def test_notification_working_to_closed_does_not_fire(self):
+        """Working→Closed does NOT trigger a notification."""
+        from power_atlas import notifications
+        notifications.mark_initialized()
+        notifications.check_and_notify("sess-2", "Another Session", "working", True)
+        with patch("power_atlas.notifications._fire_toast") as mock_fire:
+            notifications.check_and_notify("sess-2", "Another Session", "closed", True)
             mock_fire.assert_not_called()
 
     def test_notification_cooldown(self):
         """Second transition within 60s is suppressed."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        # First: active → idle (fires)
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        # First: working → waiting (fires)
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
             mock_fire.assert_called_once()
-        # Go back to active then idle again — within cooldown
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        # Go back to working then waiting again — within cooldown
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
             mock_fire.assert_not_called()  # suppressed by cooldown
 
     def test_notification_cooldown_expires(self):
         """After cooldown expires, notification fires again."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         with patch("power_atlas.notifications._fire_toast"):
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
         # Manually expire the cooldown
         state = notifications._session_states["sess-1"]
         state.last_notified_at -= 61.0
-        # Go back to active then idle
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        # Go back to working then waiting
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
             mock_fire.assert_called_once()
 
     def test_notification_disabled(self):
         """enabled=False prevents all notifications."""
         from power_atlas import notifications
         notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "active", False)
+        notifications.check_and_notify("sess-1", "My Session", "working", False)
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "idle", False)
+            notifications.check_and_notify("sess-1", "My Session", "waiting", False)
             mock_fire.assert_not_called()
 
     def test_notification_startup_no_fire(self):
@@ -3595,21 +3705,21 @@ class TestNotifications:
         from power_atlas import notifications
         # Do NOT call mark_initialized
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "active", True)
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
+            notifications.check_and_notify("sess-1", "My Session", "working", True)
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
             mock_fire.assert_not_called()
 
     def test_notification_startup_tracks_state(self):
         """Before mark_initialized(), state IS tracked (for baseline)."""
         from power_atlas import notifications
         # Establish state before init
-        notifications.check_and_notify("sess-1", "My Session", "active", True)
+        notifications.check_and_notify("sess-1", "My Session", "working", True)
         # Now initialize
         notifications.mark_initialized()
-        # Transition should work since state was already active
+        # Transition should work since state was already working
         with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "idle", True)
-            mock_fire.assert_called_once_with("My Session", "idle")
+            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
+            mock_fire.assert_called_once_with("My Session", "waiting")
 
     def test_notification_state_bounded(self):
         """>100 entries triggers LRU eviction of oldest."""
@@ -3617,11 +3727,11 @@ class TestNotifications:
         notifications.mark_initialized()
         # Add 100 entries
         for i in range(100):
-            notifications.check_and_notify(f"sess-{i}", f"Session {i}", "active", True)
+            notifications.check_and_notify(f"sess-{i}", f"Session {i}", "working", True)
         assert len(notifications._session_states) == 100
         assert "sess-0" in notifications._session_states
         # Add one more — should evict sess-0
-        notifications.check_and_notify("sess-100", "Session 100", "active", True)
+        notifications.check_and_notify("sess-100", "Session 100", "working", True)
         assert len(notifications._session_states) == 100
         assert "sess-0" not in notifications._session_states
         assert "sess-100" in notifications._session_states
