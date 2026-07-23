@@ -377,6 +377,13 @@ function pollStatus(){
         var rows=document.querySelectorAll('.session-row[data-sid="'+CSS.escape(sid)+'"]');
         rows.forEach(function(row){_updateSessionStatusDot(row,sessStatuses[sid])});
       });
+      // Clear dots for sessions that had dots but are no longer in response
+      document.querySelectorAll('.session-status').forEach(function(dot){
+        var row=dot.closest('.session-row');
+        if(row && row.dataset.sid && !sessStatuses[row.dataset.sid]){
+          dot.remove();
+        }
+      });
     })
     .catch(function(){/* retry on next cycle */})
     .finally(function(){_statusFetching=false});
@@ -411,6 +418,7 @@ function _updateWorkspaceStatusDot(card,newStatus){
     dot=document.createElement('span');
     dot.className=cls;
     dot.title=title;
+    dot.setAttribute('aria-label',title);
     var insertBefore=header.querySelector('.card-last-active')||header.querySelector('.card-actions');
     if(insertBefore)header.insertBefore(dot,insertBefore);
     else header.appendChild(dot);
@@ -432,6 +440,7 @@ function _updateSessionStatusDot(row,newStatus){
     dot=document.createElement('span');
     dot.className=cls;
     dot.title=title;
+    dot.setAttribute('aria-label',title);
     // Insert as first child of the row for consistent placement
     var titleEl=row.querySelector('.session-title');
     if(titleEl)titleEl.parentNode.insertBefore(dot,titleEl);
