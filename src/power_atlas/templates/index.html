@@ -166,58 +166,140 @@ var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
 function updateActionBar(){var sessionCount=document.querySelectorAll('.session-row.selected').length;var workspaceCount=document.querySelectorAll('.workspace-card.selected').length;document.getElementById('selCount').textContent=sessionCount+workspaceCount;document.getElementById('actionBar').classList.toggle('visible',sessionCount>0||workspaceCount>0);var launchBtn=document.querySelector('.action-btn.launch');if(launchBtn){launchBtn.disabled=sessionCount===0;launchBtn.title=sessionCount===0?'Select sessions to launch (use launcher tiles for workspaces)':''}updateLauncherBadges()}
 function toggleCard(card){card.classList.toggle('collapsed');var header=card.querySelector('.card-header');if(header)header.setAttribute('aria-expanded',!card.classList.contains('collapsed'));var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;var provider=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)+'&provider='+encodeURIComponent(provider)+_statusQs()).then(function(r){return r.text()}).then(function(html){body.innerHTML=html;if(window.htmx)htmx.process(body)}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}
+// CSS.escape handles backslashes in Windows paths; filesystem paths cannot contain literal '"'
+function _cardSelector(cwd){return '.workspace-card[data-cwd="'+CSS.escape(cwd)+'"]'}
 function refreshCards(fresh){
   var qs = fresh ? '&fresh=1' : '';
-  var expandedCards = [];
-  var selectedCards = [];
+  // 1. Capture expanded cards' cwds and scroll positions (DOM stays intact during fetch)
+  var expandedState = {};
   document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(c){
-    expandedCards.push(c.dataset.cwd);
+    var body = c.querySelector('.card-body');
+    expandedState[c.dataset.cwd] = {scrollTop: body ? body.scrollTop : 0};
   });
+  var selectedCards = [];
   document.querySelectorAll('.workspace-card.selected').forEach(function(c){
     selectedCards.push(c.dataset.cwd);
   });
+  // Capture active focus for restoration after swap
+  var focusedEl = document.activeElement;
+  var focusCwd = focusedEl && focusedEl.closest ? (focusedEl.closest('.workspace-card') || {}).dataset : null;
+  focusCwd = focusCwd ? focusCwd.cwd : null;
   var provQs = _buildWorkspaceQs();
   var wp = document.getElementById('workspace-cards');
   var sp = document.getElementById('all-sessions');
   if(wp) wp.setAttribute('aria-busy','true');
   if(sp) sp.setAttribute('aria-busy','true');
-  // Workspace panel: full innerHTML replacement (fixes ordering on filter transitions)
+  // Workspace panel: preserve expanded cards, replace collapsed ones
   fetch('/partials/workspaces?' + provQs + qs).then(function(r){
     return r.text();
   }).then(function(html){
     var el = document.getElementById('workspace-cards');
-    el.innerHTML = html;
-    if(window.htmx) htmx.process(el);
-    // Re-expand previously expanded cards
-    expandedCards.forEach(function(cwd){
-      var card = el.querySelector('.workspace-card[data-cwd="' + CSS.escape(cwd) + '"]');
-      if(card){
-        card.classList.remove('collapsed');
-        var header = card.querySelector('.card-header');
-        if(header) header.setAttribute('aria-expanded','true');
-        // Re-fetch sessions for expanded cards
-        var body = card.querySelector('.card-body');
-        if(body){
-          body.dataset.loaded = 'true';
-          var prov = window._activeProvider || 'all';
-          fetch('/partials/sessions?cwd=' + encodeURIComponent(cwd) + '&provider=' + encodeURIComponent(prov) + _statusQs() + '&fresh=1').then(function(r){
-            return r.text();
-          }).then(function(h){
-            body.innerHTML = h;
-            if(window.htmx) htmx.process(body);
-          });
+    var expandedCwds = Object.keys(expandedState);
+    if(!expandedCwds.length){
+      // No expanded cards — fast path: full innerHTML replacement
+      el.innerHTML = html;
+      if(window.htmx) htmx.process(el);
+    } else {
+      // 2. Parse new HTML into a temporary container (not in live DOM)
+      var temp = document.createElement('div');
+      temp.innerHTML = html;
+      // 3. For each expanded card: find placeholder in temp, update header metadata, replace placeholder with preserved node
+      expandedCwds.forEach(function(cwd){
+        var liveCard = el.querySelector(_cardSelector(cwd));
+        var freshCard = temp.querySelector(_cardSelector(cwd));
+        if(liveCard && freshCard){
+          // Update card-header metadata from server render
+          var freshHeader = freshCard.querySelector('.card-header');
+          var liveHeader = liveCard.querySelector('.card-header');
+          if(freshHeader && liveHeader){
+            // Update session count
+            var freshCount = freshHeader.querySelector('.card-count');
+            var liveCount = liveHeader.querySelector('.card-count');
+            if(freshCount && liveCount) liveCount.textContent = freshCount.textContent;
+            // Update last-active timestamp
+            var freshActive = freshHeader.querySelector('.card-last-active');
+            var liveActive = liveHeader.querySelector('.card-last-active');
+            if(freshActive && liveActive) liveActive.textContent = freshActive.textContent;
+            else if(freshActive && !liveActive) liveHeader.insertBefore(freshActive.cloneNode(true), liveHeader.querySelector('.card-actions'));
+            // Update status dot
+            var liveStatus = liveHeader.querySelector('.ws-status');
+            var freshStatus = freshHeader.querySelector('.ws-status');
+            if(liveStatus) liveStatus.remove();
+            if(freshStatus){
+              var insertBefore = liveHeader.querySelector('.card-last-active') || liveHeader.querySelector('.card-actions');
+              if(insertBefore) liveHeader.insertBefore(freshStatus.cloneNode(true), insertBefore);
+            }
+          }
+          // Update data attributes from fresh render
+          liveCard.dataset.timeGroup = freshCard.dataset.timeGroup || '';
+          liveCard.dataset.sortKey = freshCard.dataset.sortKey || '';
+          // Replace the placeholder in temp with the preserved live node
+          freshCard.parentNode.replaceChild(liveCard, freshCard);
         }
+      });
+      // 4. Swap the prepared temp container into live #workspace-cards
+      el.innerHTML = '';
+      while(temp.firstChild) el.appendChild(temp.firstChild);
+      if(window.htmx) htmx.process(el);
+      // Ensure preserved expanded cards remain expanded (class state)
+      expandedCwds.forEach(function(cwd){
+        var card = el.querySelector(_cardSelector(cwd));
+        if(card){
+          card.classList.remove('collapsed');
+          var header = card.querySelector('.card-header');
+          if(header) header.setAttribute('aria-expanded','true');
+        }
+      });
+    }
+    el.removeAttribute('aria-busy');
+    // 5. Restore scroll positions
+    Object.keys(expandedState).forEach(function(cwd){
+      var card = el.querySelector(_cardSelector(cwd));
+      if(card){
+        var body = card.querySelector('.card-body');
+        if(body) body.scrollTop = expandedState[cwd].scrollTop;
       }
     });
-    el.removeAttribute('aria-busy');
-    // Re-apply selection state
+    // 6. Restore selection state
     selectedCards.forEach(function(cwd){
-      var card = el.querySelector('.workspace-card[data-cwd="' + CSS.escape(cwd) + '"]');
+      var card = el.querySelector(_cardSelector(cwd));
       if(card) card.classList.add('selected');
     });
+    // Restore keyboard focus if it was within the workspace panel
+    if(focusCwd){
+      var focusCard = el.querySelector(_cardSelector(focusCwd));
+      if(focusCard){
+        var header = focusCard.querySelector('.card-header');
+        if(header) header.focus();
+      }
+    }
+    // 7. On fresh (visibilitychange tab return), re-fetch sessions for expanded cards
+    if(fresh){
+      Object.keys(expandedState).forEach(function(cwd){
+        var card = el.querySelector(_cardSelector(cwd));
+        if(card){
+          var body = card.querySelector('.card-body');
+          if(body){
+            var prov = window._activeProvider || 'all';
+            fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)+'&provider='+encodeURIComponent(prov)+_statusQs()+'&fresh=1').then(function(r){
+              return r.text();
+            }).then(function(h){
+              // Clear any visible tooltips before replacing content
+              body.querySelectorAll('.session-tooltip-slot').forEach(function(s){ s.style.display='none'; });
+              body.innerHTML = h;
+              if(window.htmx) htmx.process(body);
+            });
+          }
+        }
+      });
+    }
+    // loadExpandedCards() handles any NEW cards that arrived expanded (e.g. htmx
+    // triggers) — preserved cards already have data-loaded='true' so they're skipped.
+    // Cards that were filtered out and reappear collapsed are handled normally.
     loadExpandedCards();
     updateActionBar();
   }).catch(function(){
+    // 8. On fetch error, DOM remains intact (no detachment before response)
     if(wp) wp.removeAttribute('aria-busy');
   });
   // Sessions panel: full innerHTML (unchanged approach)

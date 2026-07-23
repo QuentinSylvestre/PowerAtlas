@@ -1,5 +1,5 @@
 <div class="workspace-card{% if stale %} stale{% endif %}{% if providers|length > 1 %} multi-provider{% endif %} collapsed"
-     data-cwd="{{ cwd }}">
+     data-cwd="{{ cwd }}" data-time-group="{{ time_group|default('') }}" data-sort-key="{{ last_updated|default('') }}">
   <div class="card-header" tabindex="0" role="button" aria-expanded="false" onclick="toggleCard(this.parentElement)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCard(this.parentElement)}">
     <span class="provider-gradient{% if providers|length > 2 %} gradient-3plus{% endif %}" style="background: {% if providers|length == 1 %}{{ providers[0].color }}{% else %}linear-gradient(to bottom, {% for p in providers %}{{ p.color }} {{ (loop.index0 * 100 // providers|length) }}%, {{ p.color }} {{ (loop.index * 100 // providers|length) }}%{% if not loop.last %}, {% endif %}{% endfor %}){% endif %}"></span>
     <div class="card-check" onclick="event.stopPropagation();handleItemClick(this.closest('.workspace-card'),event,'.workspace-card')"></div>
