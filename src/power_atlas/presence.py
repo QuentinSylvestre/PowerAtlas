@@ -78,11 +78,14 @@ def is_available() -> bool:
 class Snapshot:
     """Immutable view of which sessions/workspaces are live at scan time."""
 
-    def __init__(self, live_sids: set[tuple[str, str]], live_cwds: set[tuple[str, str]]):
+    def __init__(self, live_sids: set[tuple[str, str]], live_cwds: set[tuple[str, str]],
+                 sid_to_cwd: dict[tuple[str, str], str] | None = None):
         # live_sids: {(provider, session_id)}
         # live_cwds: {(provider, normalized_cwd)}
         self._live_sids = live_sids
         self._live_cwds = live_cwds
+        # sid_to_cwd: {(provider, session_id) -> normalized_cwd}
+        self._sid_to_cwd = sid_to_cwd or {}
 
     def is_live(self, provider: str, cwd: str, session_id: str) -> bool:
         """True if this exact session is running (id matched on a process cmdline)."""
@@ -99,10 +102,21 @@ class Snapshot:
             return {c for _p, c in self._live_cwds}
         return {c for p, c in self._live_cwds if p in providers}
 
+    def live_session_ids_for_cwd(self, provider: str, cwd: str) -> list[str]:
+        """Return session IDs of live processes running in the given cwd."""
+        from .data import _normalize_path
+        norm_cwd = _normalize_path(cwd)
+        return [sid for (prov, sid), c in self._sid_to_cwd.items()
+                if prov == provider and c == norm_cwd]
+
     def probable_fresh_session(self, provider: str, cwd: str,
                                sessions: list) -> str | None:
         """If a provider process runs in cwd but no session id was matched,
         return the session_id of the newest session (created within 90s).
+
+        .. deprecated::
+            Replaced by cwd-based detection in _session_status(). Kept for
+            backward compatibility but no longer called from the live gate.
 
         Args:
             provider: provider name (e.g. 'kiro-cli', 'claude-code')
@@ -138,7 +152,7 @@ class Snapshot:
         return None
 
 
-_EMPTY = Snapshot(set(), set())
+_EMPTY = Snapshot(set(), set(), {})
 
 
 def _extract_session_id(cmdline: list[str], flag: str) -> str | None:
@@ -171,6 +185,7 @@ def _scan() -> Snapshot:
         return _EMPTY
     live_sids: set[tuple[str, str]] = set()
     live_cwds: set[tuple[str, str]] = set()
+    sid_to_cwd: dict[tuple[str, str], str] = {}
     try:
         procs = psutil.process_iter(["name", "cmdline"])
     except Exception:  # pragma: no cover - platform edge
@@ -195,12 +210,15 @@ def _scan() -> Snapshot:
             except Exception:
                 cwd = ""
             if cwd:
-                live_cwds.add((provider, _normalize_path(cwd)))
+                norm = _normalize_path(cwd)
+                live_cwds.add((provider, norm))
+                if sid:
+                    sid_to_cwd[(provider, sid)] = norm
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
         except Exception:  # pragma: no cover - defensive per-process guard
             continue
-    return Snapshot(live_sids, live_cwds)
+    return Snapshot(live_sids, live_cwds, sid_to_cwd)
 
 
 def get_snapshot(force: bool = False) -> Snapshot:

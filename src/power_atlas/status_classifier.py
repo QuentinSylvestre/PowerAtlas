@@ -1,6 +1,6 @@
 """Semantic session status classifier.
 
-Derives live session state (active, idle, errored) from the tail of JSONL
+Derives live session state (working, waiting, errored) from the tail of JSONL
 session transcripts. Each provider has its own message envelope format, so
 classification is dispatched to per-provider parsers.
 """
@@ -22,13 +22,15 @@ _CACHE_TTL = 5.0  # seconds
 # Replicate path constant (avoids circular import through data_kiro → data → data_kiro)
 SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 
+# v3 sessions root (workspace-hash subdirs live here)
+_V3_SESSIONS_ROOT = Path.home() / ".kiro" / "sessions"
+
 
 class SemanticStatus(str, Enum):
     """Semantic state of a live session."""
 
-    ACTIVE = "active"
-    NEEDS_INPUT = "needs_input"
-    IDLE = "idle"
+    WORKING = "working"
+    WAITING = "waiting"
     ERRORED = "errored"
     CLOSED = "closed"
 
@@ -46,7 +48,21 @@ def _resolve_jsonl_path(
     Returns None if the file does not exist on disk.
     """
     if provider == "kiro-cli":
+        # v2 path
         path = SESSION_DIR / f"{session_id}.jsonl"
+        if path.is_file():
+            return path
+        # v3 path: ~/.kiro/sessions/<workspace-hash>/sess_<session_id>/messages.jsonl
+        if _V3_SESSIONS_ROOT.is_dir():
+            # session_id may or may not have sess_ prefix
+            sid = session_id if session_id.startswith("sess_") else f"sess_{session_id}"
+            for ws_dir in _V3_SESSIONS_ROOT.iterdir():
+                if not ws_dir.is_dir() or ws_dir.name == "cli":
+                    continue
+                v3_path = ws_dir / sid / "messages.jsonl"
+                if v3_path.is_file():
+                    return v3_path
+        return None
     elif provider == "claude-code":
         folder = _get_project_folder(cwd)
         if folder is None:
@@ -129,9 +145,9 @@ def classify_kiro_v2(tail_lines: list[str]) -> Optional[SemanticStatus]:
             continue
 
         if kind == "Prompt":
-            return SemanticStatus.ACTIVE
+            return SemanticStatus.WORKING
         if kind == "ToolResults":
-            return SemanticStatus.ACTIVE
+            return SemanticStatus.WORKING
         if kind == "AssistantMessage":
             data = obj.get("data", {})
             content = data.get("content", [])
@@ -139,8 +155,8 @@ def classify_kiro_v2(tail_lines: list[str]) -> Optional[SemanticStatus]:
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("kind") == "toolUse":
-                        return SemanticStatus.ACTIVE
-            return SemanticStatus.IDLE
+                        return SemanticStatus.WORKING
+            return SemanticStatus.WAITING
 
     return None
 
@@ -166,9 +182,9 @@ def classify_claude(tail_lines: list[str]) -> Optional[SemanticStatus]:
             continue
 
         if msg_type in ("tool_result", "tool_use"):
-            return SemanticStatus.ACTIVE
+            return SemanticStatus.WORKING
         if msg_type == "user" or msg_type == "human":
-            return SemanticStatus.ACTIVE
+            return SemanticStatus.WORKING
         if msg_type == "assistant":
             # Check for error indicators
             content = obj.get("content", "")
@@ -182,17 +198,117 @@ def classify_claude(tail_lines: list[str]) -> Optional[SemanticStatus]:
             # Check message-level error field
             if obj.get("is_error"):
                 return SemanticStatus.ERRORED
-            return SemanticStatus.IDLE
+            return SemanticStatus.WAITING
 
     return None
+
+
+# Types to skip when looking for meaningful v3 messages
+_V3_SKIP_TYPES = frozenset({"tool_result", "usage_summary", "session_metadata", "steering_inclusion"})
 
 
 def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
     """Classify session status from kiro-cli v3 JSONL tail.
 
-    Placeholder — not yet implemented.
+    Format: ``{"id": "...", "timestamp": "...", "payload": {"type": "...", ...}}``
+
+    Classification logic:
+    - tool_call or user → WORKING (agent is actively executing)
+    - assistant → WAITING (agent finished, awaiting user)
+    - tool_result with success==false → ERRORED (check recent lines for error pattern)
+    - Skip: tool_result, usage_summary, session_metadata, steering_inclusion
     """
-    return None
+    # First pass: check recent lines for error patterns (failed tool_results)
+    error_count = 0
+    lines_checked = 0
+    for line in reversed(tail_lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        if ptype == "tool_result" and payload.get("success") is False:
+            error_count += 1
+        lines_checked += 1
+        if lines_checked >= 5:
+            break
+
+    # Second pass: find the last meaningful message type
+    last_meaningful = None
+    for line in reversed(tail_lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        if ptype is None or ptype in _V3_SKIP_TYPES:
+            continue
+
+        if ptype in ("tool_call", "user"):
+            last_meaningful = SemanticStatus.WORKING
+            break
+        if ptype == "assistant":
+            last_meaningful = SemanticStatus.WAITING
+            break
+        # sub_agent_start means the agent is actively working
+        if ptype == "sub_agent_start":
+            last_meaningful = SemanticStatus.WORKING
+            break
+        # sub_agent_complete means work finished, awaiting user
+        if ptype == "sub_agent_complete":
+            last_meaningful = SemanticStatus.WAITING
+            break
+        # turn_start/turn_end are structural — skip
+        if ptype in ("turn_start", "turn_end"):
+            continue
+        # pending_interaction means waiting for user
+        if ptype == "pending_interaction":
+            last_meaningful = SemanticStatus.WAITING
+            break
+        # interaction_resolved means user provided input — working
+        if ptype == "interaction_resolved":
+            last_meaningful = SemanticStatus.WORKING
+            break
+        # session_event/session_start — skip
+        if ptype in ("session_event", "session_start"):
+            continue
+
+    # Only report ERRORED if recent errors AND the last meaningful message
+    # is not a recovery (WORKING) — avoids false errored state after retries
+    if error_count >= 2 and last_meaningful != SemanticStatus.WORKING:
+        return SemanticStatus.ERRORED
+
+    return last_meaningful
+
+
+def _is_v3_format(tail_lines: list[str]) -> bool:
+    """Detect whether JSONL lines are v3 format (payload.type field)."""
+    for line in tail_lines[-5:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        # v3 has "payload" with "type" field; v2 has "kind" at top level
+        if "payload" in obj and isinstance(obj.get("payload"), dict) and "type" in obj["payload"]:
+            return True
+        if "kind" in obj:
+            return False
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +398,9 @@ def _classify_from_path(
         return None
 
     if provider == "kiro-cli":
+        # Detect v3 vs v2 format
+        if _is_v3_format(tail_lines):
+            return classify_kiro_v3(tail_lines)
         return classify_kiro_v2(tail_lines)
     elif provider == "claude-code":
         return classify_claude(tail_lines)
