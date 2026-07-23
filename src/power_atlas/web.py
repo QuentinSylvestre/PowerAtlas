@@ -542,6 +542,8 @@ async def api_session_status(request: Request):
         try:
             active_cwds.append(cwd)
             # Compute per-session status (no notifications)
+            best_status = "working"  # at minimum, a process is running
+            best_pri = _STATUS_PRIORITY[best_status]
             for provider in poll_providers:
                 cached_sessions = data.session_cache.get(cwd, provider)
                 if cached_sessions is None:
@@ -552,9 +554,13 @@ async def api_session_status(request: Request):
                     )
                     if status != "closed":
                         sessions_map[session.session_id] = status
+                        pri = _STATUS_PRIORITY.get(status, 0)
+                        if pri > best_pri:
+                            best_status = status
+                            best_pri = pri
 
-            # Compute workspace-level aggregate status
-            workspaces_map[cwd] = _workspace_status(snapshot, cwd, poll_providers)
+            # Derive workspace-level aggregate from per-session statuses already computed
+            workspaces_map[cwd] = best_status
         except Exception:
             log.debug("Status poll failed for cwd %s", cwd)
             workspaces_map[cwd] = "closed"
