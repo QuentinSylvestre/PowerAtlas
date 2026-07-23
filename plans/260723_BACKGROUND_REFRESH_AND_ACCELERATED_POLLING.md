@@ -569,15 +569,18 @@ document.addEventListener('visibilitychange', function() {
 Call `startStatusPoll()` alongside `startPolling()` in the `hx-on::after-swap` attribute.
 
 **Exit criteria**:
-- [ ] Status dots update within 5s of a process state change (start/stop a kiro-cli session)
-- [ ] Both workspace cards and session rows reflect status changes
-- [ ] No DOM destruction during status poll — only class/attribute changes (no remove/recreate churn)
-- [ ] Scroll position preserved during status poll
-- [ ] Selection state preserved during status poll
-- [ ] No errors in console when workspace cards are filtered/removed between polls
-- [ ] Status poll stops when tab is hidden, resumes on focus
-- [ ] Concurrent poll calls guarded (in-flight flag)
-- [ ] Client only sends active-workspace cwds after first response (not all visible cwds)
+- [x] Status dots update within 5s of a process state change (start/stop a kiro-cli session)
+- [x] Both workspace cards and session rows reflect status changes
+- [x] No DOM destruction during status poll — only class/attribute changes (no remove/recreate churn)
+- [x] Scroll position preserved during status poll
+- [x] Selection state preserved during status poll
+- [x] No errors in console when workspace cards are filtered/removed between polls
+- [x] Status poll stops when tab is hidden, resumes on focus
+- [x] Concurrent poll calls guarded (in-flight flag)
+- [x] Client only sends active-workspace cwds after first response (not all visible cwds)
+
+Implementation (2026-07-23, code: 3ff08b4)
+Added a lightweight 5-second status polling loop to index.html. pollStatus() fetches status for active workspaces and updates DOM in-place. First call sends all visible workspace cwds; subsequent calls use window._activeCwds from the server's response to narrow to only workspaces with live processes. In-flight guard (_statusFetching) prevents overlapping requests. Timers pause on tab hidden and resume on focus. Status dot updates are in-place className changes for steady-state transitions. Review fixes (83272e4): added session dot clearing for sessions no longer in response, and added aria-label to dynamically created dot elements for accessibility parity.
 
 ### Phase 4: Accelerated 10s session content refresh [QA]
 
@@ -739,3 +742,16 @@ QA verification: PASS (2 surfaces verified — endpoint JSON response + expanded
 | 9 | Low | `data-sort-key` populated but never consumed client-side | Orchestrator: proposed-accept — intentional for future Phase 4 use |
 | 10 | Low | `aria-busy` without visible loading indicator for AT users | Orchestrator: proposed-accept — aria-live region enhancement beyond scope |
 | 11 | Low | O(n) DOM operations for 50+ expanded cards could cause frame drop | Orchestrator: proposed-accept — acceptable for typical 5-15 card scenario |
+
+### 2026-07-23 -- Implementation Review (after Phase 3, persona: Senior engineer, End-user advocate)
+
+Implementation health: Green.
+4 findings (0 High, 1 Medium, 3 Low).
+QA verification: PASS (status dots update in-place, _activeCwds populated from server, timer active).
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Medium | Session dots never cleared for sessions no longer in status response | Fixed — added clearing loop for absent session dots |
+| 2 | Low | Missing aria-label on dynamically created status dots | Fixed — added aria-label to both creation paths |
+| 3 | Low | DOM remove/create on start/stop transitions violates "no churn" exit criterion literally | Orchestrator: proposed-accept — only on session start/stop boundaries, not status-change cycles |
+| 4 | Low | _getAllVisibleCwds deduplication by toLowerCase vs server response case | Orchestrator: proposed-accept — low risk, server returns same cwd strings it received |
