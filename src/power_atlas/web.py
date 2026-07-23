@@ -210,14 +210,18 @@ def _workspace_status(snapshot, cwd: str,
                     best = s
                     best_pri = pri
     # Fallback: no explicit session IDs (chat -a without --resume-id).
-    # Classify all recently updated sessions in this workspace, take highest priority.
+    # Classify all recently active sessions in this workspace, take highest priority.
     if not found_any:
         from . import data
         from .status_classifier import _resolve_jsonl_path
         import os, time as _time
         for prov in (providers or {"kiro-cli", "claude-code"}):
             sessions = data.get_sessions(cwd=cwd, provider=prov)
+            checked = 0
             for recent in sessions:
+                if checked >= 10:  # cap: only check the 10 most recent
+                    break
+                checked += 1
                 jsonl_path = _resolve_jsonl_path(recent.session_id, prov, cwd)
                 if jsonl_path is None:
                     continue
@@ -225,8 +229,8 @@ def _workspace_status(snapshot, cwd: str,
                     mtime_age = _time.time() - os.path.getmtime(jsonl_path)
                 except OSError:
                     continue
-                if mtime_age > 300:  # stop at first stale session
-                    break
+                if mtime_age > 300:  # skip stale sessions
+                    continue
                 semantic = get_semantic_status(recent.session_id, prov, cwd)
                 if semantic is not None:
                     s = semantic.value
