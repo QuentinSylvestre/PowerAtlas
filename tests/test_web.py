@@ -3128,9 +3128,9 @@ def test_session_status_cwd_based_no_resume_id(mock_semantic, mock_resolve):
         mock_semantic.return_value = SemanticStatus.WAITING
         assert _session_status(snap, s, "claude-code") == "waiting"
 
-        # Semantic classifier returns None → fallback to "waiting"
+        # Semantic classifier returns None + fresh JSONL → fallback to "working"
         mock_semantic.return_value = None
-        assert _session_status(snap, s, "claude-code") == "waiting"
+        assert _session_status(snap, s, "claude-code") == "working"
     finally:
         os.unlink(tmp.name)
 

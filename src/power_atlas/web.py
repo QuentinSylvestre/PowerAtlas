@@ -143,15 +143,17 @@ def _session_status(snapshot, session, provider: str,
     norm_cwd = _normalize_path(session.cwd)
     has_process = norm_cwd in snapshot.live_cwds({provider})
 
+    # Resolve JSONL path (used for recency gate and fallback classification)
+    from .status_classifier import _resolve_jsonl_path
+    import os, time as _time
+    jsonl_path = _resolve_jsonl_path(session.session_id, provider, session.cwd) if (has_process or is_explicitly_live) else None
+
     # 3. Recency gate: only classify via cwd if session's JSONL was written recently
     #    (avoids false-positive dots on old sessions sharing the same workspace)
     #    Uses JSONL file mtime (actual agent activity) not metadata updated_at
     #    (which only reflects user interaction timestamps).
     if has_process and not is_explicitly_live:
-        from .status_classifier import _resolve_jsonl_path
-        jsonl_path = _resolve_jsonl_path(session.session_id, provider, session.cwd)
         if jsonl_path is not None:
-            import os, time as _time
             try:
                 mtime_age = _time.time() - os.path.getmtime(jsonl_path)
                 if mtime_age > 300:  # 5 minutes since last JSONL write
@@ -167,8 +169,17 @@ def _session_status(snapshot, session, provider: str,
     elif (semantic := get_semantic_status(session.session_id, provider, session.cwd)) is not None:
         status_value = semantic.value
     else:
-        # Process running but can't classify → waiting (needs user input)
-        status_value = "waiting"
+        # Process running but can't classify from JSONL tail.
+        # If the JSONL was written very recently (< 30s), the agent is actively
+        # working (mid-write, or subagent activity). Otherwise, waiting.
+        if jsonl_path is not None:
+            try:
+                fresh_age = _time.time() - os.path.getmtime(jsonl_path)
+                status_value = "working" if fresh_age < 30 else "waiting"
+            except OSError:
+                status_value = "waiting"
+        else:
+            status_value = "waiting"
 
     # Notify on transition
     notifications.check_and_notify(
@@ -232,8 +243,11 @@ def _workspace_status(snapshot, cwd: str,
                 if mtime_age > 300:  # skip stale sessions
                     continue
                 semantic = get_semantic_status(recent.session_id, prov, cwd)
-                # None semantic + recent JSONL = process running but can't classify → waiting
-                s = semantic.value if semantic is not None else "waiting"
+                # Determine status: use semantic if available, else infer from mtime
+                if semantic is not None:
+                    s = semantic.value
+                else:
+                    s = "working" if mtime_age < 30 else "waiting"
                 pri = _STATUS_PRIORITY.get(s, 0)
                 if pri > best_pri:
                     best = s
