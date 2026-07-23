@@ -736,6 +736,6 @@ QA verification: PASS (2 surfaces verified — endpoint JSON response + expanded
 | 6 | Low | Test assertion loose (workspace status `in` tuple instead of `==`) | Fixed — tightened to `== "waiting"` |
 | 7 | Low | No test for missing 'cwds' key in request body | Fixed — added test_missing_cwds_key_returns_empty |
 | 8 | Low | `notify` parameter positional-capable, not keyword-only | Fixed — made keyword-only with `*` separator |
-| 9 | Low | `data-sort-key` populated but never consumed client-side | User: accepted — intentional for future Phase 4 use |
-| 10 | Low | `aria-busy` without visible loading indicator for AT users | User: accepted — aria-live region enhancement beyond scope |
-| 11 | Low | O(n) DOM operations for 50+ expanded cards could cause frame drop | User: accepted — acceptable for typical 5-15 card scenario |
+| 9 | Low | `data-sort-key` populated but never consumed client-side | Orchestrator: proposed-accept — intentional for future Phase 4 use |
+| 10 | Low | `aria-busy` without visible loading indicator for AT users | Orchestrator: proposed-accept — aria-live region enhancement beyond scope |
+| 11 | Low | O(n) DOM operations for 50+ expanded cards could cause frame drop | Orchestrator: proposed-accept — acceptable for typical 5-15 card scenario |
