@@ -71,7 +71,7 @@
     <div class="section-label"><span>Workspaces</span> <div class="workspace-filters" id="workspaceFilters"></div></div>
     <div id="workspace-cards" aria-busy="true"
          hx-get="/partials/workspaces?fresh=1" hx-trigger="load" hx-swap="innerHTML"
-         hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards();startPolling();startStatusPoll()">
+         hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards();startPolling();startStatusPoll();startActiveSessionPoll()">
       <div class="skeleton-card"></div>
       <div class="skeleton-card"></div>
       <div class="skeleton-card"></div>
@@ -331,7 +331,7 @@ function loadExpandedCards(){document.querySelectorAll('.workspace-card:not(.col
 function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.querySelector('.topbar-profile-btn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){profileBtn.textContent='\u2699\ufe0f '+active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){document.addEventListener('htmx:afterSwap',function(){loadExpandedCards()});fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});initProviderFilter();initWorkspaceFilters();
 var searchInput=document.querySelector('input[name="q"]');if(searchInput){searchInput.addEventListener('input',debounce(function(e){var q=e.target.value.trim();var provQs=_buildWorkspaceQs();if(!q){refreshCards(false);return}fetch('/search?'+provQs+'&q='+encodeURIComponent(q)).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el)});fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()+'&q='+encodeURIComponent(q)).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el)})},300))}
-document.addEventListener('visibilitychange',function(){if(document.hidden){stopStatusPoll()}else{refreshSettings();refreshCards(true);initWorkspaceFilters();startStatusPoll()}});
+document.addEventListener('visibilitychange',function(){if(document.hidden){stopStatusPoll();stopActiveSessionPoll()}else{refreshSettings();refreshCards(true);initWorkspaceFilters();startStatusPoll();startActiveSessionPoll()}});
 (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);refreshCards(true)}}).catch(function(){clearInterval(t)})},2000)})();
 });
 function _escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
@@ -347,6 +347,43 @@ var _statusTimer=null;
 var _statusFetching=false;
 function startStatusPoll(){if(_statusTimer)return;_statusTimer=setInterval(pollStatus,5000)}
 function stopStatusPoll(){if(_statusTimer){clearInterval(_statusTimer);_statusTimer=null}}
+// --- Active session poll: 10s refresh of session content for expanded active cards ---
+var _activeSessionTimer=null;
+function startActiveSessionPoll(){if(_activeSessionTimer)return;_activeSessionTimer=setInterval(pollActiveSessions,10000)}
+function stopActiveSessionPoll(){if(_activeSessionTimer){clearInterval(_activeSessionTimer);_activeSessionTimer=null}}
+function pollActiveSessions(){
+  // Skip if a full refresh is in flight
+  var wsCards=document.getElementById('workspace-cards');
+  if(wsCards&&wsCards.getAttribute('aria-busy'))return;
+  // Only poll expanded cards whose cwd is in the server-authoritative _activeCwds
+  var activeCwds=window._activeCwds||[];
+  if(!activeCwds.length)return;
+  var activeSet={};
+  activeCwds.forEach(function(c){activeSet[c.toLowerCase()]=c});
+  var targets=[];
+  document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(card){
+    var cwd=card.dataset.cwd;
+    if(cwd&&activeSet[cwd.toLowerCase()]){
+      var body=card.querySelector('.card-body');
+      if(body)targets.push({card:card,body:body,cwd:cwd})
+    }
+  });
+  if(!targets.length)return;
+  // Stagger requests with 200ms offset to avoid lock contention
+  targets.forEach(function(t,idx){
+    setTimeout(function(){
+      var provider=window._activeProvider||'all';
+      var url='/partials/sessions?cwd='+encodeURIComponent(t.cwd)+'&provider='+encodeURIComponent(provider);
+      fetch(url).then(function(r){return r.text()}).then(function(html){
+        // Preserve scroll position within card-body
+        var scrollTop=t.body.scrollTop;
+        t.body.innerHTML=html;
+        t.body.scrollTop=scrollTop;
+        if(window.htmx)htmx.process(t.body);
+      }).catch(function(){/* retry on next cycle */});
+    },idx*200);
+  });
+}
 function pollStatus(){
   if(_statusFetching)return;
   // On first call (empty _activeCwds), send all visible workspace cwds
