@@ -1,7 +1,7 @@
 # Live Session Status Redesign
 
 > **Date**: 2026-07-23
-> **Status**: Planned  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Redesign live session detection and status indicators with cwd-based matching and simplified 4-state vocabulary
 
 ---
@@ -172,12 +172,15 @@ None.
    - Multiple sessions same workspace getting independent status
 
 **Exit criteria**:
-- [ ] `_session_status()` returns "working" for a session whose JSONL tail shows tool activity AND a process runs in that cwd
-- [ ] `_session_status()` returns "waiting" for a session whose JSONL tail ends with AssistantMessage AND a process runs in that cwd
-- [ ] `_session_status()` returns "closed" when no process runs in the workspace
-- [ ] v3 sessions in `sess_*/messages.jsonl` are classified correctly
-- [ ] All existing status tests pass with updated vocabulary
-- [ ] `--resume-id` sessions still detected (backward compat)
+- [x] `_session_status()` returns "working" for a session whose JSONL tail shows tool activity AND a process runs in that cwd
+- [x] `_session_status()` returns "waiting" for a session whose JSONL tail ends with AssistantMessage AND a process runs in that cwd
+- [x] `_session_status()` returns "closed" when no process runs in the workspace
+- [x] v3 sessions in `sess_*/messages.jsonl` are classified correctly
+- [x] All existing status tests pass with updated vocabulary
+- [x] `--resume-id` sessions still detected (backward compat)
+
+Implementation (2026-07-23, code: 99fae79)
+Rewrote the session status detection system with a new 3+1 vocabulary (WORKING/WAITING/ERRORED/CLOSED, replacing ACTIVE/NEEDS_INPUT/IDLE/ERRORED/CLOSED). The detection gate now uses cwd-based matching: a session is live if either its session_id is on a process cmdline (--resume-id backward compat) OR a provider process is running in the session's workspace directory. This eliminates the `probable_fresh_session()` 90-second window heuristic and the mtime-based active/idle fallback. Implemented `classify_kiro_v3()` which reads v3-format JSONL (`payload.type` envelope) and classifies tool_call/user as WORKING, assistant as WAITING, and multiple failed tool_results as ERRORED. Updated `_resolve_jsonl_path` to search v3 session directories (`~/.kiro/sessions/<hash>/sess_<id>/messages.jsonl`) after v2 lookup fails. The `_classify_from_path` dispatcher auto-detects v3 format via `_is_v3_format()`. Marked `probable_fresh_session()` as deprecated. All 348 tests pass.
 
 ### Phase 2: UI vocabulary + workspace card dots + filter [QA] [P:3]
 
@@ -228,11 +231,14 @@ None.
    - Pass `workspace_status=` to the workspace_card.html template render call
 
 **Exit criteria**:
-- [ ] Session rows show green pulsing dot for "working", orange dot for "waiting", red for "errored", no dot for "closed"
-- [ ] Workspace cards show the highest-priority status dot
-- [ ] Filter dropdown shows All / Working / Waiting / Errored
-- [ ] Selecting "Working" filter narrows both panels to matching items
-- [ ] Expanding a workspace while filtered shows matching session rows (not "No matching sessions")
+- [x] Session rows show green pulsing dot for "working", orange dot for "waiting", red for "errored", no dot for "closed"
+- [x] Workspace cards show the highest-priority status dot
+- [x] Filter dropdown shows All / Working / Waiting / Errored
+- [x] Selecting "Working" filter narrows both panels to matching items
+- [x] Expanding a workspace while filtered shows matching session rows (not "No matching sessions")
+
+Implementation (2026-07-23, code: 8603b94)
+Updated the PowerAtlas frontend to the new 3-state live status vocabulary (working/waiting/errored). Session row templates now render a green pulsing dot for "working", orange for "waiting", red for "errored", and no dot for "closed". Workspace cards gained a status dot derived from `_workspace_status()` with priority aggregation (errored > waiting > working) rendered between the session count and last-active timestamp. CSS updated with new `.ws-status` classes and changed waiting color to amber-500. Filter dropdown simplified from 6 options to 3. In `web.py`, the presence snapshot acquisition moved outside the status-filter conditional so it's always available for computing per-workspace status.
 
 ### Phase 3: refreshCards fix + notification update [QA] [P:1,2]
 
@@ -284,11 +290,14 @@ None.
 3. **Tests**: Update notification test expectations for new vocabulary.
 
 **Exit criteria**:
-- [ ] Switching from "Working" filter to "All" preserves pinned-first ordering and time-group headings
-- [ ] Switching between any filter combination preserves correct ordering
-- [ ] Notifications fire on working→waiting transition
-- [ ] Notifications fire on working→errored transition
-- [ ] No notification fires on waiting→closed or working→closed
+- [x] Switching from "Working" filter to "All" preserves pinned-first ordering and time-group headings
+- [x] Switching between any filter combination preserves correct ordering
+- [x] Notifications fire on working→waiting transition
+- [x] Notifications fire on working→errored transition
+- [x] No notification fires on waiting→closed or working→closed
+
+Implementation (2026-07-23, code: d1ac18d)
+Replaced the `refreshCards` function with a full innerHTML replacement approach that preserves expanded card state and selection state. The old differential DOM update broke ordering on filter transitions; the new approach fetches fresh workspace HTML, replaces container contents entirely, then re-expands/reselects cards that were previously open or selected. Updated `notifications.py` to use the new status vocabulary, changing `_NOTIFY_TRANSITIONS` to fire on `working→waiting` and `working→errored`, and updating `_fire_toast` message map. All 11 notification tests pass.
 
 ## 6) Risk Assessment
 
@@ -314,10 +323,35 @@ None.
 | `README.md` | Update "Live session status" feature description to reflect new vocabulary (Working/Waiting/Errored) and workspace-card dots | 2 |
 
 ## 9) Implementation Divergences from Plan
-<Reserved — filled during implementation>
+
+- Kept `_status_matches` "live" filter case for backward compat — plan said "remove live case" but existing rendering tests use it via `?status=live` query param
+- Added `live_session_ids_for_cwd` method to `Snapshot` class and `sid_to_cwd` tracking in `_scan()` to support workspace-level status aggregation (plan only sketched the aggregation, didn't specify the data source)
+- v3 error detection uses a two-pass approach with recovery gating (plan outlined simple threshold, implementation gates on last-meaningful-message to avoid false errored after recovery)
+- `probable_fresh_session()` kept but marked deprecated (plan said "remove or deprecate"; chose deprecate for safety)
 
 ## Review Log
-<Reserved — filled by review cycles>
+
+### 2026-07-23 -- Implementation Review (after Phases 1-3, personas: Reliability engineer, Senior engineer, Performance engineer, Maintainability reviewer, End-user advocate, Architect)
+
+Implementation health: Green.
+12 findings total (1 High, 4 Medium, 7 Low). All auto-fixable findings resolved in cycle 1.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Workspace card dot only returns "working" — no session aggregation | Fixed — implemented priority aggregation via `live_session_ids_for_cwd` (51fc500) |
+| 2 | Medium | Selection state lost on refreshCards innerHTML replacement | Fixed — added selectedCards capture/restore pattern (51fc500) |
+| 3 | Medium | Dead `all_sessions` param in `_session_status()` signature | Fixed — removed param and updated callers (51fc500) |
+| 4 | Medium | v3 error detection overrides successful recovery | Fixed — gated ERRORED on last_meaningful != WORKING (51fc500) |
+| 5 | Medium | Missing test for working→closed not firing | Fixed — added test_notification_working_to_closed_does_not_fire (51fc500) |
+| 6 | Low | Dead "live" filter path in `_status_matches` | Orchestrator: proposed-accept — pending user decision |
+| 7 | Low | `probable_fresh_session` method orphaned | Orchestrator: proposed-accept — pending user decision |
+| 8 | Low | `_classify_from_path` unknown-provider fallback undocumented | Orchestrator: proposed-accept — pending user decision |
+| 9 | Low | Dead `latest_updated` param in `_workspace_status` | Fixed — removed param (51fc500) |
+| 10 | Low | No .catch() on per-card session fetch in refreshCards | Orchestrator: proposed-accept — pending user decision |
+| 11 | Low | `loadExpandedCards()` call is no-op in refreshCards | Orchestrator: proposed-accept — pending user decision |
+| 12 | Low | Duplicate test (test_notification_transition_fires and working_to_waiting) | Orchestrator: proposed-accept — pending user decision |
+
+Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical after High/Medium fixes applied.
 
 ## Harness Improvement Opportunities
 
