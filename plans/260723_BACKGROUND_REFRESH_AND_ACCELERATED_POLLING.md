@@ -652,16 +652,19 @@ function pollActiveSessions() {
 Call `startActiveSessionPoll()` alongside `startStatusPoll()` in initialization.
 
 **Exit criteria**:
-- [ ] Expanded cards in active workspaces show updated session content within 10s of changes
-- [ ] No `fresh=1` in the 10s poll requests (cache-aware)
-- [ ] No status filter parameter in the 10s poll requests (avoids filter drift)
-- [ ] Inactive expanded cards are NOT polled at 10s
-- [ ] Uses `_activeCwds` from status poll (server-authoritative), not DOM dot presence
-- [ ] `htmx.process()` called after session content swap
-- [ ] Scroll position within card-body preserved
-- [ ] Requests staggered with 200ms offset
-- [ ] Poll skipped when `aria-busy` indicates a full refresh is in flight
-- [ ] Poll stops when tab is hidden, resumes on focus
+- [x] Expanded cards in active workspaces show updated session content within 10s of changes
+- [x] No `fresh=1` in the 10s poll requests (cache-aware)
+- [x] No status filter parameter in the 10s poll requests (avoids filter drift)
+- [x] Inactive expanded cards are NOT polled at 10s
+- [x] Uses `_activeCwds` from status poll (server-authoritative), not DOM dot presence
+- [x] `htmx.process()` called after session content swap
+- [x] Scroll position within card-body preserved
+- [x] Requests staggered with 200ms offset
+- [x] Poll skipped when `aria-busy` indicates a full refresh is in flight
+- [x] Poll stops when tab is hidden, resumes on focus
+
+Implementation (2026-07-23, code: 3a815a0)
+Added a 10s active-session polling loop. pollActiveSessions() iterates expanded workspace cards, checks membership in window._activeCwds (populated by the 5s status poll), and fetches /partials/sessions without fresh=1 or status filter params. Requests are staggered at 200ms intervals. Card and body are re-queried inside the setTimeout callback and after fetch response to handle state changes during the stagger window and network round-trip. Scroll position saved/restored, htmx.process() called after every swap. Timer lifecycle wired into init and visibilitychange handler. Review fix (8cbc0d0): re-query card inside stagger to prevent stale-body-reference writes to collapsed cards.
 
 ## 6) Risk Assessment
 
@@ -755,3 +758,14 @@ QA verification: PASS (status dots update in-place, _activeCwds populated from s
 | 2 | Low | Missing aria-label on dynamically created status dots | Fixed — added aria-label to both creation paths |
 | 3 | Low | DOM remove/create on start/stop transitions violates "no churn" exit criterion literally | Orchestrator: proposed-accept — only on session start/stop boundaries, not status-change cycles |
 | 4 | Low | _getAllVisibleCwds deduplication by toLowerCase vs server response case | Orchestrator: proposed-accept — low risk, server returns same cwd strings it received |
+
+### 2026-07-23 -- Implementation Review (after Phase 4, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low).
+QA verification: PASS (_activeSessionTimer running, expanded active card with 131 session rows, content refreshing).
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| 1 | Low | Stale body reference in setTimeout callback (card may be collapsed during stagger window) | Fixed — re-query card/body inside setTimeout and after fetch |
+| 2 | Low | No per-card in-flight guard (overlapping fetches possible under >10s latency) | Orchestrator: proposed-accept — last-write-wins is harmless |
