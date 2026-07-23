@@ -353,6 +353,32 @@ Implementation health: Green.
 
 Cycle 2 skipped — cycle 1 findings all Low + auto-fixes purely mechanical after High/Medium fixes applied.
 
+### 2026-07-23 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, End-user advocate, Performance engineer.
+6 findings (0 High, 2 Medium, 4 Low).
+QA verification: SKIP (live Playwright verification not run — would require PowerAtlas running with active kiro-cli sessions for status dot verification).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Core detection + classification | pass (348) | SKIP | Unit tests verify all status paths |
+| 2: UI vocabulary + workspace dots | pass (348) | SKIP | Template rendering verified |
+| 3: refreshCards + notifications | pass (348) | SKIP | Notification tests pass |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | [Reliability] Workspace dot aggregation only works for --resume-id sessions | Orchestrator: proposed-accept — pending user decision |
+| 2 | Medium | [End-user] README not updated per plan documentation requirements | Fixed — updated live status description and notification comment (4e1ab3a) |
+| 3 | Low | [Performance] `_workspace_status()` double-called when status filter active | Orchestrator: proposed-accept — pending user decision |
+| 4 | Low | [Senior] Redundant inline import in `live_session_ids_for_cwd` | Orchestrator: proposed-accept — pending user decision |
+| 5 | Low | [Senior] `loadExpandedCards()` call dead code in refreshCards | Orchestrator: proposed-accept — pending user decision |
+| 6 | Low | [Reliability] Test gap: no test for workspace status aggregation path | Orchestrator: proposed-accept — pending user decision |
+
+Finding #1 detail: `_workspace_status()` calls `live_session_ids_for_cwd()` which only has entries for sessions with `--resume-id` on cmdline. For the primary use case (`kiro-cli chat -a`), no session ID is extractable from the process cmdline, so `sid_to_cwd` is empty and workspace dots always show "working" (green). Individual session rows still show correct status — only the workspace-level aggregation is limited. Fix would require architectural change (making workspace rendering aware of per-session classification results). Recommend accepting as known limitation for initial release; session rows provide correct status.
+
 ## Harness Improvement Opportunities
 
 - The OpenAI Codex Micro page (work-louder keyboard product page) was not a useful reference for status classification design — it only mentions "thinking, running, waiting, done" in marketing copy with no specification. The user's intent was to reference a simpler model, not that specific page. A future `/qexplore` could ask "what specifically from that reference applies?" earlier. — cost: one wasted web_fetch + time parsing a product page — suggested change: when user references an external URL for design inspiration, ask what specific aspect to extract before fetching.
