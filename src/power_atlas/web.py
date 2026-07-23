@@ -170,16 +170,10 @@ def _session_status(snapshot, session, provider: str,
         status_value = semantic.value
     else:
         # Process running but can't classify from JSONL tail.
-        # If the JSONL was written very recently (< 30s), the agent is actively
-        # working (mid-write, or subagent activity). Otherwise, waiting.
-        if jsonl_path is not None:
-            try:
-                fresh_age = _time.time() - os.path.getmtime(jsonl_path)
-                status_value = "working" if fresh_age < 30 else "waiting"
-            except OSError:
-                status_value = "waiting"
-        else:
-            status_value = "waiting"
+        # A running process = working. The classifier returns None when the
+        # tail is unparseable or mid-write — not evidence of idle state.
+        # "Waiting" only comes from positive classifier identification.
+        status_value = "working"
 
     # Notify on transition
     notifications.check_and_notify(
@@ -243,11 +237,11 @@ def _workspace_status(snapshot, cwd: str,
                 if mtime_age > 300:  # skip stale sessions
                     continue
                 semantic = get_semantic_status(recent.session_id, prov, cwd)
-                # Determine status: use semantic if available, else infer from mtime
+                # Use semantic if available; otherwise process running = working
                 if semantic is not None:
                     s = semantic.value
                 else:
-                    s = "working" if mtime_age < 30 else "waiting"
+                    s = "working"
                 pri = _STATUS_PRIORITY.get(s, 0)
                 if pri > best_pri:
                     best = s

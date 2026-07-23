@@ -3097,9 +3097,9 @@ def test_session_status_semantic_and_fallback(mock_semantic):
     mock_semantic.return_value = SemanticStatus.ERRORED
     assert _session_status(live, recent_s, "claude-code") == "errored"
 
-    # Fallback path: classifier returns None -> waiting (process running but can't classify)
+    # Fallback path: classifier returns None -> working (process running, can't classify)
     mock_semantic.return_value = None
-    assert _session_status(live, recent_s, "claude-code") == "waiting"
+    assert _session_status(live, recent_s, "claude-code") == "working"
 
     # Closed: not live at all
     assert _session_status(live, closed_s, "claude-code") == "closed"
@@ -3128,7 +3128,7 @@ def test_session_status_cwd_based_no_resume_id(mock_semantic, mock_resolve):
         mock_semantic.return_value = SemanticStatus.WAITING
         assert _session_status(snap, s, "claude-code") == "waiting"
 
-        # Semantic classifier returns None + fresh JSONL → fallback to "working"
+        # Semantic classifier returns None + live process → fallback to "working"
         mock_semantic.return_value = None
         assert _session_status(snap, s, "claude-code") == "working"
     finally:
