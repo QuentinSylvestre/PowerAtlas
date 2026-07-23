@@ -1,9 +1,28 @@
 # Background Refresh and Accelerated Polling
 
 > **Date**: 2026-07-23
-> **Status**: Done  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-23T17:47-05:00
 > **Estimated effort**: ~1-2 days
 > **Scope**: Eliminate "Loading..." flicker on expanded workspace cards during refresh; accelerate session/status updates for active workspaces
+
+## Completion Summary
+
+All 4 phases implemented, reviewed (max effort, 3+ personas), and QA-verified via Playwright against the live app. Three-tier polling architecture operational: 5s status dots, 10s session content refresh, 30s full workspace discovery with DOM preservation.
+
+### Acknowledged at archival
+
+- Accepted: `data-sort-key` attribute populated but not yet consumed client-side (Low — intentional for future use)
+- Accepted: `aria-busy` without visible loading indicator for assistive technology users (Low — enhancement beyond scope)
+- Accepted: O(n) DOM operations for 50+ expanded cards could cause frame drop (Low — acceptable for typical 5-15 card scenario)
+- Accepted: DOM remove/create on session start/stop transitions (Low — only at boundaries, not on status-change cycles)
+- Accepted: `_getAllVisibleCwds` toLowerCase dedup vs server response case (Low — server echoes same strings)
+- Accepted: No per-card in-flight guard for 10s poll (Low — last-write-wins is harmless)
+- Accepted: 10s poll omits status filter by plan design decision Q8 (Low — 30s re-applies filter)
+- Accepted: Stagger pattern is serial (Low — typical case is 1-2 active expanded cards)
+- Accepted: First status poll sends all visible cwds (Low — acceptable one-time cold-start cost)
+- Accepted: `_workspace_status` fallback stat calls (Low — bounded by 5s TTL semantic_status cache)
+- Accepted: All prior per-phase proposed-accept items are reasonable trade-offs (Low — none affect correctness)
 
 ---
 
@@ -742,9 +761,9 @@ QA verification: PASS (2 surfaces verified — endpoint JSON response + expanded
 | 6 | Low | Test assertion loose (workspace status `in` tuple instead of `==`) | Fixed — tightened to `== "waiting"` |
 | 7 | Low | No test for missing 'cwds' key in request body | Fixed — added test_missing_cwds_key_returns_empty |
 | 8 | Low | `notify` parameter positional-capable, not keyword-only | Fixed — made keyword-only with `*` separator |
-| 9 | Low | `data-sort-key` populated but never consumed client-side | Orchestrator: proposed-accept — intentional for future Phase 4 use |
-| 10 | Low | `aria-busy` without visible loading indicator for AT users | Orchestrator: proposed-accept — aria-live region enhancement beyond scope |
-| 11 | Low | O(n) DOM operations for 50+ expanded cards could cause frame drop | Orchestrator: proposed-accept — acceptable for typical 5-15 card scenario |
+| 9 | Low | `data-sort-key` populated but never consumed client-side | User: accepted — intentional for future use |
+| 10 | Low | `aria-busy` without visible loading indicator for AT users | User: accepted — beyond scope |
+| 11 | Low | O(n) DOM operations for 50+ expanded cards could cause frame drop | User: accepted — typical 5-15 cards |
 
 ### 2026-07-23 -- Implementation Review (after Phase 3, persona: Senior engineer, End-user advocate)
 
@@ -756,8 +775,8 @@ QA verification: PASS (status dots update in-place, _activeCwds populated from s
 |---|---|---|---|
 | 1 | Medium | Session dots never cleared for sessions no longer in status response | Fixed — added clearing loop for absent session dots |
 | 2 | Low | Missing aria-label on dynamically created status dots | Fixed — added aria-label to both creation paths |
-| 3 | Low | DOM remove/create on start/stop transitions violates "no churn" exit criterion literally | Orchestrator: proposed-accept — only on session start/stop boundaries, not status-change cycles |
-| 4 | Low | _getAllVisibleCwds deduplication by toLowerCase vs server response case | Orchestrator: proposed-accept — low risk, server returns same cwd strings it received |
+| 3 | Low | DOM remove/create on start/stop transitions violates "no churn" exit criterion literally | User: accepted — only at session boundaries |
+| 4 | Low | _getAllVisibleCwds deduplication by toLowerCase vs server response case | User: accepted — server echoes same strings |
 
 ### 2026-07-23 -- Implementation Review (after Phase 4, persona: Senior engineer)
 
@@ -768,7 +787,7 @@ QA verification: PASS (_activeSessionTimer running, expanded active card with 13
 | # | Severity | Finding (one line) | Resolution |
 |---|---|---|---|
 | 1 | Low | Stale body reference in setTimeout callback (card may be collapsed during stagger window) | Fixed — re-query card/body inside setTimeout and after fetch |
-| 2 | Low | No per-card in-flight guard (overlapping fetches possible under >10s latency) | Orchestrator: proposed-accept — last-write-wins is harmless |
+| 2 | Low | No per-card in-flight guard (overlapping fetches possible under >10s latency) | User: accepted — last-write-wins harmless |
 
 ### 2026-07-23 -- Post-Implementation Review
 
@@ -789,9 +808,9 @@ QA verification: PASS (all 3 tiers verified live — 5s dots updating, 10s conte
 | # | Severity | Finding (one line) | Resolution |
 |---|---|---|---|
 | 1 | Medium | Redundant _workspace_status() call doubles classifier lookups in status endpoint | Fixed — derive workspace status from per-session statuses already computed in loop |
-| 2 | Medium | 30s _refreshTimer and burstTimer not stopped on tab hidden (pre-existing) | Orchestrator: proposed-accept — pre-existing behavior, not a regression; 2 reqs/30s is negligible |
-| 3 | Low | 10s poll omits status filter by plan design (Q8) | Orchestrator: proposed-accept — by design, 30s re-applies filter |
-| 4 | Low | Stagger pattern is serial (acceptable for ≤5 targets) | Orchestrator: proposed-accept — typical case is 1-2 active expanded cards |
-| 5 | Low | First status poll sends all visible cwds (cold-start, one-time) | Orchestrator: proposed-accept — acceptable one-time cost |
-| 6 | Low | _workspace_status fallback path has stat calls (bounded by 5s TTL cache) | Orchestrator: proposed-accept — mitigated by semantic_status cache |
-| 7 | Low | All 6 prior per-phase proposed-accept items are reasonable trade-offs | Orchestrator: proposed-accept — none affect correctness |
+| 2 | Medium | 30s _refreshTimer and burstTimer not stopped on tab hidden (pre-existing) | Fixed — added stopPolling() and wired into visibilitychange (d18bacf) |
+| 3 | Low | 10s poll omits status filter by plan design (Q8) | User: accepted — by design |
+| 4 | Low | Stagger pattern is serial (acceptable for ≤5 targets) | User: accepted — typical 1-2 cards |
+| 5 | Low | First status poll sends all visible cwds (cold-start, one-time) | User: accepted — one-time cost |
+| 6 | Low | _workspace_status fallback path has stat calls (bounded by 5s TTL cache) | User: accepted — mitigated by cache |
+| 7 | Low | All 6 prior per-phase proposed-accept items are reasonable trade-offs | User: accepted — none affect correctness |
