@@ -131,7 +131,9 @@ def _session_status(snapshot, session, provider: str,
 
     Detection gate: a session is live if either (a) its session_id is on a
     process cmdline (--resume-id), OR (b) a provider process is running in
-    the session's cwd. This removes the old is_fresh/mtime fallback.
+    the session's cwd AND the session was recently updated (within 5 min).
+    Gate (b) uses recency to avoid false-positive dots on old sessions that
+    happen to share a workspace with a running process.
     """
     # 1. Check explicit live (session id on cmdline) — fast path
     is_explicitly_live = snapshot.is_live(provider, session.cwd, session.session_id)
@@ -140,6 +142,13 @@ def _session_status(snapshot, session, provider: str,
     from .data import _normalize_path
     norm_cwd = _normalize_path(session.cwd)
     has_process = norm_cwd in snapshot.live_cwds({provider})
+
+    # 3. Recency gate: only classify via cwd if session was updated recently
+    #    (avoids false-positive dots on old sessions sharing the same workspace)
+    if has_process and not is_explicitly_live:
+        age = _age_seconds(session.updated_at)
+        if age is not None and age > 300:  # 5 minutes
+            has_process = False
 
     if not is_explicitly_live and not has_process:
         status_value = "closed"
