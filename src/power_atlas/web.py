@@ -30,7 +30,7 @@ PROVIDER_COLORS = {
     "kiro-ide": "#8b5cf6",
 }
 PROVIDER_DISPLAY_NAMES = {
-    "kiro-cli": "Kiro CLI",
+    "kiro-cli": "kiro-cli",
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
 }

@@ -54,7 +54,7 @@ def detect_terminal(terminal_command: str = "") -> str | None:
 
 
 _PROVIDER_DISPLAY = {
-    "kiro-cli": "Kiro CLI",
+    "kiro-cli": "kiro-cli",
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
 }
