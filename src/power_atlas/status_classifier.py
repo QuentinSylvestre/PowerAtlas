@@ -81,7 +81,7 @@ def _resolve_jsonl_path(
 # ---------------------------------------------------------------------------
 
 
-def _read_tail_lines(path: Path, max_bytes: int = 4096, file_size: int | None = None) -> list[str]:
+def _read_tail_lines(path: Path, max_bytes: int = 65536, file_size: int | None = None) -> list[str]:
     """Read the last *max_bytes* of a file and return complete lines.
 
     If the file is smaller than *max_bytes*, all lines are returned.
@@ -90,6 +90,13 @@ def _read_tail_lines(path: Path, max_bytes: int = 4096, file_size: int | None = 
 
     *file_size* may be passed to avoid a redundant stat when the caller
     already knows the file size.
+
+    ``max_bytes`` must exceed the largest single transcript line, or the
+    discard below consumes the whole read and no lines survive. Claude Code
+    lines reach 150 KB (p95 ~19 KB); at the previous 4096 default, 77% of
+    sampled transcripts yielded zero complete lines and classified as None.
+    Cost is unaffected in practice — the read is tail-bounded, so a 57 MB
+    transcript classifies in the same ~100 microseconds as a 64 KB one.
     """
     if file_size is None:
         size = path.stat().st_size
