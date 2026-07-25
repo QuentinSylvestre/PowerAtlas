@@ -1,7 +1,7 @@
 # kiro-cli ACP Client Prototype
 
 > **Date**: 2026-07-25
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — phases 1-2 complete, ACP prototype (phases 3-6) not started  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Throwaway prototype of a WebSocket-backed kiro-cli ACP client on a new `/acp` page, validating transport, process supervision and the session model before a from-scratch rebuild
 > **Estimated effort**: ~7-10 days (revised up after review — see §6)
@@ -315,16 +315,44 @@ sqlite read as `:153` vs `:150-163`). Verify each against source at implementati
 disagreement is itself an argument for symbol anchors.
 
 **Exit criteria**:
-- [ ] All 8 stale sites in the §1 table corrected or converted to symbol anchors
-- [ ] The three `web.py` citations converted to **symbol anchors**, not re-numbered
-- [ ] Bare `:NNN` continuation forms in `CLOSED_INVESTIGATIONS.md:89` individually verified
-- [ ] Re-run the enumeration and confirm every remaining `file.ext:NNN` reference resolves to the
+- [x] All 8 stale sites in the §1 table corrected or converted to symbol anchors
+- [x] The three `web.py` citations converted to **symbol anchors**, not re-numbered
+- [x] Bare `:NNN` continuation forms in `CLOSED_INVESTIGATIONS.md:89` individually verified
+- [x] Re-run the enumeration and confirm every remaining `file.ext:NNN` reference resolves to the
       construct its surrounding prose describes (spot-check by opening each cited line)
-- [ ] `ROADMAP.md:80` (`acp-agent.js:777`) left unchanged
-- [ ] `plans/260725_PARSE_AND_POLL_PERFORMANCE.md` left unchanged — it carries four stale refs of
+- [x] `ROADMAP.md:80` (`acp-agent.js:777`) left unchanged
+- [x] `plans/260725_PARSE_AND_POLL_PERFORMANCE.md` left unchanged — it carries four stale refs of
       its own but is a historical record of a completed analysis, not a live index (out of scope)
-- [ ] Cold-read check: a reader following any corrected citation lands on code that matches the
+- [x] Cold-read check: a reader following any corrected citation lands on code that matches the
       claim the sentence makes about it
+
+#### Implementation (2026-07-25, code: c906b00)
+
+Every code line-reference in `plans/ROADMAP.md` and `plans/CLOSED_INVESTIGATIONS.md` now resolves to
+the construct its surrounding prose describes. Thirteen references changed across the two files: the
+eight the plan tabulated, plus five the plan's enumeration could not have seen. Each was verified by
+opening the cited lines in current source rather than trusting either the §1 table or the "verified
+accurate" list, and the enumeration was re-run afterwards.
+
+Source disagreed with the §1 table in several places. The table's own `ROADMAP.md` doc-site line
+numbers were stale by +8, because commit `391808b` inserted a roadmap item after §1 was written, so
+rows were matched by cited content rather than by line. The plan's suggested anchor text for the
+`data_kiro.py` sub-agent filters quoted `if not data or data.get("parent_session_id")` as common to
+all four sites; two match that form, one binds `d` rather than `data`, and the fourth is a bare
+`if d.get("parent_session_id"):` with no null guard — so the guards are described rather than
+quoted. `config.py:271-291` pointed one line past end of file. And `test_web.py:3774-4003`, which
+§1 listed as "verified accurate, leave untouched", was being invalidated by Phase 2 as Phase 1 ran:
+the same grep issued twice showed the offset growing from +22 to +35 lines, so it was converted to a
+symbol anchor rather than renumbered into a moving file. Three further `web.py` citations added by
+`391808b` got the same treatment, since they sit below the points Phases 3-6 will insert routes.
+
+A `## Platform` roadmap entry was added proposing that `search` and `partials_workspaces` be
+unified, on the strength of this plan's own Phase 2 defect. It went through three drafts and two of
+them shipped false claims — a `/search` test count that Phase 2 invalidated within the hour, and
+then a fabricated assertion that a provider-filtered search overstates its session count, which is
+wrong because `search()` narrows `matched` by provider *before* `_group_workspaces` runs. The entry
+was ultimately rewritten to assert only durable facts: a commit SHA, symbol names, the ruff
+configuration, and an instruction to diff the two functions. No counts survive in it.
 
 ### Phase 2: Fix the `/search` status-filter crash [QA] [P:1]
 
@@ -874,7 +902,39 @@ Derived by a doc-impact sub-agent over every tracked `*.md` outside `plans/done/
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved -- filled during implementation>
+### Phase 1
+
+- **Three references on §1's "verified accurate, leave untouched" list were rewritten anyway.**
+  `index.html:166`, `presence.py:65` and `test_web.py:3774-4003`. Each rewrite is defensible under
+  Phase 1's own durable-fix guidance, and two were forced: `test_web.py` was being edited by Phase 2
+  during the session, and `index.html` is in Phase 5's file scope. `presence.py:65` turned out not
+  to be accurate at all — it points at the `_PROVIDER_SPECS` dict header while the `--resume-id`
+  literal its sentence describes is two lines below. **The "leave untouched" list was itself
+  unverified**, which is what a pre-verified label invites.
+- **The §1 table's own `ROADMAP.md` doc-site line numbers were stale by +8**, from commit `391808b`
+  landing after the plan was written. Rows were matched by cited content instead. This offset is
+  recorded here because Phase 6's exit criteria address `ROADMAP.md:75-91`, `:80` and `:81` as
+  though they were addresses; the plan warns they are provenance, but the wording reads otherwise.
+- **`config.py:271-291` pointed one line past end of file** and was corrected to `:271-290`. Outside
+  §1's enumeration — added by `391808b`.
+- **Three further `web.py` citations added by `391808b`** were converted to symbol anchors beyond
+  the three the plan named, on the same reasoning.
+- **A `## Platform` roadmap entry was added** proposing the `search`/`partials_workspaces`
+  unification. Not in §8's Documentation Updates table for Phase 1. Added on explicit user decision
+  after a Phase 2 reviewer identified the duplication as this defect's recurrence vector.
+- **That entry produced false claims in two successive drafts before being simplified.** Draft one
+  asserted a `/search` test count that Phase 2 invalidated in the same session; draft two replaced it
+  with a fabricated behavioural claim (that a provider-filtered search overstates its session count —
+  false, because `search()` filters by provider before grouping) and a `Snapshot(` total its own
+  embedded grep contradicted. Both were caught by review. The entry now asserts no counts at all.
+  **This is the plan's own line-number hazard generalised**: the durability problem is not line
+  numbers, it is any census asserted about concurrently-edited files.
+- **De-numbering was applied selectively, not uniformly.** `config.py:271-290` was re-derived rather
+  than replaced with a `save_config` anchor, and several accurate coordinates were left numbered:
+  `launcher_modal.html:10`, `launcher.py:403`, `config.py:53`, `data_kiro.py:16-25`,
+  `workspace_card.html:2`, `session_row.html:1`, and six `presence.py` sites. All resolve correctly
+  as committed. The `presence.py` ones are the exposure — Phase 2 modified that file this session,
+  and Phase 6's re-enumeration criterion is the only backstop.
 
 ## Review Log
 
@@ -945,6 +1005,37 @@ snippet and reported it working, while the Security auditor called it bypassable
 — the probes used a well-formed `Host` header, where the check behaves properly; the auditor
 analysed the malformed-`Host` path where Starlette falls back to `scope["server"]`. Finding 1's fix
 is strictly safer and free, so it was applied regardless.
+
+### 2026-07-25 — Implementation Review (after Phase 1, persona: Senior engineer)
+
+Implementation health: Green.
+Three review cycles. Cycle 1: 5 findings (1 Medium, 4 Low). Cycle 2: 5 findings (2 Medium, 3 Low),
+one of which was a **regression introduced by cycle 1's own fix**. Cycle 3: verified clean.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Cycle-2 fix fabricated a behavioural claim: that a provider-filtered search overstates its session count | Fixed — verified false (`search()` filters before grouping); entry simplified to drop the census |
+| 2 | High | The replacement `Snapshot(` count (18) was contradicted by the entry's own embedded grep (16) | Fixed — count removed entirely rather than re-derived |
+| 3 | Medium | Three `index.html` citations left as line numbers though Phase 5 edits that file | Fixed — converted to `_launchers` bootstrap, `editLauncher`, `handleItemClick` |
+| 4 | Medium | Roadmap entry's `/search` request count went stale within the session that wrote it | Fixed — replaced with a property claim that does not depend on a count |
+| 5 | Medium | Entry's "only real differences are" list omitted four genuine divergences | Fixed — completeness claim dropped; reader directed to diff the two functions |
+| 6 | Low | `ROADMAP.md` cited the parse-and-poll plan by its pre-archival slug | Fixed — repointed to `plans/done/260725-1542_PARSE_AND_POLL_PERFORMANCE.md` |
+| 7 | Low | `presence.py:65` points at the `_PROVIDER_SPECS` header, not the `--resume-id` literal it claims | Fixed — converted to a `_PROVIDER_SPECS` symbol anchor |
+| 8 | Low | `CLOSED_INVESTIGATIONS.md` attributed "15+" call sites to one file when the total spans two | Fixed — census removed; durable property statement retained |
+| 9 | Low | The +8 `ROADMAP.md` doc-site skew was recorded nowhere, though Phase 6 targets those numbers | Fixed — recorded in §9 |
+| 10 | Low | `config.py:271-291` pointed one line past end of file | Fixed — corrected to `:271-290` |
+| 11 | Low | De-numbering applied selectively; several accurate coordinates left as line numbers | Orchestrator: proposed-accept — pending user decision |
+
+Two findings not in the table because they are this plan's own text rather than Phase 1's output:
+§1's "verified accurate, leave untouched" list contained at least two references that were not
+accurate, and Phase 6's exit criteria are phrased as addresses over numbers the plan elsewhere calls
+provenance.
+
+The cycle-2 regression is the entry worth reading twice. The correction round whose whole purpose
+was removing false claims introduced a new one, more confident and more plausible than the stale
+count it replaced. A census asserted about a file a sibling phase is rewriting cannot be made
+durable by re-deriving it more carefully; it has to stop being a census. That is why the entry now
+contains a commit SHA, four symbol names, and no numbers.
 
 ---
 
