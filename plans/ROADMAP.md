@@ -162,8 +162,21 @@
   4. **Does an interactive `kiro-cli chat` write a transcript promptly?** The `--no-interactive` one-shot wrote none at all, which is what blocks the [P1] heuristic on the kiro-cli side. Cheap, and it gates [P1]'s kiro-cli half.
   - *Closed by round 1/2*: `_meta.kiro.status` liveness (masked to `idle` by design); `agentSpawn` session id (yes, via `KIRO_SESSION_ID` in the environment); `session/load` attach to tracked sessions (yes, with context); the baseline cost-and-miss measurement (done — see Baseline above).
 
-##Misc
-- Identify opened sessions
-- Focus on opened sessions
-- Visualize/interact with opened sessions from PowerAtlas
-- Local network access to mimic claude code remote control in semi-remote fashion
+## Misc
+
+- ~~**Identify opened sessions**~~ — **done 2026-07-24** (`a973715`). Both providers publish a per-process sidecar naming the session; see `## Session Control & Integration` → [P1]/[P1b]. This was the blocker under the three items below.
+- **Focus on opened sessions** — *unblocked by the above; the missing piece was session→process, which now exists.*
+  - `Snapshot` already holds the owning pid for every live session. What remains is turning a pid into a focused window, which differs by provider: **claude-code** runs directly under its terminal, so the pid's ancestry leads to the hosting window. **kiro-cli** does not — `kiro-cli chat` spawns `bun tui.js`, which spawns the `kiro-cli acp` child that actually holds the lock, so the pid in the sidecar is a *grandchild* and focusing means walking up two levels first.
+  - Windows focus itself needs a window handle, not a pid: enumerate top-level windows, map back via the process tree, then `SetForegroundWindow`. Terminal tabs are the awkward case — one window can host many sessions, so tab-level focus may not be reachable at all. Worth confirming what granularity is achievable before scoping.
+  - Related: `session-tab-title.md` steering already names terminal tabs after sessions, which may give a matchable window title and sidestep the tree walk entirely.
+- **Visualize/interact with opened sessions from PowerAtlas** — see the messaging-socket lead below; that would make this reachable without ACP.
+- **Local network access to mimic claude code remote control in semi-remote fashion** — note Claude Code *has* a first-party remote-control feature (`remoteControlAtStartup` is a real setting, present in the user's `settings.json`), so this may be a matter of using it rather than mimicking it.
+
+- **[SPIKE] `messagingSocketPath` — a possible path to driving live sessions without ACP**
+  - *What was found 2026-07-24*: the reader for `~\.claude\sessions\<pid>.json` accepts a `messagingSocketPath` field (aliased `sock`), and the binary carries a `[uds-client]` that sends `{type:"user", message:{role:"user", content}, priority:"next", from}` to such a socket — i.e. **injecting a prompt into an already-running session**.
+  - *Why it matters*: that is interaction with sessions the user started in a terminal, which ACP cannot do without `session/load` taking ownership and mutating history, and which hooks cannot do at all. It would collapse the two Misc items above into something far cheaper than the ~1 week ACP slice.
+  - *Status: unverified and currently absent.* No live session file on this machine carries the field — observed keys are `pid, sessionId, cwd, startedAt, version, peerProtocol, kind, entrypoint, name, nameSource, status, updatedAt, statusUpdatedAt, bridgeSessionId`. So publication is gated on something. `remoteControlAtStartup` is the obvious candidate; adjacent settings in the same block are `isolatePeerMachines`, `daemonColdStart`, `autoUploadSessions`, `inputNeededNotifEnabled`, `agentPushNotifEnabled`.
+  - *Cheapest next step*: toggle `remoteControlAtStartup`, start a session, and check whether `messagingSocketPath` appears. If it does, the follow-on question is what the socket accepts and whether writing to it is supported or merely possible.
+  - *Caveat*: this is undocumented internal IPC in a self-updating binary — a heavier dependency than reading a status field, and one that can vanish without notice. Treat as a spike, not a plan.
+
+- **Adopt the `kind` field** — the session sidecar reports `interactive` / `bg` / `daemon` / `daemon-worker` (`vDy` in the binary). PowerAtlas cannot currently tell a real interactive session from a background or daemon one, so they render identically. Cheap filter or badge. Other sidecar fields were reviewed and are not worth adopting: `name`/`nameSource` is a short derived slug (`poweratlas-d2`) that the existing title already beats, and `entrypoint`/`peerProtocol`/`version` carry no product value. `state`, `detail`, `tempo`, `jobId`, `parkedJobId` and `logPath` appear in the reader but in no observed file.
