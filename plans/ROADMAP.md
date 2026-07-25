@@ -170,7 +170,7 @@
   - Windows focus itself needs a window handle, not a pid: enumerate top-level windows, map back via the process tree, then `SetForegroundWindow`. Terminal tabs are the awkward case — one window can host many sessions, so tab-level focus may not be reachable at all. Worth confirming what granularity is achievable before scoping.
   - Related: `session-tab-title.md` steering already names terminal tabs after sessions, which may give a matchable window title and sidestep the tree walk entirely.
 - **Visualize/interact with opened sessions from PowerAtlas** — see the messaging-socket lead below; that would make this reachable without ACP.
-- **Local network access to mimic claude code remote control in semi-remote fashion** — note Claude Code *has* a first-party remote-control feature (`remoteControlAtStartup` is a real setting, present in the user's `settings.json`), so this may be a matter of using it rather than mimicking it.
+- **Local network access to mimic claude code remote control in semi-remote fashion** — **this is about kiro-cli**, which has no such feature; Claude Code already ships one (`remoteControlAtStartup`). See "Remote control for kiro-cli" below for why it is currently unreachable, and the `messagingSocketPath` spike for the Claude Code side.
 
 - **[SPIKE] `messagingSocketPath` — a possible path to driving live sessions without ACP**
   - *What was found 2026-07-24*: the reader for `~\.claude\sessions\<pid>.json` accepts a `messagingSocketPath` field (aliased `sock`), and the binary carries a `[uds-client]` that sends `{type:"user", message:{role:"user", content}, priority:"next", from}` to such a socket — i.e. **injecting a prompt into an already-running session**.
@@ -179,4 +179,27 @@
   - *Cheapest next step*: toggle `remoteControlAtStartup`, start a session, and check whether `messagingSocketPath` appears. If it does, the follow-on question is what the socket accepts and whether writing to it is supported or merely possible.
   - *Caveat*: this is undocumented internal IPC in a self-updating binary — a heavier dependency than reading a status field, and one that can vanish without notice. Treat as a spike, not a plan.
 
-- **Adopt the `kind` field** — the session sidecar reports `interactive` / `bg` / `daemon` / `daemon-worker` (`vDy` in the binary). PowerAtlas cannot currently tell a real interactive session from a background or daemon one, so they render identically. Cheap filter or badge. Other sidecar fields were reviewed and are not worth adopting: `name`/`nameSource` is a short derived slug (`poweratlas-d2`) that the existing title already beats, and `entrypoint`/`peerProtocol`/`version` carry no product value. `state`, `detail`, `tempo`, `jobId`, `parkedJobId` and `logPath` appear in the reader but in no observed file.
+- **Claude Code session-sidecar fields — full inventory and verdict**
+  - Every field the binary's reader accepts from `~\.claude\sessions\<pid>.json`. PowerAtlas consumes four today (`pid`, `sessionId`, `cwd`, `startedAt`) plus `status`/`waitingFor`. Recorded so this does not need re-deriving.
+
+  | Field | Observed? | Verdict |
+  |---|---|---|
+  | `pid`, `sessionId`, `cwd`, `startedAt` | yes | **in use** — identity + the PID-reuse guard |
+  | `status`, `statusUpdatedAt` | yes | **in use** — `busy`/`shell`/`idle`/`waiting` |
+  | `waitingFor` | yes | **in use** — approval vs question |
+  | `kind` | yes | **adopt** — `interactive`/`bg`/`daemon`/`daemon-worker` (`vDy`). Background and daemon sessions currently render identically to real ones. Cheap filter or badge |
+  | `messagingSocketPath` (alias `sock`) | **no** | **spike** — see the item above; the one field that could unlock interaction |
+  | `updatedAt` | yes | marginal — `statusUpdatedAt` is the useful one |
+  | `name`, `nameSource` | yes | skip — a short derived slug (`poweratlas-d2`); the existing session title is better |
+  | `entrypoint`, `peerProtocol`, `version` | yes | skip — no product value |
+  | `bridgeSessionId` | yes | unknown — links to a Claude Code bridge/web session; no known use yet |
+  | `jobId`, `parkedJobId` | no | possible relevance to **Dispatch no-interactive tasks** under Automation & Workflows if background jobs are ever launched from the UI |
+  | `procStart`, `state`, `detail`, `tempo`, `logPath` | no | in the reader, in no observed file. Semantics unknown |
+
+  - kiro-cli's lock file is far poorer by comparison — `{pid, started_at}` only, with `cwd`/`title` in the sibling `.json` and **no status field at all**.
+
+- **Remote control for kiro-cli** — *(corrected: the "mimic claude code remote control" idea is about **kiro-cli**, which lacks the feature. Claude Code already has first-party remote control — `remoteControlAtStartup` — so for that provider the question is whether to surface it, not build it.)*
+  - *The hard part, established 2026-07-24*: a live kiro-cli session **cannot be driven by a second client**. `session/load` over ACP on a session another process owns is hard-refused in 0.84 s (`-32603 … "Session is active in another process (PID n)"`), enforced by a pid-liveness check on `~\.kiro\sessions\cli\<id>.lock`. That refusal is correct behaviour — it is what prevents two writers corrupting a transcript — but it means ACP can only drive sessions PowerAtlas itself launched, or ones that have exited.
+  - *The architecture that would work is `kiro-cli serve`* — and this is the one use for which its design is right. It is a **multiplexer**: N clients attach to one agent, `initialize` is cached for later joiners, and observers demonstrably receive `session/request_permission` with an `_kiro/permission/respond` path back. That is remote control in shape — a second client watching and answering a session it does not own.
+  - *Why it is still blocked*: the auth callback is undeliverable to observer-role clients and no WS client can ever be `primary`, so no session can be created or loaded; and it reads only the dormant v3 store, not the `cli/` store `kiro-cli chat` writes. Both walls are in `## Session Control & Integration` → `kiro-cli serve`.
+  - *So the honest state*: kiro-cli remote control is **not currently reachable**. The nearest achievable thing is launching sessions *from* PowerAtlas via `kiro-cli acp` and driving those — a different product promise from taking over a session already running in a terminal. Revisit if `serve` grows an auth flag or if the v2 store becomes visible to it.
