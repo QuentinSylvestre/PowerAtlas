@@ -78,6 +78,21 @@
 
 ---
 
+## Rejected — focus a session's terminal window from the dashboard
+
+**Verdict: dropped 2026-07-25**, after exploration. The reachable version of the feature is not worth building, and the version worth building is not reachable.
+
+- **The process ancestry walk works.** Measured on this machine: every terminal-hosted session resolves to a window-owning ancestor. The kiro-cli chain is four hops, not the two the roadmap assumed — `kiro-cli acp` (holds the sidecar) ← `bun.exe` ← `kiro-cli chat -a` ← `pwsh.exe` ← `WindowsTerminal.exe`. claude-code is two hops via its own `pwsh.exe`.
+- **But the last hop is many-to-one, and that kills it.** Three concurrent live sessions — one `kiro-cli chat -a` and two `claude.exe`, each under a separate `pwsh.exe` — all resolved to **the same `hwnd=658812`**, a single Windows Terminal window. `SetForegroundWindow` on that handle raises the window showing whatever tab was last active, so it is the clicked session only by coincidence. Tab-level targeting is not reachable through a window handle at all.
+- **The window title cannot disambiguate either.** It reads the *active tab's* title (`✳ Claude Code` when observed); a background tab's title is not visible at window level. This kills the "`session-tab-title.md` steering gives a matchable title and sidesteps the tree walk" shortcut the roadmap proposed.
+- **Launch-time pid capture is a false lead.** `launcher.py` discards every `subprocess.Popen` return value (`:166`, `:192`, `:413`, `:432`, `:571`), which looks like free identity for self-launched sessions. It is not: Windows Terminal's monarch/peasant model means a spawned `wt.exe` hands its request to the already-running Terminal and exits, so its pid names a dead process within milliseconds. Confirmed by the probe — `pwsh.exe` is a child of `WindowsTerminal.exe`, a process PowerAtlas never spawned.
+- **Cost, had it proceeded**: the roadmap's claim that "`Snapshot` already holds the owning pid" is false — pid is captured at `presence.py:416`/`:211`/`:223`, used only as a validation join key at `:455`/`:462`, and dropped at the `Snapshot(...)` constructor call at `presence.py:481`. It would need threading through as a trailing keyword-defaulted field (15+ positional call sites in `test_data.py:1533-1674` and `test_web.py:3774-4003` break otherwise), plus an entirely new Win32 surface — no code in the repo has ever focused an external window, and there is zero precedent for testing real Win32 calls.
+- **Two further design collisions**, recorded so they are not rediscovered: row click already means multi-select for batch launch (`session_row.html:1` → `handleItemClick`, `index.html:166`), so "click a row to focus" conflicts with existing behaviour; and the live dot does not imply a resolvable pid, because `_session_status`'s cwd+recency fallback gate (`web.py:176-197`) lights a row live with no session-id match at all.
+
+**Would reopen if**: sessions stop sharing a terminal window — either because the user's habit changes to one window per session, or because `launcher.py` starts forcing a new window per launch. Cheapest signal, re-runnable in seconds: enumerate visible windows, map each live provider process up its ancestry, and check whether distinct sessions resolve to distinct `hwnd`s. If they do, window-level focus becomes exact and the feature is worth ~a day. Tab-level targeting would additionally need a session→tab-index mapping (UI Automation over Terminal's tab elements, or `wt -w <id> focus-tab -t <n>`), which does not exist for terminal-started sessions and is the reason option C was not pursued.
+
+---
+
 ## Accepted limitations — shipped code, deliberately not fixed
 
 Recorded so a future session recognises these as decisions rather than undiscovered bugs.
