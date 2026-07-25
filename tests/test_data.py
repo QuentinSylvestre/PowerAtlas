@@ -1,7 +1,9 @@
 """Tests for data module."""
 
 import json
+import os
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1659,3 +1661,204 @@ class TestProbableFreshSession:
 
         result = snap.probable_fresh_session("kiro-cli", cwd, sessions)
         assert result == "sess-newer-fresh"
+
+
+# --- Parse/head caching (260725_PARSE_AND_POLL_PERFORMANCE) ------------------
+
+
+class TestBoundedCache:
+    """LRU bound and eviction order for the shared parse-cache primitive."""
+
+    def test_evicts_least_recently_used(self):
+        from power_atlas.data import BoundedCache
+        c = BoundedCache(2)
+        c.put("a", (1,))
+        c.put("b", (2,))
+        c.get("a")           # 'a' becomes most-recently-used
+        c.put("c", (3,))     # evicts 'b', not 'a'
+        assert c.get("a") == (1,)
+        assert c.get("b") is None
+        assert c.get("c") == (3,)
+
+    def test_respects_maxsize(self):
+        from power_atlas.data import BoundedCache
+        c = BoundedCache(8)
+        for i in range(100):
+            c.put(f"k{i}", (i,))
+        assert len(c) == 8
+
+    def test_clear_empties(self):
+        from power_atlas.data import BoundedCache
+        c = BoundedCache(4)
+        c.put("a", (1,))
+        c.clear()
+        assert len(c) == 0
+        assert c.get("a") is None
+
+
+@pytest.fixture
+def claude_project(tmp_path, monkeypatch):
+    """A Claude Code project folder with clean parse/head caches."""
+    from power_atlas import data_claude
+    projects = tmp_path / "projects"
+    folder = projects / "-home-user-proj"
+    folder.mkdir(parents=True)
+    monkeypatch.setattr(data_claude, "CLAUDE_PROJECTS_DIR", projects)
+    monkeypatch.setattr(data_claude, "CLAUDE_HISTORY_PATH", tmp_path / "history.jsonl")
+    data_claude._parse_cache.clear()
+    data_claude._head_cache.clear()
+    return folder
+
+
+def _claude_session(folder: Path, name: str, lines: list[bytes]) -> Path:
+    p = folder / f"{name}.jsonl"
+    p.write_bytes(b"".join(l + b"\n" for l in lines))
+    return p
+
+
+class TestParseSessionFileHeadScan:
+    """The head scan skips json.loads on non-title lines once first_prompt is known."""
+
+    def test_ai_title_after_first_prompt_still_found(self, claude_project):
+        p = _claude_session(claude_project, "a", [
+            b'{"type":"user","message":{"content":"the first prompt"}}',
+            *[b'{"type":"assistant","message":{"content":"filler"}}'] * 50,
+            b'{"type":"ai-title","aiTitle":"Found Late"}',
+        ])
+        title, first_prompt, _lp, _lr, _ts = data_claude._parse_session_file(p)
+        assert title == "Found Late"
+        assert first_prompt == "the first prompt"
+
+    def test_custom_title_overrides_ai_title(self, claude_project):
+        p = _claude_session(claude_project, "b", [
+            b'{"type":"ai-title","aiTitle":"Auto"}',
+            b'{"type":"user","message":{"content":"prompt"}}',
+            b'{"type":"custom-title","customTitle":"Renamed By User"}',
+        ])
+        title, _fp, _lp, _lr, _ts = data_claude._parse_session_file(p)
+        assert title == "Renamed By User"
+
+    def test_word_title_in_content_does_not_corrupt(self, claude_project):
+        """A message containing the word 'title' is parsed, not mistaken for one."""
+        p = _claude_session(claude_project, "c", [
+            b'{"type":"ai-title","aiTitle":"Real Title"}',
+            b'{"type":"user","message":{"content":"what is the title of this book"}}',
+            b'{"type":"assistant","message":{"content":"the title is X"}}',
+        ])
+        title, first_prompt, _lp, _lr, _ts = data_claude._parse_session_file(p)
+        assert title == "Real Title"
+        assert first_prompt == "what is the title of this book"
+
+    def test_invalid_utf8_line_still_parses(self, claude_project):
+        """Binary reads must reproduce text-mode errors='replace' behaviour."""
+        p = _claude_session(claude_project, "d", [
+            b'{"type":"user","message":{"content":"caf\xff\xfe bad"}}',
+            b'{"type":"assistant","message":{"content":"ok"}}',
+        ])
+        _t, first_prompt, _lp, last_reply, _ts = data_claude._parse_session_file(p)
+        assert first_prompt.startswith("caf")
+        assert last_reply == "ok"
+
+    def test_malformed_line_skipped(self, claude_project):
+        p = _claude_session(claude_project, "e", [
+            b'{not json at all',
+            b'{"type":"user","message":{"content":"survived"}}',
+        ])
+        _t, first_prompt, _lp, _lr, _ts = data_claude._parse_session_file(p)
+        assert first_prompt == "survived"
+
+
+class TestParseCache:
+    """load_sessions must re-parse only files whose (mtime, size) changed."""
+
+    def test_unchanged_file_not_reparsed(self, claude_project):
+        # load_sessions only picks up UUID-named files
+        _claude_session(claude_project, "11111111-1111-4111-8111-111111111111", [
+            b'{"type":"user","message":{"content":"hello"}}',
+        ])
+        sessions, _ = data_claude.load_sessions("/home/user/proj")
+        assert len(sessions) == 1
+
+        with patch.object(data_claude, "_parse_session_file",
+                          side_effect=AssertionError("should not re-parse")):
+            again, _ = data_claude.load_sessions("/home/user/proj")
+        assert [s.title for s in again] == [s.title for s in sessions]
+
+    def test_changed_file_is_reparsed(self, claude_project):
+        p = _claude_session(claude_project, "22222222-2222-4222-8222-222222222222", [
+            b'{"type":"user","message":{"content":"before"}}',
+        ])
+        first, _ = data_claude.load_sessions("/home/user/proj")
+        assert first[0].first_prompt == "before"
+
+        p.write_bytes(b'{"type":"user","message":{"content":"after"}}\n')
+        os.utime(p, (time.time() + 5, time.time() + 5))
+        second, _ = data_claude.load_sessions("/home/user/proj")
+        assert second[0].first_prompt == "after"
+
+
+class TestHeadCacheInvalidation:
+    """first_prompt survives appends but must not survive a truncate-rewrite."""
+
+    def test_append_picks_up_rename(self, claude_project):
+        p = _claude_session(claude_project, "h1", [
+            b'{"type":"user","message":{"content":"original"}}',
+        ])
+        data_claude._parse_session_file(p, p.stat())
+
+        with open(p, "ab") as fh:
+            fh.write(b'{"type":"custom-title","customTitle":"Renamed"}\n')
+        os.utime(p, (time.time() + 5, time.time() + 5))
+
+        title, first_prompt, _lp, _lr, _ts = data_claude._parse_session_file(p, p.stat())
+        assert title == "Renamed"
+        assert first_prompt == "original"
+
+    def test_truncate_rewrite_invalidates_head(self, claude_project):
+        p = _claude_session(claude_project, "h2", [
+            b'{"type":"user","message":{"content":"original first prompt padded out"}}',
+            b'{"type":"assistant","message":{"content":"padding to grow the file"}}',
+        ])
+        data_claude._parse_session_file(p, p.stat())
+
+        # Shrink and rewrite — the cached head must not be reused.
+        p.write_bytes(b'{"type":"user","message":{"content":"brand new"}}\n')
+        os.utime(p, (time.time() + 5, time.time() + 5))
+
+        _t, first_prompt, _lp, _lr, _ts = data_claude._parse_session_file(p, p.stat())
+        assert first_prompt == "brand new"
+
+
+class TestKiroMetaCache:
+    """kiro-cli metadata parsing is cached by (mtime, size)."""
+
+    def test_meta_reused_when_unchanged(self, mock_sessions):
+        _write_session(mock_sessions, "k1", "C:\\Projects\\A", title="First")
+        data_kiro._meta_cache.clear()
+
+        first = data_kiro.discover_workspaces()
+        assert first
+        meta_file = mock_sessions / "k1.json"
+        cached = data_kiro._meta_cache.get(str(meta_file))
+        assert cached is not None
+        assert cached[2][3] == "First"   # title field of the cached tuple
+
+    def test_meta_refreshed_when_changed(self, mock_sessions):
+        _write_session(mock_sessions, "k2", "C:\\Projects\\B", title="Before")
+        data_kiro._meta_cache.clear()
+        data_kiro.load_sessions("C:\\Projects\\B")
+
+        _write_session(mock_sessions, "k2", "C:\\Projects\\B", title="After")
+        meta_file = mock_sessions / "k2.json"
+        os.utime(meta_file, (time.time() + 5, time.time() + 5))
+
+        sessions, _ = data_kiro.load_sessions("C:\\Projects\\B")
+        assert [s.title for s in sessions] == ["After"]
+
+    def test_oversized_meta_still_skipped(self, mock_sessions):
+        _write_session(mock_sessions, "k3", "C:\\Projects\\C")
+        big = mock_sessions / "k3.json"
+        big.write_text(" " * 1_048_577, encoding="utf-8")
+        data_kiro._meta_cache.clear()
+        sessions, _ = data_kiro.load_sessions("C:\\Projects\\C")
+        assert sessions == []

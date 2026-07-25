@@ -8,9 +8,51 @@ import sys
 import time
 from pathlib import Path
 
-from .data import Session, _FileInfo, _normalize_path, _cap_text
+from .data import BoundedCache, Session, _FileInfo, _normalize_path, _cap_text
 
 SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
+
+# Both discover_workspaces() and load_sessions() walk every metadata file in
+# SESSION_DIR — load_sessions() does so once per workspace, so an uncached parse
+# is O(all sessions) per card expansion. Keying by (mtime, size) makes repeat
+# walks nearly free.
+_meta_cache = BoundedCache(4096)
+_prompts_cache = BoundedCache(2048)
+
+
+def _read_meta(meta_file: Path, st: os.stat_result) -> tuple | None:
+    """Parse a session metadata .json, cached by (mtime, size).
+
+    Returns (parent_session_id, cwd, session_id, title, created_at, updated_at)
+    or None when the file is oversized, unreadable, or malformed.
+    """
+    cache_key = str(meta_file)
+    cached = _meta_cache.get(cache_key)
+    if cached is not None:
+        c_mtime, c_size, parsed = cached
+        if c_mtime == st.st_mtime and c_size == st.st_size:
+            return parsed
+
+    if st.st_size > 1_048_576:
+        parsed = None
+    else:
+        try:
+            d = json.loads(meta_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(d, dict):
+            parsed = None
+        else:
+            parsed = (
+                d.get("parent_session_id"),
+                d.get("cwd", ""),
+                d.get("session_id", meta_file.stem),
+                d.get("title", "<untitled>"),
+                d.get("created_at", ""),
+                d.get("updated_at", ""),
+            )
+    _meta_cache.put(cache_key, (st.st_mtime, st.st_size, parsed))
+    return parsed
 
 
 def _sqlite_path() -> Path:
@@ -55,21 +97,21 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
             if meta_file.suffix == ".jsonl":
                 continue
             try:
-                if meta_file.stat().st_size > 1_048_576:
-                    continue
-                d = json.loads(meta_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                st = meta_file.stat()
+            except OSError:
                 continue
-            if d.get("parent_session_id"):
+            meta = _read_meta(meta_file, st)
+            if meta is None:
                 continue
-            cwd = d.get("cwd", "")
+            parent_session_id, cwd, _sid, _title, _created, updated = meta
+            if parent_session_id:
+                continue
             if not cwd:
                 continue
             key = _normalize_path(cwd)
             counts[key] = counts.get(key, 0) + 1
             if key not in display:
                 display[key] = cwd
-            updated = d.get("updated_at", "")
             if key not in workspaces or updated > workspaces[key]:
                 workspaces[key] = updated
 
@@ -105,32 +147,33 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
             continue
         try:
             st = meta_file.stat()
-            if st.st_size > 1_048_576:
-                continue
-            data = json.loads(meta_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except OSError:
             continue
-        if data.get("parent_session_id"):
+        meta = _read_meta(meta_file, st)
+        if meta is None:
             continue
-        if _normalize_path(data.get("cwd", "")) != target:
+        parent_session_id, meta_cwd, session_id, title, created_at, updated_at = meta
+        if parent_session_id:
+            continue
+        if _normalize_path(meta_cwd) != target:
             continue
 
         file_stats[str(meta_file)] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
-        session_id = data.get("session_id", meta_file.stem)
         jsonl_path = meta_file.with_suffix(".jsonl")
+        jsonl_st = None
         try:
             jsonl_st = jsonl_path.stat()
             file_stats[str(jsonl_path)] = _FileInfo(mtime=jsonl_st.st_mtime, size=jsonl_st.st_size)
         except OSError:
             pass
-        first_prompt, last_prompt, last_reply_tail = _extract_prompts(jsonl_path)
+        first_prompt, last_prompt, last_reply_tail = _extract_prompts_cached(jsonl_path, jsonl_st)
 
         sessions.append(Session(
             session_id=session_id,
-            title=data.get("title", "<untitled>"),
-            cwd=data.get("cwd", cwd),
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
+            title=title,
+            cwd=meta_cwd or cwd,
+            created_at=created_at,
+            updated_at=updated_at,
             first_prompt=first_prompt,
             last_prompt=last_prompt,
             last_reply_tail=last_reply_tail,
@@ -138,6 +181,27 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
 
     sessions.sort(key=lambda s: s.updated_at, reverse=True)
     return sessions, file_stats
+
+
+def _extract_prompts_cached(jsonl_path: Path, st: os.stat_result | None) -> tuple[str, str, str]:
+    """_extract_prompts, memoized on the .jsonl's (mtime, size).
+
+    The companion .history file only supplies first_prompt, which is its first
+    line and so is immutable once written — the .jsonl stat is sufficient.
+    """
+    if st is None:
+        return _extract_prompts(jsonl_path)
+
+    cache_key = str(jsonl_path)
+    cached = _prompts_cache.get(cache_key)
+    if cached is not None:
+        c_mtime, c_size, parsed = cached
+        if c_mtime == st.st_mtime and c_size == st.st_size:
+            return parsed
+
+    parsed = _extract_prompts(jsonl_path)
+    _prompts_cache.put(cache_key, (st.st_mtime, st.st_size, parsed))
+    return parsed
 
 
 def _extract_prompts(jsonl_path: Path) -> tuple[str, str, str]:
@@ -238,12 +302,15 @@ def refresh_stale_entries_for_cwd(norm_cwd: str, old_stats: dict[str, _FileInfo]
         if str(meta_file) in old_stats:
             continue
         try:
-            d = json.loads(meta_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            st = meta_file.stat()
+        except OSError:
             continue
-        if d.get("parent_session_id"):
+        meta = _read_meta(meta_file, st)
+        if meta is None:
             continue
-        if _normalize_path(d.get("cwd", "")) == norm_cwd:
+        if meta[0]:  # parent_session_id — subagent session
+            continue
+        if _normalize_path(meta[1]) == norm_cwd:
             return True
 
     return False
@@ -260,14 +327,14 @@ def find_session_workspace(session_id: str) -> str | None:
     if not SESSION_DIR.is_dir():
         return None
     meta_file = SESSION_DIR / f"{session_id}.json"
-    if not meta_file.exists():
-        return None
     try:
-        d = json.loads(meta_file.read_text(encoding="utf-8"))
-        cwd = d.get("cwd", "")
-        return cwd or None
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        st = meta_file.stat()
+    except OSError:
         return None
+    meta = _read_meta(meta_file, st)
+    if meta is None:
+        return None
+    return meta[1] or None
 
 
 def get_session_tail(session_id: str, cwd: str = "", max_lines: int = 15) -> list[str]:

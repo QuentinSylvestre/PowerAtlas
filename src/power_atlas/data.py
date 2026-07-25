@@ -7,6 +7,7 @@ Provider adapters (data_kiro, data_claude) handle discovery and parsing.
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +54,43 @@ def _cap_text(text: str, max_chars: int = 2000, max_lines: int = 15) -> str:
     lines = text.split("\n")[:max_lines]
     result = "\n".join(lines)
     return result[:max_chars]
+
+
+class BoundedCache:
+    """Thread-safe LRU cache for parsed file data.
+
+    Provider adapters parse the same session files repeatedly (every refresh
+    tick re-reads a whole workspace). Keying parse results by (mtime, size)
+    lets unchanged files skip parsing entirely; the LRU bound keeps a large
+    corpus from growing the cache without limit.
+    """
+
+    def __init__(self, maxsize: int):
+        self._maxsize = maxsize
+        self._lock = threading.Lock()
+        self._data: OrderedDict[str, tuple] = OrderedDict()
+
+    def get(self, key: str) -> tuple | None:
+        with self._lock:
+            value = self._data.get(key)
+            if value is not None:
+                self._data.move_to_end(key)
+            return value
+
+    def put(self, key: str, value: tuple) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self._maxsize:
+                self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
 
 
 # Import provider modules AFTER defining shared types to avoid circular import

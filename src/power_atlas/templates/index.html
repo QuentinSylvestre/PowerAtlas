@@ -70,7 +70,7 @@
   <div class="center-panel" id="workspaces-panel">
     <div class="section-label"><span>Workspaces</span> <div class="workspace-filters" id="workspaceFilters"></div></div>
     <div id="workspace-cards" aria-busy="true"
-         hx-get="/partials/workspaces?fresh=1" hx-trigger="load" hx-swap="innerHTML"
+         hx-get="/partials/workspaces" hx-trigger="load" hx-swap="innerHTML"
          hx-on::after-swap="this.removeAttribute('aria-busy');loadExpandedCards();startPolling();startStatusPoll();startActiveSessionPoll()">
       <div class="skeleton-card"></div>
       <div class="skeleton-card"></div>
@@ -87,7 +87,7 @@
       </select>
     </div></div>
     <div id="all-sessions" aria-busy="true"
-         hx-get="/partials/all-sessions?page=1&fresh=1" hx-trigger="load" hx-swap="innerHTML"
+         hx-get="/partials/all-sessions?page=1" hx-trigger="load" hx-swap="innerHTML"
          hx-on::after-swap="this.removeAttribute('aria-busy')">
       <div class="skeleton-card"></div>
       <div class="skeleton-card"></div>
@@ -339,20 +339,51 @@ function debounce(fn,delay){var timer;return function(){var ctx=this,args=argume
 function loadMoreSessions(page){var btn=document.querySelector('.load-more-btn');if(btn){btn.disabled=true;btn.textContent='Loading...'}var qs=_buildWorkspaceQs();fetch('/partials/all-sessions?page='+page+'&'+qs).then(function(r){return r.text()}).then(function(html){var container=document.getElementById('all-sessions');if(btn)btn.remove();container.insertAdjacentHTML('beforeend',html);if(window.htmx)htmx.process(container);updateActionBar()}).catch(function(){if(btn){btn.disabled=false;btn.textContent='Load more';showToast('<div class="toast toast-error">Failed to load sessions<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')}})}
 function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
 function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});var qs='?'+_buildWorkspaceQs();fetch('/partials/workspaces'+qs).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el);loadExpandedCards();updateActionBar()});fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el);updateActionBar()})}
-var _refreshTimer=null;
-var _burstTimer=null;
-function startPolling(){if(_refreshTimer)return;var burstCount=0;_burstTimer=setInterval(function(){burstCount++;if(burstCount>=8){clearInterval(_burstTimer);_burstTimer=null}refreshCards(false)},15000);_refreshTimer=setInterval(function(){refreshCards(false)},30000)}
-function stopPolling(){if(_refreshTimer){clearInterval(_refreshTimer);_refreshTimer=null}if(_burstTimer){clearInterval(_burstTimer);_burstTimer=null}}
-// --- Status poll: lightweight 5s polling for session/workspace status dots ---
+// --- Unified background scheduler ---------------------------------------
+// One 5s tick drives all three background jobs, dispatched by counter, instead
+// of four independent setIntervals that drift into each other and can stack a
+// refresh on top of an in-flight one. Cadences are unchanged:
+//   status         every tick               (5s)
+//   session content every 2nd tick          (10s)
+//   workspace refresh every 3rd tick for the first 120s, then every 6th
+//                                           (15s burst, then 30s steady)
 window._activeCwds=[];
-var _statusTimer=null;
+var _TICK_MS=5000;
+var _BURST_TICKS=24;          // 24 * 5s = 120s, matching the old 8 x 15s burst
+var _tickTimer=null, _tick=0;
+var _pollingOn=false, _statusOn=false, _activeOn=false;
 var _statusFetching=false;
-function startStatusPoll(){if(_statusTimer)return;_statusTimer=setInterval(pollStatus,5000)}
-function stopStatusPoll(){if(_statusTimer){clearInterval(_statusTimer);_statusTimer=null}}
-// --- Active session poll: 10s refresh of session content for expanded active cards ---
-var _activeSessionTimer=null;
-function startActiveSessionPoll(){if(_activeSessionTimer)return;_activeSessionTimer=setInterval(pollActiveSessions,10000)}
-function stopActiveSessionPoll(){if(_activeSessionTimer){clearInterval(_activeSessionTimer);_activeSessionTimer=null}}
+
+function _schedulerTick(){
+  _tick++;
+  if(_statusOn) pollStatus();
+  if(_activeOn && _tick%2===0) pollActiveSessions();
+  if(_pollingOn){
+    var every = (_tick<=_BURST_TICKS) ? 3 : 6;
+    if(_tick%every===0){
+      // aria-busy is refreshCards' own in-flight flag (set on entry, cleared on
+      // both success and error) — reuse it so a slow refresh can't stack.
+      var wp=document.getElementById('workspace-cards');
+      if(!(wp&&wp.getAttribute('aria-busy'))) refreshCards(false);
+    }
+  }
+}
+function _ensureScheduler(){
+  if(_tickTimer) return;
+  _tick=0;
+  _tickTimer=setInterval(_schedulerTick,_TICK_MS);
+}
+function _maybeStopScheduler(){
+  if(_tickTimer && !_pollingOn && !_statusOn && !_activeOn){
+    clearInterval(_tickTimer); _tickTimer=null; _tick=0;
+  }
+}
+function startPolling(){_pollingOn=true;_ensureScheduler()}
+function stopPolling(){_pollingOn=false;_maybeStopScheduler()}
+function startStatusPoll(){_statusOn=true;_ensureScheduler()}
+function stopStatusPoll(){_statusOn=false;_maybeStopScheduler()}
+function startActiveSessionPoll(){_activeOn=true;_ensureScheduler()}
+function stopActiveSessionPoll(){_activeOn=false;_maybeStopScheduler()}
 function pollActiveSessions(){
   // Skip if a full refresh is in flight
   var wsCards=document.getElementById('workspace-cards');

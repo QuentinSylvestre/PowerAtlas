@@ -8,7 +8,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .data import Session, _FileInfo, _normalize_path, _cap_text
+from .data import BoundedCache, Session, _FileInfo, _normalize_path, _cap_text
+
+# Parsed-file caches. _parse_cache keys the whole parse result by (mtime, size)
+# so an unchanged file is never re-read; _head_cache keys only the immutable
+# head fields, which survive appends and so help the actively-written session.
+_parse_cache = BoundedCache(2048)
+_head_cache = BoundedCache(2048)
 
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CLAUDE_HISTORY_PATH = Path.home() / ".claude" / "history.jsonl"
@@ -209,7 +215,7 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
 
         file_stats[str(jsonl_path)] = _FileInfo(mtime=st.st_mtime, size=st.st_size)
         session_id = jsonl_path.stem
-        title, first_prompt, last_prompt, last_reply_tail, created_at = _parse_session_file(jsonl_path)
+        title, first_prompt, last_prompt, last_reply_tail, created_at = _parse_session_cached(jsonl_path, st)
 
         updated_at = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
         if not created_at:
@@ -235,10 +241,34 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
     return sessions, file_stats
 
 
-def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
+def _parse_session_cached(jsonl_path: Path, st: os.stat_result) -> tuple[str, str, str, str, str]:
+    """Parse a session file, reusing the previous result when it hasn't changed.
+
+    Keyed by (mtime, size): any content change moves one of them, so a hit means
+    the parse would produce the same tuple. This is what makes a refresh tick
+    cost work proportional to what changed rather than to workspace size.
+    """
+    cache_key = str(jsonl_path)
+    cached = _parse_cache.get(cache_key)
+    if cached is not None:
+        c_mtime, c_size, parsed = cached
+        if c_mtime == st.st_mtime and c_size == st.st_size:
+            return parsed
+
+    parsed = _parse_session_file(jsonl_path, st)
+    _parse_cache.put(cache_key, (st.st_mtime, st.st_size, parsed))
+    return parsed
+
+
+def _parse_session_file(jsonl_path: Path, st: os.stat_result | None = None) -> tuple[str, str, str, str, str]:
     """Parse a Claude Code session .jsonl file.
 
     Returns (title, first_prompt, last_prompt, last_reply_tail, created_at).
+
+    The file is read in binary so the tail seek is a real byte offset rather
+    than a text-mode cookie, and so most head lines can be skipped without
+    being decoded at all. Lines carrying invalid UTF-8 are re-decoded with
+    errors="replace" to match what the previous text-mode read produced.
     """
     title = ""
     custom_title = ""
@@ -247,15 +277,54 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
     last_prompt = ""
     last_reply_tail = ""
 
+    # first_prompt/first_timestamp are immutable under append, so a cached head
+    # lets command-heavy sessions (no user message in the first 500 lines) skip
+    # the scan that would otherwise parse every one of those lines every time.
+    cache_key = str(jsonl_path)
+    if st is None:
+        try:
+            st = jsonl_path.stat()
+        except OSError:
+            st = None
+    if st is not None:
+        cached_head = _head_cache.get(cache_key)
+        if cached_head is not None:
+            h_mtime, h_size, h_prompt, h_ts = cached_head
+            # JSONL here is append-only: a file that has only grown still has
+            # the same head. Equal size with an unchanged mtime is also safe;
+            # anything else (shrink, in-place rewrite) invalidates.
+            if st.st_size > h_size or (st.st_size == h_size and st.st_mtime == h_mtime):
+                first_prompt, first_timestamp = h_prompt, h_ts
+
     try:
-        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+        with open(jsonl_path, "rb") as fh:
             # Read first 500 lines for title and first_prompt (command-heavy sessions
             # can have hundreds of meta/task lines before real user text)
             for i, line in enumerate(fh):
                 if i >= 500:
                     break
+
+                # Once first_prompt is known the only lines that can still
+                # affect the result are title lines, and every one of those
+                # contains the bytes b"title" ("custom-title" / "ai-title" /
+                # "customTitle" / "aiTitle"). Skipping the rest without parsing
+                # is what makes this loop cheap. A false positive (the word
+                # "title" inside message content) costs one redundant parse and
+                # stays correct; a false negative is impossible.
+                if first_prompt and b"title" not in line:
+                    continue
+
                 try:
                     obj = json.loads(line)
+                except UnicodeDecodeError:
+                    # Text-mode reads used errors="replace", which turns invalid
+                    # bytes into U+FFFD *inside* the JSON string and still parses.
+                    # Reproduce that rather than dropping the line. Caught before
+                    # ValueError because UnicodeDecodeError subclasses it.
+                    try:
+                        obj = json.loads(line.decode("utf-8", errors="replace"))
+                    except (json.JSONDecodeError, ValueError):
+                        continue
                 except (json.JSONDecodeError, ValueError):
                     continue
 
@@ -304,12 +373,18 @@ def _parse_session_file(jsonl_path: Path) -> tuple[str, str, str, str, str]:
             size = fh.tell()
             read_size = min(size, 262144)  # 256KB tail
             fh.seek(max(0, size - read_size))
-            tail_text = fh.read()
+            tail_text = fh.read().decode("utf-8", errors="replace")
     except OSError:
         if not custom_title and not title and not first_prompt:
             title = jsonl_path.stem
         final_title = custom_title or title or first_prompt[:80] or jsonl_path.stem
         return final_title, first_prompt, "", "", first_timestamp
+
+    if st is not None:
+        # Always restamp, including on a hit: the shrink check compares against
+        # the last *validated* size, so leaving a stale size here would let a
+        # later truncate-and-rewrite look like an append and reuse a dead head.
+        _head_cache.put(cache_key, (st.st_mtime, st.st_size, first_prompt, first_timestamp))
 
     # Parse tail for last user/assistant messages and custom-title
     tail_lines = tail_text.splitlines()

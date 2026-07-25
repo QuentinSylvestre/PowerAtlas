@@ -113,3 +113,16 @@
 **Source**: Plan 260715-1407_SEMANTIC_SESSION_STATUS — user decision during /qexplore | **Verified**: 2026-07-16
 
 ## Declined
+
+### Session-file parsing must be skipped, not just made faster
+
+**Why**: PowerAtlas felt slow on start, card expansion, and updates. Profiling showed the cost was redundant work, not slow work: `_parse_session_file` unconditionally JSON-parsed the first 500 lines of every session file (~472 `json.loads` per file) to recover a title and first prompt that sit in the first few lines, and `refresh_stale_entries` reloaded a whole workspace when any one file changed. The instinct to reach for a faster language would have made the wasted scan faster without making it smaller.
+**How to apply**: Before optimizing a parse loop, ask what it can skip. Two patterns carry the win here: (1) a byte prefilter — once `first_prompt` is known, only title lines matter, and every title line contains the bytes `b"title"`, so non-matching lines are skipped without `json.loads`; (2) `(mtime, size)`-keyed parse caches (`data.BoundedCache`) so unchanged files are never re-read, which makes a refresh tick cost work proportional to what changed. Measured 4-6x on parse paths, 36x on a refresh tick, 154x on a warm sweep. Note that reading JSONL in binary changes error semantics: text mode with `errors="replace"` turns invalid UTF-8 into U+FFFD *inside* the JSON string and still parses, while `json.loads(bytes)` raises `UnicodeDecodeError` — catch it before `ValueError` (it subclasses it) and re-decode with `errors="replace"` to preserve behavior.
+**Source**: `plans/260725_PARSE_AND_POLL_PERFORMANCE.md` — differential-tested against 800 corpus files + 15 edge cases | **Verified**: 2026-07-25
+
+
+### Memoizing a path lookup requires the lookup's roots in the cache key
+
+**Why**: Memoizing `_resolve_jsonl_path` keyed only on `(provider, session_id, cwd)` broke two existing tests: they patch `SESSION_DIR` / `_V3_SESSIONS_ROOT` to different tmp_paths but reuse the same session id and cwd, so one test got another's resolved path back. Production never rebinds those globals, so the bug was invisible outside tests — but the cache was genuinely under-keyed.
+**How to apply**: When caching a filesystem lookup, include every module-level root the lookup reads in the key (`str(SESSION_DIR)`, `str(_V3_SESSIONS_ROOT)`). Also scope the cache to the branch that is actually expensive — only the kiro-cli v3 fallback walks directories; the claude-code branch is two syscalls and caching it added staleness for no gain. Revalidate positive entries with `is_file()` so a deleted file re-resolves, and give negative entries a short TTL so a newly created session is still picked up.
+**Source**: `plans/260725_PARSE_AND_POLL_PERFORMANCE.md` — caught by `TestResolveJsonlPath` regressions | **Verified**: 2026-07-25

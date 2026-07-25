@@ -3905,3 +3905,97 @@ class TestApiSessionStatus:
         assert resp.status_code == 200
         body = resp.json()
         assert body == {"sessions": {}, "workspaces": {}, "active_cwds": []}
+
+
+# --- Path/status caching (260725_PARSE_AND_POLL_PERFORMANCE) ----------------
+
+
+class TestResolveJsonlPathCaching:
+    """The kiro-cli v3 fallback scans every workspace dir, so it is memoized."""
+
+    def setup_method(self):
+        from power_atlas import status_classifier
+        status_classifier._path_cache.clear()
+
+    def test_repeat_lookup_avoids_rescan(self, tmp_path):
+        """A second lookup revalidates the cached path instead of walking dirs."""
+        ws = tmp_path / "abc123" / "sess_cached-id"
+        ws.mkdir(parents=True)
+        (ws / "messages.jsonl").write_text("")
+
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            first = _resolve_jsonl_path("cached-id", "kiro-cli", "C:\\proj")
+            assert first == ws / "messages.jsonl"
+
+            with _patch("power_atlas.status_classifier._resolve_jsonl_path_uncached",
+                        side_effect=AssertionError("should not rescan")):
+                second = _resolve_jsonl_path("cached-id", "kiro-cli", "C:\\proj")
+            assert second == first
+
+    def test_deleted_file_reresolves(self, tmp_path):
+        """A cached path whose file disappeared must not be returned."""
+        ws = tmp_path / "abc123" / "sess_gone-id"
+        ws.mkdir(parents=True)
+        target = ws / "messages.jsonl"
+        target.write_text("")
+
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            assert _resolve_jsonl_path("gone-id", "kiro-cli", "C:\\proj") == target
+            target.unlink()
+            assert _resolve_jsonl_path("gone-id", "kiro-cli", "C:\\proj") is None
+
+    def test_different_roots_do_not_collide(self, tmp_path):
+        """The cache key carries the roots, so rebinding them re-resolves."""
+        root_a = tmp_path / "a"
+        (root_a / "h" / "sess_same-id").mkdir(parents=True)
+        (root_a / "h" / "sess_same-id" / "messages.jsonl").write_text("")
+        root_b = tmp_path / "b"
+        (root_b / "h2" / "sess_same-id").mkdir(parents=True)
+        (root_b / "h2" / "sess_same-id" / "messages.jsonl").write_text("")
+
+        with _patch("power_atlas.status_classifier.SESSION_DIR", root_a / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", root_a):
+            a = _resolve_jsonl_path("same-id", "kiro-cli", "C:\\proj")
+        with _patch("power_atlas.status_classifier.SESSION_DIR", root_b / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", root_b):
+            b = _resolve_jsonl_path("same-id", "kiro-cli", "C:\\proj")
+
+        assert a == root_a / "h" / "sess_same-id" / "messages.jsonl"
+        assert b == root_b / "h2" / "sess_same-id" / "messages.jsonl"
+
+    def test_claude_code_is_not_cached(self, tmp_path):
+        """claude-code resolution is two syscalls — caching it would only add staleness."""
+        from power_atlas import status_classifier
+        session_file = tmp_path / "cc-id.jsonl"
+        session_file.write_text("")
+        with _patch("power_atlas.status_classifier._get_project_folder", return_value=tmp_path):
+            assert _resolve_jsonl_path("cc-id", "claude-code", "C:\\proj") == session_file
+        assert len(status_classifier._path_cache) == 0
+
+
+class TestStatusCacheLRU:
+    """Status cache evicts least-recently-used in O(1) and stays bounded."""
+
+    def test_stays_within_bound(self):
+        from power_atlas import status_classifier as sc
+        from power_atlas.status_classifier import SemanticStatus
+        sc._status_cache.clear()
+        for i in range(sc._MAX_CACHE_ENTRIES + 50):
+            sc._status_cache[("kiro-cli", f"s{i}")] = (float(i), 0.0, SemanticStatus.WORKING)
+            sc._evict_oldest()
+        assert len(sc._status_cache) == sc._MAX_CACHE_ENTRIES
+
+    def test_evicts_oldest_first(self):
+        from power_atlas import status_classifier as sc
+        from power_atlas.status_classifier import SemanticStatus
+        sc._status_cache.clear()
+        for i in range(sc._MAX_CACHE_ENTRIES):
+            sc._status_cache[("kiro-cli", f"s{i}")] = (float(i), 0.0, SemanticStatus.WORKING)
+        # Touch the oldest so it is no longer the eviction candidate
+        sc._status_cache.move_to_end(("kiro-cli", "s0"))
+        sc._status_cache[("kiro-cli", "new")] = (999.0, 0.0, SemanticStatus.WAITING)
+        sc._evict_oldest()
+        assert ("kiro-cli", "s0") in sc._status_cache
+        assert ("kiro-cli", "s1") not in sc._status_cache

@@ -8,7 +8,9 @@ classification is dispatched to per-provider parsers.
 import json
 import logging
 import os
+import threading
 import time
+from collections import OrderedDict
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -40,6 +42,22 @@ class SemanticStatus(str, Enum):
 # ---------------------------------------------------------------------------
 
 
+# Only the kiro-cli branch is memoized: its v3 fallback walks every workspace
+# directory, and this runs per-session inside the 5s status poll, so an uncached
+# miss costs O(sessions x workspace_dirs) stat calls per tick. The claude-code
+# branch is two syscalls and not worth caching.
+#
+# The key carries the directory roots the lookup reads, so rebinding them (tests
+# do; production does not) can never serve a path resolved against a different
+# root. Positive entries are revalidated with is_file() so a deleted file
+# re-resolves; negative entries expire quickly so a session whose file appears
+# moments later is still picked up.
+_PATH_CACHE_NEG_TTL = 5.0
+_MAX_PATH_CACHE_ENTRIES = 512
+_path_cache: "OrderedDict[tuple, tuple[float, Path | None]]" = OrderedDict()
+_path_cache_lock = threading.Lock()
+
+
 def _resolve_jsonl_path(
     session_id: str, provider: str, cwd: str
 ) -> Optional[Path]:
@@ -47,6 +65,40 @@ def _resolve_jsonl_path(
 
     Returns None if the file does not exist on disk.
     """
+    if provider != "kiro-cli":
+        return _resolve_jsonl_path_uncached(session_id, provider, cwd)
+
+    cache_key = (session_id, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))
+    with _path_cache_lock:
+        cached = _path_cache.get(cache_key)
+        if cached is not None:
+            cached_at, cached_path = cached
+            if cached_path is not None:
+                # Cheap revalidation — one stat instead of a directory walk.
+                try:
+                    if cached_path.is_file():
+                        _path_cache.move_to_end(cache_key)
+                        return cached_path
+                except OSError:
+                    pass
+            elif (time.monotonic() - cached_at) < _PATH_CACHE_NEG_TTL:
+                _path_cache.move_to_end(cache_key)
+                return None
+
+    resolved = _resolve_jsonl_path_uncached(session_id, provider, cwd)
+
+    with _path_cache_lock:
+        _path_cache[cache_key] = (time.monotonic(), resolved)
+        _path_cache.move_to_end(cache_key)
+        while len(_path_cache) > _MAX_PATH_CACHE_ENTRIES:
+            _path_cache.popitem(last=False)
+    return resolved
+
+
+def _resolve_jsonl_path_uncached(
+    session_id: str, provider: str, cwd: str
+) -> Path | None:
+    """Locate the JSONL transcript file for a session, hitting the filesystem."""
     if provider == "kiro-cli":
         # v2 path
         path = SESSION_DIR / f"{session_id}.jsonl"
@@ -315,19 +367,20 @@ def _is_v3_format(tail_lines: list[str]) -> bool:
 # Cache and public API
 # ---------------------------------------------------------------------------
 
-_MAX_CACHE_ENTRIES = 100
+# 100 was below a realistic active-session count, so the cache thrashed on the
+# 5s poll. Entries are small tuples, so a larger bound is cheap.
+_MAX_CACHE_ENTRIES = 512
 
-# Cache: (provider, session_id) -> (monotonic_time, file_mtime, status)
-_status_cache: dict[tuple[str, str], tuple[float, float, SemanticStatus]] = {}
+# LRU cache: (provider, session_id) -> (monotonic_time, file_mtime, status).
+# OrderedDict gives O(1) eviction; the previous dict + min()-scan was O(n) on
+# every insert, on a path that runs once per session per poll.
+_status_cache: "OrderedDict[tuple[str, str], tuple[float, float, SemanticStatus]]" = OrderedDict()
 
 
 def _evict_oldest() -> None:
-    """Evict the oldest cache entry when the cache exceeds the size limit."""
-    if len(_status_cache) <= _MAX_CACHE_ENTRIES:
-        return
-    # Find and remove the entry with the smallest (oldest) monotonic_time
-    oldest_key = min(_status_cache, key=lambda k: _status_cache[k][0])
-    del _status_cache[oldest_key]
+    """Evict least-recently-used entries when the cache exceeds the size limit."""
+    while len(_status_cache) > _MAX_CACHE_ENTRIES:
+        _status_cache.popitem(last=False)
 
 
 def get_semantic_status(
@@ -366,17 +419,20 @@ def get_semantic_status(
             cached_time, cached_mtime, cached_status = cached
             # Within TTL → always reuse (avoids re-reading rapidly-changing files)
             if (now - cached_time) < _CACHE_TTL:
+                _status_cache.move_to_end(cache_key)
                 return cached_status
             # Beyond TTL: mtime guard — if file hasn't changed, reuse anyway
             if cached_mtime == mtime:
                 # Refresh the timestamp so this entry isn't evicted as "oldest"
                 _status_cache[cache_key] = (now, cached_mtime, cached_status)
+                _status_cache.move_to_end(cache_key)
                 return cached_status
 
         # Cache miss or stale — reclassify (pass path to avoid re-resolving)
         status = _classify_from_path(path, provider, file_size=st.st_size)
         if status is not None:
             _status_cache[cache_key] = (now, mtime, status)
+            _status_cache.move_to_end(cache_key)
             _evict_oldest()
         return status
     except Exception:
