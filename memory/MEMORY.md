@@ -112,6 +112,12 @@
 **How to apply**: When adding session status features or extending the classifier, use the 4-state vocabulary. Do not re-split Active into sub-states. v3 kiro-cli support is designed-for but deferred.
 **Source**: Plan 260715-1407_SEMANTIC_SESSION_STATUS — user decision during /qexplore | **Verified**: 2026-07-16
 
+### Rejected integration paths live in `plans/CLOSED_INVESTIGATIONS.md`, not in the roadmap
+
+**Why**: Two rounds of spikes on 2026-07-24 rejected three kiro-cli paths on measurement, not on taste: `_kiro.dev/session/list` (6.5x slower cold than the filesystem scan, byte-identical data, and it loses the 3 sqlite-only workspaces), `kiro-cli serve` (reads the dormant v3 store rather than the `cli/` store `status_classifier.py` tails, and masks every externally-owned `in_progress` down to `idle` by documented design), and kiro-cli remote control (no independent path — it is blocked entirely behind serve's two walls). All three read as obvious wins from their own documentation, so they resurface easily. The evidence was moved out of `plans/ROADMAP.md` on 2026-07-25 to keep that file forward-looking.
+**How to apply**: Before proposing any kiro-cli enumeration or control path, read `plans/CLOSED_INVESTIGATIONS.md` — each verdict carries its numbers and an explicit reopen condition. The verdicts are pinned to kiro-cli `2.14.0`/`2.14.1` and Claude Code `2.1.219`, all self-updating, so re-measure rather than re-argue if the binaries have moved. New rejections belong in that file, not as struck-through roadmap bullets.
+**Source**: `plans/CLOSED_INVESTIGATIONS.md` — extracted from `plans/ROADMAP.md` 2026-07-25 | **Verified**: 2026-07-25
+
 ## Declined
 
 ### Session-file parsing must be skipped, not just made faster

@@ -1,0 +1,87 @@
+# PowerAtlas — Closed Investigations
+
+> Paths that were investigated and rejected, kept with the evidence that decided them. Moved out of
+> `ROADMAP.md` so that file stays forward-looking. **Nothing here is a to-do.** Each entry records what
+> was tried, what killed it, and the condition that would justify reopening it.
+>
+> Versions matter. Every measurement below is against Claude Code `2.1.219` and kiro-cli
+> `2.14.0`/`2.14.1`, both self-updating binaries — a verdict is only as current as the version it was
+> measured on. Claims are marked *verified* (observed on this machine, with logs) or *unverified*
+> (inferred from shipped code or docs, not executed).
+>
+> Raw wire logs, captured payloads and benchmark scripts live outside the repo at
+> `Downloads\260724_PowerAtlas-spikes\` (`REPORT.md` for round 1, `REPORT-ROUND2.md` for round 2). That
+> path is machine-local and unversioned, so the load-bearing numbers are reproduced here rather than
+> pointed at.
+
+---
+
+## Rejected — `_kiro.dev/session/list` as a replacement for filesystem session enumeration
+
+**Verdict: no. Measured 2026-07-24.** It is slower on every axis and would *lose* coverage.
+
+- *It does work pre-session* — no `session/new` needed, so no MCP children and no ~3.2 s session cost; the enumerator process is a single `kiro-cli.exe` at **~88 MB** with zero children, and exits cleanly on stdin close. Per-entry shape is `{sessionId, cwd, title, updatedAt, messageCount}` — **`title` is included**, which round 2's key list missed.
+- **Timing kills it.** ACP **6.82 s cold** (n=6 fresh processes) and **5.87 s warm** (n=8, same process) versus a re-measured filesystem baseline of **1,041 ms cold / 0.004 ms warm** (30 s TTL cache). Spawn and handshake are free (0.08-0.11 s) — the list call itself *is* the cost. Payload is 1.80 MiB (~334 bytes/session); parsing it into PowerAtlas's shape is ~19 ms, i.e. negligible. So it is ~6.5× slower cold and effectively unbounded times slower warm, for the same data.
+- **It is the same data.** Set difference against the raw `sessions\cli\*.json` meta set is **zero in both directions** — `_kiro.dev/session/list` is the v2 filesystem store re-derived by kiro-cli, not a separate index.
+- **The apparent coverage win is sub-agent noise.** ACP returns 5,652 vs PowerAtlas's 1,120, but **all 4,532 extra sessions carry a `parent_session_id`** — they are the `/qreview` and `/qdev` sub-agent fan-outs that `data_kiro.py:63,113` deliberately skips. `1,120 + 4,532 = 5,652` exactly. No user session is hidden.
+- **Swapping would lose coverage.** PowerAtlas reports 58 workspaces to ACP's 55 because `data_kiro.py:76-89` merges sqlite `conversations_v2` keys, contributing 3 cwds that exist in no file store. ACP cannot see them.
+- *Undocumented param found*: `{"cwd": "<path>"}` **is honoured** and cuts a single-workspace query to **1.45 s / 659 sessions**. `limit`, `offset`, `cursor`, `includeSubagents`, `parentSessionId` are all **silently ignored** — unknown params raise no error, so absence of an error is not evidence a param exists. Still slower than the full 1,041 ms filesystem scan.
+
+**Would reopen if**: kiro-cli stops writing the v2 `sessions\cli\` store, or PowerAtlas needs a per-session field the filesystem store does not carry. The `{cwd}`-scoped form is the only shape worth revisiting, and only for a single workspace — never as a global replacement.
+
+---
+
+## Closed — `kiro-cli serve` as a status source
+
+**Verdict: closed for status purposes on 2.14.1.** Two independent structural walls, the deeper one documented design intent rather than a bug.
+
+*Re-checked 2026-07-25: nothing has moved. Still 2.14.1; `sess_*` still 23 with the newest at 2026-07-16, while `cli/` grew to 5,654; `serve --help` still offers only `--port`, `-v`, `-h`.*
+
+- *Verified — it is genuine ACP over WebSocket*, not a Kiro-specific protocol. `serve` is a thin wrapper launching `@kiro/agent/dist/server/acp-server.js --transport=ws --auth=acp-callback` under Node; the whole 20 MB implementation is readable on disk under a content-hashed per-release path. Flag surface is only `--port` (default 8082), `-v`, `-h`. **v3-only structurally** — a different binary, not a mode switch.
+- *Verified — it is a multiplexer.* Multiple simultaneous clients attach with `role=observer`; only the first `initialize` reaches the agent and later clients get a cached result, so a second observer is cheap and does not restart the agent. Good shape for a dashboard. (It also leaks its connection count.)
+- *Verified — session-mutating calls are blocked.* `session/new` and `session/load` hang forever: `serve` hardcodes `--auth=acp-callback`, in which the agent requests its token *from the client* via `_kiro/auth/getAccessToken` — and observer-role clients never receive that frame. `session/new` reaches the agent (~100 ms, id allocated and logged) but never becomes addressable.
+- *Verified — `session/list` works unauthenticated, but returns the wrong sessions and a masked status.* It returned 23 sessions with `_meta.kiro.status`, `title`, `cwd`, `updatedAt`, `agentMode` and sometimes a model-authored `description`. That is not the read-only status source it first appeared to be, for two independent reasons.
+- **Wall 1 — two disjoint session stores, and `serve` reads the wrong one.** `kiro-cli chat` (including `--v3`) writes to `~\.kiro\sessions\cli\` — flat `<uuid>.json`/`.jsonl`/`.lock`, snake_case, and **no `status` field at all**. The KAS v3 agent writes to `~\.kiro\sessions\<hash>\sess_<uuid>\` — camelCase, has `status`. `session/list` returns only the latter. A busy test session and the user's own live `chat -a` both landed in `cli/` and never appeared; the `sess_*` count stayed pinned at 23. **The `cli/` store is exactly what `status_classifier.py` tails, so `serve` is blind to the sessions PowerAtlas watches** — and because that store has no status field, "read the kiro store directly instead of tailing JSONL" is not available as a shortcut either.
+- **Wall 2 — cross-process liveness is deliberately suppressed.** `hasActiveExecution` was extracted and is **purely in-memory** (`this.chatAgentExecutionQueue`, `this.executionQueue`, `this.activeExecution`) — no file read, no lock file, no IPC. `activeAwareStatus` therefore masks every externally-owned `in_progress` down to `idle`, with the source's own JSDoc explaining why: a crashed process leaves a stale `in_progress`, and *"reporting that as active would be wrong."* Proof: three sessions carry `"status":"in_progress"` on disk; one was returned as `"idle"` on the wire. Persisted census `{in_progress: 3, None: 11, idle: 9}` versus **23/23 `idle`** returned. Status enum is `["in_progress","waiting_on_user","completed","idle","failed"]`, and the non-`in_progress` values are **LLM-authored** (a system prompt instructs the model to set them) — best-effort, never reconciled.
+- *Verified — auth is structurally unreachable, and it is a bug.* `serve` hardcodes `--auth=acp-callback`, where the agent requests its token *from* the client — a **request**, therefore role-gated, therefore never delivered to an observer. And **no WS client can ever be `primary`**: searching the whole bundle for `"primary"` yields one minifier alias and two read-only comparisons, with **no assignment anywhere**. The `kiro-cli --remote <ws-url>` client the server's own banner advertises **does not exist** (`error: unexpected argument '--remote' found`).
+- *Verified — notifications are NOT role-gated* (correcting an earlier reading). Only requests check `role`; the notification path has no role reference, subscription is implicit on any message carrying a `sessionId`, and `_kiro/sessions/changed` is a connection-scoped broadcast to every client. Server→observer delivery was confirmed empirically. **This does not rescue the path**, because the emitters (`broadcastTurnStart`/`broadcastTurnEnd`) are subject to the same process-locality as Wall 2.
+- *Scope note*: kiro-cli only. Provides no path for Claude Code, so it never replaced anything on the roadmap — it only ever complemented it.
+- *Effort, if it were viable*: **not worth estimating for status.** A WS/JSON-RPC client polling `session/list` would cost ~1-2 days and return a constant `idle` for every session PowerAtlas cares about.
+
+**Would reopen if** — the walls bind different use cases, so decompose rather than asking "is serve viable yet":
+
+- **A v3-session inventory** (titles, cwds, `updatedAt`, `description`) needs **Wall 1 only** — liveness is irrelevant to listing. Wall 1 closes in *either* direction: `serve` starts reading `cli/`, **or** the sessions you care about start landing in `sess_*`. The second is what a kiro-cli v3 migration could deliver. Beware the axis trap: at 2.14.1 the agent and the store are **separate axes** — `--agent-engine` accepts `v1|v2|v3` and `--v3` "launches the next generation Kiro agent", but `--session-source` accepts **`v1|v2` only, with no v3 value**, and `kiro-cli chat` was observed writing to the v2 `cli/` layout even under `--v3`. Selecting the v3 agent therefore does **not** move persistence. The cheapest possible signal is the raw count: `find ~/.kiro/sessions -maxdepth 2 -type d -name 'sess_*' | wc -l`. It has read 23 since 2026-07-16. If that number starts climbing, this item is live again.
+- **Live status from `serve`** additionally needs **Wall 2**, which is version-invariant — it is about process locality, not store version. `hasActiveExecution` reads three in-memory queues, so a `serve` process cannot see an execution owned by a terminal session no matter which store that session persists to. A v3 migration does nothing here. The only shapes that lift it are kiro-cli reconciling cross-process state (explicitly reasoned against in its own JSDoc) or PowerAtlas *hosting* the sessions rather than observing them — which is a different product, and blocked below.
+- **Remote control** needs the auth wall to fall: an auth flag on `serve`, or any path for a WS client to become `primary`. Tracked separately in the remote-control entry.
+
+**And a quality caveat that survives all three**: even with every wall down, the v3 store's status is weak evidence. Of 23 sessions on disk the census was `{in_progress: 3, None: 11, idle: 9}` — **48% carry no status at all** — and every non-`in_progress` value is **LLM-authored** via a system-prompt instruction, never reconciled. That is a model's self-report; PowerAtlas's sidecar plus classifier observes the process. Do not trade an observation for a self-report.
+
+**Dead sub-question, recorded so it is not re-asked**: "who authors the 23 v3 sessions, and is a v3-session inventory worth ~1-2 days?" Answered 2026-07-24 — **not Kiro IDE, and nothing currently.** A live test creating a fresh Kiro IDE agent session left the count at 23; the IDE writes to `%APPDATA%\Kiro\User\globalStorage\kiro.kiroagent\workspace-sessions\<base64-cwd>\<uuid>.json`, which `data_kiro_ide.py:24` already reads. The v3 store is a dormant artifact of the 2026-06-18 → 2026-07-16 migration period, so the inventory would cover a closed experiment. That removed the last argument for `serve`.
+
+### Standing security finding — not closed, just not PowerAtlas's to fix
+
+`kiro-cli serve` binds `0.0.0.0` with **no authentication on the WebSocket upgrade** — no subprotocol, no header, no token. Any local process or routable host can connect and enumerate every session on the machine; capabilities claim `sessionListScopes: ["workspace"]` but listing is machine-global in practice. There is no `--host`/`--bind` flag. Corroborated by an unrelated Firefox tab attaching to the probe server by accident. This is a property of the tooling and warrants a decision (report upstream? avoid running `serve` at all?) independent of whether PowerAtlas ever adopts the path.
+
+---
+
+## Closed — remote control for kiro-cli
+
+**Verdict: not currently reachable.** (The "mimic claude code remote control" idea was always about **kiro-cli**. Claude Code already ships first-party remote control — `remoteControlAtStartup` — so for that provider the question is whether to surface it, not whether to build it, and the `messagingSocketPath` spike in `ROADMAP.md` is the live thread there.)
+
+- *The hard part, established 2026-07-24*: a live kiro-cli session **cannot be driven by a second client**. `session/load` over ACP on a session another process owns is hard-refused in 0.84 s (`-32603 … "Session is active in another process (PID n)"`), enforced by a pid-liveness check on `~\.kiro\sessions\cli\<id>.lock`. That refusal is correct behaviour — it is what prevents two writers corrupting a transcript — but it means ACP can only drive sessions PowerAtlas itself launched, or ones that have exited.
+- *Verified the refusal generalises to terminal sessions*: a user-run `kiro-cli chat -a` holding session `ceb1ecf5-…` refused an ACP `session/load` in **0.73 s** with the same error seen ACP-vs-ACP. There is only one code path — `kiro-cli chat` is a wrapper that spawns `bun.exe tui.js` which spawns `kiro-cli acp --trust-all-tools`, so **a terminal session IS an ACP session underneath**, and the grandchild holds the lock. Corollary: the interactive TUI passes `--trust-all-tools`, so the permission gate in normal kiro-cli use lives in the TUI layer, not the agent.
+- *The architecture that would work is `kiro-cli serve`* — and this is the one use for which its design is right. It is a multiplexer: N clients attach to one agent, `initialize` is cached for later joiners, and observers demonstrably receive `session/request_permission` with an `_kiro/permission/respond` path back. That is remote control in shape — a second client watching and answering a session it does not own.
+- *Why it is still blocked*: both walls in the `serve` entry above. No session can be created or loaded, and it reads only the dormant v3 store.
+- *The nearest achievable thing* is launching sessions *from* PowerAtlas via `kiro-cli acp` and driving those — a different product promise from taking over a session already running in a terminal.
+
+**Would reopen if**: the `serve` entry above reopens. This item has no independent path.
+
+---
+
+## Accepted limitations — shipped code, deliberately not fixed
+
+Recorded so a future session recognises these as decisions rather than undiscovered bugs.
+
+- **Claude Desktop's main process can still register as a live workspace.** The provider-match fix (2026-07-24, `a973715`) rejects Electron helpers via the `--type=` switch, removing 10 of 13 `claude.exe` matches. Desktop's **main** process carries no `--type=` and still matches, so a phantom `live_cwds` entry remains possible if Desktop is launched from a project directory. The alternatives were hardcoding install paths or requiring a session file, which would trade instant workspace detection for a ~3 s startup blind spot. Currently latent because Desktop's cwd is `C:\windows\system32`, which matches no workspace — that is luck, not design.
+- **kiro-cli `--no-interactive` one-shots are invisible.** They create no `.lock` and no persisted session at all, so neither the lock-file identity path nor transcript classification can see them. They are also ephemeral, so this may never matter — but it is the known hole in kiro-cli row-level coverage.
+- **Attaching to a session over ACP mutates it.** A load-plus-prompt grew a real user session's `.jsonl` from 17,057 to 17,665 bytes and moved `updated_at`. Any future PowerAtlas surface that attaches leaves turns in the user's history, even one that presents as read-only. This constrains the ACP item still live on the roadmap.
