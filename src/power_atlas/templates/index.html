@@ -162,6 +162,38 @@ window._activeTimeFilter='';
 window._activeStatus='';
 function _buildWorkspaceQs(){var qs='provider='+encodeURIComponent(window._activeProvider||'all');if(window._activeTag)qs+='&tag='+encodeURIComponent(window._activeTag);if(window._activeTimeFilter)qs+='&time_filter='+encodeURIComponent(window._activeTimeFilter);if(window._activeStatus)qs+='&status='+encodeURIComponent(window._activeStatus);return qs}
 function _statusQs(){return window._activeStatus?'&status='+encodeURIComponent(window._activeStatus):''}
+// One entry per search panel. Both panels run the same fetch-then-swap shape
+// and differ only in target, URL and wording, so _runSearchPanel owns the
+// shape and these own the differences. The two flags are separate because the
+// two failure modes are: `fetched` latches a dead server so a stream of
+// debounced keystrokes toasts once, `rendered` latches a broken swap.
+var _searchPanels={
+  cards:{target:'workspace-cards',fetchError:'Search failed',fetchFailed:false,renderFailed:false},
+  sessions:{target:'all-sessions',fetchError:'Failed to load sessions',fetchFailed:false,renderFailed:false}
+};
+function _resetSearchFlags(){Object.keys(_searchPanels).forEach(function(k){_searchPanels[k].fetchFailed=false;_searchPanels[k].renderFailed=false})}
+function _errorToast(msg){showToast('<div class="toast toast-error">'+msg+'<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')}
+function _runSearchPanel(panel,url){
+  // Two failure modes, two handlers. The first .catch sits before the swap so
+  // it only ever sees a transport or HTTP error; the trailing one only ever
+  // sees a throw out of the swap or htmx.process. Merging them would either
+  // label a rendering bug "search failed" or, with only the first, leave the
+  // swap's throw as a silent unhandled rejection.
+  return fetch(url).then(function(r){if(!r.ok)throw new Error(r.status);return r.text()})
+    .catch(function(){if(!panel.fetchFailed){panel.fetchFailed=true;_errorToast(panel.fetchError)}})
+    .then(function(html){
+      if(html===undefined)return;
+      panel.fetchFailed=false;
+      var el=document.getElementById(panel.target);
+      el.innerHTML=html;
+      if(window.htmx)htmx.process(el);
+      panel.renderFailed=false;
+    })
+    .catch(function(err){
+      if(window.console&&console.error)console.error('search render failed',err);
+      if(!panel.renderFailed){panel.renderFailed=true;_errorToast('Could not display results')}
+    });
+}
 var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
 function updateActionBar(){var sessionCount=document.querySelectorAll('.session-row.selected').length;var workspaceCount=document.querySelectorAll('.workspace-card.selected').length;document.getElementById('selCount').textContent=sessionCount+workspaceCount;document.getElementById('actionBar').classList.toggle('visible',sessionCount>0||workspaceCount>0);var launchBtn=document.querySelector('.action-btn.launch');if(launchBtn){launchBtn.disabled=sessionCount===0;launchBtn.title=sessionCount===0?'Select sessions to launch (use launcher tiles for workspaces)':''}updateLauncherBadges()}
@@ -330,7 +362,13 @@ function launchSelected(){var sessions=[];document.querySelectorAll('.session-ro
 function loadExpandedCards(){document.querySelectorAll('.workspace-card:not(.collapsed)').forEach(function(card){var body=card.querySelector('.card-body');if(body&&body.dataset.loaded==='false'){body.dataset.loaded='true';var provider=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(card.dataset.cwd)+'&provider='+encodeURIComponent(provider)+_statusQs()).then(function(r){return r.text()}).then(function(html){body.innerHTML=html;if(window.htmx)htmx.process(body)})}})}
 function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.querySelector('.topbar-profile-btn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){profileBtn.textContent='\u2699\ufe0f '+active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){document.addEventListener('htmx:afterSwap',function(){loadExpandedCards()});fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});initProviderFilter();initWorkspaceFilters();
-var searchInput=document.querySelector('input[name="q"]');if(searchInput){searchInput.addEventListener('input',debounce(function(e){var q=e.target.value.trim();var provQs=_buildWorkspaceQs();if(!q){refreshCards(false);return}fetch('/search?'+provQs+'&q='+encodeURIComponent(q)).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el)});fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()+'&q='+encodeURIComponent(q)).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el)})},300))}
+var searchInput=document.querySelector('input[name="q"]');if(searchInput){searchInput.addEventListener('input',debounce(function(e){var q=e.target.value.trim();var provQs=_buildWorkspaceQs();
+// Clearing the query re-arms both panels: they are only otherwise re-armed by
+// a successful search, so leaving them latched here would swallow the toast
+// for the next genuine failure.
+if(!q){_resetSearchFlags();refreshCards(false);return}
+_runSearchPanel(_searchPanels.cards,'/search?'+provQs+'&q='+encodeURIComponent(q));
+_runSearchPanel(_searchPanels.sessions,'/partials/all-sessions?page=1&'+provQs+'&q='+encodeURIComponent(q))},300))}
 document.addEventListener('visibilitychange',function(){if(document.hidden){stopPolling();stopStatusPoll();stopActiveSessionPoll()}else{refreshSettings();refreshCards(true);initWorkspaceFilters();startPolling();startStatusPoll();startActiveSessionPoll()}});
 (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);refreshCards(true)}}).catch(function(){clearInterval(t)})},2000)})();
 });
@@ -432,7 +470,9 @@ function pollStatus(){
   var cwds=window._activeCwds.length?window._activeCwds:_getAllVisibleCwds();
   if(!cwds.length)return;
   _statusFetching=true;
-  fetch('/api/session-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwds:cwds})})
+  // The active provider filter travels with the poll: without it the dots the
+  // poll writes would answer about providers the last render left out.
+  fetch('/api/session-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwds:cwds,provider:window._activeProvider||'all'})})
     .then(function(r){return r.json()})
     .then(function(data){
       // Update tracked active workspaces from server response

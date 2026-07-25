@@ -394,13 +394,22 @@ _MAX_CACHE_ENTRIES = 512
 # LRU cache: (provider, session_id) -> (monotonic_time, file_mtime, status).
 # OrderedDict gives O(1) eviction; the previous dict + min()-scan was O(n) on
 # every insert, on a path that runs once per session per poll.
+#
+# Locked like _path_cache above, and for the same reason: the status poll runs
+# this in a worker thread while a render can reach it from the event loop, and
+# a get/move_to_end/popitem interleaving across the two raises KeyError. The
+# caller's blanket except swallows that into a "working" dot for one tick, so
+# the failure is quiet rather than absent. The lock is never held across the
+# file read.
 _status_cache: "OrderedDict[tuple[str, str], tuple[float, float, SemanticStatus]]" = OrderedDict()
+_status_cache_lock = threading.Lock()
 
 
 def _evict_oldest() -> None:
     """Evict least-recently-used entries when the cache exceeds the size limit."""
-    while len(_status_cache) > _MAX_CACHE_ENTRIES:
-        _status_cache.popitem(last=False)
+    with _status_cache_lock:
+        while len(_status_cache) > _MAX_CACHE_ENTRIES:
+            _status_cache.popitem(last=False)
 
 
 def get_semantic_status(
@@ -410,7 +419,7 @@ def get_semantic_status(
 
     Uses a 5-second TTL with an mtime guard: if the file hasn't changed,
     the cached value is reused even after TTL expires (cheap os.stat check).
-    Cache is bounded to 100 entries with oldest-eviction.
+    Cache is bounded to ``_MAX_CACHE_ENTRIES`` with oldest-eviction.
 
     Returns None on any failure — never raises.
     """
@@ -434,25 +443,27 @@ def get_semantic_status(
         mtime = st.st_mtime
         cache_key = (provider, session_id)
 
-        cached = _status_cache.get(cache_key)
-        if cached is not None:
-            cached_time, cached_mtime, cached_status = cached
-            # Within TTL → always reuse (avoids re-reading rapidly-changing files)
-            if (now - cached_time) < _CACHE_TTL:
-                _status_cache.move_to_end(cache_key)
-                return cached_status
-            # Beyond TTL: mtime guard — if file hasn't changed, reuse anyway
-            if cached_mtime == mtime:
-                # Refresh the timestamp so this entry isn't evicted as "oldest"
-                _status_cache[cache_key] = (now, cached_mtime, cached_status)
-                _status_cache.move_to_end(cache_key)
-                return cached_status
+        with _status_cache_lock:
+            cached = _status_cache.get(cache_key)
+            if cached is not None:
+                cached_time, cached_mtime, cached_status = cached
+                # Within TTL → always reuse (avoids re-reading rapidly-changing files)
+                if (now - cached_time) < _CACHE_TTL:
+                    _status_cache.move_to_end(cache_key)
+                    return cached_status
+                # Beyond TTL: mtime guard — if file hasn't changed, reuse anyway
+                if cached_mtime == mtime:
+                    # Refresh the timestamp so this entry isn't evicted as "oldest"
+                    _status_cache[cache_key] = (now, cached_mtime, cached_status)
+                    _status_cache.move_to_end(cache_key)
+                    return cached_status
 
         # Cache miss or stale — reclassify (pass path to avoid re-resolving)
         status = _classify_from_path(path, provider, file_size=st.st_size)
         if status is not None:
-            _status_cache[cache_key] = (now, mtime, status)
-            _status_cache.move_to_end(cache_key)
+            with _status_cache_lock:
+                _status_cache[cache_key] = (now, mtime, status)
+                _status_cache.move_to_end(cache_key)
             _evict_oldest()
         return status
     except Exception:

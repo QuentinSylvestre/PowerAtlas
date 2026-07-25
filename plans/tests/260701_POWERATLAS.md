@@ -243,7 +243,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 ### 2.14 Search
 - **what**: debounced search filters workspaces by cwd substring + matches pinned sessions by title.
 - **how-to-reach**: type in search; `hx-trigger=input changed delay:300ms`; `GET /search?q`.
-- **probes**: query matching a folder name; no match (empty_state); clear (full list); rapid typing (debounce); pinned-session title match; verify it does NOT search session content despite `_session_matches` existing; pinned scan globs `SESSION_DIR` each keystroke (cost).
+- **probes**: query matching a folder name; no match (empty_state); clear (full list); rapid typing (debounce); pinned-session title match; verify it does NOT search session content despite `_session_matches` existing; pinned scan globs `SESSION_DIR` each keystroke (cost); search with status filter active (q + status param).
 - **oracle**: substring on cwd, case-insensitive; empty q restores all.
 - **risks**: cwd-only match; per-keystroke metadata glob; selection wiped by swap.
 

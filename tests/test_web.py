@@ -109,8 +109,11 @@ def test_partials_workspaces_error(mock_discover, mock_providers, client):
     assert "Error" in resp.text
 
 
+@patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_filters(mock_discover, client, tmp_path):
+def test_search_filters(mock_discover, mock_config, client, tmp_path):
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
     workspace = str(tmp_path)
     mock_discover.return_value = [
         (workspace, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
@@ -122,8 +125,11 @@ def test_search_filters(mock_discover, client, tmp_path):
     assert Path(workspace).name in resp.text
 
 
+@patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_no_results(mock_discover, client, tmp_path):
+def test_search_no_results(mock_discover, mock_config, client, tmp_path):
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
     workspace = str(tmp_path)
     mock_discover.return_value = [(workspace, 1, "", "kiro-cli")]
 
@@ -2739,6 +2745,181 @@ def test_search_with_tag_filter(mock_discover, mock_config, client, tmp_path):
     assert "backend-proj" not in resp.text
 
 
+def _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path):
+    """Three same-named workspaces with different liveness and provider shapes.
+
+    ``mixed-proj`` is registered under both providers but only claude-code is
+    running in it, which is what separates a provider-scoped status query from
+    an unscoped one.
+    """
+    from power_atlas.config import Config
+    live_ws = str(tmp_path / "live-proj")
+    dead_ws = str(tmp_path / "dead-proj")
+    mixed_ws = str(tmp_path / "mixed-proj")
+    mock_config.return_value = Config()
+    mock_discover.return_value = [
+        (live_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (dead_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (mixed_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+        (mixed_ws, 1, "2026-01-01T00:00:00Z", "claude-code"),
+    ]
+    mock_snap.return_value = _snapshot(live_cwds={
+        ("kiro-cli", _normalize_path(live_ws)),
+        ("claude-code", _normalize_path(mixed_ws)),
+    })
+    mock_sessions.return_value = []
+    return live_ws, dead_ws, mixed_ws
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_with_status_filter(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
+    """Search results respect status filter (regression: surplus arg 500'd the endpoint)."""
+    _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path)
+
+    resp = client.get("/search?q=proj&status=working")
+    assert resp.status_code == 200
+    assert "live-proj" in resp.text
+    assert "mixed-proj" in resp.text
+    assert "dead-proj" not in resp.text
+    assert mock_snap.call_count == 1
+
+    # status=live goes through the _LIVE_STATUSES branch of _status_matches.
+    resp = client.get("/search?q=proj&status=live")
+    assert resp.status_code == 200
+    assert "live-proj" in resp.text
+    assert "mixed-proj" in resp.text
+    assert "dead-proj" not in resp.text
+    assert mock_snap.call_count == 2
+
+    # Provider-scoped: mixed-proj is a kiro-cli workspace whose only running
+    # process is claude-code, so it survives this filter exactly when
+    # _workspace_status is asked about every provider instead of kiro-cli.
+    resp = client.get("/search?q=proj&provider=kiro-cli&status=working")
+    assert resp.status_code == 200
+    assert "live-proj" in resp.text
+    assert "mixed-proj" not in resp.text
+    assert "dead-proj" not in resp.text
+    assert mock_snap.call_count == 3
+
+    # status=all and the no-status path both skip the presence scan entirely.
+    for url in ("/search?q=proj&status=all", "/search?q=proj"):
+        resp = client.get(url)
+        assert resp.status_code == 200
+        assert "live-proj" in resp.text
+        assert "dead-proj" in resp.text
+    assert mock_snap.call_count == 3
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_empty_state_names_the_filter(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
+    """A filter that removes every match says which filter, as /partials/workspaces does."""
+    _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path)
+
+    resp = client.get("/search?q=proj&status=errored")
+    assert resp.status_code == 200
+    assert "No errored workspaces right now." in resp.text
+    assert "No results for" not in resp.text
+
+    resp = client.get("/search?q=proj&tag=nope")
+    assert resp.status_code == 200
+    assert "No workspaces with tag" in resp.text and "nope" in resp.text
+
+    resp = client.get("/search?q=proj&time_filter=yesterday")
+    assert resp.status_code == 200
+    assert "No workspaces active yesterday" in resp.text
+
+    # A query that matches nothing at all still reports the query, not a
+    # filter — including when a filter is active, since no filter is at fault.
+    for url in ("/search?q=nothingmatchesthis",
+                "/search?q=nothingmatchesthis&status=working",
+                "/search?q=nothingmatchesthis&tag=nope"):
+        resp = client.get(url)
+        assert resp.status_code == 200
+        assert "No results for" in resp.text, url
+        assert "workspaces right now" not in resp.text, url
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_empty_state_when_hidden_tag_removes_every_match(
+        mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
+    """The default hidden-tag filter can empty a non-empty match set.
+
+    That is the only route to the cascade's last branch: the query matched,
+    but no explicit filter was named, so the wording falls back to the query.
+    """
+    from power_atlas.config import Config
+    hidden_ws = str(tmp_path / "hidden-proj")
+    mock_config.return_value = Config(
+        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
+    )
+    mock_discover.return_value = [(hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
+    mock_snap.return_value = _snapshot()
+    mock_sessions.return_value = []
+
+    resp = client.get("/search?q=proj")
+    assert resp.status_code == 200
+    assert "No results for" in resp.text and "proj" in resp.text
+    assert "hidden-proj" not in resp.text
+    assert "workspaces right now" not in resp.text
+    # Asking for the hidden tag explicitly shows the same workspace.
+    resp = client.get("/search?q=proj&tag=hidden")
+    assert resp.status_code == 200
+    assert "hidden-proj" in resp.text
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_empty_state_names_the_provider(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
+    """A query that only matches other providers' workspaces says so.
+
+    /partials/workspaces answers "no sessions found — start one with claude",
+    which would be a lie here: the provider may well have sessions, just none
+    matching the query.
+    """
+    from power_atlas.config import Config
+    mock_config.return_value = Config()
+    mock_discover.return_value = [
+        (str(tmp_path / "kiro-only-proj"), 1, "2026-01-01T00:00:00Z", "kiro-cli"),
+    ]
+    mock_snap.return_value = _snapshot()
+    mock_sessions.return_value = []
+
+    resp = client.get("/search?q=proj&provider=claude-code")
+    assert resp.status_code == 200
+    assert "No Claude Code results for" in resp.text
+    assert "proj" in resp.text
+    assert "start one with" not in resp.text
+
+    # An unknown provider degrades to its raw name rather than erroring.
+    resp = client.get("/search?q=proj&provider=bogus")
+    assert resp.status_code == 200
+    assert "No bogus results for" in resp.text
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.presence.get_snapshot")
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_empty_state_escapes_input(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
+    """Filter values are reflected in the empty state, so they must be escaped."""
+    _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path)
+
+    resp = client.get("/search", params={"q": "proj", "status": "<b>x</b>"})
+    assert resp.status_code == 200
+    assert "<b>x</b>" not in resp.text
+    assert "&lt;b&gt;x" in resp.text
+
 
 # --- Phase 6 (Tag Color Management): /api/tag/save ---
 
@@ -3047,7 +3228,7 @@ def test_bulk_get_returns_multiple(mock_load, client, tmp_path):
 
 from datetime import datetime, timezone, timedelta
 from power_atlas import presence
-from power_atlas.web import _age_seconds, _session_status, _workspace_status, _status_matches
+from power_atlas.web import _session_status, _workspace_status, _status_matches
 from power_atlas.data import _normalize_path
 
 
@@ -3059,17 +3240,9 @@ def _old_iso(mins=10):
     return (datetime.now(timezone.utc) - timedelta(minutes=mins)).isoformat()
 
 
-def _snapshot(live_sids=(), live_cwds=(), sid_to_cwd=None):
-    return presence.Snapshot(set(live_sids), set(live_cwds), sid_to_cwd or {})
-
-
-def test_age_seconds_parses_and_degrades():
-    assert _age_seconds(_recent_iso()) < 30
-    assert _age_seconds("") is None
-    assert _age_seconds("not-a-date") is None
-    # Naive timestamp (Kiro-style) is interpreted, not rejected.
-    naive = (datetime.now() - timedelta(seconds=3)).replace(microsecond=0).isoformat()
-    assert _age_seconds(naive) is not None
+def _snapshot(live_sids=(), live_cwds=(), sid_to_cwd=None, sid_status=None):
+    return presence.Snapshot(set(live_sids), set(live_cwds), sid_to_cwd or {},
+                             sid_status or {})
 
 
 def test_status_matches_semantics():
@@ -3146,6 +3319,101 @@ def test_workspace_status_cwd_and_provider_scoped():
     assert _workspace_status(snap, "/w", {"kiro-cli"}) == "closed"
     # different folder is closed
     assert _workspace_status(snap, "/other", None) == "closed"
+
+
+def _tracked_snapshot(reported):
+    """Snapshot with one tracked claude-code session in /w reporting `reported`."""
+    norm = _normalize_path("/w")
+    return _snapshot(
+        live_sids={("claude-code", "s1")},
+        live_cwds={("claude-code", norm)},
+        sid_to_cwd={("claude-code", "s1"): norm},
+        sid_status={("claude-code", "s1"): reported},
+    )
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_report_outranks_classifier(mock_semantic):
+    """A non-empty report is first-hand and current, so it beats the tail read.
+
+    Asserted here rather than on the card, where "busy"/"shell" map onto the
+    same "working" the aggregate already seeds itself with and so could not
+    tell a folded-in report from an ignored one.
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = SemanticStatus.ERRORED
+
+    # busy/shell mean a turn is running, so even an errored tail loses.
+    assert _session_status(_tracked_snapshot("busy"), s, "claude-code") == "working"
+    assert _session_status(_tracked_snapshot("shell"), s, "claude-code") == "working"
+    # "idle" carries no verdict, and no report at all carries none either:
+    # both leave the classifier in charge.
+    assert _session_status(_tracked_snapshot("idle"), s, "claude-code") == "errored"
+    assert _session_status(_tracked_snapshot(""), s, "claude-code") == "errored"
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.get_semantic_status")
+def test_workspace_status_reads_provider_report(mock_semantic, mock_sessions):
+    """The card dot honours the provider's own report, like per-session status."""
+    mock_sessions.return_value = []
+    mock_semantic.return_value = None
+
+    # Sole signal is the report: an unclassifiable tail still shows waiting.
+    assert _workspace_status(_tracked_snapshot("waiting"), "/w",
+                             {"claude-code"}) == "waiting"
+    # "idle" is ambiguous (finished/errored/never-started) — never waiting.
+    assert _workspace_status(_tracked_snapshot("idle"), "/w",
+                             {"claude-code"}) == "working"
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.get_semantic_status")
+def test_workspace_status_report_never_downgrades(mock_semantic, mock_sessions):
+    """A report can settle an unknown state but never lower a richer verdict."""
+    from power_atlas.status_classifier import SemanticStatus
+    mock_sessions.return_value = []
+
+    mock_semantic.return_value = SemanticStatus.ERRORED
+    assert _workspace_status(_tracked_snapshot("busy"), "/w",
+                             {"claude-code"}) == "errored"
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _workspace_status(_tracked_snapshot("busy"), "/w",
+                             {"claude-code"}) == "waiting"
+    # ...and it still raises when the classifier is the weaker signal.
+    mock_semantic.return_value = SemanticStatus.WORKING
+    assert _workspace_status(_tracked_snapshot("waiting"), "/w",
+                             {"claude-code"}) == "waiting"
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.status_classifier._resolve_jsonl_path")
+@patch("power_atlas.web.get_semantic_status")
+def test_workspace_status_fallback_reads_provider_report(
+        mock_semantic, mock_resolve, mock_sessions):
+    """The no-resume-id fallback reads the report too (same live session ids)."""
+    import tempfile, os
+    tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
+    tmp.close()
+    mock_resolve.return_value = tmp.name
+    norm = _normalize_path("/w")
+    mock_sessions.return_value = [
+        _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())]
+    mock_semantic.return_value = None
+    try:
+        # No sid_to_cwd entry, so only the fallback scan can see this session.
+        waiting = _snapshot(
+            live_cwds={("claude-code", norm)},
+            sid_status={("claude-code", "s9"): "waiting"})
+        assert _workspace_status(waiting, "/w", {"claude-code"}) == "waiting"
+
+        idle = _snapshot(
+            live_cwds={("claude-code", norm)},
+            sid_status={("claude-code", "s9"): "idle"})
+        assert _workspace_status(idle, "/w", {"claude-code"}) == "working"
+    finally:
+        os.unlink(tmp.name)
 
 
 def test_classify_kiro_v3_working():
@@ -3895,6 +4163,165 @@ class TestApiSessionStatus:
         assert active_cwd in body["active_cwds"]
         assert inactive_cwd not in body["active_cwds"]
 
+    @patch("power_atlas.web.get_semantic_status")
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_workspace_dot_comes_from_workspace_status(
+        self, mock_snap, mock_cache, mock_semantic, client
+    ):
+        """Card dot is _workspace_status, so a poll cannot contradict a render.
+
+        Divergence case: nothing is cached for the cwd, so the old per-session
+        aggregation could only ever answer "working"; _workspace_status reads
+        the tracked session id and reports the classifier's verdict instead.
+        """
+        from power_atlas.status_classifier import SemanticStatus
+
+        cwd = "C:\\projects\\myapp"
+        norm_cwd = _normalize_path(cwd)
+        snap = _snapshot(
+            live_sids={("kiro-cli", "sess-9")},
+            live_cwds={("kiro-cli", norm_cwd)},
+            sid_to_cwd={("kiro-cli", "sess-9"): norm_cwd},
+        )
+        mock_snap.return_value = snap
+        mock_cache.get.return_value = None
+        mock_semantic.return_value = SemanticStatus.ERRORED
+
+        resp = client.post(
+            "/api/session-status",
+            json={"cwds": [cwd]},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["workspaces"][cwd] == "errored"
+        assert body["sessions"] == {}   # nothing cached -> no per-row dots
+        # Same answer the render path would have produced for this cwd. An
+        # unfiltered page renders with providers=None, so that is what this
+        # compares against — not the {kiro-cli, claude-code} set the poll
+        # happens to build for "all".
+        assert body["workspaces"][cwd] == _workspace_status(snap, cwd, None)
+
+    @patch("power_atlas.status_classifier._resolve_jsonl_path")
+    @patch("power_atlas.web.get_semantic_status")
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_card_may_outrank_a_cached_untracked_row(
+        self, mock_snap, mock_cache, mock_semantic, mock_resolve, client, tmp_path
+    ):
+        """The card answers for the session presence proved live, not for every row.
+
+        A workspace holding a tracked session (working) plus a cached,
+        untracked, recently-written one (waiting) shows a working card over a
+        waiting row. That is deliberate: the untracked session's process is not
+        the live one, and this is the answer a full render has always given —
+        the poll now matches it rather than aggregating the rows itself.
+        """
+        from power_atlas.status_classifier import SemanticStatus
+
+        jsonl = tmp_path / "s2.jsonl"
+        jsonl.write_text("")
+        mock_resolve.return_value = str(jsonl)
+
+        cwd = "C:\\projects\\myapp"
+        norm_cwd = _normalize_path(cwd)
+        snap = _snapshot(
+            live_sids={("claude-code", "s1")},
+            live_cwds={("claude-code", norm_cwd)},
+            sid_to_cwd={("claude-code", "s1"): norm_cwd},
+        )
+        mock_snap.return_value = snap
+        s2 = _make_session(session_id="s2", cwd=cwd, updated_at=_recent_iso())
+        mock_cache.get.side_effect = lambda c, p: [s2] if p == "claude-code" else None
+        mock_semantic.side_effect = lambda sid, prov, c: (
+            SemanticStatus.WORKING if sid == "s1" else SemanticStatus.WAITING)
+
+        resp = client.post(
+            "/api/session-status",
+            json={"cwds": [cwd]},
+            headers={"Origin": "http://testserver"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["workspaces"][cwd] == "working"
+        assert body["sessions"]["s2"] == "waiting"
+        # No render/poll divergence: the render path says the same thing, and
+        # it asks with providers=None on an unfiltered page.
+        assert body["workspaces"][cwd] == _workspace_status(snap, cwd, None)
+
+    @patch("power_atlas.web.data.get_sessions")
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_provider_filter_travels_with_the_poll(
+        self, mock_snap, mock_cache, mock_sessions, client
+    ):
+        """A provider-filtered page polls about that provider only."""
+        cwd = "C:\\projects\\myapp"
+        mock_snap.return_value = _snapshot(
+            live_cwds={("claude-code", _normalize_path(cwd))})
+        mock_cache.get.return_value = None
+        mock_sessions.return_value = []
+
+        def poll(payload):
+            resp = client.post("/api/session-status", json=payload,
+                               headers={"Origin": "http://testserver"})
+            assert resp.status_code == 200
+            return resp.json()["workspaces"][cwd]
+
+        # Only claude-code is running, so a kiro-cli-filtered page must not
+        # light this card up — which is what the render path shows it.
+        assert poll({"cwds": [cwd], "provider": "kiro-cli"}) == "closed"
+        assert poll({"cwds": [cwd], "provider": "claude-code"}) == "working"
+        # "all" and a client that sends no provider both see every CLI provider.
+        assert poll({"cwds": [cwd], "provider": "all"}) == "working"
+        assert poll({"cwds": [cwd]}) == "working"
+
+    @patch("power_atlas.web.data.get_sessions")
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_response_keeps_request_order(
+        self, mock_snap, mock_cache, mock_sessions, client
+    ):
+        """Both maps echo the order the client asked in, live cwds included."""
+        cwds = ["C:\\projects\\ccc", "C:\\projects\\aaa", "C:\\projects\\bbb"]
+        mock_snap.return_value = _snapshot(live_cwds={
+            ("claude-code", _normalize_path(c)) for c in cwds})
+        mock_cache.get.return_value = None
+        mock_sessions.return_value = []
+
+        resp = client.post("/api/session-status", json={"cwds": cwds},
+                           headers={"Origin": "http://testserver"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["active_cwds"] == cwds
+        assert list(body["workspaces"]) == cwds
+
+    @patch("power_atlas.web.data.get_sessions")
+    @patch("power_atlas.web.data.session_cache")
+    @patch("power_atlas.web.presence.get_snapshot")
+    def test_non_string_provider_does_not_500(
+        self, mock_snap, mock_cache, mock_sessions, client
+    ):
+        """A provider of the wrong JSON shape degrades to "all", not a 500.
+
+        The value reaches a set literal, so an array or object would raise
+        TypeError: unhashable type outside the per-cwd guard and take the
+        whole endpoint down.
+        """
+        cwd = "C:\\projects\\myapp"
+        mock_snap.return_value = _snapshot(
+            live_cwds={("claude-code", _normalize_path(cwd))})
+        mock_cache.get.return_value = None
+        mock_sessions.return_value = []
+
+        for bogus in ([], {}, ["kiro-cli"], {"name": "kiro-cli"}, 7, True, None):
+            resp = client.post("/api/session-status",
+                               json={"cwds": [cwd], "provider": bogus},
+                               headers={"Origin": "http://testserver"})
+            assert resp.status_code == 200, bogus
+            assert resp.json()["workspaces"][cwd] == "working", bogus
+
     def test_missing_cwds_key_returns_empty(self, client):
         """Body without 'cwds' key returns empty response without error."""
         resp = client.post(
@@ -3999,8 +4426,54 @@ class TestStatusCacheLRU:
         sc._evict_oldest()
         assert ("kiro-cli", "s0") in sc._status_cache
         assert ("kiro-cli", "s1") not in sc._status_cache
-def _snapshot_with_status(live_sids=(), sid_status=None):
-    return presence.Snapshot(set(live_sids), set(), {}, sid_status or {})
+
+    def test_every_cache_operation_holds_the_lock(self, tmp_path, monkeypatch):
+        """The status poll reaches this cache from a worker thread while a
+        render reaches it from the event loop, so an unguarded
+        get/move_to_end/popitem interleaving can raise KeyError — which
+        get_semantic_status' blanket except turns into a silently wrong dot.
+        Recorded rather than raised, for the same reason.
+        """
+        from collections import OrderedDict
+        from power_atlas import status_classifier as sc
+
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text('{"version":"v1","kind":"Prompt","data":{}}\n')
+
+        class _LockChecked(OrderedDict):
+            def __init__(self):
+                super().__init__()
+                self.unlocked_ops = []
+
+            def _chk(self, op):
+                if not sc._status_cache_lock.locked():
+                    self.unlocked_ops.append(op)
+
+            def get(self, key, default=None):
+                self._chk("get")
+                return super().get(key, default)
+
+            def __setitem__(self, key, value):
+                self._chk("setitem")
+                super().__setitem__(key, value)
+
+            def move_to_end(self, key, last=True):
+                self._chk("move_to_end")
+                super().move_to_end(key, last=last)
+
+            def popitem(self, last=True):
+                self._chk("popitem")
+                return super().popitem(last=last)
+
+        cache = _LockChecked()
+        monkeypatch.setattr(sc, "_status_cache", cache)
+        monkeypatch.setattr(sc, "_MAX_CACHE_ENTRIES", 1)
+        monkeypatch.setattr(sc, "_resolve_jsonl_path", lambda sid, prov, cwd: jsonl)
+
+        assert sc.get_semantic_status("s1", "kiro-cli", "/w") is not None  # miss: write
+        assert sc.get_semantic_status("s1", "kiro-cli", "/w") is not None  # hit: read
+        sc.get_semantic_status("s2", "kiro-cli", "/w")                     # forces eviction
+        assert cache.unlocked_ops == []
 
 
 @patch("power_atlas.web.get_semantic_status")
@@ -4013,7 +4486,7 @@ def test_session_status_prefers_provider_report_for_working(mock_semantic):
     from power_atlas.status_classifier import SemanticStatus
     s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
     for reported in ("busy", "shell"):
-        snap = _snapshot_with_status(
+        snap = _snapshot(
             live_sids={("claude-code", "s1")},
             sid_status={("claude-code", "s1"): reported},
         )
@@ -4027,7 +4500,7 @@ def test_session_status_prefers_provider_report_for_working(mock_semantic):
 @patch("power_atlas.web.get_semantic_status")
 def test_session_status_reports_waiting_from_provider(mock_semantic):
     """"waiting" means a dialog is open and needs the human."""
-    snap = _snapshot_with_status(
+    snap = _snapshot(
         live_sids={("claude-code", "s1")},
         sid_status={("claude-code", "s1"): "waiting"},
     )
@@ -4044,7 +4517,7 @@ def test_session_status_idle_does_not_erase_errored(mock_semantic):
     is the only source of "errored".
     """
     from power_atlas.status_classifier import SemanticStatus
-    snap = _snapshot_with_status(
+    snap = _snapshot(
         live_sids={("claude-code", "s1")},
         sid_status={("claude-code", "s1"): "idle"},
     )
@@ -4062,7 +4535,7 @@ def test_session_status_unknown_report_falls_through(mock_semantic):
     The field is undocumented internal state in a frequently-updated binary.
     """
     from power_atlas.status_classifier import SemanticStatus
-    snap = _snapshot_with_status(
+    snap = _snapshot(
         live_sids={("claude-code", "s1")},
         sid_status={("claude-code", "s1"): "some-future-value"},
     )
@@ -4074,7 +4547,7 @@ def test_session_status_unknown_report_falls_through(mock_semantic):
 @patch("power_atlas.web.get_semantic_status")
 def test_session_status_report_never_revives_a_closed_session(mock_semantic):
     """A stale report must not make a dead session look alive."""
-    snap = _snapshot_with_status(sid_status={("claude-code", "s9"): "busy"})
+    snap = _snapshot(sid_status={("claude-code", "s9"): "busy"})
     s = _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())
     mock_semantic.return_value = None
     assert _session_status(snap, s, "claude-code") == "closed"

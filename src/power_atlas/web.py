@@ -19,7 +19,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from datetime import timezone
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
 from . import autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
@@ -109,22 +108,6 @@ _LIVE_STATUSES = ("working", "waiting", "errored")
 _first_render_done = False
 
 
-def _age_seconds(iso_str: str) -> float | None:
-    """Seconds since an ISO-8601 timestamp, or None if unparseable.
-
-    Normalizes both aware (Claude: mtime→UTC) and naive (Kiro: raw DB value,
-    assumed local) timestamps to UTC before comparing.
-    """
-    if not iso_str:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-    except (ValueError, OSError):
-        return None
-    dt = dt.astimezone(timezone.utc)  # naive is interpreted as local time
-    return (datetime.now(timezone.utc) - dt).total_seconds()
-
-
 # claude-code reports why a session is blocked, which separates "the agent is
 # stuck behind an approval you have to grant" from "the agent asked you a
 # question". The raw strings come from the provider; the categories are ours.
@@ -153,6 +136,46 @@ def _waiting_detail(snapshot, session, provider: str, status: str) -> tuple[str,
     if known:
         return known
     return "other", reason
+
+
+def _map_reported_status(reported: str) -> str:
+    """Map a provider's self-reported live state onto the semantic vocabulary.
+
+    claude-code writes its live state to ~/.claude/sessions/<pid>.json;
+    presence validates that file against the process before exposing it. Its
+    four values map as:
+      busy    - a turn is running          -> working
+      shell   - a shell command is running -> working
+      waiting - a dialog needs the human   -> waiting
+      idle    - none of the above          -> no verdict
+    "idle" is deliberately not mapped to "waiting": it covers finished,
+    errored and never-started alike, so only the classifier can say which
+    — and it is the sole source of "errored".
+
+    Returns "" when the report carries no usable verdict (absent, "idle", or
+    a value this build does not know), meaning "defer to the classifier".
+    This is a pure mapping: how a non-empty verdict is weighed against the
+    classifier is each call site's own decision, and the two differ on
+    purpose, because they answer different questions.
+
+    ``_session_status`` answers "what is *this* session doing?", so a
+    first-hand, current report beats a transcript tail that lags an in-flight
+    turn — the report wins outright. ``_workspace_status`` answers "what is
+    the most important thing happening in this workspace?", so it keeps the
+    highest priority across every session it can see and a report may only
+    raise the answer, never lower it. Making them agree would cost a signal
+    either way: a card whose one live session reports "busy" would stop
+    showing "errored", or a row would start reporting a finished-looking tail
+    over the provider's own "a turn is running". A card reading "errored"
+    above a row reading "working" is therefore the intended output, not a
+    contradiction: the card is telling you the workspace needs attention and
+    the row is telling you that session is still moving.
+    """
+    if reported in ("busy", "shell"):
+        return "working"
+    if reported == "waiting":
+        return "waiting"
+    return ""
 
 
 def _session_status(snapshot, session, provider: str,
@@ -199,26 +222,17 @@ def _session_status(snapshot, session, provider: str,
             # No JSONL file found — can't classify, treat as closed
             has_process = False
 
-    # 4. Prefer the provider's own report over inference, where it is
-    #    unambiguous. claude-code writes its live state to
-    #    ~/.claude/sessions/<pid>.json; presence validates that file against
-    #    the process before exposing it. Its four values map as:
-    #      busy    - a turn is running        -> working
-    #      shell   - a shell command is running -> working
-    #      waiting - a dialog needs the human -> waiting
-    #      idle    - none of the above        -> ambiguous, defer
-    #    "idle" is deliberately not treated as "waiting": it covers finished,
-    #    errored and never-started alike, so only the classifier can say which
-    #    — and it is the sole source of "errored". The provider report can
-    #    therefore only ever settle a state, never downgrade a richer verdict.
-    reported = snapshot.reported_status(provider, session.session_id)
+    # 4. Here a non-empty report wins outright, including over a richer-looking
+    #    classifier verdict: it is first-hand and current, while the classifier
+    #    reads a transcript tail that lags an in-flight turn. See
+    #    _map_reported_status for the mapping and for why "idle" yields nothing.
+    reported = _map_reported_status(
+        snapshot.reported_status(provider, session.session_id))
 
     if not is_explicitly_live and not has_process:
         status_value = "closed"
-    elif reported in ("busy", "shell"):
-        status_value = "working"
-    elif reported == "waiting":
-        status_value = "waiting"
+    elif reported:
+        status_value = reported
     elif (semantic := get_semantic_status(session.session_id, provider, session.cwd)) is not None:
         status_value = semantic.value
     else:
@@ -241,6 +255,15 @@ def _session_status(snapshot, session, provider: str,
 _STATUS_PRIORITY = {"errored": 3, "waiting": 2, "working": 1, "closed": 0}
 
 
+def _raise_status(best: str, candidate: str) -> str:
+    """Return the higher-priority of two statuses; "" candidates are ignored."""
+    if not candidate:
+        return best
+    if _STATUS_PRIORITY.get(candidate, 0) > _STATUS_PRIORITY.get(best, 0):
+        return candidate
+    return best
+
+
 def _workspace_status(snapshot, cwd: str,
                       providers: set[str] | None) -> str:
     """Aggregate status for a workspace card — highest-priority session status wins.
@@ -254,20 +277,24 @@ def _workspace_status(snapshot, cwd: str,
         return "closed"
     # Check semantic status for recent sessions in this workspace
     best = "working"  # at minimum, a process is running
-    best_pri = _STATUS_PRIORITY[best]
     found_any = False
     # Try to get semantic classification for sessions in this cwd
     for prov in (providers or {"kiro-cli", "claude-code"}):
         sids = snapshot.live_session_ids_for_cwd(prov, cwd)
         for sid in sids:
+            # The provider's report is folded in alongside the classifier, not
+            # ahead of it: aggregation keeps the highest priority, so a report
+            # can raise the card (a tail nobody can classify that the provider
+            # says is "waiting") but never lower a richer classifier verdict.
+            # It deliberately does not set found_any — a report is not a
+            # classification, and skipping the fallback on the strength of one
+            # would hide an "errored" session elsewhere in the workspace.
+            best = _raise_status(
+                best, _map_reported_status(snapshot.reported_status(prov, sid)))
             semantic = get_semantic_status(sid, prov, cwd)
             if semantic is not None:
                 found_any = True
-                s = semantic.value
-                pri = _STATUS_PRIORITY.get(s, 0)
-                if pri > best_pri:
-                    best = s
-                    best_pri = pri
+                best = _raise_status(best, semantic.value)
     # Fallback: no explicit session IDs (chat -a without --resume-id).
     # Classify all recently active sessions in this workspace, take highest priority.
     if not found_any:
@@ -290,16 +317,18 @@ def _workspace_status(snapshot, cwd: str,
                     continue
                 if mtime_age > 300:  # skip stale sessions
                     continue
+                # Narrow but real: presence records a report for any validated
+                # sidecar, but a session only reaches sid_to_cwd through its
+                # sidecar's own "cwd" field or through the process pass, which
+                # maps proc.cwd() when the session id is on argv. A claude-code
+                # session with neither is invisible to the loop above and only
+                # reachable here — kiro-cli never reports a status at all.
+                best = _raise_status(best, _map_reported_status(
+                    snapshot.reported_status(prov, recent.session_id)))
                 semantic = get_semantic_status(recent.session_id, prov, cwd)
                 # Use semantic if available; otherwise process running = working
-                if semantic is not None:
-                    s = semantic.value
-                else:
-                    s = "working"
-                pri = _STATUS_PRIORITY.get(s, 0)
-                if pri > best_pri:
-                    best = s
-                    best_pri = pri
+                best = _raise_status(
+                    best, semantic.value if semantic is not None else "working")
     return best
 
 
@@ -554,26 +583,17 @@ async def unpin_session(request: Request):
     return {"ok": True}
 
 
-@app.post("/api/session-status")
-async def api_session_status(request: Request):
-    """Lightweight status endpoint for background polling.
+def _poll_statuses(snapshot, cwds: list[str], poll_providers: set[str],
+                   active_norm_cwds: set[str]) -> tuple[dict, dict, list]:
+    """Compute the per-session and per-workspace status maps for one poll tick.
 
-    Accepts {"cwds": [...]} and returns per-session and per-workspace status
-    without triggering notification side-effects. Skips kiro-ide entirely and
-    short-circuits cwds that have no live process.
+    Runs whole in a single worker thread. Every branch below can reach the
+    filesystem — ``_session_status`` stats a JSONL file and ``_workspace_status``
+    falls back to loading session files on a cache miss — so a per-cwd hop would
+    cost one serialized thread round-trip per visible workspace on a 5s timer.
+    Iterating in ``cwds`` order also keeps the response identical to the
+    caller's request order.
     """
-    body = await request.json()
-    cwds = body.get("cwds", [])
-    if not cwds:
-        return JSONResponse({"sessions": {}, "workspaces": {}, "active_cwds": []})
-
-    # Only process CLI providers (skip kiro-ide)
-    poll_providers = {"kiro-cli", "claude-code"}
-
-    # Get cached presence snapshot (3s TTL — very fast)
-    snapshot = await asyncio.to_thread(presence.get_snapshot)
-    active_norm_cwds = snapshot.live_cwds(poll_providers)
-
     from .data import _normalize_path
 
     sessions_map: dict[str, str] = {}
@@ -590,8 +610,6 @@ async def api_session_status(request: Request):
         try:
             active_cwds.append(cwd)
             # Compute per-session status (no notifications)
-            best_status = "working"  # at minimum, a process is running
-            best_pri = _STATUS_PRIORITY[best_status]
             for provider in poll_providers:
                 cached_sessions = data.session_cache.get(cwd, provider)
                 if cached_sessions is None:
@@ -602,16 +620,54 @@ async def api_session_status(request: Request):
                     )
                     if status != "closed":
                         sessions_map[session.session_id] = status
-                        pri = _STATUS_PRIORITY.get(status, 0)
-                        if pri > best_pri:
-                            best_status = status
-                            best_pri = pri
 
-            # Derive workspace-level aggregate from per-session statuses already computed
-            workspaces_map[cwd] = best_status
+            # Card-level dot comes from the same aggregator the server renders
+            # with, so a poll cannot contradict the last full render.
+            workspaces_map[cwd] = _workspace_status(snapshot, cwd, poll_providers)
         except Exception:
             log.debug("Status poll failed for cwd %s", cwd)
             workspaces_map[cwd] = "closed"
+
+    return sessions_map, workspaces_map, active_cwds
+
+
+@app.post("/api/session-status")
+async def api_session_status(request: Request):
+    """Lightweight status endpoint for background polling.
+
+    Accepts {"cwds": [...], "provider": "..."} and returns per-session and
+    per-workspace status without triggering notification side-effects.
+    Short-circuits cwds that have no live process.
+
+    ``provider`` is the filter the page currently has applied; it must reach
+    the status computation, or a poll answers about providers the render
+    deliberately excluded. Absent or "all" means every CLI provider, which
+    also keeps older clients working.
+    """
+    body = await request.json()
+    cwds = body.get("cwds", [])
+    if not cwds:
+        return JSONResponse({"sessions": {}, "workspaces": {}, "active_cwds": []})
+
+    provider_filter = body.get("provider")
+    # A JSON value of any other shape would land in a set below and raise
+    # (an array is unhashable), so anything that is not a usable name is
+    # treated as absent — the same answer an older client without the field
+    # gets. "all" narrows to the CLI providers, which is exactly what the
+    # render path's ``None`` resolves to. A "kiro-ide" filter is passed
+    # through and reports every cwd closed, because presence tracks no
+    # kiro-ide process — again the dot the render draws.
+    if not isinstance(provider_filter, str) or not provider_filter:
+        provider_filter = "all"
+    poll_providers = ({"kiro-cli", "claude-code"} if provider_filter == "all"
+                      else {provider_filter})
+
+    # Get cached presence snapshot (3s TTL — very fast)
+    snapshot = await asyncio.to_thread(presence.get_snapshot)
+    active_norm_cwds = snapshot.live_cwds(poll_providers)
+
+    sessions_map, workspaces_map, active_cwds = await asyncio.to_thread(
+        _poll_statuses, snapshot, cwds, poll_providers, active_norm_cwds)
 
     return JSONResponse({
         "sessions": sessions_map,
@@ -948,11 +1004,7 @@ async def search(request: Request, q: str = "", provider: str = "all",
     matched = [(c, n, u, p) for c, n, u, p in workspace_data if query in c.lower()]
     # Filter out disabled providers
     matched = [(c, n, u, p) for c, n, u, p in matched if _enabled(config, p)]
-
-    if not matched:
-        return templates.TemplateResponse(request, "partials/empty_state.html", {
-            "message": f'No results for "{q}"',
-        })
+    query_matched = bool(matched)
 
     from .data import _normalize_path
     from .config import get_workspace_settings
@@ -981,12 +1033,14 @@ async def search(request: Request, q: str = "", provider: str = "all",
     if time_filter:
         grouped = [g for g in grouped if _time_bucket(g["latest_updated"]) == time_filter]
 
-    # Apply live-status filter
-    if status and status != "all":
+    # Apply live-status filter (skipped when nothing survived the earlier
+    # ones — the presence scan is the expensive step and cannot change an
+    # already-empty result).
+    if grouped and status and status != "all":
         snap = await asyncio.to_thread(presence.get_snapshot)
         prov_names = None if provider == "all" else {provider}
         grouped = [g for g in grouped if _status_matches(
-            status, _workspace_status(snap, g["cwd"], g["latest_updated"], prov_names))]
+            status, _workspace_status(snap, g["cwd"], prov_names))]
 
     cards_html = ""
 
@@ -1034,8 +1088,31 @@ async def search(request: Request, q: str = "", provider: str = "all",
                 )
 
     if not cards_html:
+        # One cascade decides the wording for every empty outcome, so two
+        # routes to an empty page cannot word themselves differently.
+        # The query branch comes first and the distinction it draws is
+        # deliberate: when the query matched nothing, no filter is at fault,
+        # and naming one would send the user to clear a filter that changes
+        # nothing. Past that, a filter removed every match — name the filter
+        # rather than the query. Branch order mirrors partials_workspaces; the
+        # provider wording does not, because here the truth is "the query
+        # matched nothing for that provider", not "you have no sessions for
+        # that provider at all".
+        if not query_matched:
+            message = f'No results for "{q}"'
+        elif status and status != "all":
+            message = f"No {status} workspaces right now."
+        elif tag:
+            message = f'No workspaces with tag "{tag}"'
+        elif time_filter:
+            message = f'No workspaces active {time_filter.replace("_", " ")}'
+        elif provider != "all" and provider:
+            display = PROVIDER_DISPLAY_NAMES.get(provider, provider)
+            message = f'No {display} results for "{q}"'
+        else:
+            message = f'No results for "{q}"'
         return templates.TemplateResponse(request, "partials/empty_state.html", {
-            "message": f'No results for "{q}"',
+            "message": message,
         })
 
     return HTMLResponse(cards_html)

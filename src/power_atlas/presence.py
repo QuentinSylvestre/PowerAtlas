@@ -262,8 +262,12 @@ class Snapshot:
         # sid_to_cwd: {(provider, session_id) -> normalized_cwd}
         self._sid_to_cwd = sid_to_cwd or {}
         # sid_status: {(provider, session_id) -> provider-reported status}
-        # Currently only claude-code reports one ("busy"/"idle"). Exposed for
-        # callers; no display path consumes it yet.
+        # Currently only claude-code reports one. The value is whatever its
+        # sidecar carries, passed through unmapped — "busy", "shell", "waiting"
+        # and "idle" are the four this build knows how to read (see
+        # web._map_reported_status), and an unknown fifth would arrive here
+        # intact. Both the session dot and the workspace dot read it via
+        # reported_status().
         self._sid_status = sid_status or {}
         # sid_reason: {(provider, session_id) -> why the session is waiting}
         self._sid_reason = sid_reason or {}
