@@ -139,11 +139,11 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **risks**: H7 many-to-one collision; whole-discovery abort on one bad dir; mangled path shown in UI.
 
 ### 1.12 Claude session parse
-- **what**: `_parse_session_file` reads first 100 lines for `ai-title` + first user message (skipping metadata/`hook_*` types), 256KB tail for last user/assistant; created_at from first-message epoch-ms → ctime → updated_at.
+- **what**: `_parse_session_file` reads the file in binary — first 500 lines for `ai-title`/`custom-title` + first user message (skipping metadata/`hook_*` types), 256KB tail for last user/assistant; created_at from first-message epoch-ms → ctime → updated_at. Once `first_prompt` is known, lines not containing the bytes `b"title"` are skipped without parsing (only title lines can still change the result). Two caches sit in front: `_parse_cache` keys the whole result by `(mtime, size)`; `_head_cache` keys the immutable head (`first_prompt`, `first_timestamp`) and is reused when the file grew, or is unchanged in both size and mtime.
 - **how-to-reach**: via `load_sessions` (provider=claude-code) and tail/first-prompt endpoints.
-- **probes**: session with only metadata lines (title falls back to UUID stem); long session missing both ends (100-line/256KB caps); non-ms timestamp (wrong created_at); last message all tool_use blocks (empty tail); content str vs list-of-text-blocks.
-- **oracle**: title from ai-title else first_prompt[:80] else stem; text-only extraction.
-- **risks**: multi-step title fallback surfaces raw UUID; epoch-ms assumption; tool-only tail renders empty.
+- **probes**: session with only metadata lines (title falls back to UUID stem); long session missing both ends (500-line/256KB caps); non-ms timestamp (wrong created_at); last message all tool_use blocks (empty tail); content str vs list-of-text-blocks; the literal word "title" inside message content after `first_prompt` is set (prefilter false positive — costs a redundant parse, must stay correct); rename appending `custom-title` past line 500 (never seen); invalid UTF-8 line (re-decoded with `errors="replace"`, not dropped); repeated load of an unchanged file (must not re-read); append to a live session (head reused, tail re-parsed).
+- **oracle**: title from custom-title else ai-title else first_prompt[:80] else stem; text-only extraction; byte-identical output whether served from cache or a cold parse.
+- **risks**: multi-step title fallback surfaces raw UUID; epoch-ms assumption; tool-only tail renders empty; an in-place rewrite that preserves both size and mtime reuses a stale cached head (not reachable for append-only JSONL — accepted).
 
 ---
 
@@ -261,12 +261,12 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: 30s cadence; exceptions swallowed/logged.
 - **risks**: silent updates; H3 race with request-path cache access.
 
-### 2.17 Pinned-panel polling
-- **what**: after the first workspace swap, pinned panels re-poll every 15s, capped at 8 ticks (2 min).
-- **how-to-reach**: `startPinnedPoll`; observe over ~2 min.
-- **probes**: poll re-renders pinned panels; stops at 8 ticks and never restarts; re-render wipes expanded pinned cards.
-- **oracle**: 15s interval, `_pinnedPollMax=8`.
-- **risks**: timer never restarts after cap; expanded state lost on each tick.
+### 2.17 Unified background scheduler (client)
+- **what**: one 5s tick drives all three client-side background jobs by counter — status every tick, active-session content every 2nd tick, workspace refresh every 3rd tick while `_tick <= _BURST_TICKS` and every 6th tick after. Net cadence is 15s burst for the first 120s then 30s steady; there is no separate pinned-panel timer.
+- **how-to-reach**: `startPolling` / `startStatusPoll` / `startActiveSessionPoll` → `_schedulerTick`; observe over ~3 min.
+- **probes**: workspace refresh fires at 15s for the first 2 min then drops to 30s; a slow refresh does not stack (`aria-busy` on `#workspace-cards` makes the tick skip); `pollActiveSessions` skipped while a full refresh is in flight; `visibilitychange` to hidden stops all three and clears the timer, returning restarts them; re-render wipes expanded card state.
+- **oracle**: `_TICK_MS=5000`, `_BURST_TICKS=24`; refresh every 3rd tick during burst, every 6th after; timer cleared only when all three jobs are off.
+- **risks**: `_ensureScheduler` resets `_tick` to 0, so every tab return re-enters the 2-min burst window; expanded state lost on each refresh; all three jobs share one timer, so a blocking handler delays the others.
 
 ### 2.18 Toast notifications (H6)
 - **what**: `showToast(html)` appends a toast, auto-removed after 4s.
