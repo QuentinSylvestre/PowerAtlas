@@ -764,7 +764,7 @@ def test_workspace_card_has_provider_icon_img(mock_discover, mock_providers, cli
     assert 'src="/api/launcher-icon/provider--kiro-cli"' in resp.text
     assert 'provider-badge-fallback' in resp.text
     # Title now uses the display name
-    assert 'title="Kiro CLI"' in resp.text
+    assert 'title="kiro-cli"' in resp.text
 
 
 @patch("power_atlas.web.load_config")

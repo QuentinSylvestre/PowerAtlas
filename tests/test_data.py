@@ -1,5 +1,6 @@
 """Tests for data module."""
 
+import itertools
 import json
 import os
 import tempfile
@@ -29,6 +30,25 @@ def mock_sessions(tmp_path, monkeypatch):
     return session_dir
 
 
+# Windows stamps file and directory timestamps from the ~15 ms system clock
+# tick, so two writes issued back to back routinely land on the identical
+# mtime. The production parse caches key on (mtime, size) and the kiro-cli
+# cwd index keys on the session directory's own mtime, so a test that mutates
+# a fixture file and re-reads it is otherwise asking the cache to notice a
+# change the filesystem never recorded. Stamping every fixture write with a
+# strictly increasing mtime makes the mutation observable by construction,
+# leaving the assertions to test the cache rather than the clock.
+_MTIME_BASE = time.time() + 60
+_mtime_ticks = itertools.count()
+
+
+def _bump_mtime(*paths: Path) -> None:
+    """Stamp paths with an mtime distinct from every earlier _bump_mtime call."""
+    stamp = _MTIME_BASE + next(_mtime_ticks) * 0.01
+    for p in paths:
+        os.utime(p, (stamp, stamp))
+
+
 def _write_session(session_dir: Path, session_id: str, cwd: str, **kwargs):
     """Helper to write a session .json + .jsonl."""
     meta = {
@@ -39,13 +59,16 @@ def _write_session(session_dir: Path, session_id: str, cwd: str, **kwargs):
         "title": kwargs.get("title", f"Session {session_id}"),
         "parent_session_id": kwargs.get("parent_session_id", None),
     }
-    (session_dir / f"{session_id}.json").write_text(json.dumps(meta), encoding="utf-8")
+    meta_path = session_dir / f"{session_id}.json"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
     lines = kwargs.get("jsonl_lines", [
         json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "Hello world"}}),
         json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "Hi there, how can I help?"}}),
     ])
-    (session_dir / f"{session_id}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+    jsonl_path = session_dir / f"{session_id}.jsonl"
+    jsonl_path.write_text("\n".join(lines), encoding="utf-8")
+    _bump_mtime(meta_path, jsonl_path, session_dir)
 
 
 def test_discover_workspaces_with_data(mock_sessions):
@@ -124,6 +147,23 @@ def test_missing_jsonl_still_returns_session(mock_sessions):
 from power_atlas.data import refresh_stale_entries, warmup_pinned
 
 
+def _reset_kiro_caches():
+    """Drop data_kiro's process-global parse caches and cwd index.
+
+    In production SESSION_DIR is fixed for the life of the process, so these
+    are never stale. Tests repoint it at a fresh tmp_path per test, and the
+    cwd index is guarded only by that directory's mtime — which two tmp dirs
+    created milliseconds apart share far more often than not. Without this
+    reset a test reads the *previous* test's index and sees no sessions at all.
+    """
+    data_kiro._meta_cache.clear()
+    data_kiro._cwd_index = {}
+    data_kiro._cwd_index_mtime = None
+    data_kiro._prompts_cache.clear()
+    data_kiro._tail_cache.clear()
+    data_kiro._first_prompt_cache.clear()
+
+
 @pytest.fixture(autouse=True)
 def _clear_cache():
     """Clear session cache and discovery cache between tests."""
@@ -131,9 +171,11 @@ def _clear_cache():
     from power_atlas import data
     session_cache.clear()
     data._cache.clear()
+    _reset_kiro_caches()
     yield
     session_cache.clear()
     data._cache.clear()
+    _reset_kiro_caches()
 
 
 class TestRefreshStaleEntries:
@@ -147,13 +189,13 @@ class TestRefreshStaleEntries:
         assert sessions[0].first_prompt == "Hello world"
 
         # Modify the .jsonl file content and mtime
-        import time; time.sleep(0.05)
         jsonl_path = mock_sessions / "r1.jsonl"
         jsonl_path.write_text(
             json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "Updated prompt"}}) + "\n"
             + json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "Updated reply"}}),
             encoding="utf-8",
         )
+        _bump_mtime(jsonl_path)
 
         refresh_stale_entries()
         cached = session_cache.get(_normalize_path(cwd))
@@ -1880,7 +1922,7 @@ class TestKiroPromptsCache:
         jsonl.write_text(json.dumps(
             {"version": "v1", "kind": "Prompt", "data": {"content": "Changed prompt"}}
         ), encoding="utf-8")
-        os.utime(jsonl, (time.time() + 5, time.time() + 5))
+        _bump_mtime(jsonl)
 
         second, _ = data_kiro.load_sessions("C:\\Projects\\Q")
         assert second[0].first_prompt == "Changed prompt"
@@ -2056,15 +2098,18 @@ def _kiro_meta(dirpath, sid, cwd, updated, parent=None):
             "created_at": updated, "updated_at": updated}
     if parent:
         body["parent_session_id"] = parent
-    (dirpath / f"{sid}.json").write_text(json.dumps(body), encoding="utf-8")
-    (dirpath / f"{sid}.jsonl").write_text("", encoding="utf-8")
+    meta_path = dirpath / f"{sid}.json"
+    jsonl_path = dirpath / f"{sid}.jsonl"
+    meta_path.write_text(json.dumps(body), encoding="utf-8")
+    jsonl_path.write_text("", encoding="utf-8")
+    # The directory too: adding a session is only visible to the cwd index if
+    # the directory's own mtime moves, and every timestamp here is a rewrite
+    # of the same byte count, so size cannot discriminate either.
+    _bump_mtime(meta_path, jsonl_path, dirpath)
 
 
 def _fresh_kiro(tmp_path):
-    from power_atlas import data_kiro
-    data_kiro._meta_cache.clear()
-    data_kiro._cwd_index = {}
-    data_kiro._cwd_index_mtime = None
+    _reset_kiro_caches()
     return patch.object(data_kiro, "SESSION_DIR", tmp_path)
 
 

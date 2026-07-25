@@ -280,7 +280,7 @@ class TestLaunchSession:
         result = launch_session(cwd, provider="kiro-cli")
         assert result.success is False
         assert "'kiro-cli' not found on PATH" in result.error
-        assert "Kiro CLI" in result.error
+        assert "Install kiro-cli" in result.error
 
     def test_deleted_folder(self):
         with patch("shutil.which", return_value="C:\\kiro-cli.exe"):
