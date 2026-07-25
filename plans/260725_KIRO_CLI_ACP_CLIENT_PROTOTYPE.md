@@ -388,17 +388,52 @@ omission is why the bug shipped undetected. Closing it is the highest-value sing
 test corpus and costs one line.
 
 **Exit criteria**:
-- [ ] `GET /search?q=<term>&status=working` returns 200 with filtered cards
-- [ ] `GET /search?q=<term>` (no status) behaves exactly as before
-- [ ] Manual: type in the search box with each of Working / Waiting / Errored selected; no error
+- [x] `GET /search?q=<term>&status=working` returns 200 with filtered cards
+- [x] `GET /search?q=<term>` (no status) behaves exactly as before
+- [x] Manual: type in the search box with each of Working / Waiting / Errored selected; no error
       text appears in `#workspace-cards`
-- [ ] Regression test added to `tests/test_web.py` asserting `GET /search?q=…&status=working`
+- [x] Regression test added to `tests/test_web.py` asserting `GET /search?q=…&status=working`
       returns 200 — modelled on `test_search_with_tag_filter` (`:2721`), no new file
-- [ ] The new test fails against the pre-fix code and passes after (confirm by stashing the fix)
-- [ ] Full suite still green — 611 tests currently pass
-- [ ] The four Intent invariants for this fix all hold
-- [ ] `plans/tests/260701_POWERATLAS.md` §2.14 probe list extended with a search + status-filter
+- [x] The new test fails against the pre-fix code and passes after (confirm by stashing the fix)
+- [x] Full suite still green — 611 tests currently pass
+      <!-- Met in substance, not as worded: the "611 passing" baseline was already false when the
+           plan was written (2 tests fail on clean main). See §9. -->
+- [x] The four Intent invariants for this fix all hold
+      <!-- Invariants 1 and 4 carry user-approved deviations, recorded in §9. -->
+- [x] `plans/tests/260701_POWERATLAS.md` §2.14 probe list extended with a search + status-filter
       combination
+
+#### Implementation (2026-07-25, code: 2341d68)
+
+The reported defect is fixed by deleting the surplus `g["latest_updated"]` argument from `search()`'s
+`_workspace_status` call, matching the three other call sites. That is the whole of what the plan
+scoped. Five further changes were made on explicit user decision during review, each recorded as a
+divergence below.
+
+`api_session_status` now derives the workspace dot by calling `_workspace_status` rather than
+re-implementing priority aggregation over `_session_status` results, so the server-rendered dot and
+the 5-second-polled dot can no longer disagree — they had been computed by two independent code
+paths that agreed only by coincidence of similar defaults. That unification initially dropped
+claude-code's provider-reported `waiting` signal at workspace level, because `_workspace_status` never
+read `snapshot.reported_status`; teaching it to do so restored the signal at both surfaces, and is
+the deviation from invariant 4. The mapping is now shared with `_session_status` through
+`_map_reported_status`, and priority folding through `_raise_status`, which between them deleted three
+hand-written copies of the same "highest priority wins" logic — the duplication class that produced
+this bug in the first place. The two functions deliberately continue to weigh a report differently:
+`_session_status` answers what one session is doing, where a first-hand report beats a lagging
+transcript tail, while `_workspace_status` answers what matters most in a workspace, where
+max-priority-wins avoids hiding a signal. That divergence is now explained in the shared docstring
+rather than merely noted.
+
+The remaining changes: `/search`'s empty state names the filter that emptied it instead of claiming
+the query matched nothing; `r.ok` guards and error handling on both search fetches, so a 5xx no
+longer injects markup into the panels; dead `_age_seconds` removed with its test and its sole
+`datetime.timezone` import; and a `threading.Lock` on `status_classifier._status_cache`, which was
+the only unlocked cache of three and became reachable from a worker thread once the poll moved to
+`asyncio.to_thread`.
+
+Verification: 622 tests pass (2 failures pre-date this work on clean `main`). Runtime QA confirmed
+the fix and both guards live — see the review log entry below.
 
 **Scope boundary — status dots in `/search` results.** `/search` never passes `workspace_status` to
 the card template (`web.py:1002-1009`, `:1027-1032`), while `partials_workspaces` does (`:730`,
@@ -936,6 +971,63 @@ Derived by a doc-impact sub-agent over every tracked `*.md` outside `plans/done/
   as committed. The `presence.py` ones are the exposure — Phase 2 modified that file this session,
   and Phase 6's re-enumeration criterion is the only backstop.
 
+### Phase 2
+
+**The phase grew from one line to roughly 240 lines of production change across five concerns.** Each
+expansion below was an explicit user decision recorded at the turn it was made; none was
+agent-initiated.
+
+- **Invariant 4 deliberately overridden.** The Intent states "No change to `_workspace_status`'s
+  signature or behaviour; this is a call-site fix only." Its **behaviour** now changes: it reads
+  `snapshot.reported_status`. The signature is untouched. The override was necessary because
+  unifying the poll onto `_workspace_status` would otherwise have silently dropped claude-code's
+  provider-reported `waiting` signal from workspace cards. `/qdev` forbids editing the Intent
+  section, so the override is recorded here rather than by rewriting the invariant.
+- **Invariant 1 deviates in wording, not results.** "`/search` with `q` and `status` in `("", "all")`
+  continues to behave exactly as today" holds for which cards render, and both reviewers verified the
+  presence scan is still skipped. But with `status` empty and a `tag` or `time_filter` set, the
+  empty-state *message* changed — that is the approved empty-state fix working as intended.
+- **File scope expanded from three files to six.** The plan scopes Phase 2 to `web.py`,
+  `tests/test_web.py` and `plans/tests/260701_POWERATLAS.md`. Also modified:
+  `src/power_atlas/templates/index.html` (Phase 5's declared scope, user-directed),
+  `src/power_atlas/presence.py` (comment only), and `src/power_atlas/status_classifier.py` (the
+  cache lock).
+- **The plan's test baseline was never true.** Criterion 6 says "611 tests currently pass". On clean
+  `main`, `test_launch_session_kiro_binary_not_found` and `test_workspace_card_has_provider_icon_img`
+  already fail. Verified by stashing all changes and re-running at `HEAD`. Actual: 625 collected,
+  622 passing, those same 2 failing.
+- **The plan's status-dot scope note overstates the user-visible effect.** It says filtered search
+  results ship "with no status dots". True at first paint, but `_updateWorkspaceStatusDot` *creates*
+  a missing dot and the 5-second poll covers exactly the live cwds a Working filter selects — so the
+  gap is transient. A reviewer then found the self-healing is not guaranteed either, since
+  `pollStatus` prefers a non-empty `window._activeCwds` over `_getAllVisibleCwds()`. The note is
+  therefore wrong in both directions and should not be trusted as written.
+- **`asyncio.to_thread` breached a boundary the plan reserved for Phase 3.** §6's risk table names
+  "reader thread reaching into unlocked caches" and mitigates it with "`acp.py` imports neither
+  module". Moving the poll off-loop made `status_classifier._status_cache` reachable from a worker
+  thread by a different route entirely. Closed by adding the lock. **The plan predicted the hazard
+  and guarded the wrong entry point.**
+
+**Recorded, not fixed** — outside anything approved this phase:
+
+- **Eighteen further tests in `tests/test_web.py` read the developer's real `config.toml`**, found by
+  instrumenting `load_config`. Not uniformly trivial to fix: several render the full workspaces
+  partial, where a real config supplies pinned folders and grouping, so a bare `Config()` could
+  legitimately change what they assert. Wants a shared fixture, not eighteen decorators.
+- **Eight known-flaky tests**, six in `tests/test_data.py` plus `TestWarmupPinned::test_populates_cache_for_existing_folders`
+  and `TestGetAllSessionsPaginated::test_sort_order_by_updated_at`. All `(mtime, size)`-keyed cache
+  tests whose write-read cycle is finer than the filesystem's timestamp resolution.
+  `test_kiro_index_picks_up_a_newly_created_session` fails roughly 3 of 5 runs **standalone**. At
+  this density a genuine regression in `test_data.py` could hide in the noise.
+- **`/search` returns HTTP 200 with a toast partial when discovery fails**, so the new `r.ok` guard
+  does not catch it — the one surviving form of the exact symptom that guard was added for.
+- **Changing the status `<select>` drops the active search query.** `setStatusFilter` calls
+  `refreshCards()` → `/partials/workspaces` with no `q`, so the two controls disagree about what is
+  being filtered. Found during runtime QA. Confirmed pre-existing: commit `2341d68` does not touch
+  `setStatusFilter`.
+- **Session multi-select does not survive an auto-refresh** — the periodic poll re-renders rows and
+  clears selection. Observed during QA, unrelated to this phase.
+
 ## Review Log
 
 ### 2026-07-25 — Plan review (via /qplan Step 4)
@@ -1037,6 +1129,73 @@ count it replaced. A census asserted about a file a sibling phase is rewriting c
 durable by re-deriving it more carefully; it has to stop being a census. That is why the entry now
 contains a commit SHA, four symbol names, and no numbers.
 
+### 2026-07-25 — Implementation Review (after Phase 2, personas: Maintainability reviewer, Senior engineer)
+
+Implementation health: Green.
+Four review cycles, two personas per cycle, merged. Totals across cycles: 45 findings
+(0 High, 13 Medium, 32 Low). No cycle produced a regression.
+QA verification: **PASS** (2 surfaces verified — HTTP endpoints and browser UI; 28 probes executed).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Correct stale line-references | not_run | SKIP | Prose-only; no executable surface. Verified by opening every cited line. |
+| 2: Fix the `/search` status-filter crash | pass | PASS | 622 passed, 2 failed (both pre-existing on clean `main`), 1 skipped. |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | Regression test mocked away `_workspace_status`, so its pre-fix `TypeError` came from the mock, not production | Fixed — rebuilt to mock only at data-source boundaries; real filter path now executes |
+| 2 | Medium | Filtered-to-empty search claimed the query matched nothing, hiding that the status filter emptied it | User: accepted — fix now; cascade added mirroring `partials_workspaces` |
+| 3 | Medium | `search()` duplicates the whole `partials_workspaces` pipeline; the recurrence vector was unrecorded | User: accepted — roadmap entry added (Phase 1 file scope) |
+| 4 | Medium | Poll and render computed the workspace dot two different ways and could disagree | User: accepted — fix now; `api_session_status` unified onto `_workspace_status` |
+| 5 | Medium | That unification dropped claude-code's provider-reported `waiting` at workspace level | User: accepted — `_workspace_status` now reads `reported_status`; overrides invariant 4 |
+| 6 | Medium | `_map_reported_status`'s hoisted docstring stated a contract `_session_status` violates | Fixed — docstring describes the mapping only; precedence moved to each call site |
+| 7 | Medium | Poll reached `data.get_sessions` — a blocking cold-cache disk read on the event loop | Fixed — whole per-cwd loop moved into one `asyncio.to_thread` |
+| 8 | Medium | `r.ok` guard added to `/search` but not the sibling `/partials/all-sessions` fetch | Fixed — both guarded via a shared `_runSearchPanel` |
+| 9 | Medium | Empty-state cascade omitted the provider branch that `partials_workspaces` has | Fixed — branch added with search-appropriate wording, not copied verbatim |
+| 10 | Medium | Poll hardcoded both providers while renders pass the active filter | Fixed — provider now travels with the poll request, backward-compatibly |
+| 11 | Medium | Poll's `workspaces` map can contradict its own `sessions` map | Fixed — behaviour kept as more correct; pinned by a test in both directions |
+| 12 | Medium | Plan recorded none of the approved expansion: §9 reserved, scope and invariants unamended | Fixed — this commit |
+| 13 | Medium | Dead `_age_seconds` kept alive only by its own test | User: accepted — deleted with its test and sole `timezone` import |
+| 14 | Low | `status_classifier._status_cache` was the only unlocked cache, now reached from a worker thread | Fixed — `threading.Lock` added; never held across file I/O |
+| 15 | Low | Three of five assertions in the report test passed whether or not the report was read | Fixed — tautological cases relocated to the call site where they can fail |
+| 16 | Low | `.catch` reorder left DOM-swap throws with no handler at all | Fixed — separate pre-swap and post-swap handlers |
+| 17 | Low | Failure latches never re-armed when the query was cleared | Fixed — `_resetSearchFlags()` on the early-return path |
+| 18 | Low | Non-string `provider` raised `TypeError` outside the guard and 500'd the endpoint | Fixed — coerced; verified live with `[]`, `7`, `{}`, `null` |
+| 19 | Low | Two poll tests asserted against an explicit provider set where the render passes `None` | Fixed — corrected; mutation-verified as strictly more discriminating |
+| 20 | Low | Remaining Lows from the final gate (comment precision, test-builder overlap, `_raise_status` guard, `kiro-ide` comment) | Orchestrator: proposed-accept — pending user decision |
+
+The 32 Low findings are consolidated above; individually they were comment-precision, test-hygiene
+and naming items, each recorded in its cycle's sub-agent output.
+
+**Runtime QA (Step 5b, `[QA]`-annotated phase).** PowerAtlas was restarted so it served committed
+code — both the global and venv installs are editable and resolve to this repo, verified before
+testing. Ten HTTP probes across the status-filter topologies: `status=working` returns 200 with
+cards where it previously 500'd, `waiting`/`errored` render filter-specific empty states, an
+unmatched query returns `No results for …` with or without a filter, and quotes are escaped. Ten
+further probes on the poll endpoint confirmed the non-string `provider` guard and backward
+compatibility. An origin-less POST was correctly refused with 403, incidentally confirming
+`same_origin_guard`.
+
+Eighteen browser checks were driven live. The two that matter:
+`GET /search?provider=all&status=working&q=ol` returned **200** — byte-for-byte the request shape
+that previously threw. And with `window.fetch` monkey-patched to return a 500 carrying an injected
+marker, that marker **never reached `#workspace-cards`**, which retained its previous 82 cards
+intact; pre-fix the error body was written straight into the container. The toast latched correctly
+(two failed calls, one toast) and the run produced zero console errors and zero unhandled
+rejections.
+
+**Not verified**: the provider-reported `waiting` dot end-to-end. No agent process was live during
+QA, so every workspace correctly reported `closed` and that path was unreachable without
+manufacturing session state. It is covered by mutation-verified unit tests, not by observation.
+
+**Method note.** From cycle 3 onward reviewers verified tests by **mutation** rather than by reading
+— neutering each fix and confirming the corresponding test fails. This found three assertions that
+passed whether or not the behaviour they named was present, which no amount of reading would have
+surfaced, and it caught one reviewer's own draft weakness. The JavaScript was mutation-tested under
+Node with stubbed `fetch`/DOM/`htmx`, since the pytest suite does not reach it.
+
 ---
 
 ## Harness Improvement Opportunities
@@ -1057,3 +1216,32 @@ contains a commit SHA, four symbol names, and no numbers.
   suggested change: add `## Review Log <Reserved -- filled by review cycles>` to the Standard
   template in `shared/skills/qplan/TEMPLATES.md`, since Step 4's review is mandatory at Standard
   tier and therefore always produces one.
+- `/qdev` Step 1's orphaned-working-tree rule says to "surface the situation to the user" but
+  supplies no action set, unlike `/qclose` Step 2's Promote / Accept and note / Skip — cost: the
+  orchestrator invented a three-option question and the user rejected all three, choosing a fourth
+  framing ("assume the phase is incomplete, assess state, judge the resume point") that was the
+  right one and that the rule never offers — suggested change: give the rule an explicit action set
+  including *Treat as incomplete — re-verify against exit criteria and resume*, which is materially
+  different from adopt-or-discard because it neither trusts nor throws away the recovered work.
+- `/qdev`'s `## Multi-agent execution reference` item 6 mandates serializing auto-fix cycles in
+  phase-number order, but item 1 already suppresses sub-agent commits in parallel mode, so the git
+  index race that motivates serialization cannot occur — cost: following it literally would have
+  doubled wall-clock across four fix rounds for no safety gain, since the two phases' file scopes
+  were verified disjoint; the deviation had to be reasoned about and disclosed each time —
+  suggested change: scope item 6's serialization to the commit step it protects, and permit parallel
+  auto-fix when file scopes are disjoint and commits are suppressed.
+- The Conventional Commits type for a phase whose deliverable is a bug fix collides with
+  `/qvalidate`'s `commit-pairing` check — cost: Phase 2's code commit is `fix(<slug>): phase 2 — …`
+  because that is what the change is, and `shared/AGENTS.md` explicitly permits `fix`, but the
+  pairing check is documented as matching `feat`/`docs` pairs, so a semantically correct type may
+  produce a false FAIL — suggested change: state in `shared/AGENTS.md § Commit Conventions` which
+  types `commit-pairing` accepts on the code side, or widen the check to any Conventional Commits
+  type carrying the plan slug and a phase number.
+- `/qdev` Step 6's cycle cap bounds orchestrator-automated cycles but explicitly exempts
+  user-directed cleanup, and nothing bounds *that* — cost: four review cycles ran on a phase planned
+  as a one-line deletion, each surfacing a fresh tail of mostly-Low findings (13 Medium and 32 Low
+  in total), with no defined stopping point short of the user declining a further round; two
+  independent reviewers had already returned "safe to commit" after cycle 3 — suggested change: have
+  the post-cycle-cap prompt state the reviewers' standing verdict and the round-over-round severity
+  trend alongside the action set, so the user is choosing against a visible convergence signal
+  rather than an open-ended offer to keep fixing.
