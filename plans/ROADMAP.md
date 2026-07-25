@@ -31,7 +31,7 @@
 >
 > **Round 2's headline: the incumbent is fast but wrong, and the two biggest correctness defects are local bug fixes, not integration work.** Rank accordingly — the items below are ordered by value per day, not by ambition.
 
-- **[P0] Fix the transcript tail size — `status_classifier.py:84`** — *2-line change, largest user-visible effect on the board*
+- **[P0] Fix the transcript tail size — `status_classifier.py:84`** — **DONE 2026-07-24 (`a973715`, hardened in `ee998c2`).** Default raised 4096 → 65536, and the read now widens and retries when a seeked read yields no complete line, so no fixed window can reintroduce the failure. Measured on 79 local transcripts: `None` verdicts 49% → 8%, **41.8% of sessions changed verdict**, every observed example `None → WAITING`. Cost 127 µs → 183 µs median, and 65536 proved no dearer than 16384.
   - *Verified defect*: `_read_tail_lines` defaults to `max_bytes=4096`, then discards the first partial line after seeking (`:109-111`). Claude Code JSONL lines are routinely larger than that — median 1,617 B, p95 **19,136 B**, max 154,917 B, with **24.7% of all lines exceeding 4096 B** and final lines disproportionately the large ones. So the tail read consumes everything and yields zero complete lines.
   - *Measured impact*: over 150 sampled Claude Code transcripts, **116 (77.3%) classify as `None`**, 111 of them recovering zero complete lines. All 116 disagree with the full-file verdict, which is predominantly `waiting`. Then `web.py:176-181` converts `None` to `"working"` (*"A running process = working"*) — **so a Claude Code session that has finished and is waiting for the user displays as working**, on roughly 3 of 4 sessions. That is a direct inversion of the signal the dashboard exists to provide.
   - *The fix*: raise the default. Measured sweep on the same corpus — 4096 → 77.3% `None`; 16384 → 12.0%; **65536 → 0.0%**. Cost is negligible: classification is tail-bounded, ~101 µs median, and a 56.79 MB transcript classifies in 161 µs vs 71 µs for a 64 KB one.
@@ -39,12 +39,12 @@
   - *Follow-up worth considering separately*: once the tail is fixed, revisit whether `None` should still fall back to `"working"` or to an explicit unknown state — the fallback is only safe when `None` is rare.
   - *Independent of every integration path below. Nothing here involves hooks, ACP, or `serve`.*
 
-- **[P0] Fix provider matching — `presence.py:170-180`** — *narrow the `claude.exe` basename match*
+- **[P0] Fix provider matching — `presence.py:170-180`** — **DONE 2026-07-24 (`a973715`).** Electron helpers rejected via the `--type=` switch, removing 10 of 13 `claude.exe` matches. *Residual, accepted*: Claude Desktop's **main** process carries no `--type=` and still matches, so a phantom `live_cwds` entry remains possible if Desktop is launched from a project directory. The alternatives were install-path hardcoding or requiring a session file, which would trade instant workspace detection for a ~3 s startup blind spot.
   - *Verified defect*: `_match_provider` matches on basename only, so Claude Desktop's Electron subprocesses (`--type=renderer`, `--type=gpu-process`, `--type=crashpad-handler`) are classified as `claude-code` CLI sessions. 10-11 of 16 matched processes on this machine were Claude Desktop — provider precision ~35%.
   - *Currently latent*: their cwd is `C:\windows\system32`, which matches no workspace. That is luck, not design — launching Claude Desktop from a project directory would produce phantom live workspaces.
   - *The fix*: check the executable path, or exclude processes carrying Electron `--type=` switches.
 
-- **[P1] Row-level identity for kiro-cli via lock files — verified 2026-07-24, no integration required**
+- **[P1] Row-level identity for kiro-cli via lock files** — **DONE 2026-07-24 (`a973715`).** `live_sids` went 0 → 3 on this machine with correct cwd attribution; scan cost 51 → 68 ms median. Detail below retained as the rationale.
   - *The mechanism*: every live kiro-cli session holds `~\.kiro\sessions\cli\<session-id>.lock` containing `{"pid":…,"started_at":"<RFC3339>"}`. The session id is the filename; the sibling `<session-id>.json` carries `cwd`, `title`, `created_at`, `updated_at`. **That is exactly the session-id → live-process mapping `presence.py` cannot get from argv** — authoritative, written by kiro-cli itself, and available for sessions started anywhere including a terminal.
   - **The trap, measured — a naive implementation is worse than no detection.** Of 785 lock files on this machine, **21 have a currently-alive pid but only 1 is genuine**; the other 20 are PID reuse, their pids now belonging to `svchost.exe`, `firefox.exe`, `RuntimeBroker.exe`, `Kiro.exe`, `FortiESNAC.exe`. A "lock exists and pid is alive" check reports 21 live sessions when there is 1 — a 95% false-positive rate.
   - *The guard that fixes it*: require `|lock.started_at − process.create_time()| < tolerance`. Measured separation is enormous — the genuine lock is off by **1.2 s**, the closest impostor by **9,547 s**, most by millions. Any tolerance from ~30 s to an hour is correct. **Both clauses are mandatory.**
@@ -54,7 +54,7 @@
   - *Known gap*: a `--no-interactive` one-shot creates **no lock and no persisted session at all**, so it stays invisible. It is also ephemeral, so this may not matter.
   - *Scope*: **kiro-cli only.** Verified that Claude Code has no per-session equivalent — `~\.claude\projects\` holds only `.jsonl` transcripts plus occasional `bridge-pointer.json`, and the sole `.lock` under `~\.claude\` is `ide\<port>.lock`, which maps an IDE instance to a workspace, not a session.
 
-- **[P1b] Row-level identity AND live status for Claude Code — `~\.claude\sessions\<pid>.json`. Verified 2026-07-24. No heuristic and no hooks required.**
+- **[P1b] Row-level identity AND live status for Claude Code — `~\.claude\sessions\<pid>.json`** — **DONE 2026-07-24 (`a973715`).** Identity wired; `Snapshot.reported_status()` exposes the `busy`/`idle` field. **Not yet wired to display** — that needs a precedence decision against the JSONL classifier and is the open follow-up. Detail below retained as the rationale.
   - **Claude Code writes a per-process session file while a session is running**, containing everything the dashboard needs:
     ```json
     {"pid":51516,"sessionId":"3ee4f6fb-c84a-4681-8f91-e574a3c62300",
