@@ -65,13 +65,6 @@
 **Source**: Session 52f28138 — banner sizing back-and-forth (8+ turns) | **Verified**: 2026-07-10 | **Outcome**: not-recurred 2026-07-16
 
 
-### test_presence_matches_claude_resume_id fails on Windows — known pre-existing platform failure, deselect rather than re-diagnose
-
-**Why**: The /qdev run for 260715_SEMANTIC_SESSION_STATUS spent multiple turns (both phase sub-agents plus an orchestrator check against main) confirming this failure was pre-existing rather than caused by the change. The test (tests/test_data.py:1426) still asserts Unix-style '/home/u/proj' while _normalize_path produces backslashed paths on Windows (grep-verified 2026-07-16), so every future Windows test run in this project will hit it and risk misattributing it to the current change.
-**How to apply**: When the PowerAtlas suite fails only on test_presence_matches_claude_resume_id on Windows, treat it as the known pre-existing platform failure and deselect it (as done in the 260715 run); fixing the path normalization belongs in its own task, not mid-plan.
-**Source**: Session c431d086 (2026-07-15) — /qdev phases 1-2 test run | **Verified**: 2026-07-16
-
-
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
