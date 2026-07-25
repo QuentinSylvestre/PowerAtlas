@@ -2,7 +2,7 @@
 
 > **Date**: 2026-07-25
 > **Status**: Complete
-> **Last Updated**: 2026-07-25
+> **Last Updated**: 2026-07-25T15:42-05:00
 > **Estimated effort**: ~1 day
 > **Scope**: Eliminate redundant JSONL parsing and redundant polling work behind slow start, slow card expansion, and slow updates
 
