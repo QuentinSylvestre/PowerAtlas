@@ -86,6 +86,19 @@
 **Source**: `plans/done/260725-1542_PARSE_AND_POLL_PERFORMANCE.md` — `/qclose` Pass 4 doc-ripple sweep | **Verified**: 2026-07-25
 
 
+### `(mtime, size)`-keyed caches make a family of `test_data.py` tests timing-flaky
+
+**Why**: Eight tests fail intermittently under full-suite timing and pass when run standalone, because the cache keys are finer-grained than the filesystem's timestamp resolution — a test writes, reads back, and the cache cannot tell the file changed. `test_kiro_index_picks_up_a_newly_created_session` fails roughly 3 of 5 runs *even standalone*. This is the blast radius of the parse-and-poll cache optimisation (see [[session-file-parsing-must-be-skipped]]), and at this density a genuine `test_data.py` regression can hide in the noise — during one session the same suite reported 2, 3 and 4 failures on consecutive identical runs.
+**How to apply**: Before attributing a `test_data.py` failure to your change, re-run that test standalone; if it passes, it is this family, not a regression. Known members: `TestKiroPromptsCache::test_changed_jsonl_is_reparsed`, `test_kiro_load_sessions_sees_rewritten_metadata`, `test_cache_miss_triggers_load`, `test_kiro_index_picks_up_a_newly_created_session`, `test_missing_jsonl_still_returns_session`, `TestKiroPromptsCache::test_missing_jsonl_bypasses_cache`, plus `test_web.py::TestWarmupPinned::test_populates_cache_for_existing_folders` and `test_web.py::TestGetAllSessionsPaginated::test_sort_order_by_updated_at`. A durable fix means giving the cache an explicit invalidation hook the tests can call, not sleeping.
+**Source**: `plans/260725_KIRO_CLI_ACP_CLIENT_PROTOTYPE.md` — observed across ~15 full-suite runs during Phase 2 | **Verified**: 2026-07-25
+
+### Tests that skip `load_config` read the developer's real `config.toml`
+
+**Why**: There is no `tests/conftest.py` and the `client` fixture in `tests/test_web.py` provides no config isolation, so any test exercising a route that calls `load_config()` reads `%LOCALAPPDATA%\power-atlas\config.toml` — a populated production file holding real pinned folders and, under `[custom_launchers.env]`, real credentials. Such tests pass or fail depending on the developer's machine state. Twenty were found by wrapping `load_config` in a pytest plugin and recording which tests reached the real function; two were fixed, eighteen remain.
+**How to apply**: When adding or debugging a `tests/test_web.py` test that hits a route, patch `power_atlas.web.load_config` with a controlled `Config()` — `test_search_with_tag_filter` is the house pattern. When a route test fails only on your machine, suspect this before suspecting your change. Note the fix is not uniformly mechanical: tests rendering the full workspaces partial depend on real pinned folders for their assertions, so a bare `Config()` changes what they see. The durable fix is a shared autouse fixture, not eighteen decorators.
+**Source**: `plans/260725_KIRO_CLI_ACP_CLIENT_PROTOTYPE.md` — found by instrumenting `load_config` during Phase 2 | **Verified**: 2026-07-25
+
+
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
