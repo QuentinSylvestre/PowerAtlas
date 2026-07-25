@@ -1230,13 +1230,15 @@ Node with stubbed `fetch`/DOM/`htmx`, since the pytest suite does not reach it.
   were verified disjoint; the deviation had to be reasoned about and disclosed each time —
   suggested change: scope item 6's serialization to the commit step it protects, and permit parallel
   auto-fix when file scopes are disjoint and commits are suppressed.
-- The Conventional Commits type for a phase whose deliverable is a bug fix collides with
-  `/qvalidate`'s `commit-pairing` check — cost: Phase 2's code commit is `fix(<slug>): phase 2 — …`
-  because that is what the change is, and `shared/AGENTS.md` explicitly permits `fix`, but the
-  pairing check is documented as matching `feat`/`docs` pairs, so a semantically correct type may
-  produce a false FAIL — suggested change: state in `shared/AGENTS.md § Commit Conventions` which
-  types `commit-pairing` accepts on the code side, or widen the check to any Conventional Commits
-  type carrying the plan slug and a phase number.
+- `/qvalidate`'s `commit-pairing` check silently under-covers any phase whose code commit is not
+  `feat` — cost: Phase 2's code commit is `fix(<slug>): phase 2 — …`, because that is what the change
+  is and `shared/AGENTS.md § Commit Conventions` explicitly permits `fix`/`refactor`; the check then
+  reported PASS while its own output shows it only inspected `feat(<slug>)` commits, so Phase 2's
+  pairing was never verified at all. **The expected failure was a false FAIL on a legitimate type;
+  the actual behaviour is a vacuous PASS**, which is worse, because a genuinely unpaired `fix` phase
+  commit would also report green — suggested change: widen the check to any Conventional Commits
+  type carrying the plan slug and a phase number, and have it report the number of phase commits
+  inspected so a zero-coverage pass is visible rather than indistinguishable from a real one.
 - `/qdev` Step 6's cycle cap bounds orchestrator-automated cycles but explicitly exempts
   user-directed cleanup, and nothing bounds *that* — cost: four review cycles ran on a phase planned
   as a one-line deletion, each surfacing a fresh tail of mostly-Low findings (13 Medium and 32 Low
