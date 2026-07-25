@@ -47,6 +47,22 @@ warm-path number is dominated by work that is now skipped entirely.
   mtime would be missed (not reachable for append-only JSONL; the parse cache has the same property).
 - Accepted: negative path-resolution entries live for 5 s, so a brand-new session can take up to 5 s to
   resolve (bounded by the same 5 s status poll it feeds).
+- Accepted: the surviving kiro-cli contribution (`_extract_prompts_cached`) is not covered by the benchmark
+  above, which exercises the claude-code corpus only. It is unit-tested but its speedup is unmeasured here.
+
+### Merged with main
+
+`main` advanced 14 commits during implementation. Three overlapped:
+
+- `c346982 perf(data_kiro)` — same idea, better executed. Resolved by taking `main`'s implementation whole
+  and re-applying only `_extract_prompts_cached` on top (see P0-2 above).
+- `a973715` / `ee998c2 fix(presence,status)` — reworked `_read_tail_lines` into a widening retry with a
+  64 KB starting window. Auto-merged cleanly with the path memoization and LRU here; both are present and
+  independent (one governs how much tail is read, the other how often the path and verdict are recomputed).
+
+Post-merge verification: 523 passing against `main`'s own baseline of 502, with the same 57 pre-existing
+platform failures and no new lint findings. The parse differential and benchmark were re-run on the merged
+tree; `main` did not touch `data_claude.py` or `index.html`, so those results carry over unchanged.
 
 ## Intent
 
@@ -147,7 +163,15 @@ files whose stat changed.
 This makes `refresh_stale_entries` incremental with no API change, and benefits every other caller of
 `load_sessions()` for free. Correctness follows from the key: any content change moves mtime or size.
 
-Bounded LRU so a large corpus cannot grow the cache without limit.
+Bounded LRU (`data.BoundedCache`) so a large corpus cannot grow the cache without limit.
+
+**Superseded for kiro-cli.** While this was in flight, `c346982` landed the same idea on `main` for
+`data_kiro`, and went further: a `cwd -> files` index cached against the session directory's own mtime, so
+`load_sessions()` no longer walks the whole flat store at all. That is strictly better than the parse cache
+alone, so on merge the kiro-side work here was dropped in favour of it. What survives is the one gap that
+commit left: `_extract_prompts` was still re-parsing each matched session's `.jsonl` (a 50-line head scan
+plus a 100-line deque) on every call, so it now goes through `_extract_prompts_cached` with the same
+`(mtime, size)` key. The claude-code parse cache is unaffected — `main` did not touch `data_claude`.
 
 ### P0-3 — Immutable head cache
 

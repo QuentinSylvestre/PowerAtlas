@@ -3999,3 +3999,142 @@ class TestStatusCacheLRU:
         sc._evict_oldest()
         assert ("kiro-cli", "s0") in sc._status_cache
         assert ("kiro-cli", "s1") not in sc._status_cache
+def _snapshot_with_status(live_sids=(), sid_status=None):
+    return presence.Snapshot(set(live_sids), set(), {}, sid_status or {})
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_prefers_provider_report_for_working(mock_semantic):
+    """claude-code declaring a running turn beats an inferred verdict.
+
+    The classifier reads the transcript tail, which lags an in-flight turn
+    that has not flushed yet.
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    for reported in ("busy", "shell"):
+        snap = _snapshot_with_status(
+            live_sids={("claude-code", "s1")},
+            sid_status={("claude-code", "s1"): reported},
+        )
+        mock_semantic.return_value = SemanticStatus.WAITING
+        assert _session_status(snap, s, "claude-code") == "working", reported
+        # The classifier must not even be consulted for an unambiguous report.
+        mock_semantic.return_value = None
+        assert _session_status(snap, s, "claude-code") == "working", reported
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_reports_waiting_from_provider(mock_semantic):
+    """"waiting" means a dialog is open and needs the human."""
+    snap = _snapshot_with_status(
+        live_sids={("claude-code", "s1")},
+        sid_status={("claude-code", "s1"): "waiting"},
+    )
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = None
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_idle_does_not_erase_errored(mock_semantic):
+    """"idle" only rules out working — it must never overwrite a richer verdict.
+
+    idle covers finished, errored and never-started alike, and the classifier
+    is the only source of "errored".
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    snap = _snapshot_with_status(
+        live_sids={("claude-code", "s1")},
+        sid_status={("claude-code", "s1"): "idle"},
+    )
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = SemanticStatus.ERRORED
+    assert _session_status(snap, s, "claude-code") == "errored"
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_unknown_report_falls_through(mock_semantic):
+    """An unrecognised value must degrade to today's behaviour, not break it.
+
+    The field is undocumented internal state in a frequently-updated binary.
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    snap = _snapshot_with_status(
+        live_sids={("claude-code", "s1")},
+        sid_status={("claude-code", "s1"): "some-future-value"},
+    )
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_report_never_revives_a_closed_session(mock_semantic):
+    """A stale report must not make a dead session look alive."""
+    snap = _snapshot_with_status(sid_status={("claude-code", "s9"): "busy"})
+    s = _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = None
+    assert _session_status(snap, s, "claude-code") == "closed"
+
+
+# --- Waiting reason: blocked-on-approval vs asked-a-question ---
+
+def _snap_waiting(reason, status="waiting"):
+    return presence.Snapshot(
+        set(), set(), {},
+        {("claude-code", "s1"): status},
+        {("claude-code", "s1"): reason},
+    )
+
+
+def test_waiting_detail_separates_approval_from_question():
+    from power_atlas.web import _waiting_detail
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    approval = ["permission prompt", "sandbox request", "worker request"]
+    for r in approval:
+        cat, phrase = _waiting_detail(_snap_waiting(r), s, "claude-code", "waiting")
+        assert cat == "approval", r
+        assert "approval" in phrase, r
+    cat, phrase = _waiting_detail(_snap_waiting("input needed"), s, "claude-code", "waiting")
+    assert (cat, phrase) == ("question", "asked you a question")
+
+
+def test_waiting_detail_passes_through_an_unmapped_reason():
+    """A new provider value must surface, not vanish."""
+    from power_atlas.web import _waiting_detail
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    assert _waiting_detail(_snap_waiting("some new thing"), s, "claude-code", "waiting") \
+        == ("other", "some new thing")
+
+
+def test_waiting_detail_only_applies_to_waiting_sessions():
+    from power_atlas.web import _waiting_detail
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    snap = _snap_waiting("permission prompt", status="busy")
+    assert _waiting_detail(snap, s, "claude-code", "working") == ("", "")
+    # kiro-cli reports no reason at all; must not raise or invent one.
+    bare = presence.Snapshot(set(), set(), {}, {}, {})
+    assert _waiting_detail(bare, s, "kiro-cli", "waiting") == ("", "")
+
+
+def test_session_row_renders_the_waiting_reason():
+    from power_atlas.web import templates
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    tpl = templates.get_template("partials/session_row.html")
+
+    html = tpl.render(request=None, session=s, cwd="/w", stale=False,
+                      pinned_sessions=[], provider_name="claude-code",
+                      provider_color="", status="waiting",
+                      waiting_detail=("approval", "needs your approval"))
+    assert 'title="Waiting — needs your approval"' in html
+    assert 'data-waiting="approval"' in html
+
+    # Absent detail (kiro-cli, or an older snapshot) keeps the original text.
+    plain = tpl.render(request=None, session=s, cwd="/w", stale=False,
+                       pinned_sessions=[], provider_name="kiro-cli",
+                       provider_color="", status="waiting")
+    assert 'title="Waiting — needs your input"' in plain
+    assert "data-waiting" not in plain

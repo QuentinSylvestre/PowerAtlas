@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -1406,22 +1407,41 @@ class TestGetAllSessionsPaginated:
 class _FakeProc:
     """Minimal psutil.Process stand-in for presence scan tests."""
 
-    def __init__(self, name, cmdline, cwd=None, cwd_error=False):
+    def __init__(self, name, cmdline, cwd=None, cwd_error=False,
+                 pid=None, create_time=None):
         self.info = {"name": name, "cmdline": cmdline}
+        if pid is not None:
+            self.info["pid"] = pid
         self._cwd = cwd
         self._cwd_error = cwd_error
+        self._create_time = create_time
 
     def cwd(self):
         if self._cwd_error:
             raise RuntimeError("access denied")
         return self._cwd
 
+    def create_time(self):
+        if self._create_time is None:
+            raise RuntimeError("no create_time")
+        return self._create_time
 
-def _scan_with(procs):
-    """Run presence._scan() with a faked process table."""
+
+def _scan_with(procs, kiro_dir=None, claude_dir=None):
+    """Run presence._scan() with a faked process table.
+
+    The sidecar directories are redirected away from the real home directory
+    by default, so these tests do not depend on what happens to be running on
+    the machine. Pass *kiro_dir* / *claude_dir* to exercise them.
+    """
     from power_atlas import presence
+    missing = Path(tempfile.gettempdir()) / "_pa_no_such_sidecar_dir"
+    presence._sidecar_cache.clear()
+    presence._dir_listing_cache.clear()
     with patch.object(presence, "_AVAILABLE", True), \
-         patch.object(presence.psutil, "process_iter", return_value=procs):
+         patch.object(presence.psutil, "process_iter", return_value=procs), \
+         patch.object(presence, "_KIRO_LOCK_DIR", Path(kiro_dir) if kiro_dir else missing), \
+         patch.object(presence, "_CLAUDE_SESSION_DIR", Path(claude_dir) if claude_dir else missing):
         return presence._scan()
 
 
@@ -1431,7 +1451,10 @@ def test_presence_matches_claude_resume_id():
     ])
     assert snap.is_live("claude-code", "/home/u/proj", "abc123") is True
     assert snap.is_live("claude-code", "/home/u/proj", "other") is False
-    assert "/home/u/proj" in snap.live_cwds({"claude-code"})
+    # live_cwds holds normalized paths; on Windows that rewrites separators
+    # and casefolds, so compare against the same normalization.
+    from power_atlas.data import _normalize_path
+    assert _normalize_path("/home/u/proj") in snap.live_cwds({"claude-code"})
 
 
 def test_presence_matches_kiro_resume_id_flag():
@@ -1829,36 +1852,252 @@ class TestHeadCacheInvalidation:
         assert first_prompt == "brand new"
 
 
-class TestKiroMetaCache:
-    """kiro-cli metadata parsing is cached by (mtime, size)."""
+class TestKiroPromptsCache:
+    """The per-session .jsonl parse is memoized on (mtime, size).
 
-    def test_meta_reused_when_unchanged(self, mock_sessions):
-        _write_session(mock_sessions, "k1", "C:\\Projects\\A", title="First")
-        data_kiro._meta_cache.clear()
+    The metadata index (c346982) stops load_sessions re-reading the whole store,
+    but each matched session's .jsonl was still re-parsed on every call.
+    """
 
-        first = data_kiro.discover_workspaces()
-        assert first
-        meta_file = mock_sessions / "k1.json"
-        cached = data_kiro._meta_cache.get(str(meta_file))
-        assert cached is not None
-        assert cached[2][3] == "First"   # title field of the cached tuple
+    def test_unchanged_jsonl_not_reparsed(self, mock_sessions):
+        _write_session(mock_sessions, "p1", "C:\\Projects\\P")
+        data_kiro._prompts_cache.clear()
+        first, _ = data_kiro.load_sessions("C:\\Projects\\P")
+        assert first[0].first_prompt == "Hello world"
 
-    def test_meta_refreshed_when_changed(self, mock_sessions):
-        _write_session(mock_sessions, "k2", "C:\\Projects\\B", title="Before")
-        data_kiro._meta_cache.clear()
-        data_kiro.load_sessions("C:\\Projects\\B")
+        with patch.object(data_kiro, "_extract_prompts",
+                          side_effect=AssertionError("should not re-parse")):
+            again, _ = data_kiro.load_sessions("C:\\Projects\\P")
+        assert again[0].first_prompt == "Hello world"
 
-        _write_session(mock_sessions, "k2", "C:\\Projects\\B", title="After")
-        meta_file = mock_sessions / "k2.json"
-        os.utime(meta_file, (time.time() + 5, time.time() + 5))
+    def test_changed_jsonl_is_reparsed(self, mock_sessions):
+        _write_session(mock_sessions, "p2", "C:\\Projects\\Q")
+        data_kiro._prompts_cache.clear()
+        first, _ = data_kiro.load_sessions("C:\\Projects\\Q")
+        assert first[0].first_prompt == "Hello world"
 
-        sessions, _ = data_kiro.load_sessions("C:\\Projects\\B")
-        assert [s.title for s in sessions] == ["After"]
+        jsonl = mock_sessions / "p2.jsonl"
+        jsonl.write_text(json.dumps(
+            {"version": "v1", "kind": "Prompt", "data": {"content": "Changed prompt"}}
+        ), encoding="utf-8")
+        os.utime(jsonl, (time.time() + 5, time.time() + 5))
 
-    def test_oversized_meta_still_skipped(self, mock_sessions):
-        _write_session(mock_sessions, "k3", "C:\\Projects\\C")
-        big = mock_sessions / "k3.json"
-        big.write_text(" " * 1_048_577, encoding="utf-8")
-        data_kiro._meta_cache.clear()
-        sessions, _ = data_kiro.load_sessions("C:\\Projects\\C")
-        assert sessions == []
+        second, _ = data_kiro.load_sessions("C:\\Projects\\Q")
+        assert second[0].first_prompt == "Changed prompt"
+
+    def test_missing_jsonl_bypasses_cache(self, mock_sessions):
+        """No stat means no cache key — fall through rather than guess."""
+        _write_session(mock_sessions, "p3", "C:\\Projects\\R")
+        (mock_sessions / "p3.jsonl").unlink()
+        data_kiro._prompts_cache.clear()
+        sessions, _ = data_kiro.load_sessions("C:\\Projects\\R")
+        assert len(sessions) == 1
+        assert sessions[0].first_prompt == ""
+
+
+# --- Sidecar-derived session identity (presence.py) ---
+#
+# Neither CLI puts its session id on argv, so these files are the only way a
+# terminal-started session becomes identifiable. They are also not reliably
+# deleted, so the guard against a recycled pid is the part that matters: a
+# false positive marks an unrelated process as a live session.
+
+def _write_kiro_lock(dirpath, sid, pid, started_iso, cwd=None):
+    (dirpath / f"{sid}.lock").write_text(
+        json.dumps({"pid": pid, "started_at": started_iso}), encoding="utf-8")
+    if cwd is not None:
+        (dirpath / f"{sid}.json").write_text(
+            json.dumps({"session_id": sid, "cwd": cwd}), encoding="utf-8")
+
+
+def _write_claude_session(dirpath, pid, sid, started_ms, cwd, status="idle"):
+    (dirpath / f"{pid}.json").write_text(json.dumps({
+        "pid": pid, "sessionId": sid, "cwd": cwd,
+        "startedAt": started_ms, "status": status, "kind": "interactive",
+    }), encoding="utf-8")
+
+
+def test_presence_rejects_electron_helper_processes(tmp_path):
+    """Claude Desktop ships a binary also named claude.exe and forks helpers."""
+    snap = _scan_with([
+        _FakeProc("claude.exe", ["C:/App/claude.exe", "--type=renderer"],
+                  cwd="C:/proj", pid=101, create_time=1000.0),
+        _FakeProc("claude.exe", ["C:/App/claude.exe", "--type=gpu-process"],
+                  cwd="C:/proj", pid=102, create_time=1000.0),
+    ])
+    assert snap.live_cwds({"claude-code"}) == set()
+
+
+def test_presence_sidecar_identifies_kiro_session(tmp_path):
+    _write_kiro_lock(tmp_path, "sess-a", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                   pid=500, create_time=started - 1.2)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-a") is True
+
+
+def test_presence_sidecar_rejects_recycled_pid_on_other_binary(tmp_path):
+    """785 stale locks on one machine named 21 live pids; 20 were unrelated."""
+    _write_kiro_lock(tmp_path, "sess-old", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("svchost.exe", ["C:/windows/svchost.exe"],
+                   pid=500, create_time=started - 1.2)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-old") is False
+
+
+def test_presence_sidecar_rejects_pid_recycled_onto_same_binary(tmp_path):
+    """Same provider, wrong process: only the start time separates them."""
+    _write_kiro_lock(tmp_path, "sess-old", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                   pid=500, create_time=started + 9000)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-old") is False
+
+
+def test_presence_sidecar_rejects_sidecar_predating_its_process(tmp_path):
+    """A sidecar is written after its process spawns, never long before."""
+    _write_kiro_lock(tmp_path, "sess-x", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                   pid=500, create_time=started + 60)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-x") is False
+
+
+def test_presence_sidecar_reports_claude_status(tmp_path):
+    started_ms = 1784920809496
+    _write_claude_session(tmp_path, 700, "sess-c", started_ms,
+                          "C:/work/pa", status="busy")
+    snap = _scan_with(
+        [_FakeProc("claude.exe", ["C:/u/.local/bin/claude.exe"],
+                   pid=700, create_time=started_ms / 1000.0 - 1.5)],
+        claude_dir=tmp_path,
+    )
+    assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is True
+    assert snap.reported_status("claude-code", "sess-c") == "busy"
+    assert snap.reported_status("claude-code", "nope") == ""
+
+
+def test_presence_sidecar_malformed_record_does_not_drop_others(tmp_path):
+    """One bad file must not silently regress the scan to matching nothing."""
+    (tmp_path / "broken.lock").write_text("{not json", encoding="utf-8")
+    (tmp_path / "typed.lock").write_text(
+        json.dumps({"pid": "not-an-int", "started_at": "2026-07-24T10:00:01Z"}),
+        encoding="utf-8")
+    _write_kiro_lock(tmp_path, "sess-good", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                   pid=500, create_time=started - 1.2)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-good") is True
+
+
+def _epoch(iso):
+    from power_atlas.presence import _epoch_from_iso
+    return _epoch_from_iso(iso)
+
+
+# --- Transcript tail reader (status_classifier.py) ---
+
+def test_read_tail_lines_widens_when_final_line_exceeds_window(tmp_path):
+    """A window narrower than the last line yields nothing without the retry.
+
+    That returned None, which web.py renders as "working" — the opposite of
+    the truth for a session awaiting input.
+    """
+    from power_atlas.status_classifier import _read_tail_lines
+    p = tmp_path / "t.jsonl"
+    p.write_text('{"a":1}\n{"big":"' + "x" * 200_000 + '"}\n', encoding="utf-8")
+    lines = _read_tail_lines(p, max_bytes=4096)
+    assert lines, "widening retry did not recover the oversized final line"
+    assert lines[-1].startswith('{"big":')
+
+
+def test_read_tail_lines_small_file_returns_all_lines(tmp_path):
+    from power_atlas.status_classifier import _read_tail_lines
+    p = tmp_path / "s.jsonl"
+    p.write_text('{"a":1}\n{"b":2}\n', encoding="utf-8")
+    assert _read_tail_lines(p) == ['{"a":1}', '{"b":2}']
+
+
+def test_read_tail_lines_discards_partial_first_line(tmp_path):
+    from power_atlas.status_classifier import _read_tail_lines
+    p = tmp_path / "m.jsonl"
+    p.write_text('{"first":"' + "y" * 500 + '"}\n{"second":2}\n', encoding="utf-8")
+    lines = _read_tail_lines(p, max_bytes=64)
+    assert lines == ['{"second":2}']
+
+
+# --- kiro-cli metadata index (data_kiro.py) ---
+#
+# Sessions live flat in one directory, so filtering per workspace used to
+# parse the whole store for every workspace opened.
+
+def _kiro_meta(dirpath, sid, cwd, updated, parent=None):
+    body = {"session_id": sid, "cwd": cwd, "title": f"t-{sid}",
+            "created_at": updated, "updated_at": updated}
+    if parent:
+        body["parent_session_id"] = parent
+    (dirpath / f"{sid}.json").write_text(json.dumps(body), encoding="utf-8")
+    (dirpath / f"{sid}.jsonl").write_text("", encoding="utf-8")
+
+
+def _fresh_kiro(tmp_path):
+    from power_atlas import data_kiro
+    data_kiro._meta_cache.clear()
+    data_kiro._cwd_index = {}
+    data_kiro._cwd_index_mtime = None
+    return patch.object(data_kiro, "SESSION_DIR", tmp_path)
+
+
+def test_kiro_load_sessions_filters_by_cwd_and_skips_subagents(tmp_path):
+    from power_atlas import data_kiro
+    _kiro_meta(tmp_path, "a", "C:/one", "2026-01-01T00:00:00Z")
+    _kiro_meta(tmp_path, "b", "C:/two", "2026-01-02T00:00:00Z")
+    _kiro_meta(tmp_path, "c", "C:/one", "2026-01-03T00:00:00Z", parent="a")
+    with _fresh_kiro(tmp_path):
+        sessions, stats = data_kiro.load_sessions("C:/one")
+    assert [s.session_id for s in sessions] == ["a"], "wrong cwd or subagent leaked"
+    assert len(stats) >= 1
+
+
+def test_kiro_index_picks_up_a_newly_created_session(tmp_path):
+    """A new session adds a file, which bumps the directory mtime."""
+    from power_atlas import data_kiro
+    _kiro_meta(tmp_path, "a", "C:/one", "2026-01-01T00:00:00Z")
+    with _fresh_kiro(tmp_path):
+        first, _ = data_kiro.load_sessions("C:/one")
+        assert [s.session_id for s in first] == ["a"]
+        _kiro_meta(tmp_path, "b", "C:/one", "2026-01-04T00:00:00Z")
+        second, _ = data_kiro.load_sessions("C:/one")
+    assert sorted(s.session_id for s in second) == ["a", "b"]
+
+
+def test_kiro_load_sessions_sees_rewritten_metadata(tmp_path):
+    """An active session rewrites updated_at without the directory changing."""
+    from power_atlas import data_kiro
+    _kiro_meta(tmp_path, "a", "C:/one", "2026-01-01T00:00:00Z")
+    with _fresh_kiro(tmp_path):
+        first, _ = data_kiro.load_sessions("C:/one")
+        assert first[0].updated_at == "2026-01-01T00:00:00Z"
+        _kiro_meta(tmp_path, "a", "C:/one", "2026-06-06T00:00:00Z")
+        second, _ = data_kiro.load_sessions("C:/one")
+    assert second[0].updated_at == "2026-06-06T00:00:00Z", "stale metadata served"

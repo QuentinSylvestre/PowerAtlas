@@ -19,7 +19,9 @@ even when the exact session id could not be matched.
 ``kiro-ide`` is an IDE, not a resumable CLI session, and is excluded entirely.
 """
 
+import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,6 +71,177 @@ _SNAPSHOT_TTL = 3.0  # seconds; many partials render per refresh — reuse one s
 _cached_snapshot: "Snapshot | None" = None
 _cached_at = 0.0
 
+# --- Sidecar identity files -------------------------------------------------
+# Neither CLI puts its session id on argv, so argv matching only ever succeeds
+# for sessions PowerAtlas launched itself (launcher.py passes --resume /
+# --resume-id). Both providers do write a per-process sidecar naming the
+# session, which is the only local way to attribute a terminal-started session
+# to a live process:
+#
+#   kiro-cli     ~/.kiro/sessions/cli/<session-id>.lock   {"pid", "started_at"}
+#   claude-code  ~/.claude/sessions/<pid>.json            {"pid","sessionId","cwd",
+#                                                          "startedAt","status",...}
+#
+# A sidecar's presence does NOT mean the session is live. Neither provider
+# reliably removes them, so pids get recycled onto unrelated processes: of 785
+# kiro lock files observed on one machine, 21 named a live pid and exactly one
+# was genuine — the rest had been inherited by svchost, firefox, and friends.
+# Liveness therefore requires the pid to be alive AND its start time to match
+# the sidecar's. Observed deltas are +1.1s to +1.6s (the sidecar is written
+# just after spawn); the nearest false match was ~9500s off, so the window
+# below is deliberately generous and still leaves ~80x margin.
+_SIDECAR_SKEW_S = 120.0
+# Sidecars are never written before their process starts; this small backward
+# allowance covers clock-source jitter between the provider's timestamp and
+# psutil's create_time, nothing more.
+_SIDECAR_BACKWARD_SKEW_S = 5.0
+
+_KIRO_LOCK_DIR = Path.home() / ".kiro" / "sessions" / "cli"
+_CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
+
+# path -> (mtime, size, parsed|None). Sidecars are written once at session
+# start, so re-parsing every one on every scan is pure waste; stat is cheap.
+_sidecar_cache: dict[str, tuple[float, int, dict | None]] = {}
+
+
+def _load_json_cached(path: Path, st: os.stat_result | None = None) -> dict | None:
+    """Parse *path* as JSON, reusing the last result while mtime/size hold.
+
+    *st* may be supplied by a caller that already has it — ``os.scandir``
+    populates ``DirEntry.stat()`` from the directory walk on Windows, so
+    passing it avoids a second syscall per file.
+    """
+    key = str(path)
+    if st is None:
+        try:
+            st = path.stat()
+        except OSError:
+            _sidecar_cache.pop(key, None)
+            return None
+    hit = _sidecar_cache.get(key)
+    if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size:
+        return hit[2]
+    data: dict | None
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        data = loaded if isinstance(loaded, dict) else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        data = None
+    _sidecar_cache[key] = (st.st_mtime, st.st_size, data)
+    return data
+
+
+# directory -> (dir_mtime, records). Enumerating the kiro lock directory means
+# walking every entry in it, and it also holds the session transcripts —
+# 13k+ entries, ~19ms, growing with the store. Sidecars are write-once, and a
+# create or delete bumps the directory's own mtime, so one stat of the
+# directory tells us whether the previous listing still holds.
+_dir_listing_cache: dict[str, tuple[float, list]] = {}
+
+
+def _list_sidecars(directory: Path, suffix: str,
+                   cache_listing: bool = True) -> list[tuple[str, os.stat_result]]:
+    """Return (path, stat) for files in *directory* ending in *suffix*.
+
+    With *cache_listing*, the result is reused while the directory's own mtime
+    holds. That is only valid for sidecars written once and never rewritten,
+    because an in-place rewrite leaves the directory mtime untouched — and the
+    stats captured here are what ``_load_json_cached`` compares against, so a
+    stale listing pins a stale parse. kiro-cli locks qualify; claude-code
+    session files do not (they carry a mutable ``status`` and are rewritten in
+    place, observed with a file mtime 832s newer than its directory's), so
+    that directory is listed fresh each scan. It holds one file per running
+    session, so the cost is nil.
+    """
+    key = str(directory)
+    try:
+        dir_mtime = directory.stat().st_mtime
+    except OSError:
+        _dir_listing_cache.pop(key, None)
+        return []
+    if cache_listing:
+        hit = _dir_listing_cache.get(key)
+        if hit is not None and hit[0] == dir_mtime:
+            return hit[1]
+
+    found: list[tuple[str, os.stat_result]] = []
+    try:
+        with os.scandir(directory) as it:
+            for entry in it:
+                if not entry.name.endswith(suffix):
+                    continue
+                try:
+                    if entry.is_file():
+                        found.append((entry.path, entry.stat()))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    if cache_listing:
+        _dir_listing_cache[key] = (dir_mtime, found)
+    return found
+
+
+def _epoch_from_iso(value: str) -> float | None:
+    """Parse an RFC3339/ISO-8601 instant to a POSIX timestamp."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def _sidecar_records() -> list[tuple[str, int, str, float, str, str, str]]:
+    """Collect (provider, pid, session_id, started_epoch, cwd, status, reason).
+
+    ``cwd``, ``status`` and ``reason`` are best-effort and may be empty. No
+    liveness filtering happens here — the caller validates against the
+    process table.
+    """
+    out: list[tuple[str, int, str, float, str, str, str]] = []
+
+    for lock, st in _list_sidecars(_KIRO_LOCK_DIR, ".lock"):
+        data = _load_json_cached(Path(lock), st)
+        if not data:
+            continue
+        pid = data.get("pid")
+        started = _epoch_from_iso(str(data.get("started_at", "")))
+        if not isinstance(pid, int) or started is None:
+            continue
+        # cwd lives in the sibling metadata; only worth reading for a
+        # candidate, which the caller has not filtered yet — defer it.
+        out.append(("kiro-cli", pid, Path(lock).stem, started, "", "", ""))
+
+    for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json", cache_listing=False):
+        data = _load_json_cached(Path(meta), st)
+        if not data:
+            continue
+        pid = data.get("pid")
+        sid = data.get("sessionId") or ""
+        started_ms = data.get("startedAt")
+        cwd = data.get("cwd")
+        if not isinstance(pid, int) or not isinstance(sid, str) or not sid:
+            continue
+        if not isinstance(started_ms, (int, float)) or isinstance(started_ms, bool):
+            continue
+        reason = data.get("waitingFor")
+        out.append(("claude-code", pid, sid, started_ms / 1000.0,
+                    cwd if isinstance(cwd, str) else "",
+                    str(data.get("status") or ""),
+                    reason if isinstance(reason, str) else ""))
+
+    return out
+
+
+def _kiro_session_cwd(session_id: str) -> str:
+    """cwd for a kiro-cli session, from the metadata beside its lock file."""
+    data = _load_json_cached(_KIRO_LOCK_DIR / f"{session_id}.json")
+    return (data or {}).get("cwd", "") or ""
+
 
 def is_available() -> bool:
     """Return True if process introspection is possible."""
@@ -79,13 +252,32 @@ class Snapshot:
     """Immutable view of which sessions/workspaces are live at scan time."""
 
     def __init__(self, live_sids: set[tuple[str, str]], live_cwds: set[tuple[str, str]],
-                 sid_to_cwd: dict[tuple[str, str], str] | None = None):
+                 sid_to_cwd: dict[tuple[str, str], str] | None = None,
+                 sid_status: dict[tuple[str, str], str] | None = None,
+                 sid_reason: dict[tuple[str, str], str] | None = None):
         # live_sids: {(provider, session_id)}
         # live_cwds: {(provider, normalized_cwd)}
         self._live_sids = live_sids
         self._live_cwds = live_cwds
         # sid_to_cwd: {(provider, session_id) -> normalized_cwd}
         self._sid_to_cwd = sid_to_cwd or {}
+        # sid_status: {(provider, session_id) -> provider-reported status}
+        # Currently only claude-code reports one ("busy"/"idle"). Exposed for
+        # callers; no display path consumes it yet.
+        self._sid_status = sid_status or {}
+        # sid_reason: {(provider, session_id) -> why the session is waiting}
+        self._sid_reason = sid_reason or {}
+
+    def reported_status(self, provider: str, session_id: str) -> str:
+        """Provider-reported live status, or "" when the provider offers none."""
+        return self._sid_status.get((provider, session_id), "")
+
+    def waiting_reason(self, provider: str, session_id: str) -> str:
+        """Why a waiting session is blocked, as the provider describes it.
+
+        Only meaningful alongside a reported status of "waiting"; "" otherwise.
+        """
+        return self._sid_reason.get((provider, session_id), "")
 
     def is_live(self, provider: str, cwd: str, session_id: str) -> bool:
         """True if this exact session is running (id matched on a process cmdline)."""
@@ -167,8 +359,17 @@ def _extract_session_id(cmdline: list[str], flag: str) -> str | None:
     return None
 
 
-def _match_provider(name: str, argv0: str) -> str | None:
-    """Identify the provider from a process name / argv[0] basename."""
+def _match_provider(name: str, cmdline: list[str]) -> str | None:
+    """Identify the provider from a process name / argv[0] basename.
+
+    Electron helper processes are rejected: the Claude Desktop app ships a
+    binary also called ``claude.exe`` and forks renderer/gpu/crashpad children
+    that would otherwise be counted as CLI sessions. They are identifiable by
+    the ``--type=`` switch Electron passes to every child.
+    """
+    if any(a.startswith("--type=") for a in cmdline[1:]):
+        return None
+    argv0 = cmdline[0] if cmdline else ""
     candidates = set()
     if name:
         candidates.add(name.lower())
@@ -186,8 +387,20 @@ def _scan() -> Snapshot:
     live_sids: set[tuple[str, str]] = set()
     live_cwds: set[tuple[str, str]] = set()
     sid_to_cwd: dict[tuple[str, str], str] = {}
+    sid_status: dict[tuple[str, str], str] = {}
+    sid_reason: dict[tuple[str, str], str] = {}
+    # pid -> (provider, create_time) for live provider processes only. A
+    # sidecar is trusted only against one of these, which is both the cheap
+    # guard and the strong one: a recycled pid almost always lands on some
+    # unrelated binary (svchost, firefox, the IDE), and requiring the provider
+    # to match eliminates it without touching the process at all.
+    provider_pids: dict[int, tuple[str, float]] = {}
     try:
-        procs = psutil.process_iter(["name", "cmdline"])
+        # create_time is deliberately not requested for the whole table —
+        # that costs ~25ms across ~500 processes. It is read below only for
+        # the handful that matched a provider, off the Process object
+        # process_iter already built.
+        procs = psutil.process_iter(["pid", "name", "cmdline"])
     except Exception:  # pragma: no cover - platform edge
         log.exception("process scan failed")
         return _EMPTY
@@ -197,9 +410,15 @@ def _scan() -> Snapshot:
             cmdline = info.get("cmdline") or []
             if not cmdline:
                 continue
-            provider = _match_provider(info.get("name") or "", cmdline[0])
+            provider = _match_provider(info.get("name") or "", cmdline)
             if provider is None:
                 continue
+            pid = info.get("pid")
+            if pid is not None:
+                try:
+                    provider_pids[pid] = (provider, proc.create_time())
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
             _binaries, flag = _PROVIDER_SPECS[provider]
             sid = _extract_session_id(cmdline, flag)
             if sid:
@@ -218,7 +437,48 @@ def _scan() -> Snapshot:
             continue
         except Exception:  # pragma: no cover - defensive per-process guard
             continue
-    return Snapshot(live_sids, live_cwds, sid_to_cwd)
+
+    # Second pass: recover session ids from the sidecar files. This is what
+    # makes a terminal-started session identifiable at all — argv alone only
+    # matches sessions PowerAtlas resumed itself. See _sidecar_records() for
+    # why the start-time check is not optional.
+    try:
+        records = _sidecar_records()
+    except Exception:  # pragma: no cover - sidecars are best-effort
+        log.exception("sidecar enumeration failed")
+        records = []
+    for provider, pid, sid, started, cwd, status, reason in records:
+        # Per-record isolation: one unparseable or oddly-typed sidecar must
+        # not drop the remaining sessions, which would silently regress to
+        # the pre-sidecar behaviour of matching nothing.
+        try:
+            live = provider_pids.get(pid)
+            if live is None or live[0] != provider:
+                continue
+            # The sidecar is always written just after its process spawns, so
+            # only a forward offset is physically meaningful; observed values
+            # are +1.1s to +1.6s. Allowing an equal backward window would
+            # double the accidental-match surface for nothing.
+            delta = started - live[1]
+            if delta < -_SIDECAR_BACKWARD_SKEW_S or delta > _SIDECAR_SKEW_S:
+                continue
+            key = (provider, sid)
+            live_sids.add(key)
+            if status:
+                sid_status[key] = status
+            if reason:
+                sid_reason[key] = reason
+            if not cwd and provider == "kiro-cli":
+                cwd = _kiro_session_cwd(sid)
+            if cwd:
+                norm = _normalize_path(cwd)
+                sid_to_cwd[key] = norm
+                live_cwds.add((provider, norm))
+        except Exception:  # pragma: no cover - defensive per-record guard
+            log.exception("sidecar record rejected: provider=%s sid=%r", provider, sid)
+            continue
+
+    return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason)
 
 
 def get_snapshot(force: bool = False) -> Snapshot:
