@@ -125,6 +125,36 @@ def _age_seconds(iso_str: str) -> float | None:
     return (datetime.now(timezone.utc) - dt).total_seconds()
 
 
+# claude-code reports why a session is blocked, which separates "the agent is
+# stuck behind an approval you have to grant" from "the agent asked you a
+# question". The raw strings come from the provider; the categories are ours.
+# An unmapped value is shown verbatim rather than dropped, so a new reason
+# degrades to a slightly clumsy tooltip instead of a silent regression.
+_WAITING_REASONS = {
+    "permission prompt": ("approval", "needs your approval"),
+    "sandbox request": ("approval", "needs your approval for a sandbox request"),
+    "worker request": ("approval", "needs your approval for a worker request"),
+    "input needed": ("question", "asked you a question"),
+    "dialog open": ("other", "has a dialog open"),
+}
+
+
+def _waiting_detail(snapshot, session, provider: str, status: str) -> tuple[str, str]:
+    """Return (category, human phrase) for a waiting session, else ("", "").
+
+    Only claude-code reports this; kiro-cli's lock file carries no such field.
+    """
+    if status != "waiting":
+        return "", ""
+    reason = snapshot.waiting_reason(provider, session.session_id)
+    if not reason:
+        return "", ""
+    known = _WAITING_REASONS.get(reason)
+    if known:
+        return known
+    return "other", reason
+
+
 def _session_status(snapshot, session, provider: str,
                     notifications_enabled: bool = False, *,
                     notify: bool = True) -> str:
@@ -846,7 +876,8 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
             provider_color=_get_provider_color(prov_name, config),
             show_workspace=True,
             workspace_name=Path(session.cwd).name if session.cwd else "",
-            status=row_status.get((session.session_id, prov_name), "closed"),
+            status=(_rs := row_status.get((session.session_id, prov_name), "closed")),
+            waiting_detail=_waiting_detail(snap, session, prov_name, _rs),
         )
     if pinned_items and non_pinned:
         html += '<div class="pinned-separator" aria-hidden="true"></div>'
@@ -869,7 +900,8 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
                     provider_color=_get_provider_color(prov_name, config),
                     show_workspace=True,
                     workspace_name=Path(session.cwd).name if session.cwd else "",
-                    status=row_status.get((session.session_id, prov_name), "closed"),
+                    status=(_rs := row_status.get((session.session_id, prov_name), "closed")),
+                    waiting_detail=_waiting_detail(snap, session, prov_name, _rs),
                 )
 
     if not html:
@@ -1448,6 +1480,7 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
             provider_name=prov_name,
             provider_color=_get_provider_color(prov_name, config),
             status=sess_status,
+            waiting_detail=_waiting_detail(snap, session, prov_name, sess_status),
         )
     if not html:
         return HTMLResponse('<div class="new-session-inline">No matching sessions</div>')

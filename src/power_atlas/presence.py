@@ -195,13 +195,14 @@ def _epoch_from_iso(value: str) -> float | None:
     return dt.timestamp()
 
 
-def _sidecar_records() -> list[tuple[str, int, str, float, str, str]]:
-    """Collect (provider, pid, session_id, started_epoch, cwd, status).
+def _sidecar_records() -> list[tuple[str, int, str, float, str, str, str]]:
+    """Collect (provider, pid, session_id, started_epoch, cwd, status, reason).
 
-    ``cwd`` and ``status`` are best-effort and may be empty. No liveness
-    filtering happens here — the caller validates against the process table.
+    ``cwd``, ``status`` and ``reason`` are best-effort and may be empty. No
+    liveness filtering happens here — the caller validates against the
+    process table.
     """
-    out: list[tuple[str, int, str, float, str, str]] = []
+    out: list[tuple[str, int, str, float, str, str, str]] = []
 
     for lock, st in _list_sidecars(_KIRO_LOCK_DIR, ".lock"):
         data = _load_json_cached(Path(lock), st)
@@ -213,7 +214,7 @@ def _sidecar_records() -> list[tuple[str, int, str, float, str, str]]:
             continue
         # cwd lives in the sibling metadata; only worth reading for a
         # candidate, which the caller has not filtered yet — defer it.
-        out.append(("kiro-cli", pid, Path(lock).stem, started, "", ""))
+        out.append(("kiro-cli", pid, Path(lock).stem, started, "", "", ""))
 
     for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json", cache_listing=False):
         data = _load_json_cached(Path(meta), st)
@@ -227,9 +228,11 @@ def _sidecar_records() -> list[tuple[str, int, str, float, str, str]]:
             continue
         if not isinstance(started_ms, (int, float)) or isinstance(started_ms, bool):
             continue
+        reason = data.get("waitingFor")
         out.append(("claude-code", pid, sid, started_ms / 1000.0,
                     cwd if isinstance(cwd, str) else "",
-                    str(data.get("status") or "")))
+                    str(data.get("status") or ""),
+                    reason if isinstance(reason, str) else ""))
 
     return out
 
@@ -250,7 +253,8 @@ class Snapshot:
 
     def __init__(self, live_sids: set[tuple[str, str]], live_cwds: set[tuple[str, str]],
                  sid_to_cwd: dict[tuple[str, str], str] | None = None,
-                 sid_status: dict[tuple[str, str], str] | None = None):
+                 sid_status: dict[tuple[str, str], str] | None = None,
+                 sid_reason: dict[tuple[str, str], str] | None = None):
         # live_sids: {(provider, session_id)}
         # live_cwds: {(provider, normalized_cwd)}
         self._live_sids = live_sids
@@ -261,10 +265,19 @@ class Snapshot:
         # Currently only claude-code reports one ("busy"/"idle"). Exposed for
         # callers; no display path consumes it yet.
         self._sid_status = sid_status or {}
+        # sid_reason: {(provider, session_id) -> why the session is waiting}
+        self._sid_reason = sid_reason or {}
 
     def reported_status(self, provider: str, session_id: str) -> str:
         """Provider-reported live status, or "" when the provider offers none."""
         return self._sid_status.get((provider, session_id), "")
+
+    def waiting_reason(self, provider: str, session_id: str) -> str:
+        """Why a waiting session is blocked, as the provider describes it.
+
+        Only meaningful alongside a reported status of "waiting"; "" otherwise.
+        """
+        return self._sid_reason.get((provider, session_id), "")
 
     def is_live(self, provider: str, cwd: str, session_id: str) -> bool:
         """True if this exact session is running (id matched on a process cmdline)."""
@@ -375,6 +388,7 @@ def _scan() -> Snapshot:
     live_cwds: set[tuple[str, str]] = set()
     sid_to_cwd: dict[tuple[str, str], str] = {}
     sid_status: dict[tuple[str, str], str] = {}
+    sid_reason: dict[tuple[str, str], str] = {}
     # pid -> (provider, create_time) for live provider processes only. A
     # sidecar is trusted only against one of these, which is both the cheap
     # guard and the strong one: a recycled pid almost always lands on some
@@ -433,7 +447,7 @@ def _scan() -> Snapshot:
     except Exception:  # pragma: no cover - sidecars are best-effort
         log.exception("sidecar enumeration failed")
         records = []
-    for provider, pid, sid, started, cwd, status in records:
+    for provider, pid, sid, started, cwd, status, reason in records:
         # Per-record isolation: one unparseable or oddly-typed sidecar must
         # not drop the remaining sessions, which would silently regress to
         # the pre-sidecar behaviour of matching nothing.
@@ -452,6 +466,8 @@ def _scan() -> Snapshot:
             live_sids.add(key)
             if status:
                 sid_status[key] = status
+            if reason:
+                sid_reason[key] = reason
             if not cwd and provider == "kiro-cli":
                 cwd = _kiro_session_cwd(sid)
             if cwd:
@@ -462,7 +478,7 @@ def _scan() -> Snapshot:
             log.exception("sidecar record rejected: provider=%s sid=%r", provider, sid)
             continue
 
-    return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status)
+    return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason)
 
 
 def get_snapshot(force: bool = False) -> Snapshot:

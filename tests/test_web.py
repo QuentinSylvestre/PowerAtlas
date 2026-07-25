@@ -3986,3 +3986,63 @@ def test_session_status_report_never_revives_a_closed_session(mock_semantic):
     s = _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())
     mock_semantic.return_value = None
     assert _session_status(snap, s, "claude-code") == "closed"
+
+
+# --- Waiting reason: blocked-on-approval vs asked-a-question ---
+
+def _snap_waiting(reason, status="waiting"):
+    return presence.Snapshot(
+        set(), set(), {},
+        {("claude-code", "s1"): status},
+        {("claude-code", "s1"): reason},
+    )
+
+
+def test_waiting_detail_separates_approval_from_question():
+    from power_atlas.web import _waiting_detail
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    approval = ["permission prompt", "sandbox request", "worker request"]
+    for r in approval:
+        cat, phrase = _waiting_detail(_snap_waiting(r), s, "claude-code", "waiting")
+        assert cat == "approval", r
+        assert "approval" in phrase, r
+    cat, phrase = _waiting_detail(_snap_waiting("input needed"), s, "claude-code", "waiting")
+    assert (cat, phrase) == ("question", "asked you a question")
+
+
+def test_waiting_detail_passes_through_an_unmapped_reason():
+    """A new provider value must surface, not vanish."""
+    from power_atlas.web import _waiting_detail
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    assert _waiting_detail(_snap_waiting("some new thing"), s, "claude-code", "waiting") \
+        == ("other", "some new thing")
+
+
+def test_waiting_detail_only_applies_to_waiting_sessions():
+    from power_atlas.web import _waiting_detail
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    snap = _snap_waiting("permission prompt", status="busy")
+    assert _waiting_detail(snap, s, "claude-code", "working") == ("", "")
+    # kiro-cli reports no reason at all; must not raise or invent one.
+    bare = presence.Snapshot(set(), set(), {}, {}, {})
+    assert _waiting_detail(bare, s, "kiro-cli", "waiting") == ("", "")
+
+
+def test_session_row_renders_the_waiting_reason():
+    from power_atlas.web import templates
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    tpl = templates.get_template("partials/session_row.html")
+
+    html = tpl.render(request=None, session=s, cwd="/w", stale=False,
+                      pinned_sessions=[], provider_name="claude-code",
+                      provider_color="", status="waiting",
+                      waiting_detail=("approval", "needs your approval"))
+    assert 'title="Waiting — needs your approval"' in html
+    assert 'data-waiting="approval"' in html
+
+    # Absent detail (kiro-cli, or an older snapshot) keeps the original text.
+    plain = tpl.render(request=None, session=s, cwd="/w", stale=False,
+                       pinned_sessions=[], provider_name="kiro-cli",
+                       provider_color="", status="waiting")
+    assert 'title="Waiting — needs your input"' in plain
+    assert "data-waiting" not in plain

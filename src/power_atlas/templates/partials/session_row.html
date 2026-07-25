@@ -2,7 +2,7 @@
   <div class="session-check"></div>
   <div class="session-content" onmouseenter="loadTail(this)" onmouseleave="hideTail(this)">
     <div class="session-title-row">
-      {% if status == 'working' %}<span class="session-status status-working" title="Working — agent is executing" aria-label="Working"></span>{% elif status == 'waiting' %}<span class="session-status status-waiting" title="Waiting — needs your input" aria-label="Waiting"></span>{% elif status == 'errored' %}<span class="session-status status-errored" title="Errored — something went wrong" aria-label="Errored"></span>{% endif %}
+      {% if status == 'working' %}<span class="session-status status-working" title="Working — agent is executing" aria-label="Working"></span>{% elif status == 'waiting' %}{% set wd = waiting_detail|default(('', '')) %}<span class="session-status status-waiting{% if wd[0] %} waiting-{{ wd[0] }}{% endif %}"{% if wd[0] %} data-waiting="{{ wd[0] }}"{% endif %} title="Waiting — {{ wd[1] or 'needs your input' }}" aria-label="Waiting — {{ wd[1] or 'needs your input' }}"></span>{% elif status == 'errored' %}<span class="session-status status-errored" title="Errored — something went wrong" aria-label="Errored"></span>{% endif %}
       {% if session.session_id in pinned_sessions %}<span class="pinned-indicator" title="Pinned">📌</span>{% endif %}
       <span class="session-title">{{ session.title or 'untitled' }}</span>
       <span class="session-time">{{ session.updated_at[5:16] | replace('T', ' ') if session.updated_at else '' }}</span>
