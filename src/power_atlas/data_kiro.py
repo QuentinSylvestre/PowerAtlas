@@ -41,6 +41,87 @@ def is_available() -> bool:
     return SESSION_DIR.is_dir()
 
 
+# --- Session metadata index -------------------------------------------------
+# kiro-cli stores every session flat in one directory, so a naive
+# "glob everything, keep what matches this cwd" costs a full parse of the
+# store per workspace: with 5.6k sessions and 58 workspaces that is ~330k
+# reads and 60s to enumerate them all, and ~1s every time a workspace card is
+# opened for the first time. The parse is cached per file, and the
+# cwd -> files grouping is cached against the directory's own mtime, which
+# changes when a session is created or removed. A session's cwd is fixed at
+# creation, so a rewrite of an existing metadata file cannot invalidate the
+# grouping — only its contents, which load_sessions re-reads for the handful
+# of files in the requested workspace.
+_META_MAX_BYTES = 1_048_576
+
+_meta_cache: dict[str, tuple[float, int, dict | None]] = {}
+_cwd_index: dict[str, list[str]] = {}
+_cwd_index_mtime: float | None = None
+
+
+def _load_meta(path: str, st: os.stat_result) -> dict | None:
+    """Parse a session metadata file, reusing the last parse while it holds."""
+    hit = _meta_cache.get(path)
+    if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size:
+        return hit[2]
+    data: dict | None = None
+    if st.st_size <= _META_MAX_BYTES:
+        try:
+            loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+    _meta_cache[path] = (st.st_mtime, st.st_size, data)
+    return data
+
+
+def _iter_meta_files():
+    """Yield (path, stat) for session metadata files, newest listing wins."""
+    try:
+        with os.scandir(SESSION_DIR) as it:
+            for entry in it:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    if entry.is_file():
+                        yield entry.path, entry.stat()
+                except OSError:
+                    continue
+    except OSError:
+        return
+
+
+def _cwd_to_files() -> dict[str, list[str]]:
+    """Map normalized cwd -> metadata file paths, excluding sub-agent sessions."""
+    global _cwd_index, _cwd_index_mtime
+    try:
+        dir_mtime = SESSION_DIR.stat().st_mtime
+    except OSError:
+        return {}
+    if _cwd_index_mtime == dir_mtime and _cwd_index:
+        return _cwd_index
+
+    index: dict[str, list[str]] = {}
+    live: set[str] = set()
+    for path, st in _iter_meta_files():
+        live.add(path)
+        data = _load_meta(path, st)
+        if not data or data.get("parent_session_id"):
+            continue
+        cwd = data.get("cwd", "")
+        if not cwd:
+            continue
+        index.setdefault(_normalize_path(cwd), []).append(path)
+
+    for gone in _meta_cache.keys() - live:
+        _meta_cache.pop(gone, None)
+
+    _cwd_index = index
+    _cwd_index_mtime = dir_mtime
+    return index
+
+
 def discover_workspaces() -> list[tuple[str, int, str]]:
     """Discover workspaces from session metadata + sqlite.
 
@@ -51,16 +132,9 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
     display: dict[str, str] = {}  # norm_key -> original cwd (first seen)
 
     if SESSION_DIR.is_dir():
-        for meta_file in SESSION_DIR.glob("*.json"):
-            if meta_file.suffix == ".jsonl":
-                continue
-            try:
-                if meta_file.stat().st_size > 1_048_576:
-                    continue
-                d = json.loads(meta_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if d.get("parent_session_id"):
+        for meta_path, st in _iter_meta_files():
+            d = _load_meta(meta_path, st)
+            if not d or d.get("parent_session_id"):
                 continue
             cwd = d.get("cwd", "")
             if not cwd:
@@ -100,17 +174,17 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
         return sessions, file_stats
 
     target = _normalize_path(cwd)
-    for meta_file in SESSION_DIR.glob("*.json"):
-        if meta_file.suffix == ".jsonl":
-            continue
+    # Only the files already known to belong to this workspace are touched;
+    # they are re-stat'd because an active session rewrites its metadata
+    # (updated_at) without changing which workspace it belongs to.
+    for meta_path in _cwd_to_files().get(target, []):
+        meta_file = Path(meta_path)
         try:
             st = meta_file.stat()
-            if st.st_size > 1_048_576:
-                continue
-            data = json.loads(meta_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        except OSError:
             continue
-        if data.get("parent_session_id"):
+        data = _load_meta(meta_path, st)
+        if not data or data.get("parent_session_id"):
             continue
         if _normalize_path(data.get("cwd", "")) != target:
             continue

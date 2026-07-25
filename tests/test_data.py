@@ -1833,3 +1833,60 @@ def test_read_tail_lines_discards_partial_first_line(tmp_path):
     p.write_text('{"first":"' + "y" * 500 + '"}\n{"second":2}\n', encoding="utf-8")
     lines = _read_tail_lines(p, max_bytes=64)
     assert lines == ['{"second":2}']
+
+
+# --- kiro-cli metadata index (data_kiro.py) ---
+#
+# Sessions live flat in one directory, so filtering per workspace used to
+# parse the whole store for every workspace opened.
+
+def _kiro_meta(dirpath, sid, cwd, updated, parent=None):
+    body = {"session_id": sid, "cwd": cwd, "title": f"t-{sid}",
+            "created_at": updated, "updated_at": updated}
+    if parent:
+        body["parent_session_id"] = parent
+    (dirpath / f"{sid}.json").write_text(json.dumps(body), encoding="utf-8")
+    (dirpath / f"{sid}.jsonl").write_text("", encoding="utf-8")
+
+
+def _fresh_kiro(tmp_path):
+    from power_atlas import data_kiro
+    data_kiro._meta_cache.clear()
+    data_kiro._cwd_index = {}
+    data_kiro._cwd_index_mtime = None
+    return patch.object(data_kiro, "SESSION_DIR", tmp_path)
+
+
+def test_kiro_load_sessions_filters_by_cwd_and_skips_subagents(tmp_path):
+    from power_atlas import data_kiro
+    _kiro_meta(tmp_path, "a", "C:/one", "2026-01-01T00:00:00Z")
+    _kiro_meta(tmp_path, "b", "C:/two", "2026-01-02T00:00:00Z")
+    _kiro_meta(tmp_path, "c", "C:/one", "2026-01-03T00:00:00Z", parent="a")
+    with _fresh_kiro(tmp_path):
+        sessions, stats = data_kiro.load_sessions("C:/one")
+    assert [s.session_id for s in sessions] == ["a"], "wrong cwd or subagent leaked"
+    assert len(stats) >= 1
+
+
+def test_kiro_index_picks_up_a_newly_created_session(tmp_path):
+    """A new session adds a file, which bumps the directory mtime."""
+    from power_atlas import data_kiro
+    _kiro_meta(tmp_path, "a", "C:/one", "2026-01-01T00:00:00Z")
+    with _fresh_kiro(tmp_path):
+        first, _ = data_kiro.load_sessions("C:/one")
+        assert [s.session_id for s in first] == ["a"]
+        _kiro_meta(tmp_path, "b", "C:/one", "2026-01-04T00:00:00Z")
+        second, _ = data_kiro.load_sessions("C:/one")
+    assert sorted(s.session_id for s in second) == ["a", "b"]
+
+
+def test_kiro_load_sessions_sees_rewritten_metadata(tmp_path):
+    """An active session rewrites updated_at without the directory changing."""
+    from power_atlas import data_kiro
+    _kiro_meta(tmp_path, "a", "C:/one", "2026-01-01T00:00:00Z")
+    with _fresh_kiro(tmp_path):
+        first, _ = data_kiro.load_sessions("C:/one")
+        assert first[0].updated_at == "2026-01-01T00:00:00Z"
+        _kiro_meta(tmp_path, "a", "C:/one", "2026-06-06T00:00:00Z")
+        second, _ = data_kiro.load_sessions("C:/one")
+    assert second[0].updated_at == "2026-06-06T00:00:00Z", "stale metadata served"
