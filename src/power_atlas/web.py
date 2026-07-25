@@ -169,8 +169,26 @@ def _session_status(snapshot, session, provider: str,
             # No JSONL file found — can't classify, treat as closed
             has_process = False
 
+    # 4. Prefer the provider's own report over inference, where it is
+    #    unambiguous. claude-code writes its live state to
+    #    ~/.claude/sessions/<pid>.json; presence validates that file against
+    #    the process before exposing it. Its four values map as:
+    #      busy    - a turn is running        -> working
+    #      shell   - a shell command is running -> working
+    #      waiting - a dialog needs the human -> waiting
+    #      idle    - none of the above        -> ambiguous, defer
+    #    "idle" is deliberately not treated as "waiting": it covers finished,
+    #    errored and never-started alike, so only the classifier can say which
+    #    — and it is the sole source of "errored". The provider report can
+    #    therefore only ever settle a state, never downgrade a richer verdict.
+    reported = snapshot.reported_status(provider, session.session_id)
+
     if not is_explicitly_live and not has_process:
         status_value = "closed"
+    elif reported in ("busy", "shell"):
+        status_value = "working"
+    elif reported == "waiting":
+        status_value = "waiting"
     elif (semantic := get_semantic_status(session.session_id, provider, session.cwd)) is not None:
         status_value = semantic.value
     else:

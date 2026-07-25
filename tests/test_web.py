@@ -3905,3 +3905,84 @@ class TestApiSessionStatus:
         assert resp.status_code == 200
         body = resp.json()
         assert body == {"sessions": {}, "workspaces": {}, "active_cwds": []}
+
+
+def _snapshot_with_status(live_sids=(), sid_status=None):
+    return presence.Snapshot(set(live_sids), set(), {}, sid_status or {})
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_prefers_provider_report_for_working(mock_semantic):
+    """claude-code declaring a running turn beats an inferred verdict.
+
+    The classifier reads the transcript tail, which lags an in-flight turn
+    that has not flushed yet.
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    for reported in ("busy", "shell"):
+        snap = _snapshot_with_status(
+            live_sids={("claude-code", "s1")},
+            sid_status={("claude-code", "s1"): reported},
+        )
+        mock_semantic.return_value = SemanticStatus.WAITING
+        assert _session_status(snap, s, "claude-code") == "working", reported
+        # The classifier must not even be consulted for an unambiguous report.
+        mock_semantic.return_value = None
+        assert _session_status(snap, s, "claude-code") == "working", reported
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_reports_waiting_from_provider(mock_semantic):
+    """"waiting" means a dialog is open and needs the human."""
+    snap = _snapshot_with_status(
+        live_sids={("claude-code", "s1")},
+        sid_status={("claude-code", "s1"): "waiting"},
+    )
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = None
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_idle_does_not_erase_errored(mock_semantic):
+    """"idle" only rules out working — it must never overwrite a richer verdict.
+
+    idle covers finished, errored and never-started alike, and the classifier
+    is the only source of "errored".
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    snap = _snapshot_with_status(
+        live_sids={("claude-code", "s1")},
+        sid_status={("claude-code", "s1"): "idle"},
+    )
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = SemanticStatus.ERRORED
+    assert _session_status(snap, s, "claude-code") == "errored"
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_unknown_report_falls_through(mock_semantic):
+    """An unrecognised value must degrade to today's behaviour, not break it.
+
+    The field is undocumented internal state in a frequently-updated binary.
+    """
+    from power_atlas.status_classifier import SemanticStatus
+    snap = _snapshot_with_status(
+        live_sids={("claude-code", "s1")},
+        sid_status={("claude-code", "s1"): "some-future-value"},
+    )
+    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = SemanticStatus.WAITING
+    assert _session_status(snap, s, "claude-code") == "waiting"
+
+
+@patch("power_atlas.web.get_semantic_status")
+def test_session_status_report_never_revives_a_closed_session(mock_semantic):
+    """A stale report must not make a dead session look alive."""
+    snap = _snapshot_with_status(sid_status={("claude-code", "s9"): "busy"})
+    s = _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())
+    mock_semantic.return_value = None
+    assert _session_status(snap, s, "claude-code") == "closed"
