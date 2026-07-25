@@ -76,8 +76,11 @@ work against a known-good substrate rather than an unexplored one.
 
 **Explicit non-goals**
 
-- **Tests.** Prototype only, to be rebuilt. This waives `AGENTS.md:8`; see the proposed
-  durable amendment below.
+- **Tests — for the ACP prototype only.** Phases 3-6 ship untested; they are throwaway.
+  **Phase 2 is explicitly excluded from the waiver**: it fixes shipped code that outlives the
+  prototype, and `AGENTS.md:8` already permits a regression test for a bug fix. It gets one. The
+  waiver therefore never needs to stretch to cover it, and the proposed durable amendment below
+  stays scoped to throwaway work exactly as drafted.
 - **Linux.** Windows only for this prototype.
 - **Claude Code.** Its ACP path requires the `@zed-industries/claude-code-acp` npm bridge — a
   separate bootstrap — despite the roadmap item naming both providers.
@@ -235,7 +238,9 @@ unrelated defects found while exploring.
 | Reconnect behaviour | Bounded per-session in-memory event log, replayed on connect | Rebuild from `<sid>.jsonl`; live events only | The only option that makes server-side session lifetime pay off. The transcript is lossier than the wire format and is being concurrently written. (Q8) |
 | Tests | None | New `tests/test_acp.py`; fold into `test_web.py`; split by layer | User decision — prototype to be rebuilt. Waives `AGENTS.md:8`; durable amendment proposed in Intent. (Q9) |
 | Footprint outside the ACP module | Minimal — no config keys, agent/model/effort hardcoded | Add config keys for agent/model/effort | Throwaway. Config is cheap to add later if tuning turns out to need edit-restart cycles. (Q10) |
-| ACP teardown hook | In the existing `lifespan` cleanup (`web.py:381-389`) | Modify `__main__.py`'s shutdown sequence | Keeps `__main__.py` untouched, consistent with the minimal-footprint decision. Uvicorn runs lifespan shutdown on `should_exit` before the 5 s join at `__main__.py:309`. |
+| ACP teardown | Windows Job Object (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) as the guarantee; `lifespan` tree-kill as a fast path | `lifespan` alone; pid-file + startup reaper; narrow SC 7 to the tray path | `lifespan` teardown was *measured* working on the tray route (t+0.13 s idle, t+0.21 s with a live socket) but is structurally unreachable from `--stop`/`--restart`, which `TerminateProcess` at `__main__.py:90` — and `memory/MEMORY.md:94-98` says those are the paths dev iteration uses most. The job also covers crashes and Task Manager. `pywin32` is already a Windows dependency; `win32job` verified available. With tests waived, an OS guarantee beats code that has to run. |
+| WebSocket authentication | Per-process token (`secrets.token_urlsafe(32)`) plus the origin check | Origin check alone | Origin stops a browser; it does nothing against a local process, which under `-a` means arbitrary command execution. The "already unauthenticated" counter-argument does not hold — existing surfaces open a folder or run a user-saved launcher, not agent-driven arbitrary commands. Residual risk (token readable via `GET /acp`) recorded rather than hidden. |
+| Test scope | ACP phases untested; **Phase 2 tested** | Waive tests for everything in the plan | The waiver is scoped to throwaway work by its own wording. Phase 2 fixes shipped code that survives the prototype, and `AGENTS.md:8` explicitly permits a regression test for a bug fix — so the exemption never needs to stretch, and the amendment stays narrow. |
 | ACP process cwd | Neutral directory (not a workspace) | The session's workspace | One process serves N workspaces, so its cwd cannot be meaningful. A neutral cwd stops it lighting up a real workspace in `presence`'s process scan. Session cwd is recovered from `<sid>.json` regardless (`presence.py:471-476`). |
 | Provider scope | kiro-cli only | kiro-cli + Claude Code | Claude Code's ACP path needs the `@zed-industries/claude-code-acp` npm bridge — a separate bootstrap. Surfaced as an assumption at the exploration checkpoint; un-vetoed. |
 | Platform scope | Windows only | Windows + Linux | User decision at the exploration checkpoint. `kiro-cli acp` on Linux is unverified. |
@@ -325,7 +330,7 @@ disagreement is itself an argument for symbol anchors.
 
 **Goal**: `/search` with both `q` and a status filter returns cards instead of a 500.
 
-**File scope**: `src/power_atlas/web.py`, `plans/tests/260701_POWERATLAS.md`
+**File scope**: `src/power_atlas/web.py`, `tests/test_web.py`, `plans/tests/260701_POWERATLAS.md`
 
 Delete the surplus argument at `web.py:989`:
 
@@ -341,6 +346,13 @@ grouped = [g for g in grouped if _status_matches(
 
 This matches the two correct call sites at `web.py:722` and `:754`. No signature change.
 
+**This phase gets a regression test** — it is outside the prototype waiver, which covers throwaway
+work only. `AGENTS.md:8` permits a new test for "a regression bug fix", and no new *file* is needed:
+`tests/test_web.py:2721`'s `test_search_with_tag_filter` is the exact template — same shape, with
+`tag=` swapped for `status=`. Five of the file's `/search` tests exist (`:113`, `:126`, `:2700`,
+`:2721`, plus `:1706` for the sessions variant) and none passes `status=`, which is why the bug
+reached production.
+
 **Why the test-plan probe gap matters here**: `plans/tests/260701_POWERATLAS.md:243-248` is the
 brief for this exact endpoint (§2.14 Search) and its probe list — *"query matching a folder name;
 no match…; rapid typing (debounce)"* — **never combines search with a status filter**. That
@@ -352,6 +364,10 @@ test corpus and costs one line.
 - [ ] `GET /search?q=<term>` (no status) behaves exactly as before
 - [ ] Manual: type in the search box with each of Working / Waiting / Errored selected; no error
       text appears in `#workspace-cards`
+- [ ] Regression test added to `tests/test_web.py` asserting `GET /search?q=…&status=working`
+      returns 200 — modelled on `test_search_with_tag_filter` (`:2721`), no new file
+- [ ] The new test fails against the pre-fix code and passes after (confirm by stashing the fix)
+- [ ] Full suite still green — 611 tests currently pass
 - [ ] The four Intent invariants for this fix all hold
 - [ ] `plans/tests/260701_POWERATLAS.md` §2.14 probe list extended with a search + status-filter
       combination
@@ -458,7 +474,36 @@ New module `acp.py` provides:
           self._loop.call_soon_threadsafe(self._dispatch, msg)
   ```
 
-- **Tree-kill teardown** — `psutil` is already a dependency and already used at `presence.py:403`:
+- **Windows Job Object — the primary teardown guarantee.** Assign the child to a job with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` at spawn. Windows then destroys the whole tree whenever the
+  last job handle closes — which happens on *any* PowerAtlas death: tray quit, the `TerminateProcess`
+  used by `--stop`/`--restart` (`__main__.py:90`), an unhandled crash, or Task Manager. `pywin32` is
+  already a Windows dependency and `win32job` was verified available with both
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and `AssignProcessToJobObject`.
+
+  ```python
+  def _spawn(self) -> None:
+      self._job = win32job.CreateJobObject(None, "")       # unnamed, not inheritable
+      info = win32job.QueryInformationJobObject(
+          self._job, win32job.JobObjectExtendedLimitInformation)
+      info["BasicLimitInformation"]["LimitFlags"] |= (
+          win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+      win32job.SetInformationJobObject(
+          self._job, win32job.JobObjectExtendedLimitInformation, info)
+
+      self._proc = subprocess.Popen([...], ...)
+      handle = win32api.OpenProcess(
+          win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, self._proc.pid)
+      win32job.AssignProcessToJobObject(self._job, handle)
+      # self._job must stay referenced for the process lifetime — if it is
+      # garbage-collected the handle closes and the OS kills the agent.
+  ```
+
+  This demotes the explicit `shutdown()` below from *the* correctness mechanism to a fast path:
+  it makes teardown prompt on the tray route, while the job makes it *certain* on every route.
+  Given tests are waived, preferring an OS guarantee over code that has to run is the right trade.
+
+- **Tree-kill teardown** (fast path) — `psutil` is already a dependency and already used at `presence.py:403`:
 
   ```python
   def shutdown(self) -> None:
@@ -484,7 +529,13 @@ In `web.py`: a `GET /acp` route rendering `acp.html` (extending `base.html`, whi
 in `style.css` and `htmx.min.js`); a `@app.websocket("/ws/acp")` route whose **first action** is
 the origin check, reusing the existing `_ALLOWED_HOSTS` frozenset at `web.py:412`:
 
+The WS route requires **two** checks, in order: a per-process token, then the origin.
+
 ```python
+# Per-process, never persisted, regenerated every launch.
+_ACP_TOKEN = secrets.token_urlsafe(32)
+
+
 def _ws_origin_ok(ws: WebSocket) -> bool:
     """Mandatory first line of every WebSocket route.
 
@@ -507,14 +558,32 @@ def _ws_origin_ok(ws: WebSocket) -> bool:
 
 @app.websocket("/ws/acp")
 async def ws_acp(ws: WebSocket) -> None:
-    if not _ws_origin_ok(ws):
+    if not secrets.compare_digest(ws.query_params.get("t", ""), _ACP_TOKEN):
         await ws.close(code=1008)   # uvicorn converts a pre-accept close
         return                      # into an HTTP 403 handshake rejection
+    if not _ws_origin_ok(ws):
+        await ws.close(code=1008)
+        return
     await ws.accept()
 ```
 
-Extracted rather than inlined so the rule exists in one place — it now lives in two (`web.py:415-438`
-for HTTP, this for WS), and a future `@app.websocket` route could otherwise ship without it.
+`_ws_origin_ok` is extracted rather than inlined so the rule exists in one place — it now lives in
+two (`web.py:415-438` for HTTP, this for WS), and a future `@app.websocket` route could otherwise
+ship without it.
+
+**Why a token on top of the origin check.** Origin stops a web page; it does nothing against a local
+non-browser process, which can send any header it likes. Under `-a` that means arbitrary command
+execution in whatever directory a session was created against. The counter-argument — that
+unauthenticated local access already exists here — is true but not equivalent: `web.py:467-489`
+opens a folder in a file explorer, and `custom_launchers` runs commands the user saved themselves.
+Neither is agent-driven arbitrary execution. The token is `secrets.token_urlsafe(32)`, generated per
+launch, rendered into `acp.html`, compared with `compare_digest`.
+
+**Residual risk, stated rather than implied**: the token is delivered inside a page served over
+unauthenticated HTTP, so any local process that can fetch `GET /acp` can read it. This raises the
+bar from "connect blindly" to "scrape one page first"; it is not a boundary. Closing it properly
+means authenticating the page route too, which is out of scope here — recorded so the rebuild
+inherits the problem statement rather than the illusion of a fix.
 
 And ACP teardown appended to the existing `lifespan` cleanup after the `yield` (`web.py:381-389`).
 
@@ -527,8 +596,9 @@ And ACP teardown appended to the existing `lifespan` cleanup after the `yield` (
 - [ ] `GET /acp` renders; the page opens a WebSocket and reports connected
 - [ ] Clicking "new session" creates one; the returned `sessionId` is displayed
 - [ ] The new session's `<sid>.json`/`.jsonl`/`.lock` appear in `~/.kiro/sessions/cli/`
-- [ ] The handshake is **rejected with HTTP 403** for each of four cases: mismatched `Origin`,
-      absent `Origin`, `Origin: null`, and a mismatched `Host` with a matching `Origin`.
+- [ ] The handshake is **rejected with HTTP 403** for each of five cases: absent or wrong token,
+      mismatched `Origin`, absent `Origin`, `Origin: null`, and a mismatched `Host` with a
+      matching `Origin`.
       **Not** a 1008 close frame — a pre-`accept()` close is converted by uvicorn into a 403
       handshake rejection and the code is discarded (`websockets_impl.py:278-285`; confirmed by two
       reviewers running it, one observing `InvalidStatus: HTTP 403` with `.code is None`). An
@@ -536,10 +606,14 @@ And ACP teardown appended to the existing `lifespan` cleanup after the `yield` (
 - [ ] Probe written with `additional_headers=` (renamed from `extra_headers` in websockets 14)
 - [ ] Quitting PowerAtlas **from the tray** leaves no surviving `kiro-cli` process from this
       session — `Get-Process kiro-cli` before and after (expect parent + 5 gone)
-- [ ] `power-atlas --restart` and `power-atlas --stop` **also** leave none. These paths hard-kill via
-      `TerminateProcess` (`__main__.py:86-91`, reached from `:341`/`:346`) and never run `lifespan`,
-      so teardown alone does not cover them — and `memory/MEMORY.md:94-98` records that dev
-      iteration restarts PowerAtlas constantly, making this the *most*-used path during Phases 3-6
+- [ ] `power-atlas --restart` and `power-atlas --stop` **also** leave none — covered by the Job
+      Object, since these hard-kill via `TerminateProcess` (`__main__.py:86-91`, reached from
+      `:341`/`:346`) and never run `lifespan`. `memory/MEMORY.md:94-98` records that dev iteration
+      restarts PowerAtlas constantly, making this the most-used path during Phases 3-6
+- [ ] Killing PowerAtlas from Task Manager also leaves none — the case only the Job Object covers,
+      and the reason it was chosen over a pid-file reaper
+- [ ] The job handle is held for the process lifetime (not garbage-collected), verified by keeping
+      a session open across a several-minute idle period and confirming the agent survives
 - [ ] Spawning uses a neutral cwd, named explicitly as `CONFIG_DIR / "acp-cwd"` (created on demand)
       — **not** `Path.home()`, which is plausibly a real workspace and would be picked up by
       `presence.py`'s process scan, defeating the purpose
@@ -707,29 +781,29 @@ undelivered half.
 - [ ] Open items recorded: whether a graceful session close removes the `.lock`; whether
       `session/load` alone mutates the transcript; whether `session/new` latency is reliably ~5.8 s
 
-### Open items requiring a user decision before Phase 3
+### Review escalations — all resolved 2026-07-25
 
-Surfaced by the review cycle; each changes what gets built.
+The four decisions the review cycle raised, and how they landed. No open items remain.
 
-1. **Phase 2 regression test.** All three reviewers flagged it. `AGENTS.md:8` permits a new test for
-   "a regression bug fix"; the throwaway-prototype waiver does not cover Phase 2, which is permanent
-   code. `tests/test_web.py` already has four `/search` tests (`:120`, `:130`, `:2713`, `:2736`),
-   none passing `status=`. Options: (a) one test in the existing file, (b) widen the amendment to
-   cover incidental fixes, (c) knowing one-off violation.
-2. **SC 7 scope.** Teardown-in-`lifespan` is *proven* to work on the tray path (a reviewer
-   reproduced `__main__.py:246-320` and measured teardown at t+0.13 s idle, t+0.21 s with a live
-   WebSocket — well inside the 5 s join). It cannot cover `--stop`/`--restart`, which
-   `TerminateProcess` outright. Options: (a) Windows Job Object with
-   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — robust, kills the tree on any parent death; (b) write the
-   ACP pid to `CONFIG_DIR` and reap stale trees at next startup — simpler, leaks until next launch;
-   (c) narrow SC 7 to "quitting from the tray" and accept CLI-path orphans.
-3. **WebSocket authentication.** Origin is currently the only control, and any local non-browser
-   process can forge it. Options: (a) mint a per-process token, render it into `acp.html`, require
-   it as a WS query param; (b) accept, on the grounds that the local-process class is pre-existing —
-   `web.py:467-489` and the `custom_launchers` POST surface already reach `Popen` unauthenticated.
-4. **Effort.** Re-estimated 3-5 → 7-10 days, because `ROADMAP.md`'s own ~1 week covers only Phases 3
-   and 5. Options: (a) accept 7-10 days; (b) cut Phase 6's tool-call rendering and context telemetry
-   to stretch goals and keep the original window.
+1. **Phase 2 regression test — YES, one test in `tests/test_web.py`.** The prototype waiver applies
+   to the ACP work only; Phase 2 fixes shipped code that outlives it. No new file, no amendment
+   needed — `AGENTS.md:8` already permits a regression test for a bug fix, and
+   `test_search_with_tag_filter` (`:2721`) is the template.
+2. **SC 7 — Windows Job Object.** Teardown-in-`lifespan` was *proven* on the tray path (a reviewer
+   reproduced `__main__.py:246-320` and measured t+0.13 s idle, t+0.21 s with a live WebSocket) but
+   cannot cover `--stop`/`--restart`, which `TerminateProcess` outright. The job with
+   `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` covers every death route including crashes and Task Manager,
+   uses the already-present `pywin32`, and demotes the explicit teardown to a fast path. Chosen over
+   a pid-file reaper because an OS guarantee beats code that has to run — especially with tests
+   waived.
+3. **WebSocket authentication — per-process token, added.** Origin stops a web page but not a local
+   process, and under `-a` that gap is arbitrary command execution. Ten lines. Residual risk (the
+   token is readable by anything that can fetch `GET /acp`) is recorded in Phase 3 rather than
+   papered over.
+4. **Effort — accept 7-10 days; SC 5 and SC 6 kept.** Cutting Phase 6's tool-call rendering and
+   context-window telemetry would have meant dropping two success criteria, not trimming schedule.
+   Those two are also the features most specific to ACP — cutting them would save the least
+   informative days relative to the prototype's stated purpose.
 
 ## 6) Risk Assessment
 
@@ -748,15 +822,16 @@ Surfaced by the review cycle; each changes what gets built.
 | Re-numbered citations rot again (Phase 1) | The same fix needed in three months | Prefer symbol anchors over line numbers where the construct is stable |
 | **This plan invalidates its own Phase 1 output** — Phases 3-6 insert routes into `web.py`, shifting every line below them | Three `web.py` citations corrected in Phase 1 are stale again by Phase 3 | Symbol anchors mandated for `web.py` refs in Phase 1; re-enumeration criterion in Phase 6 as backstop |
 | Test-plan manifests silently under-describe the surface (`plans/tests/260701_POWERATLAS.md:150` enumerates 2.1–2.25 as the complete web surface) | A future `/qtest` run reports full coverage while omitting `/acp` and `/ws/acp` | §2 manifest, §2.16 (lifespan scope), §2.24 (session actions) updated in Phase 6 |
-| **`--stop` / `--restart` bypass `lifespan` entirely** — `TerminateProcess` at `__main__.py:86-91` — and dev iteration uses them constantly (`memory/MEMORY.md:94-98`) | Full 1+5N tree orphaned per restart cycle, repeatedly, during the phases that spawn most | Exit criterion in Phase 3 covers both CLI paths. If teardown-in-`lifespan` cannot cover them, the fallback is a Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, or writing the ACP pid to `CONFIG_DIR` and reaping stale trees at next startup — **user decision, see §5 open items** |
+| **`--stop` / `--restart` bypass `lifespan` entirely** — `TerminateProcess` at `__main__.py:86-91` — and dev iteration uses them constantly (`memory/MEMORY.md:94-98`) | Full 1+5N tree orphaned per restart cycle, repeatedly, during the phases that spawn most | **Resolved** — Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` kills the tree on every death route, including crashes and Task Manager. Exit criteria cover tray, `--stop`, `--restart`, and Task Manager |
+| Job handle garbage-collected while a session is live | The OS closes the last handle and kills the agent mid-turn | Supervisor holds the reference for its lifetime; exit criterion verifies survival across a multi-minute idle |
 | XSS via streamed agent output rendered with `innerHTML` | Script executes in the app's own origin and can drive `/ws/acp`, which with `-a` is full tool access | Explicit no-`innerHTML`-for-agent-output rule and exit criterion in Phase 4 |
 | Unanswered agent→client JSON-RPC request (`session/request_permission`, `fs/*`, `terminal/*`) | Turn hangs forever, indistinguishable from the ~5.8 s latency already expected | Catch-all error responder + per-request timeout in Phase 3; `clientCapabilities` declared explicitly |
 | Undrained `stderr` pipe deadlocks the child at ~64 KB | Agent hangs with no error surfaced anywhere | `stderr=subprocess.DEVNULL` in Phase 3 |
 | Unflushed `stdin` write is invisible to the agent | Presents as a hang with no error | Explicit flush-and-serialize rule in Phase 3 |
 | `/ws/acp` has no cap on connections, sessions, or message size | One accepted socket can drive the machine to memory exhaustion at ~306 MB/session | Cap sessions per supervisor and set a max WS message size in Phase 3 |
-| Origin is the only authentication; any local non-browser process can forge it | With `-a`, full tool access to any local process | Pre-existing class (`web.py:467-489` already reaches `Popen` from unauthenticated POSTs), but **worth a per-process token rendered into `acp.html` and required as a WS param — user decision, see §5 open items** |
+| Origin alone does not stop a local non-browser process | With `-a`, full tool access to any local process | **Resolved** — per-process token required on the WS handshake alongside the origin check. Residual: the token is readable by anything that can fetch `GET /acp`, which raises the bar without being a boundary; recorded in Phase 3 |
 | Credentials in cleartext reachable by the agent | `%LOCALAPPDATA%\power-atlas\config.toml` holds `AUTH_TOKEN_PRODUCTION`, `AUTH_TOKEN_STAGING`, `MQTT_CERT_PATH` under `[custom_launchers.env]`; one `fs/read` away from an `-a` session | Out of scope for this plan, but flagged: those tokens should move regardless of whether this ships |
-| Effort re-estimated 3-5 → 7-10 days | `ROADMAP.md`'s own ~1 week covers only Phases 3 and 5, leaving nothing for 4, 6, or the two fixes | Estimate revised in the header; alternative is cutting Phase 6 telemetry to stretch goals |
+| Effort re-estimated 3-5 → 7-10 days | `ROADMAP.md`'s own ~1 week covers only Phases 3 and 5, leaving nothing for 4, 6, or the two fixes | **Resolved** — 7-10 days accepted; SC 5 and SC 6 kept rather than cut, since dropping them would remove success criteria (not schedule) and would cut precisely the ACP-specific features the prototype exists to evaluate |
 
 ## 7) Verification
 
@@ -807,7 +882,8 @@ Derived by a doc-impact sub-agent over every tracked `*.md` outside `plans/done/
 
 Three personas in parallel: Architect (gap-critic lens), Security auditor, Senior engineer.
 **26 + 17 + 14 raw findings; 31 after dedupe** (10 High, 17 Medium, 4 Low). **27 auto-resolved**,
-4 escalated as user decisions (§5 open items). Confidence before fixes: 55% / 60% / 85%.
+4 escalated as user decisions — **all four resolved the same day** (see §5). Confidence before
+fixes: 55% / 60% / 85%.
 
 Two reviewers ran live probes rather than reading only — teardown timing, the origin snippet
 against a real server, and `websockets`+uvicorn compatibility were measured, not inferred.
@@ -815,7 +891,7 @@ against a real server, and `websockets`+uvicorn compatibility were measured, not
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
 | 1 | High | Origin check read its two halves from different sources, so a Host failing Starlette's `_HOST_RE` satisfied the loopback allowlist while matching an attacker's Origin | Fixed — both sides now derive from `ws.url`, extracted as `_ws_origin_ok` |
-| 2 | High | `--stop`/`--restart` hard-kill via `TerminateProcess`, never running `lifespan`, orphaning the full 1+5N tree on the path dev iteration uses most | Fixed (criterion) + Escalated — mitigation choice is §5 open item 2 |
+| 2 | High | `--stop`/`--restart` hard-kill via `TerminateProcess`, never running `lifespan`, orphaning the full 1+5N tree on the path dev iteration uses most | Fixed — Windows Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` as the guarantee; `lifespan` kill demoted to a fast path |
 | 3 | High | Browser↔server wire protocol and socket→session binding never specified; SC 3 unachievable and Phases 4-5 blocked | Fixed — envelope, message types, and `?sid=` identity specified in Phase 3 |
 | 4 | High | XSS unflagged: agent output streamed into `innerHTML` executes in-origin and can drive `/ws/acp`, which under `-a` is full tool access | Fixed — no-`innerHTML` rule, decision row, and Phase 4 exit criterion |
 | 5 | High | The `-a` rationale was factually wrong — `/acp` replaces the TUI where the permission gate actually lives, so `-a` removes the only gate rather than matching a default | Fixed — decision row rewritten on accurate grounds; choice unchanged |
@@ -827,7 +903,7 @@ against a real server, and `websockets`+uvicorn compatibility were measured, not
 | 11 | Medium | §1 table mapped `ROADMAP.md:52` to the kiro-cli branch; the construct it describes is the claude-code branch | Fixed — corrected to `status_classifier.py:118-122` |
 | 12 | Medium | Phase 3's "no workspace gains a live dot" contradicted Q7 — the sidecar path lights the real workspace for ≤120 s independently of process cwd | Fixed — split into two criteria separating the verifiable claim from the accepted one |
 | 13 | Medium | Phase 1 rewrites the two files Phase 6 then addresses by line number — the mirror of the hazard caught for `web.py` | Fixed — Phase 6 targets restated as quoted anchors, bottom-up application |
-| 14 | Medium | Phase 2 fixes shipped code with no regression test; the prototype waiver does not cover it | Escalated — §5 open item 1 |
+| 14 | Medium | Phase 2 fixes shipped code with no regression test; the prototype waiver does not cover it | Fixed — one test added to `tests/test_web.py`, modelled on `test_search_with_tag_filter`; waiver confirmed prototype-scoped |
 | 15 | Medium | Reader thread: loop capture, daemon flag, and exception handling all unstated; `call_soon_threadsafe` raises on a closed loop | Fixed — all three specified in Phase 3 |
 | 16 | Medium | Correlation table had no timeout and no agent-death path despite "health comes from the JSON-RPC channel" | Fixed — timeouts plus EOF rejection and an `agent_died` frame |
 | 17 | Medium | 3-5 day estimate contradicted the cited ~1 week, which covers only two of six phases | Fixed — revised to 7-10 days; alternative recorded as §5 open item 4 |
@@ -849,6 +925,20 @@ against a real server, and `websockets`+uvicorn compatibility were measured, not
 **Not accepted**: one reviewer suggested annotating Phases 3-6 with `[P:N]` for symmetry. Declined —
 `[P:1]`/`[P:2]` on Phases 1-2 already satisfies the symmetry rule (each partner names the other);
 Phases 3-6 are sequential and correctly carry no annotation.
+
+### 2026-07-25 — Escalation resolution
+
+The four items escalated above were resolved the same day; each strengthened the plan beyond the
+reviewers' recommendations. Two are worth noting as decisions rather than fixes:
+
+- **The Job Object was chosen over the pid-file reaper the reviewers offered as the simpler
+  option.** Both cover `--stop`/`--restart`; only the job covers crashes and Task Manager, and it
+  makes teardown an OS property rather than code that must execute — which matters more than usual
+  given tests are waived for the phases that spawn processes.
+- **The WS token was added even though "unauthenticated local access is pre-existing" is true.** It
+  is true but not equivalent: the existing surfaces open a folder or run a user-saved launcher,
+  whereas `/ws/acp` under `-a` is agent-driven arbitrary execution. The residual gap (the token
+  ships inside an unauthenticated page) is recorded in Phase 3 rather than presented as closed.
 
 **Contradiction reconciled**: the Architect and Senior engineer both executed the original origin
 snippet and reported it working, while the Security auditor called it bypassable. Both are correct
