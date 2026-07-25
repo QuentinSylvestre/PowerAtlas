@@ -80,6 +80,11 @@ def _resolve_jsonl_path(
 # Tail reader
 # ---------------------------------------------------------------------------
 
+# Ceiling for the widening retry in _read_tail_lines. Large enough to clear
+# any observed single transcript line by an order of magnitude, small enough
+# that one degenerate file cannot stall a dashboard refresh.
+_MAX_TAIL_BYTES = 2 * 1024 * 1024
+
 
 def _read_tail_lines(path: Path, max_bytes: int = 65536, file_size: int | None = None) -> list[str]:
     """Read the last *max_bytes* of a file and return complete lines.
@@ -91,40 +96,48 @@ def _read_tail_lines(path: Path, max_bytes: int = 65536, file_size: int | None =
     *file_size* may be passed to avoid a redundant stat when the caller
     already knows the file size.
 
-    ``max_bytes`` must exceed the largest single transcript line, or the
-    discard below consumes the whole read and no lines survive. Claude Code
-    lines reach 150 KB (p95 ~19 KB); at the previous 4096 default, 77% of
-    sampled transcripts yielded zero complete lines and classified as None.
-    Cost is unaffected in practice — the read is tail-bounded, so a 57 MB
-    transcript classifies in the same ~100 microseconds as a 64 KB one.
+    A window smaller than the file's final line yields nothing: the seek lands
+    mid-line and the partial-line discard below consumes the entire read. That
+    silently classifies the session as unknown, which ``web.py`` then renders
+    as "working" — the opposite of the truth for a session awaiting input.
+    Claude Code lines reach 150 KB, so no fixed window is safe; when a window
+    yields no complete line the read is retried wider rather than giving up.
+    Cost is unaffected for normal transcripts because the read stays
+    tail-bounded — a 57 MB file costs the same as a 64 KB one.
     """
     if file_size is None:
         size = path.stat().st_size
     else:
         size = file_size
-    seeked = False
 
-    with open(path, "rb") as f:
-        if size > max_bytes:
-            f.seek(size - max_bytes)
-            seeked = True
-        raw = f.read()
+    window = max(max_bytes, 1)
+    while True:
+        seeked = size > window
+        with open(path, "rb") as f:
+            if seeked:
+                f.seek(size - window)
+            raw = f.read()
 
-    text = raw.decode("utf-8", errors="replace")
-    lines = text.split("\n")
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.split("\n")
 
-    # Discard potentially partial first line when we seeked past start
-    if seeked and lines:
-        lines = lines[1:]
+        # Discard potentially partial first line when we seeked past start
+        if seeked and lines:
+            lines = lines[1:]
 
-    # Remove trailing empty string from final newline
-    if lines and lines[-1] == "":
-        lines = lines[:-1]
+        # Remove trailing empty string from final newline
+        if lines and lines[-1] == "":
+            lines = lines[:-1]
 
-    # Strip \r from Windows-style line endings
-    lines = [line.rstrip("\r") for line in lines]
+        # Strip \r from Windows-style line endings
+        lines = [line.rstrip("\r") for line in lines]
 
-    return lines
+        if lines or not seeked or window >= _MAX_TAIL_BYTES:
+            return lines
+        # Nothing survived the discard: the final line is wider than the
+        # window. Widen and retry, bounded so a pathological file cannot
+        # pull an unlimited read onto the refresh path.
+        window = min(window * 8, _MAX_TAIL_BYTES, size)
 
 
 # ---------------------------------------------------------------------------

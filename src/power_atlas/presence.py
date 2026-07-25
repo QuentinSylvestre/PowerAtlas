@@ -91,6 +91,10 @@ _cached_at = 0.0
 # just after spawn); the nearest false match was ~9500s off, so the window
 # below is deliberately generous and still leaves ~80x margin.
 _SIDECAR_SKEW_S = 120.0
+# Sidecars are never written before their process starts; this small backward
+# allowance covers clock-source jitter between the provider's timestamp and
+# psutil's create_time, nothing more.
+_SIDECAR_BACKWARD_SKEW_S = 5.0
 
 _KIRO_LOCK_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 _CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
@@ -135,12 +139,19 @@ def _load_json_cached(path: Path, st: os.stat_result | None = None) -> dict | No
 _dir_listing_cache: dict[str, tuple[float, list]] = {}
 
 
-def _list_sidecars(directory: Path, suffix: str) -> list[tuple[str, os.stat_result]]:
+def _list_sidecars(directory: Path, suffix: str,
+                   cache_listing: bool = True) -> list[tuple[str, os.stat_result]]:
     """Return (path, stat) for files in *directory* ending in *suffix*.
 
-    Cached against the directory mtime. In-place edits to an existing sidecar
-    would not invalidate this, which is safe because both providers write
-    theirs once at session start and never rewrite them.
+    With *cache_listing*, the result is reused while the directory's own mtime
+    holds. That is only valid for sidecars written once and never rewritten,
+    because an in-place rewrite leaves the directory mtime untouched — and the
+    stats captured here are what ``_load_json_cached`` compares against, so a
+    stale listing pins a stale parse. kiro-cli locks qualify; claude-code
+    session files do not (they carry a mutable ``status`` and are rewritten in
+    place, observed with a file mtime 832s newer than its directory's), so
+    that directory is listed fresh each scan. It holds one file per running
+    session, so the cost is nil.
     """
     key = str(directory)
     try:
@@ -148,9 +159,10 @@ def _list_sidecars(directory: Path, suffix: str) -> list[tuple[str, os.stat_resu
     except OSError:
         _dir_listing_cache.pop(key, None)
         return []
-    hit = _dir_listing_cache.get(key)
-    if hit is not None and hit[0] == dir_mtime:
-        return hit[1]
+    if cache_listing:
+        hit = _dir_listing_cache.get(key)
+        if hit is not None and hit[0] == dir_mtime:
+            return hit[1]
 
     found: list[tuple[str, os.stat_result]] = []
     try:
@@ -165,7 +177,8 @@ def _list_sidecars(directory: Path, suffix: str) -> list[tuple[str, os.stat_resu
                     continue
     except OSError:
         return []
-    _dir_listing_cache[key] = (dir_mtime, found)
+    if cache_listing:
+        _dir_listing_cache[key] = (dir_mtime, found)
     return found
 
 
@@ -202,17 +215,21 @@ def _sidecar_records() -> list[tuple[str, int, str, float, str, str]]:
         # candidate, which the caller has not filtered yet — defer it.
         out.append(("kiro-cli", pid, Path(lock).stem, started, "", ""))
 
-    for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json"):
+    for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json", cache_listing=False):
         data = _load_json_cached(Path(meta), st)
         if not data:
             continue
         pid = data.get("pid")
         sid = data.get("sessionId") or ""
         started_ms = data.get("startedAt")
-        if not isinstance(pid, int) or not sid or not isinstance(started_ms, (int, float)):
+        cwd = data.get("cwd")
+        if not isinstance(pid, int) or not isinstance(sid, str) or not sid:
+            continue
+        if not isinstance(started_ms, (int, float)) or isinstance(started_ms, bool):
             continue
         out.append(("claude-code", pid, sid, started_ms / 1000.0,
-                    data.get("cwd") or "", str(data.get("status") or "")))
+                    cwd if isinstance(cwd, str) else "",
+                    str(data.get("status") or "")))
 
     return out
 
@@ -412,11 +429,24 @@ def _scan() -> Snapshot:
     # matches sessions PowerAtlas resumed itself. See _sidecar_records() for
     # why the start-time check is not optional.
     try:
-        for provider, pid, sid, started, cwd, status in _sidecar_records():
+        records = _sidecar_records()
+    except Exception:  # pragma: no cover - sidecars are best-effort
+        log.exception("sidecar enumeration failed")
+        records = []
+    for provider, pid, sid, started, cwd, status in records:
+        # Per-record isolation: one unparseable or oddly-typed sidecar must
+        # not drop the remaining sessions, which would silently regress to
+        # the pre-sidecar behaviour of matching nothing.
+        try:
             live = provider_pids.get(pid)
             if live is None or live[0] != provider:
                 continue
-            if abs(started - live[1]) > _SIDECAR_SKEW_S:
+            # The sidecar is always written just after its process spawns, so
+            # only a forward offset is physically meaningful; observed values
+            # are +1.1s to +1.6s. Allowing an equal backward window would
+            # double the accidental-match surface for nothing.
+            delta = started - live[1]
+            if delta < -_SIDECAR_BACKWARD_SKEW_S or delta > _SIDECAR_SKEW_S:
                 continue
             key = (provider, sid)
             live_sids.add(key)
@@ -428,8 +458,9 @@ def _scan() -> Snapshot:
                 norm = _normalize_path(cwd)
                 sid_to_cwd[key] = norm
                 live_cwds.add((provider, norm))
-    except Exception:  # pragma: no cover - sidecars are best-effort
-        log.exception("sidecar session scan failed")
+        except Exception:  # pragma: no cover - defensive per-record guard
+            log.exception("sidecar record rejected: provider=%s sid=%r", provider, sid)
+            continue
 
     return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status)
 
