@@ -149,6 +149,15 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ## 2. Web API + UI (`web.py` + `templates/`)
 
+> **2.1–2.25 is the dashboard surface, and it is no longer the whole web surface.** The `/acp` page
+> and the `/ws/acp` WebSocket added on 2026-07-26 have no brief here, deliberately: the module behind
+> them is a throwaway prototype, and exercising it spawns a real `kiro-cli acp --trust-all-tools` and
+> writes a permanent session into the user's ~13,300-entry store — a side-effecting surface this
+> plan's probe style assumes away. Their security controls (per-process handshake token, raw-`Host`
+> allowlist, `Sec-Fetch-Site` guard on `GET /acp`, per-response CSP nonce) do have unit coverage in
+> `tests/test_web.py`. A run of this plan should report the web surface as covered **except** those
+> two routes rather than as covered outright.
+
 ### 2.1 Three-panel dashboard bootstrap
 - **what**: `GET /` renders topbar + 3 panels; htmx `hx-trigger=load` fires 4 partials (launchers, pinned-sessions, pinned-workspaces, workspaces).
 - **how-to-reach**: navigate to `/`.
@@ -254,12 +263,12 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `session_cache.clear()` + `_cache.clear()` + warmup; returns `last_refresh`.
 - **risks**: full clear expensive on many workspaces.
 
-### 2.16 Background refresh loop
-- **what**: `_background_refresh` calls `refresh_stale_entries` every 30s in an asyncio task.
-- **how-to-reach**: lifespan task; observe over a sustained window.
-- **probes**: edit a session file, wait ≤30s, confirm UI reflects it after a card interaction; exception in refresh (logged, loop continues); no UI signal of background update.
-- **oracle**: 30s cadence; exceptions swallowed/logged.
-- **risks**: silent updates; H3 race with request-path cache access.
+### 2.16 Lifespan: background refresh loop + ACP teardown
+- **what**: `lifespan` owns two concerns. Before the `yield`, `_background_refresh` calls `refresh_stale_entries` every 30s in an asyncio task. After the `yield`, since 2026-07-26, it tears down the ACP agent process tree.
+- **how-to-reach**: lifespan task; observe over a sustained window. Teardown is reached only on the tray-quit route.
+- **probes**: edit a session file, wait ≤30s, confirm UI reflects it after a card interaction; exception in refresh (logged, loop continues); no UI signal of background update; **teardown**: with an ACP session open, quit from the tray and confirm `Get-Process kiro-cli` goes to zero.
+- **oracle**: 30s cadence; exceptions swallowed/logged; no `kiro-cli` process survives a tray quit.
+- **risks**: silent updates; H3 race with request-path cache access; **teardown is a fast path, not the guarantee** — `--stop`/`--restart` and any hard kill never run `lifespan` at all and are covered instead by a Windows Job Object, so a green result here says nothing about those routes and must not be reported as covering them.
 
 ### 2.17 Unified background scheduler (client)
 - **what**: one 5s tick drives all three client-side background jobs by counter — status every tick, active-session content every 2nd tick, workspace refresh every 3rd tick while `_tick <= _BURST_TICKS` and every 6th tick after. Net cadence is 15s burst for the first 120s then 30s steady; there is no separate pinned-panel timer.
@@ -310,12 +319,12 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `{ok:true}` on success; `{ok:false,error}` otherwise.
 - **risks**: shallow validation; H1 legacy shape re-introduction.
 
-### 2.24 Session actions (resume / new / copy)
-- **what**: per-row resume, per-card new session, copy session id.
-- **how-to-reach**: hover reveal → click; `POST /api/launch` / `/api/new-session`; clipboard for copy.
-- **probes**: resume valid session (toast); resume hidden on stale workspace; new session (no resume flag); copy → clipboard toast; provider from card dataset may be empty string.
-- **oracle**: launch toast success/error; resume hidden when stale.
-- **risks**: empty provider dataset; clipboard permission; no loading state on button.
+### 2.24 Session actions (resume / new / copy / open in ACP)
+- **what**: per-row resume, per-card new session, copy session id, and — added 2026-07-26, kiro-cli rows only — **open in `/acp`**, which navigates to the ACP page for that session id.
+- **how-to-reach**: hover reveal → click; `POST /api/launch` / `/api/new-session`; clipboard for copy; `GET /acp?sid=` for the ACP action.
+- **probes**: resume valid session (toast); resume hidden on stale workspace; new session (no resume flag); copy → clipboard toast; provider from card dataset may be empty string; ACP action present on kiro-cli rows and absent on claude-code rows; ACP action does **not** toggle multi-select (it sits inside `.session-actions`, the container the row's own `onclick` excludes) — the same collision that killed the terminal-focus feature.
+- **oracle**: launch toast success/error; resume hidden when stale; ACP action navigates with the row's `sid`.
+- **risks**: empty provider dataset; clipboard permission; no loading state on button; **the ACP action is a state-changing GET** — rendering `/acp?sid=` auto-loads the session, which spawns `kiro-cli acp -a` and can write to the user's real session store, so probing it is not a read-only act.
 
 ### 2.25 App restart endpoint
 - **what**: `POST /api/restart` sets the tray restart flag and stops icon/peek.
@@ -533,7 +542,9 @@ Per the automatable-only scope decision, these are documented but NOT part of th
 
 In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25), Launcher Windows subset (3.1–3.8),
 Icons (4.1–4.4), Config (5.1–5.5), Autostart Windows (6.1), Lifecycle Windows subset (7.1–7.6).
-Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above).
+Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above), and the ACP surface
+(`/acp`, `/ws/acp`) — see the note under §2. **2.1–2.25 is the dashboard web surface, not the whole
+web surface**; a run that covers all of §2 must not report the web layer as fully covered.
 
 ### Run status (2026-07-01/02)
 - **Web GUI (2.x client-side): COVERED** — driven headless via standalone Playwright (installed into the venv). Verified: bootstrap/skeleton→cards/aria-busy removal, card expand + lazy-load + no re-fetch on re-expand, session-tail hover tooltip (show/hide), provider-tab filtering (All/Kiro/Claude), debounced search + empty-state + restore, row selection + action bar, pin→toast→refresh→unpin, 4s toast auto-dismiss, zero console errors. Finding: selection is DOM-only; after an htmx swap the action bar goes **stale** (selCount stuck, bar stays visible though 0 rows selected) — `updateActionBar()` not called on `htmx:afterSwap` (`index.html`). Launch-selected safely no-ops on the phantom selection.
