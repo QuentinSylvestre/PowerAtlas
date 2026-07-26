@@ -74,7 +74,8 @@ try:
     import win32job
 except Exception as _e:  # pragma: no cover - non-Windows or missing pywin32
     win32api = win32con = win32job = None
-    log.warning("pywin32 unavailable — no ACP job object; teardown is best-effort: %s", _e)
+    log.warning("pywin32 unavailable — no ACP job object, so no teardown "
+                "guarantee at all; the supervisor refuses to spawn: %s", _e)
 
 try:
     # What a peer reset mid-send actually raises, measured rather than assumed:
@@ -149,9 +150,17 @@ MAX_SESSIONS = 3
 INITIALIZE_TIMEOUT_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 90.0
 
-# How long the tree-kill fast path waits for the tree to actually go. Bounded
-# well inside `__main__.py`'s 5 s server-thread join: teardown that overruns it
-# is teardown that did not happen, since the process exits regardless.
+# How long the tree-kill fast path waits for the tree to actually go, so that
+# teardown has a post-condition rather than only an intent.
+#
+# It is *not* bounded inside `__main__.py`'s 5 s server-thread join, and the
+# arithmetic says so: uvicorn's 0.1 s shutdown poll, plus the fixed 0.1 s sleep
+# in `Server.shutdown`, plus up to DRAIN_TIMEOUT_SECONDS of socket drain, plus
+# this, comes to ~5.2 s worst case. Typical is ~0.3-0.5 s, because a killed
+# tree is gone long before the ceiling. The overrun is benign for exactly one
+# reason: `os._exit(0)` closes the job handle on the way out and the OS kills
+# whatever the fast path had not finished killing — which is why a spawn that
+# cannot obtain a job object refuses to spawn at all rather than degrading.
 KILL_WAIT_SECONDS = 3.0
 
 # No console window per spawn. Absent this, every session flashes one.
@@ -422,6 +431,39 @@ def _neutral_cwd() -> Path:
     return path
 
 
+def _close_streams(proc: subprocess.Popen) -> None:
+    """Close a child's pipes. Never raises.
+
+    Only for a child that failed during ``_spawn``, before any reader thread
+    exists: closing ``stdout`` under a thread blocked reading it is a different
+    hazard. Without this a spawn that is rejected after ``Popen`` succeeded
+    leaks two handles per attempt, and the rejection paths are retried on every
+    ``new`` frame.
+    """
+    for stream in (proc.stdin, proc.stdout):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
+def _close_job(job) -> None:
+    """Release a job handle. Never raises; a ``None`` job is a no-op.
+
+    Closing the last handle is itself a kill under
+    ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``, which is why every teardown path
+    ends here — it is the backstop for whatever the explicit kills missed.
+    """
+    if job is None:
+        return
+    try:
+        job.Close()
+    except Exception:
+        pass
+
+
 def _resolve_session_cwd(raw: str | None) -> str:
     """Validate the directory a session will be created against."""
     if not raw:
@@ -454,8 +496,14 @@ class _Supervisor:
         # on purpose: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE fires when the *last*
         # handle closes, so letting this be garbage-collected would have the OS
         # kill the agent mid-turn. Only `_spawn` (which takes a fresh one) and
-        # `shutdown` (which deliberately releases it) may rebind this.
+        # `_detach` (which hands it to whoever is disposing of the process) may
+        # rebind this.
         self._job = None
+        # Set only once `initialize` has answered, and cleared by every path
+        # that unbinds the process. Tracked apart from process liveness because
+        # the two differ in exactly the case that matters: a process that is
+        # running but never handshaken.
+        self._ready = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._reader: threading.Thread | None = None
         self._write_lock = threading.Lock()
@@ -463,13 +511,32 @@ class _Supervisor:
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self.sessions: dict[str, dict] = {}
+        # Sessions promised but not yet recorded — see `new_session`. Counted
+        # against MAX_SESSIONS alongside `sessions`, because the creation of one
+        # spans two awaits and the cap has to hold across them.
+        self._reserved = 0
         self.agent_info: dict = {}
 
     # -- lifecycle ---------------------------------------------------------
 
     def alive(self) -> bool:
+        """True only for a *handshaken* channel to a running process.
+
+        The handshake half is the load-bearing one. Binding ``_proc`` to a live
+        process is not the same as having completed ``initialize``: an
+        ``initialize`` that timed out or was refused used to leave a process
+        that ``poll()`` still reported as running, so every later
+        ``ensure_started`` short-circuited here and skipped the handshake
+        permanently — every subsequent ``session/new`` then ran against an
+        un-handshaken agent and burned the full request ceiling. Recovery
+        needed a PowerAtlas restart.
+
+        The ``poll()`` half stays as a cheap backstop only. The channel's own
+        death is what ``_on_agent_death`` reports, per the module docstring;
+        this is not the health test.
+        """
         proc = self._proc
-        return proc is not None and proc.poll() is None
+        return self._ready and proc is not None and proc.poll() is None
 
     def _get_start_lock(self) -> asyncio.Lock:
         # Created on first use rather than in `__init__`: an `asyncio.Lock`
@@ -484,6 +551,12 @@ class _Supervisor:
         async with self._get_start_lock():
             if self.alive():
                 return
+            if self._proc is not None:
+                # Bound but not `alive()`: a previous handshake never finished,
+                # or a teardown of it did not take. Either way it is unusable,
+                # and spawning a replacement beside it would orphan it for the
+                # app's lifetime.
+                self._discard("Replaced: the agent never completed its handshake.")
             # Captured here, inside the async path, and never at import:
             # uvicorn builds its loop inside `server.run()` on a non-main
             # thread, so an import-time capture gets a different loop or none —
@@ -491,22 +564,35 @@ class _Supervisor:
             # black hole for every agent message.
             self._loop = asyncio.get_running_loop()
             await asyncio.to_thread(self._spawn)
-            result = await self._request(
-                "initialize",
-                {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    # Declared explicitly rather than left empty. An agent that
-                    # believes we can read files or run terminals will send
-                    # `fs/read_text_file` and `terminal/*` requests this client
-                    # cannot serve; saying so up front is cheaper than the
-                    # catch-all responder having to refuse them one by one.
-                    "clientCapabilities": {
-                        "fs": {"readTextFile": False, "writeTextFile": False},
-                        "terminal": False,
+            try:
+                result = await self._request(
+                    "initialize",
+                    {
+                        "protocolVersion": PROTOCOL_VERSION,
+                        # Declared explicitly rather than left empty. An agent
+                        # that believes we can read files or run terminals will
+                        # send `fs/read_text_file` and `terminal/*` requests
+                        # this client cannot serve; saying so up front is
+                        # cheaper than the catch-all responder having to refuse
+                        # them one by one.
+                        "clientCapabilities": {
+                            "fs": {"readTextFile": False, "writeTextFile": False},
+                            "terminal": False,
+                        },
                     },
-                },
-                timeout=INITIALIZE_TIMEOUT_SECONDS,
-            )
+                    timeout=INITIALIZE_TIMEOUT_SECONDS,
+                )
+            except BaseException as exc:
+                # A handshake that fails — timed out, or refused by an agent
+                # that self-updated under us — leaves a running process that
+                # nothing can use and `poll()` cannot tell apart from a working
+                # one. Tear it down here so the next attempt starts from a
+                # clean spawn instead of short-circuiting on the wreckage.
+                # `BaseException` on purpose: a cancelled `ensure_started` must
+                # not leave a bound, un-handshaken process behind either.
+                self._discard(f"Handshake failed: {exc}")
+                raise
+            self._ready = True
             self.agent_info = (result or {}).get("agentInfo") or {}
             log.info("ACP agent ready: %s (pid %s, protocol %s)",
                      self.agent_info.get("version", "?"),
@@ -525,19 +611,9 @@ class _Supervisor:
                 "shell=True, which cannot hold clean stdio for JSON-RPC.")
         cwd = _neutral_cwd()
 
-        job = None
-        if win32job is not None:
-            try:
-                job = win32job.CreateJobObject(None, "")
-                info = win32job.QueryInformationJobObject(
-                    job, win32job.JobObjectExtendedLimitInformation)
-                info["BasicLimitInformation"]["LimitFlags"] |= (
-                    win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
-                win32job.SetInformationJobObject(
-                    job, win32job.JobObjectExtendedLimitInformation, info)
-            except Exception:
-                log.exception("ACP job object setup failed; teardown is best-effort")
-                job = None
+        # Obtained *before* the child exists, so the common failure costs
+        # nothing and there is no window in which an unprotected agent runs.
+        job = self._create_job()
 
         try:
             proc = subprocess.Popen(
@@ -558,20 +634,35 @@ class _Supervisor:
                 creationflags=_CREATE_NO_WINDOW,
             )
         except OSError as exc:
+            _close_job(job)
             raise AgentSpawnFailed(f"Could not start the agent: {exc}") from exc
 
-        if job is not None:
+        try:
+            handle = win32api.OpenProcess(
+                win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE,
+                False, proc.pid)
             try:
-                handle = win32api.OpenProcess(
-                    win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE,
-                    False, proc.pid)
-                try:
-                    win32job.AssignProcessToJobObject(job, handle)
-                finally:
-                    win32api.CloseHandle(handle)
-            except Exception:
-                log.exception("ACP job assignment failed; teardown is best-effort")
-                job = None
+                win32job.AssignProcessToJobObject(job, handle)
+            finally:
+                win32api.CloseHandle(handle)
+        except Exception as exc:
+            # The one failure that cannot be shrugged off: the child is already
+            # running and is now outside the only guarantee that reaps it on
+            # `--stop`, `--restart`, a crash or Task Manager. Leaving it up
+            # would be an agent that no death route can reach, for the machine's
+            # lifetime. Kill it, then refuse — the refusal reaches the page as a
+            # typed `agent_spawn_failed` frame rather than only a log line.
+            log.exception("ACP job assignment failed for pid %d; killing it "
+                          "rather than leaving it unprotected", proc.pid)
+            if proc.poll() is None:
+                self._tree_kill(proc)
+            _close_streams(proc)
+            _close_job(job)
+            raise AgentSpawnFailed(
+                "The agent started but could not be placed in the Windows job "
+                f"object that guarantees its teardown ({exc}). It was killed "
+                "rather than left running where nothing could reap it."
+            ) from exc
 
         self._job = job
         self._proc = proc
@@ -579,70 +670,185 @@ class _Supervisor:
             target=self._reader_loop, args=(proc,),
             name="acp-reader", daemon=True)
         self._reader.start()
-        log.info("ACP agent spawned: pid %d, cwd %s, job=%s",
-                 proc.pid, cwd, "yes" if job is not None else "NO")
+        log.info("ACP agent spawned: pid %d, cwd %s, job object held", proc.pid, cwd)
+
+    @staticmethod
+    def _create_job():
+        """Create the job object that guarantees the agent's teardown.
+
+        Fatal on failure, deliberately. The job — not ``shutdown()`` — is what
+        covers `--stop`, `--restart`, a crash and Task Manager, none of which
+        run a line of code in this module. An agent spawned without it is an
+        agent whose only teardown route is one that those paths never take, so
+        the honest outcome is to refuse rather than to spawn something the log
+        quietly describes as best-effort.
+        """
+        if win32job is None:
+            raise AgentUnavailable(
+                "pywin32 is unavailable, so the agent cannot be placed in a "
+                "Windows job object — the only thing that guarantees its whole "
+                "process tree dies with PowerAtlas. Refusing to spawn an agent "
+                "nothing could reap.")
+        job = None
+        try:
+            job = win32job.CreateJobObject(None, "")
+            info = win32job.QueryInformationJobObject(
+                job, win32job.JobObjectExtendedLimitInformation)
+            info["BasicLimitInformation"]["LimitFlags"] |= (
+                win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+            win32job.SetInformationJobObject(
+                job, win32job.JobObjectExtendedLimitInformation, info)
+        except Exception as exc:
+            _close_job(job)
+            raise AgentSpawnFailed(
+                "Could not create the Windows job object that guarantees the "
+                f"agent's teardown ({exc}). Refusing to spawn an agent nothing "
+                "could reap.") from exc
+        return job
 
     def shutdown(self) -> None:
         """Kill the agent and its whole tree. Idempotent; never raises.
 
         The fast path, not the guarantee — the job object is the guarantee, and
         it is what covers `--stop`, `--restart`, a crash and Task Manager, none
-        of which reach this function. Kills only: no graceful protocol
-        shutdown and no waiting on the agent, because anything slower than the
-        5 s server-thread join in ``__main__.py`` simply does not run.
+        of which reach this function. No graceful protocol shutdown: it kills,
+        then waits up to ``KILL_WAIT_SECONDS`` for the tree to actually go, so
+        that the one teardown route which can log anything has a post-condition
+        rather than only an intent. See ``KILL_WAIT_SECONDS`` for why that wait
+        may overrun ``__main__.py``'s 5 s join, and why the overrun is benign.
+        """
+        self._start_lock = None
+        proc, job = self._detach("The agent was shut down.")
+        self._dispose(proc, job, "shutdown")
+
+    def _discard(self, reason: str) -> None:
+        """Unbind the current process and kill it off the event loop.
+
+        For the loop-side failure paths — a handshake that never completed, a
+        channel that closed. Split in two because ``_dispose`` waits seconds for
+        a tree to die, which is correct in ``shutdown`` (where blocking the loop
+        *is* the point) and wrong on a request path the page is waiting on. The
+        kill is not awaited either: teardown must not be contingent on the
+        caller surviving long enough to await it.
+        """
+        proc, job = self._detach(reason)
+        if proc is None and job is None:
+            return
+        threading.Thread(
+            target=self._dispose, args=(proc, job, reason),
+            name="acp-dispose", daemon=True).start()
+
+    def _detach(self, reason: str):
+        """Unbind the process and fail everything waiting on it. Loop-side.
+
+        Returns the ``(proc, job)`` pair for a caller to dispose of. Never
+        touches ``_reserved``: each reservation is released by the ``finally``
+        of the ``new_session`` that took it, and zeroing the counter here would
+        let those releases drive it negative.
         """
         proc, self._proc = self._proc, None
         job, self._job = self._job, None
+        self._ready = False
+        self.agent_info = {}
         self.sessions.clear()
-        self._start_lock = None
         for fut in tuple(self._pending.values()):
             if not fut.done():
-                fut.set_exception(AgentDied("The agent was shut down."))
+                fut.set_exception(AgentDied(reason))
         self._pending.clear()
+        return proc, job
 
+    @classmethod
+    def _dispose(cls, proc: subprocess.Popen | None, job, reason: str) -> None:
+        """Kill a detached tree and release its job handle. Never raises."""
         if proc is not None and proc.poll() is None:
             # Logged because this is the only teardown route that leaves any
             # trace at all: `--stop`, `--restart`, a crash and Task Manager all
             # go through the job object, which by definition runs no code here.
-            log.info("ACP teardown: killing agent pid %d and its tree", proc.pid)
-            self._tree_kill(proc)
+            log.info("ACP teardown: killing agent pid %d and its tree (%s)",
+                     proc.pid, reason)
+            cls._tree_kill(proc)
         # Released last. While this handle lives the job lives, and closing it
         # is itself a kill — so it doubles as the backstop for anything the
         # tree-kill above missed (a grandchild spawned mid-teardown, an
         # AccessDenied on one branch).
-        if job is not None:
-            try:
-                job.Close()
-            except Exception:
-                pass
+        _close_job(job)
 
     @staticmethod
     def _tree_kill(proc: subprocess.Popen) -> None:
+        """Kill the agent and every descendant. Never raises; always reports.
+
+        Each step is separately guarded, because they fail independently and a
+        failure of the cheapest one must not cancel the others. Enumerating the
+        children is the step that used to swallow the whole function: an
+        `AccessDenied` there jumped straight past ``parent.kill()``, so nothing
+        in the tree died and nothing said so — a no-op teardown that read
+        exactly like a successful one.
+
+        Taking ``proc.pid`` is only safe because every caller checks
+        ``poll() is None`` first: an exited pid can have been recycled onto an
+        unrelated process, the hazard `presence.py`'s create-time check exists
+        for.
+        """
         if psutil is None:
             try:
                 proc.kill()
-            except Exception:
-                pass
+                log.info("ACP tree-kill: killed pid %d (no psutil; children "
+                         "left to the job object)", proc.pid)
+            except Exception as exc:
+                log.warning("ACP tree-kill: could not kill pid %d: %s", proc.pid, exc)
             return
+
+        parent = None
         try:
             parent = psutil.Process(proc.pid)
-            kids = parent.children(recursive=True)
-            # Parent first, so it cannot spawn more children while we work down
-            # the list. The `poll()` guard above is what makes taking this pid
-            # safe at all: an already-exited pid can have been recycled onto an
-            # unrelated process, which is the exact hazard `presence.py`'s
-            # create-time check defends against.
-            parent.kill()
-            for child in kids:
-                try:
-                    child.kill()
-                except psutil.Error:
-                    pass
-            psutil.wait_procs([parent, *kids], timeout=KILL_WAIT_SECONDS)
-        except psutil.Error:
-            pass
+        except (psutil.Error, OSError) as exc:
+            log.warning("ACP tree-kill: pid %d not inspectable (%s)", proc.pid, exc)
+        kids = []
+        if parent is not None:
+            try:
+                kids = parent.children(recursive=True)
+            except (psutil.Error, OSError) as exc:
+                log.warning("ACP tree-kill: could not enumerate the tree under "
+                            "pid %d (%s); killing the parent alone", proc.pid, exc)
+
+        # Parent first, so it cannot spawn more children while we work down the
+        # list that was captured above.
+        targets = ([parent] if parent is not None else []) + list(kids)
+        killed = 0
+        for victim in targets:
+            try:
+                victim.kill()
+                killed += 1
+            except psutil.NoSuchProcess:
+                killed += 1
+            except (psutil.Error, OSError) as exc:
+                log.warning("ACP tree-kill: could not kill pid %s: %s",
+                            getattr(victim, "pid", "?"), exc)
+        if parent is None:
+            # psutil could not even see the parent; the Popen handle still can.
+            try:
+                proc.kill()
+                killed += 1
+            except Exception as exc:
+                log.warning("ACP tree-kill: fallback kill of pid %d failed: %s",
+                            proc.pid, exc)
+
+        if not targets:
+            # Nothing psutil could hand to `wait_procs`, so the outcome is
+            # genuinely unknown — say that rather than claim a clean tree.
+            log.info("ACP tree-kill: killed pid %d, outcome unverified (psutil "
+                     "could not see the tree); the job object is the backstop",
+                     proc.pid)
+            return
+        survivors = []
+        try:
+            _, survivors = psutil.wait_procs(targets, timeout=KILL_WAIT_SECONDS)
         except Exception:
-            log.exception("ACP tree-kill failed")
+            log.exception("ACP tree-kill: waiting on the tree failed")
+        log.info("ACP tree-kill: %d process(es) killed, %d still alive within "
+                 "%.0fs%s", killed, len(survivors), KILL_WAIT_SECONDS,
+                 "" if not survivors else
+                 " — left to the job object: %s" % [p.pid for p in survivors])
 
     # -- JSON-RPC ----------------------------------------------------------
 
@@ -776,8 +982,12 @@ class _Supervisor:
                     "message": f"Client does not implement '{method}'.",
                 },
             })
-        except AcpError:
-            pass
+        except AcpError as exc:
+            # Never silent. This is the write that answers the one request the
+            # catch-all exists for; if it does not land, the agent is left
+            # hanging on it and the log is the only place that could say so.
+            log.warning("ACP: could not deliver the refusal of '%s' (id=%r): %s",
+                        method, request_id, exc)
 
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
@@ -804,13 +1014,11 @@ class _Supervisor:
         code = proc.poll()
         log.error("ACP agent channel closed (exit code %r); %d session(s) lost",
                   code, len(self.sessions))
-        self._proc = None
-        self.sessions.clear()
-        for fut in tuple(self._pending.values()):
-            if not fut.done():
-                fut.set_exception(AgentDied(
-                    "The agent stopped answering; its channel closed."))
-        self._pending.clear()
+        # Releases the job handle as well as the process. The parent is gone but
+        # its ~5 MCP grandchildren need not be, and closing the last handle is
+        # what kills them — otherwise a dead agent leaves its tree resident
+        # until PowerAtlas itself exits.
+        self._discard("The agent stopped answering; its channel closed.")
         frame = envelope("agent_died", {
             "exitCode": code,
             "message": "The kiro-cli agent exited. Create a new session to "
@@ -822,22 +1030,47 @@ class _Supervisor:
     # -- sessions ----------------------------------------------------------
 
     async def new_session(self, cwd: str) -> dict:
-        if len(self.sessions) >= MAX_SESSIONS:
+        """Create one session, never exceeding ``MAX_SESSIONS``.
+
+        The cap is taken as a *reservation* before the first ``await``, not as a
+        reading of ``len(self.sessions)`` that the two awaits below then
+        invalidate. Creating a session spans ``ensure_started`` and a
+        ``session/new`` round-trip measured at 5.84 s; N concurrent ``new``
+        frames — which ``_dispatch`` happily turns into N tasks — all used to
+        pass a check-then-act test before any of them recorded anything, so N
+        sessions were created whatever the cap said. That is not a cosmetic
+        overshoot: this cap is the only thing between one socket and memory
+        exhaustion at ~306 MB a session, and every excess session is a permanent
+        artifact in the user's real kiro-cli store.
+
+        Incrementing and decrementing without suspending in between is what
+        makes the reservation atomic: the event loop cannot interleave another
+        ``new_session`` between the check and the increment, nor between
+        recording the session and releasing its slot.
+        """
+        if len(self.sessions) + self._reserved >= MAX_SESSIONS:
             raise SessionLimit(
                 f"At most {MAX_SESSIONS} sessions at once "
                 f"(~306 MB each); close one first.")
-        await self.ensure_started()
-        result = await self._request("session/new", {"cwd": cwd, "mcpServers": []})
-        result = result or {}
-        session_id = result.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            raise AgentRejected("The agent returned no sessionId.")
-        self.sessions[session_id] = {
-            "cwd": cwd,
-            "created": time.time(),
-            "models": result.get("models") or {},
-            "modes": result.get("modes") or {},
-        }
+        self._reserved += 1
+        try:
+            await self.ensure_started()
+            result = await self._request("session/new", {"cwd": cwd, "mcpServers": []})
+            result = result or {}
+            session_id = result.get("sessionId")
+            if not isinstance(session_id, str) or not session_id:
+                raise AgentRejected("The agent returned no sessionId.")
+            self.sessions[session_id] = {
+                "cwd": cwd,
+                "created": time.time(),
+                "models": result.get("models") or {},
+                "modes": result.get("modes") or {},
+            }
+        finally:
+            # Every path releases the slot, including cancellation: the session
+            # it stood for is either recorded above (and counted by `sessions`
+            # from now on) or never existed.
+            self._reserved -= 1
         log.info("ACP session created: %s (cwd %s); %d live",
                  session_id, cwd, len(self.sessions))
         return {"sessionId": session_id, "cwd": cwd}

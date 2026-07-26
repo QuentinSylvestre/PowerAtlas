@@ -443,18 +443,29 @@ async def lifespan(app_instance):
             await task
         except asyncio.CancelledError:
             pass
-        # ACP teardown is the *fast* path only. The Windows job object that
-        # `acp` assigns the agent to is what actually guarantees no orphans:
-        # `--stop`/`--restart` hard-kill this process with `TerminateProcess`
-        # and never run `lifespan` at all, and neither does a crash or Task
-        # Manager. This makes the tray route prompt; the job makes every route
-        # certain. It is kills only — anything that waits on the agent would
-        # overrun `__main__.py`'s 5 s server-thread join and simply not run.
-        if acp is not None:
-            try:
-                acp.shutdown()
-            except Exception:
-                log.exception("ACP teardown failed")
+        finally:
+            # Nested, so that the ACP teardown is not conditional on how the
+            # await above ends. The `except` arm catches only `CancelledError`;
+            # anything else the refresh task raises on its way out would
+            # otherwise propagate from here and skip the teardown entirely,
+            # which is the one thing on this path that must always run.
+            #
+            # ACP teardown is the *fast* path only. The Windows job object that
+            # `acp` assigns the agent to is what actually guarantees no orphans:
+            # `--stop`/`--restart` hard-kill this process with
+            # `TerminateProcess` and never run `lifespan` at all, and neither
+            # does a crash or Task Manager. This makes the tray route prompt;
+            # the job makes every route certain. It kills, then waits up to
+            # `acp.KILL_WAIT_SECONDS` for the tree to actually go — typically
+            # ~0.3-0.5 s, but a worst case of ~5.2 s that can outlast
+            # `__main__.py`'s 5 s server-thread join. Benign, and only because
+            # the job object then finishes the job when `os._exit(0)` closes
+            # its handle; see `acp.KILL_WAIT_SECONDS` for the arithmetic.
+            if acp is not None:
+                try:
+                    acp.shutdown()
+                except Exception:
+                    log.exception("ACP teardown failed")
 
 
 async def _background_refresh():
