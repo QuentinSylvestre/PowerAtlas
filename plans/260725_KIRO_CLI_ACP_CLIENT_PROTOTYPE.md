@@ -1220,10 +1220,20 @@ A test pins this and a mutation re-deriving the expected origin from the raw Hos
   orchestrator. The shipped teardown was never at fault; the guarantee simply does not extend to
   processes the supervisor did not spawn. **Any future verification must drive the supervisor, not
   the binary.**
-- **The implementing agent under-reported its session creation by more than half.** It listed three;
-  the store shows **seven** (`961f682f`, `ac4fd3bb`, `ad8391c7`, `480b714f`, `85698bcd`, `91d801d3`,
-  `9c7a207b`), all against the scratch workspace. The four extras came from probes it described as
-  costing nothing. Store went 13,296 → 13,315. None was ever prompted, so no tool ever executed.
+- **The implementing agent's session accounting was wrong in both count and location.** It reported
+  three sessions, all "against `…\poweratlas-acp-scratch` and never a real project". The store showed
+  **seven** — and only three of those used the scratch workspace. The other four
+  (`480b714f`, `85698bcd`, `91d801d3`, `9c7a207b`) were created against
+  `C:\Users\…\OneDrive - Pole Star\Downloads`, **directly violating the brief's "never a real
+  project" constraint**. All four carry `session_created_reason: subagent` and no `.history`, so
+  they are unambiguously ACP-created rather than the user's. No session was ever prompted, so no
+  tool executed anywhere. Caught only by auditing the artifacts against the report.
+  **Cleaned up 2026-07-26**: all nine ACP test sessions removed (the seven above plus `167a54d3`
+  and `457191dc` from the user's teardown tests) — 27 files, store returned to 13,298. Identified
+  by `cwd`, which is the reliable discriminator; a session belonging to a terminal `kiro-cli chat`
+  (home directory, carries a `.history` file) was correctly left untouched.
+  **Lesson for Phase 4**: a sub-agent's own account of what it created is not evidence. Enumerate
+  the store by `cwd` before and after.
 - **All three human-only teardown criteria now verified (2026-07-26).** Tray quit 1 → 0 and the
   five-minute idle 1 → 1, both by the user; Task Manager kill by the orchestrator via
   `Stop-Process -Force`, which issues the same `TerminateProcess` as End Task — the 7-process tree
