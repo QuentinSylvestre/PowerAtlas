@@ -650,23 +650,32 @@ inherits the problem statement rather than the illusion of a fix.
 
 And ACP teardown appended to the existing `lifespan` cleanup after the `yield` (`web.py:381-389`).
 
+**Split executed — 3a complete, 3b pending.** The seam the plan documents was taken proactively
+rather than on first trouble: the two installed interpreters run uvicorn versions two minor series
+apart (see §9), which makes the transport layer a genuine variable, so 3a was ended at the
+observable "page connects" checkpoint before any subprocess existed to confound it. Criteria below
+are annotated **[3a]** or **[3b]**.
+
 **Exit criteria**:
-- [ ] `pip install -e .` re-run, `pip show websockets` confirms installation, and
+- [x] **[3a]** `pip install -e .` re-run, `pip show websockets` confirms installation, and
       `AutoWebSocketsProtocol` is no longer `None`
-- [ ] `web.py`'s module docstring (`"""FastAPI web application with htmx-powered UI."""`) updated —
+- [x] **[3a]** `web.py`'s module docstring (`"""FastAPI web application with htmx-powered UI."""`) updated —
       the module now also serves a WebSocket surface, which is neither htmx nor request/response
-- [ ] The page's WebSocket URL is built from `location.host`, with no hardcoded port
-- [ ] `GET /acp` renders; the page opens a WebSocket and reports connected
-- [ ] Clicking "new session" creates one; the returned `sessionId` is displayed
+- [x] **[3a]** The page's WebSocket URL is built from `location.host`, with no hardcoded port
+- [x] **[3a]** `GET /acp` renders; the page opens a WebSocket and reports connected
+- [ ] **[3b]** Clicking "new session" creates one; the returned `sessionId` is displayed
 - [ ] The new session's `<sid>.json`/`.jsonl`/`.lock` appear in `~/.kiro/sessions/cli/`
-- [ ] The handshake is **rejected with HTTP 403** for each of five cases: absent or wrong token,
+- [x] **[3a]** The handshake is **rejected with HTTP 403** for each of five cases: absent or wrong token,
       mismatched `Origin`, absent `Origin`, `Origin: null`, and a mismatched `Host` with a
       matching `Origin`.
       **Not** a 1008 close frame — a pre-`accept()` close is converted by uvicorn into a 403
       handshake rejection and the code is discarded (`websockets_impl.py:278-285`; confirmed by two
       reviewers running it, one observing `InvalidStatus: HTTP 403` with `.code is None`). An
       implementer chasing "1008" would loosen the check to make the criterion pass
-- [ ] Probe written with `additional_headers=` (renamed from `extra_headers` in websockets 14)
+- [x] **[3a]** Probe written with `additional_headers=` (renamed from `extra_headers` in websockets 14).
+      **Superseded in practice**: the `websockets` client and `httpx` both derive `Host` from the URI
+      and silently drop a `Host` passed this way, so every `Host` probe was hand-written raw HTTP.
+      Two agents hit the resulting false pass before this was understood — see §9
 - [ ] Quitting PowerAtlas **from the tray** leaves no surviving `kiro-cli` process from this
       session — `Get-Process kiro-cli` before and after (expect parent + 5 gone)
 - [ ] `power-atlas --restart` and `power-atlas --stop` **also** leave none — covered by the Job
@@ -689,11 +698,34 @@ And ACP teardown appended to the existing `lifespan` cleanup after the `yield` (
       `shell=True`, which is incompatible with holding clean stdio. (Verified clear on this machine:
       `where kiro-cli` → `kiro-cli.exe`. The assertion guards other machines and future installs.)
 - [ ] Spawned with `creationflags=CREATE_NO_WINDOW` so no console flashes per session
-- [ ] `grep -n "status_classifier\|notifications" src/power_atlas/acp.py` returns nothing — the
+- [x] **[3a]** `grep -n "status_classifier\|notifications" src/power_atlas/acp.py` returns nothing — the
       isolation boundary §6 relies on as a mitigation, enforced by inspection since tests are waived
-- [ ] Create a session, quit PowerAtlas, restart, and confirm **the session still reopens**.
+- [ ] **[3b]** Create a session, quit PowerAtlas, restart, and confirm **the session still reopens**.
       Teardown is `kill()`-only by design, which orphans its `<sid>.lock`; this verifies that a
       tree-killed session is not permanently poisoned in the real 13,227-session store
+
+#### Implementation — 3a (2026-07-25, code: f717b54)
+
+3a delivers a defended WebSocket surface at `/ws/acp` and a page at `/acp` that connects to it, with
+nothing behind it yet. `web.py` gained a per-process `_ACP_TOKEN`, an extracted `_ws_origin_ok`, a
+`GET /acp` route and a `@app.websocket("/ws/acp")` route that runs the token comparison then the
+origin check — both before `accept()` — and then hands the socket to `acp.serve_socket` without ever
+reading a frame's `type`. That handoff is the seam: `acp.py` owns the envelope, the routing table,
+the connection and subscriber registry, and a per-socket outbound queue drained by a single writer
+task, so Phases 4-6 can add message types without `web.py` appearing in their file scope. All five
+client types answer a typed `not_implemented` today.
+
+**The phase's largest output was not the transport.** Reviewing it surfaced four Host-validation
+defects in shipped code — three predating this plan entirely — each reproduced before being fixed
+and each now carrying regression tests. They are enumerated in §9. The plan instructed reusing
+`_ALLOWED_HOSTS`; reusing it faithfully is what exposed the first one.
+
+Wire contract fixed as specified, with two deliberate deviations recorded in §9: the connect
+acknowledgement overloads the `meta` server type rather than adding a ninth, keeping the type set
+closed for Phases 4-6 — so `meta` is a general out-of-band channel, not only context-window
+telemetry — and the message-size rejection is delivered as close code 1009 rather than a typed
+`error` frame, because the close and the queued frame race and 1009 is the standard code for the
+condition.
 
 ### Phase 4: Prompt and stream, with reconnect replay [QA]
 
@@ -1028,6 +1060,93 @@ agent-initiated.
 - **Session multi-select does not survive an auto-refresh** — the periodic poll re-renders rows and
   clears selection. Observed during QA, unrelated to this phase.
 
+### Phase 3a
+
+**§1's measured current-state is wrong about this machine, in a way that matters.** It states as
+verified fact that `AutoWebSocketsProtocol is None` and "neither `websockets` nor `wsproto` is
+installed". True of `.venv-PowerAtlas`; **false of the global interpreter, which is what runs the
+app** — `websockets` 12.0 was already installed there and WebSocket support already worked.
+
+**The two interpreters are two uvicorn minor series apart**, and this shaped the whole phase:
+
+| | Runs | uvicorn | starlette | websockets |
+|---|---|---|---|---|
+| Global | the app | 0.30.1 | 0.37.2 | 12.0 |
+| `.venv-PowerAtlas` | the tests | 0.49.0 | 1.3.1 | 16.1.1 |
+
+§4's pin rationale is therefore correct but only for the venv — `websockets>=12,<17` resolved to
+16.1.1 there, the last release before `websockets.legacy` is removed. A behaviour verified in one
+interpreter is not verified in the other, and the phase's 403-vs-1008 handshake contract is
+uvicorn-specific. **Each version leaked a different subset of the Host bypass** (below), so probing
+either alone would have shipped a hole.
+
+**Four Host-validation defects found and closed. Three predate this plan.**
+
+1. **`testserver` in `_ALLOWED_HOSTS` was a complete bypass of both ACP controls.** `GET /acp` under
+   `Host: testserver` returned the token; a handshake with that token plus matching `Host`/`Origin`
+   returned `101`. It also let a rebound origin drive all 28 `@app.post` routes. It was allowlisted
+   solely so Starlette's `TestClient` default `base_url` passed the guard, and a comment asserted it
+   was "not publicly resolvable, so inert" — single-label names are resolvable by whoever wins
+   LLMNR/NBT-NS/mDNS. **The plan instructed reusing `_ALLOWED_HOSTS`**; this is a plan assumption
+   that did not survive the raised stakes, not an implementer error.
+2. **The Host check sat inside the `method == "POST"` branch**, so no GET route had ever been
+   checked. A rebound origin could read 248 KB of workspace and session data, plus `/`'s
+   `_launchers|tojson` — which carries `[custom_launchers.env]`, the cleartext
+   `AUTH_TOKEN_PRODUCTION` / `AUTH_TOKEN_STAGING` the risk table already flags.
+3. **Both gates read `request.url.hostname`, which is not safe for an allowlist decision.** Starlette
+   ≥1.x discards a Host failing `_HOST_RE` and rebuilds the URL from `scope["server"]`, so
+   `a_b.evil.com` read as `127.0.0.1`; a malformed bracket Host raised `ValueError` and returned 500
+   on every route including the static mount; and absent, **duplicated**, userinfo-bearing and
+   non-numeric-port Hosts all passed. Both gates now parse the raw header and never raise. The
+   duplicate-Host case was found by an agent going beyond its brief.
+4. **`secrets.compare_digest` on `str` raises `TypeError` for non-ASCII**, so `?t=%C3%A9` returned an
+   unauthenticated **500** on the authentication path — and the traceback reached nobody, since
+   uvicorn's logger has `propagate=False` and writes to a stderr the tray process does not have.
+
+`_ws_origin_ok` was deliberately left unchanged and verified still sound: both halves derive from
+`ws.url`, so a discarded Host collapses the netloc too and stops matching the attacker's `Origin`.
+A test pins this and a mutation re-deriving the expected origin from the raw Host fails it.
+
+**Deviations from the plan's stated design, all deliberate:**
+
+- **Connect ack overloads the `meta` server type** rather than adding a ninth, keeping the wire
+  contract closed for Phases 4-6. `meta` is now a general out-of-band channel, not only
+  context-window telemetry — Phase 4 needs to know this.
+- **Message-size rejection is close code 1009, not a typed `error` frame.** The close and the queued
+  frame race; 1009 is the standard code for the condition and its reason string reaches `onclose`.
+- **The connection cap is enforced after `accept()`**, so the mandated pre-accept security snippet
+  stays byte-for-byte and a policy close can carry a readable reason (1013) instead of a 403
+  indistinguishable from an auth failure.
+
+**Verification traps that cost real time, recorded so later phases do not repay them:**
+
+- **`httpx` and the `websockets` client both derive `Host` from the URI** and silently ignore a
+  `Host` passed in headers. Two agents — and this orchestrator — got a **false pass** from this
+  before it was understood. Every `Host` probe must be hand-written raw HTTP over a socket.
+- **Starlette's `StaticFiles` sets no `Cache-Control`**, so a browser can serve a stale `style.css`
+  indefinitely. The `/acp` page rendered completely unstyled while the server served the correct
+  file. Any CSS verification needs a cache-bypassing reload.
+
+**Recorded, not fixed:**
+
+- **`Host: [::1` on `/ws/acp` still returns 500** under starlette 0.37.2, because `_ws_origin_ok` was
+  explicitly out of scope. It sits behind `_acp_token_ok` — a wrong or absent token gets 403 first —
+  so it is not unauthenticated, and it fails closed.
+- **`/acp` serves the token with no `Cache-Control: no-store`**, so it can persist in the browser's
+  on-disk cache.
+- **No log line for any rejection** — token 403, origin 403, or the 1013 cap. The security surface is
+  unobservable to an operator.
+- **Nothing pins `starlette`.** `pyproject.toml` bounds only `websockets`; defect 3's underscore case
+  is latent on the runtime interpreter and becomes live on any `pip install -e .` that upgrades it —
+  which Phase 3's own pre-flight mandates.
+
+**Side effect on the user's machine, corrected.** An agent probing that loopback POSTs still worked
+POSTed to `/api/save-setting` believing it was re-saving the current value; the configured port
+moved 4915 → 8080. Restored to 4915 on user instruction, verified as a single-line change against a
+backup with the file size byte-identical. `save_config` rewrites the whole file, so the round-trip
+cannot be proven value-preserving beyond structural inspection — the credentials block was
+deliberately not enumerated.
+
 ## Review Log
 
 ### 2026-07-25 — Plan review (via /qplan Step 4)
@@ -1195,6 +1314,42 @@ manufacturing session state. It is covered by mutation-verified unit tests, not 
 passed whether or not the behaviour they named was present, which no amount of reading would have
 surfaced, and it caught one reviewer's own draft weakness. The JavaScript was mutation-tested under
 Node with stubbed `fetch`/DOM/`htmx`, since the pytest suite does not reach it.
+
+### 2026-07-25 — Implementation Review (after Phase 3a, personas: Security auditor, Reliability engineer)
+
+Implementation health: Green.
+Two review rounds, two personas each. Round 1: 22 findings (2 High, 8 Medium, 12 Low). Round 2
+(final gate): 14 findings (1 High, 3 Medium, 10 Low). Both rounds returned **no REGRESSION** and an
+explicit **commit: yes**. The round-2 High was an *incomplete* fix rather than a new hole — strictly
+better than the state it replaced — and was fixed before commit anyway on user instruction.
+QA verification: **PASS** — transport-level and browser, on the interpreter that serves the app.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `testserver` in `_ALLOWED_HOSTS` fully bypassed both ACP controls and exposed all 28 POST routes | User: accepted — fix now; removed, tests repointed to a loopback base URL |
+| 2 | High | Host allowlist read `request.url.hostname`; underscore Host read as loopback, malformed Host 500'd every route | User: accepted — fix now; both gates parse the raw header and never raise |
+| 3 | High | `compare_digest` on `str` returned an unauthenticated 500 for non-ASCII tokens | User: accepted — fix now; byte comparison, 403 for every hostile shape |
+| 4 | Medium | Host check was POST-gated, so 17 GET routes leaked workspace data and launcher `env` under a rebound origin | User: accepted — fix now; check moved out of the method gate |
+| 5 | Medium | `GET /acp`, the token's only delivery vehicle, had no Host check at all | User: accepted — fix now; inline check added and independently tested |
+| 6 | Medium | `stop()` cancelled the writer with a full queue — measured 6 frames queued, 0 arrived | User: accepted — fix now; `drain()` with a 2 s bound, 6 of 6 arrive |
+| 7 | Medium | Writer death left a registered socket with no writer, silently swallowing every frame | User: accepted — fix now; `_retire()` closes on every exit path |
+| 8 | Medium | `web.py` imported `acp` at module scope; a broken prototype module would kill the whole dashboard | User: accepted — fix now; guarded import, `/acp` degrades alone |
+| 9 | Medium | Per-launch token rotation stranded any tab open across a restart on an infinitely-retrying button | User: accepted — fix now; liveness probe distinguishes stale token from dead server |
+| 10 | Medium | Malformed `Host` raised `ValueError` → 500; widened from POST-only to every route by finding 4's fix | Fixed — subsumed by finding 2's raw-header parsing |
+| 11 | Low | `/acp` inline Host check was untested — deleting it left all 28 tests green | Fixed — test drives the router directly so only the inline check can 403 |
+| 12 | Low | Remaining Lows: no rejection logging, no per-socket correlation id, token cacheable, unused `SERVER_TYPES`, double-buffered size cap | Orchestrator: proposed-accept — pending user decision |
+
+**Method note.** Every `Host` probe was hand-written raw HTTP. `httpx` and the `websockets` client
+both derive `Host` from the URI and silently drop a header-supplied one — this orchestrator reported
+a false 403 refutation of finding 2 before catching it, and two review agents hit the same trap
+independently. Both starlette versions were probed separately, which is what caught the split: 1.3.1
+leaked the underscore case, 0.37.2 leaked duplicate-Host, absent-Host, userinfo and non-numeric-port.
+The final fix round mutation-tested its own tests, killing 10 of 11 mutations; the survivor is a
+deliberately redundant userinfo blacklist, kept and documented as untestable rather than removed.
+
+Suite: **769 passed, 1 skipped** (611 at plan time). The 145 regression tests added across this phase
+cover shipped code and are outside the prototype waiver, which applies to `acp.py` and the ACP routes
+only.
 
 ---
 
