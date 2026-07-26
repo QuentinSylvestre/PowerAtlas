@@ -1,7 +1,9 @@
 """Tests for web module."""
 
 import asyncio
+import json
 import logging
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -2395,6 +2397,263 @@ class TestAcpReaderLineCap:
         from power_atlas import acp as acp_mod
         msgs, _ = _run_reader(acp_mod, [b'banner text\n\n{"id":1}\n'])
         assert msgs == [{"id": 1}]
+
+
+# --- ACP phase 4 fixes: CSP, wire encoding, subscribe throttle ---
+
+
+class TestAcpContentSecurityPolicy:
+    """``/acp`` renders agent-authored prose and agent-authored tool commands,
+    and the agent behind it runs trust-all-tools. Until now the only control on
+    that was the page's own no-innerHTML discipline — a rule every future line
+    has to keep. A nonce policy is the control that does not depend on it.
+    """
+
+    def _policy(self, resp) -> str:
+        header = resp.headers.get("content-security-policy")
+        assert header, "GET /acp served no Content-Security-Policy at all"
+        return header
+
+    def _nonce(self, policy: str) -> str:
+        match = re.search(r"script-src 'nonce-([^']+)'", policy)
+        assert match, "the policy is not nonce-based: %s" % policy
+        return match.group(1)
+
+    def test_the_page_carries_a_nonce_policy(self, raw_client):
+        resp = raw_client.get("/acp")
+        assert resp.status_code == 200
+        policy = self._policy(resp)
+        self._nonce(policy)
+        # `'unsafe-inline'` would permit both an injected <script> and an
+        # <img onerror=…>, which is the whole vector this exists against.
+        assert "'unsafe-inline'" not in policy
+        assert "'unsafe-eval'" not in policy
+        for directive in ("default-src 'self'", "object-src 'none'",
+                          "base-uri 'none'", "frame-ancestors 'none'"):
+            assert directive in policy, "%r missing from %s" % (directive, policy)
+
+    def test_the_header_nonce_is_the_one_on_the_page(self, raw_client):
+        """A mismatched nonce is a blank page, and it passes every assertion
+        that only checks the header exists."""
+        resp = raw_client.get("/acp")
+        nonce = self._nonce(self._policy(resp))
+        # The page's own inline block, which is the one the policy would blank.
+        assert '<script nonce="%s">' % nonce in resp.text
+        # And the shared <head> tag, which would otherwise log a violation on a
+        # page whose console has to stay readable.
+        assert ('<script nonce="%s" src="/static/htmx.min.js">' % nonce) in resp.text
+        tags = re.findall(r"<script\b[^>]*>", resp.text)
+        assert len(tags) == 2, "a script tag was added without a nonce: %s" % tags
+
+    def test_the_nonce_is_regenerated_per_response(self, raw_client):
+        first = self._nonce(self._policy(raw_client.get("/acp")))
+        second = self._nonce(self._policy(raw_client.get("/acp")))
+        assert first != second
+
+    def test_connect_src_admits_the_socket_the_page_opens(self, raw_client):
+        """The easiest way to break this page with a CSP. ``/ws/acp`` is what
+        the whole feature runs on, and every server-side test still passes when
+        ``connect-src`` forbids it."""
+        resp = raw_client.get("/acp", headers={"Host": "127.0.0.1:4915"})
+        assert resp.status_code == 200
+        match = re.search(r"connect-src ([^;]+)", self._policy(resp))
+        assert match, "no connect-src directive at all"
+        sources = match.group(1).split()
+        assert "ws://127.0.0.1:4915" in sources
+        assert "wss://127.0.0.1:4915" in sources
+
+    def test_the_policy_names_the_host_actually_served(self, raw_client):
+        """A hardcoded port would be wrong on most launches: config.py defaults
+        `port` to 0 and the OS assigns one."""
+        resp = raw_client.get("/acp", headers={"Host": "localhost:53119"})
+        assert "ws://localhost:53119" in self._policy(resp)
+
+    def test_no_policy_leaks_onto_the_dashboard(self, raw_client):
+        """base.html is shared. index.html carries substantial inline script and
+        static/htmx.min.js binds at DOMContentLoaded, so this policy would risk
+        the dashboard for no gain — it renders no agent-authored text."""
+        resp = raw_client.get("/")
+        assert resp.status_code == 200
+        assert "content-security-policy" not in resp.headers
+        # Rendered, not assumed: the shared template must be byte-identical
+        # where it was touched.
+        assert '<script src="/static/htmx.min.js"></script>' in resp.text
+
+
+class _EncodingWs:
+    """A socket that encodes what it is handed, the way the transport does.
+
+    ``_SinkWs`` accepts any ``str``. uvicorn's websockets layer encodes to UTF-8
+    before framing, and that encode is where a lone surrogate raises — inside
+    ``_write_loop``, whose catch-all then retires the socket.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+        self.closed: list[tuple[int, str]] = []
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(text.encode("utf-8"))
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed.append((code, reason))
+
+
+def _write_through(acp_mod, *frames):
+    """Put frames through the real writer task; returns ``(ws, conn)``."""
+
+    async def drive():
+        ws = _EncodingWs()
+        conn = acp_mod._Connection(ws)
+        conn.start()
+        for frame in frames:
+            conn.send(frame)
+        await conn.drain()
+        await conn.stop()
+        return ws, conn
+
+    return asyncio.run(drive())
+
+
+class TestAcpWireEncoding:
+    """The outbound serializer defaulted to ``ensure_ascii=True``, so every
+    non-ASCII character the agent produced left as a 6- or 12-byte escape.
+    """
+
+    def test_non_ascii_reaches_the_wire_as_utf8(self):
+        from power_atlas import acp as acp_mod
+        text = "héllo — 🌍" * 200
+        frame = acp_mod.envelope("chunk", {"role": "agent", "text": text})
+        ws, _ = _write_through(acp_mod, frame)
+        assert ws.closed == []
+        assert len(ws.sent) == 1
+        assert b"\\u" not in ws.sent[0]
+        assert text.encode("utf-8") in ws.sent[0]
+        # The saving, measured rather than asserted as an inequality that a
+        # one-byte difference would satisfy.
+        assert len(ws.sent[0]) < 0.6 * len(json.dumps(frame).encode("utf-8"))
+
+    def test_a_lone_surrogate_does_not_retire_a_healthy_socket(self):
+        """``json.loads`` turns a ``\\ud800`` escape in the agent's own output
+        into a lone surrogate, and UTF-8 cannot represent one. Unguarded, that
+        encode raises where the writer's catch-all takes the socket down."""
+        from power_atlas import acp as acp_mod
+        text = json.loads(r'"\ud800 tail"')
+        frame = acp_mod.envelope("chunk", {"role": "agent", "text": text})
+        ws, _ = _write_through(acp_mod, frame)
+        assert ws.closed == [], "an encodable frame retired the socket"
+        assert len(ws.sent) == 1, "the frame never reached the wire"
+        assert json.loads(ws.sent[0].decode("utf-8"))["payload"]["text"] == text
+
+    def test_the_fallback_is_per_frame_and_not_per_socket(self):
+        """Positive control: a poisoned frame must not send the rest of the
+        stream back to the escaped form for the socket's lifetime."""
+        from power_atlas import acp as acp_mod
+        poisoned = acp_mod.envelope(
+            "chunk", {"role": "agent", "text": json.loads(r'"\udfff"')})
+        ordinary = acp_mod.envelope("chunk", {"role": "agent", "text": "🌍" * 50})
+        ws, _ = _write_through(acp_mod, poisoned, ordinary)
+        assert ws.closed == []
+        assert len(ws.sent) == 2
+        assert b"\\u" in ws.sent[0]
+        assert b"\\u" not in ws.sent[1]
+
+    def test_the_byte_budget_now_prices_what_the_wire_carries(self):
+        """The send queue and the history buffer both charge UTF-8 bytes. While
+        the wire was escaped they bounded roughly a third of the memory they
+        were sizing."""
+        from power_atlas import acp as acp_mod
+        frame = acp_mod.envelope("chunk", {"role": "agent", "text": "🌍" * 5000})
+        wire = len(acp_mod._dumps_frame(frame).encode("utf-8"))
+        assert wire <= acp_mod._frame_weight(frame) * 1.1
+
+
+class TestAcpSubscribeThrottle:
+    """A ~60-byte ``subscribe`` rebuilds the whole replay buffer — up to
+    HISTORY_MAX_BYTES — into one ``history`` frame, and ``_dispatch`` applied no
+    throttle at all, so SEND_QUEUE_MAXSIZE of them could be queued on the event
+    loop that also serves the dashboard.
+    """
+
+    def _fill(self, acp_mod, sid, events=50):
+        history = acp_mod._supervisor.history[sid]
+        for i in range(events):
+            history.append(acp_mod.envelope(
+                "chunk", {"role": "agent", "text": "e%d" % i}, sid))
+
+    def _conn(self, acp_mod):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        return conn
+
+    def test_a_legitimate_reload_is_never_throttled(self, acp_session):
+        """The page sends exactly one ``subscribe`` per socket, from onopen."""
+        acp_mod, sid = acp_session
+        self._fill(acp_mod, sid)
+        conn = self._conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        assert [f["type"] for f in _queued(conn)] == ["session", "history"]
+
+    def test_a_repeat_is_refused_with_a_typed_error(self, acp_session, caplog):
+        """Typed rather than silent: silence on this page is indistinguishable
+        from a server that stopped answering."""
+        acp_mod, sid = acp_session
+        self._fill(acp_mod, sid)
+        conn = self._conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        _queued(conn)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == "subscribe_throttled"
+        assert any("throttled" in r.getMessage() for r in caplog.records)
+
+    def test_the_replay_is_not_rebuilt_while_throttled(self, acp_session):
+        """The re-serialisation is the cost this exists to stop, so a refused
+        call must produce no ``history`` frame at all."""
+        acp_mod, sid = acp_session
+        self._fill(acp_mod, sid, acp_mod.HISTORY_MAXLEN)
+        conn = self._conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        _queued(conn)
+        for _ in range(20):
+            acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        assert len(frames) == 20
+        assert {f["type"] for f in frames} == {"error"}
+
+    def test_a_fresh_socket_is_not_throttled_by_its_predecessor(self, acp_session):
+        """A reconnect is a new socket, and throttling it would break the one
+        recovery path the page has."""
+        acp_mod, sid = acp_session
+        self._fill(acp_mod, sid)
+        acp_mod._handle_subscribe(self._conn(acp_mod), sid)
+        second = self._conn(acp_mod)
+        acp_mod._handle_subscribe(second, sid)
+        assert [f["type"] for f in _queued(second)] == ["session", "history"]
+
+    def test_the_window_expires_rather_than_latching(self, acp_session):
+        """Positive control: a rate, not a one-replay-per-socket cap."""
+        acp_mod, sid = acp_session
+        self._fill(acp_mod, sid)
+        conn = self._conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        _queued(conn)
+        with patch.object(acp_mod, "SUBSCRIBE_MIN_INTERVAL_SECONDS", 0.0):
+            acp_mod._handle_subscribe(conn, sid)
+        assert [f["type"] for f in _queued(conn)] == ["session", "history"]
+
+    def test_the_refusal_paths_keep_their_own_codes(self, acp_session):
+        """The two cheap refusals sit above the throttle: each costs one small
+        frame and the send queue already bounds them, so answering one of them
+        ``subscribe_throttled`` would only make the page harder to read."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        _queued(conn)
+        acp_mod._handle_subscribe(conn, "no-such-session")
+        assert _queued(conn)[0]["payload"]["code"] == "unknown_session"
 
 
 # --- Phase 3 (Launch Profiles): Profile endpoint tests ---

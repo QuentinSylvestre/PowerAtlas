@@ -166,6 +166,15 @@ READ_BLOCK_BYTES = 64 * 1024
 HISTORY_MAXLEN = 2000
 HISTORY_MAX_BYTES = 2 * 1024 * 1024
 
+# The shortest gap between two replays on one socket. A `subscribe` is ~60
+# bytes and answering one rebuilds the whole buffer — up to HISTORY_MAX_BYTES
+# of it — into a single `history` frame, on the event loop that also serves the
+# dashboard, with `_dispatch` willing to queue SEND_QUEUE_MAXSIZE of them. The
+# page sends exactly one per socket, from `onopen`, so nothing legitimate is
+# ever within a second of its own predecessor; a reconnect loop is a new socket
+# each time and pays the handshake rather than this.
+SUBSCRIBE_MIN_INTERVAL_SECONDS = 1.0
+
 # How much of a tool call's input the page is shown. Under `-a` there is no
 # permission gate, so what the operator can read here is the only account of
 # what ran — a command clipped to a shell's first token would be worse than
@@ -405,8 +414,35 @@ def _frame_weight(frame: dict) -> int:
     8.24 MB. Summing the payload's strings plus a fixed envelope allowance is
     close enough to drive eviction without paying for a second ``json.dumps``
     per chunk on the streaming path.
+
+    UTF-8 bytes are also what ``_dumps_frame`` now puts on the wire, so this
+    prices a frame at what sending it costs rather than at a third of it.
     """
     return 128 + _string_bytes(frame.get("payload") or {})
+
+
+def _dumps_frame(frame: dict) -> str:
+    """Serialize one outbound frame for ``ws.send_text``.
+
+    ``ensure_ascii=False`` because the escaped form is roughly three times the
+    size on the wire for non-ASCII agent output — 12 bytes per astral character
+    against 4, 6 per other non-ASCII character against 2 or 3.
+
+    The fallback covers a shape ``json.loads`` produces and UTF-8 cannot
+    carry: a ``\\udXXX`` escape in the agent's own output becomes a lone
+    surrogate, which ``str.encode("utf-8")`` cannot represent. Unguarded, the
+    encode the transport performs would raise inside ``_write_loop``, where the
+    catch-all retires the socket — a healthy socket lost to one bad character.
+    The escaped form is pure ASCII, so it always encodes.
+    """
+    text = json.dumps(frame, ensure_ascii=False)
+    try:
+        # The encode the transport is about to perform, done here where it can
+        # fall back rather than end the socket.
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(frame)
+    return text
 
 
 class _History:
@@ -467,6 +503,10 @@ class _Connection:
         self._queued_bytes = 0
         self._writer: asyncio.Task | None = None
         self._overflowed = False
+        # When this socket was last served a replay, or ``None`` for never.
+        # Per-socket and never global: a reload is a new socket, and it must not
+        # be throttled by the one it replaces.
+        self.replayed_at: float | None = None
 
     def start(self) -> None:
         self._writer = asyncio.create_task(self._write_loop())
@@ -502,7 +542,7 @@ class _Connection:
                 weight, frame = await self._out.get()
                 self._queued_bytes -= weight
                 try:
-                    await self.ws.send_text(json.dumps(frame))
+                    await self.ws.send_text(_dumps_frame(frame))
                 finally:
                     # Paired with every `put_nowait`, and the only thing that
                     # lets `drain()` below know a frame reached the wire.
@@ -1576,6 +1616,24 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         log.warning("ACP subscribe refused: [unknown_session] session=%s",
                     session_id)
         return
+    # Below the two refusals rather than above them: each of those costs one
+    # small frame and the send queue already bounds them, while the replay is
+    # the expensive answer and the one worth rationing. A throttled frame
+    # leaves the socket attached to whatever it already was, which for the one
+    # shape the page produces — one `subscribe` per socket — is this session.
+    now = time.monotonic()
+    since = None if conn.replayed_at is None else now - conn.replayed_at
+    if since is not None and since < SUBSCRIBE_MIN_INTERVAL_SECONDS:
+        conn.send(error_frame(
+            "subscribe_throttled",
+            "This socket was replayed less than "
+            f"{SUBSCRIBE_MIN_INTERVAL_SECONDS:.0f}s ago; the replay was not "
+            "rebuilt. Reload the page if the transcript looks wrong.",
+            session_id))
+        log.warning("ACP subscribe throttled: session=%s, %.3fs since the last "
+                    "replay", session_id, since)
+        return
+    conn.replayed_at = now
     _registry.attach(conn, session_id)
     conn.send(envelope("session", {
         "sessionId": session_id,

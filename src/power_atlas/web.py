@@ -669,6 +669,38 @@ async def index(request: Request):
     })
 
 
+def _acp_csp(nonce: str, host: str) -> str:
+    """The policy served with ``/acp``, and only with ``/acp``.
+
+    Nonce-based or not worth shipping. ``acp.html`` carries its own inline
+    ``<script>``, so ``script-src 'self'`` would blank the page; ``'unsafe-inline'``
+    would admit both an injected ``<script>`` and an ``<img onerror=…>``, which
+    is the exact vector this exists to stop. A value the page cannot be made to
+    guess is the only form that blocks injected markup while the page's own
+    script runs.
+
+    It is not applied globally. ``index.html`` holds substantial inline script
+    and ``static/htmx.min.js`` binds at ``DOMContentLoaded``; a policy there
+    would risk the dashboard for no gain, and the dashboard does not render
+    agent-authored text.
+
+    ``connect-src`` names the WebSocket origins rather than leaning on
+    ``'self'``: whether ``'self'`` covers a ``ws://`` upgrade from an ``http:``
+    page is a CSP3 clarification rather than something every engine has always
+    done, and a ``connect-src`` that blocks ``/ws/acp`` takes the whole feature
+    down while every server-side test still passes. ``host`` is the validated
+    Host header, so it carries no port PowerAtlas is not actually serving on.
+    """
+    return "; ".join((
+        "default-src 'self'",
+        f"script-src 'nonce-{nonce}'",
+        f"connect-src 'self' ws://{host} wss://{host}",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "frame-ancestors 'none'",
+    ))
+
+
 @app.get("/acp", response_class=HTMLResponse)
 async def acp_page(request: Request, sid: str = ""):
     """The ACP prototype page. ``sid`` names the session to re-subscribe to.
@@ -683,14 +715,24 @@ async def acp_page(request: Request, sid: str = ""):
     """
     if not _request_host_allowed(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
-    return templates.TemplateResponse(request, "acp.html", {
+    # Fresh per response, so a nonce read out of one page's markup is already
+    # spent by the time it could be replayed into another.
+    nonce = secrets.token_urlsafe(16)
+    response = templates.TemplateResponse(request, "acp.html", {
         "acp_token": _ACP_TOKEN,
         "sid": sid,
+        "csp_nonce": nonce,
         # Non-empty when the guarded import above failed. The page renders the
         # reason and does not open a socket, rather than retrying against a
         # route that cannot answer.
         "acp_error": _ACP_IMPORT_ERROR,
     })
+    # `_request_host_allowed` has already established that there is exactly one
+    # Host header and that it parses to a loopback name with a numeric port, so
+    # nothing hostile survives into the header value.
+    response.headers["Content-Security-Policy"] = _acp_csp(
+        nonce, request.headers["host"].strip())
+    return response
 
 
 @app.websocket("/ws/acp")

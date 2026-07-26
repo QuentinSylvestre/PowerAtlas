@@ -35,7 +35,12 @@
   <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
 </div>
 
-<script>
+<script nonce="{{ csp_nonce }}">
+// This page is served with a nonce-based Content-Security-Policy, so this tag
+// runs and an injected script element or inline handler does not. The nonce is
+// one half of the defense and the no-innerHTML rule below is the other: the
+// policy stops script that reaches the markup, the rule stops it reaching it.
+//
 // Nothing on this page is written through innerHTML: every node below is built
 // with createElement + textContent. Agent output is attacker-influenced (repo
 // files, fetched pages, commit messages) and the agent runs trust-all-tools,

@@ -7,7 +7,10 @@
 <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32x32.png">
 <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
 <link rel="stylesheet" href="/static/style.css">
-<script src="/static/htmx.min.js"></script>
+{# `csp_nonce` is set only by the /acp route, which is the only page served with
+   a Content-Security-Policy. Elsewhere it is undefined and this renders exactly
+   as it did before, so no policy and no nonce attribute reaches the dashboard. #}
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/htmx.min.js"></script>
 </head>
 <body>
 <a href="#workspaces-panel" class="skip-link">Skip to content</a>
