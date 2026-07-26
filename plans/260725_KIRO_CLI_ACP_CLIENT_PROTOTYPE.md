@@ -1234,6 +1234,43 @@ A test pins this and a mutation re-deriving the expected origin from the raw Hos
   teardown worked. And the tray test was the first execution of the `lifespan` teardown at all —
   before it, the log carried zero `ACP teardown:` lines across 111,869 entries.
 
+### Carry-forward into Phase 4
+
+Written down deliberately: these were live review findings and session facts that existed nowhere
+but a conversation transcript.
+
+- **The agent→client direction has no size cap.** `_reader_loop`'s `for line in proc.stdout` is
+  unbounded, where the client→server path enforces `MAX_MESSAGE_BYTES` (256 KiB). Inert through
+  Phase 3 because nothing streamed. **Phase 4 is exactly when it becomes a live unbounded-buffer
+  path**, since tool output under `-a` arrives on it. Rated forward-looking, not scored, by the 3b
+  review.
+- **Phase 4 is where `-a` stops being theoretical.** 3a and 3b spawn an unrestricted agent but never
+  prompt it, so **no tool has ever executed**. The first prompt changes that, in whatever directory
+  the session was created against. Accepted per Q4 for a prototype "driven by a human watching it",
+  and to be re-decided before the rebuild — but the risk profile of the phases differs sharply and
+  the plan does not say so anywhere.
+- **Verification must drive the supervisor, never `kiro-cli` directly.** 3b's own probe spawned the
+  binary and leaked a 21-process tree, because the Job Object only covers what the supervisor spawns.
+- **Scratch workspace for all test sessions**:
+  `C:\Users\QSylvestre.POLESTAR\AppData\Local\Temp\poweratlas-acp-scratch`. Never a real project.
+  Every session is permanent; the store stood at 13,319 after Phase 3.
+- **Two verification traps that have now caught four separate agents.** `httpx` and the `websockets`
+  client silently drop a header-supplied `Host` — hand-write raw HTTP. Starlette's `StaticFiles`
+  sets no `Cache-Control` — hard-reload before judging appearance.
+- **Environment**: the app runs on the **global** interpreter (uvicorn 0.30.1, starlette 0.37.2,
+  websockets 12.0); the tests run in `.venv-PowerAtlas` (0.49.0 / 1.3.1 / 16.1.1). A behaviour
+  verified in one is not verified in the other, and each has leaked a different subset of a bug.
+- **Design facts Phase 4 inherits**: `meta` is a general out-of-band server type, not only
+  context-window telemetry (3a); the message-size rejection is close code 1009, not a typed frame;
+  the connection cap is enforced post-`accept()`; and `drain()` bounds shutdown at 2 s per socket,
+  which already contributes to a ~5.2 s worst case against a 5 s join.
+- **Open Low findings across 3a/3b**, recorded as `Orchestrator: proposed-accept — pending user
+  decision`: no log line for any handshake rejection (token 403, origin 403, cap 1013); no
+  per-socket correlation id, so open/close pairs cannot be matched at N>1; `/acp` serves the token
+  with no `Cache-Control: no-store`; `SERVER_TYPES` is defined but never validated against; a
+  `session/new` timeout can leave a real session created but unrecorded and uncounted against the
+  cap; and `stderr=DEVNULL` means an agent-side failure has no diagnostic trace beyond an exit code.
+
 **Side effect on the user's machine, corrected.** An agent probing that loopback POSTs still worked
 POSTed to `/api/save-setting` believing it was re-saving the current value; the configured port
 moved 4915 → 8080. Restored to 4915 on user instruction, verified as a single-line change against a
