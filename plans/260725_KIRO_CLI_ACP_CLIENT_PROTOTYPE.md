@@ -973,21 +973,65 @@ undelivered half.
   this reachable without ACP" now misleads, since an ACP path exists for *exited* sessions.
 
 **Exit criteria**:
-- [ ] A long-running turn can be cancelled; the UI shows the cancellation and the session stays
+- [x] A long-running turn can be cancelled; the UI shows the cancellation and the session stays
       usable for a subsequent prompt
-- [ ] Tool calls render as distinct items with their command and status visible
-- [ ] Context-window percentage displays and changes across turns
-- [ ] `ROADMAP.md:75-91` narrowed per the six points above, with `:80`/`:81` preserved intact
-- [ ] `ROADMAP.md:27` and `:104` updated; `:88` and `CLOSED_INVESTIGATIONS.md:102` extended
-- [ ] A session can be **closed** from the UI; `Get-Process kiro-cli | Measure-Object` and the
+- [x] Tool calls render as distinct items with their command and status visible
+- [x] Context-window percentage displays and changes across turns
+- [x] `ROADMAP.md:75-91` narrowed per the six points above, with `:80`/`:81` preserved intact
+      <!-- Addressed by quoted anchor, not line number; the doc-site offset was +13 as §9 predicted.
+           The two Claude Code bullets are byte-identical. -->
+- [x] `ROADMAP.md:27` and `:104` updated; `:88` and `CLOSED_INVESTIGATIONS.md:102` extended
+- [x] A session can be **closed** from the UI; `Get-Process kiro-cli | Measure-Object` and the
       supervisor's RSS both drop by roughly one session's worth (expect ~5 processes, ~306 MB).
       This is the measurement that makes §4 and §6's accepted memory cost real rather than assumed
-- [ ] Closing a session drops its ring buffer; the process keeps running and other sessions are
+- [x] Closing a session drops its ring buffer; the process keeps running and other sessions are
       unaffected
-- [ ] **Backstop**: re-run the Phase 1 reference enumeration now that `web.py` has shifted, and
+- [x] **Backstop**: re-run the Phase 1 reference enumeration now that `web.py` has shifted, and
       confirm no citation regressed
-- [ ] Open items recorded: whether a graceful session close removes the `.lock`; whether
+      <!-- No `web.py` citation regressed — Phase 1's symbol-anchor mandate held, and there are now
+           zero `web.py:NNN` references in either roadmap doc. Four citations *did* regress, all in
+           `CLOSED_INVESTIGATIONS.md`'s terminal-focus entry and all from Phase 2's comment-only edit
+           to `presence.py` — exactly the exposure §9 flagged. Fixed as symbol anchors. Separately,
+           `plans/tests/260701_POWERATLAS.md`'s H1-H10 hotspot citations are broadly stale and two of
+           the ten claims are now false; that rot predates this plan and is reported, not fixed. -->
+- [x] Open items recorded: whether a graceful session close removes the `.lock`; whether
       `session/load` alone mutates the transcript; whether `session/new` latency is reliably ~5.8 s
+
+#### Implementation (2026-07-26, code: a956675, fixes: 0b54cbf, docs: 822ecf9)
+
+Run as two halves with disjoint file scopes — code (cancel, close, telemetry) and documentation
+(roadmap reconciliation, citation backstop) — because they share no files and fail in completely
+different ways.
+
+**Close runs on a kiro-private extension.** `session/close` does not exist on kiro-cli 2.14.2; it
+answers `-32601 Method not found`. The method that releases a session is
+`_kiro.dev/session/terminate`, located by reading strings in the binary, where the bundled JS client
+calls it wrapped in a best-effort try/catch. `close_session` asks the agent *first* and drops local
+state only once it has answered, so a build without the extension reports a typed error rather than a
+memory saving that did not happen.
+
+**Cancel is a notification, not a request** — sent with no `id`. The agent answers nothing and
+instead completes the outstanding `session/prompt` with `stopReason: "cancelled"` in 0.11 s. Sent as
+a request it would have parked the Stop button on a future the agent never resolves, for the full
+ceiling. Nothing on the cancel path emits a turn boundary: `_handle_prompt`'s existing `finally`
+does, so every attached tab sees one ending rather than two.
+
+**Context-window telemetry keys off the JSON-RPC method name**, the opposite rule from tool calls —
+`_kiro.dev/metadata` carries no `sessionUpdate` field, exactly as Phase 4 predicted would be needed.
+It is broadcast but deliberately *not* recorded: a level rather than an event, so buffering it would
+spend a ring-buffer eviction per turn on a number the next frame supersedes. `subscribe` carries the
+latest reading on the `session` frame, which is what makes not recording it safe.
+
+**Tool-call rendering was verified, not rebuilt** — it had been pulled forward into Phase 4 on user
+decision. Confirmed against the criterion by accessibility snapshot: a distinct row with role `tool`,
+name `shell`, kind `execute`, a live status field, and a mono block carrying the full command.
+
+**The session-cap message has now been wrong in both directions.** It said "close one first" when no
+close existed (caught by the Phase 5 review), was changed to name a restart, and now names the close
+control again. Its docstring records this, because no test asserts the message's *truth* — only that
+it names a remedy. The two false claims that actually shipped are now pinned by tests.
+
+Suite: **929 → 964 passed, 1 skipped.** 28 mutations run, 28 caught.
 
 ### Review escalations — all resolved 2026-07-25
 
@@ -1446,6 +1490,62 @@ deliberately not enumerated.
   conversation is dropped; register early and any socket may attach mid-load and receive the replay
   frame by frame. Recorded because the tension is a property of the protocol, not of this
   implementation, and Phase 6 inherits it.
+
+### Phase 6
+
+- **`session/close` does not exist, and the memory lever is a kiro-private extension.** kiro-cli
+  2.14.2 answers `-32601 Method not found`; the working method is `_kiro.dev/session/terminate`,
+  found by reading strings in the binary. **This is the single largest risk to a rebuild that holds
+  sessions open**: §4 and §6 accept the per-session memory cost entirely on the strength of a close
+  control, and that control runs on an undocumented extension a release can withdraw.
+- **The close criterion's own command cannot show what it asks for.**
+  `Get-Process kiro-cli | Measure-Object` returns **1** with three sessions live and **1** after a
+  close — the per-session processes are `node` (MCP servers), `cmd` and `conhost` children of the
+  single agent process. Any re-measurement must walk the process tree, not filter by image name.
+- **Per-session cost is ~254 MB and exactly 5 processes, not ~306 MB.** Three sessions measured 17
+  processes / 1045.5 MB against a 283 MB agent baseline; one close took it to 12 / 792.1 MB — a drop
+  of 5 processes and 253.4 MB, reproduced across two runs. §1's process figure was also one short:
+  the model is `~2 + 5N`, the extra being the parent's own `conhost`.
+- **`session/new` is not "reliably ~5.8 s".** Measured 5.41 s for the first session of a process
+  (spawn included), then 2.60 s and 2.50 s. Consistent with Phase 3b's 6.83 s / ~2 s, not with §1.
+- **The three open items are now answered.** A graceful close **removes** the `.lock`.
+  `session/load` alone does **not** mutate the transcript — `.json` and `.jsonl` stay byte-identical
+  by sha256, only the lock is rewritten. And `session/new` writes all three files **at creation,
+  before any prompt**, which makes Phase 5's attribution of locks to `session/load` too narrow.
+- **The unprompted `shell` tool fired again, mid-session, on a turn that was not the first.** This
+  refutes any remaining "first turn only" reading and corroborates that the trigger condition is
+  unknown. It rendered correctly as a tool row — criterion 2 doing its job.
+- **`-32603 "Internal error"` is this build's generic failure, not a load-specific one.** One
+  `session/prompt` was refused with it in 1.17 s for no discernible reason; an immediately following
+  prompt on the same session succeeded. So the page's `agent_error` can mean anything.
+- **A test spawned a real agent and created 10 unintended sessions.** A dispatch-coverage test walked
+  every `CLIENT_TYPE` including `new`, which reaches `ensure_started`. Disclosed by the implementing
+  agent, fixed in `0b54cbf` by stubbing `ensure_started`; the suite now leaves the store
+  byte-identical. **The blast radius was contained by a design decision, not by the instruction**:
+  the sessions defaulted to the *neutral cwd*, never a real project, because the test supplied no
+  `cwd`. All 10 were empty — 0 turns, 0 tool uses — and were deleted on user decision (30 files,
+  store 13,349 → 13,319). Every session-safety rule in this plan is procedural and binds the agent
+  that reads it; the neutral-cwd default bound a test nobody had written yet.
+- **The roadmap's citation rot is worse than a line-number problem, and predates this plan.** The
+  Phase 1 backstop found **zero** `web.py:NNN` references left to regress — the symbol-anchor mandate
+  worked. But all twelve line-references in `plans/tests/260701_POWERATLAS.md`'s H1-H10 hotspot block
+  fail to resolve, and **two of the ten claims are themselves false**: H1 asserts the pinned-folder
+  migration hardcodes `kiro-cli` (it migrates `list[dict] → list[str]` and is explicitly
+  provider-agnostic), and H8 asserts a fixed 0.5 s sleep in `--restart` (it polls `_pid_alive`
+  against a 5 s deadline and refuses to restart if the old instance survives). Both verified
+  independently. **Left unfixed and escalated deliberately** — re-pointing the other eight would make
+  the block read as freshly verified while those two continued advertising defects that no longer
+  exist, so a test run would chase them with more confidence rather than less. `web.py:130` was
+  already wrong before Phase 3 first touched the file, so this is not a regression the backstop was
+  aimed at. It needs its own pass, re-deriving hotspots against current source rather than repairing
+  coordinates.
+- **Effort actual: two calendar days, ~13 h elapsed**, against a 7-10 day estimate and the roadmap's
+  ~1 week. Derived from commit timestamps for the plan slug minus the overnight gap; exploration and
+  planning are excluded, so it is a floor. Recorded in the roadmap with that caveat and flagged as
+  not like-for-like with the page's hand-written day figures, since the roadmap orders by value per
+  day and a number produced by a different process would mis-rank its neighbours. Where the cost
+  actually sat was not where the estimate put it: transport and process supervision were cheap;
+  securing the WebSocket surface and repeatedly falling into the same two verification traps were not.
 
 ## Review Log
 
