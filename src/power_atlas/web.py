@@ -692,17 +692,41 @@ def _ws_origin_ok(ws: WebSocket) -> bool:
     ``_ALLOWED_HOSTS`` DNS-rebinding defense — never sees an upgrade request.
     A new ``@app.websocket`` route that omits this call ships unprotected.
 
-    Both halves are derived from ``ws.url``. Reading the expected origin from
-    ``ws.url.netloc`` but the allowlist from ``ws.url.hostname`` is safe;
-    mixing in the raw ``Host`` header is not, because Starlette's ``URL``
-    falls back to ``scope["server"]`` when ``Host`` fails its ``_HOST_RE``
-    (underscores, for one) — a rebound host would then satisfy the loopback
-    allowlist against 127.0.0.1 while matching its own attacker-chosen Origin.
+    Both halves are derived from the raw ``Host`` header, through the same
+    ``_host_allowed`` parser the HTTP path uses, and **nothing here reads**
+    ``ws.url``. Deriving them from the URL instead was argued safe on the
+    grounds that the two halves then agree with each other; they do not, and
+    which of them is wrong depends on the Starlette in front of it:
+
+    * ``Host: evil.com@127.0.0.1:4915`` with a matching ``Origin`` **passes**
+      on starlette 0.37.2, which has no ``_HOST_RE``: the raw header goes
+      straight into the URL, ``hostname`` keeps only what follows the last
+      ``@`` and reads ``127.0.0.1``, while ``netloc`` keeps the userinfo and so
+      reproduces the attacker's Origin exactly. ``_host_allowed`` rejects any
+      ``@`` outright, which is why that trap is its own first check.
+    * ``Host: [::1`` **raises** ``ValueError`` out of ``urlsplit`` on 0.37.2,
+      turning a rejection into a traceback on the handshake path.
+
+    Starlette 1.3.1 rejects both through ``_HOST_RE`` and substitutes
+    ``scope["server"]``, which is why neither is observable from the test
+    interpreter. Reading the header is what makes the verdict the same on both.
+
+    ``getlist`` for the same reason ``_request_host_allowed`` uses it: zero
+    Host headers left the URL nothing but the ``scope["server"]`` fallback, so
+    an absent Host was a loopback Host, and two or more is a smuggling shape
+    where which copy is authoritative differs between hops.
     """
-    if (ws.url.hostname or "").lower() not in _ALLOWED_HOSTS:
+    hosts = ws.headers.getlist("host")
+    if len(hosts) != 1 or not _host_allowed(hosts[0]):
         return False
-    expected = f"{'https' if ws.url.scheme == 'wss' else 'http'}://{ws.url.netloc}"
-    return ws.headers.get("origin", "") == expected
+    # Safe to put back into a URL: ``_host_allowed`` has established that this
+    # is a loopback name, optionally bracketed, with at most a numeric port and
+    # none of ``@/\?#``. Compared case-insensitively because the allowlist is,
+    # and a browser's ``Host`` and ``Origin`` are the same string from the same
+    # address bar.
+    scheme = "https" if ws.scope.get("scheme") == "wss" else "http"
+    expected = f"{scheme}://{hosts[0].strip()}"
+    return ws.headers.get("origin", "").lower() == expected.lower()
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1542,17 +1543,18 @@ class TestAcpInlineHostCheck:
 
 
 class TestWsOriginUnaffectedByTheHostFallback:
-    """``_ws_origin_ok`` deliberately keeps reading ``ws.url`` and is *not*
-    switched to ``_host_allowed``.
+    """``_ws_origin_ok`` runs the raw ``Host`` header through ``_host_allowed``,
+    the same parser the HTTP path uses, and reads no part of ``ws.url``.
 
     Middleware never sees an upgrade request, so this is the WebSocket's whole
-    defense — but it is already safe under the same fallback, because both
-    halves come from ``ws.url``. When Starlette discards an unparseable Host the
-    netloc collapses to loopback along with the hostname, so the expected origin
-    stops matching the attacker's ``Origin`` in the same step. Reading the raw
-    Host for the allowlist while leaving the expected origin on ``ws.url`` is
-    what would break it: the two would then disagree, and a rebound host would
-    satisfy a loopback allowlist while matching its own origin.
+    defense. Deriving both halves from ``ws.url`` was argued safe on the grounds
+    that they then agree with each other; they do not, and which of them is
+    wrong depends on the Starlette in front of it — see
+    ``TestWsOriginReadsTheRawHostOnEveryStarlette`` below, which is where that
+    is pinned in a form this interpreter can observe.
+
+    These cases hold on both: a Host that Starlette 1.3.1 discards takes the
+    netloc with it, and the raw parser rejects it outright.
     """
 
     @staticmethod
@@ -1586,6 +1588,123 @@ class TestWsOriginUnaffectedByTheHostFallback:
         on the handshake path."""
         assert _ws_origin_ok(self._ws(None, "http://evil.com")) is False
         assert _ws_origin_ok(self._ws("[::1", "http://evil.com")) is False
+
+
+class _RawWs:
+    """Everything ``_ws_origin_ok`` may legitimately read, and nothing else.
+
+    ``url`` raises on purpose. A verdict derived from ``ws.url`` is a verdict
+    that differs between Starlette versions, and the two that matter here are
+    not the same one: the suite runs on 1.3.1 while the application runs on
+    0.37.2 (``__main__.py`` launches uvicorn on the interpreter PowerAtlas is
+    installed into, not on the venv). Forbidding the attribute is what makes
+    these cases mean the same thing on both.
+    """
+
+    def __init__(self, host, origin, scheme="ws", hosts=None):
+        from starlette.datastructures import Headers
+        headers = []
+        for value in (hosts if hosts is not None else ([] if host is None else [host])):
+            headers.append((b"host", value.encode()))
+        if origin is not None:
+            headers.append((b"origin", origin.encode()))
+        self.scope = {"type": "websocket", "scheme": scheme, "headers": headers}
+        self.headers = Headers(scope=self.scope)
+
+    @property
+    def url(self):
+        raise AssertionError(
+            "_ws_origin_ok read ws.url; its verdict must come from the raw "
+            "Host header, which is the only thing both Starlette versions "
+            "agree about")
+
+
+class TestWsOriginReadsTheRawHostOnEveryStarlette:
+    """The userinfo trap, and the bracket that raises.
+
+    ``_host_allowed`` exists because ``urlsplit`` keeps only what follows the
+    last ``@`` and because ``hostname`` throws on an unmatched bracket. The
+    WebSocket route did not use it, and the same two inputs measured
+    differently on the two interpreters this project runs on::
+
+                                                             0.37.2   1.3.1
+        Host 'evil.com@127.0.0.1:4915' + matching Origin  ->  True     False
+        Host '[::1'                    + loopback Origin  ->  ValueError  True
+
+    On 0.37.2 the raw Host goes straight into the URL, so ``hostname`` reads
+    ``127.0.0.1`` while ``netloc`` keeps the userinfo and reproduces the
+    attacker's Origin exactly — the two halves disagree and the check passes.
+    Practical exposure is nil (browsers never emit userinfo in ``Host``, and a
+    local process that can set headers already holds the token); what was broken
+    is a stated invariant and the fact that no test could observe it, because
+    1.3.1's ``_HOST_RE`` refuses both before the function is reached.
+    """
+
+    @pytest.mark.parametrize("host, origin, expected", [
+        # The 0.37.2 bypass, in the shape that measured True.
+        ("evil.com@127.0.0.1:4915", "http://evil.com@127.0.0.1:4915", False),
+        ("evil.com@127.0.0.1:4915", "http://127.0.0.1:4915", False),
+        # The 0.37.2 ValueError, in the shape that measured a 500.
+        ("[::1", "http://127.0.0.1:4915", False),
+        ("[::1", "http://[::1", False),
+        # Underscores: what 1.3.1 discards and 0.37.2 keeps.
+        ("a_b.evil.com", "http://a_b.evil.com", False),
+        # A hostname smuggled into the port, and bytes past the bracket.
+        ("127.0.0.1:4915.evil.com", "http://127.0.0.1:4915.evil.com", False),
+        ("[::1]extra", "http://[::1]extra", False),
+        # Loopback, matching and not.
+        ("127.0.0.1:4915", "http://127.0.0.1:4915", True),
+        ("127.0.0.1:4915", "http://evil.com", False),
+        ("127.0.0.1:4915", None, False),
+        ("localhost:4915", "http://localhost:4915", True),
+        ("[::1]:4915", "http://[::1]:4915", True),
+        ("127.0.0.1", "http://127.0.0.1", True),
+        # The allowlist is case-insensitive, so the origin comparison has to be
+        # too, or a Host the allowlist accepts fails against its own Origin.
+        ("LocalHost:4915", "http://localhost:4915", True),
+        ("localhost:4915", "HTTP://LocalHost:4915", True),
+        # Optional whitespace around a field value is legal HTTP, and
+        # ``_host_allowed`` strips it — the expected origin must be built from
+        # the same stripped value rather than the padded one.
+        (" 127.0.0.1:4915 ", "http://127.0.0.1:4915", True),
+    ])
+    def test_the_verdict_comes_from_the_header(self, host, origin, expected):
+        assert _ws_origin_ok(_RawWs(host, origin)) is expected
+
+    def test_a_secure_socket_expects_a_secure_origin(self):
+        assert _ws_origin_ok(
+            _RawWs("127.0.0.1:4915", "https://127.0.0.1:4915", scheme="wss")) is True
+        assert _ws_origin_ok(
+            _RawWs("127.0.0.1:4915", "http://127.0.0.1:4915", scheme="wss")) is False
+
+    @pytest.mark.parametrize("hosts", [[], ["127.0.0.1:4915", "evil.com"]])
+    def test_anything_but_exactly_one_host_header_is_refused(self, hosts):
+        """The counts ``_request_host_allowed`` rules out for the same reasons:
+        with none sent there was nothing left but the ``scope["server"]``
+        fallback, and two is a smuggling shape where which copy is authoritative
+        differs between hops."""
+        assert _ws_origin_ok(
+            _RawWs(None, "http://127.0.0.1:4915", hosts=hosts)) is False
+
+    def test_the_http_and_websocket_paths_share_one_parser(self, monkeypatch):
+        """One home for the rule, so the two cannot drift into disagreeing
+        about what a loopback Host is. The header is handed over **raw** —
+        stripping or lowercasing it first would move part of the parse out of
+        the parser, which is where every one of these traps was found."""
+        from power_atlas import web as web_mod
+        seen = []
+
+        def spy(raw_host):
+            seen.append(raw_host)
+            return False
+
+        monkeypatch.setattr(web_mod, "_host_allowed", spy)
+        # Padded and mixed-case on purpose: a caller that trimmed or lowered it
+        # first would have moved part of the parse out of the parser, and this
+        # is the only assertion that can see that.
+        assert _ws_origin_ok(
+            _RawWs(" LocalHost:4915 ", "http://localhost:4915")) is False
+        assert seen == [" LocalHost:4915 "]
 
 
 class _FakeWs:
@@ -3166,7 +3285,12 @@ class TestAcpSessionLoad:
                           lambda *a, **k: wire.append(a)), \
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, sid))
-        assert _queued(conn)[1]["payload"]["code"] == "too_many_sessions"
+        frames = _queued(conn)
+        # One frame, and no pending label ahead of it. The cap is read before
+        # the load spends anything on a session it is going to refuse, so the
+        # page is never told a load is running that never was.
+        assert [f["type"] for f in frames] == ["error"], frames
+        assert frames[0]["payload"]["code"] == "too_many_sessions"
         assert wire == []
 
     def test_dispatch_routes_load_off_the_synchronous_path(self, acp_store):
@@ -3561,12 +3685,21 @@ class TestAcpLoadFailureAttribution:
         for i in range(acp_mod.MAX_SESSIONS):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
         conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod, "_lock_holder", self._one_shot(4242)), \
+        reads = []
+
+        def counting_lock_holder(session_id):
+            reads.append(session_id)
+            return 4242
+
+        with patch.object(acp_mod, "_lock_holder", counting_lock_holder), \
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, sid))
-        payload = _queued(conn)[1]["payload"]
+        payload = _queued(conn)[0]["payload"]
         assert payload["code"] == "too_many_sessions"
         assert "4242" not in payload["message"]
+        # And the lock is never read at all now: the cap is consulted before the
+        # two thread hops a refused load used to pay for anyway.
+        assert reads == []
 
     def test_a_named_holder_still_wins_over_an_agent_refusal(self, acp_store):
         """Positive control: the re-read is still what turns the one cause an
@@ -3667,10 +3800,29 @@ class TestAcpSessionCapMessage:
         for i in range(acp_mod.MAX_SESSIONS):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
 
+    def _only_error(self, acp_mod, conn):
+        """The refusal, and the assertion that it is the *whole* answer.
+
+        Both cap paths used to send their "creating…" / "loading…" pending
+        frame first and refuse afterwards, so the page briefly claimed to be
+        doing work it had already decided against. The cap is now read before
+        either frame, which makes the frame list itself part of the contract.
+        """
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"], frames
+        return frames[0]["payload"]
+
     def _assert_names_the_close_control(self, acp_mod, payload):
         assert payload["code"] == "too_many_sessions"
         text = payload["message"].lower()
         assert "close" in text
+        # The figure this message quotes, pinned to the measurement rather than
+        # to whatever it said last. It has been wrong in both directions before,
+        # and ~306 MB — the round-2 model — was ~20% high: three concurrent
+        # sessions measured 17 processes / 1045.5 MB against a 283 MB one-agent
+        # baseline, and one close dropped 5 processes and 253.4 MB, twice.
+        assert "254 mb" in text, payload["message"]
+        assert "306" not in text, payload["message"]
         # The two claims this message has actually shipped falsely, pinned by
         # their own words. A generic "mentions closing" assertion passes on
         # "nothing closes a session yet", which is the wording being retired.
@@ -3699,7 +3851,8 @@ class TestAcpSessionCapMessage:
         self._fill(acp_mod)
         conn = _acp_conn(acp_mod)
         asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
-        self._assert_names_the_close_control(acp_mod, _queued(conn)[1]["payload"])
+        self._assert_names_the_close_control(
+            acp_mod, self._only_error(acp_mod, conn))
 
     def test_the_load_path_names_a_remedy_that_exists(self, acp_store):
         acp_mod, store = acp_store
@@ -3708,7 +3861,8 @@ class TestAcpSessionCapMessage:
         conn = _acp_conn(acp_mod)
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, "load-cap-0001"))
-        self._assert_names_the_close_control(acp_mod, _queued(conn)[1]["payload"])
+        self._assert_names_the_close_control(
+            acp_mod, self._only_error(acp_mod, conn))
 
 
 class TestAcpLoadPageRecovery:
@@ -3943,6 +4097,31 @@ class TestAcpCancel:
         asyncio.run(acp_mod._handle_cancel(conn, None))
         assert _queued(conn)[0]["payload"]["code"] == "bad_envelope"
 
+    def test_a_socket_watching_another_session_cannot_cancel_this_turn(
+            self, acp_session):
+        """``prompt`` has required the socket to be subscribed to the session it
+        names since Phase 4. ``cancel`` did not, so one tab could end a turn it
+        cannot see — and the boundary that turn emits goes to the session's
+        watchers, which do not include the socket that asked."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.sessions["other"] = {"cwd": ""}
+        acp_mod._supervisor.history["other"] = acp_mod._History()
+        conn = self._conn(acp_mod, "other")
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write",
+                              _sent(acp_mod, written)), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                asyncio.run(acp_mod._handle_cancel(conn, sid))
+            assert written == []
+            assert [f["payload"]["code"] for f in _queued(conn)] == ["not_subscribed"]
+            assert sid in acp_mod._supervisor.inflight
+        finally:
+            acp_mod._supervisor.sessions.pop("other", None)
+            acp_mod._supervisor.history.pop("other", None)
+
     def test_an_agent_failure_reaches_the_page_typed(self, acp_session):
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
@@ -3971,7 +4150,7 @@ class TestAcpCancel:
 
 
 class TestAcpSessionClose:
-    """The lever the whole memory budget rests on: §4 and §6 accept ~306 MB a
+    """The lever the whole memory budget rests on: §4 and §6 accept ~254 MB a
     session on the strength of a close control existing.
 
     Measured on kiro-cli 2.14.2 — closing one session took the agent's tree from
@@ -4052,24 +4231,47 @@ class TestAcpSessionClose:
             assert conn.session_id is None
         assert sid not in acp_mod._registry.subscribers
 
-    def test_a_socket_watching_another_session_keeps_it(self, acp_session):
-        """The closing socket need not be attached to what it closes, and
-        detaching it from what it *is* attached to would leave that tab
-        receiving nothing."""
+    def test_a_socket_watching_another_session_cannot_close_this_one(
+            self, acp_session):
+        """``prompt`` has required the socket to be subscribed to the session it
+        names since Phase 4; ``close`` and ``cancel`` did not. Same trust
+        boundary, so nothing crosses a privilege line — but it made the
+        prompt-during-close race an ordinary two-tab interaction rather than a
+        socket racing itself, and it let one tab release what another is
+        holding."""
         acp_mod, sid = acp_session
         acp_mod._supervisor.sessions["other"] = {"cwd": ""}
         acp_mod._supervisor.history["other"] = acp_mod._History()
         conn = self._conn(acp_mod, "other")
         _queued(conn)
+        written = []
         try:
-            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+            with patch.object(acp_mod._Supervisor, "_write",
+                              _sent(acp_mod, written)), \
                     patch.object(acp_mod._Supervisor, "alive", lambda self: True):
                 _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
-            assert [f["type"] for f in _queued(conn)] == ["session_closed"]
+            assert [f["payload"]["code"] for f in _queued(conn)] == ["not_subscribed"]
+            # Nothing reached the agent, the session survives, and the socket
+            # keeps the session it *is* watching — taking that away would leave
+            # the tab it belongs to receiving nothing.
+            assert written == []
+            assert sid in acp_mod._supervisor.sessions
             assert conn.session_id == "other"
         finally:
             acp_mod._supervisor.sessions.pop("other", None)
             acp_mod._supervisor.history.pop("other", None)
+
+    def test_a_subscribed_socket_still_closes(self, acp_session):
+        """Positive control for the guard above: the page's own socket is
+        attached to the session its Close button names."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
+        assert [f["type"] for f in _queued(conn)] == ["session_closed"]
+        assert sid not in acp_mod._supervisor.sessions
 
     def test_close_during_a_turn_is_refused(self, acp_session):
         """The outstanding `session/prompt` would sit on a session the agent no
@@ -4103,9 +4305,9 @@ class TestAcpSessionClose:
         assert _queued(conn)[0]["payload"]["code"] == "session_loading"
         assert sid in acp_mod._supervisor.sessions
 
-    def test_an_unknown_session_is_refused(self, acp_session):
-        acp_mod, sid = acp_session
-        conn = self._conn(acp_mod, sid)
+    def test_a_session_this_server_does_not_hold_is_refused(self, acp_session):
+        acp_mod, _sid = acp_session
+        conn = self._conn(acp_mod, "no-such-session")
         _queued(conn)
         written = []
         with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
@@ -4113,8 +4315,29 @@ class TestAcpSessionClose:
         # One frame and nothing on the wire: a refusal that reports and then
         # carries on reaches the agent anyway and answers the page twice, with
         # the second answer contradicting the first.
-        assert [f["payload"]["code"] for f in _queued(conn)] == ["unknown_session"]
+        assert [f["payload"]["code"] for f in _queued(conn)] == ["nothing_to_close"]
         assert written == []
+
+    def test_a_refused_close_does_not_wear_the_adopt_me_code(self, acp_session):
+        """``unknown_session`` means "this server does not hold it — try
+        adopting it" everywhere else, and the page answers it by sending
+        ``load``. Emitted from ``close`` it would have a refused Close spawn an
+        agent and re-adopt the session, spending again the memory the button
+        exists to free. Only WebSocket frame ordering prevented that."""
+        from power_atlas.web import templates
+        acp_mod, _sid = acp_session
+        conn = self._conn(acp_mod, "no-such-session")
+        _queued(conn)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])):
+            asyncio.run(acp_mod._handle_close(conn, "no-such-session"))
+        code = _queued(conn)[0]["payload"]["code"]
+        assert code != "unknown_session"
+        # Tied to the branch that would act on it, so this cannot pass by the
+        # page having stopped auto-loading instead.
+        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        adopt = src.split("if (payload.code === 'unknown_session'", 1)[1]
+        assert "send('load'" in adopt.split("return;", 1)[0]
+        assert code not in adopt.split("return;", 1)[0]
 
     def test_a_second_close_cannot_overtake_the_first(self, acp_session):
         """Two `close` frames become two tasks. The second would be refused by
@@ -4145,7 +4368,7 @@ class TestAcpSessionClose:
 
     def test_the_closed_session_frees_a_slot(self, acp_session):
         """Which is the entire point: the cap is the only thing between one
-        socket and memory exhaustion at ~306 MB a session."""
+        socket and memory exhaustion at ~254 MB a session."""
         acp_mod, sid = acp_session
         for i in range(acp_mod.MAX_SESSIONS - 1):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
@@ -4165,7 +4388,7 @@ class TestAcpSessionClose:
 
     def test_the_page_clears_the_session_and_the_url(self):
         """A ?sid= left in place makes a reload re-adopt the session through
-        `load` and spend the ~306 MB again — undoing the button."""
+        `load` and spend the ~254 MB again — undoing the button."""
         from power_atlas.web import templates
         src = templates.env.loader.get_source(templates.env, "acp.html")[0]
         branch = src.split("type === 'session_closed'", 1)[1].split(
@@ -4322,6 +4545,353 @@ class TestAcpDeclaredTypesAreRouted:
             asyncio.run(dispatch())
         codes = [f["payload"].get("code") for f in _queued(conn)]
         assert "not_implemented" not in codes, codes
+
+
+# --- ACP closing review: loop blocking, the close/prompt race, dead state ---
+
+
+class TestAcpNewDoesNotBlockTheLoop:
+    """``_resolve_session_cwd`` is two blocking filesystem calls —
+    ``Path.resolve()`` and ``is_dir()`` — on a path the page's "session
+    directory" box supplies. Measured against a UNC path to an unreachable host
+    (``\\\\10.255.255.1\\share\\x``): **42.16 s in a single call**, on the event
+    loop, during which uvicorn serves nothing at all — no dashboard, no status
+    polling, no other ACP socket.
+
+    The sibling ``load`` path has resolved its cwd through
+    ``asyncio.to_thread`` since Phase 5, and ``_load_session_cwd``'s own
+    docstring says "Blocking; call off the loop". One ``new`` frame is enough.
+    """
+
+    def _conn(self, acp_mod):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        return conn
+
+    def test_the_loop_keeps_running_while_the_resolve_blocks(self, acp_store):
+        """The property, not the call shape: another coroutine must keep being
+        scheduled for the whole of a resolve that blocks."""
+        acp_mod, store = acp_store
+        conn = self._conn(acp_mod)
+        block = 0.30
+        ticks = []
+
+        def slow_resolve(raw):
+            # An unreachable UNC path, in miniature. The real one is two orders
+            # of magnitude longer.
+            time.sleep(block)
+            return str(store)
+
+        async def ticker():
+            while True:
+                ticks.append(time.monotonic())
+                await asyncio.sleep(0.005)
+
+        async def agent_answers(self, method, params, timeout=None):
+            return {"sessionId": "new-off-loop-01"}
+
+        async def run():
+            acp_mod._supervisor._loop = asyncio.get_running_loop()
+            beat = asyncio.ensure_future(ticker())
+            try:
+                await acp_mod._handle_new(conn, {"cwd": r"\\10.255.255.1\share\x"})
+            finally:
+                beat.cancel()
+                acp_mod._supervisor._loop = None
+
+        with patch.object(acp_mod, "_resolve_session_cwd", slow_resolve), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", agent_answers):
+            asyncio.run(run())
+
+        assert "new-off-loop-01" in acp_mod._supervisor.sessions
+        # A synchronous resolve parks the loop for the whole `block`, so the
+        # ticker gets one iteration. Off the loop it gets ~60; ten is far below
+        # that and far above what a stalled loop can produce.
+        assert len(ticks) > 10, (
+            f"the loop was served {len(ticks)} time(s) during a {block:.2f}s "
+            "resolve — a `new` frame stalls the whole application")
+
+    def test_the_resolve_runs_off_the_main_thread(self, acp_store):
+        acp_mod, store = acp_store
+        conn = self._conn(acp_mod)
+        threads = []
+
+        def spy(raw):
+            threads.append(threading.current_thread().ident)
+            return str(store)
+
+        async def agent_answers(self, method, params, timeout=None):
+            return {"sessionId": "new-off-loop-02"}
+
+        with patch.object(acp_mod, "_resolve_session_cwd", spy), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", agent_answers):
+            _run_bound(acp_mod, lambda: acp_mod._handle_new(conn, {"cwd": "x"}))
+        assert threads
+        assert threading.main_thread().ident not in threads
+
+    def test_at_the_cap_nothing_is_resolved_at_all(self, acp_store, tmp_path):
+        """MAX_SESSIONS did not bound this: the cap was first read inside
+        ``new_session``, *after* the resolve, so the stall was payable
+        indefinitely with no session ever created."""
+        acp_mod, _store = acp_store
+        for i in range(acp_mod.MAX_SESSIONS):
+            acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
+        conn = self._conn(acp_mod)
+        resolves = []
+
+        def spy(raw):
+            resolves.append(raw)
+            return str(tmp_path)
+
+        with patch.object(acp_mod, "_resolve_session_cwd", spy):
+            asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
+        assert resolves == []
+        assert [f["payload"]["code"] for f in _queued(conn)] == ["too_many_sessions"]
+
+
+class TestAcpPromptDuringAnInFlightClose:
+    """``_handle_close`` guards against ``loading``, an unknown session, a live
+    turn and a concurrent ``close``. ``_handle_prompt`` checked ``sessions``,
+    the subscription and ``inflight`` — and never ``closing``.
+
+    Reproduced against a stubbed transport: with the close claim taken and the
+    agent not yet answered, a prompt was accepted, so both
+    ``_kiro.dev/session/terminate`` and ``session/prompt`` went on the wire.
+    The composed consequence is the one the close path's own turn guard exists
+    to prevent — the prompt future sits in ``_pending`` for the whole 600 s
+    ceiling — plus ``close_session`` discarding the live turn's ``inflight``
+    marker and the close dropping the ring buffer and detaching every watcher,
+    so the surviving turn's chunks and tool calls reach neither the page nor the
+    replay. Under ``-a`` that is ungated tools running with nothing watching.
+
+    Reachable without adversarial intent: ``closeBtn`` disables itself on click
+    but ``sendBtn`` and Enter do not, and two tabs on one session is a supported
+    shape.
+    """
+
+    def test_a_prompt_arriving_during_a_close_is_refused(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        _queued(conn)
+        methods = []
+        claimed = asyncio.Event()
+        release = asyncio.Event()
+
+        async def request(self, method, params, timeout=None):
+            methods.append(method)
+            if method == acp_mod.CLOSE_METHOD:
+                claimed.set()
+                await release.wait()
+            return {}
+
+        async def both():
+            closing = asyncio.ensure_future(acp_mod._handle_close(conn, sid))
+            await claimed.wait()
+            assert sid in acp_mod._supervisor.closing
+            # The prompt would return immediately if it were accepted, so a
+            # regression here fails rather than hanging.
+            await acp_mod._handle_prompt(conn, sid, {"prompt": "one more thing"})
+            release.set()
+            await closing
+
+        with patch.object(acp_mod._Supervisor, "_request", request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, both)
+
+        # The assertion that would have caught it: the close reached the agent
+        # and the prompt did not.
+        assert methods == [acp_mod.CLOSE_METHOD], methods
+        codes = [f["payload"].get("code")
+                 for f in _queued(conn) if f["type"] == "error"]
+        assert codes == ["close_in_progress"], codes
+        # And no turn was left behind on a session that no longer exists.
+        assert sid not in acp_mod._supervisor.inflight
+        assert sid not in acp_mod._supervisor.sessions
+        assert acp_mod._supervisor._pending == {}
+
+    def test_a_prompt_outside_the_close_window_still_runs(self, acp_session):
+        """Positive control: the guard reads ``closing``, not "there was a
+        close once"."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        methods = []
+
+        async def request(self, method, params, timeout=None):
+            methods.append(method)
+            return {"stopReason": "end_turn"}
+
+        with patch.object(acp_mod._Supervisor, "_request", request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod,
+                       lambda: acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+        assert methods == ["session/prompt"]
+
+
+class TestAcpLoadFloor:
+    """``subscribe`` has had a per-socket replay floor since Phase 4; ``load``
+    costs strictly more and had none — two blocking calls on the shared thread
+    pool the dashboard's own status polling uses, a registry claim, a pending
+    frame and an agent round-trip, all for ~60 bytes of client frame.
+    """
+
+    def test_a_second_load_within_the_floor_is_refused(self, acp_store):
+        acp_mod, store = acp_store
+        _stored_session(store, "floor-0001")
+        _stored_session(store, "floor-0002")
+        conn = _acp_conn(acp_mod)
+        reads = []
+
+        def counting(session_id):
+            reads.append(session_id)
+            return None
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        with patch.object(acp_mod, "_lock_holder", counting), \
+                patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, "floor-0001"))
+            first = len(reads)
+            _queued(conn)
+            asyncio.run(acp_mod._handle_load(conn, "floor-0002"))
+        assert [f["payload"]["code"] for f in _queued(conn)] == ["load_throttled"]
+        # Nothing was spent on the throttled frame: the floor is above the two
+        # thread hops, not below them.
+        assert len(reads) == first
+
+    def test_the_floor_is_per_socket(self, acp_store):
+        """A reload is a new socket and must not be throttled by the one it
+        replaces — the same rule the replay floor follows."""
+        acp_mod, store = acp_store
+        _stored_session(store, "floor-0003")
+        first, second = _acp_conn(acp_mod), _acp_conn(acp_mod)
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(first, "floor-0003"))
+            asyncio.run(acp_mod._handle_load(second, "floor-0003"))
+        codes = [f["payload"].get("code")
+                 for f in _queued(second) if f["type"] == "error"]
+        assert "load_throttled" not in codes
+        assert codes == ["agent_timeout"], codes
+
+    def test_a_served_load_still_leaves_the_floor_armed(self, acp_store):
+        """``_deliver_load`` clears ``replayed_at`` on purpose — the replay a
+        load paid an agent round-trip for must not be throttled away — and
+        clearing the load floor with it would remove the floor from the frame
+        that costs the most."""
+        acp_mod, store = acp_store
+        sid = "floor-0004"
+        _stored_session(store, sid)
+        conn = _acp_conn(acp_mod)
+
+        async def answers(self, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", answers), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert conn.replayed_at is not None
+        assert conn.loaded_at is not None
+
+
+class TestAcpSessionRecordHoldsNoDeadState:
+    """``models`` and ``modes`` were written on every session record and read
+    nowhere in ``src/``; ``_Supervisor.agent_info`` was stored, cleared on every
+    teardown, and read only inline in the log call that set it. Both are
+    agent-authored dicts of no bounded size, held for the session's whole life
+    for nobody.
+    """
+
+    def test_a_created_session_records_only_what_is_read(self, acp_store):
+        acp_mod, store = acp_store
+
+        async def verbose(self, method, params, timeout=None):
+            return {"sessionId": "records-0001",
+                    "models": {"available": ["a"] * 500},
+                    "modes": {"current": "x", "available": ["y"] * 500}}
+
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", verbose):
+            asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        assert set(acp_mod._supervisor.sessions["records-0001"]) == {"cwd", "created"}
+
+    def test_a_loaded_session_records_only_what_is_read(self, acp_store):
+        acp_mod, store = acp_store
+
+        async def answers(self, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", answers):
+            asyncio.run(acp_mod._supervisor.load_session("records-0002", str(store)))
+        assert set(acp_mod._supervisor.sessions["records-0002"]) == {"cwd", "created"}
+
+    def test_the_supervisor_keeps_no_agent_info(self):
+        from power_atlas import acp as acp_mod
+        assert not hasattr(acp_mod._supervisor, "agent_info")
+
+    @pytest.mark.parametrize("returned", [
+        "../../etc/passwd", "a/b", "a\\b", "", "with space", "x" * 200,
+        "trailing\n", None, 17,
+    ])
+    def test_an_agent_session_id_passes_the_client_gate(self, acp_store, returned):
+        """Every client-supplied id passes ``_valid_session_id``; the agent's
+        did not, though it is written straight back into ``?sid=`` — so a reload
+        after a restart routes it through ``load``, which refuses exactly what
+        this admitted, leaving the page holding an id it can never reopen."""
+        acp_mod, store = acp_store
+
+        async def answers(self, method, params, timeout=None):
+            return {"sessionId": returned}
+
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", answers):
+            with pytest.raises(acp_mod.AgentRejected):
+                asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        assert acp_mod._supervisor.sessions == {}
+        assert acp_mod._supervisor._reserved == 0
+
+    def test_a_usable_agent_session_id_is_still_accepted(self, acp_store):
+        """Positive control: the gate is ``_valid_session_id``, not a refusal
+        of everything. Real ids are hyphenated hex."""
+        acp_mod, store = acp_store
+
+        async def answers(self, method, params, timeout=None):
+            return {"sessionId": "73a40df3-2f1c-4e6a-9c11-0b7e6a2d5f88"}
+
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", answers):
+            info = asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        assert info["sessionId"] == "73a40df3-2f1c-4e6a-9c11-0b7e6a2d5f88"
+        assert acp_mod._valid_session_id(info["sessionId"])
+
+
+class TestAcpPageHarnessIsCommitted:
+    """``acp.html`` carries the XSS control, the turn state machine, reconnect
+    and the auto-load loop, and every Python assertion on it is a substring
+    check against the template source — which pins the *text* of a line, not
+    what it does. The behavioural coverage lives in a Node harness beside this
+    file; this test only keeps it from being lost, since nothing else in the
+    Python suite references it.
+    """
+
+    def test_the_harness_exists_and_names_its_command(self):
+        harness = Path(__file__).with_name("acp_page.test.mjs")
+        assert harness.is_file()
+        src = harness.read_text(encoding="utf-8")
+        assert "node tests/acp_page.test.mjs" in src, (
+            "the harness must document the one-line command that runs it")
 
 
 # --- Phase 3 (Launch Profiles): Profile endpoint tests ---

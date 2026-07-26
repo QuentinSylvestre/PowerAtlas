@@ -30,9 +30,9 @@
            aria-label="Directory to create the session against">
     <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
     <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
-    <!-- The lever the memory budget rests on: each live session costs ~5
-         processes and ~306 MB of MCP servers inside the agent, and nothing
-         sweeps idle ones. -->
+    <!-- The lever the memory budget rests on: each live session costs 5
+         processes and ~254 MB of MCP servers inside the agent, and nothing
+         sweeps idle ones. plans/ROADMAP.md carries the cost model. -->
     <button class="acp-btn acp-danger" id="acpClose" type="button" hidden>Close session</button>
     <span class="acp-sid" id="acpSid"></span>
   </div>
@@ -187,10 +187,10 @@
 
   function setPending(pending) {
     // The button is the only thing stopping a second session/new landing while
-    // the first is still in flight, and each one costs ~306 MB and is a
-    // permanent entry in the real kiro-cli store. Creation was measured at
-    // 5.84 s, plus ~1 s of spawn on the first, so the window is wide enough to
-    // double-click through by accident.
+    // the first is still in flight, and each one costs ~254 MB and is a
+    // permanent entry in the real kiro-cli store. Creation takes ~5.4 s for the
+    // first session of an agent process and ~2.5 s for each one after, so the
+    // window is wide enough to double-click through by accident.
     newBtn.disabled = pending;
     newBtn.textContent = pending ? 'Creating…' : 'New session';
   }
@@ -542,7 +542,7 @@
         + "in the agent's own store, so it can be reopened from the "
         + 'PowerAtlas dashboard.');
       // The id leaves the URL with the session. Left in place, a reload would
-      // re-adopt the session through `load` and spend the ~306 MB again —
+      // re-adopt the session through `load` and spend the ~254 MB again —
       // silently undoing the one thing the user pressed the button for.
       history.replaceState(null, '', location.pathname);
       logLine('info', '← session_closed ' + payload.sessionId);

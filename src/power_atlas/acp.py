@@ -186,6 +186,16 @@ HISTORY_MAX_BYTES = 2 * 1024 * 1024
 # each time and pays the handshake rather than this.
 SUBSCRIBE_MIN_INTERVAL_SECONDS = 1.0
 
+# The shortest gap between two ``load`` frames on one socket. A `load` is the
+# most expensive thing a client can ask for with ~60 bytes: two blocking calls
+# on the shared thread pool — a lock read and a cwd resolve, the latter against
+# a path the trust-all-tools agent wrote, where a UNC path to an unreachable
+# host measured 42 s — plus a registry claim and an agent round-trip. The page
+# sends at most one per session per socket (`loadTried`), and a reconnect is a
+# new socket with its own floor, so nothing legitimate is ever within a second
+# of its own predecessor.
+LOAD_MIN_INTERVAL_SECONDS = 1.0
+
 # How much of a tool call's input the page is shown. Under `-a` there is no
 # permission gate, so what the operator can read here is the only account of
 # what ran — a command clipped to a shell's first token would be worse than
@@ -211,9 +221,11 @@ CONTEXT_PERCENT_KEY = "contextUsagePercentage"
 # What releases one session on the agent. **Not** ``session/close``, which the
 # plan's own wording implies and which the ACP spec does not define: kiro-cli
 # 2.14.2 answers it ``-32601 Method not found``. This kiro-private extension
-# method is the one that works, and it is the whole basis of the ~306 MB/session
-# budget §4 and §6 accept — measured, one close released 5 processes and
-# 271.5 MB of MCP servers and removed the session's ``.lock``.
+# method is the one that works, and it is the whole basis of the per-session
+# memory budget §4 and §6 accept — measured across two runs, one close released
+# 5 processes and 253.4 MB of MCP servers and removed the session's ``.lock``.
+# ``plans/ROADMAP.md`` holds the cost model those figures feed and is where a
+# re-measurement lands; a copy here drifts from it within the day.
 #
 # Because it is an extension rather than protocol, a kiro-cli that drops it
 # takes the memory lever with it. That surfaces as a typed ``agent_error``
@@ -239,15 +251,18 @@ ACP_ARGS = ("acp", "-a")
 # `initialize` answers `{"protocolVersion": 1, ...}` in ~1.1 s.
 PROTOCOL_VERSION = 1
 
-# Each live session costs roughly five processes and ~306 MB of MCP servers, and
-# nothing in this prototype sweeps idle ones. Three is about as much as a
-# developer machine should carry while a browser and an IDE are also running.
+# Each live session costs exactly five processes and ~254 MB of MCP servers —
+# the model is ``~2 + 5N`` processes and ``~283 + 254N`` MB, and it lives in
+# ``plans/ROADMAP.md``. Nothing in this prototype sweeps idle sessions. Three is
+# about as much as a developer machine should carry while a browser and an IDE
+# are also running.
 MAX_SESSIONS = 3
 
 # Wall-clock ceilings on JSON-RPC requests. Every pending future carries one:
 # an agent that has stopped answering is otherwise indistinguishable from one
-# that is merely slow, and `session/new` is genuinely slow — measured at 5.84 s
-# with an earlier spike at ~3.2 s, so the ceiling has to be far above both.
+# that is merely slow, and `session/new` is genuinely slow — ~5.4 s for the
+# first session of a process, spawn included, and ~2.5 s for each one after
+# (``plans/ROADMAP.md``), so the ceiling has to be far above both.
 INITIALIZE_TIMEOUT_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 90.0
 
@@ -625,6 +640,12 @@ class _Connection:
         # Per-socket and never global: a reload is a new socket, and it must not
         # be throttled by the one it replaces.
         self.replayed_at: float | None = None
+        # The same, for ``load``. Kept apart from ``replayed_at`` because
+        # ``_deliver_load`` deliberately clears that one — the replay a load
+        # paid an agent round-trip for is the one thing the replay floor must
+        # not discard — and clearing this one with it would remove the floor
+        # from the frame that costs the most.
+        self.loaded_at: float | None = None
 
     def start(self) -> None:
         self._writer = asyncio.create_task(self._write_loop())
@@ -1029,7 +1050,7 @@ def _session_limit_message() -> str:
     asserts this text is *true*, only that it names a remedy, so it is worth
     re-reading whenever the set of controls changes.
     """
-    return (f"At most {MAX_SESSIONS} sessions at once (~306 MB each). Close "
+    return (f"At most {MAX_SESSIONS} sessions at once (~254 MB each). Close "
             "one from its tab to free a slot; restarting PowerAtlas releases "
             "them all.")
 
@@ -1088,7 +1109,6 @@ class _Supervisor:
         # against MAX_SESSIONS alongside `sessions`, because the creation of one
         # spans two awaits and the cap has to hold across them.
         self._reserved = 0
-        self.agent_info: dict = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1178,9 +1198,9 @@ class _Supervisor:
                 self._discard(f"Handshake failed: {exc}")
                 raise
             self._ready = True
-            self.agent_info = (result or {}).get("agentInfo") or {}
+            agent_info = (result or {}).get("agentInfo") or {}
             log.info("ACP agent ready: %s (pid %s, protocol %s)",
-                     self.agent_info.get("version", "?"),
+                     agent_info.get("version", "?"),
                      self._proc.pid if self._proc else "?",
                      (result or {}).get("protocolVersion"))
 
@@ -1334,7 +1354,6 @@ class _Supervisor:
         proc, self._proc = self._proc, None
         job, self._job = self._job, None
         self._ready = False
-        self.agent_info = {}
         self.sessions.clear()
         self.history.clear()
         self.inflight.clear()
@@ -1711,26 +1730,38 @@ class _Supervisor:
 
     # -- sessions ----------------------------------------------------------
 
+    def at_capacity(self) -> bool:
+        """Whether another session would exceed ``MAX_SESSIONS``.
+
+        The cap's one home, so the two frame handlers can consult it *before*
+        spending anything on a session that is refused either way — a
+        filesystem resolve of a path the client chose, a lock read, an agent
+        round-trip. Reservations count alongside recorded sessions, because
+        creating one spans two awaits and the cap has to hold across them.
+        """
+        return len(self.sessions) + self._reserved >= MAX_SESSIONS
+
     async def new_session(self, cwd: str) -> dict:
         """Create one session, never exceeding ``MAX_SESSIONS``.
 
         The cap is taken as a *reservation* before the first ``await``, not as a
         reading of ``len(self.sessions)`` that the two awaits below then
         invalidate. Creating a session spans ``ensure_started`` and a
-        ``session/new`` round-trip measured at 5.84 s; N concurrent ``new``
+        ``session/new`` round-trip of several seconds; N concurrent ``new``
         frames — which ``_dispatch`` happily turns into N tasks — all used to
         pass a check-then-act test before any of them recorded anything, so N
         sessions were created whatever the cap said. That is not a cosmetic
         overshoot: this cap is the only thing between one socket and memory
-        exhaustion at ~306 MB a session, and every excess session is a permanent
-        artifact in the user's real kiro-cli store.
+        exhaustion at the per-session cost ``plans/ROADMAP.md`` records, and
+        every excess session is a permanent artifact in the user's real
+        kiro-cli store.
 
         Incrementing and decrementing without suspending in between is what
         makes the reservation atomic: the event loop cannot interleave another
         ``new_session`` between the check and the increment, nor between
         recording the session and releasing its slot.
         """
-        if len(self.sessions) + self._reserved >= MAX_SESSIONS:
+        if self.at_capacity():
             raise SessionLimit(_session_limit_message())
         self._reserved += 1
         try:
@@ -1738,13 +1769,19 @@ class _Supervisor:
             result = await self._request("session/new", {"cwd": cwd, "mcpServers": []})
             result = result or {}
             session_id = result.get("sessionId")
-            if not isinstance(session_id, str) or not session_id:
-                raise AgentRejected("The agent returned no sessionId.")
+            if not _valid_session_id(session_id):
+                # The agent's id goes through the same gate a client-supplied
+                # one does. It is written straight back into ``?sid=``, so a
+                # reload after a restart hands it to ``load`` — which joins it
+                # into ``KIRO_SESSION_DIR`` and therefore refuses anything this
+                # would have admitted, leaving the page holding an id it can
+                # never reopen.
+                raise AgentRejected(
+                    "The agent returned an unusable sessionId: "
+                    f"{session_id!r:.200}")
             self.sessions[session_id] = {
                 "cwd": cwd,
                 "created": time.time(),
-                "models": result.get("models") or {},
-                "modes": result.get("modes") or {},
             }
             self.history[session_id] = _History()
         finally:
@@ -1778,7 +1815,7 @@ class _Supervisor:
         half-loaded session left in ``sessions`` would be counted against
         MAX_SESSIONS and answered by ``subscribe`` with an empty transcript.
         """
-        if len(self.sessions) + self._reserved >= MAX_SESSIONS:
+        if self.at_capacity():
             raise SessionLimit(_session_limit_message())
         self._reserved += 1
         reserved = True
@@ -1796,9 +1833,6 @@ class _Supervisor:
             self.sessions[session_id] = {
                 "cwd": cwd,
                 "created": time.time(),
-                "models": {},
-                "modes": {},
-                "loaded": True,
             }
             self.history[session_id] = _History()
             # Recorded, so the slot it reserved is now counted by `sessions`.
@@ -1868,11 +1902,11 @@ class _Supervisor:
         """Release one session on the agent, and everything it holds here.
 
         The local state is dropped **only after** the agent has answered. Each
-        session costs ~5 processes and ~306 MB of MCP servers that live in the
-        agent, not here, so dropping our own record of one the agent still
-        holds would report a memory saving that did not happen — and would
-        leave those processes unreachable for the agent's whole life, since
-        nothing else names a session.
+        session costs 5 processes and the memory ``plans/ROADMAP.md`` records,
+        all of it inside the agent rather than here, so dropping our own record
+        of one the agent still holds would report a memory saving that did not
+        happen — and would leave those processes unreachable for the agent's
+        whole life, since nothing else names a session.
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
@@ -2303,6 +2337,30 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
         # agent-side replay would append the whole conversation to itself.
         _handle_subscribe(conn, session_id)
         return
+    # Both gates are below the three cheap answers above and above everything
+    # this function spends: `subscribe` has had a replay floor since Phase 4
+    # while `load` — which costs strictly more — had none, and the cap was
+    # consulted only inside `load_session`, after two thread hops, a registry
+    # claim and a pending frame had already been paid for a session that is
+    # refused either way.
+    now = time.monotonic()
+    since = None if conn.loaded_at is None else now - conn.loaded_at
+    if since is not None and since < LOAD_MIN_INTERVAL_SECONDS:
+        conn.send(error_frame(
+            "load_throttled",
+            "This socket asked for a load less than "
+            f"{LOAD_MIN_INTERVAL_SECONDS:.0f}s ago. Wait for that one to "
+            "finish, or reload the page.", session_id))
+        log.warning("ACP load throttled: session=%s, %.3fs since the last load",
+                    session_id, since)
+        return
+    if _supervisor.at_capacity():
+        conn.send(error_frame(
+            SessionLimit.code, _session_limit_message(), session_id))
+        log.warning("ACP load refused: [%s] session=%s at the session cap",
+                    SessionLimit.code, session_id)
+        return
+    conn.loaded_at = now
     # Claimed before the first `await`, which is what makes it a claim: two
     # `load` frames for one session become two tasks, and each task's
     # synchronous prefix runs to completion before the other starts.
@@ -2364,11 +2422,28 @@ async def _handle_new(conn: _Connection, payload: dict) -> None:
     if raw_cwd is not None and not isinstance(raw_cwd, str):
         conn.send(error_frame("bad_payload", "'cwd' must be a string."))
         return
-    # `session/new` was measured at 5.84 s and the spawn adds ~1 s on the first
-    # one. Without this the page looks broken for the whole of it.
+    if _supervisor.at_capacity():
+        # Above the pending frame and above the resolve, not inside
+        # `new_session` where the cap used to be read for the first time. At
+        # the cap every `new` frame otherwise bought a filesystem round-trip on
+        # a path the client chose, for a session that is refused either way —
+        # and claimed to be creating one while doing it.
+        conn.send(error_frame(SessionLimit.code, _session_limit_message()))
+        log.warning("ACP session/new refused: [%s] at the session cap",
+                    SessionLimit.code)
+        return
+    # `session/new` takes ~5.4 s for the first session of a process and ~2.5 s
+    # after (``plans/ROADMAP.md``). Without this the page looks broken for the
+    # whole of it.
     conn.send(envelope("meta", {"pending": "new"}))
     try:
-        cwd = _resolve_session_cwd(raw_cwd)
+        # Off the loop. Both halves of `_resolve_session_cwd` block on the
+        # filesystem and `raw_cwd` is whatever the page's directory box holds:
+        # a UNC path to an unreachable host measured 42.16 s in a single call,
+        # during which uvicorn serves nothing at all — no dashboard, no status
+        # polling, no other ACP socket. The sibling `load` path resolves its
+        # cwd in a thread for exactly this reason.
+        cwd = await asyncio.to_thread(_resolve_session_cwd, raw_cwd)
         info = await _supervisor.new_session(cwd)
     except AcpError as exc:
         log.warning("ACP session/new refused: [%s] %s", exc.code, exc)
@@ -2435,6 +2510,22 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # from an agent that never answered.
         refuse("not_subscribed", "Subscribe to this session before prompting it.")
         return
+    if session_id in _supervisor.closing:
+        # The mirror of the `turn_in_progress` guard in `_handle_close`, and it
+        # has to be here because that one only bars the second half of the
+        # race. A close claims `closing` before its first await and leaves the
+        # session in `sessions` until the agent answers, so a prompt arriving
+        # in that window starts a turn on a session that is being released:
+        # the `session/prompt` future then sits in `_pending` for the whole of
+        # PROMPT_TIMEOUT_SECONDS — the exact cost the close guard exists to
+        # prevent — while `close_session` discards its `inflight` marker and
+        # the close drops the ring buffer and detaches every watcher. The
+        # surviving turn's chunks and tool calls then reach neither the page
+        # nor the replay, which under `-a` is a turn running ungated tools with
+        # nothing watching.
+        refuse("close_in_progress",
+               "This session is being closed. Create a new one to carry on.")
+        return
     if session_id in _supervisor.inflight:
         refuse("turn_in_progress",
                "This session is still answering the previous prompt.")
@@ -2484,6 +2575,15 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
         conn.send(error_frame("bad_envelope", "'cancel' needs a sessionId."))
         log.warning("ACP cancel refused: [bad_envelope] no sessionId")
         return
+    if conn.session_id != session_id:
+        # The same requirement `prompt` carries, for the same reason: the turn
+        # this ends belongs to the session's watchers, and a socket that is not
+        # one of them is acting on a transcript it cannot see.
+        conn.send(error_frame(
+            "not_subscribed",
+            "Subscribe to this session before cancelling its turn.", session_id))
+        log.warning("ACP cancel refused: [not_subscribed] session=%s", session_id)
+        return
     if session_id not in _supervisor.inflight:
         # Not an error worth an error frame's noise on the page, but never
         # silent: a Stop that reached a server holding no turn is the shape a
@@ -2515,8 +2615,8 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
     """Release a session on the agent and drop everything it holds here.
 
     The one control the plan's whole memory budget rests on: §4 and §6 accept
-    ~306 MB per session on the strength of it existing, and §3 calls it "the
-    lever that matters".
+    the per-session cost ``plans/ROADMAP.md`` records on the strength of it
+    existing, and §3 calls it "the lever that matters".
 
     Every check runs before the first ``await``, and the claim on
     ``_supervisor.closing`` is taken there too — two ``close`` frames become
@@ -2540,8 +2640,22 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
                "This session is still being loaded from the agent. Wait for "
                "the conversation to arrive, then close it.")
         return
+    if conn.session_id != session_id:
+        # Above `_Registry.loading` would be wrong — a loading session has no
+        # attached socket by construction, so this would answer every close
+        # during a load with the wrong reason — and below the two checks that
+        # follow would be worse: a socket that is not watching a session has no
+        # business releasing what another tab is holding.
+        refuse("not_subscribed", "Subscribe to this session before closing it.")
+        return
     if session_id not in _supervisor.sessions:
-        refuse("unknown_session",
+        # Deliberately **not** `unknown_session`. `subscribe` and `prompt` emit
+        # that to mean "this server does not hold it — try adopting it", and
+        # the page answers it by sending `load`; reusing it here would have a
+        # refused close spawn an agent and re-adopt the session, spending again
+        # the memory the Close press existed to free. Frame ordering happens to
+        # prevent that today, which is not a design.
+        refuse("nothing_to_close",
                "This server has no such live session — there is nothing to "
                "close.")
         return
@@ -2577,12 +2691,6 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
     # the same session has to be told too — it is holding a transcript that no
     # longer has a session behind it.
     frame = _session_closed_frame(session_id)
-    watchers = tuple(_registry.subscribers.get(session_id, ()))
-    for target in watchers:
+    for target in tuple(_registry.subscribers.get(session_id, ())):
         target.send(frame)
         _registry.detach(target)
-    if conn not in watchers and conn in _registry.connections:
-        # The socket that asked was never attached to this session. Told, but
-        # not detached — it is attached to something else, and taking that away
-        # would leave the tab it belongs to receiving nothing.
-        conn.send(frame)
