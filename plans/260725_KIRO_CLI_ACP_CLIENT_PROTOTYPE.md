@@ -810,18 +810,50 @@ for "cross-talk or duplication", which is unachievable without both: give each s
 live events arriving during replay are not delivered twice.
 
 **Exit criteria**:
-- [ ] A prompt sent from `/acp` produces text that appears progressively, not in one block
-- [ ] Reloading `/acp` reconnects and replays the prior conversation
-- [ ] Reload creates **no** second session — `~/.kiro/sessions/cli/` gains no new `<sid>.json`
-- [ ] Two browser tabs on `/acp` show the same session's stream without cross-talk or duplication
-- [ ] No agent-derived string reaches `innerHTML` — verified by inspection of `acp.html`
-- [ ] Ring buffer bounded by construction (`deque(maxlen=…)`), verified by code inspection rather
+- [x] A prompt sent from `/acp` produces text that appears progressively, not in one block
+- [x] Reloading `/acp` reconnects and replays the prior conversation
+- [x] Reload creates **no** second session — `~/.kiro/sessions/cli/` gains no new `<sid>.json`
+- [x] Two browser tabs on `/acp` show the same session's stream without cross-talk or duplication
+- [x] No agent-derived string reaches `innerHTML` — verified by inspection of `acp.html`
+- [x] Ring buffer bounded by construction (`deque(maxlen=…)`), verified by code inspection rather
       than measurement; when it has dropped events, replay emits a `history_truncated` marker as its
       first item, so SC 3's "replays the conversation" degrading to a suffix is visible rather than
       silent
-- [ ] Incremental arrival still holds **with the dashboard open in another tab** — the send side
+- [x] Incremental arrival still holds **with the dashboard open in another tab** — the send side
       runs on the same loop that blocks on 2 MB transcript reads every 5 s (`index.html` `_TICK_MS`),
       so smoothness measured on an idle server is not the real case
+
+#### Implementation (2026-07-26, code: e8cb4df, fixes: 48f331a)
+
+`prompt` dispatches to `session/prompt`; `agent_message_chunk` notifications forward to every socket
+attached to the session; a per-session ring buffer records events and replays them on `subscribe`.
+Turn boundaries are recorded events (`meta turn start` / `turn end`), so a reload mid-turn replays
+into the correct pending state without a separate state field.
+
+Three implementation decisions the plan did not anticipate:
+
+- **Replay is one coalesced `history` frame, not N frames.** `SEND_QUEUE_MAXSIZE` is 256 and a full
+  queue retires the socket, so replaying a 2000-event buffer frame-by-frame would have killed
+  precisely the socket the replay exists to serve — and only for sessions with enough history to be
+  worth replaying.
+- **The replay cursor is structural.** `_handle_subscribe` is synchronous, so attach-and-replay with
+  no `await` between them is atomic against the event loop and no live event can be delivered twice.
+  Both reviewers independently confirmed the property holds; a guard test now asserts the function
+  is not a coroutine function, because the invariant is otherwise only a comment.
+- **The reader cap needed block reads.** `for line in stdout` and `readline()` both accumulate until
+  a newline arrives, whatever it costs — neither can decide to stop. `read1` on the binary buffer
+  bounds it, and also keeps streaming visible: `TextIOWrapper.read(n)` would have held each chunk
+  hostage until 64 KiB accumulated.
+
+**Tool-call rendering was pulled forward from Phase 6** on user decision, after review found tool
+execution under `-a` was invisible on every channel. Tool calls now forward, record and render in
+the transcript with their command, clipped at 4000 characters with the bound stated in the UI. Tool
+*output* is deliberately not carried: it is unbounded by nature and every byte would evict the
+conversation it annotates.
+
+Suite: **769 → 826 passed, 1 skipped.** 57 tests added. The client-side fixes are covered by driving
+the rendered template over a DOM shim in Node — 15 of 21 checks fail against `e8cb4df`, which is the
+differential evidence the review findings were real.
 
 ### Phase 5: Resume an exited session [QA]
 
@@ -1288,6 +1320,62 @@ backup with the file size byte-identical. `save_config` rewrites the whole file,
 cannot be proven value-preserving beyond structural inspection — the credentials block was
 deliberately not enumerated.
 
+### Phase 4
+
+- **A shell tool executed under `-a`, unprompted, and wrote outside the session's cwd.** This is the
+  phase's most important finding and it corrects two earlier accounts of it. Verified from the
+  store's `.jsonl` transcripts: kiro-cli emitted a `shell` tool use carrying
+  `__tool_use_purpose: "Set session tab title on first response"`, running a PowerShell command that
+  read **and wrote** `%USERPROFILE%\.kiro\sessions\cli\<sid>.json`. It exited 0. The session's own
+  recorded permissions were `allowed_read_paths: [<scratch dir>]`, `allowed_write_paths: []`,
+  `trusted_tools: []` — so **`-a` overrode the recorded filesystem scoping**, and the write landed in
+  the real kiro-cli store that the dashboard parses and Phase 5 is specified to read.
+  - **It is not universal.** The implementing agent reported it fires "on the first prompt of every
+    session". False: it fired on 2 of 3 sessions (`3a6702ed`, `73a40df3` — both from the same
+    72-character prompt); `acaf903b` records `builtin_tool_uses: 0` on both turns. **The trigger
+    condition is unknown**, so the correct planning assumption is "an ungated shell command may run
+    on any turn", not "on the first turn of every session".
+  - **Titles are also set without a tool.** `acaf903b` has a title and ran no tools, so the
+    tool-rewrite is one of at least two title paths. This orchestrator initially inferred from that
+    fact that the mechanism was refuted outright — wrong, and caught only because a reviewer read the
+    `.jsonl` transcripts this orchestrator had not opened. The `.json` file records a count
+    (`builtin_tool_uses`) and never the tool's identity; the `.jsonl` sibling carries the record.
+  - **User decision (2026-07-26)**: `-a` stands and the prototype continues; the correction is
+    recorded here rather than reopening §3's decision.
+- **The tool-call audit line never ran.** Phase 3b added an INFO log line in `_on_notification` as the
+  entire mitigation for "execution capability arrives with `-a` now; without this line three phases
+  would run commands with no record anywhere". `orchestrator.log` holds 112,215 lines and **zero**
+  `ACP tool` entries. Cause: file logging is installed only in `__main__.py:_run_foreground`, so an
+  app started any other way — as Phase 4's own verification was — writes no log at all. The
+  safeguard's coverage silently depends on how the app was launched. Its test also asserted only the
+  not-forwarded half while its name claimed it covered logging.
+- **A count is not a memory bound, twice over.** `HISTORY_MAX_BYTES` summed `len()` on `str`, which is
+  characters: a nominal 2 MiB budget held 8.24 MB of UTF-8 and serialized to a measured **24.7 MiB**
+  `history` frame, built synchronously on the loop this phase's own exit criterion pins for streaming
+  smoothness. The identical defect stood on `_Connection._out` — 256 frames with no size bound, so
+  256 MiB per socket and 2 GiB across eight — even though the commit's own comment argues the point
+  for the history buffer. Both now carry byte budgets.
+- **Reload and reconnect are not the same recovery.** The plan's exit criterion tests reload, which
+  works because a reload re-renders the template. Reconnect reuses the same `connect()` *without* the
+  re-render, so `ACP_SID` — the one value only a re-render refreshes — was stale, and reconnect either
+  subscribed to nothing or silently switched the user to an older session. No server-side test could
+  have caught it; the defect lives entirely in page state.
+- **`agent_message_chunk` carries `content` as a single object**, not the list of content blocks the
+  spec's shape suggests. Measured on kiro-cli **2.14.2** — itself a correction: §1 records 2.14.1, and
+  the agent self-updated between Phase 3 and Phase 4.
+- **Two undocumented notification shapes.** A kiro-private `_kiro.dev/session/update` method carries
+  `tool_call_chunk`, and four `_kiro.dev/*` notifications arrive with no `sessionUpdate` field at all.
+  **Phase 6 must key tool rendering off `update.sessionUpdate`, not the JSON-RPC method name.**
+- **`session/prompt` needs its own ceiling.** A trivial 20-line answer took ~24 s wall clock; a turn
+  running tools under `-a` is minutes, so `REQUEST_TIMEOUT_SECONDS` (90 s) would abandon working
+  turns. `PROMPT_TIMEOUT_SECONDS` is 600 s — bounded, so a dead agent stays distinguishable from a
+  slow one.
+- **Session accounting held this time.** 3 sessions, all against the scratch directory, ids and `cwd`
+  read back from the store rather than taken from the agent's report. Store 13,298 → 13,307 (+9 =
+  3 × 3 files), verified independently. A later agent reported the store at 13,012 and inferred
+  ~295 files had been deleted; that was a counting artifact on its side — the store was intact at
+  13,307 throughout, confirmed by extension breakdown.
+
 ## Review Log
 
 ### 2026-07-25 — Plan review (via /qplan Step 4)
@@ -1494,6 +1582,45 @@ only.
 
 ---
 
+### 2026-07-26 — Implementation Review (after Phase 4, personas: Security auditor, Reliability engineer)
+
+Two personas in parallel, fresh context each, both read-only and forbidden from spawning the agent.
+**12 findings after merge** (2 High, 5 Medium, 5 Low). Health at review: **Red**; after fixes:
+**Green** with three Lows open.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Reconnect subscribed with the render-time `ACP_SID`, attaching to a stale session or none — transcript cleared, newer session stranded while still holding a slot | Fixed — every read after init uses the live `sessionId` |
+| 2 | High | Tool execution under `-a` was invisible on every channel: not rendered until Phase 6, log line never exercised, and its test asserted only the not-forwarded half | User: accepted — render and log both, now; tool calls forward, record, replay and render with their command |
+| 3 | Medium | `HISTORY_MAX_BYTES` counted characters, not bytes — measured 24.7 MiB serialized for a nominal 2 MiB budget, built on the loop the streaming criterion pins | Fixed — recursive UTF-8 byte walker; budget test now uses non-ASCII |
+| 4 | Medium | Send queue bounded on frame count only: 256 MiB per socket, 2 GiB across eight — the defect this same commit fixed for the history buffer | Fixed — 8 MiB byte budget; never refuses onto an empty queue, which would park the writer behind a flag it never wakes to read |
+| 5 | Medium | `sendPrompt()` cleared the textarea even when the send was refused, and Enter had no turn guard — a mid-turn prompt was destroyed | Fixed — `send()` reports delivery, text restored on refusal, one guard shared by Enter and the button |
+| 6 | Medium | Replayed `error`/`meta` frames rendered nowhere, so a failed turn replayed as a prompt with no answer and no explanation | Fixed — errors and abnormal turn ends write to the transcript, not only the log strip |
+| 7 | Medium | Subscribe carried no turn state; the page inferred it from a marker the ring buffer is designed to evict, while `inflight` sat in scope unused | Fixed — `turnActive` on the `session` frame; `setTurn` suppressed during replay, without which the server-side half was dead code |
+| 8 | Low | The no-`await` invariant in `_handle_subscribe` held, but nothing enforced it | Fixed — `inspect`-based guard on `_handle_subscribe` and `_dispatch` |
+| 9 | Low | No server-side trace for any prompt or subscribe refusal, including `not_subscribed` — the symptom of finding 1 | Fixed — all five refusals, both subscribe outcomes, and turn start/end now log |
+| 10 | Low | `subscribe` is unthrottled and re-serializes the whole replay per call | Orchestrator: proposed-accept — pending user decision |
+| 11 | Low | No Content-Security-Policy on `/acp`; the no-`innerHTML` rule is the sole XSS control, now that agent-authored commands render | Pending user decision — out of Phase 4's file scope (`base.html` / `web.py`) |
+| 12 | Low | `json.dumps` defaults to `ensure_ascii=True`, so non-ASCII still expands ~3x on the wire | Pending user decision — the fix agent declined it deliberately: `ensure_ascii=False` closes it but moves a lone-surrogate encode failure into the writer, where the catch-all would retire a healthy socket |
+
+**What the reviewers verified rather than assumed.** Both confirmed the no-`innerHTML` discipline
+across the *whole* client path — `insertAdjacentHTML`, `outerHTML`, `document.write`, `eval`,
+`new Function`, `setAttribute`, `srcdoc`, URL sinks, and payload-derived `className` — not just the
+one grep the exit criterion names. The reader cap was exercised against 40 MiB of newline-free input:
+one ERROR line, one delivered line, peak delivered length 17 bytes. The `-a` tool execution was found
+by reading the store's `.jsonl` transcripts, which this orchestrator had not opened.
+
+**Method note.** Findings 1 and 5-7 live entirely in `acp.html`, which the Python suite does not
+cover at all. They were fixed and then verified by rendering the template through Jinja and driving
+the *rendered* script over a DOM shim in Node: 21 behavioural checks pass now, and **15 of the 21
+fail against `e8cb4df`** — the differential that shows the findings were real rather than stylistic.
+Server-side, 20 targeted mutations, 20 caught.
+
+Suite: **826 passed, 1 skipped** (769 before this phase). Three sessions created, all against the
+scratch directory, verified by reading `cwd` back from the store rather than from any agent's report.
+
+---
+
 ## Harness Improvement Opportunities
 
 - `/qexplore`'s Step 3 output contract defines 9 sections, but only items 1–3 (Intent) are
@@ -1543,3 +1670,19 @@ only.
   the post-cycle-cap prompt state the reviewers' standing verdict and the round-over-round severity
   trend alongside the action set, so the user is choosing against a visible convergence signal
   rather than an open-ended offer to keep fixing.
+- `/qdev` Step 5b routes a `[QA]`-annotated phase to `/qqa`, whose runtime surfaces assume the thing
+  under test can be driven safely and repeatedly. Phase 4's surface is a live agent running with
+  trust-all-tools, where every exercise creates a permanent artifact in the user's real store and may
+  execute an ungated shell command — cost: `/qqa` could not be dispatched as a separate read-only
+  step, so runtime verification was folded into the implementation brief instead, leaving the
+  implementer to verify its own work, which `shared/AGENTS.md § Multi-Agent Coordination` otherwise
+  forbids ("evaluators must not evaluate their own output"); the conflict was resolved ad hoc and
+  disclosed, not by any rule — suggested change: give `/qqa` a side-effecting-surface branch that
+  names the tension and prescribes the split (implementer verifies, a separate reviewer audits the
+  *artifacts* the run produced), rather than leaving the orchestrator to invent it.
+- The harness requires a `Claude-Session:` trailer on every commit, but nothing enforces it and
+  sub-agents composing their own commit messages routinely omit it — cost: 1 of the 5 commits in this
+  session carries it; the miss is only discoverable after the fact, and the two ordinary remedies
+  (`--amend`, `reset`) are both banned by global git-safety governance, so a missed trailer is
+  permanent — suggested change: install a `prepare-commit-msg` hook that appends the trailer when
+  absent, since a rule every sub-agent must remember is exactly the case automation exists for.
