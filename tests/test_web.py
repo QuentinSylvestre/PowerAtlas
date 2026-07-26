@@ -4303,13 +4303,22 @@ class TestAcpDeclaredTypesAreRouted:
         conn = acp_mod._Connection(_SinkWs())
         acp_mod._registry.connections.add(conn)
 
+        async def no_agent(self):
+            # `new` and `load` reach `ensure_started`, which spawns a real
+            # `kiro-cli acp` and writes a real session into the user's store —
+            # this test drove ten of them there before this stub existed.
+            # Refusing here keeps every branch on its typed-error path, which
+            # is the only thing being asserted.
+            raise acp_mod.AgentUnavailable("no agent under test")
+
         async def dispatch():
             for type_ in sorted(acp_mod.CLIENT_TYPES):
                 acp_mod._dispatch(conn, {"type": type_, "sessionId": sid,
                                          "payload": {"prompt": "x"}})
             await asyncio.gather(*acp_mod._tasks)
 
-        with patch.object(acp_mod._Supervisor, "alive", lambda self: False):
+        with patch.object(acp_mod._Supervisor, "ensure_started", no_agent), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: False):
             asyncio.run(dispatch())
         codes = [f["payload"].get("code") for f in _queued(conn)]
         assert "not_implemented" not in codes, codes
