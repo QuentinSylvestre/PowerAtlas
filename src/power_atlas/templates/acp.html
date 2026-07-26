@@ -5,6 +5,14 @@
   <span class="acp-title">ACP prototype</span>
   <div class="topbar-spacer"></div>
   <div class="topbar-cluster">
+    <!-- How full the session's context window is. Hidden until the agent has
+         reported it, which it does once per turn — an empty bar and "0%" would
+         both claim a measurement that has not been taken. -->
+    <span class="acp-context" id="acpContext" hidden
+          title="Context window used by this session">
+      <span class="acp-context-track"><span class="acp-context-fill" id="acpContextFill"></span></span>
+      <span class="acp-context-label" id="acpContextLabel"></span>
+    </span>
     <span class="acp-status" id="acpStatus" data-state="connecting">connecting…</span>
   </div>
 </div>
@@ -22,6 +30,10 @@
            aria-label="Directory to create the session against">
     <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
     <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
+    <!-- The lever the memory budget rests on: each live session costs ~5
+         processes and ~306 MB of MCP servers inside the agent, and nothing
+         sweeps idle ones. -->
+    <button class="acp-btn acp-danger" id="acpClose" type="button" hidden>Close session</button>
     <span class="acp-sid" id="acpSid"></span>
   </div>
   <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
@@ -31,6 +43,10 @@
               placeholder="Prompt the agent — Enter sends, Shift+Enter for a new line"
               aria-label="Prompt"></textarea>
     <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
+    <!-- Only during a turn. A stop control that is present and inert for the
+         whole idle time is indistinguishable from one that has stopped
+         working, and a turn under -a can run tools for minutes. -->
+    <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
   </div>
   <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
 </div>
@@ -72,6 +88,11 @@
   var transcriptEl = document.getElementById('acpTranscript');
   var promptInput = document.getElementById('acpPrompt');
   var sendBtn = document.getElementById('acpSend');
+  var stopBtn = document.getElementById('acpStop');
+  var closeBtn = document.getElementById('acpClose');
+  var contextEl = document.getElementById('acpContext');
+  var contextFill = document.getElementById('acpContextFill');
+  var contextLabel = document.getElementById('acpContextLabel');
   var ws = null;
   // Whether the most recent attempt ever reached onopen. A close without one
   // means the handshake was rejected, which is a different failure from a
@@ -188,6 +209,32 @@
     turnActive = active;
     sendBtn.disabled = active || !sessionId || loadFailed;
     sendBtn.textContent = active ? 'Working…' : 'Send';
+    sendBtn.hidden = active;
+    stopBtn.hidden = !active;
+    stopBtn.disabled = false;
+    stopBtn.textContent = 'Stop';
+    // Closing under a live turn is refused by the server — the outstanding
+    // session/prompt would sit on a session the agent no longer has for the
+    // whole of its ten-minute ceiling — so the button says so by being off.
+    closeBtn.hidden = !sessionId;
+    closeBtn.disabled = active || !sessionId;
+    closeBtn.textContent = 'Close session';
+  }
+
+  function setContext(percent) {
+    // Numeric or nothing. The server clamps this to 0-100 and rounds it, and
+    // the check is repeated here because the value ends up as a CSS width:
+    // that is an attribute sink, and the rule on this page is that nothing
+    // agent-derived reaches one. A number that survives both checks is written
+    // by this line, not by the agent.
+    if (typeof percent !== 'number' || !isFinite(percent) ||
+        percent < 0 || percent > 100) {
+      contextEl.hidden = true;
+      return;
+    }
+    contextEl.hidden = false;
+    contextFill.style.width = percent + '%';
+    contextLabel.textContent = 'context ' + percent + '%';
   }
 
   function reportLoadFailure() {
@@ -422,6 +469,14 @@
       logLine('info', '← turn end (' + payload.stopReason + ')');
       return;
     }
+    if (type === 'meta' && payload.contextPercent !== undefined) {
+      // Never replayed: the server keeps the latest reading on the session and
+      // puts it on the `session` frame instead, because the ring buffer is
+      // built to evict and a stale percentage is worse than none.
+      setContext(payload.contextPercent);
+      logLine('info', '← context window ' + payload.contextPercent + '%');
+      return;
+    }
     if (type === 'chunk') {
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
       return;
@@ -463,6 +518,9 @@
       // marker, and Send would otherwise come back enabled against a session
       // still holding the turn.
       setTurn(!!payload.turnActive);
+      // `null` for a session that has not run a turn yet, which hides the
+      // meter rather than drawing an empty one.
+      setContext(payload.contextPercent);
       sidEl.textContent = 'session ' + payload.sessionId;
       logLine('in', '← session ' + payload.sessionId +
                     (payload.created ? ' (created' : ' (resubscribed') +
@@ -474,11 +532,28 @@
         location.pathname + '?sid=' + encodeURIComponent(payload.sessionId));
       return;
     }
+    if (type === 'session_closed') {
+      sessionId = null;
+      setTurn(false);
+      setContext(null);
+      setPending(false);
+      sidEl.textContent = '';
+      addMessage('note', payload.message + ' The conversation itself is still '
+        + "in the agent's own store, so it can be reopened from the "
+        + 'PowerAtlas dashboard.');
+      // The id leaves the URL with the session. Left in place, a reload would
+      // re-adopt the session through `load` and spend the ~306 MB again —
+      // silently undoing the one thing the user pressed the button for.
+      history.replaceState(null, '', location.pathname);
+      logLine('info', '← session_closed ' + payload.sessionId);
+      return;
+    }
     if (type === 'agent_died') {
       setPending(false);
       setLoading(null);
       sessionId = null;
       setTurn(false);
+      setContext(null);
       setState('closed', 'agent gone');
       sidEl.textContent = '';
       addMessage('error', 'the agent exited (code ' + payload.exitCode + ') — ' +
@@ -490,6 +565,11 @@
     }
     if (type === 'error') {
       setPending(false);
+      // A refused `cancel` or `close` leaves its button reading "Stopping…" /
+      // "Closing…" and disabled, with no other frame coming to restore it.
+      // Re-asserting the turn state the page already holds costs nothing and
+      // repaints both buttons from it.
+      setTurn(turnActive);
       if (payload.code === 'unknown_session' && sessionId &&
           frame.sessionId === sessionId && !loadTried['s:' + sessionId]) {
         // This server does not hold the session, so there is nothing to replay
@@ -604,6 +684,22 @@
 
   newBtn.addEventListener('click', function () {
     send('new', { cwd: cwdInput.value.trim() }, null);
+  });
+  stopBtn.addEventListener('click', function () {
+    if (!sessionId || !turnActive) return;
+    if (!send('cancel', {}, sessionId)) return;
+    // The turn does not end here. The agent finishes the request it is
+    // holding and answers `stopReason: "cancelled"`, which arrives as an
+    // ordinary turn boundary — so the button reports that it has asked, and
+    // `setTurn(false)` on that boundary is what puts Send back.
+    stopBtn.disabled = true;
+    stopBtn.textContent = 'Stopping…';
+  });
+  closeBtn.addEventListener('click', function () {
+    if (!sessionId) return;
+    if (!send('close', {}, sessionId)) return;
+    closeBtn.disabled = true;
+    closeBtn.textContent = 'Closing…';
   });
   reconnectBtn.addEventListener('click', connect);
   reloadBtn.addEventListener('click', function () { location.reload(); });

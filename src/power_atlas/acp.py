@@ -8,8 +8,9 @@ registry, the outbound fan-out machinery — and, since Phase 3b, the supervised
 ``agent_message_chunk`` and tool-call fan-out behind it, and the per-session
 ring buffer that a reload replays. Phase 5 adds ``session/load``, which reaches
 sessions this process never created — including ones started from a terminal.
-``cancel``/``close`` still answer a typed ``not_implemented``; they arrive in
-Phase 6.
+Phase 6 adds ``session/cancel``, session close — which is *not*
+``session/close``; see ``CLOSE_METHOD`` — and the context-window telemetry
+that arrives alongside them.
 
 Isolation boundary — this module imports exactly two names from the rest of
 ``power_atlas``: ``config.CONFIG_DIR``, to place the agent's neutral cwd where
@@ -37,8 +38,9 @@ that exists in the agent's own store but not in this process), ``prompt``,
 
 Server to client: ``session`` (id and metadata after ``new``/``subscribe``),
 ``chunk``, ``tool_call``, ``tool_update``, ``meta``, ``error``, ``agent_died``,
-``history_truncated``, ``history`` (the whole replay, coalesced into one
-frame). ``envelope`` refuses any type not in ``SERVER_TYPES``.
+``session_closed``, ``history_truncated``, ``history`` (the whole replay,
+coalesced into one frame). ``envelope`` refuses any type not in
+``SERVER_TYPES``.
 
 Session identity survives a reload because the page carries ``?sid=…`` and
 re-sends ``subscribe`` on connect.
@@ -109,7 +111,7 @@ except Exception:  # pragma: no cover - only reached if uvicorn moves the symbol
 CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close"})
 SERVER_TYPES = frozenset({
     "session", "chunk", "tool_call", "tool_update", "meta", "error",
-    "agent_died", "history_truncated", "history",
+    "agent_died", "session_closed", "history_truncated", "history",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -192,6 +194,32 @@ SUBSCRIBE_MIN_INTERVAL_SECONDS = 1.0
 # replay buffer, and is rendered into the DOM. A clipped command says so on
 # the page rather than looking complete.
 MAX_TOOL_INPUT_CHARS = 4000
+
+# The kiro-private notification carrying a turn's token accounting, and the
+# field in it that answers "how full is the context window".
+#
+# Matched on the **method name**, which is the opposite of the tool-call path
+# directly below it in `_on_notification`. Both rules are measured rather than
+# chosen: `session/update` is one method carrying at least six different update
+# kinds, so only `update.sessionUpdate` separates them — while every
+# `_kiro.dev/*` notification observed on kiro-cli 2.14.2 arrives with no
+# `sessionUpdate` field at all, so keying those off the update would drop every
+# one of them.
+METADATA_METHOD = "_kiro.dev/metadata"
+CONTEXT_PERCENT_KEY = "contextUsagePercentage"
+
+# What releases one session on the agent. **Not** ``session/close``, which the
+# plan's own wording implies and which the ACP spec does not define: kiro-cli
+# 2.14.2 answers it ``-32601 Method not found``. This kiro-private extension
+# method is the one that works, and it is the whole basis of the ~306 MB/session
+# budget §4 and §6 accept — measured, one close released 5 processes and
+# 271.5 MB of MCP servers and removed the session's ``.lock``.
+#
+# Because it is an extension rather than protocol, a kiro-cli that drops it
+# takes the memory lever with it. That surfaces as a typed ``agent_error``
+# naming ``-32601`` on the page rather than as a close that quietly does
+# nothing: ``close_session`` drops no local state until the agent has answered.
+CLOSE_METHOD = "_kiro.dev/session/terminate"
 
 # How long a server-initiated close waits for the outbound queue to reach the
 # wire before giving up on it. Bounded because the peer this is waiting on may
@@ -452,6 +480,28 @@ def _tool_payload(update: dict) -> dict:
         command = command[:MAX_TOOL_INPUT_CHARS]
     payload["command"] = command
     return payload
+
+
+def _context_percent(params: dict) -> float | None:
+    """How full the context window is, from a ``_kiro.dev/metadata`` payload.
+
+    ``None`` for anything that is not a real number in 0-100, because this
+    value is rendered as a bar width: a negative or absurd one would silently
+    become a bar that says something false rather than a bar that is absent.
+    ``bool`` is excluded explicitly — it is an ``int`` in Python, and ``True``
+    would round-trip as 1%.
+
+    The agent sends a float with four decimals (``5.8399`` measured), which is
+    four digits more precision than a percentage display can use; rounding here
+    rather than in the page keeps the wire value and the rendered value the
+    same number.
+    """
+    value = params.get(CONTEXT_PERCENT_KEY)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not 0 <= value <= 100:
+        return None
+    return round(float(value), 1)
 
 
 def _string_bytes(value) -> int:
@@ -969,17 +1019,19 @@ def _load_session_cwd(session_id: str) -> str:
 
 
 def _session_limit_message() -> str:
-    """Why the cap refused, and the only thing that actually frees a slot.
+    """Why the cap refused, and what actually frees a slot.
 
-    Not "close one first": there is no close control — ``close`` answers
-    ``not_implemented`` until Phase 6 — and a session is released only when the
-    agent process dies. Naming a control that does not exist leaves the
-    operator hunting for it, and the cap is now reachable by browsing three
-    sessions from the dashboard rather than by deliberately creating three.
+    This message has now been wrong in both directions. It said "close one
+    first" while ``close`` still answered ``not_implemented``, and was
+    corrected in Phase 5 to name a PowerAtlas restart — which Phase 6's close
+    control then made wrong the other way, since a restart is no longer the
+    only lever and is by far the more expensive one. Nothing in the test suite
+    asserts this text is *true*, only that it names a remedy, so it is worth
+    re-reading whenever the set of controls changes.
     """
-    return (f"At most {MAX_SESSIONS} sessions at once (~306 MB each). Nothing "
-            "closes a session yet, so the only way to free one is to restart "
-            "PowerAtlas.")
+    return (f"At most {MAX_SESSIONS} sessions at once (~306 MB each). Close "
+            "one from its tab to free a slot; restarting PowerAtlas releases "
+            "them all.")
 
 
 class _Supervisor:
@@ -1026,6 +1078,12 @@ class _Supervisor:
         # turn id, so the fan-out would interleave them into one transcript
         # with nothing able to separate them again.
         self.inflight: set[str] = set()
+        # Sessions with a `session/close` in flight. Claimed before the first
+        # await of `close_session`, so two `close` frames for one session cannot
+        # both reach the agent — the second would be refused by an agent that
+        # no longer has the session, and reach the page as a failure to close
+        # something that is already closed.
+        self.closing: set[str] = set()
         # Sessions promised but not yet recorded — see `new_session`. Counted
         # against MAX_SESSIONS alongside `sessions`, because the creation of one
         # spans two awaits and the cap has to hold across them.
@@ -1280,6 +1338,7 @@ class _Supervisor:
         self.sessions.clear()
         self.history.clear()
         self.inflight.clear()
+        self.closing.clear()
         for fut in tuple(self._pending.values()):
             if not fut.done():
                 fut.set_exception(AgentDied(reason))
@@ -1401,6 +1460,18 @@ class _Supervisor:
                 f"The agent did not answer '{method}' within {timeout:.0f}s.")
         finally:
             self._pending.pop(request_id, None)
+
+    async def _notify(self, method: str, params: dict) -> None:
+        """Send a JSON-RPC notification: no id, so no answer is possible.
+
+        Deliberately not ``_request`` with a discarded result. A notification
+        carries no id, so the agent has nothing to answer with and a future
+        awaiting one would sit until its ceiling expired — on ``session/cancel``
+        that would be a Stop button that appears to hang for 90 s while the
+        cancellation it asked for has already happened.
+        """
+        await asyncio.to_thread(self._write, {
+            "jsonrpc": "2.0", "method": method, "params": params})
 
     def _write(self, obj: dict) -> None:
         """Write one NDJSON line. Serialized; always flushed.
@@ -1569,6 +1640,11 @@ class _Supervisor:
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
+        if method == METADATA_METHOD:
+            percent = _context_percent(params)
+            if percent is not None and isinstance(session_id, str):
+                _note_context(session_id, percent)
+            return
         if kind in ("agent_message_chunk", "user_message_chunk"):
             # `user_message_chunk` is what makes a loaded conversation a
             # conversation: `session/load` replays both halves of it, and
@@ -1601,7 +1677,15 @@ class _Supervisor:
                     "tool_call" if kind == "tool_call" else "tool_update",
                     payload, session_id))
             return
-        log.debug("ACP notification %s (%s)", method, kind or "-")
+        if log.isEnabledFor(logging.DEBUG):
+            # Params and not only the method name. This module talks to an
+            # undocumented protocol: `_kiro.dev/*` is not in the ACP spec at
+            # all, and the context-window branch above exists only because a
+            # line like this one showed what those notifications carry. Guarded
+            # rather than lazily formatted because the `json.dumps` would
+            # otherwise run on every unmatched notification at every log level.
+            log.debug("ACP notification %s (%s): %.600s",
+                      method, kind or "-", json.dumps(params))
 
     def _on_agent_death(self, proc: subprocess.Popen) -> None:
         """The reader thread ended: the channel is gone. Runs on the loop."""
@@ -1765,6 +1849,45 @@ class _Supervisor:
         )
         return result or {}
 
+    async def cancel(self, session_id: str) -> None:
+        """Ask the agent to end the turn in flight on a session.
+
+        Nothing here waits for the turn to end, and nothing here ends it: the
+        outstanding ``session/prompt`` is what returns, with
+        ``stopReason: "cancelled"``, and ``_handle_prompt``'s own ``finally``
+        is what emits the turn boundary the page reads. Ending the turn from
+        this side as well would race that task into emitting two.
+        """
+        if session_id not in self.sessions:
+            raise AgentRejected("That session no longer exists on this agent.")
+        if not self.alive():
+            raise AgentDied("The agent is not running.")
+        await self._notify("session/cancel", {"sessionId": session_id})
+
+    async def close_session(self, session_id: str) -> None:
+        """Release one session on the agent, and everything it holds here.
+
+        The local state is dropped **only after** the agent has answered. Each
+        session costs ~5 processes and ~306 MB of MCP servers that live in the
+        agent, not here, so dropping our own record of one the agent still
+        holds would report a memory saving that did not happen — and would
+        leave those processes unreachable for the agent's whole life, since
+        nothing else names a session.
+        """
+        if session_id not in self.sessions:
+            raise AgentRejected("That session no longer exists on this agent.")
+        if not self.alive():
+            raise AgentDied("The agent is not running.")
+        await self._request(CLOSE_METHOD, {"sessionId": session_id})
+        self.sessions.pop(session_id, None)
+        # The ring buffer goes with it. It is keyed by session id and nothing
+        # else reaches it, so a buffer left behind here is up to
+        # HISTORY_MAX_BYTES resident for the app's lifetime with no path that
+        # could ever read or evict it.
+        self.history.pop(session_id, None)
+        self.inflight.discard(session_id)
+        log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
+
 
 _supervisor = _Supervisor()
 
@@ -1780,6 +1903,25 @@ def _emit(session_id: str, frame: dict) -> None:
     """
     _supervisor.record(session_id, frame)
     _registry.broadcast(session_id, frame)
+
+
+def _note_context(session_id: str, percent: float) -> None:
+    """Record and fan out how full a session's context window is.
+
+    Broadcast rather than ``_emit``: this is a *level*, not an event, and the
+    only reading worth anything is the latest one. Recording each into the ring
+    buffer would spend an eviction on every turn to replay a number that a
+    later frame has already superseded — and the buffer would then be the only
+    place the page could learn it, which is the one place designed to lose it.
+    Kept on the session's own metadata instead, from where ``subscribe`` reads
+    it back onto every reconnecting socket.
+    """
+    meta = _supervisor.sessions.get(session_id)
+    if meta is None:
+        return
+    meta["contextPercent"] = percent
+    _registry.broadcast(session_id, envelope(
+        "meta", {"contextPercent": percent}, session_id))
 
 
 def shutdown() -> None:
@@ -1892,13 +2034,19 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
     if type_ == "prompt":
         _spawn_task(_handle_prompt(conn, session_id, payload))
         return
-    # `cancel` and `close` arrive in Phase 6. Answering with a typed error
-    # keeps an unimplemented type a protocol event the page can render, rather
-    # than a dropped frame or a traceback that takes the socket down with it.
+    if type_ == "cancel":
+        _spawn_task(_handle_cancel(conn, session_id))
+        return
+    if type_ == "close":
+        _spawn_task(_handle_close(conn, session_id))
+        return
+    # Every member of CLIENT_TYPES is routed above, so reaching here means one
+    # was declared and never wired — a server bug, and one that would otherwise
+    # present as a control the page draws and the server silently ignores.
+    log.error("ACP: client frame type '%s' is declared but not routed", type_)
     conn.send(error_frame(
         "not_implemented",
-        f"'{type_}' is not implemented yet — it arrives with session close "
-        "and cancel.",
+        f"'{type_}' is a declared frame type this server does not route.",
         session_id))
 
 
@@ -1969,6 +2117,12 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         # HISTORY_MAXLEN chunks would replay without it and leave Send enabled
         # against a session that is still busy.
         "turnActive": session_id in _supervisor.inflight,
+        # ``null`` until the session has run a turn: the agent reports context
+        # usage per turn and says nothing before the first one. Carried here
+        # for the same reason as ``turnActive`` — the live frame that sets it
+        # is not recorded in the ring buffer, so a reconnect has no other
+        # source for it.
+        "contextPercent": meta.get("contextPercent"),
     }, session_id))
     history = _supervisor.history.get(session_id)
     if history is None:
@@ -2312,3 +2466,123 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         _emit(session_id, envelope(
             "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
+
+
+async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
+    """Interrupt the turn a session is running.
+
+    Emits nothing about the turn itself. ``session/cancel`` makes the
+    outstanding ``session/prompt`` return ``stopReason: "cancelled"``, and the
+    task awaiting it is what emits the turn boundary — to the *session*, so
+    every attached tab sees the same ending. A second boundary emitted here
+    would leave a transcript with two ends to one turn.
+
+    The session survives its cancellation: nothing here touches ``sessions``
+    or the ring buffer, so the next prompt runs on the same conversation.
+    """
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'cancel' needs a sessionId."))
+        log.warning("ACP cancel refused: [bad_envelope] no sessionId")
+        return
+    if session_id not in _supervisor.inflight:
+        # Not an error worth an error frame's noise on the page, but never
+        # silent: a Stop that reached a server holding no turn is the shape a
+        # lost `meta turn end` takes, and the log is where that is diagnosed.
+        log.info("ACP cancel: session=%s is not running a turn", session_id)
+        return
+    log.info("ACP cancel requested: session=%s", session_id)
+    try:
+        await _supervisor.cancel(session_id)
+    except AcpError as exc:
+        log.warning("ACP session/cancel refused: [%s] %s", exc.code, exc)
+        conn.send(error_frame(exc.code, str(exc), session_id))
+    except Exception:
+        log.exception("ACP session/cancel failed: session=%s", session_id)
+        conn.send(error_frame(
+            "internal_error",
+            "Cancelling the turn failed; see orchestrator.log.", session_id))
+
+
+def _session_closed_frame(session_id: str) -> dict:
+    return envelope("session_closed", {
+        "sessionId": session_id,
+        "message": "This session was closed. Its agent-side processes and its "
+                   "replay buffer are gone; create a new session to carry on.",
+    }, session_id)
+
+
+async def _handle_close(conn: _Connection, session_id: str | None) -> None:
+    """Release a session on the agent and drop everything it holds here.
+
+    The one control the plan's whole memory budget rests on: §4 and §6 accept
+    ~306 MB per session on the strength of it existing, and §3 calls it "the
+    lever that matters".
+
+    Every check runs before the first ``await``, and the claim on
+    ``_supervisor.closing`` is taken there too — two ``close`` frames become
+    two tasks, and each task's synchronous prefix runs to completion before the
+    other starts.
+    """
+    def refuse(code: str, message: str) -> None:
+        conn.send(error_frame(code, message, session_id))
+        log.warning("ACP close refused: [%s] session=%s", code, session_id)
+
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'close' needs a sessionId."))
+        log.warning("ACP close refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _registry.loading:
+        # `_Registry.loading` bars attachment for the whole of a `session/load`,
+        # and closing under one would have the load's own failure path pop a
+        # session this had already removed — and would strand the sockets
+        # parked on it, which are answered only when the load lands.
+        refuse("session_loading",
+               "This session is still being loaded from the agent. Wait for "
+               "the conversation to arrive, then close it.")
+        return
+    if session_id not in _supervisor.sessions:
+        refuse("unknown_session",
+               "This server has no such live session — there is nothing to "
+               "close.")
+        return
+    if session_id in _supervisor.inflight:
+        # Closing under a live turn would leave the `session/prompt` future
+        # waiting on a session the agent no longer has, for the whole of
+        # PROMPT_TIMEOUT_SECONDS.
+        refuse("turn_in_progress",
+               "This session is still answering. Stop the turn first, then "
+               "close it.")
+        return
+    if session_id in _supervisor.closing:
+        refuse("close_in_progress", "This session is already being closed.")
+        return
+    _supervisor.closing.add(session_id)
+    try:
+        await _supervisor.close_session(session_id)
+    except AcpError as exc:
+        log.warning("ACP session/close refused: [%s] session=%s %s",
+                    exc.code, session_id, exc)
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        return
+    except Exception:
+        log.exception("ACP session/close failed: session=%s", session_id)
+        conn.send(error_frame(
+            "internal_error",
+            "Closing the session failed; see orchestrator.log.", session_id))
+        return
+    finally:
+        _supervisor.closing.discard(session_id)
+    # Broadcast before detaching, and never through `_emit`: the buffer this
+    # would be recorded into has just been dropped, and a second tab watching
+    # the same session has to be told too — it is holding a transcript that no
+    # longer has a session behind it.
+    frame = _session_closed_frame(session_id)
+    watchers = tuple(_registry.subscribers.get(session_id, ()))
+    for target in watchers:
+        target.send(frame)
+        _registry.detach(target)
+    if conn not in watchers and conn in _registry.connections:
+        # The socket that asked was never attached to this session. Told, but
+        # not detached — it is attached to something else, and taking that away
+        # would leave the tab it belongs to receiving nothing.
+        conn.send(frame)

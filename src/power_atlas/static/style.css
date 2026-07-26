@@ -447,6 +447,15 @@ script { display: none; }
 .acp-input { flex: 1; min-width: 140px; cursor: text; }
 .acp-input:hover { border-color: var(--border); color: var(--text); }
 .acp-sid { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+/* Stop and Close both end something the user cannot get back in place, so they
+   read as destructive rather than as two more grey buttons in the row. */
+.acp-danger:hover { border-color: #f87171; color: #f87171; }
+/* The context meter. A bar and a number, because the number alone reads as
+   noise until you know what a full window looks like. */
+.acp-context { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+.acp-context-track { width: 72px; height: 5px; border-radius: 3px; background: var(--surface); border: 1px solid var(--border); overflow: hidden; }
+.acp-context-fill { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
+.acp-context-label { font-variant-numeric: tabular-nums; }
 
 /* Transcript is the primary pane; the transport log below it is a fixed strip,
    because once chunks stream the conversation is what the page is for. */

@@ -3655,26 +3655,51 @@ class TestAcpUnattributedRefusal:
 
 
 class TestAcpSessionCapMessage:
-    """"close one first" named a control that does not exist: ``close`` answers
-    ``not_implemented`` until Phase 6, and a session is released only when the
-    agent process dies. It matters more now that the cap is reachable by
-    *browsing* three sessions from the dashboard rather than by deliberately
-    clicking "New session" three times.
+    """This message has been wrong in both directions. It said "close one
+    first" while ``close`` answered ``not_implemented``; Phase 5 corrected it
+    to name a PowerAtlas restart; Phase 6 built the close control and made the
+    correction wrong the other way. Naming a remedy is not enough — the remedy
+    has to be one the running build actually offers, and the cap is reachable
+    by *browsing* three sessions from the dashboard.
     """
 
     def _fill(self, acp_mod):
         for i in range(acp_mod.MAX_SESSIONS):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
 
+    def _assert_names_the_close_control(self, acp_mod, payload):
+        assert payload["code"] == "too_many_sessions"
+        text = payload["message"].lower()
+        assert "close" in text
+        # The two claims this message has actually shipped falsely, pinned by
+        # their own words. A generic "mentions closing" assertion passes on
+        # "nothing closes a session yet", which is the wording being retired.
+        assert "nothing closes a session" not in text
+        assert "only way to free one" not in text
+        # The cheaper lever is named first: a restart releases every session,
+        # including the two the operator was not trying to free.
+        assert text.index("close") < text.index("restart")
+        # Tied to the control actually being routed. `close` answering
+        # `not_implemented` is exactly the state this message described
+        # falsely for two phases, and no other test reads the message's truth.
+        assert "close" in acp_mod.CLIENT_TYPES
+        conn = _acp_conn(acp_mod)
+
+        async def dispatch():
+            acp_mod._dispatch(conn, {"type": "close", "sessionId": "nope",
+                                     "payload": {}})
+            await asyncio.gather(*acp_mod._tasks)
+
+        asyncio.run(dispatch())
+        codes = [f["payload"].get("code") for f in _queued(conn)]
+        assert "not_implemented" not in codes, codes
+
     def test_the_new_path_names_a_remedy_that_exists(self, acp_store, tmp_path):
         acp_mod, _ = acp_store
         self._fill(acp_mod)
         conn = _acp_conn(acp_mod)
         asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
-        payload = _queued(conn)[1]["payload"]
-        assert payload["code"] == "too_many_sessions"
-        assert "close one" not in payload["message"]
-        assert "restart PowerAtlas" in payload["message"]
+        self._assert_names_the_close_control(acp_mod, _queued(conn)[1]["payload"])
 
     def test_the_load_path_names_a_remedy_that_exists(self, acp_store):
         acp_mod, store = acp_store
@@ -3683,10 +3708,7 @@ class TestAcpSessionCapMessage:
         conn = _acp_conn(acp_mod)
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, "load-cap-0001"))
-        payload = _queued(conn)[1]["payload"]
-        assert payload["code"] == "too_many_sessions"
-        assert "close one" not in payload["message"]
-        assert "restart PowerAtlas" in payload["message"]
+        self._assert_names_the_close_control(acp_mod, _queued(conn)[1]["payload"])
 
 
 class TestAcpLoadPageRecovery:
@@ -3817,6 +3839,480 @@ class TestAcpDashboardRowAction:
             provider_name="claude-code", provider_color="", stale=False,
             status="closed", waiting_detail=("", ""))
         assert "openInAcp" not in html
+
+
+# --- ACP phase 6: cancel, close, and context-window telemetry ---
+
+
+def _sent(acp_mod, method_calls):
+    """A ``_write`` stand-in that records the JSON-RPC objects built for it.
+
+    Stubbed at ``_write`` rather than at ``_request``/``_notify``: the shape
+    under test is the *line* the supervisor puts on the pipe, and whether it
+    carries an ``id`` is exactly what separates a request from a notification.
+    """
+    def write(self, obj):
+        method_calls.append(obj)
+        loop = self._loop
+        # Answer our own request from the reader's side, the way the agent
+        # would, so the awaiting future completes.
+        if "id" in obj and loop is not None:
+            loop.call_soon_threadsafe(
+                self._on_response, {"id": obj["id"], "result": {}})
+    return write
+
+
+def _run_bound(acp_mod, factory):
+    """Run a coroutine with the supervisor bound to the running loop.
+
+    ``_request`` refuses outright when ``_loop`` is unset, so a test that only
+    stubs ``_write`` never reaches the request it is checking. Binding here is
+    what the real ``ensure_started`` does, and it lets ``_on_response`` match
+    the future the same way the reader thread does.
+    """
+    async def run():
+        acp_mod._supervisor._loop = asyncio.get_running_loop()
+        try:
+            return await factory()
+        finally:
+            acp_mod._supervisor._loop = None
+            acp_mod._supervisor._pending.clear()
+    return asyncio.run(run())
+
+
+class TestAcpCancel:
+    """A turn under ``-a`` can run tools for minutes, and until now nothing
+    could end one. ``session/cancel`` is a **notification** on kiro-cli 2.14.2 —
+    measured: a request would have parked the Stop button on a future the agent
+    never answers.
+    """
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def test_cancel_is_a_notification_naming_the_session(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+        assert written == [{"jsonrpc": "2.0", "method": "session/cancel",
+                            "params": {"sessionId": sid}}]
+        # No id: a notification cannot be answered, and awaiting an answer
+        # would hold the page for REQUEST_TIMEOUT_SECONDS after a cancellation
+        # that has already happened.
+        assert "id" not in written[0]
+
+    def test_cancel_emits_no_turn_boundary_of_its_own(self, acp_session):
+        """The outstanding ``session/prompt`` returns ``cancelled`` and the task
+        awaiting it emits the boundary. A second one here would leave the
+        transcript with two ends to one turn."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+        assert _queued(conn) == []
+        assert acp_mod._supervisor.history[sid].events() == []
+        # And the session survives its own cancellation.
+        assert sid in acp_mod._supervisor.sessions
+
+    def test_cancel_without_a_turn_reaches_the_agent_not_at_all(
+            self, acp_session, caplog):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        written = []
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"), \
+                patch.object(acp_mod._Supervisor, "_write",
+                             _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+        assert written == []
+        assert "not running a turn" in caplog.text
+
+    def test_cancel_without_a_session_id_is_refused(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        asyncio.run(acp_mod._handle_cancel(conn, None))
+        assert _queued(conn)[0]["payload"]["code"] == "bad_envelope"
+
+    def test_an_agent_failure_reaches_the_page_typed(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+
+        def boom(self, obj):
+            raise acp_mod.AgentDied("the agent is not running")
+
+        with patch.object(acp_mod._Supervisor, "_write", boom), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+        assert _queued(conn)[0]["payload"]["code"] == "agent_died"
+
+    def test_the_page_shows_the_cancellation_and_reopens_send(self):
+        """`stopReason: "cancelled"` is not `end_turn`, so the turn-end branch
+        writes it into the transcript — the log strip is 120 px tall and is not
+        replayed, so a cancellation reaching only it disappears on reload."""
+        from power_atlas.web import templates
+        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        branch = src.split("payload.turn === 'end'", 1)[1].split("return;", 1)[0]
+        assert "addMessage('note', 'turn ended: ' + payload.stopReason)" in branch
+        assert "setTurn(false)" in branch
+        stop = src.split("stopBtn.addEventListener", 1)[1].split("});", 1)[0]
+        assert "send('cancel'" in stop
+
+
+class TestAcpSessionClose:
+    """The lever the whole memory budget rests on: §4 and §6 accept ~306 MB a
+    session on the strength of a close control existing.
+
+    Measured on kiro-cli 2.14.2 — closing one session took the agent's tree from
+    17 processes / 1045.5 MB to 12 / 792.1 MB, and removed the session's
+    ``.lock``. ``session/close`` is **not** the method that does it: the agent
+    answers that one ``-32601 Method not found``.
+    """
+
+    def _conn(self, acp_mod, sid=None):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        if sid:
+            acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def test_close_asks_the_agent_before_dropping_anything(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
+        assert [(o["method"], o["params"]) for o in written] == [
+            (acp_mod.CLOSE_METHOD, {"sessionId": sid})]
+        assert acp_mod.CLOSE_METHOD == "_kiro.dev/session/terminate"
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_the_ring_buffer_goes_with_the_session(self, acp_session):
+        """Keyed by session id and reachable from nowhere else, so a buffer left
+        behind is up to HISTORY_MAX_BYTES resident for the app's lifetime."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        for i in range(50):
+            acp_mod._emit(sid, acp_mod.envelope(
+                "chunk", {"role": "agent", "text": "e%d" % i}, sid))
+        assert len(acp_mod._supervisor.history[sid]) == 50
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
+        assert sid not in acp_mod._supervisor.history
+
+    def test_a_failed_close_keeps_the_session(self, acp_session):
+        """A kiro-cli without the extension method answers -32601. Dropping our
+        own record then would report a memory saving that did not happen and
+        leave ~5 processes unreachable for the agent's whole life."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def refuse(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("Method not found (code -32601)")
+
+        with patch.object(acp_mod._Supervisor, "_request", refuse), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_close(conn, sid))
+        assert sid in acp_mod._supervisor.sessions
+        assert sid in acp_mod._supervisor.history
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == "agent_error"
+        assert sid not in acp_mod._supervisor.closing
+
+    def test_every_watching_socket_is_told_and_detached(self, acp_session):
+        """A second tab is holding a transcript that no longer has a session
+        behind it, and a subscriber entry for a session that is gone would
+        outlive every frame that could clear it."""
+        acp_mod, sid = acp_session
+        a = self._conn(acp_mod, sid)
+        b = self._conn(acp_mod, sid)
+        _queued(a), _queued(b)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._handle_close(a, sid))
+        for conn in (a, b):
+            frames = _queued(conn)
+            assert [f["type"] for f in frames] == ["session_closed"]
+            assert frames[0]["payload"]["sessionId"] == sid
+            assert conn.session_id is None
+        assert sid not in acp_mod._registry.subscribers
+
+    def test_a_socket_watching_another_session_keeps_it(self, acp_session):
+        """The closing socket need not be attached to what it closes, and
+        detaching it from what it *is* attached to would leave that tab
+        receiving nothing."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.sessions["other"] = {"cwd": ""}
+        acp_mod._supervisor.history["other"] = acp_mod._History()
+        conn = self._conn(acp_mod, "other")
+        _queued(conn)
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
+            assert [f["type"] for f in _queued(conn)] == ["session_closed"]
+            assert conn.session_id == "other"
+        finally:
+            acp_mod._supervisor.sessions.pop("other", None)
+            acp_mod._supervisor.history.pop("other", None)
+
+    def test_close_during_a_turn_is_refused(self, acp_session):
+        """The outstanding `session/prompt` would sit on a session the agent no
+        longer has for the whole of PROMPT_TIMEOUT_SECONDS."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_close(conn, sid))
+        assert written == []
+        assert _queued(conn)[0]["payload"]["code"] == "turn_in_progress"
+        assert sid in acp_mod._supervisor.sessions
+
+    def test_close_during_a_load_is_refused(self, acp_session):
+        """``_Registry.loading`` bars attachment for the whole of a
+        ``session/load``; closing under one would strand the parked sockets."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._registry.loading[sid] = []
+        _queued(conn)
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write",
+                              _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_close(conn, sid))
+        finally:
+            acp_mod._registry.loading.pop(sid, None)
+        assert written == []
+        assert _queued(conn)[0]["payload"]["code"] == "session_loading"
+        assert sid in acp_mod._supervisor.sessions
+
+    def test_an_unknown_session_is_refused(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+            asyncio.run(acp_mod._handle_close(conn, "no-such-session"))
+        # One frame and nothing on the wire: a refusal that reports and then
+        # carries on reaches the agent anyway and answers the page twice, with
+        # the second answer contradicting the first.
+        assert [f["payload"]["code"] for f in _queued(conn)] == ["unknown_session"]
+        assert written == []
+
+    def test_a_second_close_cannot_overtake_the_first(self, acp_session):
+        """Two `close` frames become two tasks. The second would be refused by
+        an agent that no longer has the session, and reach the page as a failure
+        to close something already closed."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        started = asyncio.Event()
+
+        async def slow(self, method, params, timeout=None):
+            started.set()
+            await asyncio.sleep(0.05)
+            return {}
+
+        async def both():
+            with patch.object(acp_mod._Supervisor, "_request", slow), \
+                    patch.object(acp_mod._Supervisor, "alive",
+                                 lambda self: True):
+                first = asyncio.ensure_future(acp_mod._handle_close(conn, sid))
+                await started.wait()
+                await acp_mod._handle_close(conn, sid)
+                await first
+
+        asyncio.run(both())
+        codes = [f["payload"].get("code") for f in _queued(conn)]
+        assert "close_in_progress" in codes
+
+    def test_the_closed_session_frees_a_slot(self, acp_session):
+        """Which is the entire point: the cap is the only thing between one
+        socket and memory exhaustion at ~306 MB a session."""
+        acp_mod, sid = acp_session
+        for i in range(acp_mod.MAX_SESSIONS - 1):
+            acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
+        conn = self._conn(acp_mod, sid)
+        try:
+            assert (len(acp_mod._supervisor.sessions)
+                    >= acp_mod.MAX_SESSIONS)
+            with patch.object(acp_mod._Supervisor, "_write",
+                              _sent(acp_mod, [])), \
+                    patch.object(acp_mod._Supervisor, "alive",
+                                 lambda self: True):
+                _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
+            assert len(acp_mod._supervisor.sessions) < acp_mod.MAX_SESSIONS
+        finally:
+            for i in range(acp_mod.MAX_SESSIONS - 1):
+                acp_mod._supervisor.sessions.pop("filler%d" % i, None)
+
+    def test_the_page_clears_the_session_and_the_url(self):
+        """A ?sid= left in place makes a reload re-adopt the session through
+        `load` and spend the ~306 MB again — undoing the button."""
+        from power_atlas.web import templates
+        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        branch = src.split("type === 'session_closed'", 1)[1].split(
+            "return;", 1)[0]
+        assert "sessionId = null" in branch
+        assert "history.replaceState(null, '', location.pathname)" in branch
+        assert "setContext(null)" in branch
+
+    def test_close_is_off_while_a_turn_runs(self):
+        from power_atlas.web import templates
+        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        body = src.split("function setTurn(active)", 1)[1].split("\n  }", 1)[0]
+        assert "closeBtn.disabled = active || !sessionId" in body
+
+
+class TestAcpContextWindow:
+    """``_kiro.dev/metadata`` is kiro-private and arrives with **no**
+    ``sessionUpdate`` field, so it is matched on the JSON-RPC method name —
+    the opposite rule from tool calls, where one method carries six update
+    kinds and only ``update.sessionUpdate`` separates them.
+    """
+
+    def _attached(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _notify(self, acp_mod, sid, percent):
+        acp_mod._supervisor._on_notification({
+            "method": acp_mod.METADATA_METHOD,
+            "params": {"sessionId": sid,
+                       acp_mod.CONTEXT_PERCENT_KEY: percent,
+                       "totalTokens": 12345},
+        })
+
+    def test_the_percentage_reaches_the_page(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        self._notify(acp_mod, sid, 5.8399)
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["meta"]
+        # Rounded on the wire, so the number sent and the number rendered are
+        # the same one. The agent sends four decimals.
+        assert frames[0]["payload"] == {"contextPercent": 5.8}
+
+    def test_it_is_matched_on_the_method_not_the_update(self, acp_session):
+        """Keying off ``update.sessionUpdate`` — the tool-call rule — would drop
+        every one of these, because they carry no ``update`` at all."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "agent_message_chunk",
+                acp_mod.CONTEXT_PERCENT_KEY: 42.0,
+                "content": {"type": "text", "text": "hi"}}},
+        })
+        assert [f["payload"].get("contextPercent") for f in _queued(conn)] == [None]
+
+    def test_it_is_not_recorded_in_the_replay_buffer(self, acp_session):
+        """A level, not an event: recording each would spend an eviction per
+        turn on a number a later frame supersedes."""
+        acp_mod, sid = acp_session
+        self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, 7.0)
+        assert acp_mod._supervisor.history[sid].events() == []
+
+    def test_subscribe_carries_the_latest_reading(self, acp_session):
+        """Which is why not recording it is safe: the buffer is built to evict,
+        and this is the reconnecting socket's only other source."""
+        acp_mod, sid = acp_session
+        self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, 11.25)
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        assert _queued(conn)[0]["payload"]["contextPercent"] == 11.2
+
+    def test_a_session_with_no_turn_yet_reports_null(self, acp_session):
+        """Rather than 0%, which would draw an empty bar claiming a measurement
+        that has not been taken."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        assert _queued(conn)[0]["payload"]["contextPercent"] is None
+
+    @pytest.mark.parametrize("value", [
+        None, "5.8", True, False, -1, 101, float("nan"), float("inf"),
+        {"percent": 5}])
+    def test_a_value_that_is_not_a_percentage_is_dropped(self, acp_session,
+                                                         value):
+        """This number ends up as a CSS width. ``True`` is the one that looks
+        harmless: it is an ``int`` in Python and would round-trip as 1%."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        self._notify(acp_mod, sid, value)
+        assert _queued(conn) == []
+        assert "contextPercent" not in acp_mod._supervisor.sessions[sid]
+
+    def test_a_reading_for_an_unknown_session_is_dropped(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        self._notify(acp_mod, "someone-else", 9.0)
+        assert _queued(conn) == []
+
+    def test_the_page_narrows_the_value_again_before_the_style_sink(self):
+        """The one attribute sink on a page whose whole defence is that nothing
+        agent-derived reaches one."""
+        from power_atlas.web import templates
+        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        body = src.split("function setContext(percent)", 1)[1].split(
+            "\n  }", 1)[0]
+        assert "typeof percent !== 'number'" in body
+        assert "isFinite(percent)" in body
+        assert "percent < 0 || percent > 100" in body
+        assert "contextFill.style.width = percent + '%'" in body
+
+
+class TestAcpDeclaredTypesAreRouted:
+    """``cancel`` and ``close`` answered ``not_implemented`` for three phases
+    while the page had no control for either. Now that both are routed, the
+    fallback is a server bug rather than a phase boundary — and a control the
+    page draws while the server silently ignores it is the worst of the three
+    states.
+    """
+
+    def test_no_client_type_falls_through_to_not_implemented(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+
+        async def dispatch():
+            for type_ in sorted(acp_mod.CLIENT_TYPES):
+                acp_mod._dispatch(conn, {"type": type_, "sessionId": sid,
+                                         "payload": {"prompt": "x"}})
+            await asyncio.gather(*acp_mod._tasks)
+
+        with patch.object(acp_mod._Supervisor, "alive", lambda self: False):
+            asyncio.run(dispatch())
+        codes = [f["payload"].get("code") for f in _queued(conn)]
+        assert "not_implemented" not in codes, codes
 
 
 # --- Phase 3 (Launch Profiles): Profile endpoint tests ---
