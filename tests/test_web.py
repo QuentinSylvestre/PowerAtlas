@@ -1603,6 +1603,495 @@ class TestAcpTokenCheck:
         assert exc.value.code == 1008
 
 
+# --- ACP phase 4: prompt, streaming fan-out, and reconnect replay ---
+
+
+class _SinkWs:
+    """A socket that accepts everything, so a test can read what was queued."""
+
+    def __init__(self) -> None:
+        self.closed: list[tuple[int, str]] = []
+
+    async def send_text(self, text: str) -> None:
+        pass
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed.append((code, reason))
+
+
+def _queued(conn) -> list[dict]:
+    """Everything sitting in a connection's outbound queue, in order."""
+    frames = []
+    while True:
+        try:
+            frames.append(conn._out.get_nowait())
+        except asyncio.QueueEmpty:
+            return frames
+
+
+@pytest.fixture
+def acp_session():
+    """A live ACP session on the real supervisor singleton, torn down after.
+
+    The registry and supervisor are module globals; leaving either dirty would
+    make the next test's ``subscribe`` answer from another test's state.
+    """
+    from power_atlas import acp as acp_mod
+
+    sid = "sess-phase4"
+    acp_mod._supervisor.sessions[sid] = {
+        "cwd": r"C:\scratch", "created": 0.0, "models": {}, "modes": {}}
+    acp_mod._supervisor.history[sid] = acp_mod._History()
+    try:
+        yield acp_mod, sid
+    finally:
+        acp_mod._supervisor.sessions.pop(sid, None)
+        acp_mod._supervisor.history.pop(sid, None)
+        acp_mod._supervisor.inflight.discard(sid)
+        for conn in tuple(acp_mod._registry.connections):
+            acp_mod._registry.detach(conn)
+        acp_mod._registry.connections.clear()
+        acp_mod._registry.subscribers.clear()
+
+
+class TestAcpServerTypeGuard:
+    """``SERVER_TYPES`` was declared in phase 3a and never consulted.
+
+    Every call site passes a literal, so a type it refuses is a typo — and an
+    unrecognised frame does not fail loudly on the page, it renders as a line
+    of raw JSON in the transport log that reads like agent noise.
+    """
+
+    def test_undeclared_type_raises(self):
+        from power_atlas import acp as acp_mod
+        with pytest.raises(ValueError):
+            acp_mod.envelope("chunkk", {"text": "x"})
+
+    def test_every_declared_type_is_accepted(self):
+        """Positive control: the guard rejects typos, not the real vocabulary."""
+        from power_atlas import acp as acp_mod
+        for type_ in acp_mod.SERVER_TYPES:
+            assert acp_mod.envelope(type_)["type"] == type_
+
+    def test_error_frame_still_builds(self):
+        from power_atlas import acp as acp_mod
+        frame = acp_mod.error_frame("bad_payload", "no", "s1")
+        assert frame == {"type": "error", "sessionId": "s1",
+                         "payload": {"code": "bad_payload", "message": "no"}}
+
+
+class TestAcpHistoryBuffer:
+    """The ring buffer is bounded twice, and both bounds must announce a drop.
+
+    A ``deque`` discards its oldest entry in silence, so a replay degraded from
+    "the conversation" to "its last N events" is indistinguishable from a
+    complete one unless something records that it happened.
+    """
+
+    def _chunk(self, acp_mod, text):
+        return acp_mod.envelope("chunk", {"role": "agent", "text": text}, "s1")
+
+    def test_count_bound_holds_and_reports_the_drop(self):
+        from power_atlas import acp as acp_mod
+        history = acp_mod._History()
+        for i in range(acp_mod.HISTORY_MAXLEN + 25):
+            history.append(self._chunk(acp_mod, "e%d" % i))
+        events = history.events()
+        assert len(events) == acp_mod.HISTORY_MAXLEN
+        assert history.truncated is True
+        # The oldest went and the newest stayed — a ring, not a prefix.
+        assert events[0]["payload"]["text"] == "e25"
+        assert events[-1]["payload"]["text"] == "e%d" % (acp_mod.HISTORY_MAXLEN + 24)
+
+    def test_under_the_cap_nothing_is_marked_truncated(self):
+        from power_atlas import acp as acp_mod
+        history = acp_mod._History()
+        for i in range(acp_mod.HISTORY_MAXLEN):
+            history.append(self._chunk(acp_mod, "e%d" % i))
+        assert len(history.events()) == acp_mod.HISTORY_MAXLEN
+        assert history.truncated is False
+
+    def test_byte_budget_evicts_before_the_count_would(self):
+        """Few but enormous events are the case the count bound does not cover:
+        HISTORY_MAXLEN of them at the reader's line ceiling is hundreds of MB."""
+        from power_atlas import acp as acp_mod
+        history = acp_mod._History()
+        big = "x" * (acp_mod.HISTORY_MAX_BYTES // 4)
+        for _ in range(12):
+            history.append(self._chunk(acp_mod, big))
+        assert len(history.events()) < acp_mod.HISTORY_MAXLEN
+        assert len(history.events()) <= 5
+        assert history.truncated is True
+
+    def test_one_oversized_event_is_never_evicted_to_empty(self):
+        """A reload finding an empty replay reads as a lost conversation; a
+        suffix of one event reads as what it is."""
+        from power_atlas import acp as acp_mod
+        history = acp_mod._History()
+        history.append(self._chunk(acp_mod, "y" * (acp_mod.HISTORY_MAX_BYTES * 2)))
+        assert len(history.events()) == 1
+
+
+class TestAcpReplayOnSubscribe:
+    def test_replay_is_one_frame_and_cannot_overflow_the_socket(self, acp_session):
+        """``SEND_QUEUE_MAXSIZE`` is 256 and a full queue retires the socket, so
+        an event-per-frame replay of a full buffer would kill the very socket
+        the replay exists to serve — and only for sessions worth replaying."""
+        acp_mod, sid = acp_session
+        history = acp_mod._supervisor.history[sid]
+        for i in range(acp_mod.HISTORY_MAXLEN):
+            history.append(acp_mod.envelope(
+                "chunk", {"role": "agent", "text": "e%d" % i}, sid))
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+
+        frames = _queued(conn)
+        assert conn._overflowed is False
+        assert [f["type"] for f in frames] == ["session", "history"]
+        events = frames[1]["payload"]["events"]
+        assert len(events) == acp_mod.HISTORY_MAXLEN
+        assert events[0]["payload"]["text"] == "e0"
+        assert events[-1]["payload"]["text"] == "e%d" % (acp_mod.HISTORY_MAXLEN - 1)
+
+    def test_replay_carries_the_recorded_conversation_in_order(self, acp_session):
+        acp_mod, sid = acp_session
+        acp_mod._emit(sid, acp_mod.envelope(
+            "chunk", {"role": "user", "text": "hello"}, sid))
+        acp_mod._emit(sid, acp_mod.envelope("meta", {"turn": "start"}, sid))
+        acp_mod._emit(sid, acp_mod.envelope(
+            "chunk", {"role": "agent", "text": "hi "}, sid))
+        acp_mod._emit(sid, acp_mod.envelope(
+            "chunk", {"role": "agent", "text": "there"}, sid))
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+
+        frames = _queued(conn)
+        events = frames[-1]["payload"]["events"]
+        assert [(e["type"], e["payload"].get("text") or e["payload"].get("turn"))
+                for e in events] == [
+            ("chunk", "hello"), ("meta", "start"),
+            ("chunk", "hi "), ("chunk", "there")]
+
+    def test_truncated_marker_precedes_the_replay(self, acp_session):
+        acp_mod, sid = acp_session
+        history = acp_mod._supervisor.history[sid]
+        for i in range(acp_mod.HISTORY_MAXLEN + 1):
+            history.append(acp_mod.envelope(
+                "chunk", {"role": "agent", "text": "e%d" % i}, sid))
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+
+        assert [f["type"] for f in _queued(conn)] == [
+            "session", "history_truncated", "history"]
+
+    def test_intact_buffer_emits_no_truncation_marker(self, acp_session):
+        """Positive control for the marker: it must mean something."""
+        acp_mod, sid = acp_session
+        acp_mod._emit(sid, acp_mod.envelope(
+            "chunk", {"role": "agent", "text": "only"}, sid))
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        assert [f["type"] for f in _queued(conn)] == ["session", "history"]
+
+    def test_a_live_event_after_subscribe_is_not_also_replayed(self, acp_session):
+        """Attach and replay are atomic because ``_handle_subscribe`` never
+        awaits; an event broadcast afterwards must therefore arrive exactly
+        once, live, and not a second time inside the history frame."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        acp_mod._emit(sid, acp_mod.envelope(
+            "chunk", {"role": "agent", "text": "live"}, sid))
+
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["session", "history", "chunk"]
+        assert frames[1]["payload"]["events"] == []
+        assert frames[2]["payload"]["text"] == "live"
+
+
+class TestAcpNotificationFanout:
+    def test_agent_message_chunk_reaches_subscribers_and_the_buffer(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "agent_message_chunk",
+                # Measured shape for kiro-cli 2.14.2: one object, not a list.
+                "content": {"type": "text", "text": "partial"}}},
+        })
+
+        assert _queued(conn) == [{
+            "type": "chunk", "sessionId": sid,
+            "payload": {"role": "agent", "text": "partial"}}]
+        assert acp_mod._supervisor.history[sid].events()[0][
+            "payload"]["text"] == "partial"
+
+    def test_chunk_for_another_session_does_not_cross_over(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": "someone-else", "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "not yours"}}},
+        })
+        assert _queued(conn) == []
+
+    def test_tool_calls_are_logged_not_forwarded(self, acp_session):
+        """Rendering tool calls is phase 6's; forwarding them now would put
+        untyped frames on the wire that no client branch handles."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "tool_call", "toolCallId": "t1",
+                "title": "shell", "kind": "execute"}},
+        })
+        assert _queued(conn) == []
+        assert acp_mod._supervisor.history[sid].events() == []
+
+
+class TestAcpPromptDispatch:
+    def _conn(self, acp_mod, sid=None):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        if sid:
+            acp_mod._registry.attach(conn, sid)
+        return conn
+
+    @pytest.mark.parametrize("payload, code", [
+        ({}, "bad_payload"),
+        ({"prompt": ""}, "bad_payload"),
+        ({"prompt": "   \n "}, "bad_payload"),
+        ({"prompt": 17}, "bad_payload"),
+        ({"prompt": ["hi"]}, "bad_payload"),
+        ({"prompt": {"text": "hi"}}, "bad_payload"),
+    ])
+    def test_bad_payloads_are_refused_with_a_typed_frame(self, acp_session,
+                                                         payload, code):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        asyncio.run(acp_mod._handle_prompt(conn, sid, payload))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == code
+        assert acp_mod._supervisor.history[sid].events() == []
+
+    def test_missing_session_id_is_refused(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        asyncio.run(acp_mod._handle_prompt(conn, None, {"prompt": "hi"}))
+        assert _queued(conn)[0]["payload"]["code"] == "bad_envelope"
+
+    def test_unknown_session_is_refused(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        asyncio.run(acp_mod._handle_prompt(conn, "no-such-session",
+                                           {"prompt": "hi"}))
+        assert _queued(conn)[0]["payload"]["code"] == "unknown_session"
+
+    def test_unattached_socket_is_refused(self, acp_session):
+        """It would start a turn and then receive none of the stream it began,
+        which on the page looks like an agent that never answered."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod)
+        asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+        assert _queued(conn)[0]["payload"]["code"] == "not_subscribed"
+
+    def test_second_prompt_during_a_turn_is_refused(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+        assert _queued(conn)[0]["payload"]["code"] == "turn_in_progress"
+
+    def test_a_turn_streams_to_every_subscriber_and_is_recorded(self, acp_session):
+        """The stub sits at the JSON-RPC transport, so the request this asserts
+        is the one the supervisor really builds, and the chunk travels the real
+        notification path while the request is still outstanding."""
+        acp_mod, sid = acp_session
+        calls = []
+
+        async def fake_request(self, method, params,
+                               timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            calls.append((method, params, timeout))
+            self._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "answer"}}},
+            })
+            return {"stopReason": "end_turn"}
+
+        sup = acp_mod._supervisor
+        conn_a = self._conn(acp_mod, sid)
+        conn_b = self._conn(acp_mod, sid)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_prompt(conn_a, sid, {"prompt": "ping"}))
+
+        assert calls == [("session/prompt",
+                          {"sessionId": sid,
+                           "prompt": [{"type": "text", "text": "ping"}]},
+                          acp_mod.PROMPT_TIMEOUT_SECONDS)]
+        expected = [
+            ("chunk", {"role": "user", "text": "ping"}),
+            ("meta", {"turn": "start"}),
+            ("chunk", {"role": "agent", "text": "answer"}),
+            ("meta", {"turn": "end", "stopReason": "end_turn"}),
+        ]
+        # Both tabs see the same turn, including the prompt neither of them
+        # typed — that is what makes a second tab a view and not a rival.
+        for conn in (conn_a, conn_b):
+            assert [(f["type"], f["payload"]) for f in _queued(conn)] == expected
+        assert [(e["type"], e["payload"])
+                for e in sup.history[sid].events()] == expected
+        assert sid not in sup.inflight
+
+    def test_an_agent_failure_ends_the_turn_rather_than_hanging_it(self, acp_session):
+        """The page derives "still answering" from the turn boundary, so a
+        refused prompt that emitted no end would leave Send disabled forever."""
+        acp_mod, sid = acp_session
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        conn = self._conn(acp_mod, sid)
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "ping"}))
+
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["chunk", "meta", "error", "meta"]
+        assert frames[2]["payload"]["code"] == "agent_timeout"
+        assert frames[3]["payload"] == {"turn": "end", "stopReason": "error"}
+        assert sid not in acp_mod._supervisor.inflight
+
+
+class _BlockReader:
+    """A pipe that hands out pre-set blocks, one per ``read1``."""
+
+    def __init__(self, blocks, on_read=None) -> None:
+        self._blocks = list(blocks)
+        self._on_read = on_read
+        self.sizes: list[int] = []
+
+    def read1(self, size):
+        self.sizes.append(size)
+        if self._on_read is not None:
+            self._on_read()
+        return self._blocks.pop(0) if self._blocks else b""
+
+
+class _StdoutOf:
+    def __init__(self, reader) -> None:
+        self.buffer = reader
+
+
+class _FakeProc:
+    def __init__(self, reader) -> None:
+        self.stdout = _StdoutOf(reader)
+        self.pid = -1
+
+    def poll(self):
+        return 0
+
+
+def _run_reader(acp_mod, blocks, on_read=None):
+    """Drive the real reader loop over ``blocks`` and return what it posted."""
+    posted = []
+    sup = acp_mod._Supervisor()
+    sup._post = lambda fn, *args: posted.append((fn.__name__, args))
+    reader = _BlockReader(blocks, on_read)
+    sup._reader_loop(_FakeProc(reader))
+    return [args[0] for name, args in posted if name == "_on_message"], reader
+
+
+class TestAcpReaderLineCap:
+    """The agent→client direction had no size cap at all.
+
+    ``for line in proc.stdout`` — and ``readline()``, which is the same thing —
+    accumulates until a newline arrives however long that takes. Phase 4 is
+    when it becomes live, because tool output under ``-a`` arrives on it.
+    """
+
+    def test_lines_split_across_blocks_are_reassembled(self):
+        from power_atlas import acp as acp_mod
+        msgs, _ = _run_reader(acp_mod, [b'{"id":1}\n{"id"', b':2}\n'])
+        assert msgs == [{"id": 1}, {"id": 2}]
+
+    def test_a_multibyte_character_split_across_blocks_survives(self):
+        """Bytes are accumulated and decoded only at the newline, so a UTF-8
+        sequence straddling a block boundary is not two replacement chars."""
+        from power_atlas import acp as acp_mod
+        msgs, _ = _run_reader(acp_mod, [b'{"t":"\xc3', b'\xa9"}\n'])
+        assert msgs == [{"t": "\u00e9"}]
+
+    def test_an_overlong_line_is_dropped_and_the_channel_continues(self):
+        from power_atlas import acp as acp_mod
+        with patch.object(acp_mod, "MAX_AGENT_LINE_BYTES", 64):
+            msgs, _ = _run_reader(acp_mod, [
+                b'{"first":1}\n',
+                b'{"junk":"' + b"z" * 500,          # no newline: over the cap
+                b'more junk still no newline' * 10,  # the tail is swallowed too
+                b'"}\n{"after":2}\n',
+            ])
+        # Only the tail of the rejected line was discarded — not the good line
+        # that shared its final block, which is what makes this a cap and not a
+        # channel reset.
+        assert msgs == [{"first": 1}, {"after": 2}]
+
+    def test_the_cap_is_not_simply_dropping_everything(self):
+        """Positive control: a line just under the cap still gets through."""
+        from power_atlas import acp as acp_mod
+        payload = ('{"t":"' + "z" * 40 + '"}').encode()
+        assert len(payload) < 64
+        with patch.object(acp_mod, "MAX_AGENT_LINE_BYTES", 64):
+            msgs, _ = _run_reader(acp_mod, [payload + b"\n"])
+        assert len(msgs) == 1
+
+    def test_reads_are_bounded_blocks_delivered_as_they_arrive(self):
+        """A buffered ``read(n)`` loops until it has all n bytes, so it would
+        hold every chunk of a streamed answer until 64 KiB had accumulated.
+        ``read1`` returns one OS read, which is what makes streaming visible."""
+        from power_atlas import acp as acp_mod
+        seen_at_each_read = []
+        posted = []
+        sup = acp_mod._Supervisor()
+        sup._post = lambda fn, *args: posted.append(fn.__name__)
+        reader = _BlockReader(
+            [b'{"id":1}\n', b'{"id":2}\n'],
+            on_read=lambda: seen_at_each_read.append(
+                posted.count("_on_message")))
+        sup._reader_loop(_FakeProc(reader))
+
+        assert reader.sizes and set(reader.sizes) == {acp_mod.READ_BLOCK_BYTES}
+        # By the second read the first message had already been delivered.
+        assert seen_at_each_read[:2] == [0, 1]
+
+    def test_non_json_noise_is_tolerated(self):
+        from power_atlas import acp as acp_mod
+        msgs, _ = _run_reader(acp_mod, [b'banner text\n\n{"id":1}\n'])
+        assert msgs == [{"id": 1}]
+
+
 # --- Phase 3 (Launch Profiles): Profile endpoint tests ---
 
 

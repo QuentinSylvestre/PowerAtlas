@@ -13,18 +13,24 @@
   <div class="acp-toolbar">
     <button class="acp-btn" id="acpNew" type="button">New session</button>
     <!-- Every session created here is a permanent entry in the real kiro-cli
-         store, so the directory it is created against is worth being explicit
-         about rather than implicit. Blank means the agent's own neutral cwd,
-         which lights up no real workspace in the dashboard's process scan.
-         Styled by reusing .acp-btn plus two inline overrides: style.css is
-         outside this phase's file scope. -->
-    <input class="acp-btn" id="acpCwd" type="text" spellcheck="false"
-           style="flex:1;min-width:140px;cursor:text;"
+         store, and under -a the agent's tools run for real in whatever
+         directory it names, so the cwd is worth being explicit about rather
+         than implicit. Blank means the agent's own neutral cwd, which lights
+         up no real workspace in the dashboard's process scan. -->
+    <input class="acp-btn acp-input" id="acpCwd" type="text" spellcheck="false"
            placeholder="session directory — blank for the agent's neutral cwd"
            aria-label="Directory to create the session against">
     <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
     <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
     <span class="acp-sid" id="acpSid"></span>
+  </div>
+  <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
+       aria-label="Conversation"></div>
+  <div class="acp-composer">
+    <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
+              placeholder="Prompt the agent — Enter sends, Shift+Enter for a new line"
+              aria-label="Prompt"></textarea>
+    <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
   </div>
   <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
 </div>
@@ -34,10 +40,10 @@
 // with createElement + textContent. Agent output is attacker-influenced (repo
 // files, fetched pages, commit messages) and the agent runs trust-all-tools,
 // so an injected script here could drive /ws/acp itself and pass the origin
-// check by genuinely being same-origin. Phase 3a carries no agent text yet;
-// the rule is established now so later phases inherit it rather than retrofit
-// it. index.html's _escHtml is the alternative where markup is unavoidable —
-// but note it escapes & < > and *not* ", so it is safe for text nodes only.
+// check by genuinely being same-origin. Every chunk this page renders now
+// comes from the agent, so the rule established in 3a is live from here on.
+// index.html's _escHtml is the alternative where markup is unavoidable — but
+// note it escapes & < > and *not* ", so it is safe for text nodes only.
 //
 // This page also uses plain listeners rather than hx-* attributes, so it never
 // needs htmx.process(). Add that call if any hx-* markup ever appears here:
@@ -58,11 +64,22 @@
   var cwdInput = document.getElementById('acpCwd');
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
+  var transcriptEl = document.getElementById('acpTranscript');
+  var promptInput = document.getElementById('acpPrompt');
+  var sendBtn = document.getElementById('acpSend');
   var ws = null;
   // Whether the most recent attempt ever reached onopen. A close without one
   // means the handshake was rejected, which is a different failure from a
   // socket that lived and then dropped, and needs a different recovery.
   var opened = false;
+  var sessionId = ACP_SID || null;
+  // The message body consecutive agent chunks are appended to. Null between
+  // turns, so the next chunk opens a new bubble instead of extending the old.
+  var agentBody = null;
+  // True while a `history` frame is being fed back through handle(). The
+  // frames in it are real and render normally; what would be wrong is
+  // narrating a replay into the transport log as if it were live traffic.
+  var replaying = false;
 
   if (ACP_SID) sidEl.textContent = 'session ' + ACP_SID;
 
@@ -72,6 +89,7 @@
   }
 
   function logLine(kind, text) {
+    if (replaying) return;
     var row = document.createElement('div');
     row.className = 'acp-log-line acp-log-' + kind;
     var when = document.createElement('span');
@@ -117,6 +135,64 @@
     newBtn.textContent = pending ? 'Creating…' : 'New session';
   }
 
+  function setTurn(active) {
+    sendBtn.disabled = active || !sessionId;
+    sendBtn.textContent = active ? 'Working…' : 'Send';
+  }
+
+  function stuckToBottom() {
+    // Measured before the append, not after: once the node is in the DOM the
+    // pane is by definition no longer scrolled to the bottom, so a check made
+    // afterwards would never stick and a long answer would scroll away under
+    // anyone reading the top of it.
+    return transcriptEl.scrollHeight - transcriptEl.scrollTop
+             - transcriptEl.clientHeight < 60;
+  }
+
+  function addMessage(role, text) {
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-' + role;
+    var who = document.createElement('span');
+    who.className = 'acp-msg-role';
+    who.textContent = role === 'user' ? 'you' : (role === 'agent' ? 'agent' : '');
+    var body = document.createElement('div');
+    body.className = 'acp-msg-body';
+    body.textContent = text;
+    row.appendChild(who);
+    row.appendChild(body);
+    transcriptEl.appendChild(row);
+    return body;
+  }
+
+  function appendChunk(role, text) {
+    var stick = stuckToBottom();
+    if (role === 'agent' && agentBody) {
+      agentBody.textContent += text;
+    } else {
+      var body = addMessage(role, text);
+      agentBody = role === 'agent' ? body : null;
+    }
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function clearTranscript() {
+    // Emptying by textContent rather than innerHTML: same effect, and it keeps
+    // the no-innerHTML rule true of every line on this page without exception.
+    transcriptEl.textContent = '';
+    agentBody = null;
+  }
+
+  function sendPrompt() {
+    var text = promptInput.value;
+    if (!text.trim()) return;
+    if (!sessionId) {
+      logLine('error', 'no session yet — create one first');
+      return;
+    }
+    send('prompt', { prompt: text }, sessionId);
+    promptInput.value = '';
+  }
+
   function handle(frame) {
     var type = frame && frame.type;
     var payload = (frame && frame.payload) || {};
@@ -131,8 +207,46 @@
       logLine('info', 'creating a session — the agent takes several seconds');
       return;
     }
+    if (type === 'meta' && payload.turn === 'start') {
+      agentBody = null;
+      setTurn(true);
+      return;
+    }
+    if (type === 'meta' && payload.turn === 'end') {
+      agentBody = null;
+      setTurn(false);
+      logLine('info', '← turn end (' + payload.stopReason + ')');
+      return;
+    }
+    if (type === 'chunk') {
+      appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+      return;
+    }
+    if (type === 'history_truncated') {
+      addMessage('note', payload.message || 'earlier events were dropped');
+      return;
+    }
+    if (type === 'history') {
+      // One frame carrying every buffered event, replayed through this same
+      // handler so live and replayed frames cannot drift apart in how they
+      // render. The transcript was cleared by the `session` frame that
+      // preceded it, which is what stops a reconnect duplicating it.
+      var events = payload.events || [];
+      replaying = true;
+      try {
+        for (var i = 0; i < events.length; i++) handle(events[i]);
+      } finally {
+        replaying = false;
+      }
+      logLine('info', '← history: ' + events.length + ' event(s) replayed');
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      return;
+    }
     if (type === 'session') {
       setPending(false);
+      sessionId = payload.sessionId;
+      clearTranscript();
+      setTurn(false);
       sidEl.textContent = 'session ' + payload.sessionId;
       logLine('in', '← session ' + payload.sessionId +
                     (payload.created ? ' (created' : ' (resubscribed') +
@@ -146,6 +260,8 @@
     }
     if (type === 'agent_died') {
       setPending(false);
+      sessionId = null;
+      setTurn(false);
       setState('closed', 'agent gone');
       sidEl.textContent = '';
       logLine('error', '← agent_died (exit ' + payload.exitCode + ') ' +
@@ -223,9 +339,11 @@
       handle(frame);
     };
     ws.onclose = function (ev) {
-      // A socket that drops while session/new is in flight would otherwise
-      // leave the button disabled with nothing left to re-enable it.
+      // A socket that drops while session/new or a turn is in flight would
+      // otherwise leave those buttons disabled with nothing left to re-enable
+      // them: the frame that would have done it died with the socket.
       setPending(false);
+      setTurn(false);
       setState('closed', 'disconnected (' + ev.code + ')');
       logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
       if (opened) {
@@ -244,6 +362,15 @@
   });
   reconnectBtn.addEventListener('click', connect);
   reloadBtn.addEventListener('click', function () { location.reload(); });
+  sendBtn.addEventListener('click', sendPrompt);
+  promptInput.addEventListener('keydown', function (ev) {
+    // Enter sends and Shift+Enter breaks the line, which is why this is a
+    // textarea and not an input: a prompt with a code block in it is normal.
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+      ev.preventDefault();
+      sendPrompt();
+    }
+  });
 
   if (ACP_ERROR) {
     setState('closed', 'unavailable');
@@ -251,6 +378,7 @@
     logLine('info', 'only this page is affected — the rest of PowerAtlas is running ' +
                     'normally. Fix the import and restart the server.');
     newBtn.disabled = true;
+    promptInput.disabled = true;
   } else {
     connect();
   }

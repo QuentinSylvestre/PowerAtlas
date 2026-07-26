@@ -4,8 +4,10 @@ This module owns everything that happens on a ``/ws/acp`` socket once
 ``web.py`` has accepted it — envelope parsing, the connection and session
 registry, the outbound fan-out machinery — and, since Phase 3b, the supervised
 ``kiro-cli acp`` subprocess it all talks to: spawn, the JSON-RPC handshake,
-``session/new``, and teardown. ``prompt``/``cancel``/``close`` still answer a
-typed ``not_implemented``; they arrive in Phases 4 and 6.
+``session/new``, and teardown. Phase 4 adds ``session/prompt``, the
+``agent_message_chunk`` fan-out behind it, and the per-session ring buffer that
+a reload replays. ``cancel``/``close`` still answer a typed
+``not_implemented``; they arrive in Phase 6.
 
 Isolation boundary — this module imports exactly one name from the rest of
 ``power_atlas``: ``config.CONFIG_DIR``, to place the agent's neutral cwd where
@@ -29,7 +31,8 @@ buffer), ``new`` (create a session against a cwd), ``prompt``, ``cancel``,
 
 Server to client: ``session`` (id and metadata after ``new``/``subscribe``),
 ``chunk``, ``tool_call``, ``tool_update``, ``meta``, ``error``, ``agent_died``,
-``history_truncated``.
+``history_truncated``, ``history`` (the whole replay, coalesced into one
+frame). ``envelope`` refuses any type not in ``SERVER_TYPES``.
 
 Session identity survives a reload because the page carries ``?sid=…`` and
 re-sends ``subscribe`` on connect.
@@ -42,6 +45,7 @@ deadlocks the child once ~64 KB accumulates in it.
 """
 
 import asyncio
+import collections
 import json
 import logging
 import shutil
@@ -96,7 +100,7 @@ except Exception:  # pragma: no cover - only reached if uvicorn moves the symbol
 CLIENT_TYPES = frozenset({"subscribe", "new", "prompt", "cancel", "close"})
 SERVER_TYPES = frozenset({
     "session", "chunk", "tool_call", "tool_update", "meta", "error",
-    "agent_died", "history_truncated",
+    "agent_died", "history_truncated", "history",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -119,6 +123,39 @@ MAX_CONNECTIONS = 8
 # stopped reading drops its own socket instead of growing the server's memory
 # while Phase 3b streams chunks at it.
 SEND_QUEUE_MAXSIZE = 256
+
+# The agent→client direction's size cap, and the block size the reader works
+# in. Until Phase 4 nothing streamed, so `for line in proc.stdout` had no
+# ceiling on a single line while the client→server path enforced
+# MAX_MESSAGE_BYTES; tool output under `-a` is what makes that a live path.
+#
+# 1 MiB rather than the client's 256 KiB because the two directions carry
+# different things: the largest legitimate client frame is prose a human typed,
+# while a `tool_call_update` legitimately carries whatever a command printed —
+# a measured one already ran ~1 KB, and a file read is unbounded by nature. A
+# megabyte is far above any observed line and still small enough that the
+# reader thread's buffer cannot grow into a leak. `readline()` would be no
+# better than the old loop: both accumulate until a newline arrives, whatever
+# that costs. Reading fixed blocks and splitting them is the only shape that
+# can decide to *stop* accumulating, so an over-long line is discarded up to
+# the next newline instead of buffered.
+#
+# The block size is what streaming granularity costs: `TextIOWrapper.read(n)`
+# blocks until it has n characters, so the reader works on the underlying
+# buffered binary stream with `read1`, which returns whatever one OS read
+# yields. 64 KiB is a comfortable multiple of the ~4-64 KB Windows pipe buffer.
+MAX_AGENT_LINE_BYTES = 1024 * 1024
+READ_BLOCK_BYTES = 64 * 1024
+
+# The per-session replay buffer: how many events it holds, and what they may
+# weigh. The count is the bound the reload path cares about. The byte budget
+# exists because the count alone is not a memory bound — at MAX_AGENT_LINE_BYTES
+# a line, HISTORY_MAXLEN events could hold hundreds of megabytes for one
+# session, which is the same unbounded-buffer shape the reader cap closes.
+# Whichever binds first sets `truncated`, so a replay that has degraded to a
+# suffix says so either way.
+HISTORY_MAXLEN = 2000
+HISTORY_MAX_BYTES = 2 * 1024 * 1024
 
 # How long a server-initiated close waits for the outbound queue to reach the
 # wire before giving up on it. Bounded because the peer this is waiting on may
@@ -149,6 +186,13 @@ MAX_SESSIONS = 3
 # with an earlier spike at ~3.2 s, so the ceiling has to be far above both.
 INITIALIZE_TIMEOUT_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 90.0
+
+# A prompt is the one request whose duration is the model's, not the channel's.
+# The measured trivial turn took ~24 s end to end, and a turn that runs tools
+# under `-a` is minutes rather than seconds — so the ordinary ceiling would
+# abandon working turns. Ten minutes still bounds it, which is the point: a
+# request with no ceiling makes a dead agent indistinguishable from a slow one.
+PROMPT_TIMEOUT_SECONDS = 600.0
 
 # How long the tree-kill fast path waits for the tree to actually go, so that
 # teardown has a post-condition rather than only an intent.
@@ -215,7 +259,16 @@ class BadCwd(AcpError):
 
 def envelope(type_: str, payload: dict | None = None,
              session_id: str | None = None) -> dict:
-    """Build a wire frame. The only place the envelope shape is written."""
+    """Build a wire frame. The only place the envelope shape is written.
+
+    Raises rather than logs on an unknown type, because every call site passes
+    a literal: a type this refuses is a typo, not input. Left unchecked it
+    reaches the page as a frame no branch matches, where it renders as a line
+    of raw JSON in the transport log and is easy to read as agent noise —
+    ``SERVER_TYPES`` existed for three phases without ever being consulted.
+    """
+    if type_ not in SERVER_TYPES:
+        raise ValueError(f"'{type_}' is not a declared server frame type")
     return {"type": type_, "sessionId": session_id, "payload": payload or {}}
 
 
@@ -226,6 +279,77 @@ def error_frame(code: str, message: str, session_id: str | None = None) -> dict:
     for a human reading the page's log and may be reworded freely.
     """
     return envelope("error", {"code": code, "message": message}, session_id)
+
+
+def _content_text(content) -> str:
+    """Pull the text out of an ACP content block, or a list of them.
+
+    Measured against kiro-cli 2.14.2: ``agent_message_chunk`` carries a single
+    ``{"type": "text", "text": …}`` object, not the list the spec's content
+    blocks suggest elsewhere. Both are accepted because only one of them is
+    what this build happens to send.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+    if isinstance(content, list):
+        return "".join(_content_text(item) for item in content)
+    return ""
+
+
+def _frame_weight(frame: dict) -> int:
+    """Roughly what holding one frame in a replay buffer costs.
+
+    Only the payload's strings can grow — chunk text, an error message — so
+    summing those plus a fixed allowance for the envelope is close enough to
+    drive eviction without paying for a second ``json.dumps`` per chunk on the
+    streaming path.
+    """
+    payload = frame.get("payload") or {}
+    return 128 + sum(len(v) for v in payload.values() if isinstance(v, str))
+
+
+class _History:
+    """One session's replayable event log, bounded on both count and bytes.
+
+    ``deque(maxlen=…)`` makes the count bound structural: there is no code path
+    that can grow it, so it holds whatever a future caller does. The byte
+    budget is checked rather than structural, and is the one that actually
+    binds when a turn produces few but enormous events.
+
+    Either eviction sets ``truncated`` and it never clears again. That flag is
+    the whole reason the buffer is honest: a deque silently discards its oldest
+    entry, so without it a replay that has degraded from "the conversation" to
+    "the last N events" looks identical to a complete one.
+    """
+
+    def __init__(self) -> None:
+        self._events: collections.deque = collections.deque(maxlen=HISTORY_MAXLEN)
+        self._bytes = 0
+        self.truncated = False
+
+    def append(self, frame: dict) -> None:
+        weight = _frame_weight(frame)
+        if len(self._events) == HISTORY_MAXLEN:
+            self._bytes -= self._events[0][0]
+            self.truncated = True
+        self._events.append((weight, frame))
+        self._bytes += weight
+        # Never evicts to empty: a single frame heavier than the whole budget
+        # is still the most recent thing that happened, and dropping it would
+        # leave a reload with nothing at all rather than with a suffix.
+        while self._bytes > HISTORY_MAX_BYTES and len(self._events) > 1:
+            weight, _ = self._events.popleft()
+            self._bytes -= weight
+            self.truncated = True
+
+    def events(self) -> list[dict]:
+        return [frame for _, frame in self._events]
+
+    def __len__(self) -> int:
+        return len(self._events)
 
 
 class _Connection:
@@ -511,6 +635,16 @@ class _Supervisor:
         self._pending: dict[int, asyncio.Future] = {}
         self._next_id = 1
         self.sessions: dict[str, dict] = {}
+        # Replay buffers, keyed the same way and cleared by the same paths, so
+        # a session's history cannot outlive the session it belongs to —
+        # `_handle_subscribe` refuses an unknown session, which would otherwise
+        # leave its buffer unreachable and resident for the app's lifetime.
+        self.history: dict[str, _History] = {}
+        # Sessions with a `session/prompt` in flight. The agent is not asked to
+        # arbitrate two concurrent turns on one session: their chunks carry no
+        # turn id, so the fan-out would interleave them into one transcript
+        # with nothing able to separate them again.
+        self.inflight: set[str] = set()
         # Sessions promised but not yet recorded — see `new_session`. Counted
         # against MAX_SESSIONS alongside `sessions`, because the creation of one
         # spans two awaits and the cap has to hold across them.
@@ -751,6 +885,8 @@ class _Supervisor:
         self._ready = False
         self.agent_info = {}
         self.sessions.clear()
+        self.history.clear()
+        self.inflight.clear()
         for fut in tuple(self._pending.values()):
             if not fut.done():
                 fut.set_exception(AgentDied(reason))
@@ -893,22 +1029,51 @@ class _Supervisor:
                 raise AgentDied(f"Lost the agent's stdin: {exc}") from exc
 
     def _reader_loop(self, proc: subprocess.Popen) -> None:
-        """Blocking read of the agent's stdout, on its own OS thread."""
+        """Blocking read of the agent's stdout, on its own OS thread.
+
+        Reads bounded blocks and splits them itself rather than iterating
+        lines. The iteration form — and ``readline()``, which is the same thing
+        — accumulates until a newline arrives however long that takes, so a
+        single runaway line has no ceiling at all. Splitting blocks is what
+        makes ``MAX_AGENT_LINE_BYTES`` enforceable: an over-long line is
+        abandoned and swallowed up to the next newline instead of buffered.
+
+        The read happens on the underlying binary buffer, which is also what
+        makes the cap a byte count rather than a character count. Nothing else
+        in this module reads ``proc.stdout`` as text, so the two views of the
+        stream never interleave.
+        """
+        stream = getattr(proc.stdout, "buffer", proc.stdout)
+        pending = bytearray()
+        # True while the remainder of an over-long line is being discarded.
+        # Without it the tail of a rejected line would be parsed as if it were
+        # a line of its own, turning one rejection into a run of warnings.
+        dropping = False
         try:
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
+            while True:
+                # `read1`, not `read`: a buffered `read(n)` loops until it has
+                # all n bytes, which would hold every chunk of a streamed
+                # answer hostage until 64 KiB of them had accumulated.
+                block = stream.read1(READ_BLOCK_BYTES)
+                if not block:
+                    break
+                parts = block.split(b"\n")
+                for part in parts[:-1]:
+                    if dropping:
+                        dropping = False
+                    else:
+                        pending += part
+                        self._on_line(bytes(pending))
+                    pending.clear()
+                if dropping:
                     continue
-                try:
-                    msg = json.loads(line)
-                except ValueError:
-                    # Banner lines and other non-JSON noise are tolerated
-                    # rather than fatal, but never silent: a protocol change
-                    # would otherwise read as an agent that says nothing.
-                    log.warning("ACP: non-JSON line from agent: %.200s", line)
-                    continue
-                if isinstance(msg, dict):
-                    self._post(self._on_message, msg)
+                pending += parts[-1]
+                if len(pending) > MAX_AGENT_LINE_BYTES:
+                    log.error("ACP: discarding an agent line over %d bytes; the "
+                              "channel continues at the next newline",
+                              MAX_AGENT_LINE_BYTES)
+                    dropping = True
+                    pending.clear()
         except Exception:
             # Nothing above may take the thread down without a trace: this
             # thread is the only thing reading the agent, so its death is the
@@ -916,6 +1081,22 @@ class _Supervisor:
             log.exception("ACP reader thread failed")
         finally:
             self._post(self._on_agent_death, proc)
+
+    def _on_line(self, raw: bytes) -> None:
+        """Parse one complete NDJSON line and hand it to the loop."""
+        line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            return
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            # Banner lines and other non-JSON noise are tolerated rather than
+            # fatal, but never silent: a protocol change would otherwise read
+            # as an agent that says nothing.
+            log.warning("ACP: non-JSON line from agent: %.200s", line)
+            return
+        if isinstance(msg, dict):
+            self._post(self._on_message, msg)
 
     def _post(self, fn, *args) -> None:
         """Hand work to the event loop from the reader thread."""
@@ -994,12 +1175,19 @@ class _Supervisor:
         params = msg.get("params") or {}
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
+        session_id = params.get("sessionId")
+        if kind == "agent_message_chunk":
+            text = _content_text(update.get("content"))
+            if text and isinstance(session_id, str):
+                _emit(session_id, envelope(
+                    "chunk", {"role": "agent", "text": text}, session_id))
+            return
         if kind in ("tool_call", "tool_call_update"):
             # Logged from this phase, not from Phase 6 where tool rendering
             # lands. Execution capability arrives with `-a` *now*; without this
             # line three phases would run commands with no record anywhere.
             log.info("ACP tool %s: session=%s id=%s status=%s title=%r kind=%s",
-                     kind, params.get("sessionId"), update.get("toolCallId"),
+                     kind, session_id, update.get("toolCallId"),
                      update.get("status"), update.get("title"),
                      update.get("kind"))
             return
@@ -1066,6 +1254,7 @@ class _Supervisor:
                 "models": result.get("models") or {},
                 "modes": result.get("modes") or {},
             }
+            self.history[session_id] = _History()
         finally:
             # Every path releases the slot, including cancellation: the session
             # it stood for is either recorded above (and counted by `sessions`
@@ -1075,8 +1264,47 @@ class _Supervisor:
                  session_id, cwd, len(self.sessions))
         return {"sessionId": session_id, "cwd": cwd}
 
+    def record(self, session_id: str, frame: dict) -> None:
+        """Append a frame to a session's replay buffer, if it still has one."""
+        history = self.history.get(session_id)
+        if history is not None:
+            history.append(frame)
+
+    async def prompt(self, session_id: str, text: str) -> dict:
+        """Run one turn. Returns the agent's ``{"stopReason": …}``.
+
+        The answer does not come back through here — it arrives as
+        ``session/update`` notifications while this is still awaiting, which is
+        the whole reason the page sees text progressively. What this returns is
+        only the turn's end.
+        """
+        if session_id not in self.sessions:
+            raise AgentRejected("That session no longer exists on this agent.")
+        if not self.alive():
+            raise AgentDied("The agent is not running.")
+        result = await self._request(
+            "session/prompt",
+            {"sessionId": session_id,
+             "prompt": [{"type": "text", "text": text}]},
+            timeout=PROMPT_TIMEOUT_SECONDS,
+        )
+        return result or {}
+
 
 _supervisor = _Supervisor()
+
+
+def _emit(session_id: str, frame: dict) -> None:
+    """Record a frame in a session's history and fan it out to its sockets.
+
+    Recording first is what makes a replay complete: a socket attaching between
+    the two halves would otherwise miss the frame in both directions — too late
+    for the fan-out, too early for the buffer. Nothing can actually attach
+    there, because both halves are synchronous, but the order costs nothing and
+    does not depend on that staying true.
+    """
+    _supervisor.record(session_id, frame)
+    _registry.broadcast(session_id, frame)
 
 
 def shutdown() -> None:
@@ -1183,25 +1411,35 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
     if type_ == "subscribe":
         _handle_subscribe(conn, session_id)
         return
-    # `prompt` and `cancel` arrive with streaming in Phase 4/6, `close` in
-    # Phase 6. Answering with a typed error keeps an unimplemented type a
-    # protocol event the page can render, rather than a dropped frame or a
-    # traceback that takes the socket down with it.
+    if type_ == "prompt":
+        _spawn_task(_handle_prompt(conn, session_id, payload))
+        return
+    # `cancel` and `close` arrive in Phase 6. Answering with a typed error
+    # keeps an unimplemented type a protocol event the page can render, rather
+    # than a dropped frame or a traceback that takes the socket down with it.
     conn.send(error_frame(
         "not_implemented",
-        f"'{type_}' is not part of phase 3b — spawn, handshake and "
-        "session/new only.",
+        f"'{type_}' is not implemented yet — it arrives with session close "
+        "and cancel.",
         session_id))
 
 
 def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
-    """Attach this socket to an existing session.
+    """Attach this socket to an existing session and replay its buffer.
 
-    Replay of the session's event buffer is Phase 4's; there is no buffer yet
-    because nothing streams. Attaching is still worth doing now: the page sends
-    ``subscribe`` on every reload that carries ``?sid=``, and answering that
-    with an error would make a reload look like a lost session when the session
-    is in fact fine.
+    **This function must not grow an ``await``.** Attaching and queueing the
+    replay with nothing suspending in between is atomic against the event loop,
+    so no live event can be broadcast between the two — which is exactly what
+    would deliver it twice, once in the replay and once live. That property is
+    what stands in for an explicit replay cursor; an ``await`` anywhere between
+    ``attach`` and the ``history`` frame reintroduces the window and would need
+    a real cursor to close it again.
+
+    The replay is **one** frame carrying every event, not one frame per event.
+    ``SEND_QUEUE_MAXSIZE`` is 256 and a full queue makes ``_Connection.send``
+    retire the socket — so replaying a HISTORY_MAXLEN buffer event by event
+    would kill the very socket the replay exists to serve, and would do it
+    only for the sessions with enough history to be worth replaying.
     """
     if not session_id:
         conn.send(error_frame(
@@ -1220,6 +1458,15 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         "cwd": meta.get("cwd", ""),
         "created": False,
     }, session_id))
+    history = _supervisor.history.get(session_id)
+    if history is None:
+        return
+    if history.truncated:
+        conn.send(envelope("history_truncated", {
+            "message": "Earlier events fell out of the replay buffer; what "
+                       "follows is the tail of the conversation.",
+        }, session_id))
+    conn.send(envelope("history", {"events": history.events()}, session_id))
 
 
 async def _handle_new(conn: _Connection, payload: dict) -> None:
@@ -1258,3 +1505,69 @@ async def _handle_new(conn: _Connection, payload: dict) -> None:
         "cwd": info["cwd"],
         "created": True,
     }, session_id))
+
+
+async def _handle_prompt(conn: _Connection, session_id: str | None,
+                         payload: dict) -> None:
+    """Run one turn, reporting every failure as a typed ``error`` frame.
+
+    Every check runs before the first ``await``, which is what makes the
+    in-flight guard hold: two ``prompt`` frames become two tasks, and each
+    task's synchronous prefix runs to completion before the other starts.
+
+    Turn events are emitted to the *session*, not to the socket that asked, so
+    a second tab watching the same session sees the same transcript — including
+    the prompt it did not send.
+    """
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'prompt' needs a sessionId."))
+        return
+    text = payload.get("prompt")
+    if not isinstance(text, str) or not text.strip():
+        conn.send(error_frame(
+            "bad_payload", "'prompt' must be a non-empty string.", session_id))
+        return
+    if session_id not in _supervisor.sessions:
+        conn.send(error_frame(
+            "unknown_session",
+            "This server has no such live session. It may belong to an "
+            "earlier PowerAtlas process — create a new one.", session_id))
+        return
+    if conn.session_id != session_id:
+        # A socket that is not attached would start a turn and then receive
+        # none of the stream it started, which on the page is indistinguishable
+        # from an agent that never answered.
+        conn.send(error_frame(
+            "not_subscribed",
+            "Subscribe to this session before prompting it.", session_id))
+        return
+    if session_id in _supervisor.inflight:
+        conn.send(error_frame(
+            "turn_in_progress",
+            "This session is still answering the previous prompt.", session_id))
+        return
+    _supervisor.inflight.add(session_id)
+
+    _emit(session_id, envelope("chunk", {"role": "user", "text": text}, session_id))
+    _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
+    # Names the state a reload would find if this task never reaches its own
+    # end: the turn boundary is what the page derives "still answering" from,
+    # so it has to be emitted on the cancellation path too.
+    stop_reason = "interrupted"
+    try:
+        result = await _supervisor.prompt(session_id, text)
+        stop_reason = result.get("stopReason") or "end_turn"
+    except AcpError as exc:
+        log.warning("ACP session/prompt refused: [%s] %s", exc.code, exc)
+        _emit(session_id, error_frame(exc.code, str(exc), session_id))
+        stop_reason = "error"
+    except Exception:
+        log.exception("ACP session/prompt failed")
+        _emit(session_id, error_frame(
+            "internal_error",
+            "The prompt failed; see orchestrator.log.", session_id))
+        stop_reason = "error"
+    finally:
+        _supervisor.inflight.discard(session_id)
+        _emit(session_id, envelope(
+            "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
