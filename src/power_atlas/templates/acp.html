@@ -12,6 +12,16 @@
 <div class="acp-page">
   <div class="acp-toolbar">
     <button class="acp-btn" id="acpNew" type="button">New session</button>
+    <!-- Every session created here is a permanent entry in the real kiro-cli
+         store, so the directory it is created against is worth being explicit
+         about rather than implicit. Blank means the agent's own neutral cwd,
+         which lights up no real workspace in the dashboard's process scan.
+         Styled by reusing .acp-btn plus two inline overrides: style.css is
+         outside this phase's file scope. -->
+    <input class="acp-btn" id="acpCwd" type="text" spellcheck="false"
+           style="flex:1;min-width:140px;cursor:text;"
+           placeholder="session directory — blank for the agent's neutral cwd"
+           aria-label="Directory to create the session against">
     <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
     <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
     <span class="acp-sid" id="acpSid"></span>
@@ -45,6 +55,7 @@
   var logEl = document.getElementById('acpLog');
   var sidEl = document.getElementById('acpSid');
   var newBtn = document.getElementById('acpNew');
+  var cwdInput = document.getElementById('acpCwd');
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
   var ws = null;
@@ -96,6 +107,16 @@
     logLine('out', '→ ' + type);
   }
 
+  function setPending(pending) {
+    // The button is the only thing stopping a second session/new landing while
+    // the first is still in flight, and each one costs ~306 MB and is a
+    // permanent entry in the real kiro-cli store. Creation was measured at
+    // 5.84 s, plus ~1 s of spawn on the first, so the window is wide enough to
+    // double-click through by accident.
+    newBtn.disabled = pending;
+    newBtn.textContent = pending ? 'Creating…' : 'New session';
+  }
+
   function handle(frame) {
     var type = frame && frame.type;
     var payload = (frame && frame.payload) || {};
@@ -105,7 +126,34 @@
                       ' bytes, max sockets ' + payload.maxConnections + ')');
       return;
     }
+    if (type === 'meta' && payload.pending === 'new') {
+      setPending(true);
+      logLine('info', 'creating a session — the agent takes several seconds');
+      return;
+    }
+    if (type === 'session') {
+      setPending(false);
+      sidEl.textContent = 'session ' + payload.sessionId;
+      logLine('in', '← session ' + payload.sessionId +
+                    (payload.created ? ' (created' : ' (resubscribed') +
+                    ', cwd ' + payload.cwd + ')');
+      // Carry the id in the URL so a reload re-subscribes to this session
+      // instead of stranding it. replaceState rather than pushState: a session
+      // is not a navigation step and Back should still leave the page.
+      history.replaceState(null, '',
+        location.pathname + '?sid=' + encodeURIComponent(payload.sessionId));
+      return;
+    }
+    if (type === 'agent_died') {
+      setPending(false);
+      setState('closed', 'agent gone');
+      sidEl.textContent = '';
+      logLine('error', '← agent_died (exit ' + payload.exitCode + ') ' +
+                       payload.message);
+      return;
+    }
     if (type === 'error') {
+      setPending(false);
       logLine('error', '← error [' + payload.code + '] ' + payload.message);
       return;
     }
@@ -175,6 +223,9 @@
       handle(frame);
     };
     ws.onclose = function (ev) {
+      // A socket that drops while session/new is in flight would otherwise
+      // leave the button disabled with nothing left to re-enable it.
+      setPending(false);
       setState('closed', 'disconnected (' + ev.code + ')');
       logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
       if (opened) {
@@ -188,7 +239,9 @@
     };
   }
 
-  newBtn.addEventListener('click', function () { send('new', {}, null); });
+  newBtn.addEventListener('click', function () {
+    send('new', { cwd: cwdInput.value.trim() }, null);
+  });
   reconnectBtn.addEventListener('click', connect);
   reloadBtn.addEventListener('click', function () { location.reload(); });
 

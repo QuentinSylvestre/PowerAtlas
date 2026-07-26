@@ -435,12 +435,26 @@ log = logging.getLogger("power_atlas.web")
 @asynccontextmanager
 async def lifespan(app_instance):
     task = asyncio.create_task(_background_refresh())
-    yield
-    task.cancel()
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # ACP teardown is the *fast* path only. The Windows job object that
+        # `acp` assigns the agent to is what actually guarantees no orphans:
+        # `--stop`/`--restart` hard-kill this process with `TerminateProcess`
+        # and never run `lifespan` at all, and neither does a crash or Task
+        # Manager. This makes the tray route prompt; the job makes every route
+        # certain. It is kills only — anything that waits on the agent would
+        # overrun `__main__.py`'s 5 s server-thread join and simply not run.
+        if acp is not None:
+            try:
+                acp.shutdown()
+            except Exception:
+                log.exception("ACP teardown failed")
 
 
 async def _background_refresh():
