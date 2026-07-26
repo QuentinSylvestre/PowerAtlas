@@ -1,7 +1,7 @@
 # kiro-cli ACP Client Prototype
 
 > **Date**: 2026-07-25
-> **Status**: In Progress — phases 1-2 complete, ACP prototype (phases 3-6) not started  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — all six phases complete and reviewed; open at `/qclose`: the README exemption, and the test-plan H1-H10 hotspot block  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Throwaway prototype of a WebSocket-backed kiro-cli ACP client on a new `/acp` page, validating transport, process supervision and the session model before a from-scratch rebuild
 > **Estimated effort**: ~7-10 days (revised up after review — see §6)
@@ -1863,6 +1863,54 @@ user gesture.
 Suite: **929 passed, 1 skipped** (893 after the phase, 842 before it). One session created, in the
 scratch directory, by a real-console terminal `kiro-cli chat`; four terminal spawns across the phase,
 every tree confirmed reaped by pid.
+
+---
+
+### 2026-07-26 — Final Review (all six phases, personas: Senior engineer, Security auditor, Architect)
+
+Three personas in parallel over the **cumulative** result rather than per-phase diffs, all read-only
+and forbidden from spawning the agent or touching the user's store. **4 High, 9 Medium, 9 Low.**
+Health at review: **Red**; after fixes: **Green**.
+
+Both security Highs are **seam defects** — neither exists inside any single phase's diff, which is
+why five per-phase reviews missed them and a whole-surface review found them.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `_handle_new` resolved a client-supplied `cwd` **synchronously on the event loop** — a UNC path to an unreachable host froze the whole application for a measured **42.16 s** per frame, unbounded, because the cap is only consulted after the resolve | Fixed — `await asyncio.to_thread(...)` matching the `load` path, plus `at_capacity()` consulted first so at the cap no filesystem work happens at all |
+| 2 | High | `_handle_prompt` had no `closing` guard, so a prompt landing inside a close's await window started a turn on a session being released — its chunks and **tool calls reaching neither the ring buffer nor any socket**, under `-a`, for the full 600 s ceiling | Fixed — mirror of `_handle_close`'s existing guard; test reproduces the reviewer's stubbed-transport race and asserts only `CLOSE_METHOD` reaches the wire |
+| 3 | High | The prototype validated the **attended** configuration only, while the Intent's stated purpose is unattended automation — and `session/request_permission` has never round-tripped, so a rebuild dropping `-a` would fail every tool call rather than prompt | Recorded — the rebuild answer and a scoped `[SPIKE] The permission round trip` now live in `ROADMAP.md` (`944b15e`) |
+| 4 | High | 214 collected tests exercise `acp.py` against a §3 decision row of `Tests \| None` that was never re-decided, and `ROADMAP.md` carried a false claim about them | Recorded and corrected in `ROADMAP.md`; the accumulation is real and is now stated as making the effort figure a poor predictor in both directions |
+| 5 | Medium | `_ws_origin_ok` read `ws.url.hostname`, which on **starlette 0.37.2 — the interpreter that ships** — accepts `Host: evil.com@127.0.0.1` as loopback and raises on `[::1`. **No test could observe it**, because 1.3.1 rejects both first | Fixed — parses the raw header through `_host_allowed`, reads no part of `ws.url`; regression tests drive a stand-in whose `.url` raises, so they mean the same thing on either Starlette |
+| 6 | Medium | `load` was unthrottled and paid two thread-pool filesystem operations plus a `loading` claim **before** the session cap was consulted | Fixed — per-socket 1 s floor and an `at_capacity()` pre-flight, both above the expensive work |
+| 7 | Medium | `acp.html` — 728 lines carrying the XSS control, turn state machine, reconnect and auto-load — had **no committed coverage**, and the harness proving two Phase 4 High fixes was never committed | Fixed — `tests/acp_page.test.mjs` committed; **15/15 at HEAD, 3/15 against `e8cb4df`**, verified independently by the orchestrator |
+| 8 | Medium | The measurements disagreed with themselves: `~306 MB` six times in `acp.py` including the **user-facing** cap message, plus a third figure `271.5 MB`, against Phase 6's measured 253.4 MB | Fixed — corrected throughout; where a figure also lives in `ROADMAP.md` the comment now points there rather than keeping a second copy that will diverge again |
+| 9 | Medium | Tool-call rendering — the stated mitigation for `-a` — is a display, not a control: nothing gates a turn on a watcher, only the first input field is shown, the tool's result never is, and the replay buffer is designed to evict | Recorded — an accepted residual for a prototype; material to the rebuild decision and carried into the roadmap |
+| 10 | Medium | `## Automation & Workflows` — the six items the Intent names as the entire justification — was **byte-identical to its pre-plan state** | Fixed in `944b15e` — all six reconciled, including two honest "established nothing" records |
+| 11 | Medium | The plan's own Status line read "phases 1-2 complete, ACP prototype (phases 3-6) not started" with all six phases ticked | Fixed by the orchestrator — the header was wrong in the artifact a cold reader opens first |
+| 12-20 | Low | `close`/`cancel` did not check subscription; `unknown_session` carried three meanings so a refused close made the page issue a `load`; dead `models`/`modes`/`agent_info` state; agent-supplied `sessionId` unvalidated; Phase 3a's isolation grep now returns 7 hits; §9's "recorded, not fixed" list stale; README; token in the query string | All fixed except the last two, which are `/qclose` items |
+
+**The isolation criterion is a bad proxy, and the property it guards is intact.** Re-running Phase 3a's
+`grep -n "status_classifier\|notifications" acp.py` returns **7 hits** today — every one the ordinary
+English word "notifications" in prose about ACP `session/update` notifications. Both reviewers
+independently verified the real property by import graph (`acp.py` → `config` + `launcher` → `config`
+→ nothing), so the unlocked caches remain unreachable. Phase 3b had already recorded that the
+docstring must *describe* those modules without naming them; Phases 4-6 then wrote ordinary prose and
+broke the check without going near the boundary. A criterion satisfiable only while the code avoids a
+common word.
+
+**A sub-agent failed mid-round and was resumed, not re-spawned.** The code-fix agent died to an API
+error after F1/F2/F9 landed but before committing, leaving the suite red at 6 failed / 958 passed.
+Its edits were left untouched and it was resumed from its own transcript with the failing test list;
+it finished the remaining findings from intact context. Reported here because the alternative —
+discarding the work or re-spawning over it — was the failure mode the recovery rule exists to prevent.
+
+**Mutation honesty.** 24 run, 24 caught — but one initially survived (`_host_allowed(hosts[0].strip().lower())`,
+because the spy test's input was already stripped and lowercase). The agent fixed the *test*, added
+case and whitespace cases plus a 24th mutation, and reported the sequence rather than the final tally.
+
+Suite: **1009 passed, 1 skipped** (964 before the final round; 622 passing on clean `main` before the
+plan). No session created, loaded or prompted during the final round; store unchanged at 12,836 files.
 
 ---
 
