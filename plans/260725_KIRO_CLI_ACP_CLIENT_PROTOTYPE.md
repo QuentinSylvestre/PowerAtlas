@@ -676,23 +676,28 @@ are annotated **[3a]** or **[3b]**.
       **Superseded in practice**: the `websockets` client and `httpx` both derive `Host` from the URI
       and silently drop a `Host` passed this way, so every `Host` probe was hand-written raw HTTP.
       Two agents hit the resulting false pass before this was understood — see §9
-- [ ] **[3b — USER]** Quitting PowerAtlas **from the tray** leaves no surviving `kiro-cli` process from this
+- [x] **[3b]** Quitting PowerAtlas **from the tray** leaves no surviving `kiro-cli` process from this
       session — `Get-Process kiro-cli` before and after (expect parent + 5 gone).
-      **Awaiting user verification.** No agent can click a tray icon. Note this is also the *only*
-      route that exercises the `lifespan` teardown this phase added to shipped `web.py`; the log
-      shows zero `ACP teardown:` lines across 111,869 entries, so that path has never run
+      **Verified by the user 2026-07-26: 1 → 0.** This is also the only route that exercises the
+      `lifespan` teardown this phase added to shipped `web.py`, which had never run before this test
 - [x] **[3b]** `power-atlas --restart` and `power-atlas --stop` **also** leave none — covered by the Job
       Object, since these hard-kill via `TerminateProcess` (`__main__.py:86-91`, reached from
       `:341`/`:346`) and never run `lifespan`. `memory/MEMORY.md:94-98` records that dev iteration
       restarts PowerAtlas constantly, making this the most-used path during Phases 3-6.
       **Verified**: `--restart` with 12 pids captured by create-time → 0 survivors; `--stop` with 7
       pids → 0. Both were the Job Object working alone
-- [ ] **[3b — USER]** Killing PowerAtlas from Task Manager also leaves none — the case only the Job Object covers,
-      and the reason it was chosen over a pid-file reaper. **Awaiting user verification**
-- [ ] **[3b — USER]** The job handle is held for the process lifetime (not garbage-collected), verified by keeping
+- [x] **[3b]** Killing PowerAtlas from Task Manager also leaves none — the case only the Job Object covers,
+      and the reason it was chosen over a pid-file reaper.
+      **Verified 2026-07-26** via `Stop-Process -Force`, which issues the same `TerminateProcess`
+      Task Manager's End Task does. The full 7-process tree was captured by pid beforehand
+      (1 `kiro-cli`, 2 `cmd`, 2 `conhost`, 2 `node`); after the kill, **zero of the seven survived**
+      and the port was released. `lifespan` cannot run on this path, so the entire teardown was the
+      Job Object alone — which is the whole reason it was chosen over a pid-file reaper
+- [x] **[3b]** The job handle is held for the process lifetime (not garbage-collected), verified by keeping
       a session open across a several-minute idle period and confirming the agent survives.
-      **Awaiting user verification.** Partial evidence: one agent answered a second `session/new`
-      2 min 09 s after spawn on the same process, so the handle survived that long
+      **Verified by the user 2026-07-26: 1 → 1 across a five-minute idle.** This is what makes the
+      other two teardown results meaningful — without it, a tree dying could be the handle being
+      collected rather than teardown working
 - [x] **[3b]** Spawning uses a neutral cwd, named explicitly as `CONFIG_DIR / "acp-cwd"` (created on demand)
       — **not** `Path.home()`, which is plausibly a real workspace and would be picked up by
       `presence.py`'s process scan, defeating the purpose
@@ -1219,10 +1224,15 @@ A test pins this and a mutation re-deriving the expected origin from the raw Hos
   the store shows **seven** (`961f682f`, `ac4fd3bb`, `ad8391c7`, `480b714f`, `85698bcd`, `91d801d3`,
   `9c7a207b`), all against the scratch workspace. The four extras came from probes it described as
   costing nothing. Store went 13,296 → 13,315. None was ever prompted, so no tool ever executed.
-- **Three exit criteria remain unverified and need a human**: tray quit, Task Manager kill, and the
-  multi-minute idle proving the job handle is not garbage-collected. The tray route is also the only
-  exercise of the `lifespan` teardown this phase added to shipped `web.py` — the log carries zero
-  `ACP teardown:` lines across 111,869 entries.
+- **All three human-only teardown criteria now verified (2026-07-26).** Tray quit 1 → 0 and the
+  five-minute idle 1 → 1, both by the user; Task Manager kill by the orchestrator via
+  `Stop-Process -Force`, which issues the same `TerminateProcess` as End Task — the 7-process tree
+  was captured by pid first and **none of the seven survived**. SC 7 is therefore satisfied across
+  every death route the plan names: tray, `--stop`, `--restart`, and hard kill.
+  **The idle result is what makes the other four meaningful**: it rules out the alternative
+  explanation that trees were dying because the handle was being collected rather than because
+  teardown worked. And the tray test was the first execution of the `lifespan` teardown at all —
+  before it, the log carried zero `ACP teardown:` lines across 111,869 entries.
 
 **Side effect on the user's machine, corrected.** An agent probing that loopback POSTs still worked
 POSTed to `/api/save-setting` believing it was re-saving the current value; the configured port
