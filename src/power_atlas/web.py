@@ -1,10 +1,17 @@
-"""FastAPI web application with htmx-powered UI."""
+"""FastAPI application serving the PowerAtlas UI over two surfaces.
+
+The htmx-driven pages and partials are ordinary request/response routes. The
+ACP prototype adds a second surface — the ``/ws/acp`` WebSocket — which is
+neither htmx nor request/response, and which ``same_origin_guard`` below
+structurally cannot see. Its equivalent protections live in ``_ws_origin_ok``.
+"""
 
 import asyncio
 import html as html_mod
 import logging
 import os
 import re
+import secrets
 import subprocess
 import sys
 import uuid
@@ -14,7 +21,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,6 +29,24 @@ from fastapi.templating import Jinja2Templates
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
 from . import autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
+
+# `acp` is throwaway prototype code and is imported under a guard, unlike every
+# module above it. Phase 3b adds `win32job`, `win32api`, `win32con` and `psutil`
+# to it, and a dependency that is declared in pyproject.toml but absent from the
+# running interpreter has already broken this project once. Unguarded at module
+# scope, that ImportError takes the entire dashboard down; guarded, it costs the
+# /acp page and nothing else. The failure is deliberately loud in both places
+# that can see it: an exception traceback in the log at startup, and a banner on
+# /acp itself instead of a page that connects to nothing.
+try:
+    from . import acp
+    _ACP_IMPORT_ERROR = ""
+except Exception as exc:  # pragma: no cover - prototype degradation path
+    acp = None
+    _ACP_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+    logging.getLogger("power_atlas.web").exception(
+        "ACP prototype failed to import: /acp is disabled, the rest of the UI is "
+        "unaffected")
 
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
@@ -434,22 +459,109 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 # Loopback host names the server is legitimately reached by. Validating the Host
 # header against this allowlist blocks DNS rebinding: a rebinding attack arrives
-# with the attacker's Host (e.g. evil.com), which would otherwise make the
-# reflected same-origin check below trust the attacker's origin. "testserver" is
-# Starlette's TestClient default Host — not publicly resolvable, so inert as an
-# attack vector.
-_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+# with the attacker's Host (e.g. evil.com), which would otherwise both make the
+# reflected same-origin check below trust the attacker's origin and hand the
+# attacker's page readable responses from every unguarded route.
+#
+# Only genuine loopback names belong here. A single-label name (no dot) is *not*
+# safe to allowlist merely because it has no public DNS record: whoever wins
+# LLMNR, NBT-NS or mDNS on the local network answers for it, as does anyone
+# controlling a DNS search suffix — so it is a rebinding target like any other.
+# Tests point their client at a loopback base URL rather than widen this set.
+_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+# A Host may carry exactly one suffix, a decimal port. Five digits covers every
+# port; the value is never used as a number, only proven to be one.
+_PORT_RE = re.compile(r"[0-9]{1,5}")
+
+
+def _host_allowed(raw_host: str | None) -> bool:
+    """Return True when a raw ``Host`` header names a loopback address.
+
+    Takes the header as sent rather than ``request.url.hostname``, because
+    Starlette's ``URL`` is not a safe input to an allowlist decision:
+
+    * It **substitutes**. A ``Host`` that fails Starlette's ``_HOST_RE``
+      (``^([a-z0-9.-]+|\\[[a-f0-9]*:[a-f0-9.:]+\\])(?::[0-9]+)?$`` — note that
+      underscores are absent from that character class) is discarded and the URL
+      is rebuilt from ``scope["server"]``. ``Host: a_b.evil.com`` therefore
+      reports a hostname of ``127.0.0.1`` and passes the allowlist, handing a
+      rebound page every response body this app has — including the ACP token
+      and ``custom_launchers``, whose ``env`` holds cleartext credentials.
+      Browsers do send hostnames containing underscores, so this is reachable.
+    * It **raises**. ``hostname`` runs ``urlsplit``, which throws ``ValueError``
+      on an unmatched bracket (``[evil``, ``[::1``), turning a rejection into a
+      500 any unauthenticated caller can drive on every route.
+
+    So the parsing is done here, and every failure mode is a rejection: absent,
+    empty, userinfo-bearing, bracket-mangled, non-numeric port. Nothing in this
+    function can raise, because an unparseable Host must cost the caller a 403
+    and not a 500. ``_request_host_allowed`` wraps it for a live request.
+    """
+    if not raw_host:
+        return False
+    host = raw_host.strip()
+    # Userinfo is the trap ``urlsplit`` walks into: it keeps only what follows
+    # the *last* "@", so ``evil.com@127.0.0.1`` reads as loopback. Nothing below
+    # strips anything, so the comparison at the end already rejects these — this
+    # line is deliberately redundant and no test can kill it. It stays because
+    # that redundancy is load-bearing against a future edit: it is the only part
+    # of this function that does not assume ``_ALLOWED_HOSTS`` is compared by
+    # exact equality, and it fails closed if that ever stops being true.
+    if any(ch in host for ch in "@/\\?#"):
+        return False
+    if host.startswith("["):
+        end = host.find("]")
+        if end < 0:
+            return False
+        name, remainder = host[1:end], host[end + 1:]
+    else:
+        name, colon, port = host.partition(":")
+        remainder = colon + port
+    # ``remainder`` is empty or ":<port>". Anything else — a second colon, a
+    # hostname smuggled into the port (``127.0.0.1:4915.evil.com``), bytes
+    # trailing the closing bracket (``[::1]extra``) — is malformed, and a
+    # malformed Host is rejected rather than trimmed down to something valid.
+    if remainder and not (
+            remainder.startswith(":") and _PORT_RE.fullmatch(remainder[1:])):
+        return False
+    return name.lower() in _ALLOWED_HOSTS
+
+
+def _request_host_allowed(request: Request) -> bool:
+    """``_host_allowed`` for a live request: exactly one Host header, or refuse.
+
+    ``getlist`` rather than ``get`` because both of the counts it rules out are
+    real. **Zero**: HTTP/1.0 permits omitting Host, and with none sent there is
+    nothing left for Starlette's URL but the ``scope["server"]`` fallback, so
+    ``url.hostname`` answered ``127.0.0.1`` by construction — an absent Host was
+    a loopback Host. **Two or more**: a request-smuggling shape and never a
+    browser, since which copy is authoritative differs between hops, and
+    ``get`` would silently answer with the first.
+    """
+    hosts = request.headers.getlist("host")
+    if len(hosts) != 1:
+        return False
+    return _host_allowed(hosts[0])
 
 
 @app.middleware("http")
 async def same_origin_guard(request: Request, call_next):
-    """Reject cross-origin, non-loopback, or CSRF-suspect POST requests."""
+    """Reject non-loopback Hosts on every request, plus CSRF-suspect POSTs.
+
+    The two halves have different scopes on purpose. The Host allowlist is a
+    DNS-rebinding defense and applies to *all* methods: a rebound page is
+    same-origin with whatever it fetches, so an unguarded GET hands it the
+    response body — workspace paths, session titles, settings. The
+    Origin/Referer checks are CSRF defense and stay POST-only, since a GET here
+    is never state-changing and browsers omit Origin on ordinary navigations.
+    """
+    # A non-loopback Host cannot arise legitimately: uvicorn is bound to
+    # 127.0.0.1 in __main__.py with no host option, so nothing on the network
+    # can reach this app in the first place.
+    if not _request_host_allowed(request):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
     if request.method == "POST":
-        # DNS-rebinding defense: the Host must be a loopback name, else an
-        # attacker-controlled Host would make the same-origin check below reflect
-        # the attacker's origin.
-        if (request.url.hostname or "").lower() not in _ALLOWED_HOSTS:
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
         origin = request.headers.get("origin")
         referer = request.headers.get("referer")
         if origin == "null":
@@ -467,6 +579,54 @@ async def same_origin_guard(request: Request, call_next):
     return await call_next(request)
 
 
+# Per-process, never persisted, regenerated every launch. The origin check
+# below stops a web page; it does nothing against a local non-browser process,
+# which can send any header it likes — and the ACP agent runs with
+# trust-all-tools, so that gap is arbitrary command execution.
+#
+# Residual risk, stated rather than implied: this token is delivered inside a
+# page served over unauthenticated HTTP, so any local process that can fetch
+# GET /acp can read it. That raises the bar from "connect blindly" to "scrape
+# one page first"; it is not a boundary. Closing it properly means
+# authenticating the page route too, which this prototype does not do.
+_ACP_TOKEN = secrets.token_urlsafe(32)
+
+
+def _acp_token_ok(supplied: str) -> bool:
+    """Constant-time token comparison that cannot fault on hostile input.
+
+    ``secrets.compare_digest`` raises ``TypeError`` for a ``str`` holding
+    non-ASCII, and query params arrive URL-decoded — so ``?t=%C3%A9`` would turn
+    a 403 on the authentication path into a 500 that any unauthenticated caller
+    can drive. Comparing UTF-8 bytes keeps the comparison constant-time and
+    fails closed for every wrong token instead.
+    """
+    return secrets.compare_digest(
+        supplied.encode("utf-8", "replace"), _ACP_TOKEN.encode("utf-8")
+    )
+
+
+def _ws_origin_ok(ws: WebSocket) -> bool:
+    """Mandatory first line of *every* WebSocket route in this module.
+
+    Middleware cannot do this: ``BaseHTTPMiddleware.__call__`` returns early on
+    ``scope["type"] != "http"``, so ``same_origin_guard`` above — including its
+    ``_ALLOWED_HOSTS`` DNS-rebinding defense — never sees an upgrade request.
+    A new ``@app.websocket`` route that omits this call ships unprotected.
+
+    Both halves are derived from ``ws.url``. Reading the expected origin from
+    ``ws.url.netloc`` but the allowlist from ``ws.url.hostname`` is safe;
+    mixing in the raw ``Host`` header is not, because Starlette's ``URL``
+    falls back to ``scope["server"]`` when ``Host`` fails its ``_HOST_RE``
+    (underscores, for one) — a rebound host would then satisfy the loopback
+    allowlist against 127.0.0.1 while matching its own attacker-chosen Origin.
+    """
+    if (ws.url.hostname or "").lower() not in _ALLOWED_HOSTS:
+        return False
+    expected = f"{'https' if ws.url.scheme == 'wss' else 'http'}://{ws.url.netloc}"
+    return ws.headers.get("origin", "") == expected
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     config = load_config()
@@ -482,6 +642,58 @@ async def index(request: Request):
         "provider_settings": config.provider_settings,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
     })
+
+
+@app.get("/acp", response_class=HTMLResponse)
+async def acp_page(request: Request, sid: str = ""):
+    """The ACP prototype page. ``sid`` names the session to re-subscribe to.
+
+    This page is the ACP token's only delivery vehicle, so it repeats the
+    ``_ALLOWED_HOSTS`` check that ``same_origin_guard`` now runs for every
+    method. The duplication is deliberate: the middleware was POST-only until
+    recently, and narrowing it again would silently make this route hand the
+    token to whatever Host a rebinding attack chooses. It calls the same
+    ``_request_host_allowed`` helper, so the rule has one home and the two
+    copies cannot drift into disagreeing about what a loopback Host is.
+    """
+    if not _request_host_allowed(request):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    return templates.TemplateResponse(request, "acp.html", {
+        "acp_token": _ACP_TOKEN,
+        "sid": sid,
+        # Non-empty when the guarded import above failed. The page renders the
+        # reason and does not open a socket, rather than retrying against a
+        # route that cannot answer.
+        "acp_error": _ACP_IMPORT_ERROR,
+    })
+
+
+@app.websocket("/ws/acp")
+async def ws_acp(ws: WebSocket) -> None:
+    """Transport for the ACP page. Token, then origin, then hand off.
+
+    Both checks run before ``accept()``. uvicorn converts a pre-accept close
+    into an HTTP 403 handshake rejection and discards the code, so 1008 is the
+    intent recorded here rather than what a client observes.
+
+    Past the handoff this route is an opaque router: ``acp`` owns the frames
+    and this function never inspects a ``type``, which is what lets later
+    phases add message types without touching ``web.py``.
+    """
+    if not _acp_token_ok(ws.query_params.get("t", "")):
+        await ws.close(code=1008)
+        return
+    if not _ws_origin_ok(ws):
+        await ws.close(code=1008)
+        return
+    if acp is None:
+        # The guarded import failed. Close after accept so the reason survives:
+        # a pre-accept close becomes a bare 403 handshake rejection.
+        await ws.accept()
+        await ws.close(code=1011, reason="ACP prototype unavailable")
+        return
+    await ws.accept()
+    await acp.serve_socket(ws)
 
 
 @app.post("/api/autostart")

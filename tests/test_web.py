@@ -1,5 +1,6 @@
 """Tests for web module."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,14 +14,20 @@ from power_atlas import launcher
 
 @pytest.fixture
 def client():
-    """TestClient with default Origin header for same-origin guard."""
-    c = TestClient(app)
+    """TestClient with default Origin header for same-origin guard.
+
+    The base URL is loopback because ``_ALLOWED_HOSTS`` only admits real
+    loopback names; TestClient's own default (``http://testserver``) is a
+    single-label host an attacker can win on the local network, so it must not
+    be allowlisted just to make this suite pass.
+    """
+    c = TestClient(app, base_url="http://127.0.0.1")
     # Patch the post method to add Origin by default
     _original_post = c.post
     def _post_with_origin(*args, **kwargs):
         headers = kwargs.get("headers", {})
         if "Origin" not in headers and "origin" not in headers:
-            headers["Origin"] = "http://testserver"
+            headers["Origin"] = "http://127.0.0.1"
             kwargs["headers"] = headers
         return _original_post(*args, **kwargs)
     c.post = _post_with_origin
@@ -149,7 +156,7 @@ def test_save_provider_settings(mock_load, mock_save, client):
         "default_args": "-a --verbose",
         "color": "",
         "enabled": True,
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     assert "saved" in resp.text.lower()
     saved = mock_save.call_args[0][0]
@@ -225,7 +232,7 @@ def test_pin_session(mock_sessions, mock_config, mock_save, client):
     mock_config.return_value = Config()
     mock_sessions.return_value = []
     resp = client.post("/api/pin-session", json={"session_id": "sess-1"},
-                       headers={"X-Workspace": "C:\\app", "Origin": "http://testserver"})
+                       headers={"X-Workspace": "C:\\app", "Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert "sess-1" in saved.pinned_sessions
@@ -239,7 +246,7 @@ def test_unpin_session(mock_sessions, mock_config, mock_save, client):
     mock_config.return_value = Config(pinned_sessions=["sess-1", "sess-2"])
     mock_sessions.return_value = []
     resp = client.post("/api/unpin-session", json={"session_id": "sess-1"},
-                       headers={"X-Workspace": "C:\\app", "Origin": "http://testserver"})
+                       headers={"X-Workspace": "C:\\app", "Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert "sess-1" not in saved.pinned_sessions
@@ -325,7 +332,7 @@ def test_pin_folder_simple(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config()
     resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"},
-                       headers={"Origin": "http://testserver"})
+                       headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
@@ -339,7 +346,7 @@ def test_pin_folder_no_duplicate(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config(pinned_folders=["C:\\projects\\myapp"])
     resp = client.post("/api/pin-folder", json={"folder": "C:\\projects\\myapp"},
-                       headers={"Origin": "http://testserver"})
+                       headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     mock_save.assert_not_called()
 
@@ -351,7 +358,7 @@ def test_unpin_folder_simple(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config(pinned_folders=["C:\\projects\\myapp", "C:\\other"])
     resp = client.post("/api/unpin-folder", json={"folder": "C:\\projects\\myapp"},
-                       headers={"Origin": "http://testserver"})
+                       headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
@@ -366,7 +373,7 @@ def test_unpin_folder_not_present(mock_load, mock_save, client):
     from power_atlas.config import Config
     mock_load.return_value = Config(pinned_folders=["C:\\other"])
     resp = client.post("/api/unpin-folder", json={"folder": "C:\\nonexistent"},
-                       headers={"Origin": "http://testserver"})
+                       headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     mock_save.assert_not_called()
 
@@ -433,7 +440,7 @@ class TestSaveSettingAllowlist:
         from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "__class__", "value": "evil"},
-                           headers={"Origin": "http://testserver"})
+                           headers={"Origin": "http://127.0.0.1"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["ok"] is False
@@ -447,7 +454,7 @@ class TestSaveSettingAllowlist:
         from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "terminal_command", "value": "wt.exe"},
-                           headers={"Origin": "http://testserver"})
+                           headers={"Origin": "http://127.0.0.1"})
         body = resp.json()
         assert body["ok"] is False
         assert "unknown" in body["error"].lower()
@@ -459,7 +466,7 @@ class TestSaveSettingAllowlist:
         from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "port", "value": "not_int"},
-                           headers={"Origin": "http://testserver"})
+                           headers={"Origin": "http://127.0.0.1"})
         body = resp.json()
         assert body["ok"] is False
         assert "type" in body["error"].lower()
@@ -471,7 +478,7 @@ class TestSaveSettingAllowlist:
         from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = client.post("/api/save-setting", json={"key": "peek_hotkey", "value": "ctrl+shift+x"},
-                           headers={"Origin": "http://testserver"})
+                           headers={"Origin": "http://127.0.0.1"})
         body = resp.json()
         assert body["ok"] is True
         mock_save.assert_called_once()
@@ -483,7 +490,7 @@ def test_save_setting_port_valid(mock_load, mock_save, client):
     """Valid port value is accepted and saved."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": 8080}, headers={"Origin": "http://testserver"})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 8080}, headers={"Origin": "http://127.0.0.1"})
     assert resp.json()["ok"] is True
     saved = mock_save.call_args[0][0]
     assert saved.port == 8080
@@ -494,7 +501,7 @@ def test_save_setting_port_bool_rejected(mock_load, client):
     """Boolean value for port is rejected."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": True}, headers={"Origin": "http://testserver"})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": True}, headers={"Origin": "http://127.0.0.1"})
     assert resp.json()["ok"] is False
 
 
@@ -503,7 +510,7 @@ def test_save_setting_port_out_of_range(mock_load, client):
     """Out-of-range port is rejected."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": 99999}, headers={"Origin": "http://testserver"})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 99999}, headers={"Origin": "http://127.0.0.1"})
     assert resp.json()["ok"] is False
 
 
@@ -513,7 +520,7 @@ def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
     """Port 0 (random mode) is accepted."""
     from power_atlas.config import Config
     mock_load.return_value = Config()
-    resp = client.post("/api/save-setting", json={"key": "port", "value": 0}, headers={"Origin": "http://testserver"})
+    resp = client.post("/api/save-setting", json={"key": "port", "value": 0}, headers={"Origin": "http://127.0.0.1"})
     assert resp.json()["ok"] is True
 
 
@@ -1157,7 +1164,7 @@ def test_api_settings_autostart_exception_returns_false(mock_load, mock_autostar
 @pytest.fixture
 def raw_client():
     """TestClient WITHOUT default Origin header, for testing the guard itself."""
-    return TestClient(app)
+    return TestClient(app, base_url="http://127.0.0.1")
 
 
 class TestSameOriginGuard:
@@ -1192,7 +1199,7 @@ class TestSameOriginGuard:
         from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
-                               headers={"Origin": "http://testserver"})
+                               headers={"Origin": "http://127.0.0.1"})
         assert resp.status_code == 200
 
     @patch("power_atlas.web.save_config")
@@ -1202,7 +1209,7 @@ class TestSameOriginGuard:
         from power_atlas.config import Config
         mock_load.return_value = Config()
         resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
-                               headers={"Referer": "http://testserver/some/page"})
+                               headers={"Referer": "http://127.0.0.1/some/page"})
         assert resp.status_code == 200
 
     def test_guard_applies_to_multiple_endpoints(self, raw_client):
@@ -1222,6 +1229,378 @@ class TestSameOriginGuard:
             resp = raw_client.post(endpoint, json={},
                                    headers={"Origin": "null"})
             assert resp.status_code == 403, f"{endpoint} should reject Origin: null"
+
+
+class TestHostAllowlistCoversGetRequests:
+    """The Host allowlist used to live inside the guard's ``method == "POST"``
+    branch, so no GET route was ever Host-checked. A rebound page is same-origin
+    with what it fetches, so it could read workspace paths, session titles and
+    settings straight out of the response bodies."""
+
+    @pytest.mark.parametrize("host", ["evil.com", "testserver"])
+    @pytest.mark.parametrize("path", [
+        "/", "/partials/workspaces", "/api/settings", "/search?q=a",
+        "/api/tags", "/partials/all-sessions",
+    ])
+    def test_get_rejected_for_non_loopback_host(self, raw_client, path, host):
+        resp = raw_client.get(path, headers={"Host": host})
+        assert resp.status_code == 403, f"GET {path} should reject Host: {host}"
+        assert resp.json() == {"error": "Forbidden"}
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.1:4915", "localhost", "[::1]:4915"])
+    @patch("power_atlas.web.autostart.is_enabled")
+    @patch("power_atlas.web.load_config")
+    def test_api_settings_served_on_loopback(self, mock_load, mock_autostart, raw_client, host):
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        mock_autostart.return_value = False
+        resp = raw_client.get("/api/settings", headers={"Host": host})
+        assert resp.status_code == 200, f"GET /api/settings should accept Host: {host}"
+
+    @patch("power_atlas.web.load_config")
+    @patch("power_atlas.web.data.available_providers")
+    @patch("power_atlas.web.data.discover_workspaces_with_counts")
+    def test_partials_workspaces_served_on_loopback(self, mock_discover, mock_providers,
+                                                    mock_config, raw_client):
+        from power_atlas.config import Config
+        mock_config.return_value = Config()
+        mock_discover.return_value = []
+        mock_providers.return_value = []
+        resp = raw_client.get("/partials/workspaces", headers={"Host": "localhost"})
+        assert resp.status_code == 200
+
+
+# --- ACP surface: DNS-rebinding and token-check regressions ---
+
+from starlette.websockets import WebSocketDisconnect
+from power_atlas.web import (
+    _ACP_TOKEN, _acp_token_ok, _host_allowed, _ws_origin_ok)
+
+
+class TestSingleLabelHostRejected:
+    """``testserver`` was allowlisted so this suite would pass, which made every
+    guarded route reachable from a rebound single-label host."""
+
+    def test_post_rejected_for_single_label_host(self, raw_client):
+        resp = raw_client.post("/api/save-setting", json={"key": "port", "value": 8080},
+                               headers={"Host": "testserver", "Origin": "http://testserver"})
+        assert resp.status_code == 403
+
+    def test_acp_page_rejected_for_non_loopback_host(self, raw_client):
+        """End-to-end: no rebound Host reaches the token, whichever check stops
+        it. Which one actually did is a question this cannot answer, because the
+        middleware runs first — see ``TestAcpInlineHostCheck`` for the route's
+        own check, tested with the middleware out of the way."""
+        for host in ("testserver", "evil.com"):
+            resp = raw_client.get("/acp", headers={"Host": host})
+            assert resp.status_code == 403, f"GET /acp should reject Host: {host}"
+            assert _ACP_TOKEN not in resp.text
+
+    def test_acp_page_served_on_loopback(self, raw_client):
+        resp = raw_client.get("/acp")
+        assert resp.status_code == 200
+        assert _ACP_TOKEN in resp.text
+
+
+# --- Host header: parsed here, never taken from starlette's URL ---
+
+from fastapi.middleware.asyncexitstack import AsyncExitStackMiddleware
+
+# ``app`` minus every middleware except the one FastAPI's own route handler
+# asserts on. Routing and the endpoint run; ``same_origin_guard`` does not, so a
+# route's own checks can be tested without the middleware answering ahead of
+# them. Wrapping the router rather than reaching into the built stack keeps this
+# to one documented FastAPI class, which fails loudly if it ever moves.
+_ROUTER_ONLY = AsyncExitStackMiddleware(app.router)
+
+
+def _raw_asgi(asgi_app, path: str, raw_headers: list[tuple[bytes, bytes]],
+              method: str = "GET") -> tuple[int, bytes]:
+    """Call an ASGI app with exactly the headers given, byte for byte.
+
+    Both HTTP clients within reach synthesise ``Host`` from the URL they are
+    handed and will not send a request without one, so "no Host at all" and
+    "two Host headers" are unreachable through them — yet an HTTP/1.0 client
+    produces the first by accident and a raw socket sends either without
+    complaint. This builds the scope uvicorn would build instead.
+
+    ``asgi_app`` selects the entry point: ``app`` runs ``same_origin_guard``,
+    ``_ROUTER_ONLY`` skips it and reaches a route's own checks, which is
+    the only way to tell the two apart.
+    """
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 54321),
+        "server": ("127.0.0.1", 4915),
+        "app": app,
+        "state": {},
+    }
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(asgi_app(scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent
+                    if m["type"] == "http.response.body")
+    return status, body
+
+
+# Every one of these must be refused. The trailing note on each names the way
+# `request.url.hostname` — the value both Host checks used to read — mishandled
+# it. Starlette discards a Host that fails its `_HOST_RE` and rebuilds the URL
+# from `scope["server"]`, so a rejected Host read back as plain loopback.
+_HOSTILE_HOSTS = [
+    "evil.com",                  # ordinary rebinding target
+    "a_b.evil.com",              # underscore is absent from `_HOST_RE`, so this
+    "evil_1.attacker.com",       # read back as 127.0.0.1 and was served
+    "[evil",                     # unmatched bracket: `urlsplit` raised
+    "[::1",                      # ValueError, i.e. an unauthenticated 500
+    "[::1]extra",                # bytes trailing the closing bracket
+    "[]",                        # bracketed empty name
+    "evil.com@127.0.0.1:4915",   # userinfo: `urlsplit` keeps the last "@" part
+    "evil.com@localhost",
+    "127.0.0.1:4915.evil.com",   # a hostname smuggled in as the port
+    "127.0.0.1:",                # empty port
+    "127.0.0.1:1:2",             # two ports
+    "::1",                       # bare IPv6, which HTTP requires bracketed
+    "localhost.evil.com",        # allowlisted name as a label of another domain
+    "testserver",                # single-label name, winnable over LLMNR/mDNS
+]
+
+# One route per kind of thing a rebound page could take: the dashboard (which
+# embeds `custom_launchers`, whose `env` holds cleartext credentials), the ACP
+# token's delivery page, a JSON API, and the static mount — the last because
+# `StaticFiles` sits behind the same middleware and was answering 500.
+_GUARDED_PATHS = ["/", "/acp", "/api/settings", "/static/style.css"]
+
+
+class TestHostHeaderIsParsedNotTrusted:
+    @pytest.mark.parametrize("host", _HOSTILE_HOSTS)
+    @pytest.mark.parametrize("path", _GUARDED_PATHS)
+    def test_hostile_host_is_forbidden(self, path, host):
+        status, body = _raw_asgi(app, path, [(b"host", host.encode())])
+        assert status == 403, f"GET {path} with Host: {host} answered {status}"
+        assert b"Forbidden" in body
+        assert _ACP_TOKEN.encode() not in body
+
+    @pytest.mark.parametrize("path", _GUARDED_PATHS)
+    def test_absent_host_is_forbidden(self, path):
+        """A Host-less request used to read as loopback: with no Host header at
+        all, starlette's fallback to ``scope["server"]`` is the *only* thing
+        left, so ``url.hostname`` was 127.0.0.1 by construction."""
+        status, body = _raw_asgi(app, path, [])
+        assert status == 403, f"GET {path} without a Host answered {status}"
+        assert _ACP_TOKEN.encode() not in body
+
+    @pytest.mark.parametrize("order", [
+        [b"127.0.0.1", b"evil.com"],
+        [b"evil.com", b"127.0.0.1"],
+    ])
+    def test_duplicate_host_is_forbidden(self, order):
+        """Two Host headers is a smuggling shape, never a browser: which one is
+        authoritative differs between hops, so neither is trusted."""
+        status, _ = _raw_asgi(app, "/", [(b"host", h) for h in order])
+        assert status == 403
+
+    @pytest.mark.parametrize("host", [
+        "127.0.0.1", "127.0.0.1:4915", "127.0.0.1:8080",
+        "localhost", "localhost:8080", "LOCALHOST", "LocalHost:8080",
+        "[::1]", "[::1]:4915",
+    ])
+    def test_loopback_forms_accepted(self, host):
+        status, _ = _raw_asgi(app, "/api/last-refresh", [(b"host", host.encode())])
+        assert status == 200, f"Host: {host} is loopback and must be served"
+
+    @pytest.mark.parametrize("raw", _HOSTILE_HOSTS + [
+        None, "", "   ", "[", "]", ":", "@", "]:80", "\x00", "\U0001f600",
+        "127.0.0.1:٤٩١٥",  # non-ASCII digits: `str.isdigit()` calls these a port
+    ])
+    def test_unparseable_host_is_rejected_never_raised(self, raw):
+        assert _host_allowed(raw) is False
+
+
+class TestAcpInlineHostCheck:
+    """``GET /acp`` repeats the Host check the middleware already runs, because
+    it is the ACP token's only delivery vehicle and a narrowing of the
+    middleware must not silently un-protect it.
+
+    Every other test of that route goes through the middleware, which answers
+    first — so deleting the inline check left the whole suite green. These probe
+    ``_ROUTER_ONLY``: routing and the endpoint run, ``same_origin_guard`` does
+    not, and the inline check is the only thing that can produce a 403.
+    """
+
+    def test_router_alone_serves_acp_on_loopback(self):
+        """Anchors the three below: without this, a 403 from the router could
+        just as well mean the route never ran."""
+        status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [(b"host", b"127.0.0.1:4915")])
+        assert status == 200
+        assert _ACP_TOKEN.encode() in body
+
+    @pytest.mark.parametrize("host", [
+        "evil.com", "a_b.evil.com", "[::1", "evil.com@127.0.0.1", "testserver",
+    ])
+    def test_inline_check_refuses_without_the_middleware(self, host):
+        status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [(b"host", host.encode())])
+        assert status == 403, f"/acp served Host: {host} with no middleware above it"
+        assert _ACP_TOKEN.encode() not in body
+
+    def test_inline_check_refuses_absent_host(self):
+        status, body = _raw_asgi(_ROUTER_ONLY, "/acp", [])
+        assert status == 403
+        assert _ACP_TOKEN.encode() not in body
+
+
+class TestWsOriginUnaffectedByTheHostFallback:
+    """``_ws_origin_ok`` deliberately keeps reading ``ws.url`` and is *not*
+    switched to ``_host_allowed``.
+
+    Middleware never sees an upgrade request, so this is the WebSocket's whole
+    defense — but it is already safe under the same fallback, because both
+    halves come from ``ws.url``. When Starlette discards an unparseable Host the
+    netloc collapses to loopback along with the hostname, so the expected origin
+    stops matching the attacker's ``Origin`` in the same step. Reading the raw
+    Host for the allowlist while leaving the expected origin on ``ws.url`` is
+    what would break it: the two would then disagree, and a rebound host would
+    satisfy a loopback allowlist while matching its own origin.
+    """
+
+    @staticmethod
+    def _ws(host: str | None, origin: str):
+        from starlette.websockets import WebSocket
+        headers = [(b"origin", origin.encode())]
+        if host is not None:
+            headers.insert(0, (b"host", host.encode()))
+        return WebSocket({
+            "type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws",
+            "path": "/ws/acp", "raw_path": b"/ws/acp", "query_string": b"",
+            "root_path": "", "headers": headers,
+            "client": ("127.0.0.1", 54321), "server": ("127.0.0.1", 4915),
+        }, receive=None, send=None)
+
+    @pytest.mark.parametrize("host", ["a_b.evil.com", "evil_1.attacker.com"])
+    def test_underscore_host_still_fails_its_own_origin(self, host):
+        """The exact bypass shape: Host that Starlette discards, Origin that
+        matches it. The discarded Host takes the netloc with it."""
+        assert _ws_origin_ok(self._ws(host, f"http://{host}")) is False
+
+    def test_loopback_host_with_attacker_origin_rejected(self):
+        assert _ws_origin_ok(self._ws("127.0.0.1:4915", "http://evil.com")) is False
+
+    def test_loopback_host_with_matching_origin_accepted(self):
+        """Positive control: the rejections above are not a broken helper."""
+        assert _ws_origin_ok(self._ws("127.0.0.1:4915", "http://127.0.0.1:4915")) is True
+
+    def test_absent_and_malformed_host_do_not_raise(self):
+        """Whatever the verdict, an unparseable Host must not become a traceback
+        on the handshake path."""
+        assert _ws_origin_ok(self._ws(None, "http://evil.com")) is False
+        assert _ws_origin_ok(self._ws("[::1", "http://evil.com")) is False
+
+
+class _FakeWs:
+    """A socket whose only behaviour is to fail the way the writer must survive."""
+
+    def __init__(self, failure: BaseException) -> None:
+        self._failure = failure
+        self.closed: list[tuple[int, str]] = []
+
+    async def send_text(self, text: str) -> None:
+        raise self._failure
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed.append((code, reason))
+
+
+class TestAcpWriterTeardown:
+    """Every writer exit must leave the socket closed, not merely deregistered.
+
+    The routine-disconnect arm caught ``RuntimeError`` and retired with an empty
+    reason, which skipped the close — leaving a socket the server still held
+    open with no writer behind it, silently swallowing every frame queued at it.
+    That is precisely the zombie ``_retire`` was added to remove, surviving in
+    the one arm that reaches it most often.
+    """
+
+    @pytest.mark.parametrize("failure, expected_code", [
+        # Routine: the peer went away mid-send. Closes with "going away".
+        (RuntimeError('Cannot call "send" once a close message has been sent.'), 1001),
+        (ConnectionResetError(), 1001),
+        # Unexpected: a bug in a frame we built. Closes with 1011.
+        (ValueError("unserialisable frame"), 1011),
+    ])
+    def test_writer_exit_closes_and_deregisters(self, failure, expected_code):
+        from power_atlas import acp as acp_mod
+
+        async def run():
+            ws = _FakeWs(failure)
+            conn = acp_mod._Connection(ws)
+            acp_mod._registry.connections.add(conn)
+            try:
+                conn.send({"type": "meta", "payload": {}})
+                await conn._write_loop()
+            finally:
+                acp_mod._registry.connections.discard(conn)
+            return ws, conn
+
+        ws, conn = asyncio.run(run())
+        assert ws.closed, "the writer exited leaving the socket open"
+        assert ws.closed[0][0] == expected_code
+        assert conn not in acp_mod._registry.connections
+
+    def test_close_failure_does_not_escape_the_writer(self):
+        """A peer that is genuinely gone makes ``close()`` raise too. The writer
+        is a bare task: an exception here would surface only as a stray
+        "Task exception was never retrieved"."""
+        from power_atlas import acp as acp_mod
+
+        class _DeadWs(_FakeWs):
+            async def close(self, code: int = 1000, reason: str = "") -> None:
+                raise RuntimeError("socket already closed")
+
+        async def run():
+            conn = acp_mod._Connection(_DeadWs(ConnectionResetError()))
+            acp_mod._registry.connections.add(conn)
+            try:
+                conn.send({"type": "meta", "payload": {}})
+                await conn._write_loop()
+            finally:
+                acp_mod._registry.connections.discard(conn)
+
+        asyncio.run(run())
+
+
+class TestAcpTokenCheck:
+    @pytest.mark.parametrize("supplied", [
+        "", "é", "é" * 60, "�", "A" * 4000, "not-the-token",
+    ])
+    def test_wrong_token_rejected_without_raising(self, supplied):
+        assert _acp_token_ok(supplied) is False
+
+    def test_correct_token_accepted(self):
+        assert _acp_token_ok(_ACP_TOKEN) is True
+
+    def test_non_ascii_token_closes_socket(self, raw_client):
+        """``?t=%C3%A9`` URL-decodes to a non-ASCII str, which ``compare_digest``
+        used to reject with TypeError — an unauthenticated 500 on the auth path."""
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with raw_client.websocket_connect("/ws/acp?t=%C3%A9"):
+                pass
+        assert exc.value.code == 1008
 
 
 # --- Phase 3 (Launch Profiles): Profile endpoint tests ---
@@ -1508,7 +1887,7 @@ def test_save_provider_settings_with_default_directory(mock_load, mock_save, cli
         "color": "#ff0000",
         "enabled": True,
         "default_directory": "/home/user/work",
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     assert "saved" in resp.text.lower()
     saved = mock_save.call_args[0][0]
@@ -1572,7 +1951,7 @@ def test_save_setting_default_directory(mock_load, mock_save, client):
     resp = client.post("/api/save-setting", json={
         "key": "default_directory",
         "value": "/new/default/path",
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
@@ -1589,7 +1968,7 @@ def test_save_setting_default_directory_too_long(mock_load, mock_save, client):
     resp = client.post("/api/save-setting", json={
         "key": "default_directory",
         "value": "x" * 513,
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is False
@@ -1605,7 +1984,7 @@ def test_save_setting_default_directory_control_chars(mock_load, mock_save, clie
     resp = client.post("/api/save-setting", json={
         "key": "default_directory",
         "value": "/path/\x01bad",
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is False
@@ -1624,7 +2003,7 @@ def test_save_provider_directory_too_long(mock_load, mock_save, client):
         "color": "",
         "enabled": True,
         "default_directory": "x" * 513,
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     assert "too long" in resp.text.lower()
     mock_save.assert_not_called()
@@ -1642,7 +2021,7 @@ def test_save_provider_directory_control_chars(mock_load, mock_save, client):
         "color": "",
         "enabled": True,
         "default_directory": "/path/\x01bad",
-    }, headers={"Origin": "http://testserver"})
+    }, headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     assert "control characters" in resp.text.lower()
     mock_save.assert_not_called()
@@ -4025,7 +4404,7 @@ class TestApiSessionStatus:
         """Empty cwds list returns empty response immediately."""
         resp = client.post(
             "/api/session-status", json={"cwds": []},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4044,7 +4423,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={"cwds": ["C:\\projects\\myapp", "C:\\other"]},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4087,7 +4466,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={"cwds": [cwd]},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4121,7 +4500,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={"cwds": [cwd]},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4154,7 +4533,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={"cwds": [active_cwd, inactive_cwd]},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4191,7 +4570,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={"cwds": [cwd]},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4240,7 +4619,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={"cwds": [cwd]},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()
@@ -4265,7 +4644,7 @@ class TestApiSessionStatus:
 
         def poll(payload):
             resp = client.post("/api/session-status", json=payload,
-                               headers={"Origin": "http://testserver"})
+                               headers={"Origin": "http://127.0.0.1"})
             assert resp.status_code == 200
             return resp.json()["workspaces"][cwd]
 
@@ -4291,7 +4670,7 @@ class TestApiSessionStatus:
         mock_sessions.return_value = []
 
         resp = client.post("/api/session-status", json={"cwds": cwds},
-                           headers={"Origin": "http://testserver"})
+                           headers={"Origin": "http://127.0.0.1"})
         assert resp.status_code == 200
         body = resp.json()
         assert body["active_cwds"] == cwds
@@ -4318,7 +4697,7 @@ class TestApiSessionStatus:
         for bogus in ([], {}, ["kiro-cli"], {"name": "kiro-cli"}, 7, True, None):
             resp = client.post("/api/session-status",
                                json={"cwds": [cwd], "provider": bogus},
-                               headers={"Origin": "http://testserver"})
+                               headers={"Origin": "http://127.0.0.1"})
             assert resp.status_code == 200, bogus
             assert resp.json()["workspaces"][cwd] == "working", bogus
 
@@ -4327,7 +4706,7 @@ class TestApiSessionStatus:
         resp = client.post(
             "/api/session-status",
             json={},
-            headers={"Origin": "http://testserver"},
+            headers={"Origin": "http://127.0.0.1"},
         )
         assert resp.status_code == 200
         body = resp.json()

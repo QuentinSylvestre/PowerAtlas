@@ -430,3 +430,24 @@ script { display: none; }
 .ws-tags-info { font-size: 11px; color: var(--text-muted); padding: 4px 0 6px; line-height: 1.5; }
 .ws-info-line { display: block; }
 
+/* ACP prototype page (/acp) */
+.acp-back { color: var(--text-muted); text-decoration: none; font-size: 13px; padding: 0 4px 0 16px; }
+.acp-back:hover { color: var(--accent); }
+.acp-title { font-size: 13px; font-weight: 600; letter-spacing: -0.2px; }
+.acp-status { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
+.acp-status[data-state="open"] { border-color: var(--success); color: var(--success); }
+.acp-status[data-state="closed"] { border-color: #f87171; color: #f87171; }
+.acp-page { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+.acp-toolbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.acp-btn { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 12px; padding: 6px 12px; cursor: pointer; transition: all 0.15s; }
+.acp-btn:hover { border-color: var(--accent); color: var(--accent); }
+.acp-sid { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+.acp-log { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 10px 12px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.7; }
+.acp-log-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
+.acp-log-time { color: var(--text-dim); flex-shrink: 0; }
+.acp-log-body { flex: 1; }
+.acp-log-info .acp-log-body { color: var(--text-muted); }
+.acp-log-out .acp-log-body { color: var(--accent); }
+.acp-log-in .acp-log-body { color: var(--text); }
+.acp-log-error .acp-log-body { color: #f87171; }
+

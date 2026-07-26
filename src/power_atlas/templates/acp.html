@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="topbar">
+  <a class="acp-back" href="/">&#8592; PowerAtlas</a>
+  <span class="acp-title">ACP prototype</span>
+  <div class="topbar-spacer"></div>
+  <div class="topbar-cluster">
+    <span class="acp-status" id="acpStatus" data-state="connecting">connecting…</span>
+  </div>
+</div>
+
+<div class="acp-page">
+  <div class="acp-toolbar">
+    <button class="acp-btn" id="acpNew" type="button">New session</button>
+    <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
+    <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
+    <span class="acp-sid" id="acpSid"></span>
+  </div>
+  <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
+</div>
+
+<script>
+// Nothing on this page is written through innerHTML: every node below is built
+// with createElement + textContent. Agent output is attacker-influenced (repo
+// files, fetched pages, commit messages) and the agent runs trust-all-tools,
+// so an injected script here could drive /ws/acp itself and pass the origin
+// check by genuinely being same-origin. Phase 3a carries no agent text yet;
+// the rule is established now so later phases inherit it rather than retrofit
+// it. index.html's _escHtml is the alternative where markup is unavoidable —
+// but note it escapes & < > and *not* ", so it is safe for text nodes only.
+//
+// This page also uses plain listeners rather than hx-* attributes, so it never
+// needs htmx.process(). Add that call if any hx-* markup ever appears here:
+// static/htmx.min.js binds handlers at DOMContentLoaded and nowhere else.
+(function () {
+  var ACP_TOKEN = {{ acp_token | tojson }};
+  var ACP_SID = {{ sid | tojson }};
+  // Non-empty when web.py's guarded import of acp.py failed. The whole point of
+  // guarding that import is that the rest of the dashboard keeps working, which
+  // only pays off if this page says why it is dead instead of looking merely
+  // disconnected.
+  var ACP_ERROR = {{ acp_error | tojson }};
+
+  var statusEl = document.getElementById('acpStatus');
+  var logEl = document.getElementById('acpLog');
+  var sidEl = document.getElementById('acpSid');
+  var newBtn = document.getElementById('acpNew');
+  var reconnectBtn = document.getElementById('acpReconnect');
+  var reloadBtn = document.getElementById('acpReload');
+  var ws = null;
+  // Whether the most recent attempt ever reached onopen. A close without one
+  // means the handshake was rejected, which is a different failure from a
+  // socket that lived and then dropped, and needs a different recovery.
+  var opened = false;
+
+  if (ACP_SID) sidEl.textContent = 'session ' + ACP_SID;
+
+  function setState(state, text) {
+    statusEl.dataset.state = state;
+    statusEl.textContent = text;
+  }
+
+  function logLine(kind, text) {
+    var row = document.createElement('div');
+    row.className = 'acp-log-line acp-log-' + kind;
+    var when = document.createElement('span');
+    when.className = 'acp-log-time';
+    when.textContent = new Date().toLocaleTimeString();
+    var body = document.createElement('span');
+    body.className = 'acp-log-body';
+    body.textContent = text;
+    row.appendChild(when);
+    row.appendChild(body);
+    logEl.appendChild(row);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function wsUrl() {
+    // Derived from location.host, never a hardcoded port: config.py defaults
+    // `port` to 0 (OS-assigned), so any literal here would be wrong on most
+    // launches while looking right on the machine it was written on.
+    var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return scheme + '//' + location.host + '/ws/acp?t=' + encodeURIComponent(ACP_TOKEN);
+  }
+
+  function send(type, payload, sessionId) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      logLine('error', 'not connected — nothing sent');
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: type,
+      sessionId: sessionId || null,
+      payload: payload || {}
+    }));
+    logLine('out', '→ ' + type);
+  }
+
+  function handle(frame) {
+    var type = frame && frame.type;
+    var payload = (frame && frame.payload) || {};
+    if (type === 'meta' && payload.connected) {
+      setState('open', 'connected');
+      logLine('info', '← meta: server ack (max frame ' + payload.maxMessageBytes +
+                      ' bytes, max sockets ' + payload.maxConnections + ')');
+      return;
+    }
+    if (type === 'error') {
+      logLine('error', '← error [' + payload.code + '] ' + payload.message);
+      return;
+    }
+    logLine('in', '← ' + type + ' ' + JSON.stringify(payload));
+  }
+
+  function reportStaleToken() {
+    // The server answered an ordinary GET but refused the socket. The /acp
+    // token is regenerated on every launch and baked into the page at render
+    // time, so the one this tab holds belongs to a process that has exited.
+    // Reconnect would replay that dead token forever; only a reload can pick up
+    // the live one, and it keeps ?sid= so the session is re-subscribed rather
+    // than abandoned. Rotation is a security property and stays — the page
+    // recovers from it instead of the server weakening it.
+    setState('closed', 'stale token');
+    logLine('error', 'handshake rejected while the server is up: this tab was served ' +
+                     'by an earlier PowerAtlas process, and the /acp token is ' +
+                     'regenerated every launch. Reload to pick up the current one.');
+    reconnectBtn.hidden = true;
+    reloadBtn.hidden = false;
+  }
+
+  function diagnoseRejectedHandshake() {
+    // No onopen, so the handshake itself was refused. web.py closes before
+    // accept(), which uvicorn turns into an HTTP 403 with the code discarded,
+    // and the browser reports that as 1006 with an empty reason — byte for byte
+    // what it reports when there is no server at all. The page cannot tell those
+    // apart from the close event, so ask the server directly: if a plain GET of
+    // this same page succeeds, the server is up and it is the token that is
+    // stale.
+    setState('closed', 'handshake rejected');
+    reconnectBtn.hidden = true;
+    fetch(location.pathname + location.search, {
+      cache: 'no-store',
+      credentials: 'same-origin'
+    }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      reportStaleToken();
+    }).catch(function () {
+      setState('closed', 'server unreachable');
+      logLine('info', 'the server is not answering — it may still be starting. ' +
+                      'Reconnect once it is back up.');
+      reconnectBtn.hidden = false;
+    });
+  }
+
+  function connect() {
+    setState('connecting', 'connecting…');
+    reconnectBtn.hidden = true;
+    reloadBtn.hidden = true;
+    opened = false;
+    ws = new WebSocket(wsUrl());
+    ws.onopen = function () {
+      opened = true;
+      setState('open', 'connected');
+      logLine('info', 'socket open to ' + location.host);
+      if (ACP_SID) send('subscribe', {}, ACP_SID);
+    };
+    ws.onmessage = function (ev) {
+      var frame;
+      try {
+        frame = JSON.parse(ev.data);
+      } catch (e) {
+        logLine('error', '← unparseable frame');
+        return;
+      }
+      handle(frame);
+    };
+    ws.onclose = function (ev) {
+      setState('closed', 'disconnected (' + ev.code + ')');
+      logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
+      if (opened) {
+        reconnectBtn.hidden = false;
+      } else {
+        diagnoseRejectedHandshake();
+      }
+    };
+    ws.onerror = function () {
+      logLine('error', 'socket error — the handshake may have been rejected');
+    };
+  }
+
+  newBtn.addEventListener('click', function () { send('new', {}, null); });
+  reconnectBtn.addEventListener('click', connect);
+  reloadBtn.addEventListener('click', function () { location.reload(); });
+
+  if (ACP_ERROR) {
+    setState('closed', 'unavailable');
+    logLine('error', 'the server could not import its ACP module: ' + ACP_ERROR);
+    logLine('info', 'only this page is affected — the rest of PowerAtlas is running ' +
+                    'normally. Fix the import and restart the server.');
+    newBtn.disabled = true;
+  } else {
+    connect();
+  }
+})();
+</script>
+{% endblock %}
