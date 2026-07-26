@@ -1599,9 +1599,33 @@ Two personas in parallel, fresh context each, both read-only and forbidden from 
 | 7 | Medium | Subscribe carried no turn state; the page inferred it from a marker the ring buffer is designed to evict, while `inflight` sat in scope unused | Fixed — `turnActive` on the `session` frame; `setTurn` suppressed during replay, without which the server-side half was dead code |
 | 8 | Low | The no-`await` invariant in `_handle_subscribe` held, but nothing enforced it | Fixed — `inspect`-based guard on `_handle_subscribe` and `_dispatch` |
 | 9 | Low | No server-side trace for any prompt or subscribe refusal, including `not_subscribed` — the symptom of finding 1 | Fixed — all five refusals, both subscribe outcomes, and turn start/end now log |
-| 10 | Low | `subscribe` is unthrottled and re-serializes the whole replay per call | Orchestrator: proposed-accept — pending user decision |
-| 11 | Low | No Content-Security-Policy on `/acp`; the no-`innerHTML` rule is the sole XSS control, now that agent-authored commands render | Pending user decision — out of Phase 4's file scope (`base.html` / `web.py`) |
-| 12 | Low | `json.dumps` defaults to `ensure_ascii=True`, so non-ASCII still expands ~3x on the wire | Pending user decision — the fix agent declined it deliberately: `ensure_ascii=False` closes it but moves a lone-surrogate encode failure into the writer, where the catch-all would retire a healthy socket |
+| 10 | Low | `subscribe` is unthrottled and re-serializes the whole replay per call | User: accepted — fix now; per-socket 1 s floor on replay, typed `subscribe_throttled` refusal (`4549701`) |
+| 11 | Low | No Content-Security-Policy on `/acp`; the no-`innerHTML` rule is the sole XSS control, now that agent-authored commands render | User: accepted — fix now; per-response nonce policy scoped to `/acp` (`4549701`) |
+| 12 | Low | `json.dumps` defaults to `ensure_ascii=True`, so non-ASCII still expands ~3x on the wire | User: accepted — fix now; `ensure_ascii=False` with a per-frame ASCII fallback, so a lone surrogate cannot retire the socket (`4549701`) |
+
+**Fix round 2 (`4549701`, scope exception to `web.py` / `base.html`).** The CSP is nonce-based
+because the alternatives are worse than nothing here: `script-src 'self'` breaks `acp.html`'s own
+inline script outright, and `'unsafe-inline'` permits both injected `<script>` and `<img onerror=…>`
+— the exact vector it would exist to stop. `connect-src` names `ws://`/`wss://` explicitly rather
+than trusting `'self'` to cover a WebSocket upgrade, since a policy that forbids `/ws/acp` breaks the
+whole feature while passing every server-side test. Verified independently of the implementer: the
+header nonce matches both script tags, no script tag lacks one, the nonce is fresh per response, and
+`/` carries neither header nor nonce attribute. Confirmed adversarially in a real browser on the
+global interpreter — an injected inline script, a wrong-nonce script, and an `<img onerror>` handler
+all blocked, with the page itself raising no violation.
+
+The `ensure_ascii` guard exists because `json.loads` accepts a `\udXXX` escape from the agent and
+returns a lone surrogate that UTF-8 cannot encode; without the fallback the exception would surface
+inside `ws.send_text`, where `_write_loop`'s catch-all retires an otherwise healthy socket. Note the
+budget accounting was already counting UTF-8 bytes, so while the wire was escaped the queue and
+history buffer were bounding roughly a third of the memory they were sizing.
+
+The throttle is per socket, which closes the real amplification — many `subscribe` frames on one
+socket — rather than the reconnect loop the finding described: `connect()` builds a fresh socket each
+time, so a reconnect loop sends one `subscribe` per socket and is already bounded by
+`MAX_CONNECTIONS`.
+
+Suite after fix round 2: **842 passed, 1 skipped.** 11 mutations run, 11 caught.
 
 **What the reviewers verified rather than assumed.** Both confirmed the no-`innerHTML` discipline
 across the *whole* client path — `insertAdjacentHTML`, `outerHTML`, `document.write`, `eval`,
