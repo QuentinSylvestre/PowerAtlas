@@ -889,11 +889,43 @@ start-time skew window (`presence.py:450-476`), so it can report not-live for a 
 still refuse.
 
 **Exit criteria**:
-- [ ] A session created in Phase 4, then closed, reopens with its history rendered
-- [ ] A session created in a **terminal** (`kiro-cli chat`), then exited, reopens with its history
-- [ ] Attempting to open a session currently live in a terminal shows a clear "in use by PID n"
+- [x] A session created in Phase 4, then closed, reopens with its history rendered
+- [x] A session created in a **terminal** (`kiro-cli chat`), then exited, reopens with its history
+- [x] Attempting to open a session currently live in a terminal shows a clear "in use by PID n"
       message within ~1 s, and does not hang or retry
-- [ ] The dashboard action opens `/acp` for the correct session and does not disturb multi-select
+- [x] The dashboard action opens `/acp` for the correct session and does not disturb multi-select
+
+#### Implementation (2026-07-26, code: 516ba6f, fixes: df1bfef)
+
+`session/load` opens sessions this process never created. `_handle_load` is a separate async path
+from `_handle_subscribe` precisely because that function may not `await` — its freedom from
+suspension is what stops an event being delivered live and in replay both.
+
+The ordering is the load-bearing part and it is counter-intuitive: the agent replays the whole
+conversation as `session/update` notifications **while the `session/load` request is still
+outstanding**, and `record` drops any frame whose session has no buffer. So the session and its
+history must be registered *before* the round-trip. That early registration is also what opened the
+phase's one High finding — for the duration of the load, `_handle_subscribe` saw a live session and
+would attach anyone. Closed by `_Registry.loading`: while the key exists no socket may attach, a
+subscriber is parked instead, and every waiter is served the same coalesced `history` frame once the
+load lands. Suppressing the broadcast instead would have been wrong — a mid-load subscriber would
+have received `0..k` and silently lost the tail.
+
+**The dashboard control** sits inside `session_row.html`'s `.session-actions`, the container the
+row's own `onclick` excludes, per the collision recorded at `CLOSED_INVESTIGATIONS.md:90`. Verified
+by rendering: all 9 kiro-cli rows carry it, all 11 claude-code rows do not, and clicking it left the
+selected count at 0.
+
+**`GET /acp` became state-changing** and nobody noticed until review: the page auto-loads on
+`unknown_session`, which reaches `ensure_started()` and spawns `kiro-cli acp -a`. `web.py`'s
+`same_origin_guard` scoped its CSRF check to POST on the stated grounds that "a GET here is never
+state-changing", which this phase falsified. Now guarded on `Sec-Fetch-Site` rather than `Origin`,
+because the real flows send no `Origin` at all — browsers attach it only to non-GET navigations, and
+a bookmark sends neither `Origin` nor `Referer`. Verified on the interpreter the app actually runs
+on (starlette 0.37.2): dashboard click and bookmark allowed; cross-site, cross-site-with-referrer-
+stripped, and same-site all refused.
+
+Suite: **893 → 929 passed, 1 skipped.** 51 tests for the phase, 36 more for the fixes.
 
 ### Phase 6: Session close, cancel, tool calls, and context-window telemetry [QA]
 
@@ -1376,6 +1408,45 @@ deliberately not enumerated.
   ~295 files had been deleted; that was a counting artifact on its side — the store was intact at
   13,307 throughout, confirmed by extension breakdown.
 
+### Phase 5
+
+- **The plan's in-use refusal does not exist on kiro-cli 2.14.2.** §5 named the agent's typed
+  `-32603 … "Session is active in another process (PID n)"` as the *authority* and the lock file as a
+  mere hint. Measured live against a real terminal session holding the lock, the agent returns a bare
+  `-32603 "Internal error"` — no PID, no text, indistinguishable from any other internal failure. The
+  relationship is inverted on this build: **the lock file is the only thing that can name the
+  holder.** A failed load therefore re-reads it, with the message match kept underneath for builds
+  that do speak.
+- **A `pid_exists`-only pre-flight would have been wrong every time it fired.** Of this machine's
+  803 lock files, 22 name a currently-existing pid — and all 22 are recycled (svchost, firefox,
+  RuntimeBroker, pwsh), created days to weeks after their lock was written. A later census at 804
+  locks found 25, again all recycled. The pre-flight therefore also requires the holder's process to
+  have started at or before the lock's own `started_at` (5 s tolerance). Deliberately one-sided: it
+  can add a refusal, never grant one, so it cannot produce the false negatives that ruled out
+  reusing `presence.Snapshot.is_live()`.
+- **`session/load` takes the session's `.lock`.** Confirmed from the store: `73a40df3`'s lock was
+  written at 14:10 naming pid 21452, while that session's `.json` was created at 10:36 — the lock
+  came from a load, not a creation. Locks survive the agent's exit. This is what made a timed-out
+  load a permanent dead end reported as "active in another process" naming PowerAtlas's own agent,
+  until `_lock_holder` learned to recognise our own pid.
+- **`kiro-cli chat` persists nothing unless stdio is a real console.** Three attempts wrote zero
+  files: `--no-interactive` piped, interactive piped with a graceful `/quit` (exit 0), and
+  `--no-interactive` in a real console window. Only a fully interactive TTY session persisted. Any
+  future automated verification of terminal sessions has to allocate a real console.
+- **The shared `_SESSION_ID_RE` accepts a trailing newline when used with `.match()`**, because
+  Python's `$` also matches immediately before a final newline — and `launcher.py:134` applies it
+  exactly that way. `acp.py` uses `fullmatch`, closing it for the ACP path. **Investigated and
+  refuted as an exposure in `launcher.py`**: `$` admits exactly one trailing newline with nothing
+  after it, so no payload can follow, and every launcher sink passes the id as a discrete argv
+  element or single-quoted. Left unfixed as out of scope, recorded as a quirk rather than a hole.
+- **`GET /acp` silently became state-changing.** See the implementation note above. The invariant a
+  security control rests on can be invalidated by a phase that never touches that control.
+- **Registering the session before the round-trip is required *and* is what opened the phase's one
+  High finding.** The two constraints are in direct tension: register late and the whole replayed
+  conversation is dropped; register early and any socket may attach mid-load and receive the replay
+  frame by frame. Recorded because the tension is a property of the protocol, not of this
+  implementation, and Phase 6 inherits it.
+
 ## Review Log
 
 ### 2026-07-25 — Plan review (via /qplan Step 4)
@@ -1642,6 +1713,56 @@ Server-side, 20 targeted mutations, 20 caught.
 
 Suite: **826 passed, 1 skipped** (769 before this phase). Three sessions created, all against the
 scratch directory, verified by reading `cwd` back from the store rather than from any agent's report.
+
+---
+
+### 2026-07-26 — Implementation Review (after Phase 5, personas: Security auditor, Reliability engineer, End-user advocate)
+
+Three personas in parallel, fresh context each, all read-only and forbidden from spawning the agent
+or touching the user's store. **20 findings after merge** (1 High, 10 Medium, 9 Low). Health at
+review: **Red**; after fixes: **Green** with the nine Lows accepted.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | A socket attaching *during* an in-flight load received the replay as individual frames and could be retired on queue overflow — defeating the guarantee the coalesced `history` frame exists to provide | Fixed — `_Registry.loading` bars attachment for the load's duration and parks subscribers; all waiters get the same coalesced frame |
+| 2 | Medium | `GET /acp?sid=` became state-changing (auto-load → agent spawn), falsifying the docstring that scopes the CSRF check to POST; a cross-origin navigation caused a drive-by `kiro-cli acp -a` spawn | User: accepted — extend the guard; keyed on `Sec-Fetch-Site`, verified on starlette 0.37.2 |
+| 3 | Medium | A load timeout dropped the local record while the agent kept the session and its lock, so every retry was refused as "active in another process" naming PowerAtlas's own agent | Fixed — a lock naming our own agent is not a holder; only an `AgentRejected` is re-read as occupancy |
+| 4 | Medium | `_lock_holder` read the lock unbounded on the event loop, `MemoryError` uncaught and the first call site outside the `try` — in a directory the trust-all-tools agent writes | Fixed — 4 KiB prefix read via `to_thread`, whole handler inside one `try` |
+| 5 | Medium | The second concurrent load was refused with "exit that one first" instead of being subscribed to the buffer the code called "the better answer" | Fixed — parked on the in-flight load and served its buffer |
+| 6 | Medium | An in-flight load counted twice against `MAX_SESSIONS`, refusing a concurrent `new` when only 2 of 3 existed | Fixed — reservation released in the same synchronous stretch that records the session |
+| 7 | Medium | The in-use message degraded to bare `Internal error` on eight lock-read conditions, untested | Fixed — states what was measured and both remedies when attribution fails |
+| 8 | Medium | No in-page retry after a failed load; `Send` was disabled but Enter was not, earning "create a new one" — wrong advice for a session that exists | Fixed — recovery surfaced, `Reload` unhidden, Enter refused client-side with the prompt preserved |
+| 9 | Medium | "close one first" named a control that does not exist, and Phase 5 made the 3-session cap reachable by browsing rather than by deliberate effort | Fixed — both raise sites name the restart that actually frees a slot |
+| 10 | Medium | Failed-load log lines omitted the session id and paired the substituted code with the original message | Fixed — one line carrying code, session and the message actually sent |
+| 11 | Medium | A load set no duration expectation against a 90 s ceiling, so hung and slow looked identical | Fixed — the ceiling travels on the pending frame rather than being duplicated in markup |
+| 12-20 | Low | `load` unthrottled while `subscribe` is; Windows device names pass the regex (inert via the appended extension); the row button renders when `provider_name` is empty; a detach comment is false for the shipped page; the loaded cwd comes from a file the agent writes; "resubscribed" wording for a load; user chunks uncoalesced; focus invisible on the new button | Accepted — recorded, not fixed (user decision: High + Medium only) |
+
+**What the reviewers established rather than assumed.** Findings 1-6 were reproduced by execution
+against a patched transport with `KIRO_SESSION_DIR` repointed at a scratch directory — no agent
+spawned, no session touched. The lock census was run over all 803-804 real lock files. Path-traversal
+resistance was probed empirically (`..`, `a/b`, `C:foo`, UNC, ADS, trailing dot/space, embedded NUL,
+129 chars, and Unicode `\w` lookalikes including U+212A and U+FF21) — nothing survives `fullmatch`
+plus the 128-char cap.
+
+**One claim investigated and refuted.** The `launcher.py` trailing-newline quirk is real but not
+exploitable: `$` admits exactly one trailing newline with nothing after it, and every launcher sink
+passes the id as discrete argv or single-quoted. Recorded as a quirk, not a hole.
+
+**Mutation honesty.** 20 mutations run, **17 caught**. The three survivors are all finding 5, whose
+property is now held redundantly — neutering the `_handle_load` deferral alone is compensated by
+`load_session`'s early return and vice versa; only neutering both fails. Reported as-is rather than
+tuned to 20/20, and the redundant guard was kept deliberately: it is the only thing between a
+concurrent registration and a clobbered history buffer.
+
+**Residual risk, stated.** The navigation guard closes the browser path, not the local-process one: a
+non-browser local process can still send no fetch metadata, fetch the page and scrape `_ACP_TOKEN`.
+Closing that means authenticating the route, which is out of scope here and already noted in the
+token's own comment. What is closed is the drive-by — no web page can cause an agent spawn without a
+user gesture.
+
+Suite: **929 passed, 1 skipped** (893 after the phase, 842 before it). One session created, in the
+scratch directory, by a real-console terminal `kiro-cli chat`; four terminal spawns across the phase,
+every tree confirmed reaped by pid.
 
 ---
 
