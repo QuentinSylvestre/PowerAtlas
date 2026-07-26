@@ -110,6 +110,11 @@
   // with the whole conversation at once and says nothing before that, so
   // without a label the page is blank and looks broken for the duration.
   var loadingSid = null;
+  // True once a load has failed on this socket. The socket itself is healthy,
+  // so none of the close handlers run and none of the recovery buttons appear;
+  // without this the page is a dead end whose only pressable control is Enter,
+  // which reaches the server and is refused with advice for a different case.
+  var loadFailed = false;
 
   if (sessionId) sidEl.textContent = 'session ' + sessionId;
 
@@ -181,8 +186,22 @@
 
   function setTurn(active) {
     turnActive = active;
-    sendBtn.disabled = active || !sessionId;
+    sendBtn.disabled = active || !sessionId || loadFailed;
     sendBtn.textContent = active ? 'Working…' : 'Send';
+  }
+
+  function reportLoadFailure() {
+    // The recovery exists — back to the dashboard, or reload — but nothing
+    // said so, and the two buttons that offer it are unhidden only from
+    // `onclose`, which does not fire here because the socket is fine.
+    loadFailed = true;
+    setTurn(false);
+    setState('closed', 'session not loaded');
+    reloadBtn.hidden = false;
+    addMessage('note', 'this session was not loaded, so there is nothing to '
+      + 'prompt. Reload the page to try the load again, or go back to '
+      + 'PowerAtlas and pick another session. Restarting PowerAtlas releases '
+      + 'every session its agent is still holding.');
   }
 
   function stuckToBottom() {
@@ -312,6 +331,14 @@
   function sendPrompt() {
     var text = promptInput.value;
     if (!text.trim()) return;
+    if (loadFailed) {
+      // Send is disabled here but Enter is not, and this gate used to fall
+      // through to the server, which answered "create a new one" — the one
+      // thing the user was trying to avoid by opening an existing session.
+      logLine('error', 'the session was not loaded — nothing sent. Reload the '
+                       + 'page to try the load again.');
+      return;
+    }
     if (!sessionId) {
       logLine('error', 'no session yet — create one first');
       return;
@@ -359,8 +386,18 @@
     }
     if (type === 'meta' && payload.pending === 'load') {
       setLoading(frame.sessionId || sessionId);
+      // The ceiling comes off the wire rather than being written here, and it
+      // is said at all because a slow load and a wedged one look identical
+      // until it expires: the agent sends nothing before the whole
+      // conversation, so the pill and an empty transcript are the entire
+      // signal. The sibling `new` path sets an expectation the same way.
+      var cap = payload.timeoutSeconds
+        ? ' The server gives up after ' + payload.timeoutSeconds + 's.' : '';
+      addMessage('note', 'loading this session from the agent — the whole '
+        + 'conversation arrives at once when it answers, usually within a few '
+        + 'seconds.' + cap);
       logLine('info', 'loading the session from the agent — the whole ' +
-                      'conversation arrives at once when it answers');
+                      'conversation arrives at once when it answers.' + cap);
       return;
     }
     if (type === 'meta' && payload.turn === 'start') {
@@ -418,6 +455,7 @@
     if (type === 'session') {
       setPending(false);
       setLoading(null);
+      loadFailed = false;
       sessionId = payload.sessionId;
       clearTranscript();
       // The server's answer, not an inference from whatever survived in the
@@ -464,6 +502,8 @@
         logLine('info', 'not live on this server — asking the agent to load it');
         if (send('load', {}, sessionId)) return;
       }
+      var failedLoad = loadingSid !== null &&
+                       (frame.sessionId || sessionId) === loadingSid;
       setLoading(null);
       // In the transcript as well as the log: the log strip is 120 px tall and
       // is not replayed, so a failure that reaches only it is invisible after
@@ -471,6 +511,7 @@
       addMessage('error', '[' + payload.code + '] ' + payload.message);
       if (!replaying) restorePendingPrompt(payload.code);
       logLine('error', '← error [' + payload.code + '] ' + payload.message);
+      if (failedLoad) reportLoadFailure();
       return;
     }
     logLine('in', '← ' + type + ' ' + JSON.stringify(payload));
@@ -523,6 +564,7 @@
     opened = false;
     loadTried = Object.create(null);
     loadingSid = null;
+    loadFailed = false;
     ws = new WebSocket(wsUrl());
     ws.onopen = function () {
       opened = true;

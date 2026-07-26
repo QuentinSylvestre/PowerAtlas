@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1234,6 +1235,76 @@ class TestSameOriginGuard:
             resp = raw_client.post(endpoint, json={},
                                    headers={"Origin": "null"})
             assert resp.status_code == 403, f"{endpoint} should reject Origin: null"
+
+
+class TestAcpNavigationGuard:
+    """``GET /acp`` is state-changing, which the guard's POST-only scope was
+    justified by it not being.
+
+    Rendering the page seeds a socket that sends ``subscribe``, is answered
+    ``unknown_session``, and sends ``load`` — which reaches ``ensure_started``
+    and spawns ``kiro-cli acp -a``, trust-all-tools. A cross-origin top-level
+    navigation was therefore enough to start an agent with no user gesture.
+    """
+
+    def test_the_dashboard_row_action_still_works(self, raw_client):
+        """``location.href = '/acp?sid=…'`` is a same-origin top-level
+        navigation: **no** ``Origin`` at all, because browsers attach it only
+        to navigations that are not GET/HEAD, plus a same-origin ``Referer``.
+        Copying the POST rule verbatim would have refused this."""
+        resp = raw_client.get("/acp?sid=abc", headers={
+            "Referer": "http://127.0.0.1/", "Sec-Fetch-Site": "same-origin"})
+        assert resp.status_code == 200
+
+    def test_a_bookmark_or_a_typed_address_still_works(self, raw_client):
+        """Neither header, which is what a user-initiated load sends. This is
+        the case a rule demanding an Origin would break."""
+        resp = raw_client.get("/acp", headers={"Sec-Fetch-Site": "none"})
+        assert resp.status_code == 200
+
+    def test_a_client_that_sends_no_fetch_metadata_still_works(self, raw_client):
+        resp = raw_client.get("/acp")
+        assert resp.status_code == 200
+
+    def test_a_cross_origin_fetch_is_refused(self, raw_client):
+        resp = raw_client.get("/acp?sid=abc", headers={
+            "Origin": "http://evil.example.com", "Sec-Fetch-Site": "cross-site"})
+        assert resp.status_code == 403
+        assert _ACP_TOKEN not in resp.text
+
+    def test_a_cross_origin_referer_is_refused(self, raw_client):
+        resp = raw_client.get("/acp?sid=abc",
+                              headers={"Referer": "https://evil.example.com/x"})
+        assert resp.status_code == 403
+
+    def test_a_cross_site_navigation_with_no_referrer_is_refused(self, raw_client):
+        """One ``Referrer-Policy: no-referrer`` on the attacker's page strips
+        the only header an Origin/Referer rule could have caught this with,
+        leaving it indistinguishable from a bookmark. ``Sec-Fetch-Site`` is set
+        by the browser and page content cannot influence it."""
+        resp = raw_client.get("/acp?sid=abc",
+                              headers={"Sec-Fetch-Site": "cross-site"})
+        assert resp.status_code == 403
+        assert _ACP_TOKEN not in resp.text
+
+    def test_origin_null_is_refused(self, raw_client):
+        resp = raw_client.get("/acp", headers={"Origin": "null"})
+        assert resp.status_code == 403
+
+    @patch("power_atlas.web.autostart.is_enabled")
+    @patch("power_atlas.web.load_config")
+    def test_the_rule_is_scoped_to_acp_rather_than_every_get(
+            self, mock_load, mock_autostart, raw_client):
+        """Every other GET here only reads, and browsers omit Origin on
+        ordinary navigations — widening the rule to all of them would refuse
+        traffic that has no way to declare itself."""
+        from power_atlas.config import Config
+        mock_load.return_value = Config()
+        mock_autostart.return_value = False
+        resp = raw_client.get("/api/settings", headers={
+            "Referer": "https://evil.example.com/x",
+            "Sec-Fetch-Site": "cross-site"})
+        assert resp.status_code == 200
 
 
 class TestHostAllowlistCoversGetRequests:
@@ -2886,7 +2957,9 @@ class TestAcpSessionLoad:
         )]
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["meta", "session", "history"]
-        assert frames[0]["payload"] == {"pending": "load"}
+        assert frames[0]["payload"] == {
+            "pending": "load",
+            "timeoutSeconds": acp_mod.REQUEST_TIMEOUT_SECONDS}
         assert frames[1]["payload"]["sessionId"] == sid
         assert frames[1]["payload"]["created"] is False
         assert [(e["type"], e["payload"])
@@ -3116,6 +3189,581 @@ class TestAcpSessionLoad:
             asyncio.run(drive())
         assert seen == ["abc"]
         assert not asyncio.iscoroutinefunction(acp_mod._handle_subscribe)
+
+
+def _stored_session(store, sid):
+    """The minimum a load needs from the kiro-cli store: a recoverable cwd."""
+    (store / (sid + ".json")).write_text(
+        json.dumps({"session_id": sid, "cwd": str(store)}))
+
+
+class TestAcpLoadServesOneReplayToEverySocket:
+    """A socket that asks for a session while its ``session/load`` is running.
+
+    ``load_session`` has to register the session before the round-trip — the
+    agent replays the conversation as notifications while the request is
+    outstanding, and ``record`` drops frames for a session with no buffer — and
+    ``_emit`` both records *and* broadcasts. So for the duration of the load the
+    registry saw a live session and attached anything that asked, handing it the
+    replay frame by frame: at 1200 events a second socket subscribing halfway
+    queued SEND_QUEUE_MAXSIZE frames and set ``_overflowed``. One click reaches
+    it, because the dashboard row action opens ``/acp?sid=…`` and two tabs on
+    one session is a supported shape.
+
+    Suppressing the broadcast for the duration is the trap, not the fix: that
+    socket would receive a ``history`` frame of the events so far and then never
+    see the rest, trading a retired socket — visible — for a silently truncated
+    conversation.
+    """
+
+    # Above SEND_QUEUE_MAXSIZE (256), which is the number that decides this:
+    # at 256 queued frames `_Connection.send` sets `_overflowed` and the writer
+    # retires the socket.
+    EVENTS = 300
+
+    def _replay_with(self, sid, count, halfway):
+        """A ``session/load`` that replays ``count`` events and runs ``halfway``
+        in the middle of them — where another socket's frame would land."""
+        async def fake_request(self, method, params, timeout=None):
+            for i in range(count):
+                if i == count // 2:
+                    halfway()
+                self._on_notification({
+                    "method": "session/update",
+                    "params": {"sessionId": sid, "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "e%d" % i}}},
+                })
+            return {}
+        return fake_request
+
+    def test_a_socket_subscribing_mid_load_gets_one_frame_and_the_whole_tail(
+            self, acp_store):
+        acp_mod, store = acp_store
+        sid = "load-mid-0001"
+        _stored_session(store, sid)
+        loader = _acp_conn(acp_mod)
+        second = _acp_conn(acp_mod)
+
+        with patch.object(
+                acp_mod._Supervisor, "_request",
+                self._replay_with(
+                    sid, self.EVENTS,
+                    lambda: acp_mod._handle_subscribe(second, sid))), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(loader, sid))
+
+        frames = _queued(second)
+        # No `chunk` of its own anywhere: every event arrived inside the replay.
+        assert [f["type"] for f in frames] == ["meta", "session", "history"]
+        assert frames[0]["payload"]["pending"] == "load"
+        events = frames[2]["payload"]["events"]
+        # Both halves of the property. The head proves the replay was not
+        # started late; the tail proves the events broadcast after this socket
+        # asked were not merely dropped.
+        assert len(events) == self.EVENTS
+        assert events[0]["payload"]["text"] == "e0"
+        assert events[-1]["payload"]["text"] == "e%d" % (self.EVENTS - 1)
+        assert second._overflowed is False
+        assert second.session_id == sid
+
+    def test_the_socket_that_asked_is_served_the_same_replay(self, acp_store):
+        """Positive control: parking the other socket must not cost this one
+        the answer it is waiting for."""
+        acp_mod, store = acp_store
+        sid = "load-mid-0002"
+        _stored_session(store, sid)
+        loader = _acp_conn(acp_mod)
+        second = _acp_conn(acp_mod)
+        with patch.object(
+                acp_mod._Supervisor, "_request",
+                self._replay_with(
+                    sid, 4, lambda: acp_mod._handle_subscribe(second, sid))), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(loader, sid))
+        frames = _queued(loader)
+        assert [f["type"] for f in frames] == ["meta", "session", "history"]
+        assert len(frames[2]["payload"]["events"]) == 4
+
+    def test_nothing_is_attached_while_the_load_runs(self, acp_store):
+        """The invariant the ``_registry.loading`` key carries, asserted where
+        it holds rather than only through its consequences."""
+        acp_mod, store = acp_store
+        sid = "load-mid-0003"
+        _stored_session(store, sid)
+        seen = []
+        second = _acp_conn(acp_mod)
+
+        def halfway():
+            acp_mod._handle_subscribe(second, sid)
+            seen.append(set(acp_mod._registry.subscribers.get(sid, ())))
+
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._replay_with(sid, 4, halfway)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(_acp_conn(acp_mod), sid))
+        assert seen == [set()]
+
+
+class TestAcpConcurrentLoad:
+    """The second ``load`` for one session used to be refused
+    ``AgentRejected("That session is already loaded.")`` — relabelled
+    ``session_in_use`` with "exit that one first", against a page whose
+    ``loadTried`` guard then stopped it retrying on that socket. Nothing
+    subscribed it to the buffer the refusal's own comment called the better
+    answer.
+    """
+
+    async def _drive(self, acp_mod, sid, winner, loser):
+        first = asyncio.ensure_future(acp_mod._handle_load(winner, sid))
+        for _ in range(100):
+            if sid in acp_mod._registry.loading:
+                break
+            await asyncio.sleep(0)
+        assert sid in acp_mod._registry.loading, "the load never claimed it"
+        await acp_mod._handle_load(loser, sid)
+        await first
+
+    def test_the_second_load_is_served_the_first_ones_replay(self, acp_store):
+        acp_mod, store = acp_store
+        sid = "load-race-001"
+        _stored_session(store, sid)
+        winner, loser = _acp_conn(acp_mod), _acp_conn(acp_mod)
+
+        async def fake_request(self, method, params, timeout=None):
+            self._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "hello"}}},
+            })
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(self._drive(acp_mod, sid, winner, loser))
+
+        frames = _queued(loser)
+        assert [f["type"] for f in frames] == ["meta", "session", "history"]
+        assert frames[2]["payload"]["events"][0]["payload"]["text"] == "hello"
+        assert loser.session_id == sid
+
+    def test_only_one_round_trip_is_spent(self, acp_store):
+        """A second agent-side replay would append the whole conversation to
+        itself, which is why the loser waits rather than asking again."""
+        acp_mod, store = acp_store
+        sid = "load-race-002"
+        _stored_session(store, sid)
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append(method)
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(self._drive(acp_mod, sid, _acp_conn(acp_mod),
+                                    _acp_conn(acp_mod)))
+        assert calls == ["session/load"]
+
+    def test_a_failure_reaches_everyone_who_waited(self, acp_store):
+        """A waiter left holding a pending label is the failure mode parking
+        them introduces, so the failure path has to reach them too."""
+        acp_mod, store = acp_store
+        sid = "load-race-003"
+        _stored_session(store, sid)
+        loser = _acp_conn(acp_mod)
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(self._drive(acp_mod, sid, _acp_conn(acp_mod), loser))
+        frames = _queued(loser)
+        assert [f["type"] for f in frames] == ["meta", "error"]
+        assert frames[1]["payload"]["code"] == "agent_timeout"
+
+
+class TestAcpLoadSlotAccounting:
+    """``new_session`` records only after its round-trip, so its reservation and
+    its record never overlap. ``load_session`` must record first, and holding
+    the reservation as well counted the loading session twice: reproduced with
+    one pre-existing session, where a concurrent ``new`` was refused
+    ``too_many_sessions`` while only two existed. MAX_SESSIONS is 3.
+    """
+
+    def test_an_in_flight_load_takes_one_slot_not_two(self, acp_store):
+        acp_mod, store = acp_store
+        sid = "load-slot-001"
+        _stored_session(store, sid)
+        acp_mod._supervisor.sessions["already-live"] = {"cwd": ""}
+        acp_mod._supervisor.history["already-live"] = acp_mod._History()
+        created = []
+
+        async def fake_request(self, method, params, timeout=None):
+            if method == "session/load":
+                # A `new` landing while the load is outstanding. It is the third
+                # slot of three and must not be refused.
+                created.append(await self.new_session(str(store)))
+                return {}
+            return {"sessionId": "brand-new-01"}
+
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+
+        assert [f["type"] for f in _queued(conn)] == [
+            "meta", "session", "history"]
+        assert created == [{"sessionId": "brand-new-01", "cwd": str(store)}]
+        assert acp_mod._supervisor._reserved == 0
+        assert len(acp_mod._supervisor.sessions) == acp_mod.MAX_SESSIONS
+
+    def test_a_failed_load_releases_its_slot(self, acp_store):
+        """Positive control: the release moved, it did not disappear."""
+        acp_mod, store = acp_store
+        sid = "load-slot-002"
+        _stored_session(store, sid)
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(_acp_conn(acp_mod), sid))
+        assert acp_mod._supervisor._reserved == 0
+        assert acp_mod._supervisor.sessions == {}
+
+
+class TestAcpLockReadIsBoundedAndOffTheLoop:
+    """The lock directory is written by the agent running trust-all-tools, so a
+    lock file's size is not ours to assume, and ``MemoryError`` is in no caught
+    set on this path. One line away, ``_stored_session_cwd`` already reads a
+    bounded prefix through ``asyncio.to_thread``.
+    """
+
+    def _padded(self, pad):
+        return " " * pad + json.dumps({
+            "pid": os.getpid(),
+            "started_at": _lock_time(dt.datetime.now(dt.timezone.utc))})
+
+    def test_a_lock_is_not_read_past_the_cap(self, acp_store):
+        """The pid here sits beyond LOCK_MAX_BYTES, so a bounded read cannot
+        see it and an unbounded one can."""
+        acp_mod, store = acp_store
+        (store / "huge.lock").write_text(self._padded(acp_mod.LOCK_MAX_BYTES))
+        assert acp_mod._lock_holder("huge") is None
+
+    def test_the_same_lock_inside_the_cap_still_names_its_holder(self, acp_store):
+        """Positive control: the cap refused above, not the padding itself."""
+        acp_mod, store = acp_store
+        (store / "small.lock").write_text(self._padded(16))
+        assert acp_mod._lock_holder("small") == os.getpid()
+
+    def test_the_lock_is_read_off_the_event_loop(self, acp_store):
+        """Twice per load — the pre-flight and the re-read after a failure —
+        each a file read plus a psutil query."""
+        acp_mod, store = acp_store
+        sid = "load-thread-1"
+        _stored_session(store, sid)
+        threads = []
+
+        def spy(session_id):
+            threads.append(threading.current_thread().ident)
+            return None
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        with patch.object(acp_mod, "_lock_holder", spy), \
+                patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(_acp_conn(acp_mod), sid))
+        assert len(threads) == 2
+        assert threading.main_thread().ident not in threads
+
+
+class TestAcpLoadFailureAttribution:
+    """``_load_failure`` preferred the re-read lock over the actual exception,
+    unconditionally and for every ``AcpError`` subclass. A load that timed out
+    on our side was reported as "Session is active in another process (PID n) …
+    exit that one first" — and the pid it named was PowerAtlas's own agent,
+    because ``session/load`` makes the agent write that lock itself.
+    """
+
+    def _one_shot(self, holder):
+        """A pre-flight that sees nothing and a re-read that sees ``holder``."""
+        seen = []
+
+        def _lock_holder(session_id):
+            seen.append(session_id)
+            return None if len(seen) == 1 else holder
+        return _lock_holder
+
+    def _refuse_with(self, exc_factory):
+        async def refused(self, method, params, timeout=None):
+            raise exc_factory()
+        return refused
+
+    def test_a_lock_naming_our_own_agent_is_not_a_holder(
+            self, acp_store, monkeypatch):
+        """Confirmed against the real store: ``73a40df3….lock`` was written at
+        14:10 naming pid 21452, while that session's ``.json`` was created at
+        10:36 — so the lock came from a load, not from a creation. With the load
+        then failing on our side, every retry was refused at the pre-flight for
+        the life of the agent process, naming a process the operator cannot
+        exit because it is ours."""
+        acp_mod, store = acp_store
+
+        class _OurAgent:
+            pid = os.getpid()
+
+        (store / "ours.lock").write_text(json.dumps({
+            "pid": os.getpid(),
+            "started_at": _lock_time(dt.datetime.now(dt.timezone.utc))}))
+        assert acp_mod._lock_holder("ours") == os.getpid()
+        monkeypatch.setattr(acp_mod._supervisor, "_proc", _OurAgent())
+        assert acp_mod._lock_holder("ours") is None
+
+    @pytest.mark.parametrize("factory, code, fragment", [
+        (lambda: __import__("power_atlas.acp", fromlist=["x"]).AgentTimeout(
+            "The agent did not answer 'session/load' within 90s."),
+         "agent_timeout", "within 90s"),
+        (lambda: __import__("power_atlas.acp", fromlist=["x"]).AgentDied(
+            "The agent stopped answering; its channel closed."),
+         "agent_died", "channel closed"),
+    ])
+    def test_a_local_failure_keeps_its_own_code(
+            self, acp_store, factory, code, fragment):
+        """A timeout or a dead agent says nothing about who holds the session.
+        Relabelling them ``session_in_use`` hid the failure that did happen
+        behind advice about a process that was not there."""
+        acp_mod, store = acp_store
+        sid = "load-attr-001"
+        _stored_session(store, sid)
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod, "_lock_holder", self._one_shot(4242)), \
+                patch.object(acp_mod._Supervisor, "_request",
+                             self._refuse_with(factory)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        payload = _queued(conn)[1]["payload"]
+        assert payload["code"] == code
+        assert fragment in payload["message"]
+        assert "4242" not in payload["message"]
+
+    def test_the_session_cap_is_not_reported_as_an_occupied_session(
+            self, acp_store):
+        acp_mod, store = acp_store
+        sid = "load-attr-002"
+        _stored_session(store, sid)
+        for i in range(acp_mod.MAX_SESSIONS):
+            acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod, "_lock_holder", self._one_shot(4242)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        payload = _queued(conn)[1]["payload"]
+        assert payload["code"] == "too_many_sessions"
+        assert "4242" not in payload["message"]
+
+    def test_a_named_holder_still_wins_over_an_agent_refusal(self, acp_store):
+        """Positive control: the re-read is still what turns the one cause an
+        operator can act on into a sentence — it is only its precedence over
+        unrelated failures that was wrong."""
+        acp_mod, store = acp_store
+        sid = "load-attr-003"
+        _stored_session(store, sid)
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod, "_lock_holder", self._one_shot(4242)), \
+                patch.object(
+                    acp_mod._Supervisor, "_request",
+                    self._refuse_with(
+                        lambda: acp_mod.AgentRejected(
+                            "Internal error (code -32603)"))), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        payload = _queued(conn)[1]["payload"]
+        assert payload["code"] == "session_in_use"
+        assert "4242" in payload["message"]
+
+
+class TestAcpUnattributedRefusal:
+    """``_lock_holder`` returns ``None`` on eight conditions — psutil absent,
+    the lock missing, unreadable, not a JSON object, no pid, an unparseable
+    timestamp, a psutil error, the skew guard — and on kiro-cli 2.14.2 the
+    agent contributes only a bare ``-32603 "Internal error"``. Every one of
+    those eight therefore landed on a message saying neither what happened nor
+    what to do, and a kiro-cli that changed its lock format would silently
+    revert every in-use refusal to it.
+    """
+
+    def _refused(self, acp_mod, message):
+        async def refused(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected(message)
+        return refused
+
+    def _load(self, acp_mod, store, sid, message):
+        _stored_session(store, sid)
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._refused(acp_mod, message)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        return _queued(conn)[1]["payload"]
+
+    def test_an_opaque_refusal_still_says_what_is_known(self, acp_store):
+        acp_mod, store = acp_store
+        payload = self._load(acp_mod, store, "load-opaque-1",
+                             "Internal error (code -32603)")
+        assert payload["code"] == "session_in_use"
+        message = payload["message"]
+        assert "-32603" in message
+        # No pid is claimed, because none could be established.
+        assert "PID" not in message
+        # Both remedies, one of which is the only thing that frees a session.
+        assert "kiro-cli" in message
+        assert "restart PowerAtlas" in message
+
+    def test_a_refusal_that_names_a_cause_is_passed_through(self, acp_store):
+        """Positive control: only the code that names nothing is rewritten."""
+        acp_mod, store = acp_store
+        payload = self._load(acp_mod, store, "load-opaque-2",
+                             "No such session (code -32602)")
+        assert payload["code"] == "agent_error"
+        assert payload["message"] == "No such session (code -32602)"
+
+    def test_the_refusal_names_its_session_and_what_the_page_was_told(
+            self, acp_store, caplog):
+        """Both failed-load log lines omitted the session id, alone among this
+        module's refusals, and one paired the *substituted* code with the
+        *original* message — observed verbatim as ``[session_in_use] The agent
+        did not answer 'session/load' within 90s``."""
+        acp_mod, store = acp_store
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            self._load(acp_mod, store, "load-opaque-3",
+                       "Internal error (code -32603)")
+        line = [r.getMessage() for r in caplog.records
+                if "session/load refused" in r.getMessage()]
+        assert len(line) == 1
+        assert "[session_in_use]" in line[0]
+        assert "session=load-opaque-3" in line[0]
+        assert "-32603" in line[0]
+        # The agent's own words are kept, but as the agent's, not as ours.
+        assert "(agent: Internal error (code -32603))" in line[0]
+
+
+class TestAcpSessionCapMessage:
+    """"close one first" named a control that does not exist: ``close`` answers
+    ``not_implemented`` until Phase 6, and a session is released only when the
+    agent process dies. It matters more now that the cap is reachable by
+    *browsing* three sessions from the dashboard rather than by deliberately
+    clicking "New session" three times.
+    """
+
+    def _fill(self, acp_mod):
+        for i in range(acp_mod.MAX_SESSIONS):
+            acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
+
+    def test_the_new_path_names_a_remedy_that_exists(self, acp_store, tmp_path):
+        acp_mod, _ = acp_store
+        self._fill(acp_mod)
+        conn = _acp_conn(acp_mod)
+        asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
+        payload = _queued(conn)[1]["payload"]
+        assert payload["code"] == "too_many_sessions"
+        assert "close one" not in payload["message"]
+        assert "restart PowerAtlas" in payload["message"]
+
+    def test_the_load_path_names_a_remedy_that_exists(self, acp_store):
+        acp_mod, store = acp_store
+        _stored_session(store, "load-cap-0001")
+        self._fill(acp_mod)
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, "load-cap-0001"))
+        payload = _queued(conn)[1]["payload"]
+        assert payload["code"] == "too_many_sessions"
+        assert "close one" not in payload["message"]
+        assert "restart PowerAtlas" in payload["message"]
+
+
+class TestAcpLoadPageRecovery:
+    """After a failed load nothing on the page was pressable. ``Send`` is
+    disabled, and ``Reconnect``/``Reload page`` are unhidden only from
+    socket-close handlers that do not fire, because the socket is healthy — it
+    is the session that is not. Enter was not disabled either: ``sendPrompt``
+    gated only on ``sessionId``, so it reached the server and came back "It may
+    belong to an earlier PowerAtlas process — create a new one", which is the
+    one thing the user was avoiding by opening an existing session.
+    """
+
+    def _page(self) -> str:
+        from power_atlas.web import templates
+        return templates.env.loader.get_source(templates.env, "acp.html")[0]
+
+    def test_enter_is_refused_before_the_wrong_advice_is_earned(self):
+        src = self._page()
+        body = src.split("function sendPrompt()", 1)[1].split("\n  function ", 1)[0]
+        assert "if (loadFailed)" in body
+        # Ahead of the `sessionId` gate, which is the one that used to let it
+        # through: after a failed load `sessionId` is still set from ?sid=.
+        assert body.index("if (loadFailed)") < body.index("if (!sessionId)")
+
+    def test_a_failed_load_states_its_recovery_and_offers_a_control(self):
+        src = self._page()
+        body = src.split("function reportLoadFailure()", 1)[1].split(
+            "\n  function ", 1)[0]
+        assert "loadFailed = true" in body
+        assert "reloadBtn.hidden = false" in body
+        # In the transcript, not only the 120 px log strip.
+        assert "addMessage('note'" in body
+        assert "Reload the page" in body
+
+    def test_the_error_handler_reaches_it_only_for_a_load(self):
+        src = self._page()
+        assert "if (failedLoad) reportLoadFailure();" in src
+        assert "var failedLoad = loadingSid !== null" in src
+
+    def test_a_session_frame_clears_the_flag_again(self):
+        """A load that succeeds on a retry must not leave the page refusing to
+        send to a session it is now subscribed to."""
+        src = self._page()
+        session_branch = src.split("if (type === 'session') {", 1)[1]
+        assert "loadFailed = false;" in session_branch.split("return;", 1)[0]
+
+    def test_the_send_button_is_disabled_by_the_flag(self):
+        src = self._page()
+        assert "sendBtn.disabled = active || !sessionId || loadFailed;" in src
+
+
+class TestAcpLoadStatesItsCeiling:
+    """A slow load and a wedged one look identical until the ceiling expires:
+    the agent says nothing at all before the whole conversation, so an
+    unchanging pill and a blank transcript is the entire signal for up to
+    REQUEST_TIMEOUT_SECONDS — 90 seconds. The sibling ``new`` path sets an
+    expectation ("the agent takes several seconds"); this one did not.
+    """
+
+    def test_the_pending_frame_carries_the_ceiling(self):
+        from power_atlas import acp as acp_mod
+        frame = acp_mod._load_pending_frame("s1")
+        assert frame["type"] == "meta"
+        assert frame["sessionId"] == "s1"
+        assert frame["payload"] == {
+            "pending": "load",
+            "timeoutSeconds": acp_mod.REQUEST_TIMEOUT_SECONDS}
+
+    def test_the_page_renders_the_ceiling_rather_than_hardcoding_one(self):
+        from power_atlas.web import templates
+        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        branch = src.split("payload.pending === 'load'", 1)[1].split(
+            "return;", 1)[0]
+        assert "payload.timeoutSeconds" in branch
+        # In the transcript as well as the log strip: a blank transcript is
+        # exactly what makes a wedged load unreadable.
+        assert "addMessage('note'" in branch
 
 
 class TestAcpDashboardRowAction:

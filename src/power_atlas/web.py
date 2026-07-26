@@ -499,6 +499,11 @@ _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # port; the value is never used as a number, only proven to be one.
 _PORT_RE = re.compile(r"[0-9]{1,5}")
 
+# The one GET on this app that changes state: rendering it starts the chain
+# that spawns the agent. Named once so the route and the middleware guarding it
+# cannot drift apart.
+_ACP_PATH = "/acp"
+
 
 def _host_allowed(raw_host: str | None) -> bool:
     """Return True when a raw ``Host`` header names a loopback address.
@@ -570,16 +575,74 @@ def _request_host_allowed(request: Request) -> bool:
     return _host_allowed(hosts[0])
 
 
+def _origin_or_referer_ok(request: Request, *, allow_missing: bool) -> bool:
+    """Whether a request's declared origin is this app's own.
+
+    ``allow_missing`` is the only difference between the two callers. A POST
+    with neither header is refused: every POST here comes from the dashboard's
+    own script, which always sends one. A navigation with neither is the
+    address bar or a bookmark, which is how ``/acp`` is legitimately opened
+    from cold.
+    """
+    origin = request.headers.get("origin")
+    referer = request.headers.get("referer")
+    if origin == "null":
+        return False
+    if not origin and not referer:
+        return allow_missing
+    expected_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if origin:
+        return origin == expected_origin
+    parsed = urlparse(referer)
+    return f"{parsed.scheme}://{parsed.netloc}" == expected_origin
+
+
+def _acp_navigation_ok(request: Request) -> bool:
+    """Whether a ``GET /acp`` may proceed. Modelled on what the real flows send.
+
+    Copying the POST rule verbatim would break the page. The flows are:
+
+    * the dashboard's row action (``location.href = '/acp?sid=…'``) — a
+      same-origin top-level navigation, which sends **no** ``Origin`` at all
+      (browsers only attach it to navigations that are not GET/HEAD) and a
+      same-origin ``Referer``;
+    * a bookmark or a typed address — **neither** header;
+    * the page's own ``fetch`` of itself in ``diagnoseRejectedHandshake`` —
+      same-origin ``Referer``, no ``Origin``.
+
+    So "missing Origin" and even "missing both" have to pass, and that is what
+    ``Sec-Fetch-Site`` is consulted for. It is set by the browser and cannot be
+    influenced by page content — unlike ``Referer``, which an attacker page
+    strips with one ``Referrer-Policy`` — and it separates the two cases the
+    other headers cannot: ``none`` is a user-initiated load (bookmark, address
+    bar), while a cross-site navigation says ``cross-site`` however the
+    referrer was suppressed. Requests without it (a non-browser client) fall
+    back to the Origin/Referer rule, which is all this route had before.
+    """
+    site = request.headers.get("sec-fetch-site")
+    if site is not None and site not in ("same-origin", "none"):
+        return False
+    return _origin_or_referer_ok(request, allow_missing=True)
+
+
 @app.middleware("http")
 async def same_origin_guard(request: Request, call_next):
-    """Reject non-loopback Hosts on every request, plus CSRF-suspect POSTs.
+    """Reject non-loopback Hosts on every request, CSRF-suspect POSTs, and
+    cross-origin navigations to ``/acp``.
 
-    The two halves have different scopes on purpose. The Host allowlist is a
+    The three halves have different scopes on purpose. The Host allowlist is a
     DNS-rebinding defense and applies to *all* methods: a rebound page is
     same-origin with whatever it fetches, so an unguarded GET hands it the
     response body — workspace paths, session titles, settings. The
-    Origin/Referer checks are CSRF defense and stay POST-only, since a GET here
-    is never state-changing and browsers omit Origin on ordinary navigations.
+    Origin/Referer checks are CSRF defense and stay POST-only, because browsers
+    omit Origin on ordinary navigations and every other GET here only reads.
+
+    ``GET /acp`` is the exception, and the reason the POST-only scope could no
+    longer be justified as "a GET here is never state-changing": rendering that
+    page seeds a socket that sends ``subscribe``, is answered
+    ``unknown_session``, and sends ``load`` — which reaches ``ensure_started``
+    and spawns ``kiro-cli acp -a``. A cross-origin top-level navigation was
+    therefore enough to start a trust-all-tools agent with no user gesture.
     """
     # A non-loopback Host cannot arise legitimately: uvicorn is bound to
     # 127.0.0.1 in __main__.py with no host option, so nothing on the network
@@ -587,20 +650,10 @@ async def same_origin_guard(request: Request, call_next):
     if not _request_host_allowed(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     if request.method == "POST":
-        origin = request.headers.get("origin")
-        referer = request.headers.get("referer")
-        if origin == "null":
+        if not _origin_or_referer_ok(request, allow_missing=False):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
-        if not origin and not referer:
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        expected_origin = f"{request.url.scheme}://{request.url.netloc}"
-        if origin and origin != expected_origin:
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        if not origin and referer:
-            parsed = urlparse(referer)
-            referer_origin = f"{parsed.scheme}://{parsed.netloc}"
-            if referer_origin != expected_origin:
-                return JSONResponse({"error": "Forbidden"}, status_code=403)
+    elif request.url.path == _ACP_PATH and not _acp_navigation_ok(request):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
     return await call_next(request)
 
 
@@ -701,7 +754,7 @@ def _acp_csp(nonce: str, host: str) -> str:
     ))
 
 
-@app.get("/acp", response_class=HTMLResponse)
+@app.get(_ACP_PATH, response_class=HTMLResponse)
 async def acp_page(request: Request, sid: str = ""):
     """The ACP prototype page. ``sid`` names the session to re-subscribe to.
 

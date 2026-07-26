@@ -259,6 +259,13 @@ MAX_SESSION_ID_CHARS = 128
 # whole, behind a cache this module deliberately cannot reach.
 SESSION_JSON_PREFIX_BYTES = 16 * 1024
 
+# How much of a lock file is read before giving up on it. A lock is a JSON
+# object holding a pid and a timestamp — ~100 bytes in this machine's store —
+# and the directory it sits in is written by an agent running trust-all-tools,
+# so its size is not ours to assume. A whole-file read has no ceiling and
+# ``MemoryError`` is not in any caught set on this path.
+LOCK_MAX_BYTES = 4 * 1024
+
 # How far after its own timestamp a lock file's holder may have started before
 # the lock is judged stale rather than live. A session writes its lock *after*
 # its process starts, so the honest relation is `create_time <= started_at`;
@@ -276,6 +283,14 @@ LOCK_START_SKEW_SECONDS = 5.0
 # says no more than "something went wrong" — and this particular something is
 # the only one the operator can act on.
 _IN_USE_MARKER = "active in another process"
+
+# The JSON-RPC code kiro-cli 2.14.2 refuses a busy `session/load` with. It is
+# the generic "internal error" code, so on its own it names nothing — but it is
+# the only refusal this method has been observed answering with, and forwarding
+# it verbatim reaches the page as "Internal error", which says neither what
+# happened nor what to do. Matched against the string `_on_response` builds,
+# which is this module's own format rather than the agent's.
+_OPAQUE_REFUSAL_MARKER = "(code -32603)"
 
 # The lock's own timestamp, to second resolution. `datetime.fromisoformat`
 # cannot read the value kiro-cli writes: it is RFC 3339 with *nanoseconds*
@@ -700,7 +715,8 @@ class _Connection:
 
 
 class _Registry:
-    """Live sockets, and which session each is attached to.
+    """Live sockets, which session each is attached to, and which sessions are
+    mid-load.
 
     Phase 3b populates ``subscribers`` from ``new`` and ``subscribe``; in 3a no
     session can exist, which is why ``subscribe`` has nothing to answer with.
@@ -709,6 +725,20 @@ class _Registry:
     def __init__(self) -> None:
         self.connections: set[_Connection] = set()
         self.subscribers: dict[str, set[_Connection]] = {}
+        # Sessions with a `session/load` in flight, each mapped to the sockets
+        # that asked for it while it was running. The invariant the key carries:
+        # **while a session is in here, no socket may be attached to it.**
+        # `load_session` has to register the session before its round-trip —
+        # the agent replays the whole conversation as notifications while the
+        # request is outstanding and `record` drops frames for a session with
+        # no buffer — and `_emit` broadcasts every one of those notifications.
+        # So an attached socket would be handed the replay event by event,
+        # SEND_QUEUE_MAXSIZE of them before it is retired, which is exactly
+        # what the coalesced `history` frame exists to prevent. Waiters are
+        # served that one frame each when the load lands; nothing is lost by
+        # waiting, because the frames they did not receive are the ones the
+        # buffer they are about to be sent was built from.
+        self.loading: dict[str, list[_Connection]] = {}
 
     def attach(self, conn: _Connection, session_id: str) -> None:
         self.detach(conn)
@@ -842,6 +872,9 @@ def _lock_started_at(raw: dict) -> float | None:
 def _lock_holder(session_id: str) -> int | None:
     """The pid of the process holding a session's lock, if there is one.
 
+    Blocking — a bounded file read plus a ``psutil`` query — so call it off the
+    loop, the way its neighbour ``_stored_session_cwd`` is called.
+
     A hint and never the gate, per the plan: nothing removes a lock file on a
     hard exit, so the store is full of locks whose pid died months ago and has
     since been recycled onto something unrelated. The authority is the agent's
@@ -862,10 +895,13 @@ def _lock_holder(session_id: str) -> int | None:
         # it asked about.
         return None
     try:
-        raw = json.loads(
-            (KIRO_SESSION_DIR / f"{session_id}.lock")
-            .read_bytes().decode("utf-8", "replace"))
-    except (OSError, ValueError):
+        with open(KIRO_SESSION_DIR / f"{session_id}.lock", "rb") as fh:
+            prefix = fh.read(LOCK_MAX_BYTES)
+    except OSError:
+        return None
+    try:
+        raw = json.loads(prefix.decode("utf-8", "replace"))
+    except ValueError:
         return None
     if not isinstance(raw, dict):
         return None
@@ -882,6 +918,12 @@ def _lock_holder(session_id: str) -> int | None:
     if created > started + LOCK_START_SKEW_SECONDS:
         # The pid exists but belongs to something that started long after this
         # lock was written — a recycled pid, not the session's holder.
+        return None
+    if pid == _supervisor.agent_pid():
+        # Our own agent. `session/load` makes it write this lock naming
+        # *itself*, so a lock left behind by a load that failed on our side
+        # would otherwise refuse every retry for the agent's whole life —
+        # telling the operator to exit a process that is PowerAtlas.
         return None
     return pid
 
@@ -924,6 +966,20 @@ def _load_session_cwd(session_id: str) -> str:
     except BadCwd:
         log.info("ACP load: stored cwd %r is gone; using the neutral cwd", stored)
         return str(_neutral_cwd())
+
+
+def _session_limit_message() -> str:
+    """Why the cap refused, and the only thing that actually frees a slot.
+
+    Not "close one first": there is no close control — ``close`` answers
+    ``not_implemented`` until Phase 6 — and a session is released only when the
+    agent process dies. Naming a control that does not exist leaves the
+    operator hunting for it, and the cap is now reachable by browsing three
+    sessions from the dashboard rather than by deliberately creating three.
+    """
+    return (f"At most {MAX_SESSIONS} sessions at once (~306 MB each). Nothing "
+            "closes a session yet, so the only way to free one is to restart "
+            "PowerAtlas.")
 
 
 class _Supervisor:
@@ -996,6 +1052,18 @@ class _Supervisor:
         """
         proc = self._proc
         return self._ready and proc is not None and proc.poll() is None
+
+    def agent_pid(self) -> int | None:
+        """The pid of the process this supervisor is bound to, if any.
+
+        Deliberately not gated on ``poll()``: this is read from a worker thread
+        (``_lock_holder``) and the only thing it is used for is *suppressing* a
+        lock hint. A pid that has been recycled between the agent's death and
+        ``_detach`` unbinding it can therefore cost a more specific message and
+        nothing else — it can never grant a load that should have been refused.
+        """
+        proc = self._proc
+        return None if proc is None else proc.pid
 
     def _get_start_lock(self) -> asyncio.Lock:
         # Created on first use rather than in `__init__`: an `asyncio.Lock`
@@ -1579,9 +1647,7 @@ class _Supervisor:
         recording the session and releasing its slot.
         """
         if len(self.sessions) + self._reserved >= MAX_SESSIONS:
-            raise SessionLimit(
-                f"At most {MAX_SESSIONS} sessions at once "
-                f"(~306 MB each); close one first.")
+            raise SessionLimit(_session_limit_message())
         self._reserved += 1
         try:
             await self.ensure_started()
@@ -1614,25 +1680,35 @@ class _Supervisor:
         ``session/update`` notifications *while the request is still
         outstanding*, and ``record`` silently drops any frame whose session has
         no buffer — so registering afterwards would return a session whose
-        history is empty for exactly the reason the load existed.
+        history is empty for exactly the reason the load existed. What stops
+        that early registration also handing the replay to a socket is
+        ``_registry.loading``, held by ``_handle_load`` across this whole call.
+
+        The reservation is released the instant the session is recorded rather
+        than at the end, because from that instant ``sessions`` counts it.
+        Holding both counted the loading session twice: measured, with one
+        session live, a concurrent ``new`` was refused ``too_many_sessions``
+        while only two existed.
 
         Every failure path unregisters it again, including cancellation: a
         half-loaded session left in ``sessions`` would be counted against
         MAX_SESSIONS and answered by ``subscribe`` with an empty transcript.
         """
         if len(self.sessions) + self._reserved >= MAX_SESSIONS:
-            raise SessionLimit(
-                f"At most {MAX_SESSIONS} sessions at once "
-                f"(~306 MB each); close one first.")
+            raise SessionLimit(_session_limit_message())
         self._reserved += 1
+        reserved = True
         try:
             await self.ensure_started()
             if session_id in self.sessions:
                 # A concurrent `load` for the same id got here first — or
                 # `ensure_started` spawned a replacement and something else
                 # populated it. Either way its buffer is the better answer than
-                # a second agent-side replay appended to the first.
-                raise AgentRejected("That session is already loaded.")
+                # a second agent-side replay appended to the first, so hand the
+                # caller the live record and let it subscribe. Refusing here
+                # instead left the loser an error frame it could not act on.
+                live = self.sessions[session_id]
+                return {"sessionId": session_id, "cwd": live.get("cwd", cwd)}
             self.sessions[session_id] = {
                 "cwd": cwd,
                 "created": time.time(),
@@ -1641,6 +1717,11 @@ class _Supervisor:
                 "loaded": True,
             }
             self.history[session_id] = _History()
+            # Recorded, so the slot it reserved is now counted by `sessions`.
+            # Released without suspending in between, which is what makes the
+            # handover atomic against another `new_session`'s check.
+            self._reserved -= 1
+            reserved = False
             try:
                 await self._request(
                     "session/load",
@@ -1650,7 +1731,8 @@ class _Supervisor:
                 self.history.pop(session_id, None)
                 raise
         finally:
-            self._reserved -= 1
+            if reserved:
+                self._reserved -= 1
         history = self.history.get(session_id)
         log.info("ACP session loaded: %s (cwd %s, %d event(s) replayed); %d live",
                  session_id, cwd, 0 if history is None else len(history),
@@ -1836,11 +1918,17 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
     retire the socket — so replaying a HISTORY_MAXLEN buffer event by event
     would kill the very socket the replay exists to serve, and would do it
     only for the sessions with enough history to be worth replaying.
+
+    A session mid-``session/load`` is parked rather than attached, for the same
+    reason: see ``_defer_until_loaded``.
     """
     if not session_id:
         conn.send(error_frame(
             "bad_envelope", "'subscribe' needs a sessionId."))
         log.warning("ACP subscribe refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _registry.loading:
+        _defer_until_loaded(conn, session_id)
         return
     meta = _supervisor.sessions.get(session_id)
     if meta is None:
@@ -1902,8 +1990,33 @@ def _in_use_message(pid: int) -> str:
             "only be open once — exit that one first.")
 
 
+def _unattributed_in_use_message() -> str:
+    """What is known when the agent refuses and no lock can name a holder.
+
+    ``_lock_holder`` has eight ways to answer ``None`` — psutil missing, the
+    lock absent, unreadable, not a JSON object, no pid, an unparseable
+    timestamp, a psutil error, a recycled pid — and every one of them used to
+    land here on the agent's own word for it, which on kiro-cli 2.14.2 is the
+    bare string "Internal error". State the cause that has actually been
+    measured and both remedies, without claiming an attribution we do not have.
+    """
+    return ("The agent refused to load this session and gave no reason "
+            "(JSON-RPC -32603). On kiro-cli 2.14.2 that is what a session "
+            "already open somewhere else looks like, and no lock file here "
+            "could name the process holding it. Exit any other kiro-cli that "
+            "has this session open and try again; if there is none, restart "
+            "PowerAtlas, which releases every session its agent still holds.")
+
+
 def _load_failure(exc: AcpError, holder: int | None) -> tuple[str, str]:
     """The code and message a failed ``session/load`` reaches the page as.
+
+    Only an ``AgentRejected`` is re-read as an occupied session. The agent
+    answering with a JSON-RPC error is the one shape an in-use refusal takes;
+    a timeout, a dead agent, a bad cwd or the local session cap say nothing
+    about who holds the session, and relabelling those ``session_in_use`` told
+    the operator to exit a process that was never there — while hiding the
+    failure that did happen.
 
     ``holder`` is the lock read *again*, after the failure. Measured on
     kiro-cli 2.14.2: a session open elsewhere is refused with a bare
@@ -1915,13 +2028,88 @@ def _load_failure(exc: AcpError, holder: int | None) -> tuple[str, str]:
 
     The message match stays below it for builds that do say so: the plan
     recorded ``-32603 … "Session is active in another process (PID n)"``,
-    measured before the agent self-updated.
+    measured before the agent self-updated. The last branch is what keeps the
+    whole path from resting on a third-party file format: a kiro-cli that
+    stopped writing locks, or wrote them differently, would otherwise revert
+    every in-use refusal to "Internal error".
     """
-    if holder is not None:
-        return "session_in_use", _in_use_message(holder)
-    if isinstance(exc, AgentRejected) and _IN_USE_MARKER in str(exc):
-        return "session_in_use", str(exc)
+    if isinstance(exc, AgentRejected):
+        text = str(exc)
+        if holder is not None:
+            return "session_in_use", _in_use_message(holder)
+        if _IN_USE_MARKER in text:
+            return "session_in_use", text
+        if _OPAQUE_REFUSAL_MARKER in text:
+            return "session_in_use", _unattributed_in_use_message()
     return exc.code, str(exc)
+
+
+def _load_pending_frame(session_id: str) -> dict:
+    """The frame that tells the page a load is running, and for how long.
+
+    The ceiling travels on the frame rather than being written into the
+    template. The page is the only thing that can tell a slow load from a
+    wedged one — the agent says nothing at all until it answers — and a
+    duration duplicated in the markup drifts from REQUEST_TIMEOUT_SECONDS in
+    silence.
+    """
+    return envelope("meta", {"pending": "load",
+                             "timeoutSeconds": REQUEST_TIMEOUT_SECONDS},
+                    session_id)
+
+
+def _defer_until_loaded(conn: _Connection, session_id: str) -> None:
+    """Park a socket until the ``session/load`` for its session lands.
+
+    Attaching it now is what a live-looking session invites — ``load_session``
+    registers the session before its round-trip, so ``sessions`` already holds
+    it — and it hands this socket the agent's replay one frame at a time,
+    retiring it at SEND_QUEUE_MAXSIZE. Reproduced: a 1200-event replay with a
+    second socket subscribing halfway queued 256 frames and overflowed.
+
+    Suppressing the broadcast for the duration instead would be worse, not
+    better: this socket would receive a ``history`` frame of the events so far
+    and then never see the rest, because they were recorded but not sent —
+    trading a retired socket, which is visible, for a silently truncated
+    conversation, which is not. Waiting costs a few seconds and loses nothing:
+    the frames not delivered here are precisely the ones the buffer this socket
+    is about to be handed is being built from.
+    """
+    waiters = _registry.loading[session_id]
+    if conn not in waiters:
+        waiters.append(conn)
+    conn.send(_load_pending_frame(session_id))
+    log.info("ACP subscribe deferred: session=%s is mid-load, %d socket(s) "
+             "waiting on it", session_id, len(waiters))
+
+
+def _deliver_load(conn: _Connection, waiters: list[_Connection],
+                  session_id: str, failure: tuple[str, str] | None) -> None:
+    """Answer the socket that asked for the load, and everyone who waited.
+
+    Synchronous, and called with the session already out of
+    ``_registry.loading``: attaching a socket and queueing its replay with
+    nothing suspending in between is the property ``_handle_subscribe`` rests
+    on, extended across every waiter.
+    """
+    for target in [conn] + [w for w in waiters if w is not conn]:
+        if target not in _registry.connections:
+            # The tab went away during the load. The session is fine and stays
+            # on the supervisor for a later `subscribe`; re-registering a
+            # retired socket would leave a subscriber entry behind a dead
+            # writer.
+            log.info("ACP session %s: a socket waiting on the load is gone",
+                     session_id)
+            continue
+        if failure is not None:
+            target.send(error_frame(failure[0], failure[1], session_id))
+            continue
+        # The replay throttle exists to ration a buffer rebuild a client can
+        # ask for freely. This one was paid for with an agent round-trip, and
+        # throttling it would discard the entire point of the load — a loaded
+        # session that renders nothing.
+        target.replayed_at = None
+        _handle_subscribe(target, session_id)
 
 
 async def _handle_load(conn: _Connection, session_id: str | None) -> None:
@@ -1929,12 +2117,13 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
 
     The conversation arrives as ``session/update`` notifications while
     ``session/load`` is still outstanding. They are recorded into the session's
-    buffer and deliberately not fanned out — this socket is attached
-    afterwards, by ``_handle_subscribe``, which coalesces the lot into one
-    ``history`` frame. Delivering them as they arrive would put a whole
-    conversation's worth of frames on a queue that retires the socket at
-    SEND_QUEUE_MAXSIZE, and would do it only for the sessions long enough to be
-    worth loading.
+    buffer and reach no socket while they arrive: ``_registry.loading`` holds
+    the session for the whole of it, and every socket that asks for the session
+    in that window is parked rather than attached. Each of them is then served
+    the same coalesced ``history`` frame this one gets. Delivering the
+    notifications as they arrive would put a whole conversation's worth of
+    frames on queues that retire a socket at SEND_QUEUE_MAXSIZE, and would do
+    it only for the sessions long enough to be worth loading.
 
     This is the async half of ``subscribe``, kept out of ``_handle_subscribe``
     because that function's freedom from ``await`` is what stops an event being
@@ -1948,55 +2137,71 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
             "underscores and hyphens, and nothing else."))
         log.warning("ACP load refused: [bad_session_id] %.200r", session_id)
         return
+    if session_id in _registry.loading:
+        # A concurrent load owns this session. Waiting for its buffer is the
+        # better answer the loser used to be refused outright — an error frame
+        # relabelled "exit that one first", against a page whose `loadTried`
+        # guard then stopped it retrying.
+        _defer_until_loaded(conn, session_id)
+        return
     if session_id in _supervisor.sessions:
         # Already live here, so the buffer is the better answer: a second
         # agent-side replay would append the whole conversation to itself.
         _handle_subscribe(conn, session_id)
         return
-    holder = _lock_holder(session_id)
-    if holder is not None:
-        conn.send(error_frame("session_in_use", _in_use_message(holder),
-                              session_id))
-        log.warning("ACP load refused: [session_in_use] session=%s pid=%d",
-                    session_id, holder)
-        return
-    # Sockets still attached to a session this process no longer holds: they
-    # outlived an agent that died under them. Detaching them before the load is
-    # what keeps the replay off their queues, where SEND_QUEUE_MAXSIZE frames
-    # would retire them. They re-subscribe on their own next frame.
-    for stale in tuple(_registry.subscribers.get(session_id, ())):
-        log.info("ACP load: detaching a socket left over from an earlier life "
-                 "of session %s", session_id)
-        _registry.detach(stale)
-    # The load spans a spawn on the first one plus the agent's own replay, and
-    # the page shows nothing at all until the `history` frame lands.
-    conn.send(envelope("meta", {"pending": "load"}, session_id))
+    # Claimed before the first `await`, which is what makes it a claim: two
+    # `load` frames for one session become two tasks, and each task's
+    # synchronous prefix runs to completion before the other starts.
+    _registry.loading[session_id] = []
+    failure: tuple[str, str] | None = None
     try:
-        cwd = await asyncio.to_thread(_load_session_cwd, session_id)
-        await _supervisor.load_session(session_id, cwd)
-    except AcpError as exc:
-        code, message = _load_failure(exc, _lock_holder(session_id))
-        log.warning("ACP session/load refused: [%s] %s", code, exc)
-        conn.send(error_frame(code, message, session_id))
-        return
-    except Exception:
-        log.exception("ACP session/load failed")
-        conn.send(error_frame(
-            "internal_error",
-            "Loading the session failed; see orchestrator.log.", session_id))
-        return
-    if conn not in _registry.connections:
-        # The tab went away during the load. The session is fine and stays on
-        # the supervisor for a later `subscribe`; re-registering a retired
-        # socket would leave a subscriber entry behind a dead writer.
-        log.info("ACP session %s loaded after its socket went away", session_id)
-        return
-    # The replay throttle exists to ration a buffer rebuild a client can ask
-    # for freely. This one was paid for with an agent round-trip, and throttling
-    # it would discard the entire point of the load — a loaded session that
-    # renders nothing.
-    conn.replayed_at = None
-    _handle_subscribe(conn, session_id)
+        # Every step is inside this ``try``, the pre-flight included. It used to
+        # sit outside one, so anything it raised escaped into a spawned task's
+        # future and left the socket holding a pending label with no error
+        # frame behind it — and with waiters, that would strand them too.
+        try:
+            holder = await asyncio.to_thread(_lock_holder, session_id)
+            if holder is not None:
+                failure = ("session_in_use", _in_use_message(holder))
+                log.warning(
+                    "ACP load refused: [session_in_use] session=%s pid=%d",
+                    session_id, holder)
+            else:
+                # Sockets still attached to a session this process no longer
+                # holds: they outlived an agent that died under them. Detaching
+                # them before the load is what keeps the replay off their
+                # queues, where SEND_QUEUE_MAXSIZE frames would retire them.
+                # They re-subscribe on their own next frame.
+                for stale in tuple(_registry.subscribers.get(session_id, ())):
+                    log.info("ACP load: detaching a socket left over from an "
+                             "earlier life of session %s", session_id)
+                    _registry.detach(stale)
+                # The load spans a spawn on the first one plus the agent's own
+                # replay, and the page shows nothing until the `history` frame.
+                conn.send(_load_pending_frame(session_id))
+                cwd = await asyncio.to_thread(_load_session_cwd, session_id)
+                await _supervisor.load_session(session_id, cwd)
+        except AcpError as exc:
+            failure = _load_failure(
+                exc, await asyncio.to_thread(_lock_holder, session_id))
+            # The code, the message the page is actually given, and the session,
+            # in one line. Logging the substituted code beside the original
+            # exception produced lines that contradicted themselves, and neither
+            # failed-load line named a session at all — alone among this
+            # module's refusals.
+            log.warning("ACP session/load refused: [%s] session=%s %s%s",
+                        failure[0], session_id, failure[1],
+                        "" if failure[1] == str(exc) else " (agent: %s)" % exc)
+        except Exception:
+            log.exception("ACP session/load failed: session=%s", session_id)
+            failure = ("internal_error",
+                       "Loading the session failed; see orchestrator.log.")
+    finally:
+        # Released and the answers below queued with nothing suspending in
+        # between, so no live event can be broadcast between a socket being
+        # attached and being handed the replay that event belongs in.
+        waiters = _registry.loading.pop(session_id, [])
+    _deliver_load(conn, waiters, session_id, failure)
 
 
 async def _handle_new(conn: _Connection, payload: dict) -> None:
