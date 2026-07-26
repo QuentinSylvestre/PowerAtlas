@@ -72,6 +72,12 @@
   // means the handshake was rejected, which is a different failure from a
   // socket that lived and then dropped, and needs a different recovery.
   var opened = false;
+  // ACP_SID is only ever the *initial* value, from ?sid= in the URL. Every
+  // later read must be of `sessionId`, which `session` frames update: a
+  // reconnect that subscribed with the baked-in id would resubscribe to
+  // whatever the URL said at render time, replaying that conversation over
+  // the live one — or, with no ?sid= at all, send no subscribe and leave a
+  // connected-looking page whose next prompt is refused `not_subscribed`.
   var sessionId = ACP_SID || null;
   // The message body consecutive agent chunks are appended to. Null between
   // turns, so the next chunk opens a new bubble instead of extending the old.
@@ -80,8 +86,18 @@
   // frames in it are real and render normally; what would be wrong is
   // narrating a replay into the transport log as if it were live traffic.
   var replaying = false;
+  // Whether the server holds a turn for this session. Never inferred from a
+  // replayed turn marker — the buffer evicts those; the `session` frame
+  // carries the authoritative value.
+  var turnActive = false;
+  // The prompt handed to a `send` that has not yet been acknowledged by a
+  // turn starting. Held so a refusal can put it back in the textarea.
+  var pendingPrompt = null;
+  // toolCallId -> the elements a later `tool_update` rewrites in place, so a
+  // call that runs then completes is one row rather than three.
+  var toolRows = Object.create(null);
 
-  if (ACP_SID) sidEl.textContent = 'session ' + ACP_SID;
+  if (sessionId) sidEl.textContent = 'session ' + sessionId;
 
   function setState(state, text) {
     statusEl.dataset.state = state;
@@ -112,17 +128,21 @@
     return scheme + '//' + location.host + '/ws/acp?t=' + encodeURIComponent(ACP_TOKEN);
   }
 
-  function send(type, payload, sessionId) {
+  // Returns whether the frame actually left. Callers holding something the
+  // user typed need to know: silently reporting a drop into a 120 px log strip
+  // while clearing the textarea loses the prompt with no way to get it back.
+  function send(type, payload, sid) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       logLine('error', 'not connected — nothing sent');
-      return;
+      return false;
     }
     ws.send(JSON.stringify({
       type: type,
-      sessionId: sessionId || null,
+      sessionId: sid || null,
       payload: payload || {}
     }));
     logLine('out', '→ ' + type);
+    return true;
   }
 
   function setPending(pending) {
@@ -136,6 +156,7 @@
   }
 
   function setTurn(active) {
+    turnActive = active;
     sendBtn.disabled = active || !sessionId;
     sendBtn.textContent = active ? 'Working…' : 'Send';
   }
@@ -149,30 +170,111 @@
              - transcriptEl.clientHeight < 60;
   }
 
+  // `role` is a literal at every call site, and `appendChunk` narrows the one
+  // value that comes off the wire to a fixed pair before it gets here. That is
+  // deliberate: this is the only place a class name is built by concatenation,
+  // and a payload-derived one would be an attribute sink for a string the
+  // agent wrote.
   function addMessage(role, text) {
+    var stick = stuckToBottom();
     var row = document.createElement('div');
     row.className = 'acp-msg acp-msg-' + role;
     var who = document.createElement('span');
     who.className = 'acp-msg-role';
-    who.textContent = role === 'user' ? 'you' : (role === 'agent' ? 'agent' : '');
+    who.textContent = role === 'user' ? 'you'
+      : (role === 'agent' ? 'agent' : (role === 'error' ? 'error' : ''));
     var body = document.createElement('div');
     body.className = 'acp-msg-body';
     body.textContent = text;
     row.appendChild(who);
     row.appendChild(body);
     transcriptEl.appendChild(row);
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     return body;
   }
 
-  function appendChunk(role, text) {
-    var stick = stuckToBottom();
-    if (role === 'agent' && agentBody) {
-      agentBody.textContent += text;
-    } else {
-      var body = addMessage(role, text);
-      agentBody = role === 'agent' ? body : null;
+  function addToolCall(payload) {
+    // Every class name below is a literal. `status`, `kind` and `title` are
+    // agent-authored and reach the page only through textContent — under -a
+    // there is no permission gate, so this string can be anything, and it is
+    // the one thing an operator has to read to know what ran.
+    var id = payload.toolCallId;
+    var known = id ? toolRows['t:' + id] : null;
+    if (known) {
+      known.status.textContent = payload.status || 'update';
+      if (payload.command && !known.body.querySelector('.acp-tool-cmd')) {
+        known.body.appendChild(commandBlock(payload));
+      }
+      return;
     }
+
+    var stick = stuckToBottom();
+    // A tool call ends the open agent bubble: the prose after it is a new
+    // paragraph, not a continuation of the sentence the call interrupted.
+    agentBody = null;
+
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-tool';
+    var who = document.createElement('span');
+    who.className = 'acp-msg-role';
+    who.textContent = 'tool';
+    var body = document.createElement('div');
+    body.className = 'acp-msg-body';
+
+    var head = document.createElement('div');
+    head.className = 'acp-tool-head';
+    var name = document.createElement('span');
+    name.className = 'acp-tool-name';
+    name.textContent = payload.title || payload.kind || 'tool call';
+    head.appendChild(name);
+    if (payload.kind && payload.title) {
+      var kind = document.createElement('span');
+      kind.className = 'acp-tool-kind';
+      kind.textContent = payload.kind;
+      head.appendChild(kind);
+    }
+    var status = document.createElement('span');
+    status.className = 'acp-tool-status';
+    status.textContent = payload.status || 'started';
+    head.appendChild(status);
+    body.appendChild(head);
+
+    if (payload.command) body.appendChild(commandBlock(payload));
+
+    row.appendChild(who);
+    row.appendChild(body);
+    transcriptEl.appendChild(row);
+    if (id) toolRows['t:' + id] = { status: status, body: body };
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function commandBlock(payload) {
+    var wrap = document.createElement('div');
+    var cmd = document.createElement('div');
+    cmd.className = 'acp-tool-cmd';
+    cmd.textContent = payload.command;
+    wrap.appendChild(cmd);
+    if (payload.commandTruncated) {
+      // The clip is stated rather than silent: a command that ends mid-word
+      // and looks complete is worse than no rendering at all.
+      var more = document.createElement('div');
+      more.className = 'acp-tool-more';
+      more.textContent = 'showing the first ' + payload.command.length +
+                         ' of ' + payload.commandLength + ' characters';
+      wrap.appendChild(more);
+    }
+    return wrap;
+  }
+
+  function appendChunk(role, text) {
+    if (role === 'agent' && agentBody) {
+      var stick = stuckToBottom();
+      agentBody.textContent += text;
+      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      return;
+    }
+    var body = addMessage(role, text);
+    agentBody = role === 'agent' ? body : null;
   }
 
   function clearTranscript() {
@@ -180,6 +282,7 @@
     // the no-innerHTML rule true of every line on this page without exception.
     transcriptEl.textContent = '';
     agentBody = null;
+    toolRows = Object.create(null);
   }
 
   function sendPrompt() {
@@ -189,8 +292,31 @@
       logLine('error', 'no session yet — create one first');
       return;
     }
-    send('prompt', { prompt: text }, sessionId);
+    if (turnActive) {
+      // The button is disabled during a turn but Enter is not, and a prompt
+      // sent here comes back refused `turn_in_progress`.
+      logLine('error', 'still answering the previous prompt — not sent');
+      return;
+    }
+    if (!send('prompt', { prompt: text }, sessionId)) return;
+    pendingPrompt = text;
     promptInput.value = '';
+  }
+
+  function restorePendingPrompt(why) {
+    var text = pendingPrompt;
+    pendingPrompt = null;
+    if (text === null) return;
+    // Only if the box is still empty: the user may have started typing the
+    // next thing while the refusal was in flight, and overwriting that would
+    // be the same loss in the other direction.
+    if (promptInput.value) {
+      addMessage('note', 'the refused prompt is not restored — the box already '
+                         + 'has something in it: ' + text);
+      return;
+    }
+    promptInput.value = text;
+    logLine('info', 'prompt restored to the box (' + why + ')');
   }
 
   function handle(frame) {
@@ -209,17 +335,34 @@
     }
     if (type === 'meta' && payload.turn === 'start') {
       agentBody = null;
-      setTurn(true);
+      pendingPrompt = null;
+      // Live turn markers move the buttons; replayed ones only separate the
+      // transcript's bubbles. Whether a turn is running *now* is what the
+      // `session` frame says, because these markers are evictable.
+      if (!replaying) setTurn(true);
       return;
     }
     if (type === 'meta' && payload.turn === 'end') {
       agentBody = null;
-      setTurn(false);
+      if (!replaying) setTurn(false);
+      if (payload.stopReason && payload.stopReason !== 'end_turn') {
+        // Written into the transcript, not only the log strip, because the
+        // log is not replayed: a turn that failed would otherwise come back
+        // after a reload as a prompt with no answer and no explanation —
+        // exactly the hung-turn appearance turn boundaries exist to prevent.
+        addMessage('note', 'turn ended: ' + payload.stopReason);
+      }
       logLine('info', '← turn end (' + payload.stopReason + ')');
       return;
     }
     if (type === 'chunk') {
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+      return;
+    }
+    if (type === 'tool_call' || type === 'tool_update') {
+      addToolCall(payload);
+      logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
+                    ' [' + (payload.status || '') + ']');
       return;
     }
     if (type === 'history_truncated') {
@@ -246,7 +389,11 @@
       setPending(false);
       sessionId = payload.sessionId;
       clearTranscript();
-      setTurn(false);
+      // The server's answer, not an inference from whatever survived in the
+      // buffer. A turn longer than the buffer replays without its start
+      // marker, and Send would otherwise come back enabled against a session
+      // still holding the turn.
+      setTurn(!!payload.turnActive);
       sidEl.textContent = 'session ' + payload.sessionId;
       logLine('in', '← session ' + payload.sessionId +
                     (payload.created ? ' (created' : ' (resubscribed') +
@@ -264,12 +411,20 @@
       setTurn(false);
       setState('closed', 'agent gone');
       sidEl.textContent = '';
+      addMessage('error', 'the agent exited (code ' + payload.exitCode + ') — ' +
+                          payload.message);
+      restorePendingPrompt('the agent exited');
       logLine('error', '← agent_died (exit ' + payload.exitCode + ') ' +
                        payload.message);
       return;
     }
     if (type === 'error') {
       setPending(false);
+      // In the transcript as well as the log: the log strip is 120 px tall and
+      // is not replayed, so a failure that reaches only it is invisible after
+      // a reload and easy to miss before one.
+      addMessage('error', '[' + payload.code + '] ' + payload.message);
+      if (!replaying) restorePendingPrompt(payload.code);
       logLine('error', '← error [' + payload.code + '] ' + payload.message);
       return;
     }
@@ -326,7 +481,7 @@
       opened = true;
       setState('open', 'connected');
       logLine('info', 'socket open to ' + location.host);
-      if (ACP_SID) send('subscribe', {}, ACP_SID);
+      if (sessionId) send('subscribe', {}, sessionId);
     };
     ws.onmessage = function (ev) {
       var frame;

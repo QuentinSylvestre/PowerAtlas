@@ -5,8 +5,8 @@ This module owns everything that happens on a ``/ws/acp`` socket once
 registry, the outbound fan-out machinery — and, since Phase 3b, the supervised
 ``kiro-cli acp`` subprocess it all talks to: spawn, the JSON-RPC handshake,
 ``session/new``, and teardown. Phase 4 adds ``session/prompt``, the
-``agent_message_chunk`` fan-out behind it, and the per-session ring buffer that
-a reload replays. ``cancel``/``close`` still answer a typed
+``agent_message_chunk`` and tool-call fan-out behind it, and the per-session
+ring buffer that a reload replays. ``cancel``/``close`` still answer a typed
 ``not_implemented``; they arrive in Phase 6.
 
 Isolation boundary — this module imports exactly one name from the rest of
@@ -119,10 +119,19 @@ MAX_MESSAGE_BYTES = 256 * 1024
 # from Phase 3b one fan-out target per socket on every agent event.
 MAX_CONNECTIONS = 8
 
-# Per-socket outbound queue depth. Bounded so that one browser tab that has
-# stopped reading drops its own socket instead of growing the server's memory
-# while Phase 3b streams chunks at it.
+# Per-socket outbound queue, bounded on both count and bytes so that one
+# browser tab that has stopped reading drops its own socket instead of growing
+# the server's memory while chunks stream at it.
+#
+# The count alone is not a memory bound, for the same reason it is not one for
+# `_History`: nothing caps a queued frame's size below MAX_AGENT_LINE_BYTES, so
+# 256 frames is 256 MiB on one socket and 2 GiB across MAX_CONNECTIONS —
+# against 256 KiB in the opposite direction. 8 MiB is comfortably above the
+# largest single frame the server builds (a `history` replay, capped at
+# HISTORY_MAX_BYTES) so the bound cannot kill the socket a `subscribe` exists
+# to serve, and 64 MiB across every socket is a bound rather than a hope.
 SEND_QUEUE_MAXSIZE = 256
+SEND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 
 # The agent→client direction's size cap, and the block size the reader works
 # in. Until Phase 4 nothing streamed, so `for line in proc.stdout` had no
@@ -156,6 +165,15 @@ READ_BLOCK_BYTES = 64 * 1024
 # suffix says so either way.
 HISTORY_MAXLEN = 2000
 HISTORY_MAX_BYTES = 2 * 1024 * 1024
+
+# How much of a tool call's input the page is shown. Under `-a` there is no
+# permission gate, so what the operator can read here is the only account of
+# what ran — a command clipped to a shell's first token would be worse than
+# not rendering it. 4000 characters is far above any command yet observed and
+# still bounded, because this string is agent-authored, is recorded in the
+# replay buffer, and is rendered into the DOM. A clipped command says so on
+# the page rather than looking complete.
+MAX_TOOL_INPUT_CHARS = 4000
 
 # How long a server-initiated close waits for the outbound queue to reach the
 # wire before giving up on it. Bounded because the peer this is waiting on may
@@ -299,16 +317,96 @@ def _content_text(content) -> str:
     return ""
 
 
-def _frame_weight(frame: dict) -> int:
-    """Roughly what holding one frame in a replay buffer costs.
+def _as_text(value) -> str:
+    """A payload field the page will render, or ``""`` if it is not a string.
 
-    Only the payload's strings can grow — chunk text, an error message — so
-    summing those plus a fixed allowance for the envelope is close enough to
-    drive eviction without paying for a second ``json.dumps`` per chunk on the
-    streaming path.
+    Every field of an agent notification is agent-authored and none of it is
+    schema-checked on the way in. Narrowing to ``str`` here is what keeps the
+    frame's shape stable for `_frame_weight` and for the renderer, which reads
+    these as text and nothing else.
     """
-    payload = frame.get("payload") or {}
-    return 128 + sum(len(v) for v in payload.values() if isinstance(v, str))
+    return value if isinstance(value, str) else ""
+
+
+def _tool_input_text(update: dict) -> str:
+    """The command — or the nearest thing to one — a tool call is about to run.
+
+    ACP puts the model's own arguments under ``rawInput`` with no schema, so
+    the shape differs per tool. The named keys are the ones that carry the
+    thing an operator needs to read; anything else is serialized whole rather
+    than reported as absent, because "a tool ran and we cannot say what it did"
+    is the state this rendering exists to remove.
+    """
+    raw = update.get("rawInput")
+    if raw is None:
+        raw = update.get("input")
+    if isinstance(raw, str):
+        return raw
+    if not isinstance(raw, dict):
+        return ""
+    for key in ("command", "path", "file_path", "query", "content"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    try:
+        return json.dumps(raw, sort_keys=True)
+    except (TypeError, ValueError):
+        return ""
+
+
+def _tool_payload(update: dict) -> dict:
+    """What a tool-call notification carries to the page.
+
+    Deliberately not the tool's *output*: a file read or a build log is
+    unbounded by nature and every byte of it would be recorded in the replay
+    buffer, evicting the conversation it is meant to annotate. What ran, under
+    what name, and how it ended is the operator's question here.
+    """
+    payload = {
+        "toolCallId": _as_text(update.get("toolCallId")),
+        "title": _as_text(update.get("title")),
+        "kind": _as_text(update.get("kind")),
+        "status": _as_text(update.get("status")),
+    }
+    command = _tool_input_text(update)
+    if len(command) > MAX_TOOL_INPUT_CHARS:
+        payload["commandLength"] = len(command)
+        payload["commandTruncated"] = True
+        command = command[:MAX_TOOL_INPUT_CHARS]
+    payload["command"] = command
+    return payload
+
+
+def _string_bytes(value) -> int:
+    """UTF-8 bytes held by every string reachable from ``value``.
+
+    Recursive because payloads nest: a ``tool_call`` carries its command under
+    a key, and a ``history`` frame carries every buffered event under
+    ``events``. A top-level-only sum priced both at the envelope allowance
+    however large they really were.
+
+    ``errors="replace"`` because a lone surrogate is representable in JSON and
+    not in UTF-8 — measuring must not be the thing that raises.
+    """
+    if isinstance(value, str):
+        return len(value.encode("utf-8", "replace"))
+    if isinstance(value, dict):
+        return sum(_string_bytes(k) + _string_bytes(v) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return sum(_string_bytes(item) for item in value)
+    return 0
+
+
+def _frame_weight(frame: dict) -> int:
+    """Roughly what holding one frame costs, in **bytes**.
+
+    Bytes and not characters: ``len()`` on a ``str`` counts characters, and a
+    buffer of astral-plane text accounted at 2,087,398 was measured holding
+    8.24 MB. Summing the payload's strings plus a fixed envelope allowance is
+    close enough to drive eviction without paying for a second ``json.dumps``
+    per chunk on the streaming path.
+    """
+    return 128 + _string_bytes(frame.get("payload") or {})
 
 
 class _History:
@@ -362,7 +460,11 @@ class _Connection:
     def __init__(self, ws: WebSocket) -> None:
         self.ws = ws
         self.session_id: str | None = None
+        # Each entry is ``(weight, frame)``: the weight is computed once, on
+        # the way in, so the writer can release it again without a second walk
+        # of the frame it has just serialized.
         self._out: asyncio.Queue = asyncio.Queue(maxsize=SEND_QUEUE_MAXSIZE)
+        self._queued_bytes = 0
         self._writer: asyncio.Task | None = None
         self._overflowed = False
 
@@ -371,12 +473,22 @@ class _Connection:
 
     def send(self, frame: dict) -> None:
         """Queue a frame for delivery. Never blocks and never raises."""
+        weight = _frame_weight(frame)
+        # Never refuses onto an empty queue: a single frame heavier than the
+        # whole budget is still the only thing the socket is waiting for, and
+        # dropping it would leave the writer parked on `get()` with the
+        # overflow flag it will never wake up to read.
+        if self._queued_bytes and self._queued_bytes + weight > SEND_QUEUE_MAX_BYTES:
+            self._overflowed = True
+            return
         try:
-            self._out.put_nowait(frame)
+            self._out.put_nowait((weight, frame))
         except asyncio.QueueFull:
             # A socket that has not drained SEND_QUEUE_MAXSIZE frames is not
             # coming back. Let the writer close it rather than keep buffering.
             self._overflowed = True
+            return
+        self._queued_bytes += weight
 
     async def _write_loop(self) -> None:
         # Names the server-side fault that ended the writer, and is empty for a
@@ -387,7 +499,8 @@ class _Connection:
         close_reason = ""
         try:
             while True:
-                frame = await self._out.get()
+                weight, frame = await self._out.get()
+                self._queued_bytes -= weight
                 try:
                     await self.ws.send_text(json.dumps(frame))
                 finally:
@@ -1183,13 +1296,21 @@ class _Supervisor:
                     "chunk", {"role": "agent", "text": text}, session_id))
             return
         if kind in ("tool_call", "tool_call_update"):
-            # Logged from this phase, not from Phase 6 where tool rendering
-            # lands. Execution capability arrives with `-a` *now*; without this
-            # line three phases would run commands with no record anywhere.
-            log.info("ACP tool %s: session=%s id=%s status=%s title=%r kind=%s",
-                     kind, session_id, update.get("toolCallId"),
-                     update.get("status"), update.get("title"),
-                     update.get("kind"))
+            payload = _tool_payload(update)
+            log.info("ACP tool %s: session=%s id=%s status=%s title=%r kind=%s "
+                     "input=%.200r", kind, session_id, payload["toolCallId"],
+                     payload["status"], payload["title"], payload["kind"],
+                     payload["command"])
+            if isinstance(session_id, str):
+                # Rendered, not only logged. `-a` removes the permission gate
+                # and the justification for removing it was a human watching
+                # the run; a tool call that reaches nothing but a log file the
+                # app does not always write is not something anyone is
+                # watching. A `shell` call was observed writing outside its
+                # own session's cwd with the operator seeing none of it.
+                _emit(session_id, envelope(
+                    "tool_call" if kind == "tool_call" else "tool_update",
+                    payload, session_id))
             return
         log.debug("ACP notification %s (%s)", method, kind or "-")
 
@@ -1444,6 +1565,7 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
     if not session_id:
         conn.send(error_frame(
             "bad_envelope", "'subscribe' needs a sessionId."))
+        log.warning("ACP subscribe refused: [bad_envelope] no sessionId")
         return
     meta = _supervisor.sessions.get(session_id)
     if meta is None:
@@ -1451,12 +1573,21 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
             "unknown_session",
             "This server has no such live session. It may belong to an "
             "earlier PowerAtlas process — create a new one.", session_id))
+        log.warning("ACP subscribe refused: [unknown_session] session=%s",
+                    session_id)
         return
     _registry.attach(conn, session_id)
     conn.send(envelope("session", {
         "sessionId": session_id,
         "cwd": meta.get("cwd", ""),
         "created": False,
+        # The authoritative answer to "is this session still answering",
+        # carried on the frame that already exists for it. The page's only
+        # other source is a replayed `meta {"turn": "start"}` — a frame the
+        # ring buffer is built to evict, so a turn emitting more than
+        # HISTORY_MAXLEN chunks would replay without it and leave Send enabled
+        # against a session that is still busy.
+        "turnActive": session_id in _supervisor.inflight,
     }, session_id))
     history = _supervisor.history.get(session_id)
     if history is None:
@@ -1467,6 +1598,10 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
                        "follows is the tail of the conversation.",
         }, session_id))
     conn.send(envelope("history", {"events": history.events()}, session_id))
+    log.info("ACP subscribe: session=%s, %d event(s) replayed%s%s",
+             session_id, len(history),
+             ", truncated" if history.truncated else "",
+             ", turn in flight" if session_id in _supervisor.inflight else "")
 
 
 async def _handle_new(conn: _Connection, payload: dict) -> None:
@@ -1519,34 +1654,39 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     a second tab watching the same session sees the same transcript — including
     the prompt it did not send.
     """
+    def refuse(code: str, message: str) -> None:
+        # Every one of these is a state the page cannot explain on its own —
+        # `not_subscribed` in particular is what a reconnect subscribing with
+        # the wrong session id looks like from the client side, and it used to
+        # leave no trace on the server at all.
+        conn.send(error_frame(code, message, session_id))
+        log.warning("ACP prompt refused: [%s] session=%s", code, session_id)
+
     if not session_id:
         conn.send(error_frame("bad_envelope", "'prompt' needs a sessionId."))
+        log.warning("ACP prompt refused: [bad_envelope] no sessionId")
         return
     text = payload.get("prompt")
     if not isinstance(text, str) or not text.strip():
-        conn.send(error_frame(
-            "bad_payload", "'prompt' must be a non-empty string.", session_id))
+        refuse("bad_payload", "'prompt' must be a non-empty string.")
         return
     if session_id not in _supervisor.sessions:
-        conn.send(error_frame(
-            "unknown_session",
-            "This server has no such live session. It may belong to an "
-            "earlier PowerAtlas process — create a new one.", session_id))
+        refuse("unknown_session",
+               "This server has no such live session. It may belong to an "
+               "earlier PowerAtlas process — create a new one.")
         return
     if conn.session_id != session_id:
         # A socket that is not attached would start a turn and then receive
         # none of the stream it started, which on the page is indistinguishable
         # from an agent that never answered.
-        conn.send(error_frame(
-            "not_subscribed",
-            "Subscribe to this session before prompting it.", session_id))
+        refuse("not_subscribed", "Subscribe to this session before prompting it.")
         return
     if session_id in _supervisor.inflight:
-        conn.send(error_frame(
-            "turn_in_progress",
-            "This session is still answering the previous prompt.", session_id))
+        refuse("turn_in_progress",
+               "This session is still answering the previous prompt.")
         return
     _supervisor.inflight.add(session_id)
+    log.info("ACP turn start: session=%s (%d chars)", session_id, len(text))
 
     _emit(session_id, envelope("chunk", {"role": "user", "text": text}, session_id))
     _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
@@ -1569,5 +1709,6 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         stop_reason = "error"
     finally:
         _supervisor.inflight.discard(session_id)
+        log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         _emit(session_id, envelope(
             "meta", {"turn": "end", "stopReason": stop_reason}, session_id))

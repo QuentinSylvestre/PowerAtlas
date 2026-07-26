@@ -1,6 +1,7 @@
 """Tests for web module."""
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1620,11 +1621,15 @@ class _SinkWs:
 
 
 def _queued(conn) -> list[dict]:
-    """Everything sitting in a connection's outbound queue, in order."""
+    """Everything sitting in a connection's outbound queue, in order.
+
+    The queue holds ``(weight, frame)``; the weight is the send side's byte
+    budget bookkeeping and no test asserts on it directly.
+    """
     frames = []
     while True:
         try:
-            frames.append(conn._out.get_nowait())
+            frames.append(conn._out.get_nowait()[1])
         except asyncio.QueueEmpty:
             return frames
 
@@ -1723,6 +1728,30 @@ class TestAcpHistoryBuffer:
         assert len(history.events()) <= 5
         assert history.truncated is True
 
+    def test_the_budget_is_bytes_and_not_characters(self):
+        """``len()`` on a ``str`` counts characters: an astral-plane buffer
+        accounted at 2,087,398 was measured holding 8.24 MB. Each character
+        below is one ``len()`` unit and four UTF-8 bytes, so a character count
+        would fit eight of these under a budget that holds two."""
+        from power_atlas import acp as acp_mod
+        history = acp_mod._History()
+        big = "\U0001f600" * (acp_mod.HISTORY_MAX_BYTES // 4)
+        assert len(big) * 4 == len(big.encode("utf-8")) == acp_mod.HISTORY_MAX_BYTES
+        history.append(self._chunk(acp_mod, big))
+        assert history.truncated is False
+        history.append(self._chunk(acp_mod, big))
+        assert len(history.events()) == 1
+        assert history.truncated is True
+
+    def test_nested_payload_strings_are_weighed(self):
+        """A top-level-only walk priced a ``history`` frame — and, from this
+        phase, a ``tool_call`` carrying a command — at the envelope allowance
+        however large it really was."""
+        from power_atlas import acp as acp_mod
+        nested = acp_mod.envelope("history", {"events": [
+            acp_mod.envelope("chunk", {"role": "agent", "text": "z" * 5000})]})
+        assert acp_mod._frame_weight(nested) > 5000
+
     def test_one_oversized_event_is_never_evicted_to_empty(self):
         """A reload finding an empty replay reads as a lost conversation; a
         suffix of one event reads as what it is."""
@@ -1730,6 +1759,86 @@ class TestAcpHistoryBuffer:
         history = acp_mod._History()
         history.append(self._chunk(acp_mod, "y" * (acp_mod.HISTORY_MAX_BYTES * 2)))
         assert len(history.events()) == 1
+
+
+class TestAcpSendQueueByteBound:
+    """The send queue kept the defect the history buffer shed.
+
+    ``SEND_QUEUE_MAXSIZE`` bounds frames, not bytes, and nothing caps a queued
+    frame below ``MAX_AGENT_LINE_BYTES`` — so one socket could hold 256 MiB and
+    ``MAX_CONNECTIONS`` of them 2 GiB, against 256 KiB in the other direction.
+    """
+
+    def _conn(self, acp_mod):
+        return acp_mod._Connection(_SinkWs())
+
+    def test_a_stalled_socket_cannot_pin_unbounded_memory(self):
+        from power_atlas import acp as acp_mod
+        conn = self._conn(acp_mod)
+        big = "q" * (256 * 1024)
+        for _ in range(acp_mod.SEND_QUEUE_MAXSIZE):
+            conn.send(acp_mod.envelope("chunk", {"role": "agent", "text": big}))
+        assert conn._overflowed is True
+        assert conn._queued_bytes <= acp_mod.SEND_QUEUE_MAX_BYTES
+        # The count bound alone would have accepted every one of them.
+        assert conn._out.qsize() < acp_mod.SEND_QUEUE_MAXSIZE
+
+    def test_ordinary_traffic_never_trips_the_byte_bound(self):
+        """Positive control: a full queue of streamed chunks is normal."""
+        from power_atlas import acp as acp_mod
+        conn = self._conn(acp_mod)
+        for _ in range(acp_mod.SEND_QUEUE_MAXSIZE):
+            conn.send(acp_mod.envelope("chunk", {"role": "agent", "text": "tick"}))
+        assert conn._overflowed is False
+        assert conn._out.qsize() == acp_mod.SEND_QUEUE_MAXSIZE
+
+    def test_a_lone_frame_over_the_budget_is_still_delivered(self):
+        """Refusing it onto an empty queue would leave the writer parked on
+        ``get()`` with an overflow flag it never wakes up to read."""
+        from power_atlas import acp as acp_mod
+        conn = self._conn(acp_mod)
+        conn.send(acp_mod.envelope(
+            "chunk", {"role": "agent",
+                      "text": "w" * (acp_mod.SEND_QUEUE_MAX_BYTES + 4096)}))
+        assert conn._overflowed is False
+        assert conn._out.qsize() == 1
+
+    def test_the_writer_releases_the_bytes_it_has_sent(self):
+        """Without this the budget is a lifetime total and every long-lived
+        socket eventually refuses to send anything at all."""
+        from power_atlas import acp as acp_mod
+
+        async def drive():
+            conn = self._conn(acp_mod)
+            conn.start()
+            conn.send(acp_mod.envelope(
+                "chunk", {"role": "agent", "text": "u" * (1024 * 1024)}))
+            assert conn._queued_bytes > 1024 * 1024
+            await conn.drain()
+            await conn.stop()
+            return conn
+
+        conn = asyncio.run(drive())
+        assert conn._queued_bytes == 0
+        assert conn._overflowed is False
+
+    def test_a_full_byte_budget_replay_does_not_retire_its_own_socket(
+            self, acp_session):
+        """The bound must sit above the largest frame the server itself builds:
+        a ``history`` replay carries up to ``HISTORY_MAX_BYTES`` of text."""
+        acp_mod, sid = acp_session
+        history = acp_mod._supervisor.history[sid]
+        chunk = "h" * 64 * 1024
+        while not history.truncated:
+            history.append(acp_mod.envelope(
+                "chunk", {"role": "agent", "text": chunk}, sid))
+
+        conn = self._conn(acp_mod)
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        assert conn._overflowed is False
+        assert [f["type"] for f in _queued(conn)] == [
+            "session", "history_truncated", "history"]
 
 
 class TestAcpReplayOnSubscribe:
@@ -1816,6 +1925,65 @@ class TestAcpReplayOnSubscribe:
         assert frames[1]["payload"]["events"] == []
         assert frames[2]["payload"]["text"] == "live"
 
+    def test_subscribe_is_synchronous_by_construction(self):
+        """The atomicity above is "no ``await`` between ``attach`` and the
+        ``history`` frame", and nothing enforced it: converting this function
+        to ``async def`` together with the tests that drive it would leave
+        every frame-ordering assertion passing."""
+        import inspect
+        from power_atlas import acp as acp_mod
+        assert not inspect.iscoroutinefunction(acp_mod._handle_subscribe)
+        # Its only call site, for the same reason: a coroutine `_dispatch`
+        # would put a suspension point either side of the call.
+        assert not inspect.iscoroutinefunction(acp_mod._dispatch)
+
+    def test_subscribe_reports_a_turn_the_server_still_holds(self, acp_session):
+        """The page's only other source is a replayed ``meta {"turn":
+        "start"}`` — a frame the ring buffer is built to evict."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.inflight.add(sid)
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        assert _queued(conn)[0]["payload"]["turnActive"] is True
+
+    def test_subscribe_reports_an_idle_session(self, acp_session):
+        """Positive control: the flag must mean something."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        assert _queued(conn)[0]["payload"]["turnActive"] is False
+
+    def test_the_turn_flag_survives_a_buffer_that_evicted_its_marker(
+            self, acp_session):
+        """The whole point: a turn emitting more than ``HISTORY_MAXLEN`` chunks
+        replays with no ``turn: start`` left in it."""
+        acp_mod, sid = acp_session
+        history = acp_mod._supervisor.history[sid]
+        history.append(acp_mod.envelope("meta", {"turn": "start"}, sid))
+        for i in range(acp_mod.HISTORY_MAXLEN):
+            history.append(acp_mod.envelope(
+                "chunk", {"role": "agent", "text": "e%d" % i}, sid))
+        acp_mod._supervisor.inflight.add(sid)
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        replayed = frames[-1]["payload"]["events"]
+        assert not any(e["payload"].get("turn") == "start" for e in replayed)
+        assert frames[0]["payload"]["turnActive"] is True
+
+    def test_an_unknown_session_leaves_a_server_side_trace(self, acp_session,
+                                                           caplog):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            acp_mod._handle_subscribe(conn, "no-such-session")
+        assert any("unknown_session" in r.getMessage() for r in caplog.records)
+
 
 class TestAcpNotificationFanout:
     def test_agent_message_chunk_reaches_subscribers_and_the_buffer(self, acp_session):
@@ -1851,19 +2019,128 @@ class TestAcpNotificationFanout:
         })
         assert _queued(conn) == []
 
-    def test_tool_calls_are_logged_not_forwarded(self, acp_session):
-        """Rendering tool calls is phase 6's; forwarding them now would put
-        untyped frames on the wire that no client branch handles."""
-        acp_mod, sid = acp_session
+
+class TestAcpToolCallVisibility:
+    """Under ``-a`` there is no permission gate, and the accepted justification
+    for removing it was a human watching the run. A tool call that reaches only
+    a log file — one the app writes on a single launch path — is not something
+    anyone is watching: a ``shell`` call was observed reading and writing a
+    session store file outside its own session's cwd, unseen.
+    """
+
+    def _attached(self, acp_mod, sid):
         conn = acp_mod._Connection(_SinkWs())
         acp_mod._registry.connections.add(conn)
         acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _notify(self, acp_mod, sid, update):
         acp_mod._supervisor._on_notification({
             "method": "session/update",
-            "params": {"sessionId": sid, "update": {
-                "sessionUpdate": "tool_call", "toolCallId": "t1",
-                "title": "shell", "kind": "execute"}},
+            "params": {"sessionId": sid, "update": update},
         })
+
+    def test_a_tool_call_reaches_the_page_and_the_replay_buffer(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "Set the tab title", "kind": "execute",
+            "status": "pending",
+            "rawInput": {"command": "Get-Content ~/.kiro/sessions/cli/x.json"},
+        })
+
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["tool_call"]
+        assert frames[0]["payload"] == {
+            "toolCallId": "t1", "title": "Set the tab title",
+            "kind": "execute", "status": "pending",
+            "command": "Get-Content ~/.kiro/sessions/cli/x.json"}
+        # Recorded too, or a reload would show a conversation with no sign
+        # that anything ran during it.
+        assert acp_mod._supervisor.history[sid].events() == frames
+
+    def test_an_update_arrives_as_its_own_declared_type(self, acp_session):
+        """``tool_call_update`` is ACP's name; ``tool_update`` is the wire type
+        this module declared for it in ``SERVER_TYPES``."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed"})
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["tool_update"]
+        assert frames[0]["payload"]["status"] == "completed"
+        assert frames[0]["payload"]["toolCallId"] == "t1"
+
+    def test_the_command_is_logged_as_well_as_forwarded(self, acp_session, caplog):
+        """The log line is the trace that outlives the tab. The test it
+        replaces asserted only that forwarding did *not* happen, while its
+        name claimed it covered the logging."""
+        acp_mod, sid = acp_session
+        self._attached(acp_mod, sid)
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            self._notify(acp_mod, sid, {
+                "sessionUpdate": "tool_call", "toolCallId": "t9",
+                "title": "shell", "kind": "execute", "status": "in_progress",
+                "rawInput": {"command": "Remove-Item -Recurse C:/tmp"}})
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("ACP tool tool_call" in m and "t9" in m
+                   and "Remove-Item -Recurse C:/tmp" in m for m in messages), messages
+
+    def test_a_long_command_is_clipped_and_says_so(self, acp_session):
+        """A command clipped to look complete would be worse than none, so the
+        bound travels with the frame and the page states it."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        command = "echo " + "a" * (acp_mod.MAX_TOOL_INPUT_CHARS * 2)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t2",
+            "title": "shell", "rawInput": {"command": command}})
+        payload = _queued(conn)[0]["payload"]
+        assert payload["commandTruncated"] is True
+        assert payload["commandLength"] == len(command)
+        assert payload["command"] == command[:acp_mod.MAX_TOOL_INPUT_CHARS]
+
+    def test_a_short_command_carries_no_truncation_marker(self, acp_session):
+        """Positive control: the marker must mean something."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t3",
+            "rawInput": {"command": "dir"}})
+        assert "commandTruncated" not in _queued(conn)[0]["payload"]
+
+    def test_an_input_with_no_command_key_is_still_reported(self, acp_session):
+        """``rawInput`` has no schema and differs per tool. "A tool ran and we
+        cannot say what it did" is the state this rendering removes."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t4",
+            "title": "fs_write", "rawInput": {"mode": "create", "bytes": 42}})
+        assert _queued(conn)[0]["payload"]["command"] == (
+            '{"bytes": 42, "mode": "create"}')
+
+    def test_non_string_fields_do_not_reach_the_page_untyped(self, acp_session):
+        """Every field is agent-authored and none is schema-checked on the way
+        in; the renderer reads these as text and nothing else."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": {"nested": 1},
+            "title": ["shell"], "kind": 7, "status": None})
+        payload = _queued(conn)[0]["payload"]
+        assert payload["toolCallId"] == ""
+        assert payload["title"] == ""
+        assert payload["kind"] == ""
+        assert payload["status"] == ""
+
+    def test_a_tool_call_for_another_session_does_not_cross_over(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, "someone-else", {
+            "sessionUpdate": "tool_call", "toolCallId": "t5", "title": "shell"})
         assert _queued(conn) == []
         assert acp_mod._supervisor.history[sid].events() == []
 
@@ -1921,6 +2198,34 @@ class TestAcpPromptDispatch:
         acp_mod._supervisor.inflight.add(sid)
         asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
         assert _queued(conn)[0]["payload"]["code"] == "turn_in_progress"
+
+    @pytest.mark.parametrize("attach, sid_arg, payload, code", [
+        (True, None, {"prompt": "hi"}, "bad_envelope"),
+        (True, "self", {"prompt": ""}, "bad_payload"),
+        (True, "no-such-session", {"prompt": "hi"}, "unknown_session"),
+        (False, "self", {"prompt": "hi"}, "not_subscribed"),
+    ])
+    def test_every_refusal_leaves_a_server_side_trace(self, acp_session, caplog,
+                                                      attach, sid_arg, payload,
+                                                      code):
+        """``not_subscribed`` is what a reconnect subscribing with a stale
+        session id looks like from the client, and it left no trace at all."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid if attach else None)
+        target = sid if sid_arg == "self" else sid_arg
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            asyncio.run(acp_mod._handle_prompt(conn, target, payload))
+        assert _queued(conn)[0]["payload"]["code"] == code
+        assert any(code in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+
+    def test_the_turn_in_progress_refusal_is_logged(self, acp_session, caplog):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+        assert any("turn_in_progress" in r.getMessage() for r in caplog.records)
 
     def test_a_turn_streams_to_every_subscriber_and_is_recorded(self, acp_session):
         """The stub sits at the JSON-RPC transport, so the request this asserts

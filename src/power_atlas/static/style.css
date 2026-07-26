@@ -457,6 +457,19 @@ script { display: none; }
 .acp-msg-user .acp-msg-role { color: var(--accent); }
 .acp-msg-user .acp-msg-body { color: var(--text-muted); }
 .acp-msg-note .acp-msg-body { color: #fbbf24; font-size: 12px; font-style: italic; }
+.acp-msg-error .acp-msg-role { color: #f87171; }
+.acp-msg-error .acp-msg-body { color: #f87171; font-size: 12px; }
+/* Tool calls must not read as agent prose: under -a they are the only record
+   of what actually executed, so they get their own rail, colour and mono
+   command block rather than blending into the answer around them. */
+.acp-msg-tool .acp-msg-role { color: #c084fc; }
+.acp-msg-tool .acp-msg-body { border-left: 2px solid #c084fc; padding-left: 10px; white-space: normal; }
+.acp-tool-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.acp-tool-name { font-size: 12px; font-weight: 600; color: #e9d5ff; }
+.acp-tool-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
+.acp-tool-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.acp-tool-cmd { margin-top: 6px; max-height: 220px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; }
+.acp-tool-more { margin-top: 4px; font-size: 11px; font-style: italic; color: #fbbf24; }
 .acp-composer { display: flex; gap: 8px; align-items: stretch; flex-shrink: 0; }
 .acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: vertical; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
