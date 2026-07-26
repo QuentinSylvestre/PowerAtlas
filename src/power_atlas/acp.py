@@ -6,28 +6,34 @@ registry, the outbound fan-out machinery — and, since Phase 3b, the supervised
 ``kiro-cli acp`` subprocess it all talks to: spawn, the JSON-RPC handshake,
 ``session/new``, and teardown. Phase 4 adds ``session/prompt``, the
 ``agent_message_chunk`` and tool-call fan-out behind it, and the per-session
-ring buffer that a reload replays. ``cancel``/``close`` still answer a typed
-``not_implemented``; they arrive in Phase 6.
+ring buffer that a reload replays. Phase 5 adds ``session/load``, which reaches
+sessions this process never created — including ones started from a terminal.
+``cancel``/``close`` still answer a typed ``not_implemented``; they arrive in
+Phase 6.
 
-Isolation boundary — this module imports exactly one name from the rest of
+Isolation boundary — this module imports exactly two names from the rest of
 ``power_atlas``: ``config.CONFIG_DIR``, to place the agent's neutral cwd where
-every other PowerAtlas artifact lives. Two caches elsewhere in the package are
-plain unlocked ``OrderedDict``s, safe only because every current caller runs on
-the event loop — and this module now runs an OS reader thread that does not.
-Neither of the two modules holding them is imported here, and neither is
-reachable from ``config``, which imports nothing from the package at all. So
-the property is still held by the import graph rather than by discipline; it is
-just no longer stated as "imports nothing". The plan's exit criterion greps
-this file for those two module names, which is why they are described here
-rather than spelled.
+every other PowerAtlas artifact lives, and ``launcher._SESSION_ID_RE``, so the
+guard in front of a client-supplied session id is the one the launch path
+already applies rather than a second copy free to drift from it. ``launcher``
+imports one name from ``config`` and nothing else. Two caches elsewhere in the
+package are plain unlocked ``OrderedDict``s, safe only because every current
+caller runs on the event loop — and this module now runs an OS reader thread
+that does not. Neither of the two modules holding them is imported here, and
+neither is reachable from ``config`` (which imports nothing from the package at
+all) or from ``launcher``. So the property is still held by the import graph
+rather than by discipline; it is just no longer stated as "imports nothing".
+The plan's exit criterion greps this file for those two module names, which is
+why they are described here rather than spelled.
 
 Wire contract, identical in both directions::
 
     {"type": <str>, "sessionId": <str|null>, "payload": <object>}
 
 Client to server: ``subscribe`` (attach this socket to a session and replay its
-buffer), ``new`` (create a session against a cwd), ``prompt``, ``cancel``,
-``close``.
+buffer), ``new`` (create a session against a cwd), ``load`` (adopt a session
+that exists in the agent's own store but not in this process), ``prompt``,
+``cancel``, ``close``.
 
 Server to client: ``session`` (id and metadata after ``new``/``subscribe``),
 ``chunk``, ``tool_call``, ``tool_update``, ``meta``, ``error``, ``agent_died``,
@@ -48,15 +54,18 @@ import asyncio
 import collections
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import WebSocket, WebSocketDisconnect
 
 from .config import CONFIG_DIR
+from .launcher import _SESSION_ID_RE
 
 log = logging.getLogger("power_atlas.acp")
 
@@ -97,7 +106,7 @@ except Exception:  # pragma: no cover - only reached if uvicorn moves the symbol
     class ClientDisconnected(OSError):
         """Placeholder so the ``except`` arm below still names a real type."""
 
-CLIENT_TYPES = frozenset({"subscribe", "new", "prompt", "cancel", "close"})
+CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close"})
 SERVER_TYPES = frozenset({
     "session", "chunk", "tool_call", "tool_update", "meta", "error",
     "agent_died", "history_truncated", "history",
@@ -233,6 +242,50 @@ PROMPT_TIMEOUT_SECONDS = 600.0
 # whatever the fast path had not finished killing — which is why a spawn that
 # cannot obtain a job object refuses to spawn at all rather than degrading.
 KILL_WAIT_SECONDS = 3.0
+
+# kiro-cli's own session store. `load` names a session id that arrived from the
+# browser and this is the directory it is joined into, so the id is validated
+# against `_SESSION_ID_RE` before it ever forms a path.
+KIRO_SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
+
+# The cap `launcher.py` applies alongside `_SESSION_ID_RE`. Both halves are
+# needed and neither implies the other: the pattern refuses separators and dots
+# (so no traversal), the cap refuses a path component no filesystem accepts.
+MAX_SESSION_ID_CHARS = 128
+
+# How much of a session's `<sid>.json` is read to recover the directory it was
+# created against. `cwd` is that file's second key, while the rest of it is the
+# whole conversation state and runs to megabytes — `presence.py` parses it
+# whole, behind a cache this module deliberately cannot reach.
+SESSION_JSON_PREFIX_BYTES = 16 * 1024
+
+# How far after its own timestamp a lock file's holder may have started before
+# the lock is judged stale rather than live. A session writes its lock *after*
+# its process starts, so the honest relation is `create_time <= started_at`;
+# this only tolerates two clocks disagreeing.
+#
+# It is not decoration. Measured on this machine's store: 803 lock files, 22 of
+# which name a pid that still exists — and all 22 are recycled pids belonging
+# to svchost, firefox, RuntimeBroker and friends, every one created weeks after
+# the lock was written. A pre-flight resting on `pid_exists` alone would have
+# refused 22 perfectly loadable sessions and been wrong every time it fired.
+LOCK_START_SKEW_SECONDS = 5.0
+
+# What the agent says when the session is open somewhere else. Matched on the
+# message because the code it arrives with is -32603, "internal error", which
+# says no more than "something went wrong" — and this particular something is
+# the only one the operator can act on.
+_IN_USE_MARKER = "active in another process"
+
+# The lock's own timestamp, to second resolution. `datetime.fromisoformat`
+# cannot read the value kiro-cli writes: it is RFC 3339 with *nanoseconds*
+# ("2026-06-01T21:19:24.509198600Z") and fromisoformat accepts 3 or 6 fraction
+# digits, not 9. Seconds are ample against LOCK_START_SKEW_SECONDS.
+_LOCK_TIME_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)")
+
+# `cwd` as it appears in a session's stored metadata, with JSON's own escaping
+# left intact so `json.loads` can undo it — Windows paths are full of `\\`.
+_STORED_CWD_RE = re.compile(r'"cwd"\s*:\s*("(?:[^"\\]|\\.)*")')
 
 # No console window per spawn. Absent this, every session flashes one.
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -752,6 +805,125 @@ def _resolve_session_cwd(raw: str | None) -> str:
     if not path.is_dir():
         raise BadCwd(f"Not a directory: {path}")
     return str(path)
+
+
+def _valid_session_id(session_id) -> bool:
+    """Whether a client-supplied session id may be used as a path component.
+
+    The same rule ``launcher.py`` applies before an id reaches a command line,
+    imported rather than restated so the two cannot drift. ``^[\\w\\-]+$``
+    admits no separator and no ``.``, so no form of traversal survives it —
+    which is what this id needs before it is joined into ``KIRO_SESSION_DIR``
+    and then handed to an agent running trust-all-tools.
+
+    ``fullmatch``, not ``match``: Python's ``$`` also matches immediately
+    before a trailing newline, so the shared pattern used with ``match`` — as
+    ``launcher.py:134`` uses it — accepts ``"<id>\\n"``. That is the one shape
+    the pattern reads as if it excluded.
+    """
+    return (isinstance(session_id, str)
+            and 0 < len(session_id) <= MAX_SESSION_ID_CHARS
+            and _SESSION_ID_RE.fullmatch(session_id) is not None)
+
+
+def _lock_started_at(raw: dict) -> float | None:
+    """The lock's own timestamp as a POSIX time, or ``None`` if unreadable."""
+    match = _LOCK_TIME_RE.match(str(raw.get("started_at", "")))
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(
+            match.group(1), "%Y-%m-%dT%H:%M:%S"
+        ).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _lock_holder(session_id: str) -> int | None:
+    """The pid of the process holding a session's lock, if there is one.
+
+    A hint and never the gate, per the plan: nothing removes a lock file on a
+    hard exit, so the store is full of locks whose pid died months ago and has
+    since been recycled onto something unrelated. The authority is the agent's
+    own typed refusal, measured at 0.73-0.84 s. This exists to answer in
+    roughly no time in the common case, not to be right in every case.
+
+    Every branch that cannot *establish* a holder returns ``None``. A hint may
+    only add a refusal; it may never grant one, because the thing it would be
+    granting against is the agent's answer.
+
+    Not ``presence.Snapshot.is_live()``: that also requires a provider-name
+    match and a start-time skew window, so it reports not-live for sessions the
+    agent still refuses.
+    """
+    if psutil is None:
+        # `os.kill(pid, 0)` is not the fallback it looks like on Windows: it
+        # calls TerminateProcess, so the liveness probe would kill the process
+        # it asked about.
+        return None
+    try:
+        raw = json.loads(
+            (KIRO_SESSION_DIR / f"{session_id}.lock")
+            .read_bytes().decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    pid = raw.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    started = _lock_started_at(raw)
+    if started is None:
+        return None
+    try:
+        created = psutil.Process(pid).create_time()
+    except (psutil.Error, OSError):
+        return None
+    if created > started + LOCK_START_SKEW_SECONDS:
+        # The pid exists but belongs to something that started long after this
+        # lock was written — a recycled pid, not the session's holder.
+        return None
+    return pid
+
+
+def _stored_session_cwd(session_id: str) -> str:
+    """The directory a session was created against, from its stored metadata.
+
+    A bounded prefix read rather than a whole-file parse: see
+    ``SESSION_JSON_PREFIX_BYTES``. Returns ``""`` whenever the file is missing,
+    unreadable, or carries no ``cwd`` in that prefix.
+    """
+    try:
+        with open(KIRO_SESSION_DIR / f"{session_id}.json", "rb") as fh:
+            prefix = fh.read(SESSION_JSON_PREFIX_BYTES)
+    except OSError:
+        return ""
+    match = _STORED_CWD_RE.search(prefix.decode("utf-8", "replace"))
+    if match is None:
+        return ""
+    try:
+        value = json.loads(match.group(1))
+    except ValueError:
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def _load_session_cwd(session_id: str) -> str:
+    """The cwd a ``session/load`` runs against. Blocking; call off the loop.
+
+    The session's own directory when it still exists, because that is where a
+    prompt after the load would expect its tools to run. The agent's neutral
+    cwd otherwise — a workspace that has been moved or deleted does not make
+    the conversation unreadable, and refusing the load over it would.
+    """
+    stored = _stored_session_cwd(session_id)
+    if not stored:
+        return str(_neutral_cwd())
+    try:
+        return _resolve_session_cwd(stored)
+    except BadCwd:
+        log.info("ACP load: stored cwd %r is gone; using the neutral cwd", stored)
+        return str(_neutral_cwd())
 
 
 class _Supervisor:
@@ -1329,11 +1501,20 @@ class _Supervisor:
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
-        if kind == "agent_message_chunk":
+        if kind in ("agent_message_chunk", "user_message_chunk"):
+            # `user_message_chunk` is what makes a loaded conversation a
+            # conversation: `session/load` replays both halves of it, and
+            # without this arm the transcript would come back as the agent
+            # talking to itself. It is not a second source for a live turn —
+            # `_handle_prompt` emits the user's own text, and kiro-cli 2.14.2
+            # was measured emitting no `user_message_chunk` during
+            # `session/prompt`. A build that started emitting one would render
+            # the prompt twice, which is the thing to look for if that appears.
+            role = "user" if kind == "user_message_chunk" else "agent"
             text = _content_text(update.get("content"))
             if text and isinstance(session_id, str):
                 _emit(session_id, envelope(
-                    "chunk", {"role": "agent", "text": text}, session_id))
+                    "chunk", {"role": role, "text": text}, session_id))
             return
         if kind in ("tool_call", "tool_call_update"):
             payload = _tool_payload(update)
@@ -1423,6 +1604,57 @@ class _Supervisor:
             self._reserved -= 1
         log.info("ACP session created: %s (cwd %s); %d live",
                  session_id, cwd, len(self.sessions))
+        return {"sessionId": session_id, "cwd": cwd}
+
+    async def load_session(self, session_id: str, cwd: str) -> dict:
+        """Adopt a session that exists in the agent's store but not here.
+
+        The session is registered **before** the round-trip rather than after
+        it. ``session/load`` is answered by replaying the whole conversation as
+        ``session/update`` notifications *while the request is still
+        outstanding*, and ``record`` silently drops any frame whose session has
+        no buffer — so registering afterwards would return a session whose
+        history is empty for exactly the reason the load existed.
+
+        Every failure path unregisters it again, including cancellation: a
+        half-loaded session left in ``sessions`` would be counted against
+        MAX_SESSIONS and answered by ``subscribe`` with an empty transcript.
+        """
+        if len(self.sessions) + self._reserved >= MAX_SESSIONS:
+            raise SessionLimit(
+                f"At most {MAX_SESSIONS} sessions at once "
+                f"(~306 MB each); close one first.")
+        self._reserved += 1
+        try:
+            await self.ensure_started()
+            if session_id in self.sessions:
+                # A concurrent `load` for the same id got here first — or
+                # `ensure_started` spawned a replacement and something else
+                # populated it. Either way its buffer is the better answer than
+                # a second agent-side replay appended to the first.
+                raise AgentRejected("That session is already loaded.")
+            self.sessions[session_id] = {
+                "cwd": cwd,
+                "created": time.time(),
+                "models": {},
+                "modes": {},
+                "loaded": True,
+            }
+            self.history[session_id] = _History()
+            try:
+                await self._request(
+                    "session/load",
+                    {"sessionId": session_id, "cwd": cwd, "mcpServers": []})
+            except BaseException:
+                self.sessions.pop(session_id, None)
+                self.history.pop(session_id, None)
+                raise
+        finally:
+            self._reserved -= 1
+        history = self.history.get(session_id)
+        log.info("ACP session loaded: %s (cwd %s, %d event(s) replayed); %d live",
+                 session_id, cwd, 0 if history is None else len(history),
+                 len(self.sessions))
         return {"sessionId": session_id, "cwd": cwd}
 
     def record(self, session_id: str, frame: dict) -> None:
@@ -1572,6 +1804,9 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
     if type_ == "subscribe":
         _handle_subscribe(conn, session_id)
         return
+    if type_ == "load":
+        _spawn_task(_handle_load(conn, session_id))
+        return
     if type_ == "prompt":
         _spawn_task(_handle_prompt(conn, session_id, payload))
         return
@@ -1660,6 +1895,108 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
              session_id, len(history),
              ", truncated" if history.truncated else "",
              ", turn in flight" if session_id in _supervisor.inflight else "")
+
+
+def _in_use_message(pid: int) -> str:
+    return (f"Session is active in another process (PID {pid}). A session can "
+            "only be open once — exit that one first.")
+
+
+def _load_failure(exc: AcpError, holder: int | None) -> tuple[str, str]:
+    """The code and message a failed ``session/load`` reaches the page as.
+
+    ``holder`` is the lock read *again*, after the failure. Measured on
+    kiro-cli 2.14.2: a session open elsewhere is refused with a bare
+    ``-32603 "Internal error"`` — no pid, and nothing to tell it apart from any
+    other internal failure. The lock is the only thing on this machine that can
+    still name the process, so the second read is what turns the one cause an
+    operator can act on back into a sentence. It also covers a lock taken
+    between the pre-flight and the request.
+
+    The message match stays below it for builds that do say so: the plan
+    recorded ``-32603 … "Session is active in another process (PID n)"``,
+    measured before the agent self-updated.
+    """
+    if holder is not None:
+        return "session_in_use", _in_use_message(holder)
+    if isinstance(exc, AgentRejected) and _IN_USE_MARKER in str(exc):
+        return "session_in_use", str(exc)
+    return exc.code, str(exc)
+
+
+async def _handle_load(conn: _Connection, session_id: str | None) -> None:
+    """Adopt a session from the agent's store and replay it into this socket.
+
+    The conversation arrives as ``session/update`` notifications while
+    ``session/load`` is still outstanding. They are recorded into the session's
+    buffer and deliberately not fanned out — this socket is attached
+    afterwards, by ``_handle_subscribe``, which coalesces the lot into one
+    ``history`` frame. Delivering them as they arrive would put a whole
+    conversation's worth of frames on a queue that retires the socket at
+    SEND_QUEUE_MAXSIZE, and would do it only for the sessions long enough to be
+    worth loading.
+
+    This is the async half of ``subscribe``, kept out of ``_handle_subscribe``
+    because that function's freedom from ``await`` is what stops an event being
+    delivered live and in replay both.
+    """
+    if not _valid_session_id(session_id):
+        conn.send(error_frame(
+            "bad_session_id",
+            "That is not a usable session id: up to "
+            f"{MAX_SESSION_ID_CHARS} characters of letters, digits, "
+            "underscores and hyphens, and nothing else."))
+        log.warning("ACP load refused: [bad_session_id] %.200r", session_id)
+        return
+    if session_id in _supervisor.sessions:
+        # Already live here, so the buffer is the better answer: a second
+        # agent-side replay would append the whole conversation to itself.
+        _handle_subscribe(conn, session_id)
+        return
+    holder = _lock_holder(session_id)
+    if holder is not None:
+        conn.send(error_frame("session_in_use", _in_use_message(holder),
+                              session_id))
+        log.warning("ACP load refused: [session_in_use] session=%s pid=%d",
+                    session_id, holder)
+        return
+    # Sockets still attached to a session this process no longer holds: they
+    # outlived an agent that died under them. Detaching them before the load is
+    # what keeps the replay off their queues, where SEND_QUEUE_MAXSIZE frames
+    # would retire them. They re-subscribe on their own next frame.
+    for stale in tuple(_registry.subscribers.get(session_id, ())):
+        log.info("ACP load: detaching a socket left over from an earlier life "
+                 "of session %s", session_id)
+        _registry.detach(stale)
+    # The load spans a spawn on the first one plus the agent's own replay, and
+    # the page shows nothing at all until the `history` frame lands.
+    conn.send(envelope("meta", {"pending": "load"}, session_id))
+    try:
+        cwd = await asyncio.to_thread(_load_session_cwd, session_id)
+        await _supervisor.load_session(session_id, cwd)
+    except AcpError as exc:
+        code, message = _load_failure(exc, _lock_holder(session_id))
+        log.warning("ACP session/load refused: [%s] %s", code, exc)
+        conn.send(error_frame(code, message, session_id))
+        return
+    except Exception:
+        log.exception("ACP session/load failed")
+        conn.send(error_frame(
+            "internal_error",
+            "Loading the session failed; see orchestrator.log.", session_id))
+        return
+    if conn not in _registry.connections:
+        # The tab went away during the load. The session is fine and stays on
+        # the supervisor for a later `subscribe`; re-registering a retired
+        # socket would leave a subscriber entry behind a dead writer.
+        log.info("ACP session %s loaded after its socket went away", session_id)
+        return
+    # The replay throttle exists to ration a buffer rebuild a client can ask
+    # for freely. This one was paid for with an agent round-trip, and throttling
+    # it would discard the entire point of the load — a loaded session that
+    # renders nothing.
+    conn.replayed_at = None
+    _handle_subscribe(conn, session_id)
 
 
 async def _handle_new(conn: _Connection, payload: dict) -> None:

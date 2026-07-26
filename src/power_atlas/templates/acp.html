@@ -101,6 +101,15 @@
   // toolCallId -> the elements a later `tool_update` rewrites in place, so a
   // call that runs then completes is one row rather than three.
   var toolRows = Object.create(null);
+  // Session ids a `load` has already been tried for on this socket. Reset per
+  // connection, because the reason a load is worth retrying is a server that
+  // restarted. Without it the one refusal that matters — "active in another
+  // process" — becomes a retry loop against a session that will keep refusing.
+  var loadTried = Object.create(null);
+  // The session id a `load` is outstanding for, or null. The agent answers
+  // with the whole conversation at once and says nothing before that, so
+  // without a label the page is blank and looks broken for the duration.
+  var loadingSid = null;
 
   if (sessionId) sidEl.textContent = 'session ' + sessionId;
 
@@ -158,6 +167,16 @@
     // double-click through by accident.
     newBtn.disabled = pending;
     newBtn.textContent = pending ? 'Creating…' : 'New session';
+  }
+
+  function setLoading(sid) {
+    loadingSid = sid || null;
+    // Only the label moves. The socket really is open either way, and calling
+    // it anything else would make a slow load read as a dropped connection —
+    // which has its own recovery button and would be the wrong one to press.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      setState('open', loadingSid ? 'loading session…' : 'connected');
+    }
   }
 
   function setTurn(active) {
@@ -338,6 +357,12 @@
       logLine('info', 'creating a session — the agent takes several seconds');
       return;
     }
+    if (type === 'meta' && payload.pending === 'load') {
+      setLoading(frame.sessionId || sessionId);
+      logLine('info', 'loading the session from the agent — the whole ' +
+                      'conversation arrives at once when it answers');
+      return;
+    }
     if (type === 'meta' && payload.turn === 'start') {
       agentBody = null;
       pendingPrompt = null;
@@ -392,6 +417,7 @@
     }
     if (type === 'session') {
       setPending(false);
+      setLoading(null);
       sessionId = payload.sessionId;
       clearTranscript();
       // The server's answer, not an inference from whatever survived in the
@@ -412,6 +438,7 @@
     }
     if (type === 'agent_died') {
       setPending(false);
+      setLoading(null);
       sessionId = null;
       setTurn(false);
       setState('closed', 'agent gone');
@@ -425,6 +452,19 @@
     }
     if (type === 'error') {
       setPending(false);
+      if (payload.code === 'unknown_session' && sessionId &&
+          frame.sessionId === sessionId && !loadTried['s:' + sessionId]) {
+        // This server does not hold the session, so there is nothing to replay
+        // from memory — but the agent keeps its own store, and that is where a
+        // session created in a terminal, or before a restart, still lives.
+        // Not rendered as an error: it is the expected first answer for every
+        // session this process did not create, which is the whole case the
+        // dashboard's row action opens.
+        loadTried['s:' + sessionId] = true;
+        logLine('info', 'not live on this server — asking the agent to load it');
+        if (send('load', {}, sessionId)) return;
+      }
+      setLoading(null);
       // In the transcript as well as the log: the log strip is 120 px tall and
       // is not replayed, so a failure that reaches only it is invisible after
       // a reload and easy to miss before one.
@@ -481,6 +521,8 @@
     reconnectBtn.hidden = true;
     reloadBtn.hidden = true;
     opened = false;
+    loadTried = Object.create(null);
+    loadingSid = null;
     ws = new WebSocket(wsUrl());
     ws.onopen = function () {
       opened = true;
@@ -504,6 +546,7 @@
       // them: the frame that would have done it died with the socket.
       setPending(false);
       setTurn(false);
+      setLoading(null);
       setState('closed', 'disconnected (' + ev.code + ')');
       logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
       if (opened) {

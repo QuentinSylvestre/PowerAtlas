@@ -1,8 +1,10 @@
 """Tests for web module."""
 
 import asyncio
+import datetime as dt
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -2654,6 +2656,519 @@ class TestAcpSubscribeThrottle:
         _queued(conn)
         acp_mod._handle_subscribe(conn, "no-such-session")
         assert _queued(conn)[0]["payload"]["code"] == "unknown_session"
+
+
+# --- ACP phase 5: resume a session this process never created ---
+
+
+async def _no_spawn(self):
+    """``ensure_started`` without an agent. Every load test stubs the
+    transport, so spawning a real one would only add ~1 s and a process tree."""
+    return None
+
+
+def _lock_time(when) -> str:
+    """A lock timestamp in the shape kiro-cli writes: RFC 3339, nanoseconds."""
+    return when.astimezone(dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f") + "000Z"
+
+
+@pytest.fixture
+def acp_store(tmp_path, monkeypatch):
+    """An empty kiro-cli session store, and a supervisor left clean after.
+
+    The supervisor and registry are module globals: a load test that left a
+    session registered would make the next test's ``subscribe`` answer from it.
+    """
+    from power_atlas import acp as acp_mod
+    monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", tmp_path)
+    try:
+        yield acp_mod, tmp_path
+    finally:
+        acp_mod._supervisor.sessions.clear()
+        acp_mod._supervisor.history.clear()
+        acp_mod._supervisor.inflight.clear()
+        acp_mod._supervisor._reserved = 0
+        for conn in tuple(acp_mod._registry.connections):
+            acp_mod._registry.detach(conn)
+        acp_mod._registry.connections.clear()
+        acp_mod._registry.subscribers.clear()
+
+
+def _acp_conn(acp_mod):
+    conn = acp_mod._Connection(_SinkWs())
+    acp_mod._registry.connections.add(conn)
+    return conn
+
+
+class TestAcpSessionIdValidation:
+    """The id arrives from the browser, is joined into the kiro-cli session
+    store to read a lock file, and is then sent to an agent running
+    trust-all-tools. Nothing downstream re-checks it.
+    """
+
+    @pytest.mark.parametrize("sid", [
+        "../../../../Windows/System32/config/SAM",
+        "..",
+        ".",
+        "a/b",
+        "a\\b",
+        "C:\\Windows",
+        "sess:1",
+        "sess.1",
+        "sess 1",
+        "sess\x00",
+        # `$` also matches just before a trailing newline, so the shared
+        # pattern used with `match` accepts this one.
+        "sess\n",
+        "",
+        "x" * 129,
+    ])
+    def test_hostile_shapes_are_rejected(self, sid):
+        from power_atlas import acp as acp_mod
+        assert not acp_mod._valid_session_id(sid)
+
+    @pytest.mark.parametrize("sid", [None, 17, 1.5, ["a"], {"a": 1}, b"abc"])
+    def test_non_strings_are_rejected(self, sid):
+        from power_atlas import acp as acp_mod
+        assert not acp_mod._valid_session_id(sid)
+
+    @pytest.mark.parametrize("sid", [
+        "001b4195-ee19-4633-b1b2-488574cad044",
+        "sess_phase4",
+        "x" * 128,
+    ])
+    def test_real_session_ids_are_accepted(self, sid):
+        """Positive control: the guard refuses hostile shapes, not the ids the
+        store is actually full of."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod._valid_session_id(sid)
+
+    def test_a_rejected_id_reaches_neither_a_path_nor_the_wire(self, acp_store):
+        acp_mod, _ = acp_store
+        touched = []
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod, "_lock_holder",
+                          lambda sid: touched.append(("lock", sid))), \
+                patch.object(acp_mod._Supervisor, "_request",
+                             lambda *a, **k: touched.append(("wire",))):
+            asyncio.run(acp_mod._handle_load(conn, "../../etc/passwd"))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == "bad_session_id"
+        assert touched == []
+
+    def test_a_rejected_id_leaves_a_server_side_trace(self, acp_store, caplog):
+        acp_mod, _ = acp_store
+        conn = _acp_conn(acp_mod)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            asyncio.run(acp_mod._handle_load(conn, "a/b"))
+        assert any("bad_session_id" in r.getMessage() for r in caplog.records)
+
+
+class TestAcpLockPreflight:
+    """A hint, never the gate. Measured on this machine's store: 803 lock
+    files, 22 naming a pid that still exists — and all 22 were recycled pids
+    (svchost, firefox, RuntimeBroker), each created weeks after its lock was
+    written. A pre-flight resting on pid liveness alone would have refused 22
+    loadable sessions and been wrong every time it fired.
+    """
+
+    def _lock(self, store, sid, **fields):
+        (store / (sid + ".lock")).write_text(json.dumps(fields))
+
+    def test_a_live_lock_names_its_holder(self, acp_store):
+        acp_mod, store = acp_store
+        # This test process: alive, and started before a lock written now.
+        self._lock(store, "held", pid=os.getpid(),
+                   started_at=_lock_time(dt.datetime.now(dt.timezone.utc)))
+        assert acp_mod._lock_holder("held") == os.getpid()
+
+    def test_a_recycled_pid_is_not_a_holder(self, acp_store):
+        """The 22-of-803 case: the pid exists, but the process behind it
+        started long after the lock was written, so it is not the holder."""
+        acp_mod, store = acp_store
+        self._lock(store, "stale", pid=os.getpid(),
+                   started_at="2020-01-01T00:00:00.000000000Z")
+        assert acp_mod._lock_holder("stale") is None
+
+    def test_a_dead_pid_is_not_a_holder(self, acp_store):
+        acp_mod, store = acp_store
+        self._lock(store, "gone", pid=2 ** 31 - 1,
+                   started_at=_lock_time(dt.datetime.now(dt.timezone.utc)))
+        assert acp_mod._lock_holder("gone") is None
+
+    def test_a_missing_lock_is_not_a_holder(self, acp_store):
+        acp_mod, _ = acp_store
+        assert acp_mod._lock_holder("never-locked") is None
+
+    @pytest.mark.parametrize("body", [
+        "not json at all",
+        "[]",
+        '{"pid": "4242", "started_at": "2026-01-01T00:00:00.0Z"}',
+        '{"pid": -1, "started_at": "2026-01-01T00:00:00.0Z"}',
+        '{"started_at": "2026-01-01T00:00:00.0Z"}',
+        '{"pid": %d}' % os.getpid(),
+        '{"pid": %d, "started_at": "whenever"}' % os.getpid(),
+    ])
+    def test_an_unreadable_lock_grants_nothing(self, acp_store, body):
+        """A hint may only ever add a refusal. Every branch that cannot
+        establish a holder has to fall through to the agent, which is the
+        authority."""
+        acp_mod, store = acp_store
+        (store / "odd.lock").write_text(body)
+        assert acp_mod._lock_holder("odd") is None
+
+    def test_the_preflight_refuses_before_the_wire(self, acp_store):
+        acp_mod, store = acp_store
+        self._lock(store, "busy-0001", pid=os.getpid(),
+                   started_at=_lock_time(dt.datetime.now(dt.timezone.utc)))
+        wire = []
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          lambda *a, **k: wire.append(a)):
+            asyncio.run(acp_mod._handle_load(conn, "busy-0001"))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == "session_in_use"
+        assert str(os.getpid()) in frames[0]["payload"]["message"]
+        assert wire == []
+        assert "busy-0001" not in acp_mod._supervisor.sessions
+
+
+class TestAcpSessionLoad:
+    """``session/load`` is what reaches a session this process never created —
+    one made in a terminal, or before a restart.
+    """
+
+    def _stored(self, store, sid, cwd):
+        (store / (sid + ".json")).write_text(
+            json.dumps({"session_id": sid, "cwd": str(cwd), "title": "t"}))
+
+    def _replay(self, acp_mod, sid, events, calls):
+        """A ``session/load`` that answers the way the agent does: by replaying
+        the conversation as notifications while the request is outstanding."""
+        async def fake_request(self, method, params,
+                               timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            calls.append((method, params))
+            for kind, text in events:
+                self._on_notification({
+                    "method": "session/update",
+                    "params": {"sessionId": sid, "update": {
+                        "sessionUpdate": kind,
+                        "content": {"type": "text", "text": text}}},
+                })
+            return {}
+        return fake_request
+
+    def test_the_replayed_conversation_arrives_as_one_history_frame(
+            self, acp_store):
+        """Both halves of the conversation, in order, coalesced. Frame per
+        event would put a whole conversation on a queue that retires the socket
+        at SEND_QUEUE_MAXSIZE — and only for sessions long enough to matter."""
+        acp_mod, store = acp_store
+        calls = []
+        sid = "load-me-0001"
+        self._stored(store, sid, store)
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._replay(acp_mod, sid, [
+                              ("user_message_chunk", "what is 2+2"),
+                              ("agent_message_chunk", "4"),
+                          ], calls)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+
+        assert calls == [(
+            "session/load",
+            {"sessionId": sid, "cwd": str(Path(store).resolve()),
+             "mcpServers": []},
+        )]
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["meta", "session", "history"]
+        assert frames[0]["payload"] == {"pending": "load"}
+        assert frames[1]["payload"]["sessionId"] == sid
+        assert frames[1]["payload"]["created"] is False
+        assert [(e["type"], e["payload"])
+                for e in frames[2]["payload"]["events"]] == [
+            ("chunk", {"role": "user", "text": "what is 2+2"}),
+            ("chunk", {"role": "agent", "text": "4"}),
+        ]
+
+    def test_a_replayed_tool_call_survives_the_load(self, acp_store):
+        """Tool calls already forward and render; a loaded history full of them
+        has to travel the same path rather than a second one."""
+        acp_mod, store = acp_store
+        sid = "load-tools-01"
+        self._stored(store, sid, store)
+
+        async def fake_request(self, method, params, timeout=None):
+            self._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-1", "title": "shell", "kind": "execute",
+                    "status": "completed",
+                    "rawInput": {"command": "git status"}}},
+            })
+            return {}
+
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        events = _queued(conn)[2]["payload"]["events"]
+        assert [e["type"] for e in events] == ["tool_call"]
+        assert events[0]["payload"]["command"] == "git status"
+
+    def test_the_replay_is_not_fanned_out_while_it_is_being_built(
+            self, acp_store):
+        """A socket left attached from an earlier life of the session would
+        otherwise receive the conversation event by event."""
+        acp_mod, store = acp_store
+        sid = "load-me-0002"
+        self._stored(store, sid, store)
+        stale = _acp_conn(acp_mod)
+        acp_mod._registry.attach(stale, sid)
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._replay(acp_mod, sid,
+                                       [("agent_message_chunk", "x")] * 5,
+                                       [])), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert _queued(stale) == []
+        assert stale.session_id is None
+
+    def test_a_spoken_in_use_refusal_becomes_a_readable_message(
+            self, acp_store):
+        """The plan recorded the agent naming the holder itself, measured
+        before it self-updated. Builds that still do are read as such."""
+        acp_mod, store = acp_store
+        sid = "load-me-0003"
+        self._stored(store, sid, store)
+
+        async def refused(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected(
+                "Session is active in another process (PID 4242) (code -32603)")
+
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", refused), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["meta", "error"]
+        assert frames[1]["payload"]["code"] == "session_in_use"
+        assert "4242" in frames[1]["payload"]["message"]
+
+    def test_a_silent_refusal_is_named_by_reading_the_lock_again(
+            self, acp_store):
+        """Measured on kiro-cli 2.14.2: a session held elsewhere is refused
+        with a bare ``-32603 Internal error`` — no pid, and nothing to tell it
+        from any other failure. The lock is the only thing left that can name
+        the process. Also covers a lock taken after the pre-flight ran."""
+        acp_mod, store = acp_store
+        sid = "load-me-0009"
+        self._stored(store, sid, store)
+        first = []
+
+        def one_shot_preflight(session_id):
+            # The pre-flight sees nothing; the re-read after the failure does.
+            if not first:
+                first.append(session_id)
+                return None
+            return 4242
+
+        async def refused(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("Internal error (code -32603)")
+
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod, "_lock_holder", one_shot_preflight), \
+                patch.object(acp_mod._Supervisor, "_request", refused), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        frames = _queued(conn)
+        assert frames[1]["payload"]["code"] == "session_in_use"
+        assert "4242" in frames[1]["payload"]["message"]
+
+    def test_another_agent_error_keeps_its_own_code(self, acp_store):
+        """Positive control: with no lock and no marker, a refusal keeps the
+        code it came with rather than being reported as an occupied session."""
+        acp_mod, store = acp_store
+        sid = "load-me-0004"
+        self._stored(store, sid, store)
+
+        async def refused(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("No such session (code -32602)")
+
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", refused), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert _queued(conn)[1]["payload"]["code"] == "agent_error"
+
+    def test_a_failed_load_registers_nothing(self, acp_store):
+        """A half-loaded session left behind would count against MAX_SESSIONS
+        and be answered by ``subscribe`` with an empty transcript."""
+        acp_mod, store = acp_store
+        sid = "load-me-0005"
+        self._stored(store, sid, store)
+
+        async def boom(self, method, params, timeout=None):
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert sid not in acp_mod._supervisor.sessions
+        assert sid not in acp_mod._supervisor.history
+        assert acp_mod._supervisor._reserved == 0
+        assert _queued(conn)[1]["payload"]["code"] == "agent_timeout"
+
+    def test_a_session_already_live_here_is_answered_from_the_buffer(
+            self, acp_session):
+        """A second agent-side replay would append the conversation to itself."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.history[sid].append(
+            acp_mod.envelope("chunk", {"role": "agent", "text": "old"}, sid))
+        wire = []
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          lambda *a, **k: wire.append(a)):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["session", "history"]
+        assert len(frames[1]["payload"]["events"]) == 1
+        assert wire == []
+
+    def test_a_missing_store_entry_falls_back_to_the_neutral_cwd(
+            self, acp_store, monkeypatch, tmp_path):
+        """A workspace that has been moved or deleted does not make the
+        conversation unreadable, so it must not make the load fail."""
+        acp_mod, store = acp_store
+        calls = []
+        neutral = tmp_path / "neutral"
+        neutral.mkdir()
+        monkeypatch.setattr(acp_mod, "_neutral_cwd", lambda: neutral)
+        sid = "load-me-0006"
+        self._stored(store, sid, store / "deleted-workspace")
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._replay(acp_mod, sid, [], calls)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert calls[0][1]["cwd"] == str(neutral)
+
+    def test_a_load_is_never_throttled_by_an_earlier_replay(self, acp_store):
+        """The throttle rations a buffer rebuild a client can ask for freely.
+        This replay was paid for with an agent round-trip, and refusing it
+        would leave a loaded session rendering nothing at all."""
+        acp_mod, store = acp_store
+        sid = "load-me-0008"
+        self._stored(store, sid, store)
+        acp_mod._supervisor.sessions["other"] = {"cwd": ""}
+        acp_mod._supervisor.history["other"] = acp_mod._History()
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, "other")
+        _queued(conn)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._replay(acp_mod, sid,
+                                       [("agent_message_chunk", "x")], [])), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["meta", "session", "history"]
+        assert len(frames[2]["payload"]["events"]) == 1
+
+    def test_the_session_cap_still_binds(self, acp_store):
+        acp_mod, store = acp_store
+        sid = "load-me-0007"
+        self._stored(store, sid, store)
+        for i in range(acp_mod.MAX_SESSIONS):
+            acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
+        wire = []
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request",
+                          lambda *a, **k: wire.append(a)), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert _queued(conn)[1]["payload"]["code"] == "too_many_sessions"
+        assert wire == []
+
+    def test_dispatch_routes_load_off_the_synchronous_path(self, acp_store):
+        """``_handle_subscribe`` must stay free of ``await``; ``load`` is the
+        half that needs one, which is why it is a separate frame type."""
+        acp_mod, _ = acp_store
+        seen = []
+
+        async def fake_load(conn, session_id):
+            seen.append(session_id)
+
+        async def drive():
+            conn = _acp_conn(acp_mod)
+            acp_mod._dispatch(conn, {"type": "load", "sessionId": "abc",
+                                     "payload": {}})
+            await asyncio.sleep(0)
+
+        assert "load" in acp_mod.CLIENT_TYPES
+        with patch.object(acp_mod, "_handle_load", fake_load):
+            asyncio.run(drive())
+        assert seen == ["abc"]
+        assert not asyncio.iscoroutinefunction(acp_mod._handle_subscribe)
+
+
+class TestAcpDashboardRowAction:
+    """The control has to live inside ``.session-actions``: that container is
+    what the row's own ``onclick`` excludes, so anywhere else a click on it
+    toggles multi-select instead of opening the session. The same collision is
+    recorded at ``CLOSED_INVESTIGATIONS.md:90``.
+    """
+
+    def _row(self) -> str:
+        from power_atlas.web import templates
+
+        class _Session:
+            session_id = "001b4195-ee19-4633-b1b2-488574cad044"
+            title = "t"
+            updated_at = "2026-07-26T10:00:00"
+            first_prompt = ""
+            last_reply_tail = ""
+
+        return templates.get_template("partials/session_row.html").render(
+            session=_Session(), cwd=r"C:\scratch", pinned_sessions=[],
+            provider_name="kiro-cli", provider_color="", stale=False,
+            status="closed", waiting_detail=("", ""))
+
+    def test_the_action_sits_inside_the_excluded_container(self):
+        html = self._row()
+        actions = html.split('<div class="session-actions">', 1)
+        assert len(actions) == 2, "the row lost its .session-actions block"
+        assert "openInAcp(this)" in actions[1].split("</div>", 1)[0]
+
+    def test_the_action_opens_acp_for_this_row(self):
+        from power_atlas.web import templates
+        index = templates.env.loader.get_source(templates.env, "index.html")[0]
+        assert "function openInAcp(btn)" in index
+        assert "'/acp?sid='+encodeURIComponent(row.dataset.sid)" in index
+
+    def test_a_non_kiro_provider_gets_no_acp_action(self):
+        """`/acp` speaks ACP to kiro-cli; no other provider has a session it
+        could load, so offering the control would only ever fail."""
+        from power_atlas.web import templates
+
+        class _Session:
+            session_id = "abc"
+            title = "t"
+            updated_at = ""
+            first_prompt = ""
+            last_reply_tail = ""
+
+        html = templates.get_template("partials/session_row.html").render(
+            session=_Session(), cwd="", pinned_sessions=[],
+            provider_name="claude-code", provider_color="", stale=False,
+            status="closed", waiting_detail=("", ""))
+        assert "openInAcp" not in html
 
 
 # --- Phase 3 (Launch Profiles): Profile endpoint tests ---
