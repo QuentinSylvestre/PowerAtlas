@@ -663,8 +663,8 @@ are annotated **[3a]** or **[3b]**.
       the module now also serves a WebSocket surface, which is neither htmx nor request/response
 - [x] **[3a]** The page's WebSocket URL is built from `location.host`, with no hardcoded port
 - [x] **[3a]** `GET /acp` renders; the page opens a WebSocket and reports connected
-- [ ] **[3b]** Clicking "new session" creates one; the returned `sessionId` is displayed
-- [ ] The new session's `<sid>.json`/`.jsonl`/`.lock` appear in `~/.kiro/sessions/cli/`
+- [x] **[3b]** Clicking "new session" creates one; the returned `sessionId` is displayed
+- [x] **[3b]** The new session's `<sid>.json`/`.jsonl`/`.lock` appear in `~/.kiro/sessions/cli/`
 - [x] **[3a]** The handshake is **rejected with HTTP 403** for each of five cases: absent or wrong token,
       mismatched `Origin`, absent `Origin`, `Origin: null`, and a mismatched `Host` with a
       matching `Origin`.
@@ -676,33 +676,77 @@ are annotated **[3a]** or **[3b]**.
       **Superseded in practice**: the `websockets` client and `httpx` both derive `Host` from the URI
       and silently drop a `Host` passed this way, so every `Host` probe was hand-written raw HTTP.
       Two agents hit the resulting false pass before this was understood — see §9
-- [ ] Quitting PowerAtlas **from the tray** leaves no surviving `kiro-cli` process from this
-      session — `Get-Process kiro-cli` before and after (expect parent + 5 gone)
-- [ ] `power-atlas --restart` and `power-atlas --stop` **also** leave none — covered by the Job
+- [ ] **[3b — USER]** Quitting PowerAtlas **from the tray** leaves no surviving `kiro-cli` process from this
+      session — `Get-Process kiro-cli` before and after (expect parent + 5 gone).
+      **Awaiting user verification.** No agent can click a tray icon. Note this is also the *only*
+      route that exercises the `lifespan` teardown this phase added to shipped `web.py`; the log
+      shows zero `ACP teardown:` lines across 111,869 entries, so that path has never run
+- [x] **[3b]** `power-atlas --restart` and `power-atlas --stop` **also** leave none — covered by the Job
       Object, since these hard-kill via `TerminateProcess` (`__main__.py:86-91`, reached from
       `:341`/`:346`) and never run `lifespan`. `memory/MEMORY.md:94-98` records that dev iteration
-      restarts PowerAtlas constantly, making this the most-used path during Phases 3-6
-- [ ] Killing PowerAtlas from Task Manager also leaves none — the case only the Job Object covers,
-      and the reason it was chosen over a pid-file reaper
-- [ ] The job handle is held for the process lifetime (not garbage-collected), verified by keeping
-      a session open across a several-minute idle period and confirming the agent survives
-- [ ] Spawning uses a neutral cwd, named explicitly as `CONFIG_DIR / "acp-cwd"` (created on demand)
+      restarts PowerAtlas constantly, making this the most-used path during Phases 3-6.
+      **Verified**: `--restart` with 12 pids captured by create-time → 0 survivors; `--stop` with 7
+      pids → 0. Both were the Job Object working alone
+- [ ] **[3b — USER]** Killing PowerAtlas from Task Manager also leaves none — the case only the Job Object covers,
+      and the reason it was chosen over a pid-file reaper. **Awaiting user verification**
+- [ ] **[3b — USER]** The job handle is held for the process lifetime (not garbage-collected), verified by keeping
+      a session open across a several-minute idle period and confirming the agent survives.
+      **Awaiting user verification.** Partial evidence: one agent answered a second `session/new`
+      2 min 09 s after spawn on the same process, so the handle survived that long
+- [x] **[3b]** Spawning uses a neutral cwd, named explicitly as `CONFIG_DIR / "acp-cwd"` (created on demand)
       — **not** `Path.home()`, which is plausibly a real workspace and would be picked up by
       `presence.py`'s process scan, defeating the purpose
-- [ ] The ACP process's **own cwd** contributes no `live_cwds` entry. (Distinct from: a *created
+- [x] **[3b]** The ACP process's **own cwd** contributes no `live_cwds` entry. (Distinct from: a *created
       session* may light its real workspace for up to `_SIDECAR_SKEW_S = 120 s` via the independent
       sidecar path at `presence.py:471-476` — that is accepted per Q7, not a failure. The original
       single criterion conflated the two and was unachievable as written.)
-- [ ] `kiro-cli` resolved via `shutil.which()` and asserted **not** to be a `.cmd`/`.bat` wrapper
+      **Verified**: the snapshot shows exactly the predicted two-entry split and no more
+- [x] **[3b]** `kiro-cli` resolved via `shutil.which()` and asserted **not** to be a `.cmd`/`.bat` wrapper
       before spawning with pipes — `memory/MEMORY.md:40-44` records that `.cmd` shims need
       `shell=True`, which is incompatible with holding clean stdio. (Verified clear on this machine:
       `where kiro-cli` → `kiro-cli.exe`. The assertion guards other machines and future installs.)
-- [ ] Spawned with `creationflags=CREATE_NO_WINDOW` so no console flashes per session
+      **Note**: `shutil.which()` returns `kiro-cli.EXE` — uppercase — so the suffix check must
+      case-fold or it silently never fires. It does
+- [x] **[3b]** Spawned with `creationflags=CREATE_NO_WINDOW` so no console flashes per session
 - [x] **[3a]** `grep -n "status_classifier\|notifications" src/power_atlas/acp.py` returns nothing — the
       isolation boundary §6 relies on as a mitigation, enforced by inspection since tests are waived
-- [ ] **[3b]** Create a session, quit PowerAtlas, restart, and confirm **the session still reopens**.
+- [x] **[3b]** Create a session, quit PowerAtlas, restart, and confirm **the session still reopens**.
       Teardown is `kill()`-only by design, which orphans its `<sid>.lock`; this verifies that a
-      tree-killed session is not permanently poisoned in the real 13,227-session store
+      tree-killed session is not permanently poisoned in the real 13,227-session store.
+      **Verified**: `session/load` against a session whose whole tree was killed returned
+      immediately — the orphaned `.lock`, which holds `{"pid":…,"started_at":…}`, is treated as
+      stale rather than poisoning the session
+
+#### Implementation — 3b (2026-07-26, code: fa71c64, fixes: 68269ca)
+
+3b puts a real process behind the socket 3a defended. A `_Supervisor` lazily spawns one
+`kiro-cli acp -a` on the first session request — never at import, never at startup — with piped
+stdio, `stderr=subprocess.DEVNULL`, text mode with `errors="replace"`, `CREATE_NO_WINDOW`, and a
+cwd of `CONFIG_DIR / "acp-cwd"`. Around it: an NDJSON codec, a monotonic request id, a pending-future
+table where every entry carries a wall-clock ceiling, a daemon reader thread owning the blocking
+stdout read and bridging to the loop through a `RuntimeError`-guarded `call_soon_threadsafe`, and a
+`finally` on that thread that marks the supervisor dead, rejects every pending future and pushes
+`agent_died` to every socket. Writes are serialised through one lock and always flushed.
+`initialize` declares `clientCapabilities` explicitly; any inbound *request* from the agent gets a
+JSON-RPC `-32601` refusal plus a WARNING naming the method; `tool_call` and `tool_call_update` are
+logged from this phase, not Phase 6.
+
+**Measured, and it corrects §1**: the tree is **1 parent + 6 descendants for the first session** and
+**+5 for each after** — two `conhost`, two `cmd`, two `node` (the MCP servers, ~104-111 MB each).
+§1's "1 + 5" is right as a marginal figure but one short in absolute terms; the extra is the parent's
+own `conhost` from `CREATE_NO_WINDOW`. Timings: `initialize` 1.09 s, first session 6.83 s end to end,
+subsequent sessions ~2 s on the warm process — faster than §1's 5.84 s once the process exists.
+
+**Review found two High defects, both reproduced against mocks and both fixed in `68269ca`.** A
+failed `initialize` left the process bound while `alive()` — being `poll()`-based — reported healthy,
+so every later call short-circuited and skipped the handshake *permanently*; recovery needed a
+PowerAtlas restart. That is precisely the failure the plan's own "health comes from the JSON-RPC
+channel, never from exit code" decision exists to prevent, and `alive()` was an exit-code test.
+Separately the session cap read `len(sessions)` then awaited twice before recording, so concurrent
+`new` frames all passed: **8 concurrent calls against `MAX_SESSIONS=3` produced 8 sessions**, each a
+permanent artifact in the real store, defeating the sole mitigation for §6's memory-exhaustion risk.
+Both now demonstrated closed — 3 recorded and 5 refused under the same burst, and a failed handshake
+now re-spawns.
 
 #### Implementation — 3a (2026-07-25, code: f717b54)
 
@@ -1139,6 +1183,46 @@ A test pins this and a mutation re-deriving the expected origin from the raw Hos
 - **Nothing pins `starlette`.** `pyproject.toml` bounds only `websockets`; defect 3's underscore case
   is latent on the runtime interpreter and becomes live on any `pip install -e .` that upgrades it —
   which Phase 3's own pre-flight mandates.
+
+### Phase 3b
+
+- **§1's process-tree figure is one short.** Measured 1 parent + **6** descendants for the first
+  session, +5 for each after. The extra is the parent's own `conhost` from `CREATE_NO_WINDOW`.
+  §4's cost model (`~1 + 5N` processes, `~280 + 306N` MB) should read `~2 + 5N`.
+- **`session/new` is faster than §1 measured, once warm.** 6.83 s for the first session including
+  spawn and handshake; ~2 s for subsequent sessions on the live process, against §1's 5.84 s.
+- **The plan contradicts itself on teardown.** §6's mitigation row says "no graceful protocol
+  shutdown, **no waiting on the agent**", but the plan's own code specimen includes
+  `psutil.wait_procs(timeout=3)`, which is a wait on the agent. The implementation followed the
+  specimen. The comments that misdescribed the budget were corrected; the code was not changed to
+  match the prose.
+- **The shutdown budget exceeds the join.** uvicorn's 0.1 s poll + `Server.shutdown`'s fixed 0.1 s
+  sleep + up to 2.0 s of socket drain + 3.0 s `wait_procs` ≈ **5.2 s** against `__main__.py`'s 5 s
+  `join`. Benign *only because* `os._exit(0)` then closes the job handle and the OS kills the tree —
+  which is why job-object acquisition was made fatal rather than a logged downgrade.
+- **`shutil.which()` returns `kiro-cli.EXE`**, uppercase. A `.cmd`/`.bat` suffix check that does not
+  case-fold silently never fires.
+- **The isolation criterion is self-referential.** `grep -n "status_classifier\|notifications"` over
+  `acp.py` must return nothing, so the module docstring cannot *name* the two modules whose caches
+  the boundary exists to keep unreachable. It describes them instead. A first draft broke the plan's
+  own check by explaining it.
+- **`acp.py` gained its first intra-package import**, `config.CONFIG_DIR`, because the neutral-cwd
+  criterion names it explicitly. `config` imports nothing from the package, so the two unlocked-cache
+  modules stay unreachable by import graph rather than by discipline.
+- **The 3b review's own verification method leaked what the phase exists to prevent.** A probe
+  spawned `kiro-cli acp` directly to test session reopening — outside the supervisor, therefore
+  outside the Job Object — and left a **21-process tree** running. Found and killed by the
+  orchestrator. The shipped teardown was never at fault; the guarantee simply does not extend to
+  processes the supervisor did not spawn. **Any future verification must drive the supervisor, not
+  the binary.**
+- **The implementing agent under-reported its session creation by more than half.** It listed three;
+  the store shows **seven** (`961f682f`, `ac4fd3bb`, `ad8391c7`, `480b714f`, `85698bcd`, `91d801d3`,
+  `9c7a207b`), all against the scratch workspace. The four extras came from probes it described as
+  costing nothing. Store went 13,296 → 13,315. None was ever prompted, so no tool ever executed.
+- **Three exit criteria remain unverified and need a human**: tray quit, Task Manager kill, and the
+  multi-minute idle proving the job handle is not garbage-collected. The tray route is also the only
+  exercise of the `lifespan` teardown this phase added to shipped `web.py` — the log carries zero
+  `ACP teardown:` lines across 111,869 entries.
 
 **Side effect on the user's machine, corrected.** An agent probing that loopback POSTs still worked
 POSTed to `/api/save-setting` believing it was re-saving the current value; the configured port
