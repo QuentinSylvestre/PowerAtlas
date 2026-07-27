@@ -809,6 +809,13 @@ async def acp_page(request: Request, sid: str = ""):
     # nothing hostile survives into the header value.
     response.headers["Content-Security-Policy"] = _acp_csp(
         nonce, request.headers["host"].strip())
+    # This page is the ACP token's only delivery vehicle, so the response body
+    # is a live credential. The token rotates per launch and the page survives a
+    # stale one, so a retained copy is not a live hole — but nothing should be
+    # holding one on disk or in an intermediary either way. Scoped to this
+    # route: no other response carries a secret, and `StaticFiles` deliberately
+    # sets no caching headers at all.
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 

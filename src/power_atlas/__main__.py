@@ -18,6 +18,16 @@ _CREATE_NO_WINDOW = 0x08000000
 
 _PID_FILE = CONFIG_DIR / "power-atlas.pid"
 
+# The transport ceiling on an inbound WebSocket frame. uvicorn has decoded the
+# whole frame before the application sees it, so `/ws/acp`'s own 256 KiB cap
+# (``acp.MAX_MESSAGE_BYTES``) refuses frames the server has already buffered in
+# full — 16 MiB of one, at uvicorn's default. A megabyte bounds that while
+# staying above the application cap, which keeps the typed 1009 refusal the one
+# a client actually meets. A literal rather than an import from ``acp``: that
+# module is imported under a guard precisely because it may fail to load, and
+# the launcher has to start the server either way.
+WS_MAX_SIZE_BYTES = 1024 * 1024
+
 _mutex_handle = None
 
 
@@ -243,7 +253,9 @@ def _run_foreground() -> None:
             evt.set()
         return _patched
 
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=desired_port, log_level="warning")
+    uv_config = uvicorn.Config(app, host="127.0.0.1", port=desired_port,
+                               log_level="warning",
+                               ws_max_size=WS_MAX_SIZE_BYTES)
     server = uvicorn.Server(uv_config)
     ready_event = threading.Event()
     server.startup = _make_patched_startup(server, ready_event)
@@ -261,7 +273,9 @@ def _run_foreground() -> None:
         if server_thread.is_alive():
             log.warning("Failed server thread did not exit within 3s — orphaned (daemon)")
 
-        uv_config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning")
+        uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
+                                   log_level="warning",
+                                   ws_max_size=WS_MAX_SIZE_BYTES)
         server = uvicorn.Server(uv_config)
         ready_event = threading.Event()
         server.startup = _make_patched_startup(server, ready_event)

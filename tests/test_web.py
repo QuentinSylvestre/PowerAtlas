@@ -1379,6 +1379,28 @@ class TestSingleLabelHostRejected:
         assert _ACP_TOKEN in resp.text
 
 
+class TestAcpPageIsNotCacheable:
+    """``GET /acp`` renders the live ACP token, so its response is a credential.
+
+    Nothing may retain a copy of it — not the browser's disk cache, not an
+    intermediary. The token rotates per launch and the page recovers from a
+    stale one, so this is depth rather than a live hole.
+    """
+
+    def test_the_credential_bearing_response_says_no_store(self, raw_client):
+        resp = raw_client.get("/acp")
+        assert _ACP_TOKEN in resp.text, "the assertion below would be vacuous"
+        assert resp.headers["cache-control"] == "no-store"
+
+    def test_no_other_route_gained_a_caching_header(self, raw_client):
+        """``StaticFiles`` deliberately sets none, and the dashboard carries no
+        secret. Widening the header beyond ``/acp`` was out of scope."""
+        for path in ("/static/style.css", "/api/settings"):
+            resp = raw_client.get(path)
+            assert resp.status_code == 200, path
+            assert "cache-control" not in resp.headers, path
+
+
 # --- Host header: parsed here, never taken from starlette's URL ---
 
 from fastapi.middleware.asyncexitstack import AsyncExitStackMiddleware
@@ -1777,6 +1799,160 @@ class TestAcpWriterTeardown:
                 acp_mod._registry.connections.discard(conn)
 
         asyncio.run(run())
+
+
+class _ScriptedWs:
+    """A socket that plays a fixed script of ASGI messages, then hangs up."""
+
+    def __init__(self, messages=()) -> None:
+        self._messages = list(messages)
+        self.sent: list[str] = []
+        self.closed: list[tuple[int, str]] = []
+
+    async def receive(self) -> dict:
+        if self._messages:
+            return self._messages.pop(0)
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send_text(self, text: str) -> None:
+        self.sent.append(text)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed.append((code, reason))
+
+
+def _logged_socket_ids(caplog, verb: str) -> list[str]:
+    """Every socket id a line of the form ``ACP socket <id> <verb>`` carried.
+
+    Extracted rather than substring-matched: ``s1`` is a substring of ``s10``,
+    and the ids are process-global, so a test that asked "is this id in that
+    line" would pass or fail on how many sockets earlier tests had opened.
+    """
+    pattern = re.compile(r"ACP socket (\S+) " + verb)
+    found = []
+    for record in caplog.records:
+        match = pattern.search(record.getMessage())
+        if match:
+            found.append(match.group(1))
+    return found
+
+
+class TestAcpSocketCorrelationId:
+    """Socket lifecycle lines reported only counts, which cannot correlate.
+
+    ``MAX_CONNECTIONS`` allows eight sockets at once and two browser tabs on one
+    session produce two routinely, so "socket open (2/8)" followed later by
+    "socket closed (1 open)" leaves no way to say which of the two went.
+    """
+
+    def test_open_and_close_name_the_same_socket(self, caplog):
+        from power_atlas import acp as acp_mod
+        assert not acp_mod._registry.connections, "an earlier test left sockets"
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            asyncio.run(acp_mod.serve_socket(_ScriptedWs()))
+        opened = _logged_socket_ids(caplog, "open")
+        closed = _logged_socket_ids(caplog, "closed")
+        assert len(opened) == 1 and len(closed) == 1
+        assert opened == closed
+
+    def test_two_sockets_are_told_apart(self, caplog):
+        """The whole point: one id per socket, not one id per process."""
+        from power_atlas import acp as acp_mod
+        assert not acp_mod._registry.connections, "an earlier test left sockets"
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            asyncio.run(acp_mod.serve_socket(_ScriptedWs()))
+            asyncio.run(acp_mod.serve_socket(_ScriptedWs()))
+        opened = _logged_socket_ids(caplog, "open")
+        assert len(opened) == 2
+        assert opened[0] != opened[1]
+
+    def test_a_retire_names_the_socket_that_retired(self, caplog):
+        """A writer failure retires one socket while the others stay up. The
+        count in the line says how many are left, never which one went."""
+        from power_atlas import acp as acp_mod
+
+        async def run():
+            healthy = acp_mod._Connection(_SinkWs())
+            doomed = acp_mod._Connection(_FakeWs(ConnectionResetError()))
+            acp_mod._registry.connections.update({healthy, doomed})
+            try:
+                doomed.send({"type": "meta", "payload": {}})
+                await doomed._write_loop()
+            finally:
+                acp_mod._registry.connections.discard(healthy)
+                acp_mod._registry.connections.discard(doomed)
+            return healthy, doomed
+
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            healthy, doomed = asyncio.run(run())
+        assert _logged_socket_ids(caplog, "retired by writer") == [doomed.cid]
+        assert healthy.cid != doomed.cid
+
+    def test_the_id_stays_short_enough_to_read(self):
+        """A local single-user app's log, not a distributed trace."""
+        from power_atlas import acp as acp_mod
+        conn = acp_mod._Connection(_SinkWs())
+        assert 0 < len(conn.cid) <= 8
+
+    def test_a_throttled_socket_is_named(self, acp_session, caplog):
+        """The replay floor is deliberately per-socket, so which socket tripped
+        it is the only thing that makes the line actionable."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._handle_subscribe(conn, sid)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            acp_mod._handle_subscribe(conn, sid)
+        assert any(f"socket={conn.cid} " in r.getMessage() for r in caplog.records), \
+            [r.getMessage() for r in caplog.records]
+
+
+class TestAcpTransportFrameCap:
+    """``MAX_MESSAGE_BYTES`` refuses at the protocol layer, which is after
+    uvicorn has decoded the whole frame. Left at uvicorn's default a client
+    could make the server buffer 16 MiB before the 256 KiB refusal fired.
+    """
+
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def test_the_transport_ceiling_is_not_below_the_protocol_cap(self):
+        """Below it, a legitimate 256 KiB prompt would die at the transport
+        with a generic close instead of the typed 1009 the page explains."""
+        from power_atlas import acp as acp_mod
+        assert self._main().WS_MAX_SIZE_BYTES >= acp_mod.MAX_MESSAGE_BYTES
+
+    def test_the_transport_ceiling_is_below_uvicorns_default(self):
+        import inspect
+
+        import uvicorn
+        default = inspect.signature(
+            uvicorn.Config.__init__).parameters["ws_max_size"].default
+        assert self._main().WS_MAX_SIZE_BYTES < default
+
+    def test_the_installed_uvicorn_accepts_and_keeps_it(self):
+        """The keyword is only worth passing if the uvicorn actually running
+        the app honours it; a version that dropped it raises here."""
+        import uvicorn
+        config = uvicorn.Config(
+            "power_atlas.web:app", host="127.0.0.1", port=0, log_config=None,
+            ws_max_size=self._main().WS_MAX_SIZE_BYTES)
+        assert config.ws_max_size == self._main().WS_MAX_SIZE_BYTES
+
+    def test_every_server_config_carries_it(self):
+        """Two call sites: the configured port and the random-port fallback. A
+        busy port routes every launch through the second one."""
+        import ast
+
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        calls = [node for node in ast.walk(ast.parse(source))
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)
+                 and node.func.attr == "Config"]
+        assert len(calls) == 2, "a uvicorn.Config call site appeared or went"
+        for call in calls:
+            assert "ws_max_size" in {kw.arg for kw in call.keywords}, \
+                f"uvicorn.Config at line {call.lineno} leaves the 16 MiB default"
 
 
 class TestAcpTokenCheck:

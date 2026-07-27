@@ -54,6 +54,7 @@ deadlocks the child once ~64 KB accumulates in it.
 
 import asyncio
 import collections
+import itertools
 import json
 import logging
 import re
@@ -116,12 +117,12 @@ SERVER_TYPES = frozenset({
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
 # typed or pasted into the page. 256 KiB is far more of that than anyone
-# sends, and two orders of magnitude below uvicorn's 16 MiB `ws_max_size`
-# default. Note what this cap is and is not: uvicorn has already decoded the
+# sends. Note what this cap is and is not: uvicorn has already decoded the
 # frame by the time we see it, so this rejects oversized frames at the
-# protocol layer rather than at the transport. Lowering the transport ceiling
-# means passing `ws_max_size` to the uvicorn.Config calls in __main__.py,
-# which is outside this phase's file scope.
+# protocol layer rather than at the transport. The transport ceiling is
+# `__main__.WS_MAX_SIZE_BYTES`, which replaces uvicorn's 16 MiB `ws_max_size`
+# default with a megabyte — above this cap, so the typed refusal below stays
+# the one a client actually meets.
 MAX_MESSAGE_BYTES = 256 * 1024
 
 # A single-user local UI: one tab in practice, two while comparing, plus
@@ -619,6 +620,15 @@ class _History:
         return len(self._events)
 
 
+# Names one socket across its own log lines. Every socket-scoped line used to
+# report only counts, so with more than one open — MAX_CONNECTIONS allows eight,
+# and two tabs on one session produce two routinely — an open could not be
+# matched to its close and a retire could not be attributed. A process-local
+# counter rather than a random id: consecutive ids read as a sequence in the
+# log, which is what a single-user local app's log is read as.
+_next_conn_id = itertools.count(1)
+
+
 class _Connection:
     """One browser socket: an outbound queue drained by a single writer task.
 
@@ -628,6 +638,7 @@ class _Connection:
 
     def __init__(self, ws: WebSocket) -> None:
         self.ws = ws
+        self.cid = f"s{next(_next_conn_id)}"
         self.session_id: str | None = None
         # Each entry is ``(weight, frame)``: the weight is computed once, on
         # the way in, so the writer can release it again without a second walk
@@ -696,13 +707,14 @@ class _Connection:
         except (WebSocketDisconnect, ClientDisconnected, ConnectionError, RuntimeError):
             # The peer went away mid-send, or the socket was already closed.
             # Routine, and it stays routine once Phase 3b streams chunks.
-            log.debug("ACP socket writer stopped: peer gone")
+            log.debug("ACP socket %s writer stopped: peer gone", self.cid)
         except Exception:
             # Anything else is a bug in the frames we build. Do not leave a
             # registered socket with a dead writer behind it: it would hold one
             # of MAX_CONNECTIONS slots and swallow every outbound frame in
             # silence, which is indistinguishable from a hung agent.
-            log.exception("ACP socket writer failed; retiring the socket")
+            log.exception("ACP socket %s writer failed; retiring the socket",
+                          self.cid)
             close_reason = "writer failed"
         await self._retire(close_reason)
 
@@ -733,8 +745,9 @@ class _Connection:
                 await self.ws.close(code=1001)
         except Exception:
             pass
-        log.info("ACP socket retired by writer (%s); %d open",
-                 close_reason or "peer gone", len(_registry.connections))
+        log.info("ACP socket %s retired by writer (%s); %d open",
+                 self.cid, close_reason or "peer gone",
+                 len(_registry.connections))
 
     async def drain(self, timeout: float = DRAIN_TIMEOUT_SECONDS) -> None:
         """Wait for queued frames to reach the wire. Bounded; never raises.
@@ -764,8 +777,8 @@ class _Connection:
         finally:
             joined.cancel()
         if joined not in done and self._out.qsize():
-            log.warning("ACP socket drain gave up with %d frame(s) queued",
-                        self._out.qsize())
+            log.warning("ACP socket %s drain gave up with %d frame(s) queued",
+                        self.cid, self._out.qsize())
 
     async def stop(self) -> None:
         """Retire the writer task. Idempotent.
@@ -1989,7 +2002,8 @@ async def serve_socket(ws: WebSocket) -> None:
         "maxMessageBytes": MAX_MESSAGE_BYTES,
         "maxConnections": MAX_CONNECTIONS,
     }))
-    log.info("ACP socket open (%d/%d)", len(_registry.connections), MAX_CONNECTIONS)
+    log.info("ACP socket %s open (%d/%d)", conn.cid,
+             len(_registry.connections), MAX_CONNECTIONS)
 
     try:
         while True:
@@ -2032,7 +2046,8 @@ async def serve_socket(ws: WebSocket) -> None:
         # went away — the writer's first failed send ends the wait.
         await conn.drain()
         await conn.stop()
-        log.info("ACP socket closed (%d open)", len(_registry.connections))
+        log.info("ACP socket %s closed (%d open)", conn.cid,
+                 len(_registry.connections))
 
 
 def _dispatch(conn: _Connection, frame: dict) -> None:
@@ -2135,8 +2150,8 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
             f"{SUBSCRIBE_MIN_INTERVAL_SECONDS:.0f}s ago; the replay was not "
             "rebuilt. Reload the page if the transcript looks wrong.",
             session_id))
-        log.warning("ACP subscribe throttled: session=%s, %.3fs since the last "
-                    "replay", session_id, since)
+        log.warning("ACP subscribe throttled: socket=%s session=%s, %.3fs "
+                    "since the last replay", conn.cid, session_id, since)
         return
     conn.replayed_at = now
     _registry.attach(conn, session_id)
@@ -2351,8 +2366,8 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
             "This socket asked for a load less than "
             f"{LOAD_MIN_INTERVAL_SECONDS:.0f}s ago. Wait for that one to "
             "finish, or reload the page.", session_id))
-        log.warning("ACP load throttled: session=%s, %.3fs since the last load",
-                    session_id, since)
+        log.warning("ACP load throttled: socket=%s session=%s, %.3fs since the "
+                    "last load", conn.cid, session_id, since)
         return
     if _supervisor.at_capacity():
         conn.send(error_frame(
