@@ -1,10 +1,71 @@
 # kiro-cli ACP Client Prototype
 
 > **Date**: 2026-07-25
-> **Status**: In Progress — all six phases complete and reviewed; open at `/qclose`: the README exemption, and the test-plan H1-H10 hotspot block  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-07-26 20:16
 > **Scope**: Throwaway prototype of a WebSocket-backed kiro-cli ACP client on a new `/acp` page, validating transport, process supervision and the session model before a from-scratch rebuild
-> **Estimated effort**: ~7-10 days (revised up after review — see §6)
+> **Estimated effort**: ~7-10 days (revised up after review — see §6). **Actual: 2 calendar days, ~13 h elapsed** — a floor, and a poor predictor in both directions (see §9 Phase 6).
+
+---
+
+## Completion Summary
+
+All six phases complete. **1020 passed, 1 skipped** (622 passing on clean `main` before the plan).
+The prototype's own answer — *not this shape, not yet*; ship the read-only viewer, gate the chat
+client on the permission experiment — is recorded in `plans/ROADMAP.md`, not only here, because that
+is where the decision gets made.
+
+### Acknowledged at archival
+
+- **Documentation gap — `README.md`.** `Accepted` — the throwaway-prototype exemption proposed in the
+  Intent is granted. Three sites stay incomplete (`:3` product definition, `:30` "click to open the
+  dashboard UI", `:32-53` feature list) because `/acp` is built to be deleted.
+- **Documentation gap — `README.md` policy.** `Promoted: AGENTS.md § Doc & Test Guidelines now carries
+  a throwaway-prototype exemption that ends the moment the surface is kept.` Applied in the archive
+  commit, so the next prototype does not have to re-argue it.
+- **Test harness discoverability.** `Promoted: AGENTS.md § Doc & Test Guidelines now names
+  tests/acp_page.test.mjs, its command, and that it is outside pytest and CI.` Without it the harness
+  was reachable only from the one Python test asserting it exists.
+- **`plans/tests/260701_POWERATLAS.md` H1-H10 hotspot block.** `Follow-up plan intended` — all twelve
+  citations fail to resolve and **two claims are verifiably false** (H1's provider hardcoding, H8's
+  0.5 s restart sleep; both checked against current source). Left unfixed deliberately: re-pointing
+  the other eight would make the block read as freshly verified while those two kept advertising
+  defects that no longer exist. It predates this plan — `web.py:130` was already wrong before Phase 3
+  — and wants a pass that re-derives hotspots against source rather than repairing coordinates.
+- **Phase 1 review, finding 11 (Low).** `Accepted` — de-numbering applied selectively; raw coordinates
+  survive in files this plan did not rewrite. Phase 6's backstop confirmed the symbol-anchor mandate
+  held where it was applied (zero `web.py:NNN` refs remain).
+- **Phase 2 review, finding 20 (Low).** `Accepted` — comment precision, test-builder overlap,
+  `_raise_status` guard, `kiro-ide` comment. All cosmetic, surfaced after two fix rounds had run.
+- **Harness opportunity — `/qexplore` Discovery loss.** `Promoted: Step 3 now persists contract items
+  4-9 under a transient ## Exploration Discovery heading.`
+- **Harness opportunity — `/qplan` Standard template.** `Promoted: ## Review Log added to the Standard
+  template; removed from Major, which now inherits it.`
+- **Harness opportunity — `/qdev` orphaned working tree.** `Promoted: four-option action set led by
+  "Treat as incomplete — re-verify against exit criteria and resume", the framing the user chose here
+  after rejecting all three the orchestrator invented.`
+- **Harness opportunity — `/qvalidate` commit-pairing.** `Promoted: widened from feat-only to
+  feat|fix|refactor|test|chore|ci in both scripts.` It had passed **vacuously** over this plan's own
+  Phase 2, whose code commit was `fix(...)` — reporting PASS while inspecting nothing.
+- **Harness opportunity — `/qdev` serialization mandate.** `Promoted: mandate deleted, commit-suppression
+  contract kept.` Credited as the removal against the one-in-one-out budget. The wholesale deletion
+  the observation implied would have stripped a guardrail and re-enabled the race it cited.
+- **Harness opportunity — `/qdev` cycle-cap convergence.** `Promoted: the post-cap prompt must now lead
+  with the reviewers' standing verdict and the round-over-round severity trend.`
+- **Harness opportunity — `/qqa` side-effecting surfaces.** `Promoted: new branch prescribing implementer-
+  drives / separate-reviewer-audits, recorded on the verdict report's Method line.`
+- **Harness opportunity — `Claude-Session:` trailer.** `Accepted (harness opportunity): a prepare-commit-msg
+  hook is a local-machine change rather than a governance edit.` 1 of the first 5 commits this session
+  carried it; both ordinary remedies are banned by git-safety governance, so a miss is permanent.
+- **Carried out of the governance promotions, for a later pass** (agent-playbook, not this repo):
+  `/qplan` Step 2 does not yet fold in and remove the new `## Exploration Discovery` section — a
+  self-describing marker line mitigates it but does not close it; and `shared/AGENTS.md § Commit
+  Conventions` still describes commit-pairing as matching `feat`/`docs`, which the widened check
+  outdates.
+
+Fixed rather than accepted at archival: **Phase 3a review finding 12** — a per-socket correlation id,
+`Cache-Control: no-store` on `/acp`, and a transport-level frame cap (`3eea673`). Two of its five
+members were already stale, having been fixed by Phases 4 and 5.
 
 ---
 
