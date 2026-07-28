@@ -25,6 +25,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import mistune
 
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
 from . import autostart, data, icons, launcher, notifications, presence
@@ -47,6 +48,11 @@ except Exception as exc:  # pragma: no cover - prototype degradation path
     logging.getLogger("power_atlas.web").exception(
         "ACP prototype failed to import: /acp is disabled, the rest of the UI is "
         "unaffected")
+
+# escape=True causes mistune to HTML-entity-encode raw HTML tags (e.g. <script> → &lt;script&gt;)
+# rather than passing them through. JS-URL hrefs (javascript:) are sanitized unconditionally by
+# mistune's HTMLRenderer.safe_url(). This makes output safe for use with Jinja2's | safe filter.
+_md = mistune.create_markdown(escape=True)
 
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
@@ -1829,25 +1835,41 @@ async def save_setting(request: Request):
 
 @app.get("/partials/session-tail", response_class=HTMLResponse)
 async def partials_session_tail(request: Request, sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
+    # Validate sid to a UUID-like pattern before passing to the data layer.
+    if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
+        return HTMLResponse('<div class="tail-empty">Invalid session id</div>', status_code=400)
     messages = await asyncio.to_thread(data.get_session_tail, sid, provider, cwd)
     first_prompt = await asyncio.to_thread(data.get_first_prompt, sid, provider, cwd)
-    if not messages and not first_prompt:
-        return HTMLResponse('<div class="tail-empty">No recent output</div>')
-    # Look up session title from cache
+    # Look up session title and last_prompt from cache
     session_title = ""
+    last_prompt = ""
     cached_sessions = data.session_cache.get(cwd, provider)
     if cached_sessions:
         for s in cached_sessions:
             if s.session_id == sid:
                 session_title = s.title
+                last_prompt = (s.last_prompt or "").strip()
                 break
     # Derive workspace name from cwd
     workspace_name = Path(cwd).name if cwd else ""
+    # Guard: show empty-state if ALL content fields are absent
+    if not messages and not first_prompt and not last_prompt:
+        return HTMLResponse('<div class="tail-empty">No recent output</div>')
+    # Suppress last_prompt when it duplicates the beginning of first_prompt (dedup for single-exchange sessions).
+    # first_prompt from get_first_prompt() may be longer than last_prompt from session cache (200-char cap).
+    if last_prompt and first_prompt.startswith(last_prompt):
+        last_prompt = ""
+    # Render all text sections through mistune (escape=True entity-encodes raw HTML — safe for | safe filter)
+    first_prompt_html = _md(first_prompt) if first_prompt else ""
+    last_prompt_html = _md(last_prompt) if last_prompt else ""
+    messages_html = [_md(m) for m in messages]
     return templates.TemplateResponse(request, "partials/session_tail.html", {
-        "first_prompt": first_prompt,
-        "messages": messages,
+        "first_prompt": first_prompt_html,
+        "last_prompt": last_prompt_html,
+        "messages": messages_html,
         "session_title": session_title,
         "workspace_name": workspace_name,
+        "session_id": sid,
     })
 
 

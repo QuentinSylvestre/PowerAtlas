@@ -535,15 +535,15 @@ def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
 
 
 @patch("power_atlas.web.data.session_cache")
-@patch("power_atlas.web.data.get_first_prompt", return_value="hello user")
+@patch("power_atlas.web.data.get_first_prompt", return_value="**hello** user")
 @patch("power_atlas.web.data.get_session_tail")
 def test_session_tail_returns_messages(mock_tail, mock_first, mock_cache, client):
     mock_tail.return_value = ["message one", "message two"]
     mock_cache.get.return_value = [
-        Session(session_id="sess-1", title="My Session", cwd="C:\\Projects\\myapp",
-                created_at="", updated_at="", first_prompt="", last_prompt="", last_reply_tail=""),
+        Session(session_id="aabbccdd-1234-5678-abcd-ef0123456789", title="My Session", cwd="C:\\Projects\\myapp",
+                created_at="", updated_at="", first_prompt="", last_prompt="fix the bug", last_reply_tail=""),
     ]
-    resp = client.get("/partials/session-tail?sid=sess-1&cwd=C%3A%5CProjects%5Cmyapp")
+    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789&cwd=C%3A%5CProjects%5Cmyapp")
     assert resp.status_code == 200
     assert "message one" in resp.text
     assert "message two" in resp.text
@@ -553,6 +553,12 @@ def test_session_tail_returns_messages(mock_tail, mock_first, mock_cache, client
     assert "myapp" in resp.text
     assert "tail-label" in resp.text
     assert "My Session" in resp.text
+    assert "tail-session-id" in resp.text
+    assert "aabbccdd" in resp.text        # session_id[:8] rendered
+    assert "fix the bug" in resp.text     # last_prompt rendered
+    assert "User last message" in resp.text
+    assert "<p>" in resp.text             # mistune rendered markdown (not raw text)
+    assert "<strong>" in resp.text        # **hello** → <strong>hello</strong>
 
 
 @patch("power_atlas.web.data.session_cache")
@@ -562,23 +568,47 @@ def test_session_tail_graceful_no_cache(mock_tail, mock_first, mock_cache, clien
     """When session is not in cache, title is empty but tooltip still renders."""
     mock_tail.return_value = ["agent reply"]
     mock_cache.get.return_value = None  # Cache miss
-    resp = client.get("/partials/session-tail?sid=sess-1&cwd=C%3A%5CProjects%5Cmyapp")
+    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789&cwd=C%3A%5CProjects%5Cmyapp")
     assert resp.status_code == 200
     assert "agent reply" in resp.text
     assert "tail-workspace" in resp.text  # workspace name from Path(cwd).name still shows
     assert "myapp" in resp.text
     assert "tail-title" not in resp.text  # no title when not in cache
+    assert "User last message" in resp.text
+    assert "—" in resp.text  # em dash fallback shown
 
 
+@patch("power_atlas.web.data.session_cache")
 @patch("power_atlas.web.data.get_first_prompt", return_value="")
 @patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_empty(mock_tail, mock_first, client):
+def test_session_tail_empty(mock_tail, mock_first, mock_cache, client):
     mock_tail.return_value = []
-    resp = client.get("/partials/session-tail?sid=sess-1")
+    mock_cache.get.return_value = None
+    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789")
     assert resp.status_code == 200
     assert "tail-empty" in resp.text
     assert "No recent output" in resp.text
 
+
+@patch("power_atlas.web.data.session_cache")
+@patch("power_atlas.web.data.get_first_prompt", return_value="<script>alert(1)</script>")
+@patch("power_atlas.web.data.get_session_tail")
+def test_session_tail_xss_stripped(mock_tail, mock_first, mock_cache, client):
+    """mistune escape=True entity-encodes raw HTML tags; JS-URL hrefs (javascript:) are sanitized via mistune's HTMLRenderer.safe_url() unconditionally. Output is safe for | safe filter."""
+    mock_tail.return_value = ["<script>evil()</script>", "[click](javascript:alert(1))"]
+    mock_cache.get.return_value = None
+    resp = client.get("/partials/session-tail?sid=deadbeef-dead-beef-dead-beefdeadbeef&cwd=C%3A%5CTest")
+    assert resp.status_code == 200
+    assert "<script>" not in resp.text          # raw tags not present
+    assert "&lt;script&gt;" in resp.text        # entity-encoded form IS present (confirms _md was invoked)
+    assert "javascript:alert" not in resp.text  # mistune's HTMLRenderer.safe_url() replaces javascript: href with #harmful-link
+
+
+def test_session_tail_invalid_sid(client):
+    """Invalid sid format returns 400 without calling data functions."""
+    resp = client.get("/partials/session-tail?sid=not-a-uuid&cwd=C%3A%5CTest")
+    assert resp.status_code == 400
+    assert "Invalid session id" in resp.text
 
 
 # --- Phase 3: custom launcher CRUD ---

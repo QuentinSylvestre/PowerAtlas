@@ -250,6 +250,18 @@ script { display: none; }
 .tail-section { margin-top: 4px; }
 .tail-agent-section { border-top: 1px solid var(--border); padding-top: 6px; margin-top: 6px; }
 .tail-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; font-weight: 500; display: block; margin-bottom: 2px; }
+.tail-header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tail-session-id { font-size: 10px; color: var(--text-dim); font-family: monospace; opacity: 0.7; white-space: nowrap; flex-shrink: 0; }
+/* Markdown content resets — keep tooltip compact; override .tail-line monospace/pre-wrap defaults */
+.tail-md { font-family: inherit; white-space: normal; word-break: break-word; overflow-wrap: break-word; }
+.tail-md p { margin: 0 0 4px; }
+.tail-md p:last-child { margin-bottom: 0; }
+.tail-md code { font-size: 10px; background: rgba(255,255,255,0.07); padding: 1px 3px; border-radius: 3px; font-family: monospace; }
+.tail-md pre { font-size: 10px; background: rgba(255,255,255,0.05); padding: 4px 6px; border-radius: 4px; overflow-x: auto; margin: 4px 0; white-space: pre; }
+.tail-md ul, .tail-md ol { margin: 2px 0; padding-left: 16px; }
+.tail-md li { margin: 1px 0; }
+.tail-md strong { font-weight: 600; }
+.tail-md em { font-style: italic; }
 .tail-empty { font-size: 11px; color: var(--text-dim); padding: 4px 8px; font-style: italic; }
 
 

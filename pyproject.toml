@@ -22,6 +22,7 @@ dependencies = [
     # Upper bound: uvicorn's `auto` websocket selector still imports the
     # deprecated websockets.legacy shim, which a future release removes.
     "websockets>=12,<17",
+    "mistune>=3.3.0,<4",
 ]
 
 [project.optional-dependencies]
