@@ -25,7 +25,6 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import mistune
 
 from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
 from . import autostart, data, icons, launcher, notifications, presence
@@ -49,10 +48,19 @@ except Exception as exc:  # pragma: no cover - prototype degradation path
         "ACP prototype failed to import: /acp is disabled, the rest of the UI is "
         "unaffected")
 
-# escape=True causes mistune to HTML-entity-encode raw HTML tags (e.g. <script> → &lt;script&gt;)
-# rather than passing them through. JS-URL hrefs (javascript:) are sanitized unconditionally by
-# mistune's HTMLRenderer.safe_url(). This makes output safe for use with Jinja2's | safe filter.
-_md = mistune.create_markdown(escape=True)
+try:
+    import mistune
+    # escape=True causes mistune to HTML-entity-encode raw HTML tags (e.g. <script> → &lt;script&gt;)
+    # rather than passing them through. JS-URL hrefs (javascript:) are sanitized via
+    # mistune's HTMLRenderer.safe_url() unconditionally. This makes output safe for | safe filter.
+    _md = mistune.create_markdown(escape=True)
+except Exception:  # noqa: BLE001
+    import html as _html
+    import logging as _logging
+    _logging.getLogger(__name__).warning("mistune not available — falling back to plain-text markdown rendering")
+    def _md(text: str) -> str:  # type: ignore[misc]
+        """Fallback: escape HTML and wrap in a paragraph."""
+        return f"<p>{_html.escape(text)}</p>"
 
 PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
@@ -1836,7 +1844,8 @@ async def save_setting(request: Request):
 @app.get("/partials/session-tail", response_class=HTMLResponse)
 async def partials_session_tail(request: Request, sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
     # Validate sid to a UUID-like pattern before passing to the data layer.
-    if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
+    # Accept bare UUID (v2: aabbccdd-...) or sess_<uuid> (v3 prefix) formats.
+    if not re.fullmatch(r'(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
         return HTMLResponse('<div class="tail-empty">Invalid session id</div>', status_code=400)
     messages = await asyncio.to_thread(data.get_session_tail, sid, provider, cwd)
     first_prompt = await asyncio.to_thread(data.get_first_prompt, sid, provider, cwd)

@@ -575,7 +575,7 @@ def test_session_tail_graceful_no_cache(mock_tail, mock_first, mock_cache, clien
     assert "myapp" in resp.text
     assert "tail-title" not in resp.text  # no title when not in cache
     assert "User last message" in resp.text
-    assert "—" in resp.text  # em dash fallback shown
+    assert "\u2014" in resp.text  # em-dash fallback rendered for empty first_prompt and last_prompt
 
 
 @patch("power_atlas.web.data.session_cache")

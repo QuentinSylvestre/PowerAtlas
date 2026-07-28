@@ -585,7 +585,7 @@ var maxH=openBelow?Math.max(spaceBelow,100):Math.max(spaceAbove,100);tooltip.sty
 // spaceAbove>=spaceBelow ensures spaceAbove>=100, so effectiveH=Math.min(scrollH,spaceAbove)<=spaceAbove always holds).
 // Retained as a safety net.
 // maxHeight already set to Math.max(spaceAbove,100) above
-slot.style.top='4px';slot.style.transform='none';}slot.style.display='block';}).catch(function(){slot.style.display='none'})},300);}function hideTail(el){var row=el.closest('.session-row');var sid=row.dataset.sid;clearTimeout(_tailTimers[sid]);var slot=el.querySelector('.session-tooltip-slot');slot.style.display='none';slot.style.left='';slot.style.top='';slot.style.transform='';var tooltip=slot.querySelector('.session-tail-tooltip');if(tooltip)tooltip.style.maxHeight='';}
+slot.style.top='4px';slot.style.transform='none';}slot.style.display='block';}).catch(function(e){slot.style.left='';slot.style.top='';slot.style.transform='';slot.style.display='none';console.warn('[tooltip] loadTail fetch failed',e);})},300);}function hideTail(el){var row=el.closest('.session-row');var sid=row.dataset.sid;clearTimeout(_tailTimers[sid]);var slot=el.querySelector('.session-tooltip-slot');slot.style.display='none';slot.style.left='';slot.style.top='';slot.style.transform='';var tooltip=slot.querySelector('.session-tail-tooltip');if(tooltip)tooltip.style.maxHeight='';}
 </script>
 {% include "partials/launcher_modal.html" %}
 {% include "partials/workspace_settings_modal.html" %}
