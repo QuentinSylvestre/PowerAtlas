@@ -441,3 +441,30 @@ Implementation health: Green.
 | 3 | Low | `openBelow = spaceBelow > spaceAbove` tie-break (equal space → above) undocumented. | Fixed — comment added: "strict comparison — equal space defaults to above (legacy direction)." |
 | 4 | Low | `resetOverlays()` doesn't reset `left/top/transform` (pre-existing; Phase 2 adds three new inline properties). | User: accepted — plan invariant states `resetOverlays()` behavior unchanged; stale state is overwritten on next hover; no visible misposition. |
 | 5 | Low | Dead-code comment said "suppress fires when `spaceAbove<100`" — imprecise (actual condition is `Math.max(spaceAbove,spaceBelow)<100`). | Fixed — comment updated to cite the exact suppress condition and trace the unreachability in the above-preferred context. |
+
+### 2026-07-28 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Security auditor, Senior engineer, Reliability engineer, End-user advocate.
+14 findings (0 High, 4 Medium, 10 Low) across 2 auto-fix cycles — all resolved.
+QA verification: PASS (6 surfaces verified, 12+ probes executed).
+
+Additional user-steering fixes applied post-review: full session-id display (not truncated to 8 chars), user-last-message styled to match first-message formatting, hover persistence (tooltip stays visible when mouse moves over it), workspace name truncation and inline layout fix.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Endpoint enrichment, template, CSS, tests | pass | PASS | 683 passed, 1 skipped; 5 session-tail tests; mistune 3.3.4 |
+| 2: Viewport positioning rewrite | not_run | PASS | acp_page.test.mjs: 15/15; positioning verified via Playwright |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | v3 session IDs (`sess_<uuid>`) fail the UUID regex — tooltips silently broken for any future v3 surfacing. | Fixed — regex updated to `(?:sess_)?[0-9a-f]{8}-...`. |
+| 2 | Medium | `_md` module-level init has no startup guard; failure takes the whole dashboard down. | Fixed — wrapped in try/except with html.escape fallback (matches `acp` pattern). |
+| 3 | Medium | `test_session_tail_graceful_no_cache` asserts ASCII hyphen `"-"` (vacuously true); should assert em-dash `"\u2014"`. | Fixed — assertion changed to `"\u2014"`. |
+| 4 | Medium | `loadTail` catch branch doesn't reset `left/top/transform`; stale positioning persists on fetch failure. | Fixed — resets and `console.warn` added to catch branch. |
+| 5 | Low | `plans/tests/260701_POWERATLAS.md` §1.8 version stale (`>=3.2.1`) and `SanitizeURLPlugin` attribution wrong. | Fixed — updated to `>=3.3.0` and `HTMLRenderer.safe_url()`. |
+| 6 | Low | No `console.warn` in catch branch — silent JS failures undebuggable. | Fixed — added alongside position resets. |
+| 7 | Low | `resetOverlays()` doesn't clear `left/top/transform` (pre-existing; new inline properties worsen latent stale-state window). | User: accepted — plan invariant states `resetOverlays()` behavior unchanged; next `loadTail` hover always overwrites before display. |
+| [+7 low] | Low | Various per-phase Lows (dead-code comment wording, dedup startswith edge, ARIA gap, workspace-root cwd visual quirk, etc.) | Fixed or accepted per per-phase review log entries above. |
