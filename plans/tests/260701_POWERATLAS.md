@@ -528,6 +528,13 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `sys.prefix` equals the venv dir, not `sys.executable` — on Windows the venv `python.exe` is a redirector whose image path is the base install, so an executable comparison reports a false negative.
 - **risks**: a venv that exists but lacks the package makes every entry point fail, and silently under `pythonw` (autostart); the sentinel is inherited by launched child processes; `--stop` pays a process hop it does not need.
 
+### 7.8 Crash handler (`faulthandler` → `crash.log`)
+- **what**: `_enable_crash_handler()` runs immediately after `logging.basicConfig` in `_run_foreground`. It appends a `=== pid N started <ts> ===` header to `%LOCALAPPDATA%\power-atlas\crash.log` and installs `faulthandler` with `all_threads=True` writing to that file's descriptor. Any failure is logged and non-fatal.
+- **how-to-reach**: start the app; force a fault from any thread with `ctypes.string_at(0)`. Redirect `__main__.CONFIG_DIR` to a tmp path first — the probe must not append to the real log.
+- **probes**: header appears once per start; a fault appends `Windows fatal exception: access violation` plus a Python traceback **per thread**, with the faulting one first; verified under `pythonw`, where `sys.stderr` is None and the default `faulthandler.enable()` would raise — that is the login configuration, so a console-only check proves nothing; append mode preserves an earlier crash; a `CONFIG_DIR` that cannot be created degrades to a warning and startup continues.
+- **oracle**: the traceback lands in `crash.log`, never `orchestrator.log` — `logging.FileHandler` holds a buffered handle on the latter, and faulthandler's descriptor-level writes would land mid-line.
+- **risks**: the module-level `_crash_log` reference is load-bearing — if it is ever dropped the object is collected, the descriptor closes and the handler writes into a closed fd, which no test currently guards; `crash.log` is never rotated; a fault that corrupts the interpreter badly enough to break traceback walking still yields nothing.
+
 ---
 
 ## Scoped-out (not given full briefs — reason noted)

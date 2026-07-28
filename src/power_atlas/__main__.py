@@ -2,6 +2,8 @@
 
 import argparse
 import ctypes
+import faulthandler
+import logging
 import os
 import signal
 import subprocess
@@ -237,9 +239,38 @@ def _ensure_display() -> None:
     sys.exit(1)
 
 
+_crash_log = None  # module-level: faulthandler writes to this file's descriptor for the process lifetime
+
+
+def _enable_crash_handler() -> None:
+    """Dump every thread's Python traceback to ``crash.log`` on a native crash.
+
+    A hard crash otherwise leaves only a minidump, which names the faulting
+    machine instruction but not the Python code that got there — the 2026-07-28
+    access violation (the GC dereferencing a tuple element whose ``ob_type`` was
+    NULL) cost a dump parse to reach a subsystem-level guess.
+
+    Two constraints shape this. The file must be explicit: ``faulthandler``
+    defaults to ``sys.stderr``, which is None under ``pythonw``, the very
+    configuration that crashes at login. And the handle must outlive this
+    function — the handler writes to the raw descriptor, so letting the object
+    be collected would close it. It is a separate file from ``orchestrator.log``
+    because ``logging.FileHandler`` holds its own buffered handle on that one and
+    the descriptor-level writes would land mid-line.
+    """
+    global _crash_log
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _crash_log = open(CONFIG_DIR / "crash.log", "a", encoding="utf-8")
+        _crash_log.write(f"\n=== pid {os.getpid()} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        _crash_log.flush()
+        faulthandler.enable(file=_crash_log, all_threads=True)
+    except Exception as e:
+        logging.getLogger("power_atlas").warning("Crash handler unavailable: %s", e)
+
+
 def _run_foreground() -> None:
     """Run the server + tray in this process (blocking)."""
-    import logging
     _migrate_legacy()
     log_path = CONFIG_DIR / "orchestrator.log"
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -252,6 +283,7 @@ def _run_foreground() -> None:
         ],
     )
     log = logging.getLogger("power_atlas")
+    _enable_crash_handler()
     log.info("Starting power-atlas (foreground)")
 
     _single_instance_guard()
