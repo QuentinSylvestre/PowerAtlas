@@ -1,10 +1,18 @@
 # Session Tooltip Rework
 
 > **Date**: 2026-07-28
-> **Status**: In Progress
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete
+> **Last Updated**: 2026-07-28T14:23
 > **Estimated effort**: ~4-6 hours
 > **Scope**: Fix viewport crop, add session-id display, add user last message section, add markdown rendering to the session hover tooltip
+
+## Completion Summary
+
+All four tooltip deficiencies resolved and shipped. Tooltip now: flips below the row when space above is insufficient; displays full session UUID right-aligned on the workspace name line; shows "User last message" section with em-dash fallback; renders all message content via `mistune>=3.3.0` (XSS-safe). Post-review steering additions: hover persistence (pointer-events enabled, debounced hide, slot mouse handlers), full UUID display (not truncated to 8 chars), user-last-message styled to match first-message formatting.
+
+### Acknowledged at archival
+
+- Accepted (harness opportunity): Asking questions one-at-a-time was violated during `/qexplore` — Q5/Q6/Q7 + assumptions checkpoint batched in one turn — cost: user correction; suggested change: add an explicit anti-batch reminder in the kiro overlay for `/qexplore` Step 2.
 
 ---
 
