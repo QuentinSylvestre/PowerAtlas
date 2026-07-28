@@ -12,6 +12,7 @@ import time
 import uvicorn
 
 from .config import load_config, CONFIG_DIR
+from .interpreter import ensure_project_interpreter
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
@@ -106,6 +107,25 @@ def _stop_running() -> bool:
     return True
 
 
+def _exit_immediately(code: int) -> None:
+    """Exit without unwinding, flushing stdio first.
+
+    ``os._exit`` is deliberate — uvicorn and pystray leave threads that a normal
+    exit would wait on — but it also discards buffered output. Python
+    line-buffers stdout only when it is a console, so under a pipe every message
+    printed just before the exit is lost. ``pythonw`` has no stdio at all and
+    leaves the streams as None.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+    os._exit(code)
+
+
 def _single_instance_guard() -> None:
     """Exit if another instance is already running. Windows: named mutex. Linux: lockfile."""
     global _mutex_handle
@@ -114,7 +134,7 @@ def _single_instance_guard() -> None:
         _mutex_handle = kernel32.CreateMutexW(None, False, "PowerAtlasMutex")
         if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
             print("PowerAtlas is already running.")
-            os._exit(0)
+            _exit_immediately(0)
     else:
         import fcntl
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -124,7 +144,7 @@ def _single_instance_guard() -> None:
             fcntl.flock(_mutex_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             print("PowerAtlas is already running.")
-            os._exit(0)
+            _exit_immediately(0)
 
 
 def _release_mutex() -> None:
@@ -331,10 +351,15 @@ def _run_foreground() -> None:
     if should_restart:
         _relaunch_detached()
 
-    os._exit(0)
+    _exit_immediately(0)
 
 
 def main() -> None:
+    # Before anything reads a config or takes the single-instance mutex: every
+    # entry point converges on the checkout's venv, so the app can never run on
+    # a different dependency stack than the one the suite verifies.
+    ensure_project_interpreter()
+
     parser = argparse.ArgumentParser(prog="power-atlas")
     parser.add_argument(
         "-f", "--foreground", action="store_true",

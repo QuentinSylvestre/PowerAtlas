@@ -4,6 +4,23 @@ import os
 import sys
 from pathlib import Path
 
+from .interpreter import venv_python
+
+
+def _startup_interpreter(*, windowed: bool = False) -> Path:
+    """The interpreter the login entry should invoke.
+
+    Resolved from the checkout rather than from ``sys.executable`` so that
+    toggling autostart never records whichever interpreter happened to be
+    running the toggle.
+    """
+    resolved = venv_python(windowed=windowed)
+    if resolved is not None:
+        return resolved
+    if windowed and sys.platform == "win32":
+        return Path(sys.executable).parent / "pythonw.exe"
+    return Path(sys.executable)
+
 
 def _windows_shortcut_path() -> Path:
     appdata = os.environ.get("APPDATA", "")
@@ -31,7 +48,7 @@ def enable() -> None:
 
         shell = win32com.client.Dispatch("WScript.Shell")
         shortcut = shell.CreateShortCut(str(_windows_shortcut_path()))
-        shortcut.TargetPath = str(Path(sys.executable).parent / "pythonw.exe")
+        shortcut.TargetPath = str(_startup_interpreter(windowed=True))
         shortcut.Arguments = "-m power_atlas"
         shortcut.WorkingDirectory = str(Path.home())
         icon_path = str(Path(__file__).parent / "static" / "poweratlas.ico")
@@ -44,7 +61,7 @@ def enable() -> None:
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=PowerAtlas\n"
-            f"Exec={sys.executable} -m power_atlas\n"
+            f"Exec={_startup_interpreter()} -m power_atlas\n"
             "Hidden=false\n"
             "NoDisplay=false\n"
             "X-GNOME-Autostart-enabled=true\n"
