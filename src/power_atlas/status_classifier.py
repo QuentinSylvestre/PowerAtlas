@@ -233,12 +233,78 @@ def classify_kiro_v2(tail_lines: list[str]) -> Optional[SemanticStatus]:
     return None
 
 
+# Conversation lines. Everything else Claude Code writes (mode, attachment,
+# ai-title, bridge-session, file-history-snapshot, ...) is bookkeeping and
+# carries no turn state, so it must not consume the error-scan window below.
+_CLAUDE_TURN_TYPES = frozenset({"user", "human", "assistant"})
+
+
+def _claude_content_blocks(obj: dict) -> list:
+    """Content blocks of a Claude Code line, from whichever envelope holds them.
+
+    Live transcripts nest the payload under ``message``; a top-level ``content``
+    is the legacy shape.
+    """
+    message = obj.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if content is None:
+        content = obj.get("content")
+    return content if isinstance(content, list) else []
+
+
+def _claude_has_error(obj: dict) -> bool:
+    """True when a line flags itself, or one of its blocks, as an error."""
+    if obj.get("is_error"):
+        return True
+    return any(
+        isinstance(b, dict) and b.get("is_error")
+        for b in _claude_content_blocks(obj)
+    )
+
+
 def classify_claude(tail_lines: list[str]) -> Optional[SemanticStatus]:
     """Classify session status from Claude Code JSONL tail.
 
-    Claude Code lines are JSON objects with a ``type`` field
-    (user/assistant/tool_use/tool_result) or legacy ``role``-based format.
+    Claude Code splits one assistant turn across several lines — one per content
+    block — so block types alone cannot say whether the turn is over: a lone
+    ``text`` block is what both "here is my answer" and "here is what I am about
+    to do next" look like. Every assistant line carries the API response's
+    ``stop_reason``, which does separate them, and that is what decides here:
+    ``tool_use`` means a tool call follows (the agent is working), anything else
+    means the turn ended (the agent is waiting). Classifying by block instead
+    holds a busy session at WAITING for the whole duration of every command it
+    runs, and ``_workspace_status`` in ``web.py`` lets that outrank the
+    provider's own "busy" report.
+
+    Errors arrive as ``user`` lines whose ``tool_result`` block sets
+    ``is_error``. A single one is routine — a grep that matches nothing exits
+    non-zero — so ERRORED requires two within the recent conversation tail and a
+    session that has since stopped, mirroring ``classify_kiro_v3``.
     """
+    error_count = 0
+    checked = 0
+    for line in reversed(tail_lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if (obj.get("type") or obj.get("role")) not in _CLAUDE_TURN_TYPES:
+            continue
+        if any(
+            isinstance(b, dict)
+            and b.get("type") == "tool_result"
+            and b.get("is_error")
+            for b in _claude_content_blocks(obj)
+        ):
+            error_count += 1
+        checked += 1
+        if checked >= 5:
+            break
+
+    last_meaningful = None
     for line in reversed(tail_lines):
         line = line.strip()
         if not line:
@@ -248,31 +314,33 @@ def classify_claude(tail_lines: list[str]) -> Optional[SemanticStatus]:
         except (json.JSONDecodeError, ValueError):
             continue
 
-        # Determine message type from either 'type' or 'role' field
         msg_type = obj.get("type") or obj.get("role")
-        if msg_type is None:
-            continue
-
-        if msg_type in ("tool_result", "tool_use"):
-            return SemanticStatus.WORKING
-        if msg_type == "user" or msg_type == "human":
-            return SemanticStatus.WORKING
+        if msg_type in ("user", "human"):
+            # A prompt or a tool result coming back; both hand control to the agent.
+            last_meaningful = SemanticStatus.WORKING
+            break
         if msg_type == "assistant":
-            # Check for error indicators
-            content = obj.get("content", "")
-            if isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("is_error"):
-                        return SemanticStatus.ERRORED
-            elif isinstance(content, str):
-                # Legacy single-string content — no structured error signal
-                pass
-            # Check message-level error field
-            if obj.get("is_error"):
-                return SemanticStatus.ERRORED
-            return SemanticStatus.WAITING
+            message = obj.get("message")
+            stop_reason = (
+                message.get("stop_reason") if isinstance(message, dict) else None
+            )
+            if stop_reason == "tool_use":
+                last_meaningful = SemanticStatus.WORKING
+            elif _claude_has_error(obj):
+                last_meaningful = SemanticStatus.ERRORED
+            elif stop_reason is None and any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                for b in _claude_content_blocks(obj)
+            ):
+                # Legacy envelope carries no stop_reason — fall back to blocks.
+                last_meaningful = SemanticStatus.WORKING
+            else:
+                last_meaningful = SemanticStatus.WAITING
+            break
 
-    return None
+    if error_count >= 2 and last_meaningful is not SemanticStatus.WORKING:
+        return SemanticStatus.ERRORED
+    return last_meaningful
 
 
 # Types to skip when looking for meaningful v3 messages

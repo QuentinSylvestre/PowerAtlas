@@ -7216,8 +7216,15 @@ def test_workspace_status_reads_provider_report(mock_semantic, mock_sessions):
 
 @patch("power_atlas.web.data.get_sessions")
 @patch("power_atlas.web.get_semantic_status")
-def test_workspace_status_report_never_downgrades(mock_semantic, mock_sessions):
-    """A report can settle an unknown state but never lower a richer verdict."""
+def test_workspace_status_settles_sessions_before_aggregating(
+        mock_semantic, mock_sessions):
+    """The card settles each session the way its row does, then aggregates.
+
+    A tail that lags an in-flight turn must not outrank the provider's own
+    "busy" — that is what painted a card "waiting" above a row the very same
+    signals had settled as "working". "Errored" is the carve-out: the classifier
+    is its only source, so it survives a "busy", and the row honours it too.
+    """
     from power_atlas.status_classifier import SemanticStatus
     mock_sessions.return_value = []
 
@@ -7226,11 +7233,30 @@ def test_workspace_status_report_never_downgrades(mock_semantic, mock_sessions):
                              {"claude-code"}) == "errored"
     mock_semantic.return_value = SemanticStatus.WAITING
     assert _workspace_status(_tracked_snapshot("busy"), "/w",
-                             {"claude-code"}) == "waiting"
-    # ...and it still raises when the classifier is the weaker signal.
+                             {"claude-code"}) == "working"
+    # ...and a report still settles a session the classifier reads as working.
     mock_semantic.return_value = SemanticStatus.WORKING
     assert _workspace_status(_tracked_snapshot("waiting"), "/w",
                              {"claude-code"}) == "waiting"
+
+
+@patch("power_atlas.web.data.get_sessions")
+@patch("power_atlas.web.get_semantic_status")
+def test_workspace_status_aggregates_across_sessions(mock_semantic, mock_sessions):
+    """Settling per session does not flatten the card onto one session's answer."""
+    from power_atlas.status_classifier import SemanticStatus
+    mock_sessions.return_value = []
+    norm = _normalize_path("/w")
+    snap = _snapshot(
+        live_sids={("claude-code", "s1"), ("claude-code", "s2")},
+        live_cwds={("claude-code", norm)},
+        sid_to_cwd={("claude-code", "s1"): norm, ("claude-code", "s2"): norm},
+        sid_status={("claude-code", "s1"): "busy"},
+    )
+    # s1 is mid-turn and says so first-hand; s2 has finished and needs the user.
+    mock_semantic.side_effect = lambda sid, prov, c: (
+        SemanticStatus.WAITING if sid == "s2" else SemanticStatus.WORKING)
+    assert _workspace_status(snap, "/w", {"claude-code"}) == "waiting"
 
 
 @patch("power_atlas.web.data.get_sessions")
@@ -7569,13 +7595,83 @@ class TestClassifyKiroV2:
 
 
 class TestClassifyClaude:
-    def test_tool_result_returns_active(self):
-        lines = [_json.dumps({"type": "tool_result", "content": "output"})]
+    """Live transcripts nest the payload under ``message`` and carry the API
+    response's ``stop_reason``; the flat shapes are the legacy envelope."""
+
+    @staticmethod
+    def _assistant(blocks, stop_reason):
+        return _json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": blocks,
+                        "stop_reason": stop_reason},
+        })
+
+    @staticmethod
+    def _tool_result(is_error=False):
+        return _json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "is_error": is_error},
+            ]},
+        })
+
+    # --- live envelope: stop_reason decides --------------------------------
+
+    def test_text_block_mid_turn_returns_working(self):
+        """Narration before a tool call, not a finished turn — the shape that
+        painted the workspace card orange under a green session row."""
+        lines = [self._assistant([{"type": "text", "text": "Now I'll check."}],
+                                 "tool_use")]
         assert classify_claude(lines) == SemanticStatus.WORKING
 
-    def test_tool_use_returns_active(self):
-        lines = [_json.dumps({"type": "tool_use", "name": "read_file"})]
+    def test_tool_use_block_returns_working(self):
+        lines = [self._assistant([{"type": "tool_use", "name": "Bash"}], "tool_use")]
         assert classify_claude(lines) == SemanticStatus.WORKING
+
+    def test_thinking_block_follows_the_turn_not_the_block(self):
+        """A turn is split across lines with stop_reason copied onto each, so a
+        trailing thinking block is classified by the turn it belongs to."""
+        lines = [self._assistant([{"type": "thinking", "thinking": "..."}], "tool_use")]
+        assert classify_claude(lines) == SemanticStatus.WORKING
+
+    def test_end_turn_returns_waiting(self):
+        lines = [self._assistant([{"type": "text", "text": "Done."}], "end_turn")]
+        assert classify_claude(lines) == SemanticStatus.WAITING
+
+    def test_tool_result_returns_working(self):
+        lines = [self._assistant([{"type": "tool_use", "name": "Bash"}], "tool_use"),
+                 self._tool_result()]
+        assert classify_claude(lines) == SemanticStatus.WORKING
+
+    # --- errored: two failures and a session that stopped -------------------
+
+    def test_two_failures_then_stop_returns_errored(self):
+        lines = [self._tool_result(is_error=True), self._tool_result(is_error=True),
+                 self._assistant([{"type": "text", "text": "I'm stuck."}], "end_turn")]
+        assert classify_claude(lines) == SemanticStatus.ERRORED
+
+    def test_single_failure_is_not_errored(self):
+        """One failure is routine — a grep that matches nothing exits non-zero."""
+        lines = [self._tool_result(is_error=True),
+                 self._assistant([{"type": "text", "text": "No matches."}], "end_turn")]
+        assert classify_claude(lines) == SemanticStatus.WAITING
+
+    def test_failures_followed_by_recovery_are_not_errored(self):
+        lines = [self._tool_result(is_error=True), self._tool_result(is_error=True),
+                 self._assistant([{"type": "tool_use", "name": "Bash"}], "tool_use")]
+        assert classify_claude(lines) == SemanticStatus.WORKING
+
+    def test_bookkeeping_lines_do_not_consume_the_error_window(self):
+        """mode/attachment/ai-title lines are noise; were they counted, the
+        failures below would fall out of the window and go unreported."""
+        noise = [_json.dumps({"type": t}) for t in
+                 ("mode", "permission-mode", "attachment", "ai-title", "bridge-session")]
+        lines = ([self._tool_result(is_error=True), self._tool_result(is_error=True)]
+                 + noise
+                 + [self._assistant([{"type": "text", "text": "stuck"}], "end_turn")])
+        assert classify_claude(lines) == SemanticStatus.ERRORED
+
+    # --- legacy flat envelope ----------------------------------------------
 
     def test_user_message_returns_active(self):
         lines = [_json.dumps({"type": "user", "content": "do something"})]
@@ -7589,6 +7685,13 @@ class TestClassifyClaude:
     def test_assistant_without_error_returns_idle(self):
         lines = [_json.dumps({"type": "assistant", "content": "Done."})]
         assert classify_claude(lines) == SemanticStatus.WAITING
+
+    def test_legacy_tool_use_block_without_stop_reason_returns_working(self):
+        lines = [_json.dumps({
+            "type": "assistant",
+            "content": [{"type": "tool_use", "name": "Bash"}],
+        })]
+        assert classify_claude(lines) == SemanticStatus.WORKING
 
     def test_assistant_with_is_error_block_returns_errored(self):
         lines = [_json.dumps({

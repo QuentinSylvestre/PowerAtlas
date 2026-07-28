@@ -180,21 +180,8 @@ def _map_reported_status(reported: str) -> str:
     Returns "" when the report carries no usable verdict (absent, "idle", or
     a value this build does not know), meaning "defer to the classifier".
     This is a pure mapping: how a non-empty verdict is weighed against the
-    classifier is each call site's own decision, and the two differ on
-    purpose, because they answer different questions.
-
-    ``_session_status`` answers "what is *this* session doing?", so a
-    first-hand, current report beats a transcript tail that lags an in-flight
-    turn — the report wins outright. ``_workspace_status`` answers "what is
-    the most important thing happening in this workspace?", so it keeps the
-    highest priority across every session it can see and a report may only
-    raise the answer, never lower it. Making them agree would cost a signal
-    either way: a card whose one live session reports "busy" would stop
-    showing "errored", or a row would start reporting a finished-looking tail
-    over the provider's own "a turn is running". A card reading "errored"
-    above a row reading "working" is therefore the intended output, not a
-    contradiction: the card is telling you the workspace needs attention and
-    the row is telling you that session is still moving.
+    classifier belongs to ``_resolved_session_status``, which the row and the
+    card both settle their sessions through.
     """
     if reported in ("busy", "shell"):
         return "working"
@@ -289,6 +276,29 @@ def _raise_status(best: str, candidate: str) -> str:
     return best
 
 
+def _resolved_session_status(snapshot, provider: str, session_id: str,
+                             semantic: SemanticStatus | None) -> str:
+    """Settle one live session's status, the way its own row settles it.
+
+    Same precedence as ``_session_status``: a first-hand, current report beats a
+    transcript tail that lags an in-flight turn. The one exception is "errored",
+    which only the classifier can report at all, so an errored tail is kept even
+    against a "busy" — the signal the card exists to surface.
+
+    Callers pass the classifier verdict they have already read, so settling a
+    session here costs no extra tail parse.
+    """
+    if semantic is SemanticStatus.ERRORED:
+        return "errored"
+    reported = _map_reported_status(snapshot.reported_status(provider, session_id))
+    if reported:
+        return reported
+    if semantic is not None:
+        return semantic.value
+    # A process is running and nothing could classify it — not evidence of idle.
+    return "working"
+
+
 def _workspace_status(snapshot, cwd: str,
                       providers: set[str] | None) -> str:
     """Aggregate status for a workspace card — highest-priority session status wins.
@@ -296,6 +306,13 @@ def _workspace_status(snapshot, cwd: str,
     Priority: errored > waiting > working > closed (no dot).
     Falls back to classifying the most recently updated session when no
     explicit --resume-id sessions are tracked for this cwd.
+
+    Each session is settled by ``_resolved_session_status`` first and only then
+    aggregated. Folding the raw report and the raw classifier straight into the
+    aggregate instead let a lagging tail outrank the provider's own "busy", so a
+    card read "waiting" above a row the very same signals had already settled as
+    "working". The card can still outrank a row, but only on the strength of a
+    different session, or of the errored verdict the row honours too.
     """
     from .data import _normalize_path
     if _normalize_path(cwd) not in snapshot.live_cwds(providers):
@@ -307,19 +324,14 @@ def _workspace_status(snapshot, cwd: str,
     for prov in (providers or {"kiro-cli", "claude-code"}):
         sids = snapshot.live_session_ids_for_cwd(prov, cwd)
         for sid in sids:
-            # The provider's report is folded in alongside the classifier, not
-            # ahead of it: aggregation keeps the highest priority, so a report
-            # can raise the card (a tail nobody can classify that the provider
-            # says is "waiting") but never lower a richer classifier verdict.
-            # It deliberately does not set found_any — a report is not a
-            # classification, and skipping the fallback on the strength of one
-            # would hide an "errored" session elsewhere in the workspace.
-            best = _raise_status(
-                best, _map_reported_status(snapshot.reported_status(prov, sid)))
             semantic = get_semantic_status(sid, prov, cwd)
             if semantic is not None:
+                # Only a classification clears the fallback — a report is not
+                # one, and skipping the scan on the strength of one would hide
+                # an "errored" session elsewhere in the workspace.
                 found_any = True
-                best = _raise_status(best, semantic.value)
+            best = _raise_status(
+                best, _resolved_session_status(snapshot, prov, sid, semantic))
     # Fallback: no explicit session IDs (chat -a without --resume-id).
     # Classify all recently active sessions in this workspace, take highest priority.
     if not found_any:
@@ -348,12 +360,9 @@ def _workspace_status(snapshot, cwd: str,
                 # maps proc.cwd() when the session id is on argv. A claude-code
                 # session with neither is invisible to the loop above and only
                 # reachable here — kiro-cli never reports a status at all.
-                best = _raise_status(best, _map_reported_status(
-                    snapshot.reported_status(prov, recent.session_id)))
-                semantic = get_semantic_status(recent.session_id, prov, cwd)
-                # Use semantic if available; otherwise process running = working
-                best = _raise_status(
-                    best, semantic.value if semantic is not None else "working")
+                best = _raise_status(best, _resolved_session_status(
+                    snapshot, prov, recent.session_id,
+                    get_semantic_status(recent.session_id, prov, cwd)))
     return best
 
 
