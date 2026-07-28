@@ -123,6 +123,9 @@ workspace_name = Path(cwd).name if cwd else ""
 # Guard: show empty-state if ALL content fields are absent
 if not messages and not first_prompt and not last_prompt:
     return HTMLResponse('<div class="tail-empty">No recent output</div>')
+# Suppress last_prompt when it equals first_prompt (single-exchange session — avoid duplicate display)
+if last_prompt == first_prompt:
+    last_prompt = ""
 # Render all text sections through mistune (escape=True entity-encodes raw HTML — safe for | safe filter)
 first_prompt_html = _md(first_prompt) if first_prompt else ""
 last_prompt_html = _md(last_prompt) if last_prompt else ""
@@ -227,6 +230,7 @@ def test_session_tail_xss_stripped(mock_tail, mock_first, mock_cache, client):
 - [ ] `_md` module-level renderer created with `escape=True`; comment clarifies "entity-encodes" not "strips"
 - [ ] `session_id` and `last_prompt` present in template context dict
 - [ ] Early-return guard extended to `not messages and not first_prompt and not last_prompt`
+- [ ] `last_prompt` suppressed (set to `""`) when it equals `first_prompt` before rendering
 - [ ] `session_tail.html` renders `.tail-header-row` with `.tail-session-id` showing first 8 chars of session_id (full UUID in `title` attribute)
 - [ ] "User last message:" section always rendered; shows "—" when `last_prompt` is empty
 - [ ] All message content uses `| safe` filter (content pre-sanitized by mistune)
@@ -390,8 +394,8 @@ _Reserved — filled during implementation._
 | 9 | Low | `[P:N]` annotation semantics: Phase 1 = `[P:2]` and Phase 2 = `[P:1]` is unconventionally reversed but functionally correct (symmetric pairing identifies the partner, not execution order). | Accepted — the `[P:N]` scheme identifies parallel partners, not ordering; the annotation is correct per `TEMPLATES.md § Parallel Phase Annotation`. |
 | 10 | Low | `plans/tests/260701_POWERATLAS.md` Section 2.3 oracle "above the row" becomes stale after Phase 2. | Fixed — added Section 2.3 update to Documentation Updates table assigned to Phase 2. |
 | 11 | Low | UUID (36 chars) at 10px monospace is unreadable; no copy functionality in tooltip. | Fixed — template truncated to first 8 chars with full UUID in `title` attribute; existing row-level copy button covers full-ID need. |
-| 12 | Low | Single-exchange sessions show identical content in both User sections (first_prompt == last_prompt). | Escalated — design trade-off: suppress last_prompt when it equals first_prompt (cleaner) vs. always show (predictable). User decision required. |
-| 13 | Low | "User last message" and "User original message" labels visually identical — hard to distinguish at a glance. | Escalated — UX choice: add visual differentiation (color, border) vs. rely on label text. User decision required. |
+| 12 | Low | Single-exchange sessions show identical content in both User sections (first_prompt == last_prompt). | User: accepted — suppress `last_prompt` in endpoint when it equals `first_prompt`; set `last_prompt = ""` before rendering so template shows "—". |
+| 13 | Low | "User last message" and "User original message" labels visually identical — hard to distinguish at a glance. | User: accepted — keep labels as-is; label text is sufficient distinction. |
 | 14 | Low | `_md()` calls run synchronously on the async event loop — should use `asyncio.to_thread`. | Accepted — tooltip content is bounded in size (200 chars per message, 15 messages max); synchronous processing time is negligible; `asyncio.to_thread` overhead would exceed processing time for this payload size. |
 | 15 | Low | Flip-below tooltip overlaps lower rows — visual overlap is accepted design per `pointer-events: none`. | Fixed — comment added in Phase 2 code; exit criteria note acknowledges this as intentional. |
 | 16 | Low | `test_session_tail_graceful_no_cache` existing assertion `"tail-title" not in resp.text` not explicitly confirmed to survive template change. | Fixed — plan now explicitly notes this assertion holds because `{% if session_title %}` guard is preserved. |
