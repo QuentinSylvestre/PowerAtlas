@@ -6,11 +6,22 @@ Supports **Windows** and **Linux**.
 
 ## Installation
 
+PowerAtlas runs on a virtualenv inside the checkout, never on a global interpreter — the app and the
+test suite share one dependency stack, so a green suite is evidence about the app that actually runs.
+Create the venv and install into it:
+
 ```bash
-pip install -e .
+python -m venv .venv-PowerAtlas
+.venv-PowerAtlas\Scripts\python -m pip install -e .   # Windows
+.venv-PowerAtlas/bin/python -m pip install -e .       # Linux
 ```
 
 Requires Python 3.11+.
+
+Started with any other interpreter, PowerAtlas re-launches itself on the checkout's venv, so the
+autostart entry, the tray's Restart action and a plain `python -m power_atlas` all converge on it.
+A venv directory named `.venv` is also recognised; when several `.venv*` directories exist and none
+matches either name, PowerAtlas declines to guess and stays on the interpreter it was given.
 
 On Linux, the system tray icon requires PyGObject and a running notification area:
 
@@ -24,7 +35,18 @@ sudo dnf install python3-gobject libayatana-appindicator-gtk3
 ## Usage
 
 ```bash
-power-atlas
+.venv-PowerAtlas\Scripts\power-atlas    # Windows
+.venv-PowerAtlas/bin/power-atlas        # Linux
+```
+
+The console script is installed into the venv, so a bare `power-atlas` works only while the venv is
+active. To call it from any shell, put a wrapper on your `PATH` that invokes the venv interpreter
+rather than adding the venv's `Scripts`/`bin` directory itself — that directory also carries `pip`,
+`pytest` and `ruff`, which would then shadow the system copies. On Windows, a `power-atlas.cmd`:
+
+```cmd
+@echo off
+"<checkout>\.venv-PowerAtlas\Scripts\python.exe" -m power_atlas %*
 ```
 
 The app starts as a system tray icon. Click to open the dashboard UI.
@@ -108,9 +130,12 @@ Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hot
 
 ## Development
 
+Install the dev extras into the same venv the app runs on:
+
 ```bash
-pip install -e ".[dev]"
-pytest
+.venv-PowerAtlas\Scripts\python -m pip install -e ".[dev]"   # Windows
+.venv-PowerAtlas/bin/python -m pip install -e ".[dev]"       # Linux
+.venv-PowerAtlas/bin/python -m pytest
 ```
 
 ## Assets

@@ -471,9 +471,9 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 ### 6.1 Enable / disable / query
 - **what**: Windows `enable()` creates `PowerAtlas.lnk` (WScript.Shell COM, target pythonw.exe, args `-m power_atlas`, icon); `disable()` unlinks; `is_enabled()` existence check.
 - **how-to-reach**: library `autostart.enable()/disable()/is_enabled()`; `POST /api/autostart`. **Snapshot state, restore after.**
-- **probes**: enable → `.lnk` at Startup with TargetPath = pythonw.exe next to sys.executable; **verify pythonw.exe actually exists in this venv (`.venv-PowerAtlas`) — may be absent**; verify IconLocation `poweratlas.ico` exists; disable removes it; disable when absent (no-op); enable twice (overwrite); is_enabled True/False; **stale shortcut pointing elsewhere still reports enabled** (existence-only).
-- **oracle**: `.lnk` presence = enabled; COM creates shortcut.
-- **risks**: pythonw.exe missing in venv breaks autostart silently; COM Dispatch failure unhandled; existence-only check ignores wrong target; APPDATA fallback path drift.
+- **probes**: enable → `.lnk` at Startup with TargetPath = `.venv-PowerAtlas\Scripts\pythonw.exe`, resolved from the checkout by `interpreter.venv_python()` and **not** from the enabling process's `sys.executable` — probe it from a non-venv interpreter, which is the case that used to record the wrong target; **verify that pythonw.exe actually exists — may be absent from a venv built with `--without-pip` or a stripped copy**; verify IconLocation `poweratlas.ico` exists; disable removes it; disable when absent (no-op); enable twice (overwrite); is_enabled True/False; **stale shortcut pointing elsewhere still reports enabled** (existence-only).
+- **oracle**: `.lnk` presence = enabled; COM creates shortcut; target is a function of the checkout, not of the caller.
+- **risks**: pythonw.exe missing in venv breaks autostart silently; COM Dispatch failure unhandled; existence-only check ignores wrong target; APPDATA fallback path drift; a checkout with two off-convention `.venv*` directories resolves to None and silently falls back to `sys.executable`.
 
 ---
 
@@ -520,6 +520,13 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **probes**: ready within 10s → port extracted; timeout/no-servers → "Server failed to start" exit(1); 5s join cutoff drops in-flight requests; `os._exit` skips atexit/finally; monkeypatch depends on uvicorn `sockets` kwarg (upgrade fragility).
 - **oracle**: port from `server.servers[0].sockets[0]`; graceful within timeouts.
 - **risks**: 10s/5s hard cutoffs; monkeypatch fragility; os._exit skips cleanup.
+
+### 7.7 Venv re-exec guard (`interpreter.py`)
+- **what**: `main()` calls `ensure_project_interpreter()` before argparse, the mutex and any config read. Off the checkout's venv it re-launches `<venv-python> -m power_atlas <argv[1:]>` — `subprocess.run` + `SystemExit(returncode)` on Windows, `os.execv` elsewhere — with `POWER_ATLAS_VENV_REEXEC=1` set on the child.
+- **how-to-reach**: invoke `python -m power_atlas` from any interpreter that is not the checkout venv. Requires a second interpreter that can import the package (the repo's own venv is the only one that can post-2026-07-28, so use a scratch venv with `pip install -e .`).
+- **probes**: from a foreign interpreter → surviving process cmdline names the venv python and `psutil.Process(pid).memory_maps()` shows exactly one `site-packages` root, the venv's; from the venv itself → no extra process; with the sentinel pre-set → no re-exec even when detection says otherwise (fork-bomb guard); `--foreground` output and exit code survive the Windows subprocess hop; args are forwarded verbatim; no checkout (wheel install) → no guard, runs in place; two off-convention `.venv*` dirs → no guard.
+- **oracle**: `sys.prefix` equals the venv dir, not `sys.executable` — on Windows the venv `python.exe` is a redirector whose image path is the base install, so an executable comparison reports a false negative.
+- **risks**: a venv that exists but lacks the package makes every entry point fail, and silently under `pythonw` (autostart); the sentinel is inherited by launched child processes; `--stop` pays a process hop it does not need.
 
 ---
 
