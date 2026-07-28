@@ -379,7 +379,11 @@ Runtime manual checks (start app with `.venv-PowerAtlas\Scripts\power-atlas`):
 
 ## 9) Implementation Divergences from Plan
 
-_Reserved — filled during implementation._
+- Phase 1: mistune lower bound raised from `>=3.2.1` to `>=3.3.0` during review (CVE-2026-59923 — percent-encoded JS-URL bypass in 3.2.x; 3.3.0 is fully patched). Version in External Dependencies section was updated in plan text.
+- Phase 1: Dedup logic changed from exact equality `last_prompt == first_prompt` to `first_prompt.startswith(last_prompt)` (handles 200-char cap mismatch on `s.last_prompt`).
+- Phase 1: UUID validation for `sid` parameter added (RFC 4122 pattern, 400 on mismatch) — not in original plan; added during review cycle for path-traversal defense.
+- Phase 1: One additional test `test_session_tail_invalid_sid` added beyond the plan's specified tests — covers the new 400 path from UUID validation.
+- Phase 2: No divergences from plan.
 
 ## Review Log
 
