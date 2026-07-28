@@ -1,7 +1,9 @@
 # Session Tooltip Rework
 
 > **Date**: 2026-07-28
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: <set by /qclose at archival>
+> **Estimated effort**: ~4-6 hours
 > **Scope**: Fix viewport crop, add session-id display, add user last message section, add markdown rendering to the session hover tooltip
 
 ---
@@ -50,89 +52,346 @@ Desired outcomes: a tooltip that never crops off-screen, provides full session c
 
 ---
 
-## Exploration Discovery
+## 1) Current State
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+The session hover tooltip pipeline: `loadTail` JS (`index.html:582`) → `GET /partials/session-tail` (`web.py:1821`) → `data.get_session_tail` + `data.get_first_prompt` → `session_tail.html` template.
 
-### Existing patterns & constraints
+Four deficiencies:
 
-- Step 1.5 dispatched the code-tracing trio — in-scope files were predominantly `.py`, `.html`, `.css`, `.js` source code.
-- **Tooltip data pipeline**: `loadTail` JS (`index.html:582`) → `GET /partials/session-tail` (`web.py:1821`) → `data.get_session_tail` + `data.get_first_prompt` → `session_tail.html` template
-- **`session_id` in endpoint scope**: `sid` query param is already in scope at `web.py:1822` but not forwarded to the template context (`web.py:1837–1843`). Adding `"session_id": sid` to the dict is the entire change needed.
-- **`last_prompt` already on `Session`**: `data.py:34` — `Session.last_prompt: str` is populated by all three providers (kiro-cli `data_kiro.py:310`, claude-code `data_claude.py:407–411`, kiro-ide `data_kiro_ide.py:217`), capped at 200 chars. The endpoint already iterates the session cache to find `session_title`; `s.last_prompt` from that same matched object is the source — no new data fetch.
-- **Jinja2 autoescaping**: Starlette's `Jinja2Templates` (`web.py:482`) enables autoescaping for `.html` files by default. Markdown-rendered HTML must use `{{ value | safe }}` after mistune sanitizes input. [unverified: Starlette constructor details]
-- **`.tail-header` is block-layout** (`style.css:247`): currently `.tail-workspace` and `.tail-title` are stacked block children. Converting the workspace row to `display: flex; justify-content: space-between` achieves right-alignment of session-id without affecting `.tail-title` below.
-- **`.session-title-row` precedent** (`style.css:162–164`): uses `display: flex; align-items: center; gap: 8px` with `margin-left: auto` on `.session-time` for right-alignment. Same pattern applies to the session-id in `.tail-header`.
-- **Custom htmx-mini** (`static/htmx.min.js`): `htmx.process(slot)` must be called after `slot.innerHTML` assignment. Current `loadTail` already does this. `session_tail.html` has no htmx attributes so `process()` is a no-op, but the call must remain.
-- **`package_data`** (`pyproject.toml:22`): `"power_atlas": ["static/**", "templates/**"]` — new static files are automatically bundled. No CI/CD pipeline.
-- **Test convention** (`tests/test_web.py:539–590`): three tests use `@patch("power_atlas.web.data.session_cache")`, `@patch("power_atlas.web.data.get_first_prompt")`, `@patch("power_atlas.web.data.get_session_tail")`. `Session` is constructed directly with all 8 fields. No new mock patches needed for `last_prompt` (read from the already-mocked `mock_cache.get.return_value`).
-- **Prior art** (`plans/done/260708-1624_SESSION_TOOLTIP_IMPROVEMENTS.md`): the previous tooltip plan added workspace name, session title, User:/Agent: labels, viewport clamping (upward only), and dynamic max-height. This plan extends that work — the clamping logic is the specific area being replaced.
+1. **Top-crop**: `loadTail` clamping logic (`index.html:582`) only opens upward. When `desiredTop - effectiveH < 0`, the tooltip is shrunk to `clampedH = desiredTop - 4` or hidden if `clampedH < 100`. No flip-below branch exists.
+2. **No session-id in template**: `sid` is received by `partials_session_tail` (`web.py:1822`) but not added to the Jinja context dict (`web.py:1837–1843`). The template has no `{{ session_id }}`.
+3. **No last-user-message**: `Session.last_prompt` (`data.py:34`) is populated by all three providers but never read by the endpoint or rendered in the template.
+4. **No markdown rendering**: messages reach the template as raw text; `{{ msg }}` is HTML-escaped by Jinja2 autoescaping — markdown syntax renders verbatim. No markdown library in the stack.
 
-### Risks & mitigations
+## 2) Goal
 
-- **XSS via markdown `| safe`** (High without mitigation): mistune must be configured with `HTMLRenderer(escape=True)` (mistune 3.x default) or equivalent safe mode. All message content passes through mistune before reaching `| safe`. Risk: if mistune version or config changes, raw HTML passthrough could enable XSS. Mitigation: pin `mistune>=3.0,<4` in `pyproject.toml`; add a test asserting `<script>` in a message is stripped in rendered output.
-- **Cache miss for `last_prompt`** (Low): sessions not yet in the workspace cache (e.g., first hover before workspace is expanded) will have `last_prompt = ""` → displays "—". Consistent degradation with `session_title`. Mitigated by warmup which pre-loads pinned sessions.
-- **Viewport measurement timing** (Low): `tooltip.scrollHeight` is measured after `slot.innerHTML = html` and `tooltip.style.maxHeight = maxH + 'px'`. If the browser hasn't reflowed yet, `scrollHeight` may be stale. Mitigated: this is the same pattern that worked in the previous plan (proven in QA).
-- **mistune output changes on upgrade** (Low): markdown rendering of edge cases (e.g., bare URLs, line breaks) may change between minor versions. Mitigated by pinning `<4`.
-- **`test_data.py` timing flakiness** (known, pre-existing): `(mtime, size)`-keyed caches make 8 tests intermittently flaky. Not introduced by this plan. Re-run standalone to distinguish from regressions.
+Enrich the session tooltip with session-id, user last message, and markdown rendering, and replace the upward-only viewport clamping with a flip-below algorithm.
 
-### Resolved decisions
+## 3) Design Decisions
 
-- Q1: How should the tooltip behave when near the top of the viewport? — A: flip below the row — Decision: when `desiredTop - effectiveH < 0`, position tooltip below `rect.bottom` with `maxHeight = window.innerHeight - rect.bottom - 8`; if neither side has ≥100px, open on the larger side; suppress only when max of both sides < 100px
-- Q2: Where should session-id appear in the tooltip header? — A: right-aligned inline with workspace name — Decision: add `.tail-session-id` right-aligned via flexbox on the workspace name row; `.tail-title` remains below
-- Q3: Where should the user last message section appear? — A: between first user message and agent last message — Decision: new `.tail-section` with label "User last message:" sourced from `s.last_prompt`; shows "—" when empty
-- Q4: Markdown rendering approach — A: server-side Python library — Decision: add `mistune>=3.0,<4` to `pyproject.toml`; render all message sections (first_prompt, last_prompt, messages) via mistune in safe mode; use `{{ value | safe }}` in template
-- Q5: Empty `last_prompt` display — A: show "—" or "N/A" — Decision: display "—" (dash), consistent with common UI convention for missing values
-- Q6: Apply markdown to which sections? — A: all sections — Decision: markdown rendering applies to first_prompt, last_prompt, and each message in messages
-- Q7: Which Python markdown library? — A: mistune — Decision: `mistune>=3.0,<4` (BSD license, pure Python, safe-mode HTML rendering)
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Viewport overflow handling | Flip tooltip below the row when space above is insufficient | Shrink-to-fit (current, crops) | User requested "moved so the full content can be displayed" |
+| Session-id placement | Right-aligned on workspace-name row in header | Separate line below title | "Inline of the workspace name" — user's wording |
+| `last_prompt` source | Read `s.last_prompt` from the existing session-cache loop in the endpoint | New `data.get_last_prompt()` function | No new data fetch; cache loop already runs; same degradation pattern as `session_title` |
+| Empty `last_prompt` display | Show "—" (em dash) | Omit section | User explicitly requested visible placeholder |
+| Markdown rendering | Server-side via `mistune>=3.0,<4` | Client-side JS library (marked.js) | Consistent with project's server-side rendering pattern; no new JS dep; sanitization at render time |
+| Markdown sections | All three (first_prompt, last_prompt, messages) | Agent messages only | Users use markdown in prompts too; consistency |
+| XSS safety | `mistune.create_markdown(escape=True)` (default safe mode) + `\| safe` filter | Trust Jinja2 autoescaping alone | Autoescaping would double-escape; must use `\| safe` after mistune sanitizes |
 
-### Open items
+## 4) External Dependencies & Costs
 
-None — all decisions resolved.
+### Required external changes
 
-### Recommended approach
+None — code-only change. No CI/CD, IAM, cloud resources, data migration, DNS, or third-party services.
 
-**Phase 1 — Endpoint enrichment + template + CSS**
+One new Python dependency: `mistune>=3.2.1,<4` (BSD license). No cost impact. Requires `pip install -e ".[dev]"` rerun after `pyproject.toml` edit. Lower bound is `3.2.1` (not `3.0`) because CVE-2026-44708, CVE-2026-44896, CVE-2026-44897, CVE-2026-59923, and CVE-2026-59926 were fixed across 3.2.0–3.3.0; `3.2.1` is the earliest release with all these fixed.
 
-1. Add `mistune>=3.0,<4` to `pyproject.toml` dependencies.
-2. In `web.py`, import mistune and create a module-level `_md = mistune.create_markdown(escape=True)` (or equivalent safe renderer). In `partials_session_tail`:
-   - Add `"session_id": sid` to the template context.
-   - Read `last_prompt` from the matched Session object in the cache loop (`s.last_prompt`); fall back to `""` on cache miss.
-   - Pass `"last_prompt": last_prompt` to the template context.
-   - Apply `_md()` to render `first_prompt`, `last_prompt`, and each item in `messages` before passing to template (or apply via a Jinja2 filter).
-3. In `session_tail.html`:
-   - Make the workspace name row a flex row: wrap `.tail-workspace` and a new `.tail-session-id` span in a flex container.
-   - Add `{{ session_id }}` right-aligned in that row.
-   - Add a new `.tail-section` between first-prompt and agent sections for "User last message:" with `{{ last_prompt | safe }}` (or "—" fallback).
-   - Change all `{{ variable }}` to `{{ variable | safe }}` for markdown-rendered content (since content has already been sanitized by mistune).
-4. In `style.css`:
-   - Add `.tail-header-row { display: flex; align-items: center; justify-content: space-between; }` for the workspace/session-id line.
-   - Add `.tail-session-id { font-size: 10px; color: var(--text-dim); font-family: monospace; opacity: 0.7; }`.
-   - Add CSS for rendered markdown content inside `.tail-line` (e.g., `code`, `pre`, `strong`, `em` resets to fit the tooltip's compact style).
-5. Update `tests/test_web.py` — the three existing session-tail tests:
-   - Update `Session` mock to include a non-empty `last_prompt`.
-   - Add assertions for `session_id`, `last_prompt` content, and `tail-session-id` class.
-   - Add a test asserting `<script>` tags in message content are stripped.
+## 5) Implementation Phases
 
-**Phase 2 — Positioning rewrite (loadTail/hideTail)**
+### Phase 1: Endpoint enrichment, template, CSS, and tests [QA] [P:2]
 
-1. Replace the clamping branch in `loadTail` with flip-below logic:
-   - `spaceAbove = rect.top - 8`
-   - `spaceBelow = window.innerHeight - rect.bottom - 8`
-   - If `spaceAbove >= effectiveH`: open above (current normal path).
-   - Else if `spaceBelow >= 100`: open below at `rect.bottom + 4`, `maxHeight = spaceBelow`.
-   - Else if `spaceAbove >= 100`: open above clamped (current clamp path, kept as last resort).
-   - Else: suppress.
-2. In `hideTail`: reset `slot.style.left`, `slot.style.top`, `slot.style.transform` in addition to the already-reset `tooltip.style.maxHeight`.
+**Goal**: Add `mistune` markdown rendering, expose `session_id` and `last_prompt` through the endpoint, update the template with session-id display and user-last-message section, add CSS for new elements, and update existing tests.
 
-### QA environment
+**File scope**: `pyproject.toml`, `src/power_atlas/web.py`, `src/power_atlas/templates/partials/session_tail.html`, `src/power_atlas/static/style.css`, `tests/test_web.py`
 
-- Start the app: `.venv-PowerAtlas\Scripts\power-atlas` (or `python -m power_atlas` from checkout)
-- Web UI: `http://localhost:<port>` (random port by default; printed on startup)
-- Test runner: `.venv-PowerAtlas\Scripts\pytest tests/test_web.py -v` (after `pip install -e ".[dev]"`)
-- Runtime verification surfaces: hover a session row → tooltip appears; hover near top → tooltip flips below; hover near bottom → tooltip opens above; inspect session-id displayed; inspect "User last message" section; inspect markdown rendering in message content
-- Template script test: `node tests/acp_page.test.mjs` — not affected by this plan (`session_tail.html` has no inline scripts)
+**`pyproject.toml`** — add to `dependencies` list:
+```toml
+"mistune>=3.2.1,<4",
+```
+
+**`web.py`** — at module level (near other imports):
+```python
+import mistune as _mistune
+# escape=True causes mistune to HTML-entity-encode raw HTML tags (e.g. <script> → &lt;script&gt;)
+# rather than passing them through. This prevents XSS when output is used with Jinja2's | safe filter.
+_md = _mistune.create_markdown(escape=True)
+```
+
+In `partials_session_tail` — extend the cache-lookup loop, early-return guard, and template context:
+```python
+session_title = ""
+last_prompt = ""
+cached_sessions = data.session_cache.get(cwd, provider)
+if cached_sessions:
+    for s in cached_sessions:
+        if s.session_id == sid:
+            session_title = s.title
+            last_prompt = s.last_prompt or ""
+            break
+workspace_name = Path(cwd).name if cwd else ""
+# Guard: show empty-state if ALL content fields are absent
+if not messages and not first_prompt and not last_prompt:
+    return HTMLResponse('<div class="tail-empty">No recent output</div>')
+# Render all text sections through mistune (escape=True entity-encodes raw HTML — safe for | safe filter)
+first_prompt_html = _md(first_prompt) if first_prompt else ""
+last_prompt_html = _md(last_prompt) if last_prompt else ""
+messages_html = [_md(m) for m in messages]
+return templates.TemplateResponse(request, "partials/session_tail.html", {
+    "first_prompt": first_prompt_html,
+    "last_prompt": last_prompt_html,
+    "messages": messages_html,
+    "session_title": session_title,
+    "workspace_name": workspace_name,
+    "session_id": sid,
+})
+```
+
+Note: the early-return guard is extended from `not messages and not first_prompt` to also include `not last_prompt` — a session with only `last_prompt` populated should render content, not "No recent output."
+
+**`session_tail.html`** — full replacement:
+```html
+<div class="session-tail-tooltip">
+  {% if workspace_name or session_title %}
+  <div class="tail-header">
+    <div class="tail-header-row">
+      {% if workspace_name %}<div class="tail-workspace">{{ workspace_name }}</div>{% endif %}
+      {% if session_id %}<div class="tail-session-id" title="{{ session_id }}">{{ session_id[:8] }}</div>{% endif %}
+    </div>
+    {% if session_title %}<div class="tail-title" title="{{ session_title }}">{{ session_title }}</div>{% endif %}
+  </div>
+  {% endif %}
+  <div class="tail-section">
+    <span class="tail-label">User original message:</span>
+    <div class="tail-line tail-first-prompt tail-md">{% if first_prompt %}{{ first_prompt | safe }}{% else %}—{% endif %}</div>
+  </div>
+  <div class="tail-section">
+    <span class="tail-label">User last message:</span>
+    <div class="tail-line tail-md">{% if last_prompt %}{{ last_prompt | safe }}{% else %}—{% endif %}</div>
+  </div>
+  {% if messages %}
+  <div class="tail-section tail-agent-section">
+    <span class="tail-label">Agent last message:</span>
+    {% for msg in messages %}
+    <div class="tail-line tail-md">{{ msg | safe }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+```
+
+Note: `first_prompt` and `last_prompt` sections are always rendered (not conditional) so the section labels and "—" fallback are always visible. The `messages` section remains conditional (some sessions have no agent reply yet).
+
+**`style.css`** — add after the existing `.tail-label` rule:
+```css
+.tail-header-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tail-session-id { font-size: 10px; color: var(--text-dim); font-family: monospace; opacity: 0.7; white-space: nowrap; flex-shrink: 0; }
+/* Markdown content resets — keep tooltip compact; override .tail-line monospace/pre-wrap defaults */
+.tail-md { font-family: inherit; white-space: normal; word-break: break-word; overflow-wrap: break-word; }
+.tail-md p { margin: 0 0 4px; }
+.tail-md p:last-child { margin-bottom: 0; }
+.tail-md code { font-size: 10px; background: rgba(255,255,255,0.07); padding: 1px 3px; border-radius: 3px; font-family: monospace; }
+.tail-md pre { font-size: 10px; background: rgba(255,255,255,0.05); padding: 4px 6px; border-radius: 4px; overflow-x: auto; margin: 4px 0; white-space: pre; }
+.tail-md ul, .tail-md ol { margin: 2px 0; padding-left: 16px; }
+.tail-md li { margin: 1px 0; }
+.tail-md strong { font-weight: 600; }
+.tail-md em { font-style: italic; }
+```
+
+**`tests/test_web.py`** — update the three session-tail tests:
+
+`test_session_tail_returns_messages`: set `last_prompt="fix the bug"` in the mock Session. Also use `"**hello** user"` as `first_prompt` return value to exercise markdown rendering. Add assertions:
+```python
+assert "tail-session-id" in resp.text
+assert "sess-1" in resp.text          # session_id[:8] rendered
+assert "fix the bug" in resp.text     # last_prompt rendered
+assert "User last message" in resp.text
+assert "<p>" in resp.text             # mistune rendered markdown (not raw text)
+assert "<strong>" in resp.text        # **hello** → <strong>hello</strong>
+```
+
+`test_session_tail_graceful_no_cache`: `mock_cache.get.return_value = None`. Assert `"User last message" in resp.text` and `"—" in resp.text` (fallback shown). Also confirm `"tail-title" not in resp.text` still holds (the `{% if session_title %}` guard preserves this).
+
+`test_session_tail_empty`: assert `"tail-empty" in resp.text` and `"No recent output" in resp.text` (unchanged). Note: this test patches `get_first_prompt` to return `""` and `get_session_tail` to return `[]`; `session_cache` is not patched (cache miss → `last_prompt = ""`). Since all three of `messages`, `first_prompt`, `last_prompt` are empty, the early-return guard fires correctly.
+
+Add a new XSS test (within existing test file, no new file):
+```python
+@patch("power_atlas.web.data.session_cache")
+@patch("power_atlas.web.data.get_first_prompt", return_value="<script>alert(1)</script>")
+@patch("power_atlas.web.data.get_session_tail")
+def test_session_tail_xss_stripped(mock_tail, mock_first, mock_cache, client):
+    """mistune escape=True entity-encodes raw HTML and JS-URL hrefs; output is safe for | safe filter."""
+    mock_tail.return_value = ["<script>evil()</script>", "[click](javascript:alert(1))"]
+    mock_cache.get.return_value = None
+    resp = client.get("/partials/session-tail?sid=xss-test&cwd=C%3A%5CTest")
+    assert resp.status_code == 200
+    assert "<script>" not in resp.text          # raw tags not present
+    assert "&lt;script&gt;" in resp.text        # entity-encoded form IS present (confirms _md was invoked)
+    assert "javascript:alert" not in resp.text  # JS URL not present in rendered output
+```
+
+**Covers**: SC-3, SC-4, SC-5, SC-7, SC-8
+
+**Exit criteria**:
+- [ ] `mistune>=3.2.1,<4` present in `pyproject.toml` dependencies
+- [ ] `_md` module-level renderer created with `escape=True`; comment clarifies "entity-encodes" not "strips"
+- [ ] `session_id` and `last_prompt` present in template context dict
+- [ ] Early-return guard extended to `not messages and not first_prompt and not last_prompt`
+- [ ] `session_tail.html` renders `.tail-header-row` with `.tail-session-id` showing first 8 chars of session_id (full UUID in `title` attribute)
+- [ ] "User last message:" section always rendered; shows "—" when `last_prompt` is empty
+- [ ] All message content uses `| safe` filter (content pre-sanitized by mistune)
+- [ ] `.tail-header-row`, `.tail-session-id`, `.tail-md` CSS rules added to `style.css` (including `font-family: inherit; white-space: normal; word-break: break-word` reset on `.tail-md`)
+- [ ] `test_session_tail_returns_messages` updated and passes: `session_id`, `last_prompt`, `"<p>"`, `"<strong>"` assertions
+- [ ] `test_session_tail_graceful_no_cache` updated and passes with "—" assertion; `"tail-title" not in resp.text` still holds
+- [ ] `test_session_tail_xss_stripped` written and passes: no `<script>`, `&lt;script&gt;` present, `javascript:alert` absent
+- [ ] `pytest tests/test_web.py -v` passes (all session-tail tests green)
+- [ ] `plans/tests/260701_POWERATLAS.md` Section 1.8 oracle and probes updated
+
+### Phase 2: Viewport positioning rewrite [QA] [P:1]
+
+**Goal**: Replace the shrink/hide clamping logic in `loadTail` with a flip-below algorithm; fix `hideTail` state leaks.
+
+**File scope**: `src/power_atlas/templates/index.html`
+
+**`index.html`** — replace the `loadTail` and `hideTail` functions (at the line containing `var _tailTimers`). New implementation:
+
+```javascript
+var _tailTimers={};
+function loadTail(el){
+  var row=el.closest('.session-row');
+  var sid=row.dataset.sid;
+  var provider=row.dataset.provider||'kiro-cli';
+  var cwd=row.dataset.cwd||'';
+  var slot=el.querySelector('.session-tooltip-slot');
+  _tailTimers[sid]=setTimeout(function(){
+    fetch('/partials/session-tail?sid='+encodeURIComponent(sid)+'&provider='+encodeURIComponent(provider)+'&cwd='+encodeURIComponent(cwd))
+    .then(function(r){if(!r.ok)throw new Error(r.status);return r.text()})
+    .then(function(html){
+      slot.innerHTML=html;
+      if(window.htmx)htmx.process(slot);
+      var tooltip=slot.querySelector('.session-tail-tooltip');
+      if(!tooltip)return;
+      var rect=el.getBoundingClientRect();
+      var spaceAbove=rect.top-8;
+      var spaceBelow=window.innerHeight-rect.bottom-8;
+      // Suppress when neither side has ≥100px usable space
+      if(Math.max(spaceAbove,spaceBelow)<100){
+        slot.style.left='';slot.style.top='';slot.style.transform='';
+        slot.style.display='none';return;
+      }
+      // Determine max usable height and which side to open on
+      var openBelow=spaceBelow>spaceAbove;
+      var maxH=openBelow?Math.max(spaceBelow,100):Math.max(spaceAbove,100);
+      tooltip.style.maxHeight=maxH+'px';
+      var tooltipH=tooltip.scrollHeight;
+      var effectiveH=Math.min(tooltipH,maxH);
+      slot.style.left=rect.left+'px';
+      if(!openBelow&&spaceAbove>=effectiveH){
+        // Fits above — normal path
+        slot.style.top=(rect.top-4)+'px';
+        slot.style.transform='translateY(-100%)';
+      } else if(openBelow){
+        // Open below the row (pointer-events:none means tooltip overlapping lower rows is acceptable)
+        slot.style.top=(rect.bottom+4)+'px';
+        slot.style.transform='none';
+      } else {
+        // Above preferred but doesn't fully fit — clamp to viewport top
+        slot.style.top='4px';
+        slot.style.transform='none';
+        tooltip.style.maxHeight=Math.max(spaceAbove,100)+'px';
+      }
+      slot.style.display='block';
+    })
+    .catch(function(){slot.style.display='none'});
+  },300);
+}
+function hideTail(el){
+  var row=el.closest('.session-row');
+  var sid=row.dataset.sid;
+  clearTimeout(_tailTimers[sid]);
+  var slot=el.querySelector('.session-tooltip-slot');
+  slot.style.display='none';
+  slot.style.left='';
+  slot.style.top='';
+  slot.style.transform='';
+  var tooltip=slot.querySelector('.session-tail-tooltip');
+  if(tooltip)tooltip.style.maxHeight='';
+}
+```
+
+Key changes from current (`index.html:582`):
+- `spaceAbove` vs `spaceBelow` computed; larger side preferred; suppress only when `Math.max < 100`
+- Suppress branch now resets `left/top/transform` before returning (F-A3 fix)
+- Opens below when preferred: `slot.style.top = rect.bottom + 4`; visual overlap with lower rows is accepted design (`pointer-events: none`)
+- `hideTail` resets `slot.style.left`, `slot.style.top`, `slot.style.transform` (state leak fix)
+
+**Covers**: SC-1, SC-2, SC-6
+
+**Exit criteria**:
+- [ ] `loadTail` replaced with flip-below algorithm
+- [ ] Suppress branch resets `left/top/transform` before `return`
+- [ ] `hideTail` resets `left`, `top`, `transform` in addition to `maxHeight`
+- [ ] Hovering a session row near top of viewport: tooltip opens below the row
+- [ ] Hovering a session row in the middle: tooltip opens above the row (normal path)
+- [ ] Hovering a session row near bottom: tooltip opens above; if insufficient space above, flips below
+- [ ] `resetOverlays()` behavior unchanged (still hides all `.session-tooltip-slot` elements)
+- [ ] `node tests/acp_page.test.mjs` passes (template inline script harness — verifies no regressions in acp.html; loadTail/hideTail not covered by this harness, which is accepted as a known gap)
 
 ## Harness Improvement Opportunities
 
 - Asking questions one-at-a-time was violated during this session (Q5/Q6/Q7 + assumptions checkpoint batched in one turn) — cost: user correction; suggested change: add an explicit anti-batch reminder in the kiro overlay for `/qexplore` Step 2
+
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| XSS via `\| safe` on markdown output | High | `mistune.create_markdown(escape=True)` entity-encodes raw HTML (`<script>` → `&lt;script&gt;`); pin `>=3.2.1,<4` avoids all active CVEs; XSS test covers `<script>` and `javascript:` URL payloads |
+| Cache miss degrades last_prompt to "—" | Low | Consistent with existing `session_title` degradation; warmup pre-loads pinned sessions |
+| Viewport reflow timing (scrollHeight stale) | Low | Same pattern proven in prior plan (260708-1624); browser reflow happens synchronously before scrollHeight read |
+| mistune minor-version output changes | Low | Pinned `<4`; only formatting details may change, not sanitization |
+| `test_data.py` timing flakiness (pre-existing) | Low | Re-run standalone to distinguish from regressions; not introduced by this plan |
+
+## 7) Verification
+
+```bash
+# Install mistune then run tests
+.venv-PowerAtlas\Scripts\python -m pip install -e ".[dev]"
+.venv-PowerAtlas\Scripts\pytest tests/test_web.py -v -k "session_tail"
+# Full suite
+.venv-PowerAtlas\Scripts\pytest tests/test_web.py -v
+```
+
+Runtime manual checks (start app with `.venv-PowerAtlas\Scripts\power-atlas`):
+- Hover a session row in the middle of the panel → tooltip opens above
+- Hover a session row near the top → tooltip opens below the row
+- Hover a session row near the bottom → tooltip opens above; if cramped, flips below
+- Inspect tooltip header: workspace name left, session-id right on same line
+- Inspect "User last message:" section — shows content or "—"
+- Inspect markdown rendering: `**bold**` renders as `<strong>bold</strong>`, backtick code renders styled
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `plans/tests/260701_POWERATLAS.md` | Section 1.8 oracle: add `session_id` + `last_prompt` as returned fields; add markdown-rendering note. Probes: add `last_prompt` populated/empty cases and `<script>`-stripped + `javascript:`-URL cases. | 1 |
+| `plans/tests/260701_POWERATLAS.md` | Section 2.3 oracle: change "positioned above the row" to "positioned above or below the row depending on available viewport space." | 2 |
+
+## 9) Implementation Divergences from Plan
+
+_Reserved — filled during implementation._
+
+## Review Log
+
+### 2026-07-28 — Plan Creation Review (high effort, 4 personas: Architect, Senior engineer, Security auditor, End-user advocate)
+
+16 findings across 4 personas. 12 auto-resolved, 4 escalated (2 Low — user decision).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `mistune>=3.0,<4` admits versions with active CVEs bypassing `escape=True`; XSS test passes on vulnerable versions. | Fixed — pin raised to `>=3.2.1,<4`; XSS test extended with `javascript:` URL probe and positive entity assertion. |
+| 2 | Medium | Early-return guard `not messages and not first_prompt` misses `last_prompt`; session with only `last_prompt` shows "No recent output." | Fixed — guard extended to include `not last_prompt`. |
+| 3 | Medium | `loadTail` suppress-branch does not reset `left/top/transform` before early return — stale positioning persists. | Fixed — resets added before `return` in suppress branch. |
+| 4 | Medium | Phase 2 exit criteria omit `acp_page.test.mjs`; AGENTS.md mandates running it on template inline script changes. | Fixed — exit criterion added (acknowledged as known gap: `loadTail`/`hideTail` not covered by that harness). |
+| 5 | Medium | XSS test assertion `"<script>" not in resp.text` does not verify `_md` was invoked and does not cover JS-URL bypass class. | Fixed — added `&lt;script&gt;` presence assertion and `javascript:alert` absence check. |
+| 6 | Medium | Comment says `escape=True` "strips raw HTML" — factually wrong; it entity-encodes. | Fixed — corrected to "entity-encodes" in code comment and Risk Assessment. |
+| 7 | Medium | `test_session_tail_returns_messages` doesn't assert markdown was rendered (no HTML tag check). | Fixed — added `"<p>" in resp.text` and `"<strong>"` assertions using `**hello**` in `first_prompt`. |
+| 8 | Medium | `.tail-line` monospace/pre-wrap inherited into `.tail-md` — prose renders in monospace with extra blank lines. | Fixed — added `font-family: inherit; white-space: normal; word-break: break-word` reset to `.tail-md` CSS. |
+| 9 | Low | `[P:N]` annotation semantics: Phase 1 = `[P:2]` and Phase 2 = `[P:1]` is unconventionally reversed but functionally correct (symmetric pairing identifies the partner, not execution order). | Accepted — the `[P:N]` scheme identifies parallel partners, not ordering; the annotation is correct per `TEMPLATES.md § Parallel Phase Annotation`. |
+| 10 | Low | `plans/tests/260701_POWERATLAS.md` Section 2.3 oracle "above the row" becomes stale after Phase 2. | Fixed — added Section 2.3 update to Documentation Updates table assigned to Phase 2. |
+| 11 | Low | UUID (36 chars) at 10px monospace is unreadable; no copy functionality in tooltip. | Fixed — template truncated to first 8 chars with full UUID in `title` attribute; existing row-level copy button covers full-ID need. |
+| 12 | Low | Single-exchange sessions show identical content in both User sections (first_prompt == last_prompt). | Escalated — design trade-off: suppress last_prompt when it equals first_prompt (cleaner) vs. always show (predictable). User decision required. |
+| 13 | Low | "User last message" and "User original message" labels visually identical — hard to distinguish at a glance. | Escalated — UX choice: add visual differentiation (color, border) vs. rely on label text. User decision required. |
+| 14 | Low | `_md()` calls run synchronously on the async event loop — should use `asyncio.to_thread`. | Accepted — tooltip content is bounded in size (200 chars per message, 15 messages max); synchronous processing time is negligible; `asyncio.to_thread` overhead would exceed processing time for this payload size. |
+| 15 | Low | Flip-below tooltip overlaps lower rows — visual overlap is accepted design per `pointer-events: none`. | Fixed — comment added in Phase 2 code; exit criteria note acknowledges this as intentional. |
+| 16 | Low | `test_session_tail_graceful_no_cache` existing assertion `"tail-title" not in resp.text` not explicitly confirmed to survive template change. | Fixed — plan now explicitly notes this assertion holds because `{% if session_title %}` guard is preserved. |
