@@ -111,10 +111,10 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **risks**: pinned Claude sessions can't be located; wasted scans loading a folder under the wrong provider; TOCTOU on `exists()`→load.
 
 ### 1.8 Session-tail + first-prompt dispatch (H2)
-- **what**: `get_session_tail` / `get_first_prompt` route to kiro or claude; kiro ignores cwd (global dir), claude requires cwd (resolve folder).
+- **what**: `get_session_tail` / `get_first_prompt` route to kiro or claude; kiro ignores cwd (global dir), claude requires cwd (resolve folder). The endpoint additionally passes `session_id` (from the `sid` query param) and `last_prompt` (from the session cache, or empty string on cache miss) to the template context. `first_prompt`, `last_prompt`, and all `messages` items are rendered through `mistune.create_markdown(escape=True)` before passing to the template (markdown rendering uses `mistune>=3.2.1,<4`; `escape=True` causes HTML entity-encoding, e.g. `<script>` → `&lt;script&gt;`). The `tail-empty` early-return guard fires only when ALL THREE of `messages`, `first_prompt`, and `last_prompt` are empty — a session with only a `last_prompt` will not short-circuit.
 - **how-to-reach**: `GET /partials/session-tail?sid&provider&cwd` (300ms hover tooltip).
-- **probes**: kiro tail with empty cwd (tolerated) vs claude tail with empty/wrong cwd (silently `[]`); repeated hovers — confirm kiro caches (5s/60s) but claude re-reads every time (H2); 128KB tail truncation dropping newest messages in a huge session; kiro `"toolUse"` substring skip dropping a legit message mentioning the literal.
-- **oracle**: oldest-first assistant messages; kiro `.history`-preferred first prompt; not-found → `[]`/`""`.
+- **probes**: kiro tail with empty cwd (tolerated) vs claude tail with empty/wrong cwd (silently `[]`); repeated hovers — confirm kiro caches (5s/60s) but claude re-reads every time (H2); 128KB tail truncation dropping newest messages in a huge session; kiro `"toolUse"` substring skip dropping a legit message mentioning the literal; `last_prompt` populated — verify it appears in rendered output under "User last message" label; `last_prompt` empty (cache miss, `session_cache.get` returns None) — verify "User last message" label appears with `—` (em dash) fallback; XSS probe: `<script>alert(1)</script>` as message input — verify entity-encoded to `&lt;script&gt;` in output (never raw `<script>`); JS-URL probe: `[click](javascript:alert(1))` as message input — verify `javascript:alert` is not present in rendered output (mistune's SanitizeURLPlugin replaces `javascript:` hrefs with `#harmful-link` unconditionally).
+- **oracle**: oldest-first assistant messages; kiro `.history`-preferred first prompt; not-found → `[]`/`""`. `session_id` and `last_prompt` passed to template; all text fields HTML-entity-encoded via mistune before template rendering; output safe for Jinja2 `| safe` filter.
 - **risks**: H2 asymmetric caching; inconsistent cwd contract; textual `"toolUse"` heuristic fragility; negative-cache blanks kiro tooltip for 60s.
 
 ### 1.9 Kiro discovery (metadata + sqlite union)
@@ -176,7 +176,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **what**: hovering a session row 300ms fetches and positions a tail tooltip.
 - **how-to-reach**: hover `.session-content`; `GET /partials/session-tail`.
 - **probes**: hover shows tooltip; empty → "No recent output"; row swapped mid-hover (timer not cleared); scroll after show (stale position); kiro vs claude freshness (H2); provider/cwd passed from dataset.
-- **oracle**: 300ms debounce; positioned above the row.
+- **oracle**: 300ms debounce; positioned above or below the row depending on available viewport space. Specifically: when space above ≥ space below AND the tooltip fits above, opens above (`transform: translateY(-100%)`); when space below > space above (or above doesn't fit), opens below (`top: rect.bottom + 4px`, `transform: none`); when BOTH sides < 100px, suppressed (`display: none`). `hideTail` resets `left`, `top`, `transform`, and `maxHeight` on close.
 - **risks**: leaked timers; stale position; per-provider cost divergence (H2).
 
 ### 2.4 Provider tab switching

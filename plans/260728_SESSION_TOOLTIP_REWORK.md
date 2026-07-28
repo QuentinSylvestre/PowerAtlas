@@ -1,7 +1,7 @@
 # Session Tooltip Rework
 
 > **Date**: 2026-07-28
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Estimated effort**: ~4-6 hours
 > **Scope**: Fix viewport crop, add session-id display, add user last message section, add markdown rendering to the session hover tooltip
@@ -226,20 +226,23 @@ def test_session_tail_xss_stripped(mock_tail, mock_first, mock_cache, client):
 **Covers**: SC-3, SC-4, SC-5, SC-7, SC-8
 
 **Exit criteria**:
-- [ ] `mistune>=3.2.1,<4` present in `pyproject.toml` dependencies
-- [ ] `_md` module-level renderer created with `escape=True`; comment clarifies "entity-encodes" not "strips"
-- [ ] `session_id` and `last_prompt` present in template context dict
-- [ ] Early-return guard extended to `not messages and not first_prompt and not last_prompt`
-- [ ] `last_prompt` suppressed (set to `""`) when it equals `first_prompt` before rendering
-- [ ] `session_tail.html` renders `.tail-header-row` with `.tail-session-id` showing first 8 chars of session_id (full UUID in `title` attribute)
-- [ ] "User last message:" section always rendered; shows "—" when `last_prompt` is empty
-- [ ] All message content uses `| safe` filter (content pre-sanitized by mistune)
-- [ ] `.tail-header-row`, `.tail-session-id`, `.tail-md` CSS rules added to `style.css` (including `font-family: inherit; white-space: normal; word-break: break-word` reset on `.tail-md`)
-- [ ] `test_session_tail_returns_messages` updated and passes: `session_id`, `last_prompt`, `"<p>"`, `"<strong>"` assertions
-- [ ] `test_session_tail_graceful_no_cache` updated and passes with "—" assertion; `"tail-title" not in resp.text` still holds
-- [ ] `test_session_tail_xss_stripped` written and passes: no `<script>`, `&lt;script&gt;` present, `javascript:alert` absent
-- [ ] `pytest tests/test_web.py -v` passes (all session-tail tests green)
-- [ ] `plans/tests/260701_POWERATLAS.md` Section 1.8 oracle and probes updated
+- [x] `mistune>=3.2.1,<4` present in `pyproject.toml` dependencies
+- [x] `_md` module-level renderer created with `escape=True`; comment clarifies "entity-encodes" not "strips"
+- [x] `session_id` and `last_prompt` present in template context dict
+- [x] Early-return guard extended to `not messages and not first_prompt and not last_prompt`
+- [x] `last_prompt` suppressed (set to `""`) when it equals `first_prompt` before rendering
+- [x] `session_tail.html` renders `.tail-header-row` with `.tail-session-id` showing first 8 chars of session_id (full UUID in `title` attribute)
+- [x] "User last message:" section always rendered; shows "—" when `last_prompt` is empty
+- [x] All message content uses `| safe` filter (content pre-sanitized by mistune)
+- [x] `.tail-header-row`, `.tail-session-id`, `.tail-md` CSS rules added to `style.css` (including `font-family: inherit; white-space: normal; word-break: break-word` reset on `.tail-md`)
+- [x] `test_session_tail_returns_messages` updated and passes: `session_id`, `last_prompt`, `"<p>"`, `"<strong>"` assertions
+- [x] `test_session_tail_graceful_no_cache` updated and passes with "—" assertion; `"tail-title" not in resp.text` still holds
+- [x] `test_session_tail_xss_stripped` written and passes: no `<script>`, `&lt;script&gt;` present, `javascript:alert` absent
+- [x] `pytest tests/test_web.py -v` passes (all session-tail tests green)
+- [x] `plans/tests/260701_POWERATLAS.md` Section 1.8 oracle and probes updated
+
+#### Implementation (2026-07-28, code: e31a4a0)
+Added `mistune>=3.3.0,<4` to `pyproject.toml` dependencies (lower bound raised from 3.2.1 during review — CVE-2026-59923 percent-encoded JS-URL bypass affects 3.2.x; 3.3.0 is the first fully patched release). In `web.py`, added module-level `_md = mistune.create_markdown(escape=True)` instance and rewrote `partials_session_tail` to: extend the cache-lookup loop to also read `last_prompt`; change the empty-state guard to require all three content fields absent; strip whitespace from `last_prompt`; suppress `last_prompt` when `first_prompt.startswith(last_prompt)` (handles 200-char cap mismatch in single-exchange sessions); add UUID validation (RFC 4122 regex, returns 400 for invalid sids); render all three text variables through `_md`; pass `session_id` and rendered HTML to template. `session_tail.html` fully replaced with `tail-header-row` (session_id[:8] + full UUID in title attribute), unconditional "User original message" and "User last message" sections with em-dash fallbacks, and `tail-md` class on all content divs with a Jinja comment explaining `| safe` safety. In `style.css`, 12 new rules added after `.tail-label` covering header row layout, session ID styling, and markdown content resets. Five session-tail tests written/updated (5/5 pass); `plans/tests/260701_POWERATLAS.md` §1.8 updated with new oracle fields and probes. Full test suite: 683 passed, 1 skipped.
 
 ### Phase 2: Viewport positioning rewrite [QA] [P:1]
 
@@ -322,14 +325,17 @@ Key changes from current (`index.html:582`):
 **Covers**: SC-1, SC-2, SC-6
 
 **Exit criteria**:
-- [ ] `loadTail` replaced with flip-below algorithm
-- [ ] Suppress branch resets `left/top/transform` before `return`
-- [ ] `hideTail` resets `left`, `top`, `transform` in addition to `maxHeight`
-- [ ] Hovering a session row near top of viewport: tooltip opens below the row
-- [ ] Hovering a session row in the middle: tooltip opens above the row (normal path)
-- [ ] Hovering a session row near bottom: tooltip opens above; if insufficient space above, flips below
-- [ ] `resetOverlays()` behavior unchanged (still hides all `.session-tooltip-slot` elements)
-- [ ] `node tests/acp_page.test.mjs` passes (template inline script harness — verifies no regressions in acp.html; loadTail/hideTail not covered by this harness, which is accepted as a known gap)
+- [x] `loadTail` replaced with flip-below algorithm
+- [x] Suppress branch resets `left/top/transform` before `return`
+- [x] `hideTail` resets `left`, `top`, `transform` in addition to `maxHeight`
+- [x] Hovering a session row near top of viewport: tooltip opens below the row
+- [x] Hovering a session row in the middle: tooltip opens above the row (normal path)
+- [x] Hovering a session row near bottom: tooltip opens above; if insufficient space above, flips below
+- [x] `resetOverlays()` behavior unchanged (still hides all `.session-tooltip-slot` elements)
+- [x] `node tests/acp_page.test.mjs` passes (template inline script harness — verifies no regressions in acp.html; loadTail/hideTail not covered by this harness, which is accepted as a known gap)
+
+#### Implementation (2026-07-28, code: 457d0e5)
+Replaced `loadTail` and `hideTail` in `index.html` with a flip-below algorithm. New `loadTail` computes `spaceAbove = rect.top - 8` and `spaceBelow = window.innerHeight - rect.bottom - 8`; suppresses when `Math.max(spaceAbove, spaceBelow) < 100` (with full `left/top/transform` reset before `display:none`); sets `openBelow = spaceBelow > spaceAbove` (strict — equal space defaults to above); positions below at `rect.bottom + 4px` when `openBelow`, above at `rect.top - 4px` with `translateY(-100%)` when above preferred and fits, or clamps to `top: 4px` in the theoretically-unreachable fallback (safety net). New `hideTail` resets `left`, `top`, `transform`, and `maxHeight` on the slot, preventing state leaks across hovers. Added comments: tie-break documentation, dead-code rationale in fallback branch. `plans/tests/260701_POWERATLAS.md` §2.3 updated to reflect above-or-below positioning. `node tests/acp_page.test.mjs`: 15 passed.
 
 ## Harness Improvement Opportunities
 
@@ -399,3 +405,35 @@ _Reserved — filled during implementation._
 | 14 | Low | `_md()` calls run synchronously on the async event loop — should use `asyncio.to_thread`. | Accepted — tooltip content is bounded in size (200 chars per message, 15 messages max); synchronous processing time is negligible; `asyncio.to_thread` overhead would exceed processing time for this payload size. |
 | 15 | Low | Flip-below tooltip overlaps lower rows — visual overlap is accepted design per `pointer-events: none`. | Fixed — comment added in Phase 2 code; exit criteria note acknowledges this as intentional. |
 | 16 | Low | `test_session_tail_graceful_no_cache` existing assertion `"tail-title" not in resp.text` not explicitly confirmed to survive template change. | Fixed — plan now explicitly notes this assertion holds because `{% if session_title %}` guard is preserved. |
+
+### 2026-07-28 — Implementation Review (after Phase 1, personas: Security auditor, Senior engineer, Maintainability reviewer, End-user advocate)
+
+Implementation health: Green.
+9 findings (0 High, 5 Medium, 4 Low) — all resolved in 2 auto-fix cycles.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | CVE-2026-59923: `mistune>=3.2.1` admits percent-encoded JS-URL bypass; `>=3.3.0` is the first fully patched release. | Fixed — version pin raised to `>=3.3.0,<4` in pyproject.toml. |
+| 2 | Medium | `plans/tests/260701_POWERATLAS.md` §1.8 not updated — exit criterion 15 explicitly requires oracle and probes updated. | Fixed — §1.8 updated with session_id, last_prompt, markdown rendering note, XSS/JS-URL probes. |
+| 3 | Medium | `test_session_tail_empty` lacks `session_cache` patch — fragile if a prior test populates the real cache. | Fixed — added `@patch("power_atlas.web.data.session_cache")` with `mock_cache.get.return_value = None`. |
+| 4 | Medium | XSS test docstring incorrectly attributes JS-URL sanitization to `escape=True`; actual mechanism is `HTMLRenderer.safe_url()`. | Fixed — docstring and comment corrected to name `HTMLRenderer.safe_url()`. |
+| 5 | Medium | Dedup comparison `last_prompt == first_prompt` fails for sessions where `first_prompt` exceeds the 200-char `last_prompt` cap. | Fixed — changed to `first_prompt.startswith(last_prompt)`. |
+| 6 | Medium | `sid` query param not validated — permissive pass-through enables path traversal in the data layer. | Fixed — RFC 4122 UUID regex validation added; returns 400 for invalid sids; test added. |
+| 7 | Low | `import mistune as _mistune` placed after local imports, adding a new ruff I001 error. | Fixed — moved to third-party section; alias removed; `_md =` moved after all imports. |
+| 8 | Low | Whitespace-only `last_prompt` bypasses empty guard and renders as "—" instead of triggering "No recent output". | Fixed — `last_prompt` now stripped with `.strip()` before all comparisons. |
+| 9 | Low | UUID regex `[0-9a-f-]{36}` accepts 36-dash or 36-hex inputs — not RFC 4122 format. | Fixed — tightened to `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`. |
+
+Persona: Security auditor, Senior engineer, Maintainability reviewer, End-user advocate. Identical findings merged; contributing personas noted in descriptions. Other low findings (import alias, `overflow-wrap` addition, `| safe` comment gap, `tail-line` CSS audit) were auto-fixed in the same pass (all mechanical/clarity improvements with no behavioral change).
+
+### 2026-07-28 — Implementation Review (after Phase 2, personas: Senior engineer, End-user advocate)
+
+Implementation health: Green.
+5 findings (0 High, 1 Medium, 4 Low) — all resolved in 2 auto-fix cycles.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `plans/tests/260701_POWERATLAS.md` §2.3 oracle still reads "positioned above the row" — not updated to reflect flip-below. | Fixed — §2.3 updated to tri-case description (above/below/suppressed). |
+| 2 | Low | Dead code in else-clamp-to-top branch — provably unreachable given suppress handles `spaceAbove<100`. | Fixed — removed redundant `maxHeight` assignment; added accurate dead-code comment explaining unreachability. |
+| 3 | Low | `openBelow = spaceBelow > spaceAbove` tie-break (equal space → above) undocumented. | Fixed — comment added: "strict comparison — equal space defaults to above (legacy direction)." |
+| 4 | Low | `resetOverlays()` doesn't reset `left/top/transform` (pre-existing; Phase 2 adds three new inline properties). | User: accepted — plan invariant states `resetOverlays()` behavior unchanged; stale state is overwritten on next hover; no visible misposition. |
+| 5 | Low | Dead-code comment said "suppress fires when `spaceAbove<100`" — imprecise (actual condition is `Math.max(spaceAbove,spaceBelow)<100`). | Fixed — comment updated to cite the exact suppress condition and trace the unreachability in the above-preferred context. |
