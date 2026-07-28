@@ -3,7 +3,7 @@
   <div class="tail-header">
     <div class="tail-header-row">
       {% if workspace_name %}<div class="tail-workspace">{{ workspace_name }}</div>{% endif %}
-      {% if session_id %}<div class="tail-session-id" title="{{ session_id }}">{{ session_id[:8] }}</div>{% endif %}
+      {% if session_id %}<div class="tail-session-id">{{ session_id }}</div>{% endif %}
     </div>
     {% if session_title %}<div class="tail-title" title="{{ session_title }}">{{ session_title }}</div>{% endif %}
   </div>
@@ -15,7 +15,7 @@
   </div>
   <div class="tail-section">
     <span class="tail-label">User last message:</span>
-    <div class="tail-line tail-md">{% if last_prompt %}{{ last_prompt | safe }}{% else %}—{% endif %}</div>
+    <div class="tail-line tail-first-prompt tail-md">{% if last_prompt %}{{ last_prompt | safe }}{% else %}—{% endif %}</div>
   </div>
   {% if messages %}
   <div class="tail-section tail-agent-section">

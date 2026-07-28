@@ -586,6 +586,10 @@ var maxH=openBelow?Math.max(spaceBelow,100):Math.max(spaceAbove,100);tooltip.sty
 // Retained as a safety net.
 // maxHeight already set to Math.max(spaceAbove,100) above
 slot.style.top='4px';slot.style.transform='none';}slot.style.display='block';}).catch(function(e){slot.style.left='';slot.style.top='';slot.style.transform='';slot.style.display='none';console.warn('[tooltip] loadTail fetch failed',e);})},300);}function hideTail(el){var row=el.closest('.session-row');var sid=row.dataset.sid;clearTimeout(_tailTimers[sid]);var slot=el.querySelector('.session-tooltip-slot');slot.style.display='none';slot.style.left='';slot.style.top='';slot.style.transform='';var tooltip=slot.querySelector('.session-tail-tooltip');if(tooltip)tooltip.style.maxHeight='';}
+var _hideTimers={};
+function schedulHideTail(el){var row=el.closest('.session-row');var sid=row.dataset.sid;_hideTimers[sid]=setTimeout(function(){hideTail(el);},80);}
+function cancelHideTail(slotEl){var row=slotEl.closest('.session-row');var sid=row.dataset.sid;clearTimeout(_hideTimers[sid]);}
+function hideTailFromSlot(slotEl){var row=slotEl.closest('.session-row');var sid=row.dataset.sid;_hideTimers[sid]=setTimeout(function(){var slot=row.querySelector('.session-tooltip-slot');if(slot){slot.style.display='none';slot.style.left='';slot.style.top='';slot.style.transform='';var tooltip=slot.querySelector('.session-tail-tooltip');if(tooltip)tooltip.style.maxHeight='';}clearTimeout(_tailTimers[sid]);},80);}
 </script>
 {% include "partials/launcher_modal.html" %}
 {% include "partials/workspace_settings_modal.html" %}
