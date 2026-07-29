@@ -98,6 +98,19 @@
 **How to apply**: When adding or debugging a `tests/test_web.py` test that hits a route, patch `power_atlas.web.load_config` with a controlled `Config()` — `test_search_with_tag_filter` is the house pattern. When a route test fails only on your machine, suspect this before suspecting your change. Note the fix is not uniformly mechanical: tests rendering the full workspaces partial depend on real pinned folders for their assertions, so a bare `Config()` changes what they see. The durable fix is a shared autouse fixture, not eighteen decorators.
 **Source**: `plans/260725_KIRO_CLI_ACP_CLIENT_PROTOTYPE.md` — found by instrumenting `load_config` during Phase 2 | **Verified**: 2026-07-25
 
+### The launched agent owns the terminal tab title — PowerAtlas cannot hold it
+
+**Why**: kiro-cli sets the terminal title itself once its session starts, overwriting anything the launcher set. Several successive fix attempts (injecting `$Host.UI.RawUI.WindowTitle` into the bare `wt` path, then into `{pscmd}`, a `--suppressApplicationTitle` flag that is a settings.json profile key rather than a CLI flag, an ANSI escape, a default-template rewrite) all failed, and the `{pscmd}` variant broke session launching outright. The user diagnosed it, not the agent.
+**How to apply**: Treat the tab title as owned by whatever the terminal launches, not by the launch command. PowerAtlas's `--title` only controls the window between `wt` spawn and agent startup; anything the agent sets afterwards wins. If a title must persist, fix it in the agent's own steering (kiro-cli `tab-title.md`), not in `launcher.py`. Do not re-attempt title injection into `{pscmd}` — that path broke launching once already.
+**Source**: session 8cf565d0-a987-4616-a782-cb00af9ff6d7 (2026-07-24), user turn at line 65; work reverted the same day | **Verified**: 2026-07-28
+**Evidence-quote**: "the tab name change works well, but kiro-cli sets the title to \"Windows Powershell\" when I open it, so I'll have to handle it from kiro-cli directly"
+
+### Workspace dots must aggregate resolved session statuses, not raw signals
+
+**Why**: A session row showed green (working) while its workspace card showed orange (waiting) for the same single live session at the same tick. `_session_status` let a non-empty provider report win outright, while `_workspace_status` folded the raw report and the raw classifier verdict into a max over `errored > waiting > working` — so a lagging transcript tail could only ever *raise* the card and silently outranked the provider's first-hand "busy".
+**How to apply**: Aggregate `_resolved_session_status(...)` outputs, never the raw `(reported_status, semantic)` pair, so precedence is decided once per session. A card may still outrank a row, but only on the strength of a *different* session or of the errored verdict the row honours too. When touching either function, re-check that both surfaces read the same settled value — the pair has diverged twice.
+**Source**: claude-code session 6ab328ed-b9e7-41e2-8e66-2efe2a1a3afa (2026-07-28), line 87; fixed in commit 09cbbe1 | **Verified**: 2026-07-28
+**Evidence-quote**: "The real design smell is that `_workspace_status` aggregates *raw signals* rather than *resolved session statuses*. If it aggregated `_session_status` outputs, precedence would be decided once, per session"
 
 ## Feedback
 
@@ -132,12 +145,6 @@
 **Source**: Session 2ec9143d (2026-07-15) — user correction | **Verified**: 2026-07-16
 
 ## Decision
-
-### Semantic session status uses 4-state vocabulary: Active, Needs-input, Idle, Errored
-
-**Why**: User explicitly merged executing/thinking into 1 Active status during exploration. Design deliberately avoids v3-specific features but abstracts for future v3 support.
-**How to apply**: When adding session status features or extending the classifier, use the 4-state vocabulary. Do not re-split Active into sub-states. v3 kiro-cli support is designed-for but deferred.
-**Source**: Plan 260715-1407_SEMANTIC_SESSION_STATUS — user decision during /qexplore | **Verified**: 2026-07-16
 
 ### Rejected integration paths live in `plans/CLOSED_INVESTIGATIONS.md`, not in the roadmap
 
