@@ -11,10 +11,16 @@
     {% if last_updated %}<span class="card-last-active">{{ last_updated[5:16] | replace('T', ' ') }}</span>{% endif %}
     <div class="card-actions">
       <button class="card-terminal-btn" onclick="event.stopPropagation();openTerminal(this)" aria-label="Open terminal" title="Open terminal">&gt;_</button>
-      {% for p in providers %}
-      <button class="card-new-btn" onclick="event.stopPropagation();launchNew(this,'{{ p.name }}')" aria-label="New {{ p.display }} session" title="New {{ p.display }} session">
-        <img src="/api/launcher-icon/provider--{{ p.name }}" class="card-new-icon" alt="" onerror="this.outerHTML='&gt;_'">
+      {% for hl in hover_launchers %}
+      {% if hl.is_provider %}
+      <button class="card-new-btn" onclick="event.stopPropagation();launchNew(this,'{{ hl.id[10:] }}')" aria-label="New {{ hl.name }} session" title="New {{ hl.name }} session">
+        <img src="/api/launcher-icon/{{ hl.id }}" class="card-new-icon" alt="" onerror="this.outerHTML='&gt;_'">
       </button>
+      {% else %}
+      <button class="card-new-btn" onclick="event.stopPropagation();launchCustomFromCard(this,'{{ hl.id }}')" aria-label="{{ hl.name }}" title="{{ hl.name }}">
+        <img src="/api/launcher-icon/{{ hl.id }}" class="card-new-icon" alt="" onerror="this.outerHTML='&gt;_'">
+      </button>
+      {% endif %}
       {% endfor %}
       <button class="card-settings-btn" onclick="event.stopPropagation();openWorkspaceSettings(this)" aria-label="Workspace settings" title="Settings">&#x2699;&#xfe0f;</button>
       <button class="card-pin-btn{% if is_pinned %} pinned{% endif %}" onclick="event.stopPropagation();pinWorkspace(this)" aria-label="Pin workspace">📌</button>

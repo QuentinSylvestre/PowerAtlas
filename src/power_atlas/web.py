@@ -121,6 +121,45 @@ def _enabled(config, prov: str) -> bool:
     return config.provider_settings.get(prov, {}).get("enabled", True)
 
 
+def _all_hover_launchers(config) -> list[dict]:
+    """Return the ordered list of launcher entries to show in workspace card hover actions.
+
+    Order: installed+enabled providers with show_in_workspace_hover=true (alphabetical),
+    then custom launchers with use_selected_workspaces=true AND show_in_workspace_hover=true.
+    """
+    result: list[dict] = []
+    # Built-in providers — installed (on disk) + enabled + show_in_workspace_hover (default true)
+    try:
+        installed = set(data.available_providers())
+    except Exception:
+        installed = set()
+    for prov in sorted(installed):
+        if not _enabled(config, prov):
+            continue
+        settings = config.provider_settings.get(prov, {})
+        if not settings.get("show_in_workspace_hover", True):
+            continue
+        result.append({
+            "id": f"provider--{prov}",
+            "name": PROVIDER_DISPLAY_NAMES.get(prov, prov),
+            "color": settings.get("color", "") or PROVIDER_COLORS.get(prov, "#888"),
+            "is_provider": True,
+        })
+    # Custom launchers — use_selected_workspaces=true AND show_in_workspace_hover=true
+    for launcher in config.custom_launchers:
+        if not launcher.get("use_selected_workspaces"):
+            continue
+        if not launcher.get("show_in_workspace_hover"):
+            continue
+        result.append({
+            "id": launcher["id"],
+            "name": launcher.get("name", ""),
+            "color": launcher.get("color", ""),
+            "is_provider": False,
+        })
+    return result
+
+
 def _time_bucket(iso_str: str) -> str:
     """Classify an ISO-8601 timestamp into today/yesterday/this_week/before."""
     if not iso_str:
@@ -1153,6 +1192,7 @@ async def partials_workspaces(
         other_grouped = [g for g in other_grouped if _ws_status_keep(g)]
 
     # --- Render: pinned first, then time-grouped non-pinned ---
+    hover_launchers = _all_hover_launchers(config)
     for group in pinned_grouped:
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
@@ -1171,6 +1211,7 @@ async def partials_workspaces(
             providers=group["providers"],
             workspace_status=ws_status,
             time_group="pinned",
+            hover_launchers=hover_launchers,
         )
 
     if pinned_grouped and other_grouped:
@@ -1203,6 +1244,7 @@ async def partials_workspaces(
                     providers=group["providers"],
                     workspace_status=ws_status,
                     time_group=key,
+                    hover_launchers=hover_launchers,
                 )
 
     if not cards_html:
@@ -1626,6 +1668,7 @@ async def get_provider_settings(key: str):
     config = load_config()
     settings = config.provider_settings.get(key, {"default_args": "", "color": "", "enabled": True, "default_directory": ""})
     settings.setdefault("default_directory", "")
+    settings.setdefault("show_in_workspace_hover", True)
     return {"provider": key, **settings}
 
 
@@ -1663,6 +1706,7 @@ async def save_provider_settings(request: Request):
         "color": body.get("color", ""),
         "enabled": body.get("enabled", True),
         "default_directory": default_directory,
+        "show_in_workspace_hover": body.get("show_in_workspace_hover", True),
     }
     save_config(config)
     return templates.TemplateResponse(request, "partials/toast.html", {
@@ -2132,6 +2176,7 @@ async def launcher_create(request: Request):
         "color": body.get("color", ""),
         "terminal": body.get("terminal", True),
         "use_selected_workspaces": body.get("use_selected_workspaces", False),
+        "show_in_workspace_hover": body.get("show_in_workspace_hover", False),
     }
     config.custom_launchers.append(entry)
     save_config(config)
@@ -2146,7 +2191,7 @@ async def launcher_update(request: Request):
     config = load_config()
     for entry in config.custom_launchers:
         if entry["id"] == lid:
-            for k in ("name", "command", "custom_args", "cwd", "env", "color", "terminal", "use_selected_workspaces"):
+            for k in ("name", "command", "custom_args", "cwd", "env", "color", "terminal", "use_selected_workspaces", "show_in_workspace_hover"):
                 if k in body:
                     entry[k] = body[k]
             icons.extract_icon(lid, entry.get("command", ""), entry.get("terminal", True))
