@@ -1461,16 +1461,19 @@ async def search(request: Request, q: str = "", provider: str = "all",
     if time_filter:
         grouped = [g for g in grouped if _time_bucket(g["latest_updated"]) == time_filter]
 
+    snap = await asyncio.to_thread(presence.get_snapshot)
+    prov_names = None if provider == "all" else {provider}
+
     # Apply live-status filter (skipped when nothing survived the earlier
     # ones — the presence scan is the expensive step and cannot change an
     # already-empty result).
     if grouped and status and status != "all":
-        snap = await asyncio.to_thread(presence.get_snapshot)
-        prov_names = None if provider == "all" else {provider}
         grouped = [g for g in grouped if _status_matches(
             status, _workspace_status(snap, g["cwd"], prov_names))]
 
     cards_html = ""
+
+    hover_launchers = _all_hover_launchers(config)
 
     # Separate pinned from non-pinned results
     pinned_results = [g for g in grouped if _normalize_path(g["cwd"]) in pinned_norm_paths]
@@ -1481,6 +1484,7 @@ async def search(request: Request, q: str = "", provider: str = "all",
         cwd = group["cwd"]
         stale = not Path(cwd).exists()
         workspace_color = _resolve_workspace_color(cwd, config)
+        ws_status = _workspace_status(snap, cwd, prov_names)
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=stale,
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
@@ -1488,6 +1492,9 @@ async def search(request: Request, q: str = "", provider: str = "all",
             is_pinned=True,
             workspace_color=workspace_color,
             providers=group["providers"],
+            workspace_status=ws_status,
+            time_group="pinned",
+            hover_launchers=hover_launchers,
         )
 
     if pinned_results and other_results:
@@ -1506,6 +1513,7 @@ async def search(request: Request, q: str = "", provider: str = "all",
                 cwd = group["cwd"]
                 stale = not Path(cwd).exists()
                 workspace_color = _resolve_workspace_color(cwd, config)
+                ws_status = _workspace_status(snap, cwd, prov_names)
                 cards_html += templates.get_template("partials/workspace_card.html").render(
                     request=request, cwd=cwd, sessions=[], stale=stale,
                     pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
@@ -1513,6 +1521,9 @@ async def search(request: Request, q: str = "", provider: str = "all",
                     is_pinned=False,
                     workspace_color=workspace_color,
                     providers=group["providers"],
+                    workspace_status=ws_status,
+                    time_group=key,
+                    hover_launchers=hover_launchers,
                 )
 
     if not cards_html:
