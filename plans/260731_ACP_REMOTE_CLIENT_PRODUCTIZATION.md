@@ -219,7 +219,16 @@ if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
 **File scope**: `src/power_atlas/acp.py`, `src/power_atlas/config.py`, `src/power_atlas/__main__.py`, `src/power_atlas/web.py` (lifespan hook only), `tests/test_web.py`
 **Covers**: SC-8, SC-9, SC-10, SC-10b
 
-**Change 1 — `last_used`, stamped correctly.** Three parts, each of which the cycle-1 review found the original wording got wrong.
+**Change 1 — two timestamps, not one.** Cycle 2 found that the single-field design conflates two *opposed* questions, so the record carries both:
+
+| Field | Question it answers | Advanced by | Read by |
+|---|---|---|---|
+| `last_activity` | "is the agent still working?" | **any** `session/update`, including `_kiro.dev/*` metadata | the inactivity ceiling |
+| `last_used` | "has nobody used this session?" | prompt sent; subscriber attach/detach | the sweeper |
+
+Using one field for both means an agent-side heartbeat refreshes the sweeper's idle clock, so a chatty agent silently makes sessions **permanently unsweepable** — defeating SC-9 and SC-10 with no error anywhere and nothing in Phase 0 verifying that `_kiro.dev/*` notifications are turn-scoped. The ceiling wants *any* sign of life to count; the sweeper must ignore agent-generated noise. They cannot share a field.
+
+Three further parts, each of which the cycle-1 review found the original wording got wrong.
 
 *Initialise at both constructors.* Write `"last_used": time.monotonic()` in `new_session` (`acp.py:1795-1798`) **and** `load_session` (`:1846-1849`). Without this the sweeper `KeyError`s on any session that was created but never prompted — including the `_handle_new` "socket went away" case (`:2474-2480`), which also has no subscriber and would be swept on the first tick. This is also what actually makes the two named test edits correct: `TestAcpSessionRecordHoldsNoDeadState` (`tests/test_web.py:5033`, `:5044`) asserts the key set **immediately after** `new_session`/`load_session` with no notification in between, so under notification-only stamping it would not have broken at all.
 
@@ -241,18 +250,50 @@ Direct assignment raises `KeyError` after `close_session` pops the record (`:192
 **Change 2 — inactivity ceiling** (mechanism per D30). `PROMPT_TIMEOUT_SECONDS = 600.0` (`acp.py:275`) bounds a turn on wall clock via `_request(..., timeout=PROMPT_TIMEOUT_SECONDS)` (`:1895`). Replace with a deadline reset by activity, **without changing `_request`'s signature**:
 
 ```python
-# `timeout` carries a sentinel meaning "inactivity mode"; the session id
-# comes from params, which session/prompt always carries (acp.py:1893).
-# asyncio.wait_for CANCELS its future on expiry (:1489), so the bare `fut`
-# must never be handed to it directly in a re-wait loop - shield each pass.
+# `timeout` carries the _INACTIVITY sentinel (a module-level object(), branched
+# on with `is` BEFORE the try - the slot is annotated float and formatted
+# {timeout:.0f} at :1492, which a sentinel would blow up).
+#
+# The deadline is LOCAL and seeded at send time. Reading the shared
+# last_activity as the baseline would cancel the first prompt on a session
+# that has been idle longer than the silence window - a session idle 20 min
+# with a tab attached is unswept but already "silent", so its next prompt
+# dies at the first tick before the agent can answer.
+deadline = time.monotonic() + PROMPT_SILENCE_SECONDS
+hard_stop = time.monotonic() + PROMPT_ABSOLUTE_MAX_SECONDS
 while True:
     try:
-        return await asyncio.wait_for(asyncio.shield(fut), tick)
+        # wait_for CANCELS its future on expiry (:1489), so the bare `fut`
+        # is never handed to it directly - shield each pass. Verified on
+        # 3.13.13: the inner future survives, and shield detaches its
+        # callback on outer cancellation, so callbacks do not accumulate.
+        return await asyncio.wait_for(asyncio.shield(fut), PROMPT_TICK_SECONDS)
     except asyncio.TimeoutError:
-        if time.monotonic() - last_activity(sid) > silence_limit:
-            await self._notify("session/cancel", {"sessionId": sid})
+        meta = self.sessions.get(session_id)
+        if meta is None:
+            break            # closed, or _detach cleared it on agent death;
+                             # fall through to `await fut` so the typed
+                             # AgentDied it already carries is what surfaces
+        deadline = max(deadline,
+                       meta["last_activity"] + PROMPT_SILENCE_SECONDS)
+        now = time.monotonic()
+        if now > deadline or now > hard_stop:
+            await self._notify("session/cancel", {"sessionId": session_id})
+            # Bounded grace: let an honoured cancel land a final frame before
+            # inflight is released, or prompt #2 interleaves with turn #1 in
+            # the same transcript with no turn id to separate them.
+            with contextlib.suppress(asyncio.TimeoutError):
+                return await asyncio.wait_for(asyncio.shield(fut),
+                                              CANCEL_GRACE_SECONDS)
             raise AgentTimeout(...)
+return await fut             # session-gone path
 ```
+
+**A hard ceiling survives, deliberately.** `PROMPT_ABSOLUTE_MAX_SECONDS` (default 4 h) replaces the safety property the wall-clock bound provided. Without it a turn emitting one chunk just under the silence window runs forever — and `inflight` makes that session simultaneously un-closable (`acp.py:2677`) **and** un-sweepable (sweep condition 3), so ~150 MB and its processes are unreclaimable for the app's lifetime with no operator path short of restart. "Long turns" means generous, not unbounded.
+
+**Named constants, all module-level and rebindable** so tests can shorten them rather than burning wall clock: `PROMPT_TICK_SECONDS = 15.0`, `PROMPT_SILENCE_SECONDS = 900.0`, `PROMPT_ABSOLUTE_MAX_SECONDS = 14400.0`, `CANCEL_GRACE_SECONDS = 30.0`, `SWEEP_INTERVAL_SECONDS = 60.0`. Worst-case cancel latency is `silence + tick`.
+
+**Testability**: the loop lives inside `_request`, which ~30 test doubles replace wholesale — so nothing reaching `_handle_prompt` exercises it. The three timing exit criteria need a direct `_request` test with a fake `_write` and a hand-driven `_pending` future, with the constants rebound small.
 
 Signature preservation is not cosmetic: **19** fixed-signature `_request` stubs in `tests/test_web.py` (7 `boom`, 5 `fake_request`, 5 `refused`, 2 multi-line) would raise `TypeError` on a new parameter. `session/cancel` is a `_notify`, not a `_request` (`acp.py:1912`), so the cancel cannot itself hang.
 
@@ -262,11 +303,17 @@ Signature preservation is not cosmetic: **19** fixed-signature `_request` stubs 
 
 *Honest scope of the cancel*: `_handle_prompt`'s `finally` (`:2570-2574`) still clears `inflight` and emits `turn end`, so a user can immediately send a second prompt while the agent may still be finishing the first, and the eventual response is dropped as "late or unmatched" (`:1630`). Cancel-on-timeout **mitigates** the orphaned turn; it does not eliminate it. Phase 0 verifies whether kiro-cli honours cancel mid-tool at all.
 
-**Change 3 — the idle sweeper** (discipline per D28). Owned by `acp.py`, started from `lifespan` **guarded** (`if acp is not None:`, exactly as the teardown at `web.py:526` is) and **cancelled-and-awaited** there too, alongside `_background_refresh` (`web.py:503-507`) — `acp.shutdown()` is synchronous and cannot await a task cancellation.
+**Change 3 — the idle sweeper** (discipline per D28). Owned by `acp.py`, started from `lifespan` **guarded** (`if acp is not None:`, exactly as the teardown at `web.py:526` is) — `acp.shutdown()` is synchronous and cannot await a task cancellation.
 
-Each tick, first `if not _supervisor.sessions: continue` so a launch that never opens `/acp` still pays nothing (`acp.py:1074-1076`). Then iterate `tuple(_supervisor.sessions.items())` — `close_session` mutates the dict (`:1929`) and a live iterator would raise `RuntimeError: dictionary changed size during iteration`.
+**Shutdown ordering is load-bearing.** Cancel both tasks, then a single `await asyncio.gather(refresh, sweeper, return_exceptions=True)`, **inside the nested `finally` block and before `acp.shutdown()`**. Putting the sweeper await in the outer `finally` alongside `_background_refresh` (`web.py:503-507`) means a non-`CancelledError` from `await task` skips the teardown — precisely the failure the nested block at `web.py:508-513` was written to prevent for `acp.shutdown()`.
 
-Sweep when **all five** hold, checked and claimed in one synchronous prefix:
+**Sleep first, always.** The tick body is `await asyncio.sleep(SWEEP_INTERVAL_SECONDS)` **then** the work — a `continue` placed before the sleep never yields and hangs the entire event loop, taking the dashboard and every websocket with it. After sleeping, `if not _supervisor.sessions: continue` so a launch that never opens `/acp` still pays nothing (`acp.py:1074-1076`).
+
+Then iterate `tuple(_supervisor.sessions.items())` — `close_session` mutates the dict (`:1929`) and a live iterator would raise `RuntimeError: dictionary changed size during iteration`.
+
+Sweep when **all six** hold, checked and claimed in one synchronous prefix:
+
+- `sid in _supervisor.sessions` — re-checked **inside** each iteration. The tuple is snapshotted once but `close_session` awaits within the loop, so by the time session *n* is reached a user close may have popped it, and `close_session` would raise `AgentRejected` (`:1924-1925`) and log a WARNING every pass.
 
 - `now - last_used > ACP_IDLE_TTL_SECONDS` (default 1800)
 - `not _registry.subscribers.get(sid)` — an attached tab means leave it alone regardless of age
@@ -306,6 +353,13 @@ Do **not** call `load_config()` from `at_capacity()` — it runs on the loop and
 - [ ] **Eight concurrent sessions created and driven**, with process count and RSS recorded (SC-10b)
 - [ ] Out-of-range values for the three new keys are rejected with a named error
 - [ ] Four test edits landed: `:5033`/`:5044` key set, `:4030` cap figure, `:2658` `_request` tuple, `:3723` docstring
+- [ ] A prompt on a session idle longer than the silence window is **not** cancelled before the agent has had a full window to answer
+- [ ] An agent metadata/heartbeat notification advances `last_activity` but **not** `last_used`, so it cannot keep an idle session unsweepable
+- [ ] A turn past `PROMPT_ABSOLUTE_MAX_SECONDS` is cancelled and its session becomes reclaimable
+- [ ] Agent death during a prompt surfaces the typed `AgentDied`, not a `TypeError`-derived `internal_error`
+- [ ] The sweeper task sleeps before its first work item; a tick with zero sessions still yields to the loop
+- [ ] A session closed by the user between snapshot and sweep is skipped, not re-terminated with a WARNING
+- [ ] Sweeper and refresh tasks are cancelled and awaited inside the nested `finally`, before `acp.shutdown()`
 
 ---
 
@@ -315,24 +369,68 @@ Do **not** call `load_config()` from `at_capacity()` — it runs on the loop and
 **Covers**: SC-1, SC-2, SC-3, SC-3b, SC-4, SC-5
 **Blocked by**: Phase 0's NetBird policy verification. **Does not block Phases 4 or 5** — they need one allowlist entry each, registered in a small integration step.
 
-**Change 1 — dual bind via pre-bound sockets** (D23, D25, D27). Add `remote_bind_address: str = ""` to `Config`, validated at load with `ipaddress.ip_address()` and rejecting `0.0.0.0`, `::` and anything non-literal — which enforces D2's "IP, never FQDN" mechanically rather than by convention. Reject a zero `port` when the address is set (SC-3b).
+**Change 1 — dual bind via pre-bound sockets** (D23, D25, D27). Add `remote_bind_address: str = ""` to `Config`.
+
+**Validate on the write path, not in `load_config()`.** `load_config` is implemented and documented as never raising — wrong types silently get defaults and unknown keys are ignored (`config.py:139-140`, `:157-166`, `:220-256`) — and it is called from ~16 routes on the event loop, so a raising validator turns one `config.toml` typo into a 500 on every route plus a startup crash. Validation therefore lives in `save_setting` (`web.py:1866-1893`, which needs `remote_bind_address` added to `_SETTING_TYPES` — the plan previously added only the three `acp_*` keys) and in the first-enable flow. At load, sanitise an invalid value to `""` and log at ERROR: **fail closed to loopback-only**. SC-3b's "named error" is met on the write and startup paths.
+
+Reject on **parsed properties**, never string equality — `ip.is_unspecified or ip.is_multicast or ip.is_loopback`. A string comparison against `"0.0.0.0"`/`"::"` is bypassed by `::0`, `0000::` and `::ffff:0.0.0.0`, and would let `remote_bind_address = "127.0.0.1"` produce two listeners on the same loopback address and port inside one process. `ipaddress.ip_address()` also enforces D2's "IP, never FQDN" mechanically rather than by convention, and rules out the bracketed, uppercase and zone-id forms `_host_allowed`'s parser would silently never match. Reject a zero `port` when the address is set (SC-3b).
 
 Replace the `uvicorn.Config(...)` + `server.run()` pattern at `__main__.py:308`/`:315` and `:328`/`:334`:
 
 ```python
-socks = [_bind("127.0.0.1", port)]          # loopback first: always secured
-if cfg.remote_bind_address:
+def _bind(host: str, port: int) -> socket.socket:
+    """Do NOT copy uvicorn.Config.bind_socket (config.py:571).
+
+    It sets SO_REUSEADDR, which on Windows lets a DIFFERENT LOCAL PROCESS
+    bind the identical 127.0.0.1:<port> and hijack connections to a surface
+    that serves _ACP_TOKEN and fronts `kiro-cli acp -a`. It also sets
+    set_inheritable(True) (:583), which we do not want either.
+    """
+    s = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
+                      socket.SOCK_STREAM)
+    if sys.platform == "win32":
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    s.set_inheritable(False)
+    s.bind((host, port))
+    s.listen()
+    return s
+
+# Loopback is MANDATORY and keeps its port-in-use fallback. Only the remote
+# bind may degrade - a remote-only listener with no loopback is a state the
+# whole model assumes cannot exist.
+try:
+    socks = [_bind("127.0.0.1", port)]
+except OSError:
+    socks = [_bind("127.0.0.1", 0)]          # existing random-port fallback
+    port = socks[0].getsockname()[1]
+if cfg.remote_bind_address and _secret_is_usable():
     try:
         socks.append(_bind(cfg.remote_bind_address, port))
-    except OSError as exc:                   # WinError 10049 when the
+    except OSError as exc:                   # WinError 10049: interface not up
         log.error("remote bind to %s failed (%s); loopback only",
                   cfg.remote_bind_address, exc)
-uvicorn.Server(uvicorn.Config(app, ...)).run(sockets=socks)
+log.info("listening on %s", [s.getsockname() for s in socks])
+
+server = uvicorn.Server(uvicorn.Config(
+    app, ...,
+    # ProxyHeadersMiddleware OVERWRITES scope["client"] from X-Forwarded-For
+    # for peers in forwarded_allow_ips (proxy_headers.py:52-60), and
+    # proxy_headers defaults to True (config.py:207). FORWARDED_ALLOW_IPS=*
+    # in the environment would silently reopen exactly the class of bug D26
+    # exists to close. PowerAtlas is never behind a proxy.
+    proxy_headers=False,
+))
+# run() blocks, so the existing thread + ready_event scaffolding
+# (__main__.py:300-317) must be kept or tray and peek never start.
+threading.Thread(target=server.run, kwargs={"sockets": socks},
+                 daemon=True).start()
 ```
 
 `Server.run(sockets=…)` is supported on the installed uvicorn 0.49.0 (`server.py:74`). One `Server` means **one lifespan** — two `Server` instances would start two `_background_refresh` loops, two sweepers racing on the same sessions, and call `acp.shutdown()` twice.
 
-Bind failure must degrade, never kill startup: the existing retry (`__main__.py:322`) covers only port-in-use and is gated on `desired_port > 0`, so an unhandled `OSError` leaves `ready_event` unset and `__main__.py:340-342` exits 1.
+**Check the secret before binding**, not at request time: if `remote-secret` is absent or shorter than 43 characters (`secrets.token_urlsafe(32)`), do not create the remote socket at all. Otherwise the remote surface is bound and accepting while authentication is structurally impossible.
+
+`Server.startup` skips its "Uvicorn running on…" line entirely when `sockets` is passed (`uvicorn/server.py:188-193`), which is why the explicit `log.info` above matters — it is the only operator-visible record of which addresses are live, precisely when there are two.
 
 **Change 2 — `_ALLOWED_HOSTS` learns the configured IP at startup.** It is a module-level `frozenset` (`web.py:558`) read on every request and every upgrade, and `web.py` never calls `load_config()` at import. Both obvious options are traps: a per-request `load_config()` puts an uncached TOML parse on the hot path (the very thing D15 forbids), and an import-time read makes the host tests depend on the developer's real `config.toml` (`memory/MEMORY.md:95-97`). Use a **startup setter** mirroring D15's `acp` injection, defaulting to loopback-only when unset.
 
@@ -341,31 +439,59 @@ Bind failure must degrade, never kill startup: the existing retry (`__main__.py:
 **Change 3 — one raw-ASGI middleware enforcing allowlist and cookie** (D7 revised, D26).
 
 ```python
-# Raw ASGI, added with app.add_middleware(...) - NOT @app.middleware("http").
-# BaseHTTPMiddleware returns early on non-http scope (web.py:752-755), and
-# /static is a Mount whose matches() admits websocket scopes, so an http-only
-# guard leaves ws://<ip>/static/x reaching StaticFiles past every check.
+def _is_remote_peer(peer: str | None) -> bool:
+    """Defined here, not left to implementation time - the whole model
+    collapses to whichever predicate someone writes. "peer != bind_address"
+    and "peer in an allowlist" are both wrong; only "is it loopback?" is
+    right, and unparseable or absent means remote."""
+    if not peer:
+        return True
+    try:
+        return not ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return True
+
+# Registered AFTER same_origin_guard (web.py:690) so this guard is OUTERMOST:
+# add_middleware inserts at index 0 (starlette/applications.py:101) and
+# build_middleware_stack wraps reversed(middleware) (:75), so LAST registered
+# is outermost. Deny decisions survive either order, but the refusal body and
+# whether the exchange-failure WARNING fires both flip.
 async def __call__(self, scope, receive, send):
     if scope["type"] in ("http", "websocket"):
-        peer = (scope.get("client") or (None,))[0]
-        if _is_remote_peer(peer):            # None => treated as remote
+        if _is_remote_peer((scope.get("client") or (None,))[0]):
             path = scope["path"]
             if not _remote_path_allowed(path):
                 return await _refuse(scope, send)
             if path not in _COOKIE_EXEMPT and not _cookie_ok(scope):
                 return await _refuse(scope, send)
     await self.app(scope, receive, send)
+
+async def _refuse(scope, send):
+    """Scope-typed. Emitting http.response.start into a websocket scope is an
+    ASGI protocol violation and surfaces as a uvicorn exception, not a
+    refusal - on the very path this middleware exists to guard."""
+    if scope["type"] == "websocket":
+        await send({"type": "websocket.close", "code": 1008})
+    else:
+        await send({"type": "http.response.start", "status": 403, ...})
+        await send({"type": "http.response.body", "body": b'{"error":"Forbidden"}'})
 ```
+
+**Path matching is exact for the four fixed paths**; the mount is `path == "/static" or path.startswith("/static/")` — a bare `startswith("/static")` would also admit `/staticfoo`. `_COOKIE_EXEMPT` is path-only, so the exchange route must reject methods other than GET/POST itself.
 
 Remoteness comes from `scope["client"]`, never the `Host` header (D26). The allowlist is **default-deny**: `/acp`, `/ws/acp`, `/static/*`, the Phase 4 listing endpoint, **and the two secret-exchange routes** — without those last two, no remote device can ever authenticate, because the exchange page would itself be refused. The exchange GET and its POST target are the only cookie-exempt remote paths; its POST must still satisfy `same_origin_guard`'s Origin rule (`web.py:714-716`).
 
-Apply `_acp_navigation_ok`'s `Sec-Fetch-Site` rule (`web.py:662-687`) to **every** remote-allowlisted GET, not only `/acp` — cookies are host-scoped and port-agnostic, so any other service on the NetBird interface is "same-site" for `SameSite=Strict`.
+Apply `_acp_navigation_ok`'s `Sec-Fetch-Site` rule (`web.py:662-687`) to remote-allowlisted **`http`-scope GETs only** — cookies are host-scoped and port-agnostic, so another service on the NetBird interface is "same-site" for `SameSite=Strict`. Exclude the `/ws/acp` upgrade: it is a GET at the HTTP layer but a `websocket` ASGI scope, and browsers do not attach `Sec-Fetch-Site` to WebSocket handshakes, so the literal reading would break the phone client. Note the rule falls back to `_origin_or_referer_ok(allow_missing=True)` when the header is absent (`web.py:684-687`), so it constrains browsers only — **the cookie, not this rule, is the control against a non-browser remote client.**
+
+**Accepted residual, stated rather than implied**: the cookie is port-agnostic in the *outbound* direction too. The phone transmits it to every service listening on any port of `100.78.142.124`, so any other process bound to `0.0.0.0` on the laptop can harvest it — and its payoff is full remote access to a `-a` agent. `SameSite` does not address this direction and the design does not mitigate it. The README security note must therefore say plainly: **do not bind other services to `0.0.0.0` while the remote bind is enabled.**
 
 **Change 4 — the device secret and cookie** (D24, D8).
 
 Generate `CONFIG_DIR/remote-secret` (`secrets.token_urlsafe(32)`) on first enable, loaded **once at startup**. Missing, empty, or shorter than the expected length ⇒ **fail closed**: refuse every remote request and log at ERROR. An empty secret compared with `compare_digest` would otherwise match an empty cookie and silently remove authentication while the bind stayed open.
 
-The cookie is an HMAC over a device identifier keyed by that secret, compared in constant time over UTF-8 **bytes** — reuse `_acp_token_ok`'s pattern (`web.py:735-746`), which already encodes the lesson that a `str` holding non-ASCII raises `TypeError` out of `compare_digest` and turns a 403 into a 500 any unauthenticated caller can drive. `HttpOnly`, `SameSite=Strict`; no `Secure` (D5 — no TLS, WireGuard carries the transport).
+The cookie signs **`(device_id, issued_at)`**, keyed by that secret, compared in constant time over UTF-8 **bytes** — reuse `_acp_token_ok`'s pattern (`web.py:735-746`), which already encodes the lesson that a `str` holding non-ASCII raises `TypeError` out of `compare_digest` and turns a 403 into a 500 any unauthenticated caller can drive. Including `issued_at` gives expiry **without a server store**, which is D24's whole premise; without it "long-lived" means eternal, since D24 also gives up per-device revocation. Reject beyond a configured age and set a matching `Max-Age` (default 90 days). `HttpOnly`, `SameSite=Strict`; no `Secure` (D5 — no TLS, WireGuard carries the transport).
+
+`device_id` must be bounded to `[A-Za-z0-9_-]` and a maximum length, and the cookie set via Starlette's `response.set_cookie` (which raises `CookieError` on illegal characters) rather than a hand-assembled header — `src/` sets no cookies today, so there is no safe pattern to inherit, and a `;`, `,` or CR-LF in a client-supplied identifier is cookie-attribute or header injection. The same bound prevents log injection when the identifier appears in the WARNING line.
 
 Log every failed exchange at WARNING with the peer address and apply a per-peer backoff. D3 makes the cookie "the layer that survives policy drift" — without failure logging, drift is never observable.
 
@@ -401,6 +527,17 @@ On Windows, "restrictive permissions" via `os.chmod` toggles only the read-only 
 - [ ] `server_url` is derived from the loopback socket explicitly; peek and tray still open the dashboard
 - [ ] All three stale comments corrected (`web.py:709-711`, `:830-831`, and the fixture docstring at `tests/test_web.py:26-29`)
 - [ ] `_HOSTILE_HOSTS` still refused with the remote bind **on**
+- [ ] `X-Forwarded-For` cannot move `scope["client"]` — `proxy_headers=False` asserted at the `uvicorn.Config` site
+- [ ] The loopback socket sets `SO_EXCLUSIVEADDRUSE` on Windows and **not** `SO_REUSEADDR`; a second process cannot bind the same `127.0.0.1:<port>`
+- [ ] A loopback bind failure still falls back to a random port; the app never starts remote-only with no loopback listener
+- [ ] A websocket refusal emits `websocket.close`, not `http.response.start` — no ASGI protocol violation on the guarded path
+- [ ] The remote guard is registered after `same_origin_guard` and rejects first
+- [ ] An invalid `remote_bind_address` in `config.toml` sanitises to loopback-only and logs ERROR; it does **not** raise from `load_config()`
+- [ ] `0.0.0.0`, `::`, `::0`, `0000::`, `::ffff:0.0.0.0` and loopback literals are all rejected on parsed properties
+- [ ] The remote socket is not created at all when the secret is absent or shorter than 43 characters
+- [ ] A cookie past its `issued_at` age is rejected
+- [ ] Both bound addresses are logged at startup (uvicorn suppresses its own banner when `sockets=` is passed)
+- [ ] Tray and peek still start — the server thread scaffolding survives the socket change
 - [ ] Full suite green
 
 ---
@@ -501,7 +638,12 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| An HTTP-only guard leaves **two** websocket paths exempt — `/ws/acp` (the route reaching `-a`) and `ws://…/static/…` via the `Mount` | Critical: arbitrary command execution from any reachable peer | D7 revised to one raw-ASGI middleware seeing every scope type; SC-3 tests HTTP, the `/ws/acp` upgrade and the `/static` websocket path separately |
+| An HTTP-only guard leaves **two** websocket paths exempt — `/ws/acp` and `ws://…/static/…` via the `Mount` | **Critical for `/ws/acp`** (arbitrary command execution from any reachable peer, once `_ALLOWED_HOSTS` widens and `_ws_origin_ok` stops covering it). **Low for `/static`** — `StaticFiles.__call__` asserts `scope["type"] == "http"` (`starlette/staticfiles.py:91`), so the pre-fix impact there is an unauthenticated `AssertionError`: log spam and minor DoS, not execution. *An earlier draft rated both Critical; corrected in cycle 2.* | D7 revised to one raw-ASGI middleware seeing every scope type; SC-3 tests HTTP, the `/ws/acp` upgrade and the `/static` websocket path separately |
+| `proxy_headers` defaults to `True`, so `ProxyHeadersMiddleware` rewrites `scope["client"]` from `X-Forwarded-For` for trusted peers | **Critical if `FORWARDED_ALLOW_IPS=*` is set** — D26's whole basis becomes an environment variable. The shipped default (`127.0.0.1`) leaves a NetBird peer untrusted, so the practical hole is closed by default and silently reopened by config | `proxy_headers=False` passed explicitly at the `uvicorn.Config` site, with an exit criterion asserting `X-Forwarded-For` cannot move `scope["client"]` |
+| A local process binds the same `127.0.0.1:<port>` and hijacks the ACP surface | High on Windows: `SO_REUSEADDR` permits it, and the hijacked surface serves `_ACP_TOKEN` and fronts a `-a` agent | `_bind()` specified explicitly — no `SO_REUSEADDR`, `SO_EXCLUSIVEADDRUSE` on win32, non-inheritable — rather than copying `uvicorn.Config.bind_socket` (`config.py:571`, `:583`) |
+| The device cookie is transmitted to **every** service on any port of the NetBird address | High, **unmitigated**: any process bound to `0.0.0.0` on the laptop harvests full remote access to a `-a` agent. `SameSite` addresses only the inbound direction | **Accepted, stated in writing** (Phase 3 Change 4) and carried into the README security note: do not bind other services to `0.0.0.0` while the remote bind is enabled |
+| An agent heartbeat notification refreshes the sweeper's idle clock | High: a chatty agent makes sessions permanently unsweepable, defeating SC-9/SC-10 with no error anywhere | Two fields — `last_activity` (any notification, drives the ceiling) and `last_used` (prompt/attach, drives the sweeper) |
+| A turn emitting one chunk just under the silence window runs forever | High: `inflight` makes it simultaneously un-closable and un-sweepable, so ~150 MB is unreclaimable for the app's lifetime | `PROMPT_ABSOLUTE_MAX_SECONDS` (4 h) checked in the same loop |
 | Remoteness derived from the `Host` header lets a peer self-classify as local and skip every check | Critical: defeats SC-4 and SC-5 entirely | D26 — remoteness comes from `scope["client"]`, set by the transport; `client is None` treated as remote |
 | A missing or empty `remote-secret` compared with `compare_digest` matches an empty cookie | Critical: authentication silently disappears while the bind stays open | Fail closed — refuse all remote requests and log at ERROR; exit criterion in Phase 3 |
 | The sweeper terminates a session mid-`session/load`, which has zero subscribers by construction | High: a load in flight is destroyed; `_deliver_load` replays a dead session to parked waiters | D28 adds `_registry.loading` as a fifth sweep condition |
@@ -635,6 +777,53 @@ Phases 1, 2, 3 and 4 are logically independent but **all modify `tests/test_web.
 <Reserved -- filled during implementation>
 
 ## Review Log
+
+### 2026-07-31 — Cycle 2 (via /qplan Step 4)
+
+Two focused sub-agents re-reviewing the two phases that were **rewritten** rather than patched: Security auditor on Phase 3, Reliability engineer on Phase 2. Both were asked to verify their own cycle-1 findings genuinely closed rather than got reworded, and to hunt defects the rewrite introduced.
+
+**Cycle-1 closure**: of 18 re-checked items, **12 CLOSED, 6 PARTIALLY CLOSED, 0 NOT CLOSED.** The partials are the findings below. Reliability confidence 85%, Security 60% as-specified (85% with S1/S2/S4/S5/S6/S7 written in — all now written in).
+
+**34 new findings (7 High, 9 Medium-High/Medium, 18 Low). All applied.** Every one was introduced or left open by the cycle-1 revision, which is the point of re-reviewing a rewrite.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| C2-1 | High | `proxy_headers` defaults to `True`, so `ProxyHeadersMiddleware` rewrites `scope["client"]` from `X-Forwarded-For` — D26's basis is an environment variable | Fixed — `proxy_headers=False` passed explicitly, with an exit criterion |
+| C2-2 | High | `_bind()` unspecified; copying `uvicorn.Config.bind_socket` sets `SO_REUSEADDR`, letting another local process hijack the loopback ACP surface on Windows | Fixed — `_bind()` written out: no `SO_REUSEADDR`, `SO_EXCLUSIVEADDRUSE` on win32, non-inheritable |
+| C2-3 | High | The cookie is port-agnostic **outbound**, so any service on `0.0.0.0` harvests full `-a` access; `SameSite` covers only inbound | **Accepted in writing** — stated in Phase 3 and carried into the README security note |
+| C2-4 | High | One timestamp served both the ceiling and the sweeper; an agent heartbeat made sessions permanently unsweepable | Fixed — split into `last_activity` and `last_used` with a table naming which reads which |
+| C2-5 | High | The loop's baseline was the shared timestamp, so the first prompt on an idle session is cancelled before the agent can answer | Fixed — deadline is local to the request and seeded at send time |
+| C2-6 | High | The absolute turn ceiling was deleted with nothing in its place; an `inflight` session is both un-closable and un-sweepable | Fixed — `PROMPT_ABSOLUTE_MAX_SECONDS` (4 h) checked in the same loop |
+| C2-7 | High | The unguarded `last_activity` read turns a handled agent death into `monotonic() - None` → `TypeError`, replacing typed `AgentDied` with `internal_error` | Fixed — `.get()`-then-bail applied to the read, falling through to `await fut` |
+| C2-8 | Med-High | `_is_remote_peer` undefined; "peer != bind address" and "peer in allowlist" are both wrong | Fixed — defined in the plan as inverted `is_loopback`, unparseable/absent ⇒ remote |
+| C2-9 | Med-High | Validation placed in `load_config()`, whose contract is never-raise; a typo would 500 ~16 routes | Fixed — validate on the write path; sanitise to `""` at load and log ERROR |
+| C2-10 | Med-High | Only the remote bind was wrapped, so a busy port kills startup — and the symmetric fix admits a remote-only listener with no loopback | Fixed — loopback mandatory with its port-in-use fallback; only remote may degrade |
+| C2-11 | Med-High | One `_refuse` for two scope types; `http.response.start` into a websocket scope is an ASGI protocol violation | Fixed — scope-typed refusal, `websocket.close` code 1008 |
+| C2-12 | Medium | The HMAC carries no issuance time, so "long-lived" is eternal with no revocation | Fixed — signs `(device_id, issued_at)`, rejected beyond a configured age, `Max-Age` 90 days |
+| C2-13 | Medium | String rejection of `0.0.0.0`/`::` is bypassed by `::0`, `0000::`, `::ffff:0.0.0.0`; loopback not rejected | Fixed — reject on parsed properties (`is_unspecified`/`is_multicast`/`is_loopback`) |
+| C2-14 | Medium | Middleware order unspecified and counter-intuitive — last-registered is outermost | Fixed — registration site pinned after `web.py:690`, with an exit criterion |
+| C2-15 | Medium | `Sec-Fetch-Site` on "every remote GET" breaks the `/ws/acp` upgrade, which browsers do not send it for | Fixed — scoped to `http` GETs; noted the rule constrains browsers only |
+| C2-16 | Medium | Fail-closed enforced at request time, so the remote socket is bound while auth is impossible; no minimum length named | Fixed — secret checked **before** binding; 43 characters named |
+| C2-17 | Medium | `tick` and the sweep interval defined nowhere | Fixed — five named module-level constants with values |
+| C2-18 | Medium | "First `if not sessions: continue`" reads as continuing before the sleep, hanging the event loop | Fixed — sleep-first ordering stated explicitly |
+| C2-19 | Medium | Snapshot staleness: `sid in sessions` was not a sweep condition, so a user close mid-loop causes `AgentRejected` every pass | Fixed — membership re-check added as a sixth condition |
+| C2-20 | Medium | Shutdown ordering put the sweeper await in the outer `finally`, where a non-`CancelledError` skips teardown | Fixed — cancel both, one `gather(...)` inside the nested block before `acp.shutdown()` |
+| C2-21 | Medium | Post-cancel release re-opens the interleaving hazard `inflight` exists to prevent | Fixed — bounded `CANCEL_GRACE_SECONDS` re-await before releasing |
+| C2-22 | Medium | The mechanism lives where ~30 test doubles stub, so no test reaches it; three timing criteria would burn 600-900 s | Fixed — constants made rebindable; a direct `_request` test named |
+| C2-23 | Low-Med | `startswith("/static")` also admits `/staticfoo`; exact/prefix asymmetry undocumented | Fixed — exact for the four fixed paths, `== "/static" or startswith("/static/")` for the mount |
+| C2-24 | Low-Med | `device_id` provenance unspecified — `;`/`,`/CR-LF permit cookie-attribute, header and log injection | Fixed — bounded charset and length, set via `response.set_cookie` |
+| C2-25 | Low | Sentinel identity/type unspecified while the slot is annotated `float` and formatted `{timeout:.0f}` | Fixed — module-level `_INACTIVITY = object()`, branched on `is` before the `try` |
+| C2-26 | Low | uvicorn suppresses its "running on" banner when `sockets=` is passed, losing the only record of live addresses | Fixed — explicit `log.info` of both `getsockname()` values |
+| C2-27 | Low | The Change-1 snippet discarded the thread + `ready_event` scaffolding, so `run()` blocks and tray/peek never start | Fixed — thread kept, `sockets` passed via `kwargs` |
+| C2-28 | Low | The `/static` websocket bypass was rated Critical/ACE; `StaticFiles` asserts `http`, so it is log spam and minor DoS | Fixed — risk row severity corrected; the ACE path is `/ws/acp` |
+| C2-29 | Low | Rebind site `__main__:292` runs before `from .web import app` (`:294`), so `acp` is not imported yet | Fixed — rebind placed after the web import |
+| C2-30 | Low | "`.lock` removed" asserts agent behaviour no Phase 0 item verifies | Fixed — added to Phase 0's verification list |
+| C2-31 | Low | Backoff has no cap, no lockout, no table eviction, and does not cover cookie-verification failures | Fixed — N-failures/T-seconds lockout, bounded LRU, cookie failures logged |
+| C2-32 | Low | `_handle_load`/`_handle_subscribe` have no `closing` guard, which the sweeper makes reachable without a user close | Recorded — pre-existing; a `close_in_progress` refusal noted for `_handle_load` |
+| C2-33 | Low | "without relaxing the `not_subscribed` guard" is vacuous — sweep condition 2 guarantees zero subscribers | Fixed — rationale restated as covering the subscribe-during-close race |
+| C2-34 | Low | The exchange page loads unstyled, since `/static/*` is allowlisted but not cookie-exempt | Recorded — cosmetic; will read as a bug, so the exchange page inlines its own minimal styling |
+
+**Empirically verified during this cycle, not reasoned**: `asyncio.shield` semantics on the target interpreter (3.13.13) — five consecutive `wait_for(shield(fut), …)` timeouts left the inner future intact, `_callbacks` measured empty after each pass (no accumulation over a long turn), and `_request`'s `finally` still pops `_pending` on the raise path. The mechanism choice in D30 is sound; only the surrounding details were wrong.
 
 ### 2026-07-31 — Cycle 1 (via /qplan Step 4)
 
