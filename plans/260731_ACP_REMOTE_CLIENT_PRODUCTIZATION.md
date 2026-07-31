@@ -1,10 +1,10 @@
 # ACP Remote Client Productization
 
 > **Date**: 2026-07-31
-> **Status**: Draft — review cycle 1 complete; 6 decisions outstanding before Phase 3 is implementable  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Promote the throwaway `/acp` prototype into a NetBird-reachable remote client that dispatches, drives and resumes kiro-cli sessions PowerAtlas creates, with a Zed-style session browser, an idle sweeper, and a security model that survives leaving loopback.
-> **Estimated effort**: 6-9 days
+> **Estimated effort**: 9-13.5 days (revised from 6-9 after review cycle 1; see Review Log)
 
 ---
 
@@ -26,15 +26,17 @@ Desired outcomes:
 ### Success criteria
 
 - **SC-1**: With the remote bind enabled, a phone on NetBird can load `/acp`, authenticate once, and drive a session — create, prompt, stream, cancel, close — with the laptop's dashboard untouched on loopback.
-- **SC-2**: With the remote bind disabled (the default), behaviour is byte-identical to today: loopback only, no new listening surface.
-- **SC-3**: A request arriving on the NetBird address for any path outside the remote allowlist is refused, **including WebSocket upgrades**, verified by a test that exercises the socket path separately from the HTTP path.
+- **SC-2**: With the remote bind disabled (the default), exactly one listening socket exists and it is loopback; `_ALLOWED_HOSTS` admits only loopback forms. (Scoped to the listening surface and the Host allowlist — Phases 1, 2 and 5 deliberately change loopback *behaviour*, so "byte-identical" would be untestable.)
+- **SC-3**: A request arriving on the remote socket is refused unless its path is on the remote allowlist **and** it carries a valid device cookie. Verified separately for HTTP, for the `/ws/acp` upgrade, and for `ws://…/static/…` — the three transports that reach the app by different code paths.
+- **SC-3b**: With the remote bind enabled, `port` must be non-zero; a zero port is rejected at config load with a named error rather than producing two differently-numbered listeners.
 - **SC-4**: `/api/launchers`, `/api/settings` and `GET /` are unreachable from the NetBird address; reaching them requires loopback.
 - **SC-5**: A device without the remote secret is refused on both HTTP and the WebSocket, even when it reaches the NetBird address.
 - **SC-6**: The session browser lists workspaces with their sessions, defaulting to 10 groups expanded with 3 sessions each, both independently paginated, with a per-session availability indicator; sessions locked by a live foreign process are greyed and not loadable.
 - **SC-7**: An ACP-owned session shows a live status dot in the dashboard for its whole lifetime, including more than 120 seconds after the agent process started and while idle between turns for more than 5 minutes.
 - **SC-8**: A turn that streams for longer than the old 600 s ceiling completes rather than timing out; a turn that goes silent for the configured window fails and cancels agent-side.
 - **SC-9**: A session idle beyond the TTL with no attached subscriber, no in-flight turn and no in-flight close is terminated and its `.lock` removed; a session with an attached tab or a running turn is never swept regardless of age.
-- **SC-10**: `MAX_SESSIONS` is read from configuration rather than a module constant, defaults to 8, and is not read from disk on the event loop.
+- **SC-10**: `MAX_SESSIONS` is read from configuration rather than a hardcoded literal, defaults to 8, and is not read from disk on the event loop.
+- **SC-10b**: Eight concurrent sessions can be created and driven, with the measured process and RSS cost recorded — the new default is validated, not assumed.
 - **SC-11**: The full suite passes: `pytest` green, and `node tests/acp_page.test.mjs` green against the reworked page.
 - **SC-12**: README's three deliberately-incomplete sites are completed, per `AGENTS.md:7`'s exemption ending on promotion.
 
@@ -93,14 +95,14 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 | D4 `custom_launchers[].env` | Left readable; no redaction, no at-rest encryption | Redact from read paths; DPAPI at rest | **User override** — recommended redaction, chose reliance on the loopback split so values stay readable in the WebUI. Measured input: PyCharm stores run-config env vars in plain text (`.idea/workspace.xml`), so "PyCharm's level" was already the status quo |
 | D5 TLS | None | Self-signed; mkcert | WireGuard already encrypts the transport; TLS would encrypt inside an encrypted tunnel and adds nothing for authorization. Reopens only if a real LAN interface is bound |
 | D6 Remote path exposure | Default-deny allowlist: `/acp`, `/ws/acp`, `/static/*`, one listing endpoint | Denylist; full app behind auth | A denylist over ~40 routes leaks by default on the next route added. Default-deny makes new routes loopback-only until deliberately exposed |
-| D7 Allowlist enforcement points | **Two**: `same_origin_guard` for HTTP **and** inside the `/ws/acp` handler | Middleware alone | `BaseHTTPMiddleware` cannot see WebSocket upgrades (`web.py:752-755`); middleware-only would exempt the one route reaching `-a` |
+| D7 Allowlist enforcement point | **One raw-ASGI outer middleware** (`app.add_middleware(cls)`) that sees `http` **and** `websocket` scopes | Two points (`same_origin_guard` + the `/ws/acp` handler); middleware alone | *Revised in cycle 1.* `BaseHTTPMiddleware` returns early on non-`http` scope (`web.py:752-755`), so the original "middleware alone" is wrong — but so was "two points": `/static` is a `Mount` whose `matches` admits websocket scopes, so `ws://<ip>/static/x` reaches `StaticFiles` having passed neither `same_origin_guard` **nor** `ws_acp`. A raw-ASGI middleware is the only construct that sees every scope type, and it collapses two partial gates into one complete one |
 | D8 Secret storage | Own file `CONFIG_DIR/remote-secret`, generated on first enable | In `config.toml` + a new `tests/conftest.py` | Keeps a credential out of `config.toml`'s sanitise-and-whole-file-rewrite path and out of the blast radius of 18 known config-leaking tests; avoids a new test file `AGENTS.md:8` would require the user to request |
 | D9 Presence fix location | Fix `presence.py`'s own heuristic; no coupling either direction | `acp → presence`; `presence → _supervisor` | Preserves `acp.py`'s import invariant (`:15-28`) and avoids reading loop-owned state from presence's worker threads |
-| D10 Skew check repair | Drop the upper bound at `presence.py:467`, keep the `-5 s` lower bound | Widen 120 s → hours; special-case the agent pid | A recycled pid writes its lock *before* the current process started, so the lower bound alone still rejects it. Widening only postpones the failure |
+| D10 Skew check repair | Drop the upper bound at `presence.py:467` **for the kiro-cli branch only**, keep the `-5 s` lower bound | Widen 120 s → hours; special-case the agent pid; drop it for both providers | A recycled pid writes its lock *before* the current process started, so the lower bound alone still rejects it — verified against `presence.py:85-92`'s own measurement (785 locks, 21 live pids, one genuine). Widening only postpones the failure. *Cycle-1 correction*: the loop serves both kiro and Claude sidecars (`presence.py:207`, `:219`) while this rationale is kiro-specific, so the change is provider-scoped rather than global. The residual false-live class is D32 |
 | D11 Turn ceiling | Inactivity ceiling of 15 min silence, reset by each `session/update` | Raise the wall clock; remove the bound | Preserves the ceiling's actual purpose (detect a stopped agent) without capping legitimate long turns. Process death is separately detected by the reader thread's finally (`acp.py:1722`) |
 | D12 Idle signal | Stamp `last_used` from the same `session/update` stream | Stamp at turn start; stamp at turn end | Start-stamping makes a 45-min turn look 45 min idle the instant it ends; notification-stamping makes a working session never-idle by construction |
 | D13 Sweeper close path | Call `_supervisor.close_session` directly and broadcast `session_closed`; do **not** relax `_handle_close` | Relax the `not_subscribed` guard | That guard protects a real case ("a socket not watching a session has no business releasing what another tab holds", `acp.py:2658-2665`); the sweeper has no socket and should not weaken it |
-| D14 Sweeper ownership | `acp.py` owns the task; `web.py` `lifespan` starts/stops it | `web.py` owns it, like `_background_refresh` | Keeps ACP lifecycle policy inside `acp.py`; grows the `web → acp` surface from 3 call sites to 4, the smallest available increase |
+| D14 Sweeper ownership | `acp.py` owns the task; `web.py` `lifespan` starts it (guarded by `if acp is not None`) and **cancels-and-awaits** it before the ACP teardown finally | `web.py` owns it, like `_background_refresh`; stop it from `acp.shutdown()` | Keeps ACP lifecycle policy inside `acp.py`. *Cycle-1 corrections*: `acp.shutdown()` is **synchronous** and cannot await a task cancellation, which is exactly why `_background_refresh` is cancelled-and-awaited in the lifespan finally (`web.py:503-507`); and the start hook must be guarded, or an `acp` import failure turns "/acp disabled" (`web.py:41-49`) into "app will not start". The coupling budget in the original wording was also wrong: `web → acp` goes 3 → 6 and a new `__main__ → acp` edge appears. The invariant actually preserved is `acp.py`'s **import list** (`:15-28`), not the caller count |
 | D15 `MAX_SESSIONS` plumbing | Read from config **once at startup**, injected into `acp`; default 8 | `load_config()` inside `at_capacity()` | `at_capacity()` runs on the loop and `load_config()` is an uncached full TOML parse; reading it there reproduces the exact stall `_handle_new` already threads out to avoid |
 | D16 Session browser shape | Workspace groups; 10 groups default with show-more; groups expanded showing 3 sessions with per-group paging | Flat recency list; collapsed groups | User decision. 10×3 ≈ 30 visible rows also bounds the per-row lock check to ~30, not 1,207 |
 | D17 Availability indicator | Three states — available / held-by-PowerAtlas / locked-elsewhere; lazy per visible row, off-loop, **fails open** | Two states; no indicator | A wrongly-greyed session is unreachable from the UI; a wrongly-available one gets the typed in-use refusal at load. 841 of 1,207 sessions carry a lock, nearly all stale, so "has a lock" alone is useless |
@@ -110,7 +112,18 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 | D21 Remote bind default | Off; absent config means loopback-only | On once configured | A version bump must never silently start listening on NetBird |
 | D22 Secret delivery | URL + secret as copyable text in settings | QR code | A QR needs a new dependency for convenience only; deferred |
 
-*D1-D18 and D20-D22 carry forward from `/qexplore`'s resolved decisions and its assumptions ledger (surfaced and un-vetoed at the exploration assumptions checkpoint). D19 is a deterministic open item resolved here by planner judgment.*
+| D23 Dual bind mechanism | **Pre-bound sockets** — create both sockets, hand them to one `uvicorn.Server` via `run(sockets=[...])` | `0.0.0.0` (re-opens D2); two `Server` instances; NetBird-only | *User decision, cycle 1.* `uvicorn.Config(host=)` takes one address, so SC-1 and SC-2 were unsatisfiable as written. `Server.run(sockets=…)` is supported API on the installed uvicorn 0.49.0 (`server.py:74`) and is what uvicorn uses for `--reload`/`--workers`. Two `Server`s would run **lifespan twice** — two refresh loops, two sweepers racing on the same sessions, `acp.shutdown()` twice. `0.0.0.0` would put a listener on every network the laptop ever joins |
+| D24 Cookie derivation | **HMAC over a device identifier, keyed by the file secret**, constant-time compared | Opaque server-side token; the raw secret as the cookie | *User decision, cycle 1.* Verifiable with no server-side store, so it survives a restart — which is what "long-lived" must mean if the phone is not to re-enter the secret after every launch. Rotation of the secret revokes every device at once; per-device revocation is knowingly given up (there are two devices). The raw-secret option would leave the credential at rest in every cookie jar |
+| D25 Port when remote | **Non-zero `port` required** when `remote_bind_address` is set; rejected at config load | Allow `port = 0` | Two independent reasons. A phone cannot bookmark an OS-assigned ephemeral port (`__main__.py:344`). And with `port = 0` the OS assigns **per bind call**, so the two sockets would land on different port numbers and the laptop and phone URLs would permanently disagree |
+| D26 Remoteness signal | ASGI **`scope["client"]`** (peer address); `client is None` treated as remote | The `Host` header; `scope["server"]` | *Cycle-1 security finding.* `Host` is attacker-controlled — a NetBird peer sending `Host: 127.0.0.1:<port>` would read as local and skip both allowlist and cookie, defeating SC-4 and SC-5. `Host` answers "what name did the browser use", the right question for DNS-rebinding defence and the wrong one for network origin. Nothing in `src/` reads `scope["client"]` today |
+| D27 Bind-failure behaviour | Bind loopback **first**, then attempt remote; on failure log at ERROR and continue loopback-only | Let it raise; retry | PowerAtlas autostarts at login and NetBird's interface may not be up yet, raising `OSError` (Windows `WinError 10049`). The existing retry (`__main__.py:322`) covers only port-in-use and is gated on `desired_port > 0`, so unhandled this makes the app **exit 1** rather than degrade |
+| D28 Sweeper claim discipline | Claim `closing` in a **synchronous prefix** after the checks, `discard` in `finally`; guard on `_registry.loading` as a fifth condition | Rely on the four original conditions | *Cycle-1 reliability findings.* `close_session` leaves the session in `sessions` and out of `closing` for the whole terminate round-trip, so a prompt arriving in that window starts a turn on a session being released — the window `acp.py:2528-2540` exists to close. And a session mid-`session/load` has **zero subscribers by construction** (`acp.py:812-825`), so it satisfied all four original conditions and would have been swept mid-load |
+| D29 `MAX_SESSIONS` shape | Stays a **module-level rebindable name** in `acp.py`, rewritten at startup | A `_Supervisor` attribute; a config read in `at_capacity()` | Nine test sites read `acp_mod.MAX_SESSIONS` (verified count); an attribute would break all nine with `AttributeError`. A config read in `at_capacity()` puts an uncached TOML parse on the loop, which D15 forbids |
+| D30 Inactivity ceiling mechanism | Preserve `_request`'s signature; reuse the `timeout` slot with a sentinel meaning "inactivity mode"; re-wait on `asyncio.shield(fut)` each iteration; session id from `params["sessionId"]` | A new `_request` parameter; a watchdog task cancelling `_pending[id]` | **19** fixed-signature `_request` stubs in `tests/test_web.py` (7 `boom`, 5 `fake_request`, 5 `refused`, 2 multi-line) would raise `TypeError` on a new parameter; 4 tolerant `lambda *a, **k` patches would not. And `asyncio.wait_for` **cancels** the future on expiry (`acp.py:1489`), so a naive re-wait loop destroys the pending future and the real answer is dropped as "late or unmatched" (`:1630`) — `shield` is required, not optional |
+| D31 Sweeper vs a backgrounded phone | **No grace period.** A swept session stays resumable via `session/load` | A detach-keyed grace window; never sweep a session that ever had a subscriber | While the agent streams, `last_used` advances, so a *running* task is never swept whatever happened to the socket. The only affected case is returning >30 min after the task finished, and terminate leaves `.json`/`.jsonl` intact — cost is one reload. A grace window would add state for a case the activity stamp already covers |
+| D32 Agent-orphaned-lock false-live | **Accepted and recorded** | Gate acceptance on `_supervisor.sessions` | `session/load` makes our own agent write a lock naming itself (`acp.py:1006-1011`); a lock orphaned by a failed load, or by `close_session` when terminate raises, has `pid == live agent pid` and a forward delta — so with the ceiling gone it reads live for the agent's whole life, where today it self-heals after 120 s. The only fix is reading `_supervisor.sessions` from presence, which D9 forbids; accepting is the honest option |
+
+*D1-D18 and D20-D22 carry forward from `/qexplore`'s resolved decisions and its assumptions ledger (surfaced and un-vetoed at the exploration assumptions checkpoint). D19 is a deterministic open item resolved by planner judgment. D23-D32 are cycle-1 review outcomes: D23-D25 and D31 are user decisions or planner calls on escalated findings; D26-D30 and D32 are corrections to defects the review found.*
 
 ## 4) External Dependencies & Costs
 
@@ -137,11 +150,15 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 
 1. **NetBird policy** — confirm in the NetBird console that a policy restricts access to this peer to the user's own device group. Record the policy name and the groups it admits. **If no such policy exists, Phase 3 does not start** until one does.
 2. **Re-verify terminate** — run the scratch probe against the installed kiro-cli: `_kiro.dev/session/terminate` returns `{}`, frees processes, and removes the `.lock`. Record the version.
-3. **Capture green baselines** — `pytest` (full), and `node tests/acp_page.test.mjs`. Record counts; `tests/test_data.py` has ~8 known timing-flaky tests (`memory/MEMORY.md:89-93`), so re-run standalone before attributing a failure.
+3. **Verify `session/cancel` is honoured mid-tool** — D30 sends cancel on an inactivity timeout, and whether kiro-cli actually stops a running tool on receipt is unverified. If it does not, the orphaned-turn claim in §2 must be softened rather than asserted.
+4. **Capture green baselines** — `pytest` (full), and `node tests/acp_page.test.mjs`. Record counts; `tests/test_data.py` has ~8 known timing-flaky tests (`memory/MEMORY.md:89-93`), so re-run standalone before attributing a failure.
 
 **Exit criteria**:
-- [ ] NetBird policy verified and recorded, or Phase 3 explicitly blocked with the reason
+- [ ] NetBird policy verified: the admitting policy is named, and the groups it admits are recorded
+- [ ] The policy admits the user's own devices only — `iphone-quentin` (`100.78.26.204`) and `ipad-quentin` (`100.78.66.16`) — and not the other 14 account peers
+- [ ] If no such policy exists, Phase 3 is marked blocked in the Progress Tracker with the reason, and Phases 1, 2, 4 and 5 proceed
 - [ ] `_kiro.dev/session/terminate` re-verified on the installed version, with the version recorded
+- [ ] `session/cancel` mid-tool behaviour observed and recorded, either way
 - [ ] Full `pytest` baseline recorded (count + any pre-existing failures)
 - [ ] `node tests/acp_page.test.mjs` baseline recorded
 
@@ -149,7 +166,7 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 
 ### Phase 1: Presence — make ACP sessions visible in the dashboard [QA]
 **Goal**: Fix both mechanisms that make an ACP-owned session read `closed`, without coupling `presence` and `acp`.
-**File scope**: `src/power_atlas/presence.py`, `tests/test_web.py`
+**File scope**: `src/power_atlas/presence.py`, `tests/test_web.py`, `tests/test_data.py`
 **Covers**: SC-7
 
 **Preservation constraints** (this phase is bugfix-shaped; these must not regress):
@@ -171,105 +188,220 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 delta = started - live[1]
 if delta < -_SIDECAR_BACKWARD_SKEW_S:
     continue
+if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
+    continue          # Claude Code sidecars keep the original window
 ```
 
-Retire `_SIDECAR_SKEW_S` (`presence.py:93`) or leave it unused with a comment naming this decision.
+**Provider scoping matters** (cycle-1 finding): this loop serves both `_KIRO_LOCK_DIR` and `_CLAUDE_SESSION_DIR` sidecars (`presence.py:207`, `:219`), while D10's rationale is entirely kiro-specific. Dropping the ceiling for both would silently widen Claude Code matching with no argument behind it.
 
-**Change 2 — stop caching the lock-directory listing.** `_list_sidecars(_KIRO_LOCK_DIR, ".lock")` is called with `cache_listing=True` (`presence.py:207`, default `:143`). Its docstring's premise — sidecars are written once and never rewritten — is falsified by `session/load` rewriting a lock in place, which leaves directory mtime untouched so `_load_json_cached` matches a stale `(mtime, size)` and returns the old parse (`:121-123`). Pass `cache_listing=False` for the kiro lock directory and update the docstring to record why the premise does not hold.
+`_SIDECAR_SKEW_S` (`presence.py:93`) therefore stays — it still governs the Claude branch. Its comment must be rewritten to say it is provider-specific rather than universal.
+
+**Change 2 — stop caching the kiro lock-directory listing.** `_list_sidecars(_KIRO_LOCK_DIR, ".lock")` is called with `cache_listing=True` (`presence.py:207`, default `:143`). Its docstring's premise — sidecars are written once and never rewritten — is falsified by `session/load` rewriting a lock in place, which leaves directory mtime untouched so `_load_json_cached` matches a stale `(mtime, size)` and returns the old parse (`:121-123`). Pass `cache_listing=False` for the kiro directory only; the Claude call site (`:219`) keeps it.
+
+**Do not leave dead code behind.** If the Claude branch also ends up not caching, the `cache_listing` parameter and `_dir_listing_cache` (`presence.py:139`, `:160-181`) lose their last consumer and must be **deleted**, not left with a comment — the global rule forbids retaining unused code. `tests/test_data.py:1482` reaches into `_dir_listing_cache` and would need updating in the same change.
+
+**Cost note**: 841 `.lock` files are re-listed per scan instead of on directory-mtime change. Measured at ~19 ms, off-loop at all five `get_snapshot` call sites (`web.py:1091`, `:1183`, `:1332`, `:1464`, `:2004`, all via `asyncio.to_thread`) behind a 3 s TTL (`presence.py:70`, `:492`) — acceptable, but bounded by an exit criterion rather than assumed.
 
 **Exit criteria**:
-- [ ] A lock whose `started_at` is hours after its live holder's start reads as live
-- [ ] A lock whose `started_at` precedes its (recycled) pid's start still reads as not-live
+- [ ] A kiro lock whose `started_at` is hours after its live holder's start reads as live
+- [ ] A kiro lock whose `started_at` precedes its (recycled) pid's start still reads as not-live
+- [ ] A **Claude Code** sidecar outside the 120 s window still reads as not-live — the change is provider-scoped
 - [ ] An in-place lock rewrite is observed on the next scan rather than pinned to the previous parse
-- [ ] `presence.py`'s docstrings no longer assert the falsified write-once premise
+- [ ] A full `_scan` with 841 locks completes within 50 ms, measured
+- [ ] `presence.py`'s docstrings no longer assert the falsified write-once premise, and `_SIDECAR_SKEW_S`'s comment says it is provider-specific
+- [ ] Any parameter or cache left without a consumer is deleted, not commented; `tests/test_data.py:1482` updated if `_dir_listing_cache` goes
 - [ ] Tests added to `tests/test_web.py` covering both changes; full suite green
 
 ---
 
 ### Phase 2: Session lifecycle — long turns survive, idle sessions are reclaimed [QA]
 **Goal**: Replace the wall-clock turn ceiling with an inactivity ceiling, stamp activity, sweep idle sessions, and make `MAX_SESSIONS` configurable.
-**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/config.py`, `src/power_atlas/web.py` (lifespan hook only), `tests/test_web.py`
-**Covers**: SC-8, SC-9, SC-10
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/config.py`, `src/power_atlas/__main__.py`, `src/power_atlas/web.py` (lifespan hook only), `tests/test_web.py`
+**Covers**: SC-8, SC-9, SC-10, SC-10b
 
-**Change 1 — stamp `last_used` on every `session/update`.** `_note_context` (`acp.py:1955-1969`) already writes into the session record on a notification, so the hook exists. Extend `_on_notification` (`:1669`) to stamp `sessions[sid]["last_used"] = time.monotonic()` for every update belonging to a known session. This breaks `TestAcpSessionRecordHoldsNoDeadState` (`tests/test_web.py:5033`, `:5044`), which asserts the key set is exactly `{"cwd", "created"}` — update it to `{"cwd", "created", "last_used"}`.
+**Change 1 — `last_used`, stamped correctly.** Three parts, each of which the cycle-1 review found the original wording got wrong.
 
-Use `time.monotonic()`, not `time.time()`: the sweeper compares elapsed intervals and must not be moved by a clock adjustment.
+*Initialise at both constructors.* Write `"last_used": time.monotonic()` in `new_session` (`acp.py:1795-1798`) **and** `load_session` (`:1846-1849`). Without this the sweeper `KeyError`s on any session that was created but never prompted — including the `_handle_new` "socket went away" case (`:2474-2480`), which also has no subscriber and would be swept on the first tick. This is also what actually makes the two named test edits correct: `TestAcpSessionRecordHoldsNoDeadState` (`tests/test_web.py:5033`, `:5044`) asserts the key set **immediately after** `new_session`/`load_session` with no notification in between, so under notification-only stamping it would not have broken at all.
 
-**Change 2 — inactivity ceiling.** `PROMPT_TIMEOUT_SECONDS = 600.0` (`acp.py:275`) currently bounds a turn on wall clock via `_request(..., timeout=PROMPT_TIMEOUT_SECONDS)` (`:1895`). Replace with a deadline reset by activity: the prompt future fails only after `ACP_PROMPT_SILENCE_SECONDS` (default 900) elapses with **no** `session/update` for that session. On timeout, send `session/cancel` before raising, so the agent stops rather than working orphaned.
+*Stamp above the branch dispatch.* In `_on_notification` (`acp.py:1669`), stamp once for any notification carrying a resolvable session id, **before** the `sessionUpdate` kind dispatch and including `METADATA_METHOD` (`:1675`). The two obvious branches (`:1680`, `:1695`) do not cover the fall-through at `:1712`, and `acp.py:210-218` records at least six update kinds — so a turn emitting only `agent_thought_chunk`, `plan` or `current_mode_update` for the silence window would be judged silent and cancelled, the exact regression SC-8 forbids.
 
-Keep `REQUEST_TIMEOUT_SECONDS = 90.0` unchanged for ordinary requests — only the prompt path changes.
+*Use the non-resurrecting write idiom*, which `record()` (`:1873-1877`) and `_note_context()` (`:1966-1968`) already model:
 
-**Change 3 — the idle sweeper.** A task owned by `acp.py`, started from `web.py`'s `lifespan` (the 4th `web → acp` call site) and stopped by the existing `acp.shutdown()`. Every minute, for each session, sweep when **all** hold:
+```python
+meta = self.sessions.get(session_id)
+if meta is None:
+    return          # closed or detached; never recreate the record
+meta["last_used"] = time.monotonic()
+```
+
+Direct assignment raises `KeyError` after `close_session` pops the record (`:1929`) or `_detach` clears the dict (`:1370`); a `setdefault`-shaped write resurrects it, where `at_capacity()` counts it against `MAX_SESSIONS` forever and the sweeper re-issues terminate every minute.
+
+`time.monotonic()` deliberately, not `time.time()` — the sweeper compares elapsed intervals and must not be moved by a clock adjustment. This puts two clocks in one record (`created` is wall-clock); note it in the code rather than leaving it to be rediscovered.
+
+**Change 2 — inactivity ceiling** (mechanism per D30). `PROMPT_TIMEOUT_SECONDS = 600.0` (`acp.py:275`) bounds a turn on wall clock via `_request(..., timeout=PROMPT_TIMEOUT_SECONDS)` (`:1895`). Replace with a deadline reset by activity, **without changing `_request`'s signature**:
+
+```python
+# `timeout` carries a sentinel meaning "inactivity mode"; the session id
+# comes from params, which session/prompt always carries (acp.py:1893).
+# asyncio.wait_for CANCELS its future on expiry (:1489), so the bare `fut`
+# must never be handed to it directly in a re-wait loop - shield each pass.
+while True:
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), tick)
+    except asyncio.TimeoutError:
+        if time.monotonic() - last_activity(sid) > silence_limit:
+            await self._notify("session/cancel", {"sessionId": sid})
+            raise AgentTimeout(...)
+```
+
+Signature preservation is not cosmetic: **19** fixed-signature `_request` stubs in `tests/test_web.py` (7 `boom`, 5 `fake_request`, 5 `refused`, 2 multi-line) would raise `TypeError` on a new parameter. `session/cancel` is a `_notify`, not a `_request` (`acp.py:1912`), so the cancel cannot itself hang.
+
+`REQUEST_TIMEOUT_SECONDS = 90.0` is unchanged — only the prompt path moves.
+
+*A third by-design test edit*: `tests/test_web.py:2658` asserts the exact `_request` call tuple including `acp_mod.PROMPT_TIMEOUT_SECONDS`. `:4484`'s docstring and `:3723`'s "MAX_SESSIONS is 3" also go stale.
+
+*Honest scope of the cancel*: `_handle_prompt`'s `finally` (`:2570-2574`) still clears `inflight` and emits `turn end`, so a user can immediately send a second prompt while the agent may still be finishing the first, and the eventual response is dropped as "late or unmatched" (`:1630`). Cancel-on-timeout **mitigates** the orphaned turn; it does not eliminate it. Phase 0 verifies whether kiro-cli honours cancel mid-tool at all.
+
+**Change 3 — the idle sweeper** (discipline per D28). Owned by `acp.py`, started from `lifespan` **guarded** (`if acp is not None:`, exactly as the teardown at `web.py:526` is) and **cancelled-and-awaited** there too, alongside `_background_refresh` (`web.py:503-507`) — `acp.shutdown()` is synchronous and cannot await a task cancellation.
+
+Each tick, first `if not _supervisor.sessions: continue` so a launch that never opens `/acp` still pays nothing (`acp.py:1074-1076`). Then iterate `tuple(_supervisor.sessions.items())` — `close_session` mutates the dict (`:1929`) and a live iterator would raise `RuntimeError: dictionary changed size during iteration`.
+
+Sweep when **all five** hold, checked and claimed in one synchronous prefix:
 
 - `now - last_used > ACP_IDLE_TTL_SECONDS` (default 1800)
 - `not _registry.subscribers.get(sid)` — an attached tab means leave it alone regardless of age
 - `sid not in _supervisor.inflight`
 - `sid not in _supervisor.closing`
+- `sid not in _registry.loading` — **the condition the original four missed.** A session mid-`session/load` is registered before the round-trip (`:1846`) and has **zero subscribers by construction** (`:812-825`), so it satisfied every other condition and would have been terminated mid-load, after which `_handle_load`'s failure path (`:1861`) pops an already-removed session and `_deliver_load` (`:2289`) replays a dead one to parked waiters.
 
-Sweeping calls `_supervisor.close_session(sid)` directly and then broadcasts `session_closed` to any subscriber and detaches them, reproducing `_handle_close`'s notification half (`acp.py:2708-2711`) **without** relaxing its `not_subscribed` guard. Failure is caught, logged at WARNING, and never propagates — if `_kiro.dev/session/terminate` disappears, the sweeper degrades to memory growth rather than a crashed background task.
+Then `_supervisor.closing.add(sid)` **before the first await**, `discard` in a `finally` — mirroring `_handle_close` (`:2688`, `:2703`). Without the claim, `close_session` leaves the session in `sessions` and out of `closing` for the whole terminate round-trip (first await at `:1928`), so a prompt arriving in that window passes every guard at `:2517-2547` and starts a turn on a session being released: the window `acp.py:2528-2540` exists to close.
 
-**Change 4 — `MAX_SESSIONS` from config.** Add `acp_max_sessions: int = 8` to `Config` (`config.py:51`), plus `acp_idle_ttl_seconds: int = 1800` and `acp_prompt_silence_seconds: int = 900`. Read **once at startup** in `__main__._run_foreground` (where `load_config()` is already called, `:292`) and inject into `acp` via a setter. Do **not** call `load_config()` from `at_capacity()` — it runs on the loop and `load_config` is an uncached full TOML parse (`config.py:139-268`). Add the three keys to `_SETTING_TYPES` (`web.py:1857`) with range validation.
+Sweeping calls `_supervisor.close_session(sid)` directly, then broadcasts `session_closed` and detaches, reproducing `_handle_close`'s notification half (`:2708-2711`) **without** relaxing its `not_subscribed` guard.
 
-`TestAcpSessionCapMessage` (`tests/test_web.py:4030`) asserts the literal `"254 mb"`; the measured figure is now ~150 MB marginal. Update both the message (`acp.py:1055-1068`) and the assertion.
+Failure handling: catch **`Exception`**, not `BaseException` — `CancelledError` is a `BaseException` since 3.8, and swallowing it would hold teardown for up to `REQUEST_TIMEOUT_SECONDS` against `__main__.py:375`'s 5 s join. Do not `asyncio.shield` the close, for the same reason. Log at WARNING and continue: if `_kiro.dev/session/terminate` disappears, the sweeper degrades to memory growth, never a crashed task.
+
+**Change 4 — `MAX_SESSIONS` from config** (shape per D29). Add to `Config` (`config.py:51`): `acp_max_sessions: int = 8`, `acp_idle_ttl_seconds: int = 1800`, `acp_prompt_silence_seconds: int = 900`. Read **once at startup** in `__main__._run_foreground` (`:292`, where `load_config()` already runs) and rebind the module-level names in `acp` — `acp.MAX_SESSIONS` must stay a module attribute, because nine test sites read `acp_mod.MAX_SESSIONS` (`tests/test_web.py:3486`, `:3751`, `:3891`, `:4006`, `:4579`, `:4584`, `:4590`, `:4592`, `:4845`) and an attribute move breaks all nine. The setter must tolerate `acp is None` (`web.py:41-49`).
+
+Do **not** call `load_config()` from `at_capacity()` — it runs on the loop and `load_config` is an uncached full TOML parse (`config.py:139-268`).
+
+`_SETTING_TYPES` (`web.py:1857`) is a bare `key → type` map with no range support and its only range branch today is `if key == "port"`. Extend it with explicit bounds: `acp_max_sessions` 1-16, `acp_idle_ttl_seconds` 300-86400, `acp_prompt_silence_seconds` 60-7200. Because all three are read only at startup, the settings UI must say **restart to apply** rather than silently doing nothing.
+
+`TestAcpSessionCapMessage` (`tests/test_web.py:4030`) asserts the literal `"254 mb"`; the measured marginal figure is now ~150 MB. Update the message (`acp.py:1055-1068`) and the assertion together.
 
 **Exit criteria**:
 - [ ] A turn streaming past 600 s completes rather than raising `AgentTimeout`
+- [ ] A turn emitting only unhandled `sessionUpdate` kinds for 20 min is **not** cancelled — stamping is above the dispatch
 - [ ] A turn silent past the configured window fails **and** `session/cancel` is sent
-- [ ] `last_used` advances on every `session/update`, verified for chunk, tool_call and tool_call_update
-- [ ] An idle session past TTL with no subscriber, no in-flight turn and no in-flight close is terminated and its `.lock` removed
+- [ ] `_request`'s signature is unchanged; all 19 fixed-signature stubs still pass
+- [ ] `last_used` is present on a session created but never prompted
+- [ ] A `session/update` arriving after the record is gone neither raises nor recreates it
+- [ ] An idle session past TTL with no subscriber, no in-flight turn, no in-flight close and no in-flight load is terminated and its `.lock` removed
+- [ ] A session mid-`session/load` is never swept
+- [ ] A prompt arriving during the sweeper's terminate round-trip is refused, not started
 - [ ] A session with an attached subscriber is never swept regardless of age
-- [ ] A session mid-turn is never swept regardless of age
-- [ ] A sweeper failure is logged and does not kill the task or the app
-- [ ] `MAX_SESSIONS` defaults to 8, comes from config, and `at_capacity()` performs no disk I/O
-- [ ] `TestAcpSessionRecordHoldsNoDeadState` and `TestAcpSessionCapMessage` updated to match the new record shape and figure
+- [ ] A sweeper failure is logged at WARNING and does not kill the task or the app
+- [ ] Cancelling the sweeper during shutdown completes within the teardown budget; `acp.py:277-288`'s arithmetic still holds
+- [ ] An `acp` import failure still yields a running app with `/acp` disabled, not a startup crash
+- [ ] `MAX_SESSIONS` defaults to 8, comes from config, remains a module attribute, and `at_capacity()` performs no disk I/O
+- [ ] **Eight concurrent sessions created and driven**, with process count and RSS recorded (SC-10b)
+- [ ] Out-of-range values for the three new keys are rejected with a named error
+- [ ] Four test edits landed: `:5033`/`:5044` key set, `:4030` cap figure, `:2658` `_request` tuple, `:3723` docstring
 
 ---
 
 ### Phase 3: Remote access — bind, allowlist, and the device cookie [QA]
 **Goal**: Make PowerAtlas reachable on the NetBird interface with a default-deny path allowlist enforced on both HTTP and WebSocket, behind a device secret.
 **File scope**: `src/power_atlas/web.py`, `src/power_atlas/__main__.py`, `src/power_atlas/config.py`, `tests/test_web.py`
-**Covers**: SC-1, SC-2, SC-3, SC-4, SC-5
-**Blocked by**: Phase 0's NetBird policy verification.
+**Covers**: SC-1, SC-2, SC-3, SC-3b, SC-4, SC-5
+**Blocked by**: Phase 0's NetBird policy verification. **Does not block Phases 4 or 5** — they need one allowlist entry each, registered in a small integration step.
 
-**Change 1 — bind configuration.** Add `remote_bind_address: str = ""` to `Config`. Empty means loopback-only (D21). Both `uvicorn.Config` sites must read it — `__main__.py:308` **and** `:328`, the random-port fallback — or a port collision silently reverts to loopback.
+**Change 1 — dual bind via pre-bound sockets** (D23, D25, D27). Add `remote_bind_address: str = ""` to `Config`, validated at load with `ipaddress.ip_address()` and rejecting `0.0.0.0`, `::` and anything non-literal — which enforces D2's "IP, never FQDN" mechanically rather than by convention. Reject a zero `port` when the address is set (SC-3b).
 
-**Change 2 — widen the Host allowlist to the configured IP.** `_ALLOWED_HOSTS` (`web.py:558`) becomes loopback plus the configured bind address when set. Allowlist the **IP**, never the FQDN: `web.py:553-557` records that a single-label name is answerable by whoever wins LLMNR/NBT-NS/mDNS. `_host_allowed`'s parser (`:570-620`) is already host-agnostic except its final membership test, so only that line changes.
-
-**Change 3 — the default-deny remote allowlist, enforced twice** (D7):
+Replace the `uvicorn.Config(...)` + `server.run()` pattern at `__main__.py:308`/`:315` and `:328`/`:334`:
 
 ```python
-# HTTP: inside same_origin_guard, after the Host check.
-if _is_remote_host(request) and not _remote_path_allowed(request.url.path):
-    return JSONResponse({"error": "Forbidden"}, status_code=403)
+socks = [_bind("127.0.0.1", port)]          # loopback first: always secured
+if cfg.remote_bind_address:
+    try:
+        socks.append(_bind(cfg.remote_bind_address, port))
+    except OSError as exc:                   # WinError 10049 when the
+        log.error("remote bind to %s failed (%s); loopback only",
+                  cfg.remote_bind_address, exc)
+uvicorn.Server(uvicorn.Config(app, ...)).run(sockets=socks)
 ```
+
+`Server.run(sockets=…)` is supported on the installed uvicorn 0.49.0 (`server.py:74`). One `Server` means **one lifespan** — two `Server` instances would start two `_background_refresh` loops, two sweepers racing on the same sessions, and call `acp.shutdown()` twice.
+
+Bind failure must degrade, never kill startup: the existing retry (`__main__.py:322`) covers only port-in-use and is gated on `desired_port > 0`, so an unhandled `OSError` leaves `ready_event` unset and `__main__.py:340-342` exits 1.
+
+**Change 2 — `_ALLOWED_HOSTS` learns the configured IP at startup.** It is a module-level `frozenset` (`web.py:558`) read on every request and every upgrade, and `web.py` never calls `load_config()` at import. Both obvious options are traps: a per-request `load_config()` puts an uncached TOML parse on the hot path (the very thing D15 forbids), and an import-time read makes the host tests depend on the developer's real `config.toml` (`memory/MEMORY.md:95-97`). Use a **startup setter** mirroring D15's `acp` injection, defaulting to loopback-only when unset.
+
+`_host_allowed`'s parser (`:570-620`) is already host-agnostic except its final membership test (`:620`), so only that line changes. Note the IPv6 normalisation trap: the parser strips brackets (`:605-609`) and lowercases (`:620`), so an IPv6 bind must be stored unbracketed and lowercase, and a zone id (`%eth0`) is not in the reject set at `:603` — the `ip_address()` validator above prevents all three from reaching it.
+
+**Change 3 — one raw-ASGI middleware enforcing allowlist and cookie** (D7 revised, D26).
 
 ```python
-# WebSocket: inside the /ws/acp handler, beside _ws_origin_ok.
-# The middleware CANNOT see upgrades (web.py:752-755), so this is not
-# redundant - it is the socket's only exposure to the split.
-if _is_remote_host_ws(ws) and not _remote_path_allowed("/ws/acp"):
-    await ws.close(code=1008)
-    return
+# Raw ASGI, added with app.add_middleware(...) - NOT @app.middleware("http").
+# BaseHTTPMiddleware returns early on non-http scope (web.py:752-755), and
+# /static is a Mount whose matches() admits websocket scopes, so an http-only
+# guard leaves ws://<ip>/static/x reaching StaticFiles past every check.
+async def __call__(self, scope, receive, send):
+    if scope["type"] in ("http", "websocket"):
+        peer = (scope.get("client") or (None,))[0]
+        if _is_remote_peer(peer):            # None => treated as remote
+            path = scope["path"]
+            if not _remote_path_allowed(path):
+                return await _refuse(scope, send)
+            if path not in _COOKIE_EXEMPT and not _cookie_ok(scope):
+                return await _refuse(scope, send)
+    await self.app(scope, receive, send)
 ```
 
-The allowlist is exactly `/acp`, `/ws/acp`, `/static/*` and the Phase 4 listing endpoint. Everything else — including any route added later — is loopback-only by default.
+Remoteness comes from `scope["client"]`, never the `Host` header (D26). The allowlist is **default-deny**: `/acp`, `/ws/acp`, `/static/*`, the Phase 4 listing endpoint, **and the two secret-exchange routes** — without those last two, no remote device can ever authenticate, because the exchange page would itself be refused. The exchange GET and its POST target are the only cookie-exempt remote paths; its POST must still satisfy `same_origin_guard`'s Origin rule (`web.py:714-716`).
 
-**Change 4 — the device secret and cookie.** Generate `CONFIG_DIR/remote-secret` (`secrets.token_urlsafe(32)`) on first enable (D8), restrictive permissions where the platform supports it. A remote request without a valid cookie is redirected to a minimal exchange page; posting the correct secret sets a long-lived `HttpOnly`, `SameSite=Strict` cookie. The check runs in the same two places as the allowlist, for the same reason. Loopback requests bypass it entirely, so today's desktop workflow is untouched.
+Apply `_acp_navigation_ok`'s `Sec-Fetch-Site` rule (`web.py:662-687`) to **every** remote-allowlisted GET, not only `/acp` — cookies are host-scoped and port-agnostic, so any other service on the NetBird interface is "same-site" for `SameSite=Strict`.
 
-**Change 5 — the ~153 loopback-encoding tests get re-decided, not re-pointed.** `_HOSTILE_HOSTS` (`tests/test_web.py:1495`) deliberately includes single-label names and `localhost.evil.com`; both client fixtures pin `base_url="http://127.0.0.1"` with a docstring saying `testserver` "must not be allowlisted just to make this suite pass" (`:26-29`). Each affected test needs a decision about what it now asserts, not a mechanical edit. Add new cases for: remote Host + allowlisted path + valid cookie → allowed; remote Host + non-allowlisted path → 403; remote Host + no cookie → refused; **remote Host on `/ws/acp` without a cookie → closed**, exercised through the socket path rather than HTTP (SC-3).
+**Change 4 — the device secret and cookie** (D24, D8).
 
-**Change 6 — settings surface.** Show the bind address and the secret as copyable text (D22), plus the reachable URL. Correct the stale middleware rationale at `web.py:709-711`, which asserts a non-loopback Host "cannot arise legitimately".
+Generate `CONFIG_DIR/remote-secret` (`secrets.token_urlsafe(32)`) on first enable, loaded **once at startup**. Missing, empty, or shorter than the expected length ⇒ **fail closed**: refuse every remote request and log at ERROR. An empty secret compared with `compare_digest` would otherwise match an empty cookie and silently remove authentication while the bind stayed open.
+
+The cookie is an HMAC over a device identifier keyed by that secret, compared in constant time over UTF-8 **bytes** — reuse `_acp_token_ok`'s pattern (`web.py:735-746`), which already encodes the lesson that a `str` holding non-ASCII raises `TypeError` out of `compare_digest` and turns a 403 into a 500 any unauthenticated caller can drive. `HttpOnly`, `SameSite=Strict`; no `Secure` (D5 — no TLS, WireGuard carries the transport).
+
+Log every failed exchange at WARNING with the peer address and apply a per-peer backoff. D3 makes the cookie "the layer that survives policy drift" — without failure logging, drift is never observable.
+
+On Windows, "restrictive permissions" via `os.chmod` toggles only the read-only attribute and never touches ACLs, so say plainly that the protection is `%LOCALAPPDATA%`'s inherited ACLs, or use `icacls`. Assert the secret never reaches `orchestrator.log` (`__main__.py:274-283`).
+
+**Change 5 — the loopback-encoding tests.** The honest figure is **77 distinct test functions** touching host/origin/websocket (~153 is the *collected* count, inflated by `_HOSTILE_HOSTS` 15 × `_GUARDED_PATHS` 4 = 60 in one method). None of the 15 hostile hosts is a NetBird IP and the bind is off by default, so most pass unchanged. The real work is four new scenario families plus whatever the `_ALLOWED_HOSTS` shape change forces:
+
+- remote peer + allowlisted path + valid cookie → allowed
+- remote peer + non-allowlisted path → refused (`/`, `/api/launchers`, `/api/settings`)
+- remote peer + no cookie → refused, on HTTP **and** on the `/ws/acp` upgrade **and** on `ws://…/static/…`
+- `_HOSTILE_HOSTS` still refused **with the remote bind on** — the fixture docstring at `:26-29` gets updated, not contradicted
+
+**Change 6 — settings surface and stale comments.** Show the reachable URL and secret as copyable text (D22) and state **restart to apply**. Correct three stale comments: `web.py:709-711` ("a non-loopback Host cannot arise legitimately"), and `web.py:830-831`, which claims the CSP host "carries no port PowerAtlas is not actually serving on" — `_PORT_RE` (`:562`) proves digits, not range, so `:99999` passes into `connect-src`.
+
+`__main__.py:345` derives `server_url` from `server.servers[0].sockets[0]`; with two sockets, index 0 is merely whichever bound first, so the loopback URL must come from the loopback socket explicitly. It feeds `create_peek` (`peek.py:267`) and `run_tray` (`tray.py:47`).
 
 **Exit criteria**:
-- [ ] Remote bind disabled by default; with it unset, no non-loopback listener exists and behaviour is unchanged
-- [ ] Both `uvicorn.Config` sites read the same configured address
-- [ ] `_ALLOWED_HOSTS` admits the configured IP and still rejects single-label and lookalike hosts
-- [ ] A remote request to a non-allowlisted path is 403, verified for `/`, `/api/launchers`, `/api/settings`
-- [ ] A remote WebSocket upgrade to `/ws/acp` without a cookie is closed, verified through the socket path
-- [ ] A remote request with no cookie cannot reach `/acp`; with a valid cookie it can
+- [ ] With the remote bind unset: exactly one listening socket, and it is loopback (SC-2)
+- [ ] With it set: exactly two sockets, on the same port number, on loopback and the configured IP
+- [ ] A zero `port` with the remote bind set is rejected at config load with a named error (SC-3b)
+- [ ] A bind failure on the remote address logs at ERROR and leaves a working loopback app — not exit 1
+- [ ] `remote_bind_address` rejects `0.0.0.0`, `::`, hostnames and zone-id forms
+- [ ] `_ALLOWED_HOSTS` admits the configured IP, still rejects single-label and lookalike hosts, and is populated without any per-request config read
+- [ ] Remoteness is derived from `scope["client"]`; a remote peer sending `Host: 127.0.0.1` is still treated as remote
+- [ ] A remote request to a non-allowlisted path is refused, verified for `/`, `/api/launchers`, `/api/settings`
+- [ ] `ws://<remote-ip>:<port>/static/style.css` is refused — the `/static` Mount bypass is closed
+- [ ] A remote `/ws/acp` upgrade without a valid cookie is closed, exercised through the socket path
+- [ ] A missing, empty or short `remote-secret` refuses **all** remote requests and logs at ERROR
+- [ ] The exchange GET and POST are reachable without a cookie and are the only such paths
+- [ ] A failed exchange logs at WARNING with the peer address; repeated failures are backed off
 - [ ] Loopback requests need no cookie and are unaffected
-- [ ] `web.py:709-711`'s rationale updated to match reality
-- [ ] Settings surface shows the reachable URL and secret; full suite green
+- [ ] The cookie survives a PowerAtlas restart without re-entering the secret (D24)
+- [ ] `server_url` is derived from the loopback socket explicitly; peek and tray still open the dashboard
+- [ ] All three stale comments corrected (`web.py:709-711`, `:830-831`, and the fixture docstring at `tests/test_web.py:26-29`)
+- [ ] `_HOSTILE_HOSTS` still refused with the remote bind **on**
+- [ ] Full suite green
 
 ---
 
@@ -280,18 +412,28 @@ The allowlist is exactly `/acp`, `/ws/acp`, `/static/*` and the Phase 4 listing 
 
 Serves workspace groups with their sessions, paginated **independently at both levels** (D19) — the existing listing filters all set `has_more = False` (`web.py:1301`, `:1318`, `:1329`, `:1340`), which would silently truncate the 208-session workspace. Returns only: workspace path and display name, session id, title, updated timestamp, and availability state. **No `env`, no launcher data, no action affordances.**
 
-Availability is the three-state field from D17 — `available` / `held` / `locked` — computed **only for the rows in the response** (~30 by default, not 1,207), off the event loop, and failing open to `available` on any error. `held` is free from `_supervisor.sessions`; `locked` reuses the pid-liveness logic `acp._lock_holder` already implements (`acp.py:956-1012`).
+Availability is the three-state field from D17 — `available` / `held` / `locked` — computed **only for the rows in the response** (~30 by default, not 1,207), off the event loop, and failing open to `available` on any error. `locked` reuses the pid-liveness logic `acp._lock_holder` already implements (`acp.py:956-1012`).
+
+**`held` must be snapshotted on the loop before the thread hop.** `_supervisor.sessions` is loop-owned and unlocked (see §1), and D9 explicitly forbids reading loop-owned state from a worker thread — iterating it under `asyncio.to_thread` while the loop mutates gives a torn read or `RuntimeError: dictionary changed size during iteration`. So:
+
+```python
+held = set(_supervisor.sessions)          # on the loop, synchronous
+rows = await asyncio.to_thread(_resolve_availability, sids, held)
+```
 
 Reuses `data.discover_workspaces_with_counts` (`data.py:189`) and `data_kiro.load_sessions`, inheriting the `parent_session_id` filtering that removes 4,734 sub-agent sessions.
+
+**Allowlist registration** is a one-line integration step gated on Phase 3; the endpoint itself is not, so this phase can complete while the NetBird policy is still pending.
 
 **Exit criteria**:
 - [ ] Endpoint returns workspace-grouped sessions with independent paging at both levels
 - [ ] A 208-session workspace pages correctly rather than truncating
 - [ ] Response contains no `env`, no launcher fields, no action affordances
 - [ ] Availability is computed only for returned rows and never for the whole store
+- [ ] `_supervisor.sessions` is snapshotted on the loop; no worker thread iterates it
 - [ ] Availability computation runs off the event loop and fails open to `available`
 - [ ] Sub-agent sessions are absent
-- [ ] Endpoint is on the remote allowlist and reachable with a cookie, refused without
+- [ ] Endpoint reachable with a cookie and refused without, once registered on the allowlist (integration step, gated on Phase 3)
 
 ---
 
@@ -302,42 +444,71 @@ Reuses `data.discover_workspaces_with_counts` (`data.py:189`) and `data_kiro.loa
 
 Left rail: search, workspace groups, **10 groups shown with show-more**, groups **expanded** showing **3 sessions each with per-group paging** (D16). Availability rendered per D17, with `locked` greyed and non-interactive. Right pane: the existing conversation, composer pinned.
 
-Responsive without a build step: two-pane above a breakpoint, drill-down below it (rail → conversation with a back affordance), since `style.css` has zero width breakpoints today and `html, body { height: 100%; overflow: hidden }` (`:2`) makes this an app shell. Use `100dvh` rather than `100%` for the shell height so mobile browser chrome collapsing does not clip the composer.
+Responsive without a build step: two-pane at **≥768 px**, drill-down below it (rail → conversation with a back affordance), since `style.css` has zero width breakpoints today and `html, body { height: 100%; overflow: hidden }` (`:2`) makes this an app shell. Use `100dvh` rather than `100%` for the shell height so mobile browser chrome collapsing does not clip the composer.
 
-**Constraints that are not negotiable here**: `/acp` is the only page under CSP (`web.py:811-840`) with a per-response nonce, exactly one `<script>`, and a strict no-`innerHTML` rule. `tests/acp_page.test.mjs` enforces all three — its DOM stand-in makes `innerHTML`/`outerHTML`/`insertAdjacentHTML` throw. Any added script tag, external stylesheet or inline handler violates the policy. The harness must be extended alongside the markup, and it is **not** run by pytest or CI (`AGENTS.md:9`), so it must be run by hand.
+**Constraints, stated accurately**: `/acp` is the only page under CSP (`web.py:811-840`) with a per-response nonce. The policy is `default-src 'self'` with a `script-src` override and **no `style-src`** — so a **same-origin stylesheet is permitted**; an earlier draft of this plan wrongly said otherwise and would have steered the implementer away from a legitimate option. What the policy does forbid is a second inline `<script>` without the nonce. Separately, `tests/acp_page.test.mjs` enforces exactly one `<script>` and the no-`innerHTML` rule by making `innerHTML`/`outerHTML`/`insertAdjacentHTML` throw. The harness is **not** run by pytest or CI (`AGENTS.md:9`) and must be run by hand.
+
+**Split into 5a and 5b**, because the harness work is a distinct risk from the layout work.
+
+#### Phase 5a: Harness capability + rail data binding [QA]
+**File scope**: `tests/acp_page.test.mjs`, `src/power_atlas/templates/acp.html`
+
+`tests/acp_page.test.mjs` cannot simply be "extended" — its DOM stand-in has no `classList`, no `querySelectorAll`, no `removeChild` and no attribute API; `querySelector` throws on anything but a class selector (`:110-112`); `document` exposes only `createElement`/`getElementById`/`write` (`:176-181`); `byId` is built by regex over **static** markup (`:157`), so dynamically-created rail rows are unaddressable; `fetch` is `() => Promise.resolve({ok:true})` (`:191`) with no body; and all 15 checks are synchronous with no microtask flush. A rail with search, 10 groups and 30 dynamic rows consuming Phase 4's JSON needs all of that.
+
+**Decide server- vs client-rendered rail first**: `render()` strips all `{% %}` (`:38`) and throws on leftover Jinja (`:46-51`), so a server-rendered `{% for %}` renders one iteration's body silently. Client-rendered avoids that but hits the fetch-body gap. **Recommended: client-rendered**, with the harness gaining a fetch-body stub and an async flush.
 
 **Exit criteria**:
-- [ ] Rail lists workspace groups with search, 10 groups + show-more, 3 sessions + per-group paging
-- [ ] Availability indicator renders three states; `locked` is greyed and cannot be loaded
-- [ ] Selecting a session loads and streams it; creating a new session still works
-- [ ] Two-pane above the breakpoint, drill-down below it, verified at ~390 px
-- [ ] Composer remains reachable with a soft keyboard open
+- [ ] Harness supports dynamic element lookup, a fetch body, and async checks
+- [ ] Rail renders groups and rows from Phase 4's payload shape
+- [ ] Search filters rows; 10 groups + show-more; 3 sessions + per-group paging
+- [ ] Availability indicator renders three states; `locked` is greyed and cannot be selected
 - [ ] Still exactly one `<script>`, still nonce-carrying, still no `innerHTML`
-- [ ] `node tests/acp_page.test.mjs` extended for the new behaviour and green
-- [ ] Full pytest suite green
+- [ ] `node tests/acp_page.test.mjs` green, with the added checks enumerated in the phase log
+
+#### Phase 5b: Responsive layout and conversation integration [QA]
+**File scope**: `src/power_atlas/static/style.css`, `src/power_atlas/templates/acp.html`
+
+**Exit criteria**:
+- [ ] Two-pane at ≥768 px; drill-down below, verified at 390 px and 768 px
+- [ ] `100dvh` shell; the composer stays visible with a soft keyboard open on a real device (manual, device named in the phase log)
+- [ ] Selecting a rail row loads that session and streams a turn
+- [ ] Creating a new session still works from the reworked page
+- [ ] `acp.html:4`'s back link no longer points at `/`, which is loopback-only and would 403 on a phone
+- [ ] `node tests/acp_page.test.mjs` green; full pytest suite green
 
 ---
 
 ### Phase 6: Documentation
 **Goal**: Complete the README sites the throwaway exemption deferred, and correct the stale roadmap claim.
-**File scope**: `README.md`, `plans/ROADMAP.md`
+**File scope**: `README.md`, `plans/ROADMAP.md`, `plans/CLOSED_INVESTIGATIONS.md`, `plans/tests/260701_POWERATLAS.md`
 **Covers**: SC-12
 
-`AGENTS.md:7`'s exemption ends on promotion — "promoting it to product is what makes the README row required work" — and the prototype left three sites deliberately incomplete: the product definition (`README.md:3`), the "click to open the dashboard UI" line (`:30`), and the feature list (`:32-53`). Document remote access, how to enable it, and the security expectation that the NetBird policy is the primary authorization layer.
+`AGENTS.md:7`'s exemption ends on promotion — "promoting it to product is what makes the README row required work". **Line references re-derived** (the first draft's were wrong): the product definition is `README.md:3`, the "click to open the dashboard UI" line is **`:52`** (not `:30`, which is inside the Linux `apt install` block), and the feature list starts at **`:54`** (not `:32-53`). A fourth site the first draft missed: the config sample block at **`:83-127`**, which gains four documented keys, plus `:84`'s `port = 0` default (now conditional per D25) and `:92`'s `default_args = "-a"` line — the natural home for the security expectation.
 
-`plans/ROADMAP.md:62` still describes `same_origin_guard` as POST-only; that has been false since the prototype widened it.
+`plans/tests/260701_POWERATLAS.md` is required here by `memory/MEMORY.md:82-86`, a standing instruction to add it to the Documentation Updates table **at planning time** when a plan changes cache layers or client-timer topology. Six sites: `:152-159` and `:559-561` scope the ACP surface out of test coverage on throwaway grounds that no longer hold; `:266-271` describes `lifespan` as owning two concerns (D14 adds a third); `:315-320` enumerates the `_SETTING_TYPES` allowlist; `:322-327` describes the `?sid=` page shape the rework changes; `:489-494` needs a bind-address case. Its `:156-157` control list is the only doc enumerating the ACP surface's security controls, and Phase 3 adds two.
 
 **Exit criteria**:
-- [ ] README's three sites describe the remote client and how to enable it
+- [ ] README's four sites describe the remote client, how to enable it, and the four new config keys
 - [ ] README states the NetBird policy is the primary authorization layer and the cookie the second
-- [ ] `plans/ROADMAP.md:62` corrected
-- [ ] The ACP roadmap entry reflects the shipped shape
+- [ ] `README.md:84` records that a fixed port is required when the remote bind is on
+- [ ] `plans/ROADMAP.md` corrected at `:62`, `:66` and `:120` (three sites of the POST-only claim), `:36` ("no idle sweeper anywhere"), `:65` ("none chosen" — D4 chose), `:54` (rebuild dependency retired by D1), and the ACP entry's rebuild verdict at `:124`, `:152`, `:154`, `:160-163`
+- [ ] `plans/ROADMAP.md:200` — the `## Misc` "Local network access to mimic claude code remote control" item, which is what this plan actually ships — updated; and `:8`'s header pointer given a carve-out so it does not read as closing this
+- [ ] `plans/CLOSED_INVESTIGATIONS.md:67-77` updated: the "no independent path" verdict and `:75`'s "throwaway prototype" wording
+- [ ] `plans/tests/260701_POWERATLAS.md` updated at all six sites, including the `:156-157` control list
+- [ ] A memory update for `memory/MEMORY.md:149-153` is **proposed** to the user (falsified clauses: permission round trip never happened; unidentified trigger; no independent path) — proposed, not written directly, since a plan phase must not silently rewrite a memory entry
 
 ## 6) Risk Assessment
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Allowlist applied only in middleware leaves `/ws/acp` — the route reaching `-a` — exempt | Critical: arbitrary command execution from any reachable peer | D7 mandates enforcement in both places; SC-3 tests the socket path separately |
+| An HTTP-only guard leaves **two** websocket paths exempt — `/ws/acp` (the route reaching `-a`) and `ws://…/static/…` via the `Mount` | Critical: arbitrary command execution from any reachable peer | D7 revised to one raw-ASGI middleware seeing every scope type; SC-3 tests HTTP, the `/ws/acp` upgrade and the `/static` websocket path separately |
+| Remoteness derived from the `Host` header lets a peer self-classify as local and skip every check | Critical: defeats SC-4 and SC-5 entirely | D26 — remoteness comes from `scope["client"]`, set by the transport; `client is None` treated as remote |
+| A missing or empty `remote-secret` compared with `compare_digest` matches an empty cookie | Critical: authentication silently disappears while the bind stays open | Fail closed — refuse all remote requests and log at ERROR; exit criterion in Phase 3 |
+| The sweeper terminates a session mid-`session/load`, which has zero subscribers by construction | High: a load in flight is destroyed; `_deliver_load` replays a dead session to parked waiters | D28 adds `_registry.loading` as a fifth sweep condition |
+| The sweeper's check-then-close is not atomic, so a prompt can start a turn on a session being released | High: reopens the ungated-tool window `acp.py:2528-2540` closes | D28 claims `closing` in a synchronous prefix, `discard` in `finally` |
+| A bind failure on the configured remote address kills startup | High: app will not start after a NetBird hiccup, since `__main__.py:322`'s retry covers only port-in-use | D27 — bind loopback first, log and continue on remote failure |
+| Our own agent's orphaned locks read live indefinitely once the skew ceiling is dropped | Medium: a session the agent does not hold shows a live dot and a `locked` indicator, for the agent's whole life | **Accepted** (D32) — the only alternative is the `presence → acp` coupling D9 forbids |
+| `_ALLOWED_HOSTS` populated by a per-request config read puts an uncached TOML parse on the hot path | Medium: the stall D15 forbids elsewhere | Startup setter mirroring D15; exit criterion forbids a per-request read |
 | NetBird account has 17 peers; reachability is not authorization | High: a colleague's device reaches the instance | Phase 0 gates Phase 3 on policy verification; the cookie survives policy drift |
 | `-a` behind a remote surface is arbitrary command execution as the user | High, accepted knowingly | Two independent layers (policy + cookie); default-deny allowlist; bind off by default |
 | Random-port fallback reverts to loopback if only `__main__.py:308` changes | Medium: silent loss of remote access, or worse, a silent bind mismatch | Explicit exit criterion that both sites read one value |
@@ -346,7 +517,7 @@ Responsive without a build step: two-pane above a breakpoint, drill-down below i
 | `_kiro.dev/session/terminate` is undocumented with no fallback | Medium: sweeper stops reclaiming | Phase 0 re-verifies; sweeper failure is non-fatal and logged |
 | The 250 white-box ACP tests break on any structural change | Medium: churn | D1 keeps the module; Phase 2's changes are additive except the two by-design test edits |
 | Clock skew stamping a lock in the future is no longer rejected once the upper bound is dropped | Low: a stale lock reads as live | Accepted; recorded in D10 |
-| Every mutating route is a lost-update race (`load_config` → mutate → `save_config`) | Medium, pre-existing; a second concurrent client makes it likelier | Add no remote-reachable write routes; the allowlist enforces this structurally |
+| Every mutating route is a lost-update race (`load_config` → mutate → `save_config`) | Medium, pre-existing; a second concurrent client makes it likelier | **No remote-reachable route writes `config.toml`** — every mutating route is `@app.post` and none is on the allowlist. Note the narrower claim: `/acp` *is* state-changing by design (`web.py:564-567` — rendering it spawns the agent) and `/ws/acp` is command execution by design, so "no remote-reachable write routes" would be false |
 | 18 tests read the real `config.toml` holding real credentials | Medium, pre-existing | D8 keeps the new secret out of that file, adding nothing to the blast radius |
 | `tests/acp_page.test.mjs` is outside pytest and CI | Medium: a page regression ships silently | Phase 5 exit criteria require running it by hand |
 | kiro-cli self-updates and has regressed a measured behaviour before | Medium | Phase 0 re-verification; version recorded |
@@ -370,22 +541,33 @@ Responsive without a build step: two-pane above a breakpoint, drill-down below i
 
 | Document | Update needed | Phase |
 |---|---|---|
-| `README.md` | Product definition, dashboard-open line, and feature list to cover remote access and how to enable it (`AGENTS.md:7` exemption ends on promotion) | 6 |
-| `plans/ROADMAP.md` | Correct the stale POST-only claim at `:62`; update the ACP entry to the shipped shape | 6 |
-| `src/power_atlas/presence.py` docstrings | Remove the falsified write-once premise and the retired skew rationale | 1 |
-| `src/power_atlas/acp.py` module comments | Version-pinned figures (`~254 MB`, `~5.4 s`, `2.14.1`) superseded by the 2026-07-31 measurements | 2 |
-| `src/power_atlas/web.py:709-711` | Middleware rationale asserting a non-loopback Host "cannot arise legitimately" | 3 |
+| `README.md:3`, `:52`, `:54-75` | Product definition, dashboard-open line, feature list — cover remote access and how to enable it (`AGENTS.md:7` exemption ends on promotion) | 6 |
+| `README.md:83-127` | Config sample gains `remote_bind_address`, `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`; `:84`'s `port = 0` becomes conditional (D25); `:92`'s `-a` line carries the security expectation | 6 |
+| `plans/ROADMAP.md:62`, `:66`, `:120` | Three sites of the stale POST-only `same_origin_guard` claim | 6 |
+| `plans/ROADMAP.md:200`, `:8` | The `## Misc` remote-control item this plan ships, and the header pointer that reads as closing it | 6 |
+| `plans/ROADMAP.md:36`, `:54`, `:65` | "No idle sweeper anywhere" (falsified by Phase 2); the sub-agent-pipeline item's dependency on a rebuild (retired by D1); "shapes worth considering, none chosen" (D4 chose) | 6 |
+| `plans/ROADMAP.md:124`, `:152`, `:154`, `:160-163` | The ACP entry's throwaway framing and rebuild verdict, retired by D1 | 6 |
+| `plans/ROADMAP.md:16`, `:88`, `:126` | Section-level version pins and the superseded `~5.4 s` / `~2.5 s` figures | 6 |
+| `plans/CLOSED_INVESTIGATIONS.md:67-77` | "Closed — remote control for kiro-cli": the "no independent path" verdict and `:75`'s "throwaway prototype" wording | 6 |
+| `plans/tests/260701_POWERATLAS.md` | Six sites: `:152-159` and `:559-561` (ACP scoped out of coverage on throwaway grounds), `:266-271` (lifespan gains a third concern), `:315-320` (`_SETTING_TYPES` enumeration), `:322-327` (`?sid=` page shape), `:489-494` (bind-address case), `:156-157` (security-control list gains two) — **required at planning time by `memory/MEMORY.md:82-86`** | 6 |
+| `memory/MEMORY.md:149-153` | Falsified clauses (permission round trip; unidentified trigger; no independent path) — **propose to the user, do not write directly** | 6 (doc-table-only) |
+| `src/power_atlas/presence.py` docstrings | Remove the falsified write-once premise; scope `_SIDECAR_SKEW_S`'s comment to the Claude branch | 1 |
+| `src/power_atlas/acp.py` module comments | Version-pinned figures (`~254 MB`, `~5.4 s`, `2.14.1`) superseded by the 2026-07-31 measurements; `:339-342`'s claim that `fromisoformat` cannot parse kiro's 9-digit fraction is stale on Python 3.13; `:277-288`'s teardown arithmetic now includes the sweeper; `:1074-1076`'s "pays nothing" invariant is amended by the tick guard | 2 |
+| `src/power_atlas/web.py:709-711`, `:830-831` | Middleware rationale asserting a non-loopback Host "cannot arise legitimately"; CSP comment claiming the host carries no unserved port | 3 |
+| `tests/test_web.py:26-29`, `:3723`, `:4484` | Fixture docstring on loopback base URLs; "MAX_SESSIONS is 3"; stale `_request` timeout docstring | 2, 3 |
 
 ## Progress Tracker
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pre-flight verification | Not started | Gates Phase 3 |
+| 0 | Pre-flight verification | Not started | Gates Phase 3 only |
 | 1 | Presence fixes | Not started | |
 | 2 | Session lifecycle | Not started | |
-| 3 | Remote access | Not started | Blocked by Phase 0 |
-| 4 | Listing endpoint | Not started | |
-| 5 | `/acp` rework | Not started | |
+| 3 | Remote access | Not started | Blocked by Phase 0's NetBird policy check |
+| 4 | Listing endpoint | Not started | Allowlist registration deferred to the integration step |
+| 5a | Harness + rail data binding | Not started | |
+| 5b | Responsive layout + integration | Not started | |
+| I | Integration: register endpoint + page on the remote allowlist | Not started | Needs 3, 4, 5b |
 | 6 | Documentation | Not started | |
 
 ## Dependency Graph
@@ -393,17 +575,24 @@ Responsive without a build step: two-pane above a breakpoint, drill-down below i
 ```
 Phase 0 (pre-flight)
    |
-   +--> Phase 1 (presence.py)  ------------------+
-   |                                             |
-   +--> Phase 2 (acp.py lifecycle) --------------+
-   |                                             |
-   +--> Phase 3 (remote access) --> Phase 4 -----+--> Phase 6 (docs)
-        [gated on NetBird policy]    (listing)   |
-                                        |        |
-                                        +--> Phase 5 (/acp rework)
+   +--> Phase 1 (presence.py)
+   |
+   +--> Phase 2 (acp.py lifecycle)
+   |
+   +--> Phase 4 (listing endpoint) --> Phase 5a (harness+rail) --> Phase 5b (layout)
+   |                                                                    |
+   +--> Phase 3 (remote access)                                         |
+        [gated on NetBird policy]                                       |
+                       |                                                |
+                       +----------------> Integration step <------------+
+                                                 |
+                                                 v
+                                          Phase 6 (docs)
 ```
 
-Phases 1, 2 and 3 are logically independent of each other but **all three modify `tests/test_web.py`**, so none is annotated `[P:N]` — the parallel-eligibility rule requires non-overlapping file scopes. Phase 4 precedes Phase 5 because the page consumes the endpoint. Phase 6 is last because it documents the shipped shape.
+**Phases 4, 5a and 5b no longer sit behind Phase 3** (cycle-1 finding). They need it for one allowlist entry each, and Phase 3 is gated on a NetBird policy administered by other people — so an external stall would otherwise block the entire product half. The allowlist registration moves to a small integration step that needs both.
+
+Phases 1, 2, 3 and 4 are logically independent but **all modify `tests/test_web.py`**, so none is annotated `[P:N]` — the parallel-eligibility rule requires non-overlapping file scopes. That is a repo constraint rather than a property of the work; recorded under Harness Improvement Opportunities.
 
 ## Backwards Compatibility
 
@@ -423,22 +612,24 @@ Phases 1, 2 and 3 are logically independent of each other but **all three modify
 - `CONFIG_DIR/remote-secret` (runtime artifact, not in the repo)
 
 ### Modified
-- `src/power_atlas/presence.py` — skew check, listing cache, docstrings
-- `src/power_atlas/acp.py` — `last_used`, inactivity ceiling, cancel-on-timeout, sweeper, injected config, cap message
-- `src/power_atlas/web.py` — remote allowlist (HTTP + WS), cookie, settings surface, listing endpoint, lifespan sweeper hook, stale rationale
-- `src/power_atlas/__main__.py` — bind address at both `uvicorn.Config` sites, config injection into `acp`
-- `src/power_atlas/config.py` — `remote_bind_address`, `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`
-- `src/power_atlas/templates/acp.html` — two-pane rework
-- `src/power_atlas/static/style.css` — rail, responsive breakpoint, `100dvh` shell
-- `tests/test_web.py` — new coverage; re-decide the ~153 loopback-encoding tests; two by-design edits
-- `tests/acp_page.test.mjs` — extended for the reworked page
-- `README.md`, `plans/ROADMAP.md`
+- `src/power_atlas/presence.py` — provider-scoped skew check, kiro listing cache, docstrings
+- `src/power_atlas/acp.py` — `last_used` (init + stamp above dispatch + safe write idiom), inactivity ceiling with preserved `_request` signature, cancel-on-timeout, sweeper, rebindable config names, cap message
+- `src/power_atlas/web.py` — raw-ASGI remote middleware (allowlist + cookie, http and websocket scopes), secret exchange routes, settings surface, listing endpoint, guarded lifespan sweeper start + cancel-and-await, stale comments at `:709-711` and `:830-831`
+- `src/power_atlas/__main__.py` — pre-bound sockets replacing both `uvicorn.Config` host sites, bind-failure fallback, config injection into `acp`, and `:345`'s `server_url` derived from the loopback socket explicitly
+- `src/power_atlas/config.py` — `remote_bind_address` (IP-literal validated), `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`; zero-port rejection when the remote bind is set
+- `src/power_atlas/templates/acp.html` — two-pane rework, back-link fix
+- `src/power_atlas/static/style.css` — rail, 768 px breakpoint, `100dvh` shell
+- `tests/test_web.py` — four by-design edits (`:5033`/`:5044`, `:4030`, `:2658`, `:3723`), fixture docstring `:26-29`, four new remote scenario families
+- `tests/test_data.py` — only if `_dir_listing_cache` is deleted (`:1482` reaches into it)
+- `tests/acp_page.test.mjs` — harness capability work (dynamic lookup, fetch body, async flush) plus new checks
+- `README.md`, `plans/ROADMAP.md`, `plans/CLOSED_INVESTIGATIONS.md`, `plans/tests/260701_POWERATLAS.md`
 
 ### Deleted
-None.
+- `presence._dir_listing_cache` and the `cache_listing` parameter, **if** the Claude branch also stops caching — dead code is deleted, not commented out
 
 ### Unchanged
-- `src/power_atlas/data.py`, `data_kiro.py`, `status_classifier.py`, `launcher.py`, `peek.py`, `tray.py`, `notifications.py`
+- `src/power_atlas/data.py`, `data_kiro.py`, `status_classifier.py`, `launcher.py`, `notifications.py`
+- `src/power_atlas/peek.py` and `tray.py` — **behaviourally** unchanged, but both consume `server_url` from `__main__.py:345` (`peek.py:267`, `tray.py:47`), so they must be re-verified after the socket change rather than assumed untouched
 
 ## 9) Implementation Divergences from Plan
 <Reserved -- filled during implementation>
@@ -449,7 +640,9 @@ None.
 
 Five sub-agents: doc-impact scan, Architect (gap-critic lens), Security auditor, Reliability engineer, Senior engineer. Confidence: Architect 45%, Security 25%, Senior engineer 20-25% (on the 6-9 day estimate; realistic 9-13.5 days), Reliability 85% (own scope).
 
-**42 findings after dedup (11 High, 20 Medium, 11 Low). 0 auto-resolved — 6 blocking decisions gate the revision pass; the remainder are queued behind them because most touch Phase 3, whose shape depends on decision 1.**
+**42 findings after dedup (11 High, 20 Medium, 11 Low). All 42 applied in the 2026-07-31 revision** — every row below reading "Queued" was fixed in that pass; the six "Escalated" rows were resolved by user decision (1, 12) or planner call on an escalated finding (13, 14, 15, 16) and became D23-D25 and D31-D32. The table preserves the finding wording as reported so the trail from finding to fix stays auditable.
+
+**Three reviewer claims were checked and corrected rather than applied**, per the trust-but-verify rule: (a) the Architect's recycled-pid objection to D10 is wrong — pid exclusivity means a dead writer held the pid before the live process existed, so the `-5 s` lower bound still rejects it, verified against `presence.py:85-92`; (b) the Reliability reviewer's "~30 of 40 `_request` stubs" is **19** fixed-signature stubs (7 `boom`, 5 `fake_request`, 5 `refused`, 2 multi-line) plus 4 tolerant `lambda *a, **k` patches — the guidance stands, the count did not; (c) the Senior engineer's "~153 tests re-decided" is **77 distinct test functions**, with ~153 being the collected count inflated by one 15×4 parametrisation.
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
