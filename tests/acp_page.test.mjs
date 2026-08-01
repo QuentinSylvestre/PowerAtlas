@@ -1,7 +1,14 @@
-// Behavioural coverage for src/power_atlas/templates/acp.html.
+// Behavioural coverage for the browser-side code this repo has no other way to
+// test: src/power_atlas/templates/acp.html, the remote-access panel in
+// templates/index.html, and the two rules in static/style.css that decide what
+// the /acp topbar shows whom.
 //
 //   node tests/acp_page.test.mjs                    # the committed template
 //   node tests/acp_page.test.mjs <path-to-acp.html> # any other copy of it
+//
+// The argument overrides acp.html only. The panel and stylesheet checks read
+// their committed paths, because what they measure is a mutation of the
+// committed file and pointing them elsewhere would measure nothing.
 //
 // Exits 0 when every check passes, 1 otherwise. No dependencies: Node's own
 // `vm` plus the DOM stand-in below, so it runs anywhere `node` does and needs
@@ -17,9 +24,16 @@
 //
 // The template is rendered here rather than read raw: the script under test is
 // the *rendered* one, and `ACP_SID` in particular only differs from `sessionId`
-// after Jinja has substituted it. `render()` handles the subset of Jinja this
-// template uses and refuses anything left unrendered, so a new construct fails
-// loudly instead of reaching the page as literal `{{ ... }}`.
+// after Jinja has substituted it. `render()` implements exactly four things —
+// `{# … #}`, `{% if <name> %}` / `{% else %}` / `{% endif %}` over a boolean
+// context key, `{{ name }}` and `{{ name|tojson }}` — strips four content-free
+// tags by name (`extends`, `block`, `endblock`, `include`), and **throws on
+// everything else**, including every conditional it cannot evaluate.
+//
+// That last clause was untrue until the Phase 5b review measured it: the tag
+// sweep was a blanket `replace(/\{%[^%]*%\}/g, "")`, so an `{% elif %}` or a
+// condition that was not a bare identifier was deleted in silence. The three
+// measured misrenders are pinned as checks below rather than described here.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -48,6 +62,22 @@ function render(src, ctx) {
   // Non-nested and boolean-only: the only conditional on this page tests one
   // context flag. A nested one would need a real parser, so it fails loudly
   // below rather than being half-handled here.
+  //
+  // `{% elif %}` is refused *before* IF_RE runs, and the ordering is the point.
+  // IF_RE matches an `{% if %}` with a bare-identifier condition and stops at
+  // the first `{% endif %}`, so a three-arm conditional matches it and then
+  // renders wrongly: splitting the body on `{% else %}` buries the elif arm
+  // inside arm one, and a falsy condition renders the else arm where Jinja
+  // renders the elif's. Measured against the previous version of this file,
+  // `{% if local %}L{% elif other %}E{% else %}R{% endif %}` with
+  // `local=false, other=true` produced "R" and threw nothing — one plausible
+  // wrong arm, silently, which is strictly worse than the blanket strip it
+  // replaced. That produced an obviously wrong "LER".
+  if (/\{%-?\s*elif\b/.test(out)) {
+    throw new Error(
+      "{% elif %} in the template; render() implements if/else/endif only and " +
+      "would render the wrong arm rather than fail");
+  }
   const IF_RE = /\{%\s*if\s+(\w+)\s*%\}([\s\S]*?)\{%\s*endif\s*%\}/g;
   out = out.replace(IF_RE, (_m, name, body) => {
     if (!(name in ctx)) throw new Error(`template branches on an unknown variable: ${name}`);
@@ -59,9 +89,31 @@ function render(src, ctx) {
     if (parts.length > 2) throw new Error("more than one {% else %} in one {% if %}");
     return ctx[name] ? parts[0] : (parts[1] ?? "");
   });
-  // `{% extends %}` / `{% block %}` carry no content this page's script reads;
-  // the block body is the whole file.
-  out = out.replace(/\{%[^%]*%\}/g, "");
+  // Anything conditional still standing did not match IF_RE, which accepts a
+  // bare identifier and nothing else. Under the blanket strip these fell
+  // through and left *both* arms in the output: measured,
+  // `{% if not local %}A{% else %}B{% endif %}` rendered "AB" and
+  // `{% if user.admin %}yes{% else %}no{% endif %}` rendered "yesno", neither
+  // throwing. A check written against either would pass over a template that
+  // had lost the arm it meant to assert.
+  const stray = out.match(/\{%-?\s*(?:if|else|endif)\b[^%]*%\}/);
+  if (stray) {
+    throw new Error(
+      `render() cannot evaluate ${stray[0]} — it implements {% if <name> %} ` +
+      "over a boolean context key and nothing else. Teach it the construct " +
+      "rather than letting both arms reach the page");
+  }
+  // `{% extends %}` / `{% block %}` / `{% include %}` carry no content this
+  // page's script reads; the block body is the whole file. An allowlist by
+  // name, so a tag nobody taught this renderer about survives to the refusal
+  // below instead of being deleted on the way past.
+  out = out.replace(/\{%-?\s*(?:extends|block|endblock|include)\b[\s\S]*?%\}/g, "");
+  const unknownTag = out.match(/\{%[\s\S]*?%\}/);
+  if (unknownTag) {
+    throw new Error(
+      `render() does not implement ${unknownTag[0]}; teach it the tag rather ` +
+      "than letting the page run against a template it silently rewrote");
+  }
   const lookup = (name) => {
     if (!(name in ctx)) throw new Error(`template reads an unknown variable: ${name}`);
     return ctx[name];
@@ -69,7 +121,12 @@ function render(src, ctx) {
   out = out.replace(/\{\{\s*(\w+)\s*\|\s*tojson\s*\}\}/g,
                     (_m, name) => JSON.stringify(lookup(name)));
   out = out.replace(/\{\{\s*(\w+)\s*\}\}/g, (_m, name) => String(lookup(name)));
-  const leftover = out.match(/\{\{[^}]*\}\}|\{%[^%]*%\}/);
+  // `{{ … }}` only. This check used to carry a `|\{%[^%]*%\}` alternative that
+  // could never fire: the tag sweep above it ran first and deleted every `{% %}`
+  // in the file, so the match had nothing left to find. Unknown tags are
+  // refused by `unknownTag` above instead, which runs while they are still
+  // there to be seen.
+  const leftover = out.match(/\{\{[^}]*\}\}/);
   if (leftover) {
     throw new Error(
       `unrendered Jinja left in the page: ${leftover[0]} — teach render() ` +
@@ -152,6 +209,22 @@ class El {
     this.childNodes.push(child);
     return child;
   }
+  // `markRestartInputs` takes a badge back off when the server stops reporting
+  // the key, and a harness with no removal could not tell that from a badge
+  // that was never added.
+  remove() {
+    if (!this.parentNode) return;
+    const kin = this.parentNode.childNodes;
+    const at = kin.indexOf(this);
+    if (at >= 0) kin.splice(at, 1);
+    this.parentNode = null;
+    if (ACTIVE === this) ACTIVE = null;
+  }
+  // The remote panel's Copy button selects the field first and unconditionally,
+  // because that is its fallback when the clipboard API is unavailable — which
+  // it is over plain http off localhost, i.e. on the remote surface the panel
+  // exists to configure. Recorded rather than ignored so a check can see it.
+  select() { this.selected = true; ACTIVE = this; }
   focus() { ACTIVE = this; }
   addEventListener(type, fn) {
     (this._listeners[type] = this._listeners[type] || []).push(fn);
@@ -1422,13 +1495,409 @@ check("a re-render puts keyboard focus back where the user left it", async (tpl)
          "as far as the keyboard is concerned");
 });
 
+// ----------------------------------------------- render(), as its own subject --
+//
+// Everything above renders one template and asserts on the page. These three
+// assert on the renderer, because the Phase 5b review measured it silently
+// producing a *wrong* page: the strip-all it used for anything IF_RE could not
+// match deleted the construct and kept every arm of it. Each case below is
+// quoted with what the previous version of this file actually returned for it.
+
+function assertThrows(fn, pattern, message) {
+  let threw = null;
+  try {
+    fn();
+  } catch (err) {
+    threw = err;
+  }
+  if (!threw) throw new Error(`${message}: it returned instead of throwing`);
+  if (!pattern.test(String(threw.message))) {
+    throw new Error(`${message}: threw the wrong thing — ${threw.message}`);
+  }
+}
+
+check("render() refuses an {% elif %} rather than rendering the wrong arm", () => {
+  const tpl = "{% if local %}L{% elif other %}E{% else %}R{% endif %}";
+  // Measured against the previous version of this renderer: `"R"`, where Jinja
+  // renders `"E"`. One plausible wrong arm, silently — and the entire
+  // justification for teaching this harness `{% if %}` was that a silent strip
+  // is dangerous. Under the strip-all it replaced, the same template produced
+  // `"LER"`, which is wrong in a way nobody could miss.
+  assertThrows(() => render(tpl, { local: false, other: true }), /elif/,
+               "an {% elif %} rendered instead of throwing");
+  // Both settings of the condition: a renderer that happened to keep arm one
+  // would look right for `local = true` and be wrong for the case that matters.
+  assertThrows(() => render(tpl, { local: true, other: true }), /elif/,
+               "an {% elif %} rendered instead of throwing");
+});
+
+check("render() refuses a condition it cannot evaluate rather than keeping both arms", () => {
+  // Measured against the previous version: `"AB"` and `"yesno"` — every arm
+  // concatenated, no throw. A check asserting either arm would have passed
+  // against a template that had lost the other, which is the exact failure the
+  // `{% if %}` branch was added to prevent.
+  assertThrows(() => render("{% if not local %}A{% else %}B{% endif %}", { local: true }),
+               /cannot evaluate/, "a negated condition fell through to the strip");
+  assertThrows(() => render("{% if user.admin %}yes{% else %}no{% endif %}", { user: {} }),
+               /cannot evaluate/, "an attribute condition fell through to the strip");
+  assertThrows(() => render("{% if a == b %}x{% endif %}", { a: 1, b: 1 }),
+               /cannot evaluate/, "a comparison fell through to the strip");
+  // The positive control. Without it every assertion above is satisfied by a
+  // render() that throws on all input.
+  assertEqual(render("{% if local %}A{% else %}B{% endif %}", { local: false }), "B",
+              "the one conditional shape render() implements stopped working");
+});
+
+check("render() refuses a tag nobody taught it instead of deleting it", () => {
+  // The old sweep was `replace(/\{%[^%]*%\}/g, "")`, so a `{% for %}` vanished
+  // and its body reached the page once, unlooped. The leftover check that was
+  // supposed to catch this could not: it ran *after* the strip, so by the time
+  // it looked there was no `{% %}` left in the string to find, and its
+  // `|\{%[^%]*%\}` alternative was unreachable code.
+  assertThrows(() => render("{% for row in rows %}x{% endfor %}", { rows: [] }),
+               /does not implement/, "an unknown tag was deleted in silence");
+  assertThrows(() => render("{% set x = 1 %}", {}),
+               /does not implement/, "an unknown tag was deleted in silence");
+  // The four stripped by name still are — this is what the allowlist replaced,
+  // not removed.
+  assertEqual(render('{% extends "base.html" %}{% block c %}hi{% endblock %}', {}), "hi",
+              "the tags render() strips by name stopped being stripped");
+});
+
+// ------------------------------------------------ the settings panel (D22, D24) --
+//
+// `index.html`'s remote-access panel: ~220 lines of createElement JS that had no
+// test anywhere. A grep across `tests/` for `renderRemoteAccess`,
+// `markRestartInputs`, `_RESTART_KEY_LABELS`, `remoteAccessBody`,
+// `rotateRemoteSecret` or `restart-badge` returned nothing, and the Phase 5b
+// review proved it rather than inferring it: deleting the D24 rotation warning
+// outright left 42/42 node checks and 1371 pytest green. Three exit criteria
+// rest on this code — the copyable URL and secret, the restart-to-apply labels,
+// and the rotation warning.
+//
+// Covered from here rather than from `tests/test_web.py`, deliberately. What the
+// criteria are about is what the JS *builds*: which node carries the URL,
+// whether the field can be selected by hand, whether a key the server reports
+// and this file does not label still gets a row, whether the warning precedes
+// the button it warns about. Python can asserta string literal appears in the
+// rendered template, which pins the text of a line and not what it does — and
+// the mutation that survived was invisible to a substring check for the plainest
+// possible reason: the substring went with it.
+//
+// Only the panel's own region runs. `index.html`'s other scripts touch dashboard
+// DOM that does not exist here and would throw at load, and the file as a whole
+// cannot go through `render()` — it carries `{{ }}` expressions with filters and
+// attribute access that `render()` refuses by design.
+
+const INDEX_TEMPLATE = path.join(
+  HERE, "..", "src", "power_atlas", "templates", "index.html");
+const STYLESHEET = path.join(
+  HERE, "..", "src", "power_atlas", "static", "style.css");
+
+const PANEL_NAMES = [
+  "_remoteField", "_remoteNote", "renderRemoteAccess", "rotateRemoteSecret",
+  "loadRemoteAccess", "_RESTART_KEY_LABELS", "renderRestartKeys",
+  "markRestartInputs", "loadRestartKeys", "openRemoteModal",
+];
+
+function panelSource() {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  // Anchored on the panel's first function and the end of the <script> element
+  // holding it — both code. Anchoring on the section comment above them would
+  // let a comment rewrite silently shrink what is under test, which is the
+  // defect the phase before this one found in two of its own checks.
+  const from = src.indexOf("function _remoteField(");
+  if (from < 0) throw new Error("index.html no longer defines _remoteField");
+  const to = src.indexOf("</script>", from);
+  if (to < 0) throw new Error("the remote panel's <script> element is unterminated");
+  const region = src.slice(from, to);
+  for (const name of PANEL_NAMES) {
+    if (!region.includes(name)) {
+      throw new Error(
+        `the extracted region does not contain ${name}; the panel has moved and ` +
+        "this harness is measuring less of it than it claims to");
+    }
+  }
+  return region;
+}
+
+function loadPanel(opts = {}) {
+  const body = new El("div");         // #remoteAccessBody
+  const restartBody = new El("div");  // #remoteRestartBody
+  const modal = new El("dialog");
+  modal.showModal = () => { modal.open = true; };
+  const byId = new Map([
+    ["remoteAccessBody", body],
+    ["remoteRestartBody", restartBody],
+    ["remoteModal", modal],
+  ]);
+  // The two live controls in the dashboard topbar that `markRestartInputs`
+  // reaches for by class. Present here because their absence is a passing
+  // state in that function (`if (!host) return`), so a harness without them
+  // would run the badge code and assert on nothing.
+  const hosts = new Map([
+    [".peek-hotkey-group", new El("div")],
+    [".port-group", new El("div")],
+  ]);
+  ACTIVE = null;
+
+  const toasts = [];
+  const fetches = [];
+  const confirms = [];
+  const clipboard = [];
+  const timers = [];
+  const domReady = [];
+
+  function fakeFetch(target, init) {
+    const url = String(target);
+    fetches.push({ url, init: init || {} });
+    const answer = opts.answer ? opts.answer(url) : undefined;
+    if (answer && answer.reject) return Promise.reject(new Error(answer.reject));
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(answer && "body" in answer ? answer.body : {}),
+    });
+  }
+
+  const sandbox = {
+    document: {
+      createElement: (tag) => new El(tag),
+      getElementById: (id) => byId.get(id) ?? null,
+      querySelector: (sel) => hosts.get(sel) ?? null,
+      addEventListener: (type, fn) => {
+        if (type === "DOMContentLoaded") domReady.push(fn);
+      },
+      write: () => HTML_SINK("document.write"),
+    },
+    // Absent in a browser off localhost over plain http, which is the surface
+    // this panel configures — so `opts.clipboard === false` is not a hypothetical.
+    navigator: opts.clipboard === false ? {} : {
+      clipboard: {
+        writeText: (text) => { clipboard.push(text); return Promise.resolve(); },
+      },
+    },
+    confirm: (text) => { confirms.push(text); return opts.confirm !== false; },
+    // Helpers the panel uses from an earlier <script> block in the same page.
+    showToast: (html) => toasts.push(html),
+    _escHtml: (s) => String(s).replace(/&/g, "&amp;")
+                              .replace(/</g, "&lt;").replace(/>/g, "&gt;"),
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    fetch: fakeFetch,
+    console: { log() {}, warn() {}, error() {} },
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(panelSource(), sandbox, { filename: "index.html#remote-panel" });
+
+  return {
+    sandbox, body, restartBody, modal, hosts,
+    toasts, fetches, confirms, clipboard, timers, domReady,
+    fields() { return body.querySelectorAll(".remote-field"); },
+    rows() { return restartBody.querySelectorAll(".remote-restart-row"); },
+    badge(sel) { return hosts.get(sel).querySelector(".restart-badge"); },
+    settle() { return new Promise((resolve) => setImmediate(resolve)); },
+  };
+}
+
+check("the panel renders the URL and the secret as copyable text", async () => {
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess({
+    enabled: true,
+    url: "http://100.90.1.5:4915/acp",
+    secret_present: true,
+    secret: "9f3c-secret-value",
+    secret_path: "C:\\Users\\me\\AppData\\Local\\power-atlas\\remote-secret",
+  });
+  const fields = p.fields();
+  assertEqual(fields.length, 2,
+              "the panel drew neither the URL nor the secret as a field");
+  const boxOf = (f) => f.querySelector(".remote-field-value");
+  assertEqual(boxOf(fields[0]).value, "http://100.90.1.5:4915/acp",
+              "the first field does not hold the URL to open on the device");
+  assertEqual(boxOf(fields[1]).value, "9f3c-secret-value",
+              "the second field does not hold the device secret");
+  for (const f of fields) {
+    // Read-only rather than disabled, and the distinction is the criterion: a
+    // disabled input cannot be selected, so its text cannot be copied by hand,
+    // and copying by hand is the guarantee here. The button is convenience.
+    assertEqual(boxOf(f).readOnly, true, "the field is editable");
+    assertEqual(boxOf(f).disabled, false,
+                "the field is disabled, so its text cannot be selected by hand");
+  }
+  const copy = fields[1].querySelector(".remote-copy");
+  assert(copy, "the secret has no Copy button");
+  copy.onclick();
+  assertEqual(boxOf(fields[1]).selected, true,
+              "Copy did not select the field, which is its only fallback where " +
+              "the clipboard API is unavailable — i.e. on the remote surface");
+  await p.settle();
+  assertEqual(p.clipboard.join("|"), "9f3c-secret-value",
+              "Copy put something other than the secret on the clipboard");
+  assertEqual(copy.textContent, "Copied", "the button gave no feedback");
+});
+
+check("the panel copies by selection where there is no clipboard API", async () => {
+  // Plain http off localhost is not a secure context, so `navigator.clipboard`
+  // is undefined there — on exactly the devices this panel exists to enrol.
+  const p = loadPanel({ clipboard: false });
+  p.sandbox.renderRemoteAccess({
+    enabled: true, url: "http://100.90.1.5:4915/acp",
+    secret_present: true, secret: "s", secret_path: "p",
+  });
+  const copy = p.fields()[0].querySelector(".remote-copy");
+  copy.onclick();
+  await p.settle();
+  assertEqual(p.fields()[0].querySelector(".remote-field-value").selected, true,
+              "nothing was selected, so there is no way to copy the URL at all");
+  assertEqual(copy.textContent, "Copied",
+              "the button gave no feedback where the clipboard API is absent");
+});
+
+check("the panel shows no secret it does not have, and no form when remote is off", () => {
+  const absent = loadPanel();
+  absent.sandbox.renderRemoteAccess({
+    enabled: true, url: "http://x/acp", secret_present: false });
+  assertEqual(absent.fields().length, 1,
+              "a secret field was drawn for a secret that does not exist");
+  assert(!absent.body.textContent.includes("undefined"),
+         "the panel rendered `undefined` where the absent secret would go");
+  assertEqual(
+    absent.body.querySelectorAll(".remote-note-warn")
+          .filter((n) => /no device secret exists/i.test(n.textContent)).length, 1,
+    "nothing says that no device can authenticate yet");
+
+  const off = loadPanel();
+  off.sandbox.renderRemoteAccess({ enabled: false });
+  assertEqual(off.fields().length, 0,
+              "a field was drawn for a surface that is not listening");
+  assertEqual(off.body.querySelectorAll(".remote-rotate").length, 0,
+              "a rotate button was drawn for a surface that is not listening");
+  const note = off.body.querySelectorAll(".remote-note-off");
+  assertEqual(note.length, 1, "nothing says remote access is off");
+  assert(/loopback/i.test(note[0].textContent),
+         `the off note does not say what the server is doing instead: ${note[0].textContent}`);
+});
+
+check("the rotation warning names every device, above the button that revokes them", () => {
+  // The exact code the Phase 5b review deleted to prove this file untested. It
+  // removed the four lines below `// D24 gave up per-device revocation` and both
+  // suites stayed green.
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess({
+    enabled: true, url: "u", secret_present: true, secret: "s", secret_path: "p" });
+  const warnings = p.body.querySelectorAll(".remote-note-warn")
+                    .filter((n) => /revocation/i.test(n.textContent));
+  assertEqual(warnings.length, 1,
+              "no warning tells the user that rotating signs out every device");
+  const text = warnings[0].textContent;
+  assert(/\bEVERY\b|\bevery\b|\ball\b/.test(text) && /device/i.test(text),
+         `the warning does not say which devices are revoked: ${text}`);
+  assert(/no per-device revocation/i.test(text),
+         `the warning does not say revocation is all-or-nothing: ${text}`);
+  // Order, not merely presence. D24 gave up per-device revocation knowingly, so
+  // the consequence has to be on screen *before* the control — not discovered
+  // afterwards by a second device that stopped working.
+  const button = p.body.querySelector(".remote-rotate");
+  assert(button, "there is no rotate button");
+  assert(p.body.childNodes.indexOf(warnings[0]) < p.body.childNodes.indexOf(button),
+         "the warning sits below the button that triggers what it warns about");
+
+  // And again at the point of no return, which is a separate gate on a separate
+  // code path: a user who scrolled past the note still has to be told.
+  p.sandbox.rotateRemoteSecret();
+  assertEqual(p.confirms.length, 1, "rotation asked nothing before rotating");
+  assert(/every authorized device/i.test(p.confirms[0]),
+         `the confirm does not name the consequence: ${p.confirms[0]}`);
+  assertEqual(p.fetches.length, 1, "the confirmed rotation sent no request");
+  assertEqual(p.fetches[0].url, "/api/remote-access/rotate",
+              "rotation posted somewhere other than the rotate endpoint");
+
+  // A refused confirm must rotate nothing — the warning is a gate, not a notice.
+  const declined = loadPanel({ confirm: false });
+  declined.sandbox.rotateRemoteSecret();
+  assertEqual(declined.fetches.length, 0,
+              "declining the confirm rotated the secret anyway");
+});
+
+check("every key the server reports as restart-only gets a row and a badge", () => {
+  const p = loadPanel();
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey", "acp_max_sessions", "brand_new_key"],
+    port: 4915,
+    peek_hotkey: "ctrl+alt+p",
+    acp_max_sessions: 3,
+    brand_new_key: "",
+  });
+  const rows = p.rows();
+  assertEqual(rows.length, 4,
+              "the panel dropped a key the server reported, which is the one " +
+              "thing this panel exists to report");
+  const named = rows.map((r) => r.querySelector(".remote-restart-key").textContent);
+  assertEqual(named[0], "Server port", "a labelled key lost its label");
+  // The unlabelled key falls back to its raw name rather than being skipped. A
+  // key added server-side and not labelled here must still appear, or the panel
+  // silently under-reports exactly the list it exists to report — which is the
+  // same lie, told from the other side, that Phase 3 fixed in the API.
+  assertEqual(named[3], "brand_new_key",
+              "a key the server reports and this file does not label was dropped");
+  const values = rows.map((r) => r.querySelector(".remote-restart-value").textContent);
+  assertEqual(values[0], "4915", "the value in force is not shown beside the key");
+  assertEqual(values[1], "ctrl+alt+p", "the value in force is not shown beside the key");
+  assertEqual(values[3], "\u2014",
+              "an empty value rendered as nothing rather than as a dash");
+
+  // The two keys with a live control in the topbar get the badge on the control
+  // itself. Without it the hotkey field accepts a new value, saves it, and
+  // behaves as though nothing happened until the next launch.
+  for (const sel of [".peek-hotkey-group", ".port-group"]) {
+    const badge = p.badge(sel);
+    assert(badge, `${sel} carries no restart badge`);
+    assertEqual(badge.textContent, "restart", `${sel}'s badge says nothing`);
+    assert(/next launch/i.test(String(badge.title)),
+           `${sel}'s badge does not say when the value takes effect: ${badge.title}`);
+  }
+  // And it comes back off when the server stops reporting the key. A badge that
+  // only ever accretes is the same lie in the other direction.
+  p.sandbox.renderRestartKeys({ restart_to_apply: ["port"], port: 4915 });
+  assertEqual(p.badge(".peek-hotkey-group"), null,
+              "the badge outlived the server's report of the key");
+  assert(p.badge(".port-group"), "the still-reported key lost its badge");
+});
+
+check("the dashboard link is hidden from the remote viewer, not from a narrow window", () => {
+  // CSS is the code here, so this reads the sheet rather than the page: there
+  // is no layout engine in this harness and a check on the template alone
+  // cannot see a rule that hides what the template rendered.
+  const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const hidden = [];
+  // Selector lists are the text between a `}` and the `{` of a block whose body
+  // has no nested block, which is every rule including those inside `@media`.
+  for (const m of css.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    if (!/display\s*:\s*none/.test(m[2])) continue;
+    for (const sel of m[1].split(",")) hidden.push(sel.trim().replace(/\s+/g, " "));
+  }
+  assert(!hidden.includes(".acp-back"),
+         "`.acp-back` is hidden outright, and *both* arms of the template carry " +
+         "that class — so a loopback viewer who merely narrowed a desktop window " +
+         "below 768 px loses the only link back to the dashboard. The width is " +
+         "not the viewer; `local` is, and the template already computes it");
+  // The positive control. Without it this check also passes against a sheet
+  // that hides nothing at all — a different regression, in which the remote
+  // arm's plain-text span keeps the space the 390 px topbar reclaimed from it.
+  assert(hidden.includes(".acp-back-local-only"),
+         "nothing hides the remote arm at narrow widths, so the tightest row on " +
+         "the page keeps a control that resolves to nothing for that viewer");
+});
+
 // -------------------------------------------------------------------- main --
 
 const template = process.argv[2]
   ? path.resolve(process.argv[2])
   : DEFAULT_TEMPLATE;
 
-console.log(`acp.html behavioural harness — ${template}\n`);
+console.log(`browser-side behavioural harness — ${template}\n`);
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

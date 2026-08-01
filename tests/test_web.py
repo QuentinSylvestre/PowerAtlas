@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime as dt
+import errno
 import json
 import logging
 import os
@@ -12197,21 +12198,26 @@ class TestAcpListingEndpoint:
         network drive raising `OSError` must not badge a live workspace as
         gone: a false "folder missing" tells the user to stop trusting rows
         that are fine, which is the more expensive of the two errors. The
-        opposite reading is merely the behaviour that shipped before."""
+        opposite reading is merely the behaviour that shipped before.
+
+        Patches `os.stat` rather than `Path.exists` since Phase 5b's review:
+        the function under test no longer goes through `Path.exists`, and
+        patching the method it stopped calling would have left this test
+        passing while measuring nothing."""
         from power_atlas import web as web_mod
 
         target = "C:\\dev\\unreadable"
-        real = web_mod.Path.exists
+        real = web_mod.os.stat
 
-        def _boom(self):
+        def _boom(path, *args, **kwargs):
             # Only the workspace under test. `load_config` stats its own path
-            # through the same class, and raising for everything would fail this
-            # test somewhere that has nothing to do with what it measures.
-            if str(self) == target:
+            # through the same function, and raising for everything would fail
+            # this test somewhere that has nothing to do with what it measures.
+            if path == target:
                 raise OSError(1314, "A required privilege is not held by the client")
-            return real(self)
+            return real(path, *args, **kwargs)
 
-        monkeypatch.setattr(web_mod.Path, "exists", _boom)
+        monkeypatch.setattr(web_mod.os, "stat", _boom)
         acp_listing_store["add"](target, [_acp_row("s1")])
         assert client.get(self._PATH).json()["groups"][0]["exists"] is True
 
@@ -12243,3 +12249,145 @@ class TestAcpListingEndpoint:
         assert body == {"groups": [], "group_page": 1, "group_total": 0,
                         "has_more": False}
         assert acp_listing_store["lock_calls"] == []
+
+
+class TestWorkspaceExistsDiscriminatesAbsenceFromSilence:
+    """Phase 5b review. `_acp_cwd_exists`'s docstring promised that "a
+    permission error or an unmounted network drive must not badge a live
+    workspace as gone", and for the network half the implementation delivered
+    the opposite: `Path.exists()` **swallows** every `OSError` on pathlib's own
+    ignore list and returns `False` without raising, so the `except OSError:
+    return True` beneath it was never reached for them.
+
+    The test that guarded it could not see this, because it monkeypatched
+    `Path.exists` to raise — which proves the handler works *if reached*, not
+    that the real call reaches it. Everything below either calls the real
+    syscall or drives the classifier directly.
+    """
+
+    # A UNC host chosen not to resolve. `os.stat` on it raises ERROR_BAD_NETPATH
+    # rather than answering, which is the whole case under test.
+    UNREACHABLE = r"\\pa-no-such-host-9f3c\share\proj"
+
+    def test_a_real_unreachable_network_path_is_not_reported_as_vanished(self):
+        """The review's own case, driven through a real syscall.
+
+        Skips rather than passes when the environment does not produce the
+        error, because a DNS wildcard or a captive resolver can make this name
+        resolve — and a test that quietly measured nothing on those machines is
+        the exact defect this class exists to correct.
+
+        Costs one cold negative-cache miss, measured at 2.6 s on this machine
+        and 0.00 s on every run after; the same probe against a *routable* dead
+        host took 42 s, which is why `_ACP_EXISTS_BUDGET_SECONDS` exists.
+        """
+        from power_atlas.web import _acp_cwd_exists
+
+        try:
+            os.stat(self.UNREACHABLE)
+        except OSError as exc:
+            observed = exc
+        else:
+            pytest.skip(f"{self.UNREACHABLE} resolved here; no unreachable path "
+                        "to test against")
+        if os.name == "nt" and getattr(observed, "winerror", None) is None:
+            pytest.skip(f"unexpected error shape: {observed!r}")
+
+        # The discriminating half. `Path.exists()` is what the shipped code
+        # delegated to, and it answers `False` for this path without raising —
+        # so asserting only the line below would pass against the old
+        # implementation too.
+        assert Path(self.UNREACHABLE).exists() is False
+        assert _acp_cwd_exists(self.UNREACHABLE) is True
+
+    def test_a_real_absent_directory_is_still_reported_gone(self, tmp_path):
+        """The positive control, also a real syscall. Without it every
+        assertion above is satisfied by a function that returns `True`."""
+        from power_atlas.web import _acp_cwd_exists
+
+        assert _acp_cwd_exists(str(tmp_path)) is True
+        assert _acp_cwd_exists(str(tmp_path / "never-created")) is False
+
+    @pytest.mark.parametrize("winerror,absent", [
+        (2, True),      # ERROR_FILE_NOT_FOUND
+        (3, True),      # ERROR_PATH_NOT_FOUND — an unmapped drive letter
+        (123, True),    # ERROR_INVALID_NAME — a name that can never resolve
+        (21, False),    # ERROR_NOT_READY — the drive is there and did not answer
+        (53, False),    # ERROR_BAD_NETPATH — the measured unreachable-UNC code
+        (67, False),    # ERROR_BAD_NET_NAME
+        (121, False),   # ERROR_SEM_TIMEOUT
+        (1231, False),  # ERROR_NETWORK_UNREACHABLE
+        (1326, False),  # ERROR_LOGON_FAILURE — an expired mapped-share credential
+        (1921, False),  # ERROR_CANT_RESOLVE_FILENAME
+        (1314, False),  # ERROR_PRIVILEGE_NOT_HELD
+        (9999, False),  # unanticipated: unknown fails open, never to "gone"
+    ])
+    def test_winerror_is_read_before_errno(self, winerror, absent):
+        """Every one of these carries `errno` 2 — `ENOENT` — because that is
+        what Windows gives them, and `ERROR_BAD_NETPATH` really does arrive
+        that way (measured 2026-08-01). A classifier that read `errno` first
+        would call all twelve absent, so the parametrisation discriminates the
+        ordering and not merely the membership of the two sets."""
+        from power_atlas.web import _acp_stat_says_absent
+
+        exc = OSError(errno.ENOENT, "measured shape")
+        exc.winerror = winerror
+        assert _acp_stat_says_absent(exc) is absent
+
+    @pytest.mark.parametrize("code,absent", [
+        (errno.ENOENT, True),
+        (errno.ENOTDIR, True),
+        (errno.EACCES, False),
+        (errno.ETIMEDOUT, False),
+        (errno.EIO, False),
+    ])
+    def test_errno_decides_where_there_is_no_winerror(self, code, absent):
+        """The POSIX arm: `winerror` is absent and `errno` is all there is."""
+        from power_atlas.web import _acp_stat_says_absent
+
+        assert _acp_stat_says_absent(OSError(code, "posix shape")) is absent
+
+
+class TestWorkspaceStatIsBoundedPerRequest:
+    """Phase 5b review, Low. One blocking `stat` per returned group, serialized
+    inside a single worker, up to the clamp of 20. The event loop is correctly
+    not blocked; the *response* is. Measured 2026-08-01: `os.stat` on a
+    routable-but-dead UNC host took 42.2 s to return, so the unbounded version
+    could hold one request for over ten minutes."""
+
+    def test_the_budget_stops_the_walk_but_never_before_the_first(self,
+                                                                 monkeypatch):
+        from power_atlas import web as web_mod
+
+        seen = []
+
+        def _slow(cwd):
+            seen.append(cwd)
+            time.sleep(0.02)
+            return False
+
+        monkeypatch.setattr(web_mod, "_acp_cwd_exists", _slow)
+        monkeypatch.setattr(web_mod, "_ACP_EXISTS_BUDGET_SECONDS", 0.05)
+        flags = web_mod._acp_exists_flags([f"C:\\ws-{i}" for i in range(20)])
+
+        assert len(flags) == 20, "every group must still get an answer"
+        assert 1 <= len(seen) < 20, (
+            f"the budget neither fired nor spared the first call: {len(seen)} "
+            "of 20 were stat'ed")
+        # Everything actually stat'ed reported gone; everything past the
+        # deadline reports present, because not having looked is not evidence
+        # of absence.
+        assert flags[:len(seen)] == [False] * len(seen)
+        assert flags[len(seen):] == [True] * (20 - len(seen))
+
+    def test_a_single_group_is_answered_from_disk_and_not_from_the_budget(
+            self, monkeypatch):
+        """A zero budget must not turn a one-group page into a fabricated
+        `True`: the deadline is set from `time.monotonic()` one line above the
+        first check, so the first entry always runs."""
+        from power_atlas import web as web_mod
+
+        monkeypatch.setattr(web_mod, "_ACP_EXISTS_BUDGET_SECONDS", 0.0)
+        monkeypatch.setattr(web_mod, "_acp_cwd_exists", lambda cwd: False)
+        assert web_mod._acp_exists_flags(["C:\\only"]) == [False]
+        assert web_mod._acp_exists_flags(["C:\\a", "C:\\b"]) == [False, True]

@@ -567,9 +567,19 @@ body:has(> .acp-shell) { height: 100dvh; }
    panes are on screen and a button that moves between them would move nothing. */
 .acp-viewtoggle { flex-shrink: 0; }
 /* Reclaimed for the toggle at 390 px, where the topbar is the tightest row on
-   the page. The dashboard link is the honest thing to drop: `/` is loopback-only
-   (SC-4), so on the device this width is for it does not resolve at all. */
-.acp-back, .acp-title { display: none; }
+   the page. Keyed on **which arm the template rendered, not on viewport
+   width** — the previous rule named `.acp-back`, which both arms carry, and
+   the justification it gave ("`/` is loopback-only (SC-4), so on the device
+   this width is for it does not resolve at all") is a statement about the
+   *viewer*, which a media query cannot observe. A loopback viewer who merely
+   narrowed a desktop window below 768 px lost the only link back to the
+   dashboard, for a constraint that is the phone's.
+
+   `.acp-back-local-only` is the remote arm: a <span> of plain text whose only
+   job is to name the product, so dropping it costs nothing. The loopback arm
+   is an <a href="/"> and is navigation, so it stays at every width. The title
+   is decoration on either arm and stays droppable. */
+.acp-back-local-only, .acp-title { display: none; }
 .acp-back-local-only { color: var(--text-dim); }
 
 .acp-rail { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
@@ -619,7 +629,9 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-shell[data-view="rail"] > .acp-page { display: flex; }
   .acp-shell[data-view="chat"] > .acp-rail { display: flex; }
   .acp-viewtoggle { display: none; }
-  .acp-back { display: inline; }
+  /* Both arms are back above the breakpoint, including the remote one: there
+     is room for it, and naming the product is the only thing it was ever for. */
+  .acp-back-local-only { display: inline; }
   .acp-title { display: inline; }
   .acp-rail { flex: 0 0 288px; border-right: 1px solid var(--border); padding: 14px 12px 14px 16px; }
   .acp-page { padding: 14px 16px; }

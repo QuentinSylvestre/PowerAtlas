@@ -7,6 +7,7 @@ structurally cannot see. Its equivalent protections live in ``_ws_origin_ok``.
 """
 
 import asyncio
+import errno
 import hashlib
 import hmac
 import html as html_mod
@@ -1410,6 +1411,39 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
     return out
 
 
+# Error codes that mean **"there is nothing at that path"**. Everything not
+# named here — including everything Windows and POSIX have to say about a host
+# that did not answer — reads as *unknown*, and unknown fails open to present.
+#
+# Deliberately an allowlist of absence rather than a denylist of failure: a code
+# nobody anticipated is far likelier to be a new way of not reaching a share
+# than a new way of a directory being gone, and the cheap error is the one that
+# leaves a live workspace unbadged.
+_ACP_ABSENT_WINERRORS = frozenset({
+    2,    # ERROR_FILE_NOT_FOUND
+    3,    # ERROR_PATH_NOT_FOUND — an unmapped drive letter lands here
+    123,  # ERROR_INVALID_NAME — a name Windows will never resolve
+    267,  # ERROR_DIRECTORY
+})
+_ACP_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG})
+
+
+def _acp_stat_says_absent(exc: OSError) -> bool:
+    """Does this failed `stat` mean *gone*, or merely *unanswered*?
+
+    **`winerror` is read before `errno`, and that ordering is the whole point.**
+    Measured on this machine 2026-08-01, Python 3.13.13: `os.stat` on an
+    unreachable UNC path raises `ERROR_BAD_NETPATH` — `winerror=53` — carrying
+    `errno=2`, i.e. `ENOENT`. Reading `errno` first therefore calls a host that
+    did not answer "absent", which is exactly the misreading this function
+    exists to stop. On POSIX `winerror` is absent and `errno` decides alone.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _ACP_ABSENT_WINERRORS
+    return exc.errno in _ACP_ABSENT_ERRNOS
+
+
 def _acp_cwd_exists(cwd: str) -> bool:
     """Does the workspace directory still exist on disk?
 
@@ -1423,19 +1457,83 @@ def _acp_cwd_exists(cwd: str) -> bool:
 
     The field has to come from here because **a browser cannot stat a
     filesystem**; there is no client-side answer to substitute. Cost is one
-    `stat` per returned group — ~10-20 a page, not per row — and this function
-    body runs inside `asyncio.to_thread` with the rest of `_acp_listing`.
+    `stat` per returned group — ~10-20 a page, not per row — bounded in total by
+    `_acp_exists_flags`, and this function body runs inside `asyncio.to_thread`
+    with the rest of `_acp_listing`.
 
-    **Fails to `True`.** An unreadable path, a permission error or a
-    temporarily-unmounted network drive must not be reported as a vanished
-    workspace: a false "gone" badge tells the user to stop trusting rows that
-    are fine, which is the more expensive error of the two. The opposite
-    reading is merely today's behaviour.
+    **Fails to `True` on any failure that is not positively an absence.** A
+    permission error, an unmounted network drive or a host that did not answer
+    must not be reported as a vanished workspace: a false "gone" badge tells the
+    user to stop trusting rows that are fine, which is the more expensive error
+    of the two.
+
+    **`os.stat`, not `Path.exists()`, and the difference is the contract.**
+    `Path.exists()` swallows every `OSError` whose code is on pathlib's own
+    ignore list (`_IGNORED_ERRNOS` = ENOENT/ENOTDIR/EBADF/ELOOP,
+    `_IGNORED_WINERRORS` = NOT_READY/INVALID_NAME/CANT_RESOLVE_FILENAME) and
+    returns `False` without raising — so an `except OSError` wrapped around it
+    never sees them and the fail-open above was half a promise. Measured
+    2026-08-01: `os.stat(r"\\\\<unreachable-host>\\share\\proj")` raises
+    `winerror=53` with `errno=2`, and `Path(...).exists()` answers `False` for
+    the same path without raising at all. The unreachable network workspace the
+    paragraph above cites was therefore badged "folder missing" — the expensive
+    error — for exactly the reason the paragraph said it must not be.
+
+    **What stays indistinguishable.** An unmapped drive letter (`Q:\\proj`)
+    raises `ERROR_PATH_NOT_FOUND`, the same code a deleted local directory
+    raises, and is reported gone. Windows offers nothing to separate the two and
+    this function does not guess.
     """
     try:
-        return Path(cwd).exists()
-    except OSError:
-        return True
+        os.stat(cwd)
+    except OSError as exc:
+        return not _acp_stat_says_absent(exc)
+    except ValueError:
+        # A path the OS cannot be asked about at all — an embedded NUL. Nothing
+        # transient about it and no later `stat` will succeed, so it is absent
+        # rather than unknown.
+        return False
+    return True
+
+
+# Wall-clock ceiling on the `stat` phase of one listing response. Measured
+# 2026-08-01 on this machine: `os.stat` on a routable-but-dead UNC host
+# (`\\10.255.255.1\share\x`) took **42.2 s** to return `ERROR_BAD_NETPATH`, and
+# one on an unresolvable host took 2.6 s. The event loop is not blocked —
+# `_acp_listing` runs under `asyncio.to_thread` — but the *response* is, and at
+# `_ACP_MAX_GROUPS_PER_PAGE` = 20 the unbounded serial version could hold a
+# single request for over ten minutes.
+_ACP_EXISTS_BUDGET_SECONDS = 2.0
+
+
+def _acp_exists_flags(cwds: list[str]) -> list[bool]:
+    """`_acp_cwd_exists` for each cwd, under one budget for the whole request.
+
+    The deadline is checked **between** calls, never inside one: `os.stat` takes
+    no timeout and there is no interrupting it, so the achievable bound is *one*
+    stalled `stat` per request rather than up to twenty. That is the guarantee
+    made here and it is worth stating plainly — a caller reading "capped at 2 s"
+    would be reading a promise this cannot keep.
+
+    Every cwd past the deadline reports `True`, the same fail-open reading
+    `_acp_cwd_exists` gives an unanswered `stat`, and for the same reason: not
+    having looked is not evidence of absence.
+    """
+    out: list[bool] = []
+    deadline = time.monotonic() + _ACP_EXISTS_BUDGET_SECONDS
+    for index, cwd in enumerate(cwds):
+        # The first entry is unconditional, and the exemption is explicit rather
+        # than inferred from the clock. Reading `time.monotonic() >= deadline`
+        # for index 0 as well looks equivalent and is not: at a budget of zero
+        # it skips the only group on a single-workspace page and answers `True`
+        # without having looked, which is a fabricated reading rather than a
+        # deferred one. The first test written against this function caught
+        # exactly that.
+        if index and time.monotonic() >= deadline:
+            out.append(True)
+            continue
+        out.append(_acp_cwd_exists(cwd))
+    return out
 
 
 def _acp_listing(cwd: str, group_page: int, group_size: int,
@@ -1494,7 +1592,10 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
     rows: list[tuple[dict, list]] = []
     sids: list[str] = []
-    for ws_cwd, _count, _updated, _prov in page_groups:
+    # Hoisted out of the row loop so one budget covers the whole page rather
+    # than each group getting its own — see `_acp_exists_flags`.
+    exists_flags = _acp_exists_flags([w[0] for w in page_groups])
+    for index, (ws_cwd, _count, _updated, _prov) in enumerate(page_groups):
         try:
             sessions = data.get_sessions(ws_cwd, _ACP_LISTING_PROVIDER)
         except Exception:
@@ -1510,7 +1611,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             "total": total,
             "session_page": session_page,
             "has_more": s_start + session_size < total,
-            "exists": _acp_cwd_exists(ws_cwd),
+            "exists": exists_flags[index],
         }, page_sessions))
 
     # One call for the whole response, over exactly the ids the response
