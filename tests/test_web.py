@@ -26,9 +26,19 @@ def client():
     The base URL is loopback because ``_ALLOWED_HOSTS`` only admits real
     loopback names; TestClient's own default (``http://testserver``) is a
     single-label host an attacker can win on the local network, so it must not
-    be allowlisted just to make this suite pass.
+    be allowlisted just to make this suite pass. With the remote bind enabled
+    that set gains exactly one further name — the configured IP, taught to it
+    by ``web.set_remote_host`` at startup — and every hostile host below is
+    still refused, which ``TestRemoteBindDoesNotWidenTheHostAllowlist`` pins.
+
+    ``client=`` is loopback for the same reason and a separate one:
+    ``RemoteAccessGuard`` classifies a peer from ``scope["client"]``, and
+    TestClient's own default of ``("testclient", 50000)`` is unparseable as an
+    address, so it reads as **remote** and every route outside the remote
+    allowlist answers 403. A test that means "a request from this machine" has
+    to say so in the scope.
     """
-    c = TestClient(app, base_url="http://127.0.0.1")
+    c = TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
     # Patch the post method to add Origin by default
     _original_post = c.post
     def _post_with_origin(*args, **kwargs):
@@ -44,7 +54,11 @@ def client():
 def test_post_rejected_for_non_loopback_host():
     """DNS-rebinding defense: a POST arriving with a non-loopback Host is refused (403),
     even when the Origin matches the (attacker-controlled) Host."""
-    rebind_client = TestClient(app, base_url="http://evil.com")
+    # A loopback peer on purpose: this pins the *Host* guard, so the request
+    # must reach it rather than being refused earlier by `RemoteAccessGuard`
+    # for coming from a non-loopback address.
+    rebind_client = TestClient(app, base_url="http://evil.com",
+                               client=("127.0.0.1", 50000))
     resp = rebind_client.post(
         "/api/pin-folder",
         json={"folder": "C:\\projects\\myapp"},
@@ -1143,10 +1157,15 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     resp = client.get("/api/settings")
     assert resp.status_code == 200
     body = resp.json()
-    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart"}
+    expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
+                     "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
+                     "remote_bind_address", "restart_to_apply"}
     assert set(body.keys()) == expected_keys
     assert body["autostart"] is False
     assert "terminal_command" not in body
+    # The device secret is served by /api/remote-access alone: this payload is
+    # fetched broadly by the dashboard and a credential does not belong in it.
+    assert "secret" not in body
 
 
 @patch("power_atlas.web.autostart.is_enabled")
@@ -1200,8 +1219,12 @@ def test_api_settings_autostart_exception_returns_false(mock_load, mock_autostar
 
 @pytest.fixture
 def raw_client():
-    """TestClient WITHOUT default Origin header, for testing the guard itself."""
-    return TestClient(app, base_url="http://127.0.0.1")
+    """TestClient WITHOUT default Origin header, for testing the guard itself.
+
+    Loopback ``client=`` for the reason the ``client`` fixture spells out:
+    TestClient's default peer is unparseable and reads as remote.
+    """
+    return TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))
 
 
 class TestSameOriginGuard:
@@ -1970,8 +1993,10 @@ class TestAcpTransportFrameCap:
         assert config.ws_max_size == self._main().WS_MAX_SIZE_BYTES
 
     def test_every_server_config_carries_it(self):
-        """Two call sites: the configured port and the random-port fallback. A
-        busy port routes every launch through the second one."""
+        """One call site since the dual bind (D23): both listeners are handed
+        to a single ``Server`` via ``run(sockets=…)``, and the random-port
+        fallback now happens at ``_bind`` rather than by building a second
+        ``uvicorn.Config``. Two ``Server`` instances would run lifespan twice."""
         import ast
 
         source = Path(self._main().__file__).read_text(encoding="utf-8")
@@ -1979,7 +2004,7 @@ class TestAcpTransportFrameCap:
                  if isinstance(node, ast.Call)
                  and isinstance(node.func, ast.Attribute)
                  and node.func.attr == "Config"]
-        assert len(calls) == 2, "a uvicorn.Config call site appeared or went"
+        assert len(calls) == 1, "a uvicorn.Config call site appeared or went"
         for call in calls:
             assert "ws_max_size" in {kw.arg for kw in call.keywords}, \
                 f"uvicorn.Config at line {call.lineno} leaves the 16 MiB default"
@@ -9724,3 +9749,975 @@ class TestAcpLifespanWiring:
 
         with patch.object(web_mod, "acp", None):
             assert asyncio.run(run()) == "started"
+
+
+# --- Phase 3: the remote surface is the whole authorization boundary -------
+#
+# D3 designed two independent layers — a NetBird access-control policy and this
+# device cookie. Phase 0 measured that the policy layer does not exist: all 17
+# peers on the account sit in this host's network map. D33 records the decision
+# to ship anyway, so every check below is the only thing between a peer and
+# `kiro-cli acp -a`. Each test here is written to fail when its one control is
+# removed, because a bypassable check with a passing test beside it is the
+# failure mode this phase cannot afford.
+
+_REMOTE_IP = "100.78.26.204"
+_LOCAL_BIND_IP = "100.78.142.124"
+_TEST_SECRET = "T" * 43
+
+
+@pytest.fixture
+def remote_enabled():
+    """The process state `__main__` reaches after a successful remote bind."""
+    from power_atlas import web as web_mod
+    web_mod.set_remote_host(_LOCAL_BIND_IP)
+    web_mod.set_remote_secret(_TEST_SECRET)
+    web_mod._exchange_failures.clear()
+    try:
+        yield web_mod
+    finally:
+        web_mod.set_remote_host("")
+        web_mod.set_remote_secret("")
+        web_mod._exchange_failures.clear()
+
+
+def _peer_http(path, headers=(), *, client=(_REMOTE_IP, 33333), method="GET",
+               asgi_app=None, body=b""):
+    """Drive an HTTP scope with an explicit peer address, byte-for-byte headers.
+
+    No client within reach can set `scope["client"]`, and that value is the one
+    thing `RemoteAccessGuard` classifies on — so the whole remote surface is
+    only reachable by building the scope uvicorn would build.
+    """
+    raw = list(headers)
+    if not any(k.lower() == b"host" for k, _ in raw):
+        raw.insert(0, (b"host", f"{_LOCAL_BIND_IP}:4915".encode()))
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1", "method": method, "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"",
+        "root_path": "", "headers": raw, "client": client,
+        "server": (_LOCAL_BIND_IP, 4915), "app": app, "state": {},
+    }
+    sent = []
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run((asgi_app or app)(scope, receive, send))
+    status = next((m["status"] for m in sent if m["type"] == "http.response.start"), None)
+    payload = b"".join(m.get("body", b"") for m in sent
+                       if m["type"] == "http.response.body")
+    return status, payload, sent
+
+
+def _peer_ws(path, headers=(), *, client=(_REMOTE_IP, 33333), asgi_app=None):
+    raw = list(headers)
+    if not any(k.lower() == b"host" for k, _ in raw):
+        raw.insert(0, (b"host", f"{_LOCAL_BIND_IP}:4915".encode()))
+    scope = {
+        "type": "websocket", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "scheme": "ws", "path": path, "raw_path": path.encode(),
+        "query_string": b"", "root_path": "", "headers": raw, "client": client,
+        "server": (_LOCAL_BIND_IP, 4915), "subprotocols": [], "app": app,
+        "state": {},
+    }
+    sent = []
+
+    async def receive():
+        return {"type": "websocket.connect"}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run((asgi_app or app)(scope, receive, send))
+    return sent
+
+
+class _Reached(Exception):
+    """Raised by the sentinel inner app, so "the guard let it through" is a
+    distinguishable outcome rather than an indistinguishable 403."""
+
+
+def _guard_over_sentinel():
+    """`RemoteAccessGuard` wrapping an app that announces being reached.
+
+    Every refusal test below has a matching pass test through this, because a
+    403 from the real app could equally mean the route does not exist.
+    """
+    from power_atlas.web import RemoteAccessGuard
+
+    async def _sentinel(scope, receive, send):
+        raise _Reached(scope["path"])
+
+    return RemoteAccessGuard(_sentinel)
+
+
+def _cookie_header(device_id="phone", issued_at=None, secret=None):
+    """Mint a cookie the way the exchange route does, for the tests that need
+    a valid one — computed, never hardcoded, so a change to the derivation
+    cannot leave these passing against a stale literal."""
+    from power_atlas import web as web_mod
+    import hashlib as _h, hmac as _hm, time as _t
+    stamp = str(int(_t.time()) if issued_at is None else issued_at)
+    key = (secret if secret is not None else _TEST_SECRET).encode("utf-8")
+    sig = _hm.new(key, f"{device_id}.{stamp}".encode("utf-8"), _h.sha256).hexdigest()
+    return (b"cookie",
+            f"{web_mod._DEVICE_COOKIE_NAME}={device_id}.{stamp}.{sig}".encode())
+
+
+class TestRemotenessComesFromTheTransport:
+    """D26. `Host` is attacker-controlled and answers "what name did the
+    browser use"; `scope["client"]` answers "where did this connection come
+    from". Deriving remoteness from the header lets a NetBird peer send
+    `Host: 127.0.0.1` and skip both the allowlist and the cookie."""
+
+    @pytest.mark.parametrize("peer", ["127.0.0.1", "127.0.0.5", "::1"])
+    def test_loopback_peers_are_local(self, peer):
+        from power_atlas.web import _is_remote_peer
+        assert _is_remote_peer(peer) is False
+
+    @pytest.mark.parametrize("peer", [
+        None, "", "testclient", "not-an-ip", "100.78.26.204", "fd00::1",
+        "::ffff:100.78.26.204",  # a v4-mapped NetBird peer is still a peer
+        "127.0.0.1 ", "0x7f000001",
+    ])
+    def test_everything_else_is_remote(self, peer):
+        from power_atlas.web import _is_remote_peer
+        assert _is_remote_peer(peer) is True
+
+    def test_a_v4_mapped_loopback_is_safe_either_way(self):
+        """`IPv6Address.is_loopback` delegates to the embedded v4 address from
+        Python 3.13 and did not before, so a dual-stack loopback connection
+        reads local on a new interpreter and remote on an old one. Both
+        verdicts are safe: the old one only forces a genuine loopback client
+        through the cookie, and no remote peer can make the kernel report a
+        mapped-loopback peername. What must never flip is the line below."""
+        from power_atlas.web import _is_remote_peer
+        assert _is_remote_peer("::ffff:100.78.26.204") is True
+
+    @pytest.mark.parametrize("path", ["/", "/api/launchers", "/api/settings"])
+    def test_loopback_host_header_does_not_make_a_peer_local(self, path, remote_enabled):
+        """The bypass D26 exists to close, exercised end to end."""
+        status, body, _ = _peer_http(path, [(b"host", b"127.0.0.1:4915"),
+                                            _cookie_header()])
+        assert status == 403, f"{path} served a remote peer claiming to be loopback"
+        assert b"Forbidden" in body
+
+    def test_absent_client_is_treated_as_remote(self, remote_enabled):
+        status, _, _ = _peer_http("/api/settings", client=None)
+        assert status == 403
+
+
+class TestRemotePathAllowlistIsDefaultDeny:
+    """D6. A denylist over ~40 routes leaks by default on the next route
+    added; this makes a new route loopback-only until someone lists it."""
+
+    @pytest.mark.parametrize("path", [
+        "/", "/api/launchers", "/api/settings", "/api/remote-access",
+        "/api/save-setting", "/partials/workspaces", "/staticfoo",
+        "/staticfoo/style.css", "/acp/", "/ws/acp/x", "/remote-authx",
+        "/api/save-launcher", "/api/run-launcher", "/partials/all-sessions",
+    ])
+    def test_non_allowlisted_paths_are_refused(self, path, remote_enabled):
+        status, body, _ = _peer_http(path, [_cookie_header()])
+        assert status == 403, f"{path} is reachable from the NetBird address"
+        assert b"Forbidden" in body
+
+    @pytest.mark.parametrize("path", ["/", "/api/launchers", "/api/settings"])
+    def test_sc4_routes_need_loopback(self, path, remote_enabled):
+        """SC-4 by name: these three carry `custom_launchers[].env`, the
+        settings surface and the dashboard, and must need loopback."""
+        with pytest.raises(_Reached):
+            _peer_http(path, [_cookie_header()], client=("127.0.0.1", 1),
+                       asgi_app=_guard_over_sentinel())
+        status, _, _ = _peer_http(path, [_cookie_header()],
+                                  asgi_app=_guard_over_sentinel())
+        assert status == 403
+
+    @pytest.mark.parametrize("path", [
+        "/acp", "/ws/acp", "/remote-auth", "/static/style.css",
+        "/static/deep/nested.js",
+    ])
+    def test_allowlisted_paths_pass_the_path_gate(self, path, remote_enabled):
+        with pytest.raises(_Reached):
+            _peer_http(path, [_cookie_header()], asgi_app=_guard_over_sentinel())
+
+    def test_the_static_mount_is_matched_as_a_directory(self, remote_enabled):
+        """A bare `startswith("/static")` also admits `/staticfoo`."""
+        from power_atlas.web import _remote_path_allowed
+        assert _remote_path_allowed("/static") is True
+        assert _remote_path_allowed("/static/style.css") is True
+        assert _remote_path_allowed("/staticfoo") is False
+        assert _remote_path_allowed("/staticfoo/style.css") is False
+
+
+class TestRemoteRequestsNeedTheCookie:
+    """SC-5. With the NetBird policy layer absent (D33), this is the control."""
+
+    @pytest.mark.parametrize("path", ["/acp", "/static/style.css"])
+    def test_http_without_a_cookie_is_refused(self, path, remote_enabled):
+        status, body, _ = _peer_http(path)
+        assert status == 403
+        assert b"Forbidden" in body
+
+    @pytest.mark.parametrize("path", ["/acp", "/static/style.css"])
+    def test_http_with_a_valid_cookie_is_served(self, path, remote_enabled):
+        status, _, _ = _peer_http(path, [_cookie_header()])
+        assert status == 200, f"{path} refused a device holding a valid cookie"
+
+    def test_the_ws_acp_upgrade_without_a_cookie_is_closed(self, remote_enabled):
+        sent = _peer_ws("/ws/acp")
+        assert sent and sent[0]["type"] == "websocket.close"
+        assert sent[0]["code"] == 1008
+        assert not any(m["type"] == "http.response.start" for m in sent)
+
+    def test_ws_static_is_refused_and_never_reaches_the_mount(self, remote_enabled):
+        """D7's second finding: `/static` is a `Mount` whose `matches` admits
+        websocket scopes, so `ws://<ip>/static/x` reached `StaticFiles` having
+        passed neither `same_origin_guard` nor `ws_acp`."""
+        sent = _peer_ws("/static/style.css")
+        assert sent and sent[0]["type"] == "websocket.close"
+        assert sent[0]["code"] == 1008
+
+    def test_a_websocket_refusal_is_never_an_http_response(self, remote_enabled):
+        """Emitting `http.response.start` into a websocket scope is an ASGI
+        protocol violation: it surfaces as a uvicorn exception rather than a
+        refusal, on the one path this guard exists to protect."""
+        for path in ("/ws/acp", "/static/style.css", "/api/settings"):
+            sent = _peer_ws(path)
+            assert all(m["type"].startswith("websocket.") for m in sent), path
+
+    def test_the_ws_upgrade_with_a_cookie_passes_the_guard(self, remote_enabled):
+        from power_atlas.web import RemoteAccessGuard
+        reached = []
+
+        async def _sentinel(scope, receive, send):
+            reached.append(scope["path"])
+
+        _peer_ws("/ws/acp", [_cookie_header()],
+                 asgi_app=RemoteAccessGuard(_sentinel))
+        assert reached == ["/ws/acp"]
+
+    def test_loopback_needs_no_cookie(self, remote_enabled):
+        """The laptop's own dashboard is untouched (SC-1's second half)."""
+        status, _, _ = _peer_http("/api/last-refresh", client=("127.0.0.1", 5),
+                                  headers=[(b"host", b"127.0.0.1:4915")])
+        assert status == 200
+
+
+class TestRemoteNavigationRule:
+    """Cookies are host-scoped and **port-agnostic**, so another service on any
+    port of the NetBird address is "same-site" for `SameSite=Strict`. This
+    applies `_acp_navigation_ok`'s `Sec-Fetch-Site` rule to remote `http` GETs
+    to close the browser half of that — and to those only."""
+
+    # `/static/*` is the path that discriminates this rule. `same_origin_guard`
+    # already applies `_acp_navigation_ok` to `GET /acp`, so a test written
+    # against `/acp` answers 403 whether this rule exists or not — it was, and
+    # the mutation that deleted the rule left it green. Everything else on the
+    # remote allowlist has no inner navigation check at all.
+    @pytest.mark.parametrize("path", ["/static/style.css", "/acp"])
+    @pytest.mark.parametrize("site", [b"cross-site", b"same-site"])
+    def test_a_cross_site_remote_get_is_refused(self, site, path, remote_enabled):
+        status, _, _ = _peer_http(
+            path, [_cookie_header(), (b"sec-fetch-site", site)])
+        assert status == 403
+
+    @pytest.mark.parametrize("path", ["/static/style.css", "/acp"])
+    @pytest.mark.parametrize("site", [b"same-origin", b"none"])
+    def test_a_same_origin_or_typed_remote_get_is_served(self, site, path, remote_enabled):
+        status, _, _ = _peer_http(
+            path, [_cookie_header(), (b"sec-fetch-site", site)])
+        assert status == 200
+
+    def test_the_ws_upgrade_is_exempt(self, remote_enabled):
+        """`/ws/acp` is a GET at the HTTP layer but a `websocket` ASGI scope,
+        and browsers do not attach `Sec-Fetch-Site` to a handshake — the
+        literal reading would break the phone client outright."""
+        from power_atlas.web import RemoteAccessGuard
+        reached = []
+
+        async def _sentinel(scope, receive, send):
+            reached.append(scope["path"])
+
+        _peer_ws("/ws/acp", [_cookie_header()],
+                 asgi_app=RemoteAccessGuard(_sentinel))
+        assert reached == ["/ws/acp"]
+
+    def test_a_non_browser_client_is_not_blocked_by_it(self, remote_enabled):
+        """The rule falls back to the Origin/Referer check with
+        `allow_missing=True`, so it constrains browsers only. **The cookie, not
+        this rule, is the control against a non-browser remote client** — which
+        is why the cookie tests above, not this one, carry SC-5."""
+        status, _, _ = _peer_http("/acp", [_cookie_header()])
+        assert status == 200
+        assert _peer_http("/acp")[0] == 403
+
+
+class TestDeviceCookieVerification:
+    @pytest.mark.parametrize("mutate", [
+        lambda d, t, s: (d, t, "0" * 64),                      # forged signature
+        lambda d, t, s: (d, t, s[:-1] + ("0" if s[-1] != "0" else "1")),
+        lambda d, t, s: ("other", t, s),                       # id swapped
+        lambda d, t, s: (d, str(int(t) - 1), s),               # stamp swapped
+        lambda d, t, s: (d, t, ""),                            # empty signature
+        lambda d, t, s: (d, "", s),                            # empty stamp
+        lambda d, t, s: ("", t, s),                            # empty id
+        lambda d, t, s: ("a;b", t, s),                         # id outside charset
+        lambda d, t, s: (d, "٤٩١٥", s),    # non-ASCII digits
+        lambda d, t, s: (d, t, "é" * 64),                 # non-ASCII signature
+    ])
+    def test_a_mutated_cookie_is_refused(self, mutate, remote_enabled):
+        from power_atlas import web as web_mod
+        device, stamp = "phone", str(int(time.time()))
+        sig = web_mod._device_cookie_sig(_TEST_SECRET, device, stamp)
+        d, t, s = mutate(device, stamp, sig)
+        scope = {"headers": [(b"cookie",
+                              f"{web_mod._DEVICE_COOKIE_NAME}={d}.{t}.{s}".encode(
+                                  "utf-8", "replace"))]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_the_unmutated_cookie_is_accepted(self, remote_enabled):
+        """Positive control: the rejections above are not a broken helper."""
+        from power_atlas import web as web_mod
+        scope = {"headers": [_cookie_header()]}
+        assert web_mod._cookie_ok(scope) is True
+
+    def test_an_expired_cookie_is_refused(self, remote_enabled):
+        from power_atlas import web as web_mod
+        old = int(time.time()) - web_mod.REMOTE_COOKIE_MAX_AGE_SECONDS - 1
+        scope = {"headers": [_cookie_header(issued_at=old)]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_a_cookie_just_inside_the_age_limit_is_accepted(self, remote_enabled):
+        from power_atlas import web as web_mod
+        fresh = int(time.time()) - web_mod.REMOTE_COOKIE_MAX_AGE_SECONDS + 60
+        scope = {"headers": [_cookie_header(issued_at=fresh)]}
+        assert web_mod._cookie_ok(scope) is True
+
+    def test_a_far_future_cookie_is_refused(self, remote_enabled):
+        """Without a future bound, a forged-clock stamp is an unbounded life."""
+        from power_atlas import web as web_mod
+        ahead = int(time.time()) + web_mod._COOKIE_FUTURE_SKEW_SECONDS + 60
+        scope = {"headers": [_cookie_header(issued_at=ahead)]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_a_cookie_signed_with_another_secret_is_refused(self, remote_enabled):
+        from power_atlas import web as web_mod
+        scope = {"headers": [_cookie_header(secret="X" * 43)]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_the_cookie_survives_a_restart(self, remote_enabled):
+        """D24's whole premise: verifiable with no server-side store, so the
+        phone does not re-enter the secret after every launch."""
+        from power_atlas import web as web_mod
+        header = _cookie_header()
+        web_mod.set_remote_secret("")          # process exits
+        assert web_mod._cookie_ok({"headers": [header]}) is False
+        web_mod.set_remote_secret(_TEST_SECRET)  # and comes back up
+        assert web_mod._cookie_ok({"headers": [header]}) is True
+
+    def test_a_cookie_among_others_is_found(self, remote_enabled):
+        from power_atlas import web as web_mod
+        name, value = _cookie_header()[1].decode().split("=", 1)
+        scope = {"headers": [(b"cookie",
+                              f"other=1; {name}={value}; third=x".encode())]}
+        assert web_mod._cookie_ok(scope) is True
+
+    @pytest.mark.parametrize("raw", [
+        b"", b"=", b";;;", b"pa_device", b"pa_device=", b"pa_device=..",
+        b"pa_device=" + b"A" * 4000, b"\xff\xfe", b"pa_device=a.b",
+    ])
+    def test_a_malformed_cookie_header_never_raises(self, raw, remote_enabled):
+        from power_atlas import web as web_mod
+        assert web_mod._cookie_ok({"headers": [(b"cookie", raw)]}) is False
+
+    @pytest.mark.parametrize("device_id", ["a b", "a,b", "a/b", "a@b", "x" * 65])
+    def test_a_correctly_signed_out_of_charset_id_is_still_refused(
+            self, device_id, remote_enabled):
+        """The charset bound is enforced at **both** ends, not only where the
+        cookie is minted. A cookie produced by any other minting path — an
+        older build, a future one, a hand-rolled script holding the secret —
+        must not be able to carry a cookie-attribute or log-injection
+        character through the verifier just because its signature is right."""
+        from power_atlas import web as web_mod
+        stamp = str(int(time.time()))
+        sig = web_mod._device_cookie_sig(_TEST_SECRET, device_id, stamp)
+        scope = {"headers": [
+            (b"cookie",
+             f"pa_device={device_id}.{stamp}.{sig}".encode("utf-8", "replace"))]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_make_device_cookie_refuses_the_same_ids(self, remote_enabled):
+        from power_atlas.web import make_device_cookie
+        assert make_device_cookie("a b") == ""
+        assert make_device_cookie("x" * 65) == ""
+        assert make_device_cookie("phone") != ""
+
+
+class TestSecretFailsClosed:
+    """A missing or empty secret compared with `compare_digest` would match an
+    empty signature and silently remove authentication while the bind stayed
+    open. Every unusable form has to collapse to "refuse everything"."""
+
+    @pytest.mark.parametrize("secret", ["", "   ", "short", "T" * 42])
+    def test_an_unusable_secret_refuses_every_remote_request(self, secret, caplog):
+        from power_atlas import web as web_mod
+        web_mod.set_remote_host(_LOCAL_BIND_IP)
+        try:
+            with caplog.at_level(logging.ERROR, logger="power_atlas.web"):
+                web_mod.set_remote_secret(secret)
+            assert web_mod._REMOTE_SECRET == ""
+            for path in ("/acp", "/static/style.css", "/remote-auth"):
+                status, _, _ = _peer_http(path, [_cookie_header(secret=secret or "x")])
+                assert status in (403, 503), path
+            assert _peer_ws("/ws/acp")[0]["type"] == "websocket.close"
+        finally:
+            web_mod.set_remote_host("")
+            web_mod.set_remote_secret("")
+
+    def test_a_short_secret_logs_at_error(self, caplog):
+        from power_atlas import web as web_mod
+        try:
+            with caplog.at_level(logging.ERROR, logger="power_atlas.web"):
+                web_mod.set_remote_secret("T" * 42)
+            assert any(r.levelno >= logging.ERROR for r in caplog.records)
+        finally:
+            web_mod.set_remote_secret("")
+
+    def test_an_empty_secret_does_not_match_an_empty_signature(self):
+        from power_atlas import web as web_mod
+        web_mod.set_remote_secret("")
+        scope = {"headers": [(b"cookie", b"pa_device=phone.1.")]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_an_empty_secret_cannot_be_signed_around(self):
+        """The `compare_digest` trap in full, and the reason the length floor
+        is repeated inside `_cookie_ok` rather than trusted from the setter.
+
+        With no secret, HMAC keyed by the empty string is computable by anyone
+        on the network — so the signature check alone would happily verify a
+        cookie signed under nothing. It is the "no usable secret" refusal, not
+        the comparison, that closes this."""
+        import hashlib as _h, hmac as _hm
+        from power_atlas import web as web_mod
+        web_mod.set_remote_secret("")
+        stamp = str(int(time.time()))
+        sig = _hm.new(b"", f"phone.{stamp}".encode(), _h.sha256).hexdigest()
+        scope = {"headers": [
+            (b"cookie", f"pa_device=phone.{stamp}.{sig}".encode())]}
+        assert web_mod._cookie_ok(scope) is False
+
+    def test_load_remote_secret_collapses_every_unusable_form(self, tmp_path, monkeypatch):
+        from power_atlas import config as config_mod
+        path = tmp_path / "remote-secret"
+        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", path)
+        assert config_mod.load_remote_secret() == ""       # absent
+        path.write_text("")
+        assert config_mod.load_remote_secret() == ""       # empty
+        path.write_text("   \n")
+        assert config_mod.load_remote_secret() == ""       # whitespace
+        path.write_text("T" * 42)
+        assert config_mod.load_remote_secret() == ""       # one short
+        path.write_text("T" * 43 + "\n")
+        assert config_mod.load_remote_secret() == "T" * 43
+
+    def test_ensure_remote_secret_does_not_rotate_an_existing_one(self, tmp_path, monkeypatch):
+        """Re-issuing here would revoke every device that already holds a
+        cookie, on a route the user thinks only sets an address."""
+        from power_atlas import config as config_mod
+        path = tmp_path / "remote-secret"
+        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", path)
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+        first = config_mod.ensure_remote_secret()
+        assert len(first) >= config_mod.REMOTE_SECRET_MIN_LEN
+        assert config_mod.ensure_remote_secret() == first
+
+    def test_the_secret_never_reaches_a_log_record(self, tmp_path, monkeypatch, caplog):
+        """`orchestrator.log` is a plain file next to config.toml."""
+        from power_atlas import config as config_mod, web as web_mod
+        path = tmp_path / "remote-secret"
+        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", path)
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+        with caplog.at_level(logging.DEBUG):
+            secret = config_mod.ensure_remote_secret()
+            web_mod.set_remote_secret(secret)
+            try:
+                _peer_http("/remote-auth", method="POST",
+                           body=f"device_id=phone&secret={secret}".encode(),
+                           headers=[(b"content-type",
+                                     b"application/x-www-form-urlencoded"),
+                                    (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())])
+            finally:
+                web_mod.set_remote_secret("")
+        assert secret not in caplog.text
+
+
+class TestSecretExchange:
+    def test_the_form_is_reachable_without_a_cookie(self, remote_enabled):
+        status, body, _ = _peer_http("/remote-auth")
+        assert status == 200
+        assert b"<form" in body
+
+    def test_the_exchange_is_the_only_cookie_exempt_path(self):
+        from power_atlas.web import _COOKIE_EXEMPT, _REMOTE_AUTH_PATH
+        assert _COOKIE_EXEMPT == frozenset({_REMOTE_AUTH_PATH})
+
+    def _post(self, secret, device_id="phone", peer=_REMOTE_IP):
+        return _peer_http(
+            "/remote-auth", method="POST", client=(peer, 4444),
+            body=f"device_id={device_id}&secret={secret}".encode(),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded"),
+                     (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())])
+
+    def test_the_right_secret_sets_a_usable_cookie(self, remote_enabled):
+        from power_atlas import web as web_mod
+        status, _, sent = self._post(_TEST_SECRET)
+        assert status == 200
+        headers = dict(next(m for m in sent if m["type"] == "http.response.start")["headers"])
+        raw = headers[b"set-cookie"].decode()
+        assert "HttpOnly" in raw
+        assert "samesite=strict" in raw.lower()
+        assert "secure" not in raw.lower()   # D5: no TLS, WireGuard carries it
+        assert f"Max-Age={web_mod.REMOTE_COOKIE_MAX_AGE_SECONDS}" in raw
+        value = raw.split(";")[0].split("=", 1)[1]
+        assert web_mod._cookie_ok(
+            {"headers": [(b"cookie", f"pa_device={value}".encode())]}) is True
+
+    def test_a_wrong_secret_is_refused_and_logged_with_the_peer(self, remote_enabled, caplog):
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            status, _, _ = self._post("W" * 43)
+        assert status == 403
+        assert any(_REMOTE_IP in r.getMessage() for r in caplog.records
+                   if r.levelno == logging.WARNING)
+
+    @pytest.mark.parametrize("device_id", [
+        "", "a;b", "a,b", "a b", "a.b", "x" * 65, "phone%0d%0a",
+    ])
+    def test_an_out_of_charset_device_id_is_refused(self, device_id, remote_enabled):
+        status, _, _ = self._post(_TEST_SECRET, device_id=device_id)
+        assert status == 400, f"device id {device_id!r} was accepted"
+
+    def test_repeated_failures_are_backed_off(self, remote_enabled):
+        peer = "100.78.9.9"
+        assert self._post("W" * 43, peer=peer)[0] == 403
+        assert self._post("W" * 43, peer=peer)[0] == 429
+        # The backoff throttles before the secret is compared, so even the
+        # right one is refused while the lockout stands.
+        assert self._post(_TEST_SECRET, peer=peer)[0] == 429
+
+    def test_a_success_clears_the_backoff(self, remote_enabled):
+        peer = "100.78.9.10"
+        assert self._post("W" * 43, peer=peer)[0] == 403
+        from power_atlas import web as web_mod
+        web_mod._exchange_failures.pop(peer, None)
+        assert self._post(_TEST_SECRET, peer=peer)[0] == 200
+        assert peer not in web_mod._exchange_failures
+
+    def test_the_exchange_post_still_needs_a_same_origin(self, remote_enabled):
+        """`_COOKIE_EXEMPT` exempts the cookie, not `same_origin_guard`."""
+        status, _, _ = _peer_http(
+            "/remote-auth", method="POST",
+            body=f"device_id=phone&secret={_TEST_SECRET}".encode(),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded"),
+                     (b"origin", b"http://evil.com")])
+        assert status == 403
+
+    def test_other_methods_are_not_exempt_by_path(self, remote_enabled):
+        status, _, _ = _peer_http("/remote-auth", method="DELETE")
+        assert status == 405
+
+
+class TestRemoteBindDoesNotWidenTheHostAllowlist:
+    @pytest.mark.parametrize("host", _HOSTILE_HOSTS)
+    def test_hostile_hosts_still_refused_with_the_bind_on(self, host, remote_enabled):
+        """The fixture docstring's rule holds with the remote bind enabled:
+        the set gains exactly one IP, not a relaxation."""
+        status, body, _ = _peer_http(
+            "/acp", [(b"host", host.encode()), _cookie_header()])
+        assert status == 403, f"Host: {host} was served with the remote bind on"
+        assert _ACP_TOKEN.encode() not in body
+
+    def test_the_configured_ip_is_admitted(self, remote_enabled):
+        from power_atlas.web import _host_allowed
+        assert _host_allowed(f"{_LOCAL_BIND_IP}:4915") is True
+        assert _host_allowed(_LOCAL_BIND_IP) is True
+
+    def test_it_is_loopback_only_by_default(self):
+        from power_atlas import web as web_mod
+        assert web_mod._ALLOWED_HOSTS == web_mod._LOOPBACK_HOSTS
+        assert web_mod._host_allowed(f"{_LOCAL_BIND_IP}:4915") is False
+
+    def test_unsetting_restores_loopback_only(self):
+        from power_atlas import web as web_mod
+        web_mod.set_remote_host(_LOCAL_BIND_IP)
+        web_mod.set_remote_host("")
+        assert web_mod._ALLOWED_HOSTS == web_mod._LOOPBACK_HOSTS
+
+    @pytest.mark.parametrize("address", [
+        "0.0.0.0", "::", "127.0.0.1", "myhost", "[fd00::1]", "fe80::1%eth0",
+        "FD00::1", "not an ip",
+    ])
+    def test_an_invalid_address_never_widens_the_set(self, address):
+        from power_atlas import web as web_mod
+        try:
+            web_mod.set_remote_host(address)
+            assert web_mod._ALLOWED_HOSTS == web_mod._LOOPBACK_HOSTS, address
+        finally:
+            web_mod.set_remote_host("")
+
+    def test_the_allowlist_is_never_read_from_config_per_request(self):
+        """D15's rule applied here: `load_config` is an uncached whole-file
+        TOML parse and this runs on every request and every upgrade."""
+        from power_atlas import web as web_mod
+
+        def _explode():
+            raise AssertionError("load_config on the Host-check path")
+
+        with patch.object(web_mod, "load_config", _explode):
+            assert web_mod._host_allowed("127.0.0.1:4915") is True
+            web_mod.set_remote_host(_LOCAL_BIND_IP)
+            try:
+                assert web_mod._host_allowed(f"{_LOCAL_BIND_IP}:4915") is True
+                web_mod.set_remote_secret(_TEST_SECRET)
+                assert _peer_http("/static/style.css",
+                                  [_cookie_header()])[0] == 200
+            finally:
+                web_mod.set_remote_host("")
+                web_mod.set_remote_secret("")
+
+
+class TestRemoteBindAddressValidation:
+    @pytest.mark.parametrize("address", [
+        "0.0.0.0", "::", "::0", "0000::", "::ffff:0.0.0.0", "0:0:0:0:0:0:0:0",
+        "127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1",
+        "224.0.0.1", "ff02::1",
+        "powerlaptop", "powerlaptop.netbird.cloud", "not an ip",
+        "[fd00::1]", "fd00::1%eth0", "FD00::1", "100.078.142.124",
+        " 100.78.142.124 x", "1" * 60,
+    ])
+    def test_rejected(self, address):
+        from power_atlas.config import validate_remote_bind_address
+        assert validate_remote_bind_address(address, 4915) != "", address
+
+    def test_empty_means_loopback_only_and_is_valid(self):
+        from power_atlas.config import validate_remote_bind_address
+        assert validate_remote_bind_address("", 4915) == ""
+        assert validate_remote_bind_address("   ", 4915) == ""
+
+    @pytest.mark.parametrize("address", ["100.78.142.124", "fd00::1", "10.0.0.5"])
+    def test_accepted(self, address):
+        from power_atlas.config import validate_remote_bind_address
+        assert validate_remote_bind_address(address, 4915) == ""
+
+    def test_a_zero_port_is_rejected_by_name(self):
+        """SC-3b. With `port = 0` the OS assigns per bind call, so the two
+        sockets would land on different numbers and the laptop and phone URLs
+        would permanently disagree."""
+        from power_atlas.config import validate_remote_bind_address
+        reason = validate_remote_bind_address("100.78.142.124", 0)
+        assert "port" in reason.lower()
+
+    def test_load_config_sanitises_rather_than_raising(self, tmp_path, monkeypatch, caplog):
+        """`load_config` is documented as never raising and ~16 routes call it
+        on the event loop; a raising validator turns one config.toml typo into
+        a 500 on every route plus a startup crash."""
+        from power_atlas import config as config_mod
+        path = tmp_path / "config.toml"
+        path.write_text('port = 4915\nremote_bind_address = "0.0.0.0"\n')
+        monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
+        with caplog.at_level(logging.ERROR, logger=config_mod.__name__):
+            cfg = config_mod.load_config()
+        assert cfg.remote_bind_address == ""
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_load_config_drops_the_address_when_the_port_is_zero(self, tmp_path, monkeypatch):
+        from power_atlas import config as config_mod
+        path = tmp_path / "config.toml"
+        path.write_text('port = 0\nremote_bind_address = "100.78.142.124"\n')
+        monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
+        assert config_mod.load_config().remote_bind_address == ""
+
+    def test_load_config_keeps_a_valid_address(self, tmp_path, monkeypatch):
+        from power_atlas import config as config_mod
+        path = tmp_path / "config.toml"
+        path.write_text('port = 4915\nremote_bind_address = "100.78.142.124"\n')
+        monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
+        assert config_mod.load_config().remote_bind_address == "100.78.142.124"
+
+
+class TestSettingsSurface:
+    def test_the_acp_keys_are_writable_within_bounds(self, client, tmp_path, monkeypatch):
+        from power_atlas import config as config_mod
+        monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+        resp = client.post("/api/save-setting",
+                           json={"key": "acp_max_sessions", "value": 8})
+        assert resp.json() == {"ok": True, "restart_required": True}
+
+    @pytest.mark.parametrize("key,value", [
+        ("acp_max_sessions", 0), ("acp_max_sessions", 17),
+        ("acp_idle_ttl_seconds", 299), ("acp_idle_ttl_seconds", 86401),
+        ("acp_prompt_silence_seconds", 59), ("acp_prompt_silence_seconds", 7201),
+    ])
+    def test_out_of_range_values_are_refused(self, key, value, client):
+        body = client.post("/api/save-setting",
+                           json={"key": key, "value": value}).json()
+        assert body["ok"] is False
+        assert "between" in body["error"]
+
+    def test_every_bounded_key_is_declared(self):
+        """Adding a key to `_SETTING_TYPES` without a bound is what would turn
+        the fail-closed `Unknown setting` refusal into an unbounded write."""
+        from power_atlas.web import _SETTING_BOUNDS, _SETTING_TYPES
+        assert set(_SETTING_BOUNDS) == {
+            "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds"}
+        assert set(_SETTING_BOUNDS) <= set(_SETTING_TYPES)
+
+    def test_the_startup_only_keys_say_restart_to_apply(self, client):
+        from power_atlas.web import _RESTART_TO_APPLY
+        assert {"acp_max_sessions", "acp_idle_ttl_seconds",
+                "acp_prompt_silence_seconds", "remote_bind_address",
+                "port"} <= _RESTART_TO_APPLY
+        body = client.get("/api/settings").json()
+        assert set(body["restart_to_apply"]) == set(_RESTART_TO_APPLY)
+
+    def test_an_invalid_remote_bind_address_is_refused_by_name(self, client):
+        body = client.post("/api/save-setting",
+                           json={"key": "remote_bind_address", "value": "0.0.0.0"}).json()
+        assert body["ok"] is False
+        assert "wildcard" in body["error"]
+
+    def test_unknown_settings_are_still_default_denied(self, client):
+        body = client.post("/api/save-setting",
+                           json={"key": "acp_nonsense", "value": 1}).json()
+        assert body == {"ok": False, "error": "Unknown setting: acp_nonsense"}
+
+    def test_enabling_the_bind_creates_the_secret(self, client, tmp_path, monkeypatch):
+        from power_atlas import config as config_mod
+        monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
+        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
+        (tmp_path / "config.toml").write_text("port = 4915\n")
+        body = client.post("/api/save-setting",
+                           json={"key": "remote_bind_address",
+                                 "value": "100.78.142.124"}).json()
+        assert body["ok"] is True
+        assert len((tmp_path / "remote-secret").read_text()) >= config_mod.REMOTE_SECRET_MIN_LEN
+
+    def test_the_secret_route_is_loopback_only(self, remote_enabled):
+        assert _peer_http("/api/remote-access", [_cookie_header()])[0] == 403
+
+
+class TestBindSockets:
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def test_loopback_socket_is_exclusive_and_not_inheritable(self):
+        """A second local process binding the identical 127.0.0.1:<port> would
+        hijack a surface serving `_ACP_TOKEN` and fronting `kiro-cli acp -a`.
+        `uvicorn.Config.bind_socket` sets `SO_REUSEADDR`, which permits it."""
+        import socket as socket_mod
+        import sys as sys_mod
+        s = self._main()._bind("127.0.0.1", 0)
+        try:
+            assert s.getsockopt(socket_mod.SOL_SOCKET, socket_mod.SO_REUSEADDR) == 0
+            assert s.get_inheritable() is False
+            if sys_mod.platform == "win32":
+                assert s.getsockopt(socket_mod.SOL_SOCKET,
+                                    socket_mod.SO_EXCLUSIVEADDRUSE) != 0
+        finally:
+            s.close()
+
+    def test_a_second_bind_to_the_same_address_fails(self):
+        s = self._main()._bind("127.0.0.1", 0)
+        try:
+            port = s.getsockname()[1]
+            with pytest.raises(OSError):
+                self._main()._bind("127.0.0.1", port).close()
+        finally:
+            s.close()
+
+    def test_proxy_headers_is_disabled_at_the_config_site(self):
+        """`ProxyHeadersMiddleware` overwrites `scope["client"]` from
+        `X-Forwarded-For` for peers in `forwarded_allow_ips`, and
+        `proxy_headers` defaults to True — so `FORWARDED_ALLOW_IPS=*` in the
+        environment would make D26's basis an environment variable."""
+        import ast
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        calls = [n for n in ast.walk(ast.parse(source))
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "Config"]
+        assert calls, "the uvicorn.Config call site went"
+        for call in calls:
+            kwargs = {kw.arg: kw.value for kw in call.keywords}
+            assert "proxy_headers" in kwargs, \
+                f"uvicorn.Config at line {call.lineno} leaves proxy_headers defaulted"
+            assert kwargs["proxy_headers"].value is False
+
+    def test_run_is_handed_both_sockets(self):
+        """One `Server`, not two: two would run lifespan twice — two refresh
+        loops, two sweepers racing the same sessions, `acp.shutdown()` twice."""
+        import ast
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        assert 'kwargs={"sockets": socks}' in source
+        servers = [n for n in ast.walk(ast.parse(source))
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "Server"]
+        assert len(servers) == 1
+
+    def test_the_thread_and_ready_event_scaffolding_survives(self):
+        """`run()` blocks, so removing the thread or the patched-startup event
+        means neither the tray nor peek ever starts — and the socket change
+        rewrote the block they live in."""
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        for fragment in ("_make_patched_startup(server, ready_event)",
+                         "ready_event.wait(timeout=10)",
+                         "create_peek(server_url",
+                         "run_tray, args=(server_url, config)"):
+            assert fragment in source, fragment
+
+    def test_server_url_comes_from_the_loopback_socket(self):
+        """With two sockets, `server.servers[0].sockets[0]` is merely whichever
+        bound first. It feeds `create_peek` and `run_tray`."""
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        assert "loopback_sock = socks[0]" in source
+        assert "port = loopback_sock.getsockname()[1]" in source
+        assert 'server_url = f"http://127.0.0.1:{port}"' in source
+        assert "server.servers[0].sockets[0]" not in source
+
+    def test_both_bound_addresses_are_logged(self):
+        """`Server.startup` skips its "Uvicorn running on…" banner entirely
+        when `sockets=` is passed, so this line is the only operator-visible
+        record of which addresses are live — precisely when there are two."""
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        assert 'log.info("Listening on %s",' in source
+        assert "[s.getsockname()[:2] for s in socks]" in source
+
+    def test_the_loopback_bind_keeps_its_random_port_fallback(self):
+        """The app must never come up remote-only with no loopback listener."""
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        assert 'socks = [_bind("127.0.0.1", 0)]' in source
+        assert source.index('socks = [_bind("127.0.0.1", desired_port)]') < \
+            source.index("_bind_remote_socket(log, config, socks, port)")
+
+
+class TestRemoteSocketBinding:
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def _cfg(self, **kw):
+        from power_atlas.config import Config
+        return Config(**kw)
+
+    def test_no_address_means_no_second_socket(self):
+        socks = []
+        assert self._main()._bind_remote_socket(
+            logging.getLogger("t"), self._cfg(), socks, 4915) is False
+        assert socks == []
+
+    def test_an_unusable_secret_means_the_socket_is_never_created(self, monkeypatch, caplog):
+        """Otherwise the remote surface is bound and accepting while
+        authentication is structurally impossible."""
+        main_mod = self._main()
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: "")
+        called = []
+        monkeypatch.setattr(main_mod, "_bind",
+                            lambda h, p: called.append((h, p)))
+        socks = []
+        with caplog.at_level(logging.ERROR):
+            ok = main_mod._bind_remote_socket(
+                logging.getLogger("t"),
+                self._cfg(port=4915, remote_bind_address="100.78.142.124"),
+                socks, 4915)
+        assert ok is False
+        assert called == [] and socks == []
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+
+    def test_a_bind_failure_degrades_rather_than_exiting(self, monkeypatch, caplog):
+        """D27: NetBird's interface may not be up at login, raising
+        `WinError 10049`. Unhandled that makes the app exit 1."""
+        main_mod = self._main()
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+
+        def _boom(host, port):
+            raise OSError(10049, "cannot assign requested address")
+
+        monkeypatch.setattr(main_mod, "_bind", _boom)
+        sentinel = object()
+        socks = [sentinel]
+        with caplog.at_level(logging.ERROR):
+            ok = main_mod._bind_remote_socket(
+                logging.getLogger("t"),
+                self._cfg(port=4915, remote_bind_address="100.78.142.124"),
+                socks, 4915)
+        assert ok is False
+        assert socks == [sentinel], "the loopback listener must survive"
+        assert any(r.levelno == logging.ERROR for r in caplog.records)
+        from power_atlas import web as web_mod
+        assert web_mod._ALLOWED_HOSTS == web_mod._LOOPBACK_HOSTS
+        assert web_mod._REMOTE_SECRET == ""
+
+    def test_the_remote_socket_is_appended_after_the_loopback_one(self, monkeypatch):
+        """`server_url` — the URL tray and peek open — is read from `socks[0]`,
+        so the loopback listener has to stay at index 0. Reading
+        `server.servers[0].sockets[0]` instead would give whichever bound
+        first, which with two sockets is not a property anything guarantees."""
+        main_mod = self._main()
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+        made = object()
+        monkeypatch.setattr(main_mod, "_bind", lambda h, p: made)
+        loopback = object()
+        socks = [loopback]
+        try:
+            main_mod._bind_remote_socket(
+                logging.getLogger("t"),
+                self._cfg(port=4915, remote_bind_address="100.78.142.124"),
+                socks, 4915)
+            assert socks == [loopback, made]
+        finally:
+            web_mod.set_remote_host("")
+            web_mod.set_remote_secret("")
+
+    def test_success_wires_both_startup_setters(self, monkeypatch):
+        main_mod = self._main()
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+        made = object()
+        monkeypatch.setattr(main_mod, "_bind", lambda h, p: made)
+        socks = []
+        try:
+            ok = main_mod._bind_remote_socket(
+                logging.getLogger("t"),
+                self._cfg(port=4915, remote_bind_address="100.78.142.124"),
+                socks, 4915)
+            assert ok is True and socks == [made]
+            assert web_mod._host_allowed("100.78.142.124:4915") is True
+            assert web_mod._REMOTE_SECRET == _TEST_SECRET
+        finally:
+            web_mod.set_remote_host("")
+            web_mod.set_remote_secret("")
+
+
+class TestGuardOrdering:
+    def test_the_remote_guard_is_outermost(self):
+        """`add_middleware` inserts at index 0 and the stack is built over
+        `reversed(middleware)`, so the last registered wraps the rest. A deny
+        survives either order; the refusal body does not."""
+        from power_atlas.web import RemoteAccessGuard
+        assert app.user_middleware[0].cls is RemoteAccessGuard
+
+    def test_it_rejects_before_the_host_guard_does(self, remote_enabled):
+        """The refusal body is the raw-ASGI one, not `same_origin_guard`'s."""
+        status, body, sent = _peer_http("/api/settings", [(b"host", b"evil.com")])
+        assert status == 403
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert dict(start["headers"])[b"content-type"] == b"application/json"
+        assert body == b'{"error":"Forbidden"}'

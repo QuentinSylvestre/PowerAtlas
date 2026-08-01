@@ -7,26 +7,33 @@ structurally cannot see. Its equivalent protections live in ``_ws_origin_ok``.
 """
 
 import asyncio
+import hashlib
+import hmac
 import html as html_mod
+import ipaddress
 import logging
 import os
 import re
 import secrets
 import subprocess
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .config import load_config, save_config, get_active_launch_profile, LaunchProfile
+from .config import (load_config, save_config, get_active_launch_profile,
+                     LaunchProfile, ensure_remote_secret, load_remote_secret,
+                     validate_remote_bind_address, REMOTE_SECRET_MIN_LEN,
+                     REMOTE_SECRET_PATH)
 from . import autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -567,7 +574,15 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 # LLMNR, NBT-NS or mDNS on the local network answers for it, as does anyone
 # controlling a DNS search suffix — so it is a rebinding target like any other.
 # Tests point their client at a loopback base URL rather than widen this set.
-_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+#
+# Rebindable, by `set_remote_host` at startup and by nothing else. The two
+# obvious ways to teach this set the configured NetBird IP are both traps: a
+# per-request `load_config()` puts an uncached whole-file TOML parse on the hot
+# path (the stall D15 forbids in `at_capacity`), and an import-time read makes
+# every host test in this suite depend on the developer's real config.toml.
+# A startup setter mirrors how `acp.apply_config` already injects its tunables.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_ALLOWED_HOSTS = _LOOPBACK_HOSTS
 
 # A Host may carry exactly one suffix, a decimal port. Five digits covers every
 # port; the value is never used as a number, only proven to be one.
@@ -577,6 +592,40 @@ _PORT_RE = re.compile(r"[0-9]{1,5}")
 # that spawns the agent. Named once so the route and the middleware guarding it
 # cannot drift apart.
 _ACP_PATH = "/acp"
+
+# The secret-exchange surface: one path, GET renders the form and POST trades
+# the device secret for the cookie. Named once because three things must agree
+# about it — the routes, the remote path allowlist, and the cookie exemption.
+_REMOTE_AUTH_PATH = "/remote-auth"
+
+
+def set_remote_host(address: str) -> None:
+    """Teach `_ALLOWED_HOSTS` the one non-loopback address we bind. Startup only.
+
+    Called from `__main__` **after** the remote socket has actually bound, so
+    the allowlist never widens for an address nothing is listening on.
+
+    Re-validates rather than trusting the caller. This function is the single
+    point where the DNS-rebinding defence can be weakened, and `""` restores
+    loopback-only — which is what makes it safe for a test to set and unset.
+    """
+    global _ALLOWED_HOSTS
+    value = (address or "").strip()
+    if not value:
+        _ALLOWED_HOSTS = _LOOPBACK_HOSTS
+        return
+    # `port` is irrelevant to the host allowlist, so pass a non-zero placeholder
+    # rather than re-deriving it; SC-3b is enforced on the bind path.
+    reason = validate_remote_bind_address(value, 1)
+    if reason:
+        log.error("remote host %r not added to the Host allowlist (%s)",
+                  value, reason)
+        _ALLOWED_HOSTS = _LOOPBACK_HOSTS
+        return
+    # Stored unbracketed and lowercase: `_host_allowed` strips brackets and
+    # lowercases the name before the membership test, so any other form binds a
+    # socket that no Host header can ever match.
+    _ALLOWED_HOSTS = _LOOPBACK_HOSTS | {value.lower()}
 
 
 def _host_allowed(raw_host: str | None) -> bool:
@@ -718,9 +767,13 @@ async def same_origin_guard(request: Request, call_next):
     and spawns ``kiro-cli acp -a``. A cross-origin top-level navigation was
     therefore enough to start a trust-all-tools agent with no user gesture.
     """
-    # A non-loopback Host cannot arise legitimately: uvicorn is bound to
-    # 127.0.0.1 in __main__.py with no host option, so nothing on the network
-    # can reach this app in the first place.
+    # `_ALLOWED_HOSTS` is loopback-only by default and gains **at most one**
+    # further name — the configured remote bind address, taught to it by
+    # `set_remote_host` at startup after that socket actually bound. So a Host
+    # outside the set still cannot arise legitimately, but the reason is no
+    # longer "nothing on the network can reach this app": with the remote bind
+    # enabled, every peer on the NetBird account can, and this check is what
+    # keeps a rebound page from being same-origin with the responses.
     if not _request_host_allowed(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     if request.method == "POST":
@@ -729,6 +782,270 @@ async def same_origin_guard(request: Request, call_next):
     elif request.url.path == _ACP_PATH and not _acp_navigation_ok(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     return await call_next(request)
+
+
+# --- Remote access: the whole authorization boundary ---------------------
+#
+# D3 designed two independent layers — a NetBird access-control policy plus
+# this device secret. Phase 0 measured that the policy layer does not exist:
+# all 17 peers on the account sit in this host's network map, so reachability
+# is not authorization and the cookie below is the ONLY control. D33 records
+# the user's decision to ship on that basis, with the consequence stated: what
+# sits behind this code is `kiro-cli acp -a`, i.e. arbitrary command execution
+# as the user. Every check here is load-bearing on its own.
+
+# Loaded once at startup by `set_remote_secret`, from a file, never from
+# `config.toml` (D8). Empty means "no usable secret", which is the state a
+# missing, unreadable, empty or truncated file collapses to — and with it
+# empty, `_cookie_ok` returns False for every cookie ever presented.
+_REMOTE_SECRET = ""
+
+_DEVICE_COOKIE_NAME = "pa_device"
+
+# Bounded charset and length. This value is client-supplied, is echoed into a
+# WARNING line, and is concatenated into a cookie: a ";" or "," is a cookie
+# attribute injection, a CR-LF is a header injection, and a newline is log
+# injection. Excluding "." also makes the three-field cookie unambiguous to
+# split.
+_DEVICE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+# `str.isdigit()` is True for non-ASCII decimal digits and `int()` accepts
+# them, so the timestamp field is matched against ASCII digits explicitly —
+# the same trap `_PORT_RE` above exists for.
+_ISSUED_AT_RE = re.compile(r"[0-9]{1,12}")
+
+# 90 days. `issued_at` is what gives the cookie an expiry with **no server-side
+# store**, which is D24's whole premise: a stored token dies with the process
+# and the phone would re-enter the secret after every restart. Without the
+# timestamp, "long-lived" means eternal, because D24 also gives up per-device
+# revocation.
+REMOTE_COOKIE_MAX_AGE_SECONDS = 90 * 24 * 3600
+
+# A cookie stamped in the future is a clock disagreement, not a forgery — but
+# an unbounded future stamp is an unbounded lifetime, so it is bounded too.
+_COOKIE_FUTURE_SKEW_SECONDS = 300
+
+
+def set_remote_secret(secret: str) -> None:
+    """Load the device secret. Startup only, mirroring `set_remote_host`.
+
+    Called from `__main__` only after the remote socket has actually bound, so
+    an instance with no remote listener also has no secret in memory. Passing
+    `""` restores the fail-closed state, which is what lets a test set and
+    unset it without leaving the process authenticating.
+    """
+    global _REMOTE_SECRET
+    value = (secret or "").strip()
+    if value and len(value) < REMOTE_SECRET_MIN_LEN:
+        log.error("remote secret is shorter than %d characters; refusing every "
+                  "remote request", REMOTE_SECRET_MIN_LEN)
+        value = ""
+    _REMOTE_SECRET = value
+
+
+def _device_cookie_sig(secret: str, device_id: str, issued_at: str) -> str:
+    """HMAC-SHA256 over `(device_id, issued_at)`, keyed by the file secret."""
+    return hmac.new(secret.encode("utf-8"),
+                    f"{device_id}.{issued_at}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def make_device_cookie(device_id: str, issued_at: int | None = None) -> str:
+    """Mint a cookie value, or `""` when there is no usable secret."""
+    if not _REMOTE_SECRET:
+        return ""
+    if not _DEVICE_ID_RE.fullmatch(device_id):
+        return ""
+    stamp = str(int(time.time()) if issued_at is None else issued_at)
+    return f"{device_id}.{stamp}.{_device_cookie_sig(_REMOTE_SECRET, device_id, stamp)}"
+
+
+def _scope_cookie(scope, name: str) -> str:
+    """Read one cookie out of a raw ASGI scope without raising.
+
+    Hand-parsed rather than routed through `http.cookies`, which is lenient in
+    ways an authorization decision must not inherit and which this guard cannot
+    afford to have raise: it runs on the `websocket` scope too, where an
+    exception is not a 500 but a broken handshake on the guarded path.
+    """
+    for key, value in scope.get("headers") or ():
+        if key.lower() != b"cookie":
+            continue
+        try:
+            raw = value.decode("latin-1")
+        except Exception:  # pragma: no cover - bytes always decode as latin-1
+            continue
+        for part in raw.split(";"):
+            candidate, sep, val = part.partition("=")
+            if sep and candidate.strip() == name:
+                return val.strip()
+    return ""
+
+
+def _cookie_ok(scope) -> bool:
+    """Whether a scope carries a valid, unexpired device cookie.
+
+    Fails closed on every path: no secret, no cookie, malformed cookie, a
+    device id outside the bounded charset, a non-ASCII-digit timestamp, an age
+    past the ceiling, a signature that does not verify. Nothing here raises,
+    because a raise on this path is a 500 an unauthenticated peer can drive.
+    """
+    secret = _REMOTE_SECRET
+    if not secret or len(secret) < REMOTE_SECRET_MIN_LEN:
+        return False
+    raw = _scope_cookie(scope, _DEVICE_COOKIE_NAME)
+    # 64 (id) + 12 (stamp) + 64 (hex digest) + 2 separators = 142.
+    if not raw or len(raw) > 160:
+        return False
+    device_id, sep_a, rest = raw.partition(".")
+    issued_at, sep_b, sig = rest.partition(".")
+    if not sep_a or not sep_b or not sig:
+        return False
+    if not _DEVICE_ID_RE.fullmatch(device_id):
+        return False
+    if not _ISSUED_AT_RE.fullmatch(issued_at):
+        return False
+    now = int(time.time())
+    issued = int(issued_at)
+    if issued > now + _COOKIE_FUTURE_SKEW_SECONDS:
+        return False
+    if now - issued > REMOTE_COOKIE_MAX_AGE_SECONDS:
+        return False
+    # UTF-8 bytes, not str: `compare_digest` raises `TypeError` for a `str`
+    # holding non-ASCII, and a cookie is entirely attacker-chosen — the same
+    # lesson `_acp_token_ok` already encodes.
+    return secrets.compare_digest(
+        sig.encode("utf-8", "replace"),
+        _device_cookie_sig(secret, device_id, issued_at).encode("utf-8"))
+
+
+def _is_remote_peer(peer: str | None) -> bool:
+    """Is the transport-level peer address non-loopback?
+
+    Defined once rather than left to a call site, because the whole model
+    collapses to whichever predicate someone writes. `peer != bind_address` and
+    `peer in an allowlist` are both wrong; only "is it loopback?" is right, and
+    unparseable or absent means remote.
+
+    The input is `scope["client"]`, set by the transport, **never the `Host`
+    header** (D26): `Host` is attacker-controlled, so a NetBird peer sending
+    `Host: 127.0.0.1:4915` would otherwise read as local and skip both the path
+    allowlist and the cookie.
+    """
+    if not peer:
+        return True
+    try:
+        return not ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return True
+
+
+# Default-deny (D6). A denylist over ~40 routes leaks by default on the next
+# route added; this makes every new route loopback-only until someone puts it
+# here deliberately. Phase 4's listing endpoint is the next intended entry and
+# is deliberately absent until it exists.
+_REMOTE_ALLOWED_PATHS = frozenset({_ACP_PATH, "/ws/acp", _REMOTE_AUTH_PATH})
+
+# Path-only, so the exchange route itself must reject methods other than
+# GET/POST — which FastAPI does by registering only those two.
+_COOKIE_EXEMPT = frozenset({_REMOTE_AUTH_PATH})
+
+_FORBIDDEN_BODY = b'{"error":"Forbidden"}'
+
+
+def _remote_path_allowed(path: str) -> bool:
+    """Exact match for the fixed paths; prefix match only for the mount.
+
+    `startswith("/static")` alone would also admit `/staticfoo`, so the mount
+    is matched as the directory it is.
+    """
+    if path in _REMOTE_ALLOWED_PATHS:
+        return True
+    return path == "/static" or path.startswith("/static/")
+
+
+async def _refuse(scope, send) -> None:
+    """Scope-typed refusal.
+
+    Emitting `http.response.start` into a `websocket` scope is an ASGI protocol
+    violation and surfaces as a uvicorn exception rather than a refusal — on
+    the very path this guard exists to protect. uvicorn turns a pre-accept
+    close into an HTTP 403 handshake rejection and discards the code, so 1008
+    records the intent rather than what a client observes.
+    """
+    if scope["type"] == "websocket":
+        await send({"type": "websocket.close", "code": 1008})
+        return
+    await send({"type": "http.response.start", "status": 403, "headers": [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(_FORBIDDEN_BODY)).encode("ascii")),
+    ]})
+    await send({"type": "http.response.body", "body": _FORBIDDEN_BODY})
+
+
+def _remote_navigation_ok(scope) -> bool:
+    """`_acp_navigation_ok`'s `Sec-Fetch-Site` rule, for remote GETs only.
+
+    Cookies are host-scoped and **port-agnostic**, so another service listening
+    on any port of the NetBird address is "same-site" as far as
+    `SameSite=Strict` is concerned. This rule closes the browser half of that.
+
+    It constrains browsers only: the rule falls back to
+    `_origin_or_referer_ok(allow_missing=True)` when the header is absent, and
+    a non-browser client simply omits it. **The cookie, not this rule, is the
+    control against a non-browser remote client.**
+    """
+    try:
+        return _acp_navigation_ok(Request(scope))
+    except Exception:  # pragma: no cover - a malformed scope must not 500
+        return False
+
+
+class RemoteAccessGuard:
+    """The one construct that sees every ASGI scope type (D7, revised).
+
+    `BaseHTTPMiddleware.__call__` returns early on a non-`http` scope, so
+    `same_origin_guard` — and its `_ALLOWED_HOSTS` rebinding defence — never
+    sees an upgrade. Two enforcement points were the other candidate and were
+    also wrong: `/static` is a `Mount` whose `matches` admits websocket scopes,
+    so `ws://<ip>/static/x` reaches `StaticFiles` having passed neither
+    `same_origin_guard` nor `ws_acp`'s own checks.
+
+    Registered **after** `same_origin_guard`, which makes it OUTERMOST:
+    `add_middleware` inserts at index 0 and the stack is built over
+    `reversed(middleware)`, so the last registered wraps the rest. A deny
+    survives either order; the refusal body and whether an inner guard's
+    logging fires do not.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            if _is_remote_peer((scope.get("client") or (None,))[0]):
+                path = scope.get("path") or ""
+                if not _remote_path_allowed(path):
+                    await _refuse(scope, send)
+                    return
+                if path not in _COOKIE_EXEMPT and not _cookie_ok(scope):
+                    await _refuse(scope, send)
+                    return
+                # `http`-scope GETs only. The `/ws/acp` upgrade is a GET at the
+                # HTTP layer but a `websocket` ASGI scope, and browsers do not
+                # attach `Sec-Fetch-Site` to a WebSocket handshake — the literal
+                # reading would break the phone client outright.
+                if (scope["type"] == "http" and scope.get("method") == "GET"
+                        and not _remote_navigation_ok(scope)):
+                    await _refuse(scope, send)
+                    return
+        await self.app(scope, receive, send)
+
+
+# Registered here, after `same_origin_guard`'s definition, so that this guard
+# ends up outermost. Moving this line above that decorator silently inverts the
+# order.
+app.add_middleware(RemoteAccessGuard)
 
 
 # Per-process, never persisted, regenerated every launch. The origin check
@@ -839,8 +1156,15 @@ def _acp_csp(nonce: str, host: str) -> str:
     ``'self'``: whether ``'self'`` covers a ``ws://`` upgrade from an ``http:``
     page is a CSP3 clarification rather than something every engine has always
     done, and a ``connect-src`` that blocks ``/ws/acp`` takes the whole feature
-    down while every server-side test still passes. ``host`` is the validated
-    Host header, so it carries no port PowerAtlas is not actually serving on.
+    down while every server-side test still passes.
+
+    ``host`` is the Host header ``_host_allowed`` accepted, which bounds the
+    **name** to the allowlist and nothing else: ``_PORT_RE`` proves the suffix
+    is one to five decimal digits, not that it is a port in range, so
+    ``127.0.0.1:99999`` reaches ``connect-src`` intact. That is a policy naming
+    an origin nothing can connect to — the page's own socket still matches the
+    real origin the browser loaded it from — so it costs a broken page for a
+    caller who chose to break it, and grants nothing.
     """
     return "; ".join((
         "default-src 'self'",
@@ -919,6 +1243,144 @@ async def ws_acp(ws: WebSocket) -> None:
         return
     await ws.accept()
     await acp.serve_socket(ws)
+
+
+# --- The secret exchange -------------------------------------------------
+#
+# The only two cookie-exempt remote paths. Without them no remote device could
+# ever authenticate, because the page that trades the secret for the cookie
+# would itself be refused for having no cookie.
+
+_EXCHANGE_BASE_BACKOFF_SECONDS = 2.0
+_EXCHANGE_MAX_BACKOFF_SECONDS = 300.0
+# Bounded so an attacker cycling source addresses cannot grow this dict without
+# limit. Evicting the oldest entry costs a forgiving attacker nothing they did
+# not already have (they can always come from a fresh address), and costs a
+# single-address attacker nothing at all.
+_EXCHANGE_MAX_TRACKED_PEERS = 512
+_exchange_failures: dict[str, tuple[int, float]] = {}
+
+_EXCHANGE_FORM = """<!doctype html>
+<title>PowerAtlas remote access</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<h1>PowerAtlas remote access</h1>
+<p>{message}</p>
+<form method="post" action="{action}">
+<p><label>Device name<br><input name="device_id" maxlength="64"
+   pattern="[A-Za-z0-9_-]+" value="{device_id}" required></label></p>
+<p><label>Device secret<br><input name="secret" type="password"
+   autocomplete="off" required></label></p>
+<p><button type="submit">Authorize this device</button></p>
+</form>
+"""
+
+
+def _exchange_backoff_remaining(peer: str) -> float:
+    """Seconds left on this peer's lockout, or 0.0.
+
+    Exponential from the first failure, capped. Checked **before** the secret
+    is compared, so it throttles guessing rather than merely recording it.
+    """
+    count, last = _exchange_failures.get(peer, (0, 0.0))
+    if count <= 0:
+        return 0.0
+    delay = min(_EXCHANGE_BASE_BACKOFF_SECONDS * (2 ** min(count - 1, 8)),
+                _EXCHANGE_MAX_BACKOFF_SECONDS)
+    remaining = delay - (time.monotonic() - last)
+    return remaining if remaining > 0 else 0.0
+
+
+def _record_exchange_failure(peer: str) -> None:
+    count = _exchange_failures.get(peer, (0, 0.0))[0]
+    if peer not in _exchange_failures and len(_exchange_failures) >= _EXCHANGE_MAX_TRACKED_PEERS:
+        _exchange_failures.pop(next(iter(_exchange_failures)), None)
+    _exchange_failures[peer] = (count + 1, time.monotonic())
+
+
+def _peer_of(request: Request) -> str:
+    client = request.scope.get("client")
+    return (client[0] if client else "") or "unknown"
+
+
+@app.get(_REMOTE_AUTH_PATH, response_class=HTMLResponse)
+async def remote_auth_page(request: Request):
+    """The form that trades the device secret for the cookie.
+
+    Deliberately script-free and self-contained: it is served to an
+    unauthenticated peer, so it must not be a delivery vehicle for anything.
+    """
+    if not _REMOTE_SECRET:
+        return HTMLResponse(
+            "<!doctype html><title>PowerAtlas remote access</title>"
+            "<h1>Remote access is not configured</h1>"
+            "<p>No usable device secret exists on the server.</p>",
+            status_code=503)
+    return HTMLResponse(_EXCHANGE_FORM.format(
+        message="Enter the device secret shown in PowerAtlas settings.",
+        action=_REMOTE_AUTH_PATH, device_id=""))
+
+
+@app.post(_REMOTE_AUTH_PATH, response_class=HTMLResponse)
+async def remote_auth_exchange(request: Request):
+    """Verify the secret, then set the long-lived device cookie.
+
+    The comparison is constant-time over UTF-8 bytes for the reason
+    `_acp_token_ok` documents: `compare_digest` raises `TypeError` on a `str`
+    holding non-ASCII, and this field is entirely attacker-chosen, so a `str`
+    comparison turns a 403 on the authentication path into a 500 that any
+    unauthenticated caller can drive.
+    """
+    peer = _peer_of(request)
+    remaining = _exchange_backoff_remaining(peer)
+    if remaining > 0:
+        log.warning("remote auth throttled for peer %s (%.0fs remaining)",
+                    peer, remaining)
+        return HTMLResponse(_EXCHANGE_FORM.format(
+            message=f"Too many attempts. Try again in {int(remaining) + 1}s.",
+            action=_REMOTE_AUTH_PATH, device_id=""), status_code=429)
+    if not _REMOTE_SECRET:
+        log.error("remote auth attempted from %s with no usable device secret",
+                  peer)
+        return HTMLResponse("Remote access is not configured", status_code=503)
+    raw = await request.body()
+    fields = dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+    supplied = fields.get("secret", "")
+    device_id = fields.get("device_id", "")
+    # Validate the identifier before it reaches a cookie or a log line: a ";"
+    # or "," is cookie-attribute injection, a CR-LF is header injection, and a
+    # newline in the WARNING below is log injection.
+    if not _DEVICE_ID_RE.fullmatch(device_id):
+        _record_exchange_failure(peer)
+        log.warning("remote auth from %s rejected: invalid device id", peer)
+        return HTMLResponse(_EXCHANGE_FORM.format(
+            message="Device name must be 1-64 characters of A-Z a-z 0-9 _ -",
+            action=_REMOTE_AUTH_PATH, device_id=""), status_code=400)
+    if not secrets.compare_digest(supplied.encode("utf-8", "replace"),
+                                  _REMOTE_SECRET.encode("utf-8")):
+        _record_exchange_failure(peer)
+        # D3 makes the cookie "the layer that survives policy drift"; without
+        # this line the drift is never observable.
+        log.warning("remote auth from %s rejected for device %r: bad secret",
+                    peer, device_id)
+        return HTMLResponse(_EXCHANGE_FORM.format(
+            message="That secret was not accepted.",
+            action=_REMOTE_AUTH_PATH, device_id=device_id), status_code=403)
+    _exchange_failures.pop(peer, None)
+    value = make_device_cookie(device_id)
+    response = HTMLResponse(
+        "<!doctype html><title>PowerAtlas remote access</title>"
+        "<h1>Device authorized</h1>"
+        f'<p><a href="{_ACP_PATH}">Open PowerAtlas</a></p>')
+    # `set_cookie` rather than a hand-assembled header: it raises `CookieError`
+    # on an illegal character, and nothing in `src/` sets a cookie today, so
+    # there is no in-house pattern to inherit. No `Secure`: there is no TLS by
+    # design (D5) — WireGuard carries the transport.
+    response.set_cookie(
+        _DEVICE_COOKIE_NAME, value,
+        max_age=REMOTE_COOKIE_MAX_AGE_SECONDS,
+        httponly=True, samesite="strict", path="/")
+    log.info("remote device %r authorized from %s", device_id, peer)
+    return response
 
 
 @app.post("/api/autostart")
@@ -1606,6 +2068,12 @@ async def api_settings():
         "provider_settings": config.provider_settings,
         "custom_launchers": config.custom_launchers,
         "autostart": autostart_enabled,
+        "acp_max_sessions": config.acp_max_sessions,
+        "acp_idle_ttl_seconds": config.acp_idle_ttl_seconds,
+        "acp_prompt_silence_seconds": config.acp_prompt_silence_seconds,
+        # The address only; the secret is served by `/api/remote-access` alone.
+        "remote_bind_address": config.remote_bind_address,
+        "restart_to_apply": sorted(_RESTART_TO_APPLY),
     }
 
 
@@ -1872,7 +2340,33 @@ _SETTING_TYPES: dict[str, type] = {
     "default_directory": str,
     "pinned_folders": list,
     "pinned_sessions": list,
+    # Read once at startup by design (`acp.apply_config`), so the settings UI
+    # must say **restart to apply** — see `_RESTART_TO_APPLY` below.
+    "acp_max_sessions": int,
+    "acp_idle_ttl_seconds": int,
+    "acp_prompt_silence_seconds": int,
+    "remote_bind_address": str,
 }
+
+# Inclusive integer bounds, enforced on the write path only. `load_config` is
+# documented as never raising and runs on the event loop, so the bounds cannot
+# live there; `acp.apply_config` separately logs-and-ignores an out-of-range
+# hand-edit rather than clamping it. Adding a key to `_SETTING_TYPES` without a
+# bound here is what would turn Phase 2's fail-closed `Unknown setting` refusal
+# into an unbounded write.
+_SETTING_BOUNDS: dict[str, tuple[int, int]] = {
+    "acp_max_sessions": (1, 16),
+    "acp_idle_ttl_seconds": (300, 86400),
+    "acp_prompt_silence_seconds": (60, 7200),
+}
+
+# Keys whose value is read exactly once at startup. Returned to the settings UI
+# so it can say so, rather than appearing to take effect and silently doing
+# nothing until the next launch.
+_RESTART_TO_APPLY = frozenset({
+    "port", "acp_max_sessions", "acp_idle_ttl_seconds",
+    "acp_prompt_silence_seconds", "remote_bind_address",
+})
 
 
 @app.post("/api/save-setting")
@@ -1896,6 +2390,10 @@ async def save_setting(request: Request):
     if key == "port":
         if value != 0 and not (1024 <= value <= 65535):
             return {"ok": False, "error": "Port must be 0 (random) or 1024\u201365535"}
+    bounds = _SETTING_BOUNDS.get(key)
+    if bounds is not None and not (bounds[0] <= value <= bounds[1]):
+        return {"ok": False,
+                "error": f"{key} must be between {bounds[0]} and {bounds[1]}"}
     # String-specific validation (applies to peek_hotkey, default_directory)
     if expected_type is str:
         if len(value) > 512:
@@ -1903,9 +2401,52 @@ async def save_setting(request: Request):
         if any(ord(ch) < 0x20 for ch in value):
             return {"ok": False, "error": f"{key} contains invalid control characters"}
     config = load_config()
+    if key == "remote_bind_address":
+        # The named error SC-3b asks for, on the write path. `load_config`
+        # sanitises the same value to "" and logs, because it may not raise;
+        # here the user is told why, before the value is ever persisted.
+        reason = validate_remote_bind_address(value, config.port)
+        if reason:
+            return {"ok": False, "error": reason}
+        if value.strip():
+            # First enable: create the device secret in the same step that
+            # turns the surface on, so "reachable" and "authenticable" cannot
+            # come apart. An existing secret is returned untouched \u2014 issuing a
+            # new one here would revoke every device that already holds a
+            # cookie, on a route the user thinks only sets an address.
+            if not ensure_remote_secret():
+                return {"ok": False,
+                        "error": "Could not create the device secret; "
+                                 "remote access not enabled"}
+            value = value.strip()
     setattr(config, key, value)
     save_config(config)
-    return {"ok": True}
+    return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}
+
+
+@app.get("/api/remote-access")
+async def api_remote_access():
+    """The remote URL and device secret, as copyable text (D22).
+
+    Its own route rather than a field on `/api/settings`: that payload is
+    fetched broadly by the dashboard and a credential does not belong in it.
+    Both routes are loopback-only \u2014 they are absent from
+    `_REMOTE_ALLOWED_PATHS`, and the allowlist is default-deny \u2014 so the secret
+    is never served over the remote surface it authenticates.
+    """
+    config = load_config()
+    secret = load_remote_secret()
+    address = config.remote_bind_address
+    return {
+        "enabled": bool(address),
+        "remote_bind_address": address,
+        "url": f"http://{address}:{config.port}{_REMOTE_AUTH_PATH}" if address and config.port else "",
+        "secret": secret,
+        "secret_present": bool(secret),
+        "secret_path": str(REMOTE_SECRET_PATH),
+        # Read once at startup: the bind happens before the app exists.
+        "restart_required": True,
+    }
 
 
 @app.get("/partials/session-tail", response_class=HTMLResponse)

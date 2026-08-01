@@ -6,6 +6,7 @@ import faulthandler
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -13,7 +14,8 @@ import time
 
 import uvicorn
 
-from .config import load_config, CONFIG_DIR
+from .config import (load_config, load_remote_secret, CONFIG_DIR,
+                     REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH)
 from .interpreter import ensure_project_interpreter
 
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -32,6 +34,77 @@ _PID_FILE = CONFIG_DIR / "power-atlas.pid"
 WS_MAX_SIZE_BYTES = 1024 * 1024
 
 _mutex_handle = None
+
+
+def _bind(host: str, port: int) -> socket.socket:
+    """Create one listening socket.
+
+    Do **not** replace this with ``uvicorn.Config.bind_socket``. That helper
+    sets ``SO_REUSEADDR``, which on Windows lets a *different local process*
+    bind the identical ``127.0.0.1:<port>`` and hijack connections to a surface
+    that serves ``_ACP_TOKEN`` and fronts ``kiro-cli acp -a``. It also sets
+    ``set_inheritable(True)``, handing the listener to every child process the
+    app spawns — and this app spawns terminals and agents.
+
+    ``SO_EXCLUSIVEADDRUSE`` is the Windows opposite of ``SO_REUSEADDR``: it
+    makes a second bind to the same address fail. It does not exist on POSIX,
+    where the default ``SO_REUSEADDR``-off behaviour is already exclusive.
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    s = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        if sys.platform == "win32":
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        s.set_inheritable(False)
+        s.bind((host, port))
+        s.listen()
+    except BaseException:
+        s.close()
+        raise
+    return s
+
+
+def _bind_remote_socket(log, config, socks: list, port: int) -> bool:
+    """Append the remote listener to ``socks``, or explain why not.
+
+    Never raises. PowerAtlas autostarts at login and NetBird's interface may
+    not be up yet, which raises ``OSError`` (Windows ``WinError 10049``); the
+    existing port-in-use retry does not cover that, so unhandled this would
+    make the app **exit 1** rather than degrade to loopback-only.
+
+    The secret is checked **before** the socket is created, not at request
+    time. Otherwise the remote surface is bound and accepting while
+    authentication is structurally impossible — a listener on a network of 17
+    peers with no way to say no.
+
+    ``web``'s two startup setters are called only after the bind succeeds, so
+    the Host allowlist never widens for an address nothing is listening on and
+    the process holds no secret it cannot use.
+    """
+    address = (config.remote_bind_address or "").strip()
+    if not address:
+        return False
+    secret = load_remote_secret()
+    if not secret:
+        log.error("Remote bind to %s skipped: %s is missing, empty or shorter "
+                  "than %d characters. Remote access stays disabled.",
+                  address, REMOTE_SECRET_PATH, REMOTE_SECRET_MIN_LEN)
+        return False
+    try:
+        socks.append(_bind(address, port))
+    except OSError as exc:
+        log.error("Remote bind to %s:%d failed (%s); loopback only",
+                  address, port, exc)
+        return False
+    if config.port and port != config.port:
+        log.warning("Remote listener is on port %d, not the configured %d "
+                    "(loopback fell back); bookmarked remote URLs will be stale",
+                    port, config.port)
+    from .web import set_remote_host, set_remote_secret
+    set_remote_host(address)
+    set_remote_secret(secret)
+    log.info("Remote access enabled on %s:%d", address, port)
+    return True
 
 
 def _write_pid() -> None:
@@ -315,43 +388,75 @@ def _run_foreground() -> None:
             evt.set()
         return _patched
 
-    uv_config = uvicorn.Config(app, host="127.0.0.1", port=desired_port,
+    # Both listeners are created here and handed to ONE `uvicorn.Server` via
+    # `run(sockets=…)` (D23). `uvicorn.Config(host=)` takes a single address, so
+    # two addresses meant either `0.0.0.0` — a listener on every network this
+    # laptop ever joins — or two `Server` instances, which would run lifespan
+    # twice: two background-refresh loops, two sweepers racing on the same
+    # sessions, and `acp.shutdown()` called twice.
+    #
+    # Loopback is MANDATORY and keeps its port-in-use fallback. Only the remote
+    # bind may degrade: a remote-only listener with no loopback is a state the
+    # whole model assumes cannot exist.
+    try:
+        socks = [_bind("127.0.0.1", desired_port)]
+    except OSError as exc:
+        if desired_port <= 0:
+            log.error("Loopback bind on an OS-assigned port failed: %s", exc)
+            print("ERROR: Server failed to start", file=sys.stderr)
+            _remove_pid()
+            sys.exit(1)
+        log.warning("Port %d unavailable (%s), falling back to random port",
+                    desired_port, exc)
+        try:
+            socks = [_bind("127.0.0.1", 0)]
+        except OSError as exc2:
+            log.error("Loopback bind failed on port %d and on the random "
+                      "fallback: %s", desired_port, exc2)
+            print("ERROR: Server failed to start", file=sys.stderr)
+            _remove_pid()
+            sys.exit(1)
+    # Read from the loopback socket explicitly, never from `server.servers[0]`:
+    # with two sockets, index 0 is merely whichever one uvicorn happened to
+    # register first, and this value becomes the URL tray and peek open.
+    loopback_sock = socks[0]
+    port = loopback_sock.getsockname()[1]
+
+    _bind_remote_socket(log, config, socks, port)
+
+    log.info("Listening on %s",
+             [s.getsockname()[:2] for s in socks])
+
+    uv_config = uvicorn.Config(app, host="127.0.0.1", port=port,
                                log_level="warning",
-                               ws_max_size=WS_MAX_SIZE_BYTES)
+                               ws_max_size=WS_MAX_SIZE_BYTES,
+                               # `ProxyHeadersMiddleware` OVERWRITES
+                               # `scope["client"]` from `X-Forwarded-For` for
+                               # any peer in `forwarded_allow_ips`, and
+                               # `proxy_headers` defaults to True. With
+                               # `FORWARDED_ALLOW_IPS=*` in the environment,
+                               # a remote peer could then declare itself
+                               # loopback and skip both the path allowlist and
+                               # the cookie — the exact class of bug D26 exists
+                               # to close. PowerAtlas is never behind a proxy.
+                               proxy_headers=False)
     server = uvicorn.Server(uv_config)
     ready_event = threading.Event()
     server.startup = _make_patched_startup(server, ready_event)
 
-    server_thread = threading.Thread(target=server.run, daemon=True)
+    # `run()` blocks, so the thread + ready_event scaffolding has to stay or
+    # neither the tray nor peek ever starts.
+    server_thread = threading.Thread(target=server.run,
+                                     kwargs={"sockets": socks}, daemon=True)
     server_thread.start()
     ready_event.wait(timeout=10)
 
-    # Detect failure: either timeout or thread died (port-in-use exits run() immediately)
-    if (not ready_event.is_set() or not server.servers) and desired_port > 0:
-        # Static port failed — shut down failed server, fall back to random
-        log.warning("Port %d unavailable, falling back to random port", desired_port)
-        server.should_exit = True
-        server_thread.join(timeout=3)
-        if server_thread.is_alive():
-            log.warning("Failed server thread did not exit within 3s — orphaned (daemon)")
-
-        uv_config = uvicorn.Config(app, host="127.0.0.1", port=0,
-                                   log_level="warning",
-                                   ws_max_size=WS_MAX_SIZE_BYTES)
-        server = uvicorn.Server(uv_config)
-        ready_event = threading.Event()
-        server.startup = _make_patched_startup(server, ready_event)
-        server_thread = threading.Thread(target=server.run, daemon=True)
-        server_thread.start()
-        ready_event.wait(timeout=10)
-
     if not ready_event.is_set() or not server.servers:
-        log.error("Server failed to start on port %d and random fallback", desired_port)
+        log.error("Server failed to start on port %d", port)
         print("ERROR: Server failed to start", file=sys.stderr)
         _remove_pid()
         sys.exit(1)
 
-    port = server.servers[0].sockets[0].getsockname()[1]
     server_url = f"http://127.0.0.1:{port}"
     log.info("Server ready at %s", server_url)
 

@@ -1,8 +1,10 @@
 """Thread-safe config persistence via TOML."""
 
+import ipaddress
 import logging
 import os
 import re
+import secrets
 import shutil
 import sys
 import threading
@@ -76,6 +78,140 @@ class Config:
     acp_max_sessions: int = 8
     acp_idle_ttl_seconds: int = 1800
     acp_prompt_silence_seconds: int = 900
+    # The single non-loopback address PowerAtlas additionally listens on, and
+    # the single non-loopback name `web._ALLOWED_HOSTS` admits. Empty means
+    # loopback-only, which is the default and the state a version bump must
+    # never silently leave (D21). Validated by `validate_remote_bind_address`
+    # on the write path and sanitised to "" here on load — `load_config` is
+    # documented as never raising and ~16 routes call it on the event loop.
+    remote_bind_address: str = ""
+
+
+# The device secret backing the remote cookie. Its own file rather than a key
+# in config.toml (D8): `save_config` rewrites the whole file from an `asdict`
+# of every field, so a credential there is in the blast radius of every
+# mutating route and of the 18 known config-leaking tests.
+#
+# On Windows the protection is `%LOCALAPPDATA%`'s inherited ACLs, **not** file
+# mode: `os.chmod` on win32 toggles only the read-only attribute and never
+# touches an ACL. The 0o600 below is therefore real on POSIX and decorative on
+# Windows, and saying so is the honest form.
+REMOTE_SECRET_PATH = CONFIG_DIR / "remote-secret"
+
+# `len(secrets.token_urlsafe(32))` is 43. A shorter file is a truncated write,
+# a hand-edit, or an empty file, and every one of those must fail closed: an
+# empty secret compared with `compare_digest` matches an empty signature and
+# removes authentication while the remote socket stays bound.
+REMOTE_SECRET_MIN_LEN = 43
+
+
+def load_remote_secret() -> str:
+    """Return the device secret, or ``""`` when it is unusable.
+
+    Unusable covers absent, unreadable, empty, whitespace-only and shorter than
+    ``REMOTE_SECRET_MIN_LEN``. Every one of them collapses to the same empty
+    string precisely so that no caller has to enumerate them, and so that the
+    only possible verdict on a damaged secret is "no remote access".
+
+    Never raises: it is called from the bind path at startup and from the
+    request path's startup setter, and neither has anywhere to put an
+    ``OSError``.
+    """
+    try:
+        raw = REMOTE_SECRET_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    value = raw.strip()
+    if len(value) < REMOTE_SECRET_MIN_LEN:
+        return ""
+    return value
+
+
+def ensure_remote_secret() -> str:
+    """Create the device secret if absent; return it, or ``""`` on failure.
+
+    Called on first enable — the write path that sets ``remote_bind_address``
+    to a usable value — so that enabling remote access and being able to
+    authenticate to it are one step. An existing usable secret is returned
+    untouched: regenerating here would silently revoke every device that
+    already holds a cookie, on a route the user thinks only flips an address.
+    """
+    existing = load_remote_secret()
+    if existing:
+        return existing
+    value = secrets.token_urlsafe(32)
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(REMOTE_SECRET_PATH,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, value.encode("ascii"))
+        finally:
+            os.close(fd)
+    except OSError:
+        log.error("Could not write %s; remote access stays disabled",
+                  REMOTE_SECRET_PATH)
+        return ""
+    return value
+
+
+def validate_remote_bind_address(raw: object, port: int) -> str:
+    """Return ``""`` when ``raw`` is a usable remote bind address, else why not.
+
+    Rejection is on **parsed properties**, never string equality. A comparison
+    against ``"0.0.0.0"``/``"::"`` is bypassed by ``::0``, ``0000::`` and
+    ``::ffff:0.0.0.0``, and would let ``remote_bind_address = "127.0.0.1"``
+    produce two listeners on the same address and port inside one process.
+
+    ``ipaddress.ip_address`` also enforces "an IP, never an FQDN" (D2)
+    mechanically: a single-label name is hijackable over LLMNR/NBT-NS/mDNS, so
+    widening the Host allowlist to one would re-open the rebinding hole the
+    allowlist exists to close.
+
+    The bracketed, zone-id and non-canonical forms are rejected separately,
+    because ``web._host_allowed`` strips brackets and lowercases before its
+    membership test — an address stored as ``[FD00::1]`` or ``fe80::1%eth0``
+    would bind a socket and then match no Host header ever sent, which is a
+    listener nobody can reach and no error anywhere.
+
+    An empty value is valid: it means loopback-only, which is the default.
+    """
+    if not isinstance(raw, str):
+        return "remote_bind_address must be a string"
+    value = raw.strip()
+    if not value:
+        return ""
+    if len(value) > 45:  # longest textual IPv6 form
+        return "remote_bind_address is too long to be an IP address"
+    if "%" in value:
+        return "remote_bind_address must not carry an IPv6 zone id"
+    if "[" in value or "]" in value:
+        return "remote_bind_address must be unbracketed"
+    try:
+        parsed = ipaddress.ip_address(value)
+    except ValueError:
+        return ("remote_bind_address must be a literal IP address, "
+                "not a hostname")
+    # An IPv4-mapped IPv6 address carries its properties on the embedded v4
+    # address, so `::ffff:0.0.0.0` is NOT `is_unspecified` and `::ffff:127.0.0.1`
+    # is NOT `is_loopback`. Unwrap before asking.
+    checked = getattr(parsed, "ipv4_mapped", None) or parsed
+    if checked.is_unspecified:
+        return "remote_bind_address must not be a wildcard address"
+    if checked.is_loopback:
+        return "remote_bind_address must not be a loopback address"
+    if checked.is_multicast:
+        return "remote_bind_address must not be a multicast address"
+    if str(parsed) != value:
+        return (f"remote_bind_address must be in canonical form "
+                f"(did you mean {parsed}?)")
+    if port == 0:
+        # SC-3b. With `port = 0` the OS assigns a number **per bind call**, so
+        # the loopback and remote sockets would land on different ports and the
+        # laptop and phone URLs would permanently disagree — and a phone cannot
+        # bookmark an ephemeral port in the first place.
+        return "port must be a fixed non-zero value when remote_bind_address is set"
+    return ""
 
 
 def get_workspace_settings(config: Config, cwd: str) -> dict:
@@ -268,6 +404,24 @@ def load_config() -> Config:
         if not isinstance(config.default_directory, str):
             config.default_directory = ""
         config.default_directory = _strip_control_chars(config.default_directory).strip()
+
+        # Sanitize remote_bind_address: fail closed to loopback-only, log, never
+        # raise. `load_config` is documented as never raising and is called on
+        # the event loop from ~16 routes, so a raising validator would turn one
+        # config.toml typo into a 500 on every route plus a startup crash. The
+        # named error SC-3b asks for is produced here in the log and on the
+        # write path in `web.save_setting`.
+        if not isinstance(config.remote_bind_address, str):
+            config.remote_bind_address = ""
+        config.remote_bind_address = config.remote_bind_address.strip()
+        if config.remote_bind_address:
+            reason = validate_remote_bind_address(
+                config.remote_bind_address, config.port)
+            if reason:
+                log.error("remote_bind_address %r rejected (%s); "
+                          "listening on loopback only",
+                          config.remote_bind_address, reason)
+                config.remote_bind_address = ""
 
         # Platform-aware terminal_command default: fill on Windows, leave empty on Linux (auto-detect)
         if sys.platform == "win32":
