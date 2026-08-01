@@ -1774,10 +1774,18 @@ check("the panel shows no secret it does not have, and no form when remote is of
               "a secret field was drawn for a secret that does not exist");
   assert(!absent.body.textContent.includes("undefined"),
          "the panel rendered `undefined` where the absent secret would go");
-  assertEqual(
-    absent.body.querySelectorAll(".remote-note-warn")
-          .filter((n) => /no device secret exists/i.test(n.textContent)).length, 1,
+  const missing = absent.body.querySelectorAll(".remote-note-warn")
+                        .filter((n) => /no device secret exists/i.test(n.textContent));
+  assertEqual(missing.length, 1,
     "nothing says that no device can authenticate yet");
+  // Not a check on wording but on which control the note sends the user to.
+  // Rotation is the panel's destructive action — it signs every device out —
+  // and it happens to work here only because there is nothing to revoke yet.
+  // Save reaches `ensure_remote_secret`, which issues one without revoking.
+  assert(!/rotat/i.test(missing[0].textContent),
+         `the secretless note points at the destructive control: ${missing[0].textContent}`);
+  assert(/\bsave\b/i.test(missing[0].textContent),
+         `the secretless note names no way to get a secret: ${missing[0].textContent}`);
 
   const off = loadPanel();
   off.sandbox.renderRemoteAccess({ enabled: false });

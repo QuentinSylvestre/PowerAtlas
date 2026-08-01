@@ -874,9 +874,14 @@ function renderRemoteAccess(d) {
       'Kept in ' + d.secret_path + ', never in config.toml and never served '
       + 'over the remote surface it authenticates.'));
   } else {
+    // Points at Save, not at the rotate button directly below it. `Save`
+    // reaches `ensure_remote_secret`, which issues one only when absent and
+    // returns an existing one untouched; rotating happens to work here only
+    // because there is nothing to revoke yet, and naming it teaches the one
+    // control that signs every device out as the routine way to get a secret.
     body.appendChild(_remoteNote(
-      'No device secret exists yet, so no device can authenticate. Rotating '
-      + 'below creates one.', 'warn'));
+      'No device secret exists yet, so no device can authenticate. Save the '
+      + 'bind address above — already filled in — and one is issued.', 'warn'));
   }
   // D24 gave up per-device revocation knowingly. The consequence has to be on
   // screen *before* the button is pressed, not discovered afterwards by a

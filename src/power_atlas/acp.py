@@ -2515,13 +2515,19 @@ def _unattributed_in_use_message() -> str:
     land here on the agent's own word for it, which on kiro-cli 2.14.2 is the
     bare string "Internal error". State the cause that has actually been
     measured and both remedies, without claiming an attribution we do not have.
+
+    The sentence names no kiro-cli version, unlike the comments around it. A
+    reader of a comment can check which build the observation came from; a user
+    reading this on screen cannot, so a version there either reads as "this does
+    not apply to me" or claims a re-verification on the build they are actually
+    running that nobody has done.
     """
     return ("The agent refused to load this session and gave no reason "
-            "(JSON-RPC -32603). On kiro-cli 2.14.2 that is what a session "
-            "already open somewhere else looks like, and no lock file here "
-            "could name the process holding it. Exit any other kiro-cli that "
-            "has this session open and try again; if there is none, restart "
-            "PowerAtlas, which releases every session its agent still holds.")
+            "(JSON-RPC -32603). A session already open somewhere else has been "
+            "seen to look exactly like this, and no lock file here could name "
+            "the process holding it. Exit any other kiro-cli that has this "
+            "session open and try again; if there is none, restart PowerAtlas, "
+            "which releases every session its agent still holds.")
 
 
 def _load_failure(exc: AcpError, holder: int | None) -> tuple[str, str]:
