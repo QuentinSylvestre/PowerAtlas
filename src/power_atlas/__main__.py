@@ -4,6 +4,7 @@ import argparse
 import ctypes
 import faulthandler
 import logging
+import logging.handlers
 import os
 import signal
 import socket
@@ -22,6 +23,53 @@ _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_NO_WINDOW = 0x08000000
 
 _PID_FILE = CONFIG_DIR / "power-atlas.pid"
+
+# `orchestrator.log` is unbounded under a plain `FileHandler`, and two sources
+# write to it without a natural end: Phase 2's idle sweeper emits a line per
+# tick per stuck session for as long as that session stays stuck, and an
+# unauthenticated remote peer drives a WARNING per refused `/remote-auth`
+# attempt. The developer's own file had already reached ~10 MB before either of
+# those existed. A log that grows until the disk does is a availability bug the
+# app inflicts on its host.
+#
+# 10 MiB x 3 backups = 40 MiB worst case. The size is chosen so one file is
+# about what the app produced over its whole life so far, which makes a single
+# file roughly a "recent history" unit rather than an arbitrary slice; three
+# backups then keep enough context to look back past the incident that made
+# someone open the log, while capping the footprint at something no user will
+# notice next to the workspaces this app indexes.
+#
+# `crash.log` is deliberately NOT rotated: `faulthandler` writes to a raw
+# descriptor held for the process lifetime (see `_enable_crash_handler`), so a
+# rename underneath it would send the next dump to an unlinked inode. It grows
+# only on a native crash, which is rare enough that unbounded is honest there.
+_LOG_MAX_BYTES = 10 * 1024 * 1024
+_LOG_BACKUP_COUNT = 3
+
+
+def _build_log_handler(log_path) -> logging.Handler:
+    """The single log handler, size-bounded.
+
+    Its own function so a test can bind a real file and drive a real rollover.
+    Asserting the handler class against ``__main__.py``'s source text would pass
+    just as happily against a ``RotatingFileHandler`` constructed with no
+    ``maxBytes``, which is a plain ``FileHandler`` wearing the right name — it
+    never rolls over at all.
+
+    Nothing tails or byte-offsets into this file: ``tray.py`` hands the path to
+    ``os.startfile``, which opens whatever is at ``orchestrator.log`` at that
+    moment, and that is always the newest segment. ``crash.log`` is a separate
+    file on a raw descriptor and is untouched by this.
+
+    On Windows a rollover renames the live file, which fails while another
+    process holds it open — a log viewer, typically. ``logging`` routes that
+    through ``handleError``, so the effect is a skipped rotation and a file that
+    keeps growing until the next attempt succeeds, never a lost record or a
+    crashed app.
+    """
+    return logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUP_COUNT,
+        encoding="utf-8")
 
 # The transport ceiling on an inbound WebSocket frame. uvicorn has decoded the
 # whole frame before the application sees it, so `/ws/acp`'s own 256 KiB cap
@@ -80,6 +128,12 @@ def _bind_remote_socket(log, config, socks: list, port: int) -> bool:
     ``web``'s two startup setters are called only after the bind succeeds, so
     the Host allowlist never widens for an address nothing is listening on and
     the process holds no secret it cannot use.
+
+    ``port`` is always ``config.port`` in practice: ``_choose_sockets`` does not
+    call this at all once the loopback bind has fallen back to an OS-assigned
+    port, because a remote listener on a port that changes every restart is
+    unreachable by the bookmark D25 assumes and is an exposed listener nobody
+    can find on purpose.
     """
     address = (config.remote_bind_address or "").strip()
     if not address:
@@ -96,10 +150,6 @@ def _bind_remote_socket(log, config, socks: list, port: int) -> bool:
         log.error("Remote bind to %s:%d failed (%s); loopback only",
                   address, port, exc)
         return False
-    if config.port and port != config.port:
-        log.warning("Remote listener is on port %d, not the configured %d "
-                    "(loopback fell back); bookmarked remote URLs will be stale",
-                    port, config.port)
     from .web import set_remote_host, set_remote_secret
     set_remote_host(address)
     set_remote_secret(secret)
@@ -122,7 +172,8 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
 
     Raises ``OSError`` when no loopback listener can be created at all; the
     caller turns that into a clean exit. The remote bind never raises — it
-    degrades to loopback-only by design (D27).
+    degrades to loopback-only by design (D27), and is skipped entirely when the
+    loopback bind fell back to an OS-assigned port.
     """
     # Both listeners are created here and handed to ONE `uvicorn.Server` via
     # `run(sockets=…)` (D23). `uvicorn.Config(host=)` takes a single address, so
@@ -134,6 +185,7 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
     # Loopback is MANDATORY and keeps its port-in-use fallback. Only the remote
     # bind may degrade: a remote-only listener with no loopback is a state the
     # whole model assumes cannot exist.
+    fell_back = False
     try:
         socks = [_bind("127.0.0.1", desired_port)]
     except OSError as exc:
@@ -143,13 +195,33 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
         log.warning("Port %d unavailable (%s), falling back to random port",
                     desired_port, exc)
         socks = [_bind("127.0.0.1", 0)]
+        fell_back = True
     # Read from the loopback socket explicitly, never from `server.servers[0]`:
     # with two sockets, index 0 is merely whichever one uvicorn happened to
     # register first, and this value becomes the URL tray and peek open.
     loopback_sock = socks[0]
     port = loopback_sock.getsockname()[1]
 
-    _bind_remote_socket(log, config, socks, port)
+    # A fallback port is a *new* port on every restart. D25's premise is that a
+    # phone holds a bookmarked `http://<address>:<port>/…`, so a remote listener
+    # on an OS-assigned port is unreachable by the only means anyone was ever
+    # going to reach it by — while still being a listener on a 17-peer network,
+    # in front of `kiro-cli acp -a`. Binding it buys nothing and exposes a
+    # surface no legitimate user can find on purpose, so it is not bound at all.
+    #
+    # This deliberately does not fall back to `config.port` for the remote
+    # socket: both listeners share one port by design (D23/D25), and a remote
+    # socket on a port the loopback one could not take would make `server_url`
+    # and the remote URL disagree — the exact confusion `_choose_sockets`
+    # exists to prevent.
+    if fell_back and (config.remote_bind_address or "").strip():
+        log.warning("Remote bind to %s skipped: loopback fell back to port %d, "
+                    "so the remote listener would be on a port that changes "
+                    "every restart and no bookmarked URL can reach. Free port "
+                    "%d and restart to re-enable remote access.",
+                    config.remote_bind_address, port, config.port)
+    else:
+        _bind_remote_socket(log, config, socks, port)
 
     log.info("Listening on %s",
              [s.getsockname()[:2] for s in socks])
@@ -400,9 +472,7 @@ def _run_foreground() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-        ],
+        handlers=[_build_log_handler(log_path)],
     )
     log = logging.getLogger("power_atlas")
     _enable_crash_handler()

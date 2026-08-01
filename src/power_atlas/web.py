@@ -32,8 +32,8 @@ from fastapi.templating import Jinja2Templates
 
 from .config import (load_config, save_config, get_active_launch_profile,
                      LaunchProfile, ensure_remote_secret, load_remote_secret,
-                     validate_remote_bind_address, REMOTE_SECRET_MIN_LEN,
-                     REMOTE_SECRET_PATH)
+                     rotate_remote_secret, validate_remote_bind_address,
+                     REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH)
 from . import autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
@@ -1297,7 +1297,19 @@ _EXCHANGE_MAX_BACKOFF_SECONDS = 300.0
 # not already have (they can always come from a fresh address), and costs a
 # single-address attacker nothing at all.
 _EXCHANGE_MAX_TRACKED_PEERS = 512
-_exchange_failures: dict[str, tuple[int, float]] = {}
+# `(failure count, monotonic time of the last failure, already warned?)`.
+#
+# The third field is a log-amplification bound, not throttle state. `/remote-auth`
+# is reachable by an unauthenticated remote peer by construction, and the refusal
+# below is a WARNING — so without it, a peer that is already locked out writes one
+# line to `orchestrator.log` per request, at whatever rate it can issue them,
+# forever. The refusal itself costs the peer nothing to retry, which is what makes
+# the *logging* the amplified resource rather than the authentication.
+#
+# Scoped to the lockout window rather than suppressed outright: the first refusal
+# in each window is still recorded, so a real attack is still visible in the log —
+# once per window, per peer, which is the rate at which it carries new information.
+_exchange_failures: dict[str, tuple[int, float, bool]] = {}
 
 # `/remote-auth` is the ONE path an unauthenticated remote peer can reach, so
 # it is the one path where an unbounded `await request.body()` is a remote
@@ -1344,7 +1356,7 @@ def _exchange_backoff_remaining(peer: str) -> float:
     Exponential from the first failure, capped. Checked **before** the secret
     is compared, so it throttles guessing rather than merely recording it.
     """
-    count, last = _exchange_failures.get(peer, (0, 0.0))
+    count, last, _ = _exchange_failures.get(peer, (0, 0.0, False))
     if count <= 0:
         return 0.0
     delay = min(_EXCHANGE_BASE_BACKOFF_SECONDS * (2 ** min(count - 1, 8)),
@@ -1354,10 +1366,26 @@ def _exchange_backoff_remaining(peer: str) -> float:
 
 
 def _record_exchange_failure(peer: str) -> None:
-    count = _exchange_failures.get(peer, (0, 0.0))[0]
+    count = _exchange_failures.get(peer, (0, 0.0, False))[0]
     if peer not in _exchange_failures and len(_exchange_failures) >= _EXCHANGE_MAX_TRACKED_PEERS:
         _exchange_failures.pop(next(iter(_exchange_failures)), None)
-    _exchange_failures[peer] = (count + 1, time.monotonic())
+    # `False`: a new failure opens a new lockout window, and the first refusal
+    # inside it is worth one line.
+    _exchange_failures[peer] = (count + 1, time.monotonic(), False)
+
+
+def _claim_throttle_warning(peer: str) -> bool:
+    """True once per lockout window, then False until a new failure opens one.
+
+    The caller has already established that this peer is throttled, so the entry
+    exists; the `.get` default only guards a concurrent `pop` from the success
+    path.
+    """
+    count, last, warned = _exchange_failures.get(peer, (0, 0.0, False))
+    if count <= 0 or warned:
+        return False
+    _exchange_failures[peer] = (count, last, True)
+    return True
 
 
 def _peer_of(request: Request) -> str:
@@ -1396,8 +1424,14 @@ async def remote_auth_exchange(request: Request):
     peer = _peer_of(request)
     remaining = _exchange_backoff_remaining(peer)
     if remaining > 0:
-        log.warning("remote auth throttled for peer %s (%.0fs remaining)",
-                    peer, remaining)
+        # Once per lockout window. Every subsequent request inside the same
+        # window is refused just as hard but writes nothing: see
+        # `_exchange_failures` for why the log line, not the check, is the
+        # amplified resource here.
+        if _claim_throttle_warning(peer):
+            log.warning("remote auth throttled for peer %s (%.0fs remaining); "
+                        "further attempts in this window are refused silently",
+                        peer, remaining)
         return HTMLResponse(_EXCHANGE_FORM.format(
             message=f"Too many attempts. Try again in {int(remaining) + 1}s.",
             action=_REMOTE_AUTH_PATH, device_id=""), status_code=429)
@@ -2562,6 +2596,77 @@ async def api_remote_access(response: Response):
         "secret_path": str(REMOTE_SECRET_PATH),
         # Read once at startup: the bind happens before the app exists.
         "restart_required": True,
+    }
+
+
+@app.post("/api/remote-access/rotate")
+async def api_remote_access_rotate(response: Response):
+    """Issue a new device secret, revoking **every** authorized device (D24).
+
+    D24 knowingly gives up *per-device* revocation and names secret rotation as
+    the remedy — but until now no route, flag or command performed one, so the
+    real answer for a lost phone was "delete `remote-secret` by hand and
+    restart", which nobody finds under pressure.
+
+    Loopback-only by the same mechanism as `/api/remote-access`, not a second
+    one: neither path appears in `_REMOTE_ALLOWED_PATHS`, and that allowlist is
+    default-deny (D6), so `RemoteAccessGuard` refuses both from any non-loopback
+    peer before routing. A remote peer must not be able to lock the owner out of
+    their own devices, and one holding a stolen cookie must not be able to
+    re-key the surface around it.
+
+    POST, so `same_origin_guard`'s Origin/Referer check applies — the same CSRF
+    protection every other mutating route here gets, and it matters more than
+    usual: a GET would be reachable by any cross-origin `<img src>`, and this
+    action is irreversible.
+
+    **Ordering.** The file is written first, the in-process secret second, and
+    that order is chosen for how the partial failures read:
+
+    * file written, in-process update not reached — the durable state is the new
+      secret, the running process still honours the old one. The lost device
+      keeps working until the next restart, which then completes the rotation.
+      Stale-but-converging.
+    * in-process updated, file write failed — every device is revoked *now*, but
+      the process reloads the OLD secret from disk at startup and every revoked
+      cookie comes back to life. Revocation that silently undoes itself on
+      restart is the worse failure, and it is the one this ordering excludes.
+
+    When the write fails outright, nothing changes at all and the caller is told.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    secret = rotate_remote_secret()
+    if not secret:
+        return {"ok": False,
+                "error": f"Could not write {REMOTE_SECRET_PATH}; "
+                         "the previous secret is still in effect"}
+    # Only when this process actually serves the remote surface. `_REMOTE_SECRET`
+    # is empty on an instance that never bound a remote listener, and
+    # `set_remote_secret` documents that as deliberate — loading one here would
+    # give a loopback-only process a live authentication path for a surface it
+    # is not serving. `applied` reports which of the two happened rather than
+    # letting the caller assume.
+    applied = bool(_REMOTE_SECRET)
+    if applied:
+        set_remote_secret(secret)
+    log.warning("device secret rotated; every authorized device must "
+                "re-authenticate (applied in-process: %s)", applied)
+    return {
+        "ok": True,
+        "secret": secret,
+        "secret_path": str(REMOTE_SECRET_PATH),
+        # The destructive consequence, in the payload rather than only in a doc:
+        # a caller that renders `ok` and nothing else still cannot claim it was
+        # not told.
+        "devices_revoked": True,
+        "applied": applied,
+        "restart_required": not applied,
+        "message": ("Every authorized device has been signed out and must "
+                    "re-enter the new secret."
+                    if applied else
+                    "The new secret is saved but takes effect on restart; "
+                    "remote access is not running in this process."),
     }
 
 

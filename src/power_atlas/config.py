@@ -139,6 +139,38 @@ def ensure_remote_secret() -> str:
     existing = load_remote_secret()
     if existing:
         return existing
+    return _write_remote_secret()
+
+
+def rotate_remote_secret() -> str:
+    """Issue a **new** device secret, replacing any existing one. ``""`` on failure.
+
+    The deliberate opposite of ``ensure_remote_secret``, and the reason that one
+    can safely refuse to rotate: D24 gives up per-device revocation, naming
+    secret rotation as the remedy for a lost phone — so the remedy has to exist
+    somewhere, and it has to be somewhere a user under pressure will find it
+    rather than "delete this file by hand and restart".
+
+    Rotating invalidates **every** device cookie at once, because each one is an
+    HMAC keyed by this value. That is the intended semantic; the caller owns
+    saying so.
+
+    Writing is the same fixed-mode create-truncate ``ensure_remote_secret``
+    uses, not a write-temp-then-``os.replace``. A torn write here is not a
+    silent hazard: ``load_remote_secret`` rejects anything shorter than
+    ``REMOTE_SECRET_MIN_LEN``, so a truncated file reads as "no usable secret"
+    and fails closed rather than authenticating a prefix.
+    """
+    return _write_remote_secret()
+
+
+def _write_remote_secret() -> str:
+    """Generate and persist a fresh secret; ``""`` when the write fails.
+
+    Shared by ``ensure_remote_secret`` and ``rotate_remote_secret`` so the two
+    differ only in *whether* they write, never in *how* — the mode, the
+    truncation and the failure verdict are one implementation.
+    """
     value = secrets.token_urlsafe(32)
     try:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)

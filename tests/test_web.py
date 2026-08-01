@@ -9954,6 +9954,7 @@ class TestRemotePathAllowlistIsDefaultDeny:
 
     @pytest.mark.parametrize("path", [
         "/", "/api/launchers", "/api/settings", "/api/remote-access",
+        "/api/remote-access/rotate",
         "/api/save-setting", "/partials/workspaces", "/staticfoo",
         "/staticfoo/style.css", "/acp/", "/ws/acp/x", "/remote-authx",
         "/api/save-launcher", "/api/run-launcher", "/partials/all-sessions",
@@ -10411,6 +10412,52 @@ class TestSecretExchange:
         # right one is refused while the lockout stands.
         assert self._post(_TEST_SECRET, peer=peer)[0] == 429
 
+    def test_a_throttled_peer_is_logged_once_per_lockout_window(self, remote_enabled, caplog):
+        """`/remote-auth` is reachable by an unauthenticated remote peer by
+        construction, and the 429 costs that peer nothing to retry — so a WARNING
+        on every refused attempt is a remote write-amplification primitive
+        against `orchestrator.log`: one line per request, at whatever rate the
+        peer can issue them, for as long as it cares to.
+
+        The bound is per lockout *window*, not a blanket suppression: the first
+        refusal in each window is still recorded, because that is the rate at
+        which the line carries new information. Removing `_claim_throttle_warning`
+        and logging unconditionally puts all 20 lines back.
+        """
+        from power_atlas import web as web_mod
+        peer = "100.78.9.11"
+        assert self._post("W" * 43, peer=peer)[0] == 403      # opens the window
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            for _ in range(20):
+                assert self._post("W" * 43, peer=peer)[0] == 429
+        throttle_lines = [r for r in caplog.records
+                          if "throttled for peer" in r.getMessage()]
+        assert len(throttle_lines) == 1, \
+            f"20 refused attempts wrote {len(throttle_lines)} log lines"
+        assert peer in throttle_lines[0].getMessage()
+
+    def test_a_new_lockout_window_is_logged_again(self, remote_enabled, caplog):
+        """The suppression must not be permanent — a peer that comes back after
+        its lockout expires, fails again and is re-locked is new information, and
+        `warned=True` sticking across windows would hide a sustained attack after
+        its first minute."""
+        from power_atlas import web as web_mod
+        peer = "100.78.9.12"
+        assert self._post("W" * 43, peer=peer)[0] == 403
+        with caplog.at_level(logging.WARNING, logger="power_atlas.web"):
+            assert self._post("W" * 43, peer=peer)[0] == 429   # logs
+            assert self._post("W" * 43, peer=peer)[0] == 429   # silent
+            # Expire the lockout the way time would, then let the peer fail
+            # again — which opens a fresh window via `_record_exchange_failure`.
+            count, _, _ = web_mod._exchange_failures[peer]
+            web_mod._exchange_failures[peer] = (count, 0.0, True)
+            assert self._post("W" * 43, peer=peer)[0] == 403   # not throttled
+            assert self._post("W" * 43, peer=peer)[0] == 429   # logs again
+        throttle_lines = [r for r in caplog.records
+                          if "throttled for peer" in r.getMessage()]
+        assert len(throttle_lines) == 2, \
+            "the second lockout window must be logged as well as the first"
+
     def test_a_success_clears_the_backoff(self, remote_enabled):
         peer = "100.78.9.10"
         assert self._post("W" * 43, peer=peer)[0] == 403
@@ -10761,6 +10808,118 @@ class TestSettingsSurface:
     def test_the_secret_route_is_loopback_only(self, remote_enabled):
         assert _peer_http("/api/remote-access", [_cookie_header()])[0] == 403
 
+    def test_the_rotate_route_is_loopback_only(self, remote_enabled):
+        """A remote peer must not be able to lock the owner out of every device,
+        and one holding a stolen cookie must not be able to re-key the surface
+        around it. Loopback-only by the same default-deny allowlist
+        `/api/remote-access` relies on — adding the path to
+        `_REMOTE_ALLOWED_PATHS` makes this fail."""
+        status, body, _ = _peer_http("/api/remote-access/rotate",
+                                     [_cookie_header(),
+                                      (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())],
+                                     method="POST")
+        assert status == 403
+        assert b"Forbidden" in body
+
+    def test_rotating_replaces_the_stored_secret(self, client, tmp_path):
+        from power_atlas import config as config_mod
+        first = config_mod.ensure_remote_secret()
+        assert len(first) >= config_mod.REMOTE_SECRET_MIN_LEN
+        body = client.post("/api/remote-access/rotate").json()
+        assert body["ok"] is True
+        second = body["secret"]
+        assert second != first, "the secret was not actually rotated"
+        assert len(second) >= config_mod.REMOTE_SECRET_MIN_LEN
+        assert config_mod.load_remote_secret() == second
+        # Rotation is destructive and irreversible, and the payload has to say
+        # so — a caller that renders `ok` and nothing else must still have been
+        # told what it just did.
+        assert body["devices_revoked"] is True
+        assert "re-enter" in body["message"] or "restart" in body["message"]
+
+    def test_rotating_invalidates_a_cookie_minted_under_the_old_secret(
+            self, client, remote_enabled, tmp_path):
+        """The point of the route (D24): rotation is the *only* revocation
+        mechanism, so a cookie signed by the previous secret must stop working.
+        Every device is revoked at once — that is the intended semantic.
+        """
+        from power_atlas import web as web_mod
+        old_cookie = _cookie_header()
+        # Before: the old cookie reaches the app.
+        with pytest.raises(_Reached):
+            _peer_http("/acp", [old_cookie], asgi_app=_guard_over_sentinel())
+        body = client.post("/api/remote-access/rotate").json()
+        assert body["ok"] is True
+        assert body["applied"] is True, \
+            "the running process still authenticates the old secret"
+        assert web_mod._REMOTE_SECRET == body["secret"]
+        # After: the same cookie is refused, and one minted under the new secret
+        # works — so this is revocation, not a blanket lockout.
+        status, _, _ = _peer_http("/acp", [old_cookie],
+                                  asgi_app=_guard_over_sentinel())
+        assert status == 403, "the old device cookie still authenticates"
+        with pytest.raises(_Reached):
+            _peer_http("/acp", [_cookie_header(secret=body["secret"])],
+                       asgi_app=_guard_over_sentinel())
+
+    def test_rotating_needs_a_post(self, client):
+        """Irreversible, so it must not be reachable by a cross-origin
+        `<img src>` — and POST is what puts it under `same_origin_guard`'s
+        Origin/Referer check."""
+        assert client.get("/api/remote-access/rotate").status_code == 405
+
+    def test_rotating_is_csrf_protected(self, raw_client, tmp_path):
+        """The same CSRF protection every other mutating route here gets. The
+        secret on disk must be untouched by the refused call."""
+        from power_atlas import config as config_mod
+        before = config_mod.ensure_remote_secret()
+        resp = raw_client.post("/api/remote-access/rotate",
+                               headers={"Origin": "http://evil.example"})
+        assert resp.status_code == 403
+        assert config_mod.load_remote_secret() == before, \
+            "a cross-origin POST rotated the secret anyway"
+
+    def test_rotating_is_not_cacheable(self, client):
+        resp = client.post("/api/remote-access/rotate")
+        assert resp.status_code == 200
+        assert "secret" in resp.json(), "the assertion below would be vacuous"
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
+
+    def test_a_failed_write_leaves_the_previous_secret_in_effect(
+            self, client, remote_enabled, monkeypatch):
+        """Ordering: the file is written first, the in-process secret second.
+        When the write fails nothing changes at all — the alternative ordering
+        revokes every device now and then resurrects them all on restart, when
+        the process reloads the old secret from disk."""
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "rotate_remote_secret", lambda: "")
+        body = client.post("/api/remote-access/rotate").json()
+        assert body["ok"] is False
+        assert "still in effect" in body["error"]
+        assert web_mod._REMOTE_SECRET == _TEST_SECRET, \
+            "the in-process secret changed despite the write failing"
+        with pytest.raises(_Reached):
+            _peer_http("/acp", [_cookie_header()],
+                       asgi_app=_guard_over_sentinel())
+
+    def test_rotating_without_a_live_remote_surface_says_restart(self, client, tmp_path):
+        """`set_remote_secret` documents that a process with no remote listener
+        holds no secret in memory. Rotating must not quietly give a
+        loopback-only process a live authentication path — it persists the new
+        secret and says the change lands on restart, rather than implying
+        otherwise."""
+        from power_atlas import config as config_mod, web as web_mod
+        assert web_mod._REMOTE_SECRET == "", "no remote surface in this fixture"
+        body = client.post("/api/remote-access/rotate").json()
+        assert body["ok"] is True
+        assert body["applied"] is False
+        assert body["restart_required"] is True
+        assert "restart" in body["message"]
+        assert web_mod._REMOTE_SECRET == "", \
+            "a loopback-only process now authenticates remote cookies"
+        assert config_mod.load_remote_secret() == body["secret"]
+
     def test_the_secret_route_is_not_cacheable(self, client):
         """This body carries the **permanent** device secret, where `/acp`
         carries the strictly weaker per-launch rotating `_ACP_TOKEN` — and
@@ -11086,6 +11245,168 @@ class TestChooseSocketsReturnsTheLoopbackPort:
                 logging.getLogger("t"), self._cfg(port=taken), taken)
             assert port != taken, "the fallback port must not be the taken one"
             assert port == socks[0].getsockname()[1]
+        finally:
+            for s in socks:
+                s.close()
+            squatter.close()
+
+
+class TestTheLogFileIsBounded:
+    """`orchestrator.log` had no size ceiling, and two sources write to it with
+    no natural end: Phase 2's idle sweeper emits a line per tick per stuck
+    session for as long as the session stays stuck, and an unauthenticated
+    remote peer drives a WARNING per refused `/remote-auth` attempt. The
+    developer's own file reached ~10 MB before either existed.
+
+    These bind a real file and drive a real rollover. A source-text assertion
+    that the handler is named `RotatingFileHandler` passes just as happily
+    against one constructed without `maxBytes`, which never rolls over at all.
+    """
+
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def test_the_handler_actually_rolls_over(self, tmp_path, monkeypatch):
+        main_mod = self._main()
+        monkeypatch.setattr(main_mod, "_LOG_MAX_BYTES", 512)
+        monkeypatch.setattr(main_mod, "_LOG_BACKUP_COUNT", 2)
+        log_path = tmp_path / "orchestrator.log"
+        handler = main_mod._build_log_handler(log_path)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        try:
+            for i in range(200):
+                handler.emit(logging.LogRecord(
+                    "t", logging.INFO, __file__, i, "x" * 80, None, None))
+        finally:
+            handler.close()
+        assert log_path.exists(), "the live file must survive rotation"
+        assert (tmp_path / "orchestrator.log.1").exists(), \
+            "nothing rotated: the log still grows without bound"
+        # The bound is what the change is for: current + backupCount, each
+        # capped, and no unbounded tail of old segments.
+        segments = sorted(p.name for p in tmp_path.glob("orchestrator.log*"))
+        assert segments == ["orchestrator.log", "orchestrator.log.1",
+                            "orchestrator.log.2"], segments
+        total = sum(p.stat().st_size for p in tmp_path.glob("orchestrator.log*"))
+        assert total <= 512 * 3 + 200, \
+            f"200 records of 80 bytes left {total} bytes on disk"
+
+    def test_the_live_path_is_always_the_newest_segment(self, tmp_path, monkeypatch):
+        """`tray.py` opens `CONFIG_DIR / "orchestrator.log"` with `os.startfile`
+        and nothing else in `src/` reads or tails it, so rotation is only safe
+        if that fixed path keeps naming the file being written *now*. A handler
+        that renamed forward — writing to `.1` and leaving the base path stale —
+        would satisfy "it rotates" and silently break the tray's Open Log."""
+        main_mod = self._main()
+        monkeypatch.setattr(main_mod, "_LOG_MAX_BYTES", 256)
+        monkeypatch.setattr(main_mod, "_LOG_BACKUP_COUNT", 2)
+        log_path = tmp_path / "orchestrator.log"
+        handler = main_mod._build_log_handler(log_path)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        try:
+            for i in range(60):
+                handler.emit(logging.LogRecord(
+                    "t", logging.INFO, __file__, i, f"line-{i:03d}", None, None))
+        finally:
+            handler.close()
+        assert (tmp_path / "orchestrator.log.1").exists(), \
+            "the test cannot discriminate unless a rollover happened"
+        assert "line-059" in log_path.read_text(encoding="utf-8")
+
+    def test_the_crash_log_is_not_rotated(self):
+        """`faulthandler` writes to a raw descriptor held for the process
+        lifetime, so renaming `crash.log` underneath it would send the next dump
+        to an unlinked inode. It must stay a plain append-mode file."""
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        assert 'open(CONFIG_DIR / "crash.log", "a", encoding="utf-8")' in source
+        assert "RotatingFileHandler" not in source.split(
+            "def _enable_crash_handler")[1].split("def _run_foreground")[0]
+
+
+class TestALoopbackFallbackSkipsTheRemoteBind:
+    """D25's premise is a bookmarked `http://<address>:<port>/…` on a phone. A
+    loopback fallback assigns a *new* port every restart, so binding the remote
+    socket on it produces a listener in front of `kiro-cli acp -a` that no
+    bookmark can reach — exposure with no corresponding reachability.
+
+    The loopback fallback itself must stay: loopback is mandatory and its
+    fallback is what keeps the app running through a port conflict.
+    """
+
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def _cfg(self, **kw):
+        from power_atlas.config import Config
+        return Config(**kw)
+
+    def test_no_remote_socket_is_bound_after_a_fallback(self, monkeypatch, caplog):
+        main_mod = self._main()
+        import socket as _socket
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+        attempted = []
+        monkeypatch.setattr(main_mod, "_bind_remote_socket",
+                            lambda log, config, socks, port: attempted.append(port))
+        squatter = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen()
+        taken = squatter.getsockname()[1]
+        socks = []
+        try:
+            with caplog.at_level(logging.WARNING):
+                socks, port = main_mod._choose_sockets(
+                    logging.getLogger("t"),
+                    self._cfg(port=taken, remote_bind_address=_LOCAL_BIND_IP),
+                    taken)
+            assert port != taken, "the loopback fallback itself must still happen"
+            assert len(socks) == 1, "only the loopback listener may exist"
+            assert attempted == [], \
+                "the remote socket was bound on a port that changes every restart"
+            messages = " ".join(r.getMessage() for r in caplog.records
+                                if r.levelno >= logging.WARNING)
+            assert "Remote bind" in messages and "skipped" in messages, \
+                f"the skip must be visible at WARNING; got {messages!r}"
+        finally:
+            for s in socks:
+                s.close()
+            squatter.close()
+
+    def test_the_remote_bind_still_happens_without_a_fallback(self, monkeypatch):
+        """The skip must be conditional on the fallback, not on the remote
+        address being set — otherwise it disables remote access outright."""
+        main_mod = self._main()
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+        attempted = []
+        monkeypatch.setattr(main_mod, "_bind_remote_socket",
+                            lambda log, config, socks, port: attempted.append(port))
+        socks = []
+        try:
+            socks, port = main_mod._choose_sockets(
+                logging.getLogger("t"),
+                self._cfg(port=0, remote_bind_address=_LOCAL_BIND_IP), 0)
+            assert attempted == [port]
+        finally:
+            for s in socks:
+                s.close()
+
+    def test_a_fallback_without_a_remote_address_is_silent_about_remote(self, monkeypatch, caplog):
+        """A user who never enabled remote access must not be told a remote bind
+        was skipped — the port-conflict warning is the whole story for them."""
+        main_mod = self._main()
+        import socket as _socket
+        squatter = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen()
+        taken = squatter.getsockname()[1]
+        socks = []
+        try:
+            with caplog.at_level(logging.WARNING):
+                socks, port = main_mod._choose_sockets(
+                    logging.getLogger("t"), self._cfg(port=taken), taken)
+            assert "Remote bind" not in " ".join(
+                r.getMessage() for r in caplog.records)
         finally:
             for s in socks:
                 s.close()
