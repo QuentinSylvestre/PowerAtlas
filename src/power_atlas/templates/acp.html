@@ -23,8 +23,30 @@
      page forbids. Empty here and filled by renderRail(). Phase 5b owns the
      two-pane shell and the CSS; this markup is deliberately a sibling of
      .acp-page rather than a wrapper around it, so the existing flex layout is
-     untouched until the phase that owns it. -->
-<aside class="acp-rail" id="acpRail" aria-label="Sessions">
+     untouched until the phase that owns it.
+
+     `hidden` — READ BEFORE REMOVING. This element is a flex child of a body that
+     is `display:flex; flex-direction:column` (style.css:23) inside
+     `html, body { height:100%; overflow:hidden }` (style.css:2), and style.css
+     carries **no .acp-rail rule at all** until 5b writes one. With none, the
+     rail's flex `min-height` resolves to `auto` — content height, unshrinkable —
+     while `.acp-page { flex:1; min-height:0 }` (style.css:452) has `flex-basis:0`
+     and absorbs the entire squeeze. Measured in Chromium against this template
+     and that stylesheet with twelve workspaces: at 1280x800 the rail takes
+     567 px, `.acp-page` falls from ~752 px to 185 px and `#acpTranscript` to
+     26 px, with `body.scrollHeight` 890 against an 800 px viewport that
+     `overflow:hidden` will not scroll; at 390x844 the rail is 1007 px tall and
+     the transcript, the prompt, Send, New session and Close all sit below the
+     fold with no scrollbar. So the rail stays inert here and the conversation
+     keeps the layout it had before 5a.
+
+     **Phase 5b deletes this attribute** as the first act of its exit criterion
+     "Two-pane at >=768 px; drill-down below, verified at 390 px and 768 px",
+     once style.css gives .acp-rail a bounded height. Deleting it before that
+     re-ships the collapse. `tests/acp_page.test.mjs` pins the attribute in
+     "the rail stays inert until Phase 5b gives it a layout"; that check is 5b's
+     to retire, together with the attribute, after the 390/768 verification. -->
+<aside class="acp-rail" id="acpRail" aria-label="Sessions" hidden>
   <div class="acp-rail-head">
     <input class="acp-rail-search" id="acpRailSearch" type="text" spellcheck="false"
            placeholder="Filter the sessions below"
@@ -180,25 +202,44 @@
   // The value comes off the wire and ends up in a class name and a data
   // attribute, both of which are attribute sinks — so it is narrowed to one of
   // these literals first, the same discipline `addMessage` applies to `role`.
-  var RAIL_AVAILABILITY = {
-    available: 'available',
-    held: 'held',
-    locked: 'locked'
-  };
-  var RAIL_AVAILABILITY_LABEL = {
-    available: 'available',
-    held: 'held by this PowerAtlas',
-    locked: 'in use by another process — cannot be opened here'
-  };
+  //
+  // `Object.create(null)`, not a literal, and that is the whole of what makes
+  // the set closed: on a literal every `Object.prototype` key is a hit, so
+  // `RAIL_AVAILABILITY['constructor'] || 'available'` answers the Object
+  // constructor and `acp-rail-row-function Object() { [native code] }` reaches
+  // className, dataset.availability and — via the label map, which misses —
+  // an aria-label reading the literal "undefined". `__proto__` and `toString`
+  // do the same. Same idiom, same reason, as `toolRows` and `loadTried`.
+  var RAIL_AVAILABILITY = Object.create(null);
+  RAIL_AVAILABILITY.available = 'available';
+  RAIL_AVAILABILITY.held = 'held';
+  RAIL_AVAILABILITY.locked = 'locked';
+  var RAIL_AVAILABILITY_LABEL = Object.create(null);
+  RAIL_AVAILABILITY_LABEL.available = 'available';
+  RAIL_AVAILABILITY_LABEL.held = 'held by this PowerAtlas';
+  RAIL_AVAILABILITY_LABEL.locked = 'in use by another process — cannot be opened here';
   // Every group fetched so far, in fetch order, each carrying the sessions
   // fetched for it so far. Accumulated rather than replaced: "show more" is
   // additive on both axes, and a page that dropped what it had would lose the
   // row the user was reading towards.
   var railGroups = [];
+  // cwd -> the entry in `railGroups` for it, so a workspace that comes back on
+  // a later page merges into the copy on screen instead of being drawn beside
+  // it. Prefixed and prototype-less for the reason above: the key is a path off
+  // the wire.
+  var railGroupsByCwd = Object.create(null);
   var railGroupPage = 0;
+  var railGroupTotal = 0;
   var railHasMore = false;
   var railFilter = '';
   var railBusy = false;
+  // The node the user last activated in the rail, so the rebuild that follows
+  // can put focus back on it. renderRail() empties and recreates every node it
+  // owns, which drops focus to <body> — harmless for the filter box, which
+  // lives outside that container, and not harmless for a row or a show-more,
+  // where it throws a keyboard or screen-reader user out of the rail mid-task.
+  // That is the same population the `locked` row's `disabled` exists for.
+  var railFocus = null;
 
   if (sessionId) sidEl.textContent = 'session ' + sessionId;
 
@@ -466,10 +507,64 @@
     logLine('error', 'session list: ' + why);
   }
 
+  function railSummary() {
+    // Both loaders end here, so the status never keeps a "loading…" line that
+    // the answer has already made false.
+    railStatus.textContent = railGroups.length
+      ? railGroups.length + ' of ' + railGroupTotal + ' workspaces'
+      : 'no sessions found';
+  }
+
+  function railMergeSessions(group, rows) {
+    // By id, because the same reorder that repeats a workspace repeats the
+    // sessions inside it: a session that moved to the front of its workspace
+    // between two pages is legitimately in both answers.
+    var seen = Object.create(null);
+    var i;
+    for (i = 0; i < group.sessions.length; i++) {
+      seen['s:' + group.sessions[i].id] = true;
+    }
+    for (i = 0; i < rows.length; i++) {
+      if (seen['s:' + rows[i].id]) continue;
+      seen['s:' + rows[i].id] = true;
+      group.sessions.push(rows[i]);
+    }
+  }
+
+  function railMergeGroup(incoming) {
+    // Workspaces come back recency-ordered and the rail's own purpose reorders
+    // them — opening a session and running a turn moves that workspace towards
+    // the front — so "More workspaces" after any activity can legitimately
+    // answer with a workspace already on screen. Pushed blind, that workspace
+    // is drawn twice, and each copy then carries its own `session_page`, so its
+    // per-group show-more extends only one of them.
+    var key = 'c:' + incoming.cwd;
+    var group = railGroupsByCwd[key];
+    var rows = incoming.sessions || [];
+    if (!group) {
+      incoming.sessions = [];
+      railGroupsByCwd[key] = incoming;
+      railGroups.push(incoming);
+      railMergeSessions(incoming, rows);
+      return;
+    }
+    railMergeSessions(group, rows);
+    if (typeof incoming.total === 'number') group.total = incoming.total;
+    // Paging state only ever moves forward. A repeat on a later group page
+    // carries `session_page: 1`, and adopting it would rewind a workspace the
+    // user had already paged into and re-offer rows that are already drawn.
+    if ((incoming.session_page || 1) > (group.session_page || 1)) {
+      group.session_page = incoming.session_page;
+      group.has_more = !!incoming.has_more;
+    }
+  }
+
   function loadGroupPage(page) {
     // One request in flight at a time. Both show-more buttons and Refresh reach
     // this, and two overlapping pages would interleave into `railGroups` in
-    // whatever order they answered.
+    // whatever order they answered. A click dropped here is not announced
+    // separately: the status line below is already saying the rail is loading,
+    // which is what the second click is being refused for.
     if (railBusy) return;
     railBusy = true;
     railStatus.textContent = page > 1 ? 'loading more workspaces…' : 'loading sessions…';
@@ -481,18 +576,16 @@
     }).then(function (data) {
       railBusy = false;
       // Page 1 is a reload, every later page is an append.
-      if (page === 1) railGroups = [];
-      var groups = (data && data.groups) || [];
-      for (var i = 0; i < groups.length; i++) {
-        groups[i].sessions = groups[i].sessions || [];
-        railGroups.push(groups[i]);
+      if (page === 1) {
+        railGroups = [];
+        railGroupsByCwd = Object.create(null);
       }
+      var groups = (data && data.groups) || [];
+      for (var i = 0; i < groups.length; i++) railMergeGroup(groups[i]);
       railGroupPage = page;
       railHasMore = !!(data && data.has_more);
-      var total = (data && data.group_total) || railGroups.length;
-      railStatus.textContent = railGroups.length
-        ? railGroups.length + ' of ' + total + ' workspaces'
-        : 'no sessions found';
+      railGroupTotal = (data && data.group_total) || railGroups.length;
+      railSummary();
       renderRail();
     }).catch(function (err) {
       railFailed('could not load the session list', err);
@@ -502,6 +595,10 @@
   function loadGroupSessions(group) {
     if (railBusy) return;
     railBusy = true;
+    // Said out loud for the same reason the group page says it: without a line
+    // here the per-group show-more is silent both when it works and when it is
+    // dropped for a request already in flight.
+    railStatus.textContent = 'loading more sessions…';
     var next = (group.session_page || 1) + 1;
     // `cwd` selects one workspace and bypasses the group axis, so paging deep
     // into a 208-session workspace costs that workspace rather than the page.
@@ -516,14 +613,15 @@
         // The workspace answered nothing — it was hidden, or emptied since the
         // page loaded. Stop offering more rather than looping on the button.
         group.has_more = false;
+        railSummary();
         renderRail();
         return;
       }
-      var rows = got.sessions || [];
-      for (var i = 0; i < rows.length; i++) group.sessions.push(rows[i]);
+      railMergeSessions(group, got.sessions || []);
       group.session_page = next;
       group.has_more = !!got.has_more;
       if (typeof got.total === 'number') group.total = got.total;
+      railSummary();
       renderRail();
     }).catch(function (err) {
       railFailed('could not load more sessions', err);
@@ -596,9 +694,46 @@
       // everything else that can reach the handler, including a later refactor
       // that stops drawing the row as one.
       if (locked) return;
+      railFocus = { sid: session.id };
       selectSession(session.id);
     });
     return row;
+  }
+
+  function railLastRow(root) {
+    var rows = root.querySelectorAll('.acp-rail-row');
+    return rows.length ? rows[rows.length - 1] : null;
+  }
+
+  function railRestoreFocus() {
+    var want = railFocus;
+    railFocus = null;
+    if (!want) return;
+    var node = null;
+    var i;
+    if (want.sid) {
+      var rows = railGroupsEl.querySelectorAll('.acp-rail-row');
+      for (i = 0; i < rows.length; i++) {
+        if (rows[i].dataset.sid === want.sid) { node = rows[i]; break; }
+      }
+    } else if (want.cwd) {
+      var groups = railGroupsEl.querySelectorAll('.acp-rail-group');
+      for (i = 0; i < groups.length; i++) {
+        if (groups[i].dataset.cwd !== want.cwd) continue;
+        // The button the user pressed is gone once the workspace is fully
+        // shown, so fall back to the last row — which is where it stood, and
+        // is the row the press just revealed.
+        node = groups[i].querySelector('.acp-rail-group-more') ||
+               railLastRow(groups[i]);
+        break;
+      }
+    } else if (want.more) {
+      // This button is outside the rebuilt container, so it keeps focus by
+      // itself; the one case that needs restoring is the render that hides it,
+      // which is exactly the render that brought the last page in.
+      node = railMore.hidden ? railLastRow(railGroupsEl) : railMore;
+    }
+    if (node && node.focus) node.focus();
   }
 
   function railGroupNode(group, sessions) {
@@ -617,7 +752,13 @@
     head.appendChild(name);
     var count = document.createElement('span');
     count.className = 'acp-rail-group-count';
-    count.textContent = group.sessions.length + ' of ' + group.total;
+    // Under a filter the group draws only the rows that matched, so counting the
+    // loaded set here would contradict what is directly beneath it — a header
+    // reading "3 of 5" above a single row. `sessions` is the filtered list this
+    // node is actually built from, which is the only count that can agree.
+    count.textContent = railFilter
+      ? sessions.length + ' matching'
+      : group.sessions.length + ' of ' + group.total;
     head.appendChild(count);
     wrap.appendChild(head);
 
@@ -630,7 +771,10 @@
       more.className = 'acp-btn acp-rail-group-more';
       more.type = 'button';
       more.textContent = 'More in ' + (group.name || 'this workspace');
-      more.addEventListener('click', function () { loadGroupSessions(group); });
+      more.addEventListener('click', function () {
+        railFocus = { cwd: group.cwd };
+        loadGroupSessions(group);
+      });
       wrap.appendChild(more);
     }
     return wrap;
@@ -664,6 +808,7 @@
       railGroupsEl.appendChild(empty);
     }
     railMore.hidden = !railHasMore;
+    railRestoreFocus();
   }
 
   function selectSession(sid) {
@@ -677,6 +822,16 @@
     // `subscribed` in particular must not, or a `close_in_progress` for this one
     // would take the wrong arm.
     subscribed = false;
+    // Adoption is per *selection*, not per connection. `connect()` resets this
+    // whole map because a socket that dropped took its subscription with it,
+    // and before the rail existed one socket held one session so that was the
+    // only reset needed. The rail makes several sessions per socket normal: A,
+    // then B, then A again is an ordinary sequence, and Phase 2's idle sweeper
+    // can reclaim A while the user is working in B. Without this delete the
+    // second `unknown_session` for A sends no `load` at all — the transcript
+    // gets a bare `[unknown_session]` and not even the recovery note, because
+    // `reportLoadFailure` fires off a `meta pending:'load'` that never arrives.
+    delete loadTried['s:' + sid];
     loadFailed = false;
     setLoading(null);
     clearTranscript();
@@ -1083,9 +1238,14 @@
     // route whose per-row cost is a file read plus a psutil query — is an
     // amplification lever, not a feature.
     railFilter = String(railSearch.value || '').trim().toLowerCase();
+    // Typing is not a rail activation. The box is outside the rebuilt container
+    // and keeps focus by itself, so any pending restore is dropped rather than
+    // allowed to pull focus off the box mid-word.
+    railFocus = null;
     renderRail();
   });
   railMore.addEventListener('click', function () {
+    railFocus = { more: true };
     loadGroupPage(railGroupPage + 1);
   });
   railReload.addEventListener('click', function () { loadGroupPage(1); });
@@ -1110,6 +1270,13 @@
     promptInput.disabled = true;
     // The rail's only action is to open a session, and there is no ACP module
     // to open one with, so listing them would be an invitation to a dead end.
+    // Saying so is not enough on its own: Refresh's listener is registered
+    // unconditionally, so a press replaces this line with "10 of 12 workspaces"
+    // and a full rail of rows that cannot open anything. Both controls are
+    // turned off, which is the version of "not available" a keyboard and a
+    // screen reader also get.
+    railReload.disabled = true;
+    railSearch.disabled = true;
     railStatus.textContent = 'the session list is unavailable while the ACP '
       + 'module is not loaded';
   } else {

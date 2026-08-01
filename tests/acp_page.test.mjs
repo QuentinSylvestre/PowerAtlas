@@ -60,6 +60,13 @@ const HTML_SINK = (what) => {
     "createElement + textContent and nothing else");
 };
 
+// The focused element, or null for "nothing" (a browser would say <body>). A
+// harness with no focus model cannot see the thing renderRail() breaks: it
+// empties and recreates every node it owns, so whatever the user was on stops
+// existing. Module-scope rather than per-page because `El` is defined out here;
+// `loadPage` clears it, and the checks run one page at a time.
+let ACTIVE = null;
+
 class El {
   constructor(tag) {
     this.tagName = String(tag).toUpperCase();
@@ -93,6 +100,16 @@ class El {
     return this.childNodes.map((c) => c.textContent).join("");
   }
   set textContent(v) {
+    // A browser moves focus to <body> the moment the focused element leaves the
+    // document, and emptying a container by textContent is how renderRail()
+    // removes every node it drew. Without this the harness would go on
+    // reporting a detached node as focused and could not see focus being lost
+    // at all — which is the entire failure the focus checks exist for.
+    if (ACTIVE && this.childNodes.length) {
+      for (const node of this.descendants()) {
+        if (node === ACTIVE) { ACTIVE = null; break; }
+      }
+    }
     this._text = String(v);
     this.childNodes = [];
   }
@@ -109,9 +126,14 @@ class El {
     this.childNodes.push(child);
     return child;
   }
+  focus() { ACTIVE = this; }
   addEventListener(type, fn) {
     (this._listeners[type] = this._listeners[type] || []).push(fn);
   }
+  // Deliberately *not* gated on `disabled`. A browser fires no click on a
+  // disabled control, but several checks below exist to exercise the page's own
+  // guard behind that attribute; gating here would pass them without running
+  // the guard. Checks that care about the attribute assert on the attribute.
   dispatch(type, ev) {
     const fns = this._listeners[type] || [];
     if (fns.length === 0) throw new Error(`nothing listens for '${type}' here`);
@@ -189,15 +211,34 @@ function parseQuery(target) {
   return out;
 }
 
+// `web.py:1518-1519` clamps both sizes before `_acp_listing` ever sees them,
+// and the route's `cwd` arm forces the reported page to 1 and returns at most
+// one group (`web.py:1426-1429`). Mirrored here so a rail that asked for a page
+// the endpoint would narrow gets the narrowed page from the harness too:
+// nothing bites at today's 10/3, but a future RAIL_GROUP_SIZE above 20 would
+// pass against a stub that honoured it and under-fill against the real route.
+const MAX_GROUP_SIZE = 20;    // web.py:_ACP_MAX_GROUPS_PER_PAGE
+const MAX_SESSION_SIZE = 50;  // web.py:_ACP_MAX_SESSIONS_PER_GROUP
+
+function clampSize(raw, fallback, ceiling) {
+  const n = Number(raw === undefined || raw === "" ? fallback : raw);
+  return Math.max(1, Math.min(Number.isFinite(n) ? n : fallback, ceiling));
+}
+
 function serveListing(store, params) {
-  const groupSize = Number(params.group_size || 10);
-  const groupPage = Number(params.group_page || 1);
-  const sessionSize = Number(params.session_size || 3);
-  const sessionPage = Number(params.session_page || 1);
+  const groupSize = clampSize(params.group_size, 10, MAX_GROUP_SIZE);
+  const sessionSize = clampSize(params.session_size, 3, MAX_SESSION_SIZE);
+  const groupPage = Math.max(1, Number(params.group_page || 1));
+  const sessionPage = Math.max(1, Number(params.session_page || 1));
   const single = Boolean(params.cwd);
+  // The one place this stub still diverges: the route matches through
+  // `data._normalize_path`, so it resolves case and separators, and this is an
+  // exact string compare. Left as-is deliberately — reproducing path
+  // normalisation here would be a second implementation of it to keep correct,
+  // and the rail sends back the exact `cwd` string the endpoint gave it.
   const matched = single ? store.filter((w) => w.cwd === params.cwd) : store;
   const start = single ? 0 : (groupPage - 1) * groupSize;
-  const page = single ? matched : matched.slice(start, start + groupSize);
+  const page = single ? matched.slice(0, 1) : matched.slice(start, start + groupSize);
   return {
     groups: page.map((w) => {
       const from = (sessionPage - 1) * sessionSize;
@@ -210,7 +251,7 @@ function serveListing(store, params) {
         sessions: w.sessions.slice(from, from + sessionSize),
       };
     }),
-    group_page: groupPage,
+    group_page: single ? 1 : groupPage,
     group_total: single ? matched.length : store.length,
     has_more: single ? false : start + groupSize < store.length,
   };
@@ -227,9 +268,17 @@ function loadPage(templatePath, opts = {}) {
     csp_nonce: opts.nonce ?? "NONCE-1",
   });
 
+  // `acp.html`'s own content block only — `{% extends %}` is stripped by
+  // `render()`, so `base.html`'s `<script src="/static/htmx.min.js">` is not in
+  // this string and is not being counted. The served `/acp` therefore has two
+  // script elements, not one; the policy still holds because base.html applies
+  // the same nonce conditionally, and what is measured here is that this
+  // template contributes exactly one inline script and no external one.
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
   if (scripts.length !== 1) {
-    throw new Error(`expected exactly one <script>, found ${scripts.length}`);
+    throw new Error(
+      `expected exactly one inline <script> in acp.html's content block, ` +
+      `found ${scripts.length}`);
   }
   const scriptAttrs = scripts[0][1];
   const scriptBody = scripts[0][2];
@@ -237,6 +286,7 @@ function loadPage(templatePath, opts = {}) {
 
   const byId = new Map();
   for (const m of markup.matchAll(/\bid="([^"]+)"/g)) byId.set(m[1], new El("div"));
+  ACTIVE = null;
 
   const sockets = [];
   const urls = [];
@@ -344,6 +394,8 @@ function loadPage(templatePath, opts = {}) {
     listingCalls() {
       return page.fetches.filter((f) => f.url.startsWith("/api/acp/sessions"));
     },
+    // Null is this harness's <body>: nothing in the rail holds focus.
+    focused() { return ACTIVE; },
     // Everything the rail does hangs off a promise chain, so a check that
     // asserted straight after the click would be asserting on the frame before
     // the one it cares about. `setImmediate` runs after the microtask queue has
@@ -401,7 +453,12 @@ check("no HTML sink appears anywhere in the page source", (tpl) => {
               `the page writes through an HTML sink: ${uses.map((m) => m[0]).join(", ")}`);
 });
 
-check("exactly one script tag, carrying the CSP nonce", (tpl) => {
+check("exactly one inline script in the content block, carrying the CSP nonce", (tpl) => {
+  // Named for what it measures. The *served* /acp has two script elements: this
+  // template extends base.html, which carries `<script src="/static/htmx.min.js">`
+  // with the same nonce applied conditionally. `loadPage` renders this template
+  // in isolation, so what the count below pins is that acp.html contributes one
+  // inline script and no external one — not that the page has a single tag.
   const page = loadPage(tpl);
   assert(/nonce="NONCE-1"/.test(page.scriptAttrs),
          `the single <script> carries no rendered nonce: ${page.scriptAttrs}`);
@@ -792,13 +849,25 @@ check("a workspace's own show-more pages that workspace alone", async (tpl) => {
 });
 
 check("the availability indicator renders all three states", async (tpl) => {
-  const store = fakeStore({ workspaces: 2, sessions: 3 });
+  const store = fakeStore({ workspaces: 3, sessions: 3 });
   store[0].sessions[0].availability = "available";
   store[0].sessions[1].availability = "held";
   store[0].sessions[2].availability = "locked";
   // Off the wire and into a class name and a data attribute — both attribute
   // sinks, and this page's rule is that nothing payload-derived reaches one.
+  //
+  // The first of these is an *own-property* miss and passes any lookup. The
+  // other three are the reason the map has to be prototype-less: on an object
+  // literal every `Object.prototype` key is a hit, so `map[value] || 'available'`
+  // answers with the inherited value and never reaches the default. Measured on
+  // the literal: "constructor" puts `acp-rail-row-function Object() { [native
+  // code] }` into className and dataset.availability and makes the indicator's
+  // aria-label the literal string "undefined"; "__proto__" gives
+  // `acp-rail-row-[object Object]`; "toString" the same shape.
   store[1].sessions[0].availability = 'locked" onload=x';
+  store[1].sessions[1].availability = "constructor";
+  store[1].sessions[2].availability = "__proto__";
+  store[2].sessions[0].availability = "toString";
   const page = await railed(tpl, { store });
 
   const rows = page.railRows();
@@ -815,10 +884,19 @@ check("the availability indicator renders all three states", async (tpl) => {
     assert(dot.getAttribute("aria-label"),
            `the ${want} indicator has no accessible name, and it carries no text`);
   }
-  assertEqual(rows[3].dataset.availability, "available",
-              "an unrecognised state was passed through rather than narrowed");
-  assert(!/onload|"/.test(String(rows[3].className)),
-         `an agent-reachable string reached a class name: ${rows[3].className}`);
+  for (const [i, sent] of [[3, 'locked" onload=x'], [4, "constructor"],
+                           [5, "__proto__"], [6, "toString"]]) {
+    assertEqual(rows[i].dataset.availability, "available",
+                `the state ${JSON.stringify(sent)} was passed through rather ` +
+                "than narrowed to one of the three literals");
+    assert(/^acp-rail-row acp-rail-row-(available|held|locked)$/.test(
+             String(rows[i].className)),
+           `${JSON.stringify(sent)} reached a class name: ${rows[i].className}`);
+    assertEqual(rows[i].querySelector(".acp-avail").getAttribute("aria-label"),
+                "available",
+                `${JSON.stringify(sent)} left the indicator without a real ` +
+                "accessible name, and it carries no text of its own");
+  }
 });
 
 check("a locked row is greyed off and cannot be selected", async (tpl) => {
@@ -892,6 +970,265 @@ check("a listing that fails says so instead of leaving the rail blank", async (t
   });
   assert(/could not load/i.test(refused.el("acpRailStatus").textContent),
          "a 403 was rendered as an empty store rather than as a refusal");
+});
+
+check("the rail stays inert until Phase 5b gives it a layout", (tpl) => {
+  // `.acp-rail` is a flex child of a body that is `display:flex;
+  // flex-direction:column` (style.css:23) inside `html, body { height:100%;
+  // overflow:hidden }` (style.css:2), and style.css carries no `.acp-rail` rule
+  // at all. With none, the rail's flex `min-height` resolves to `auto` —
+  // content height, unshrinkable — while `.acp-page { flex:1; min-height:0 }`
+  // (style.css:452) has `flex-basis:0` and absorbs the whole squeeze. Measured
+  // in Chromium against this template and that stylesheet, twelve workspaces:
+  // at 1280x800 the rail takes 567 px, `.acp-page` falls from ~752 px to
+  // 185 px and `#acpTranscript` to 26 px; at 390x844 the rail is 1007 px and
+  // the transcript, prompt, Send, New session and Close are all below a
+  // viewport that `overflow:hidden` will not scroll.
+  //
+  // **Phase 5b deletes the attribute this pins**, as the first act of "Two-pane
+  // at >=768 px; drill-down below, verified at 390 px and 768 px", once
+  // style.css bounds the rail's height — and deletes this check with it, after
+  // that verification. Failing here is the hand-off working, not a regression;
+  // what must not happen is the attribute going without the CSS arriving.
+  const page = loadPage(tpl);
+  const aside = page.markup.match(/<aside\b[^>]*class="acp-rail"[^>]*>/);
+  assert(aside, "the rail's <aside> is not where this check expects it");
+  assert(/\shidden(\s|>)/.test(aside[0]),
+         "the rail is rendered without `hidden` while style.css still has no " +
+         ".acp-rail rule, so it collapses the conversation view to a 26 px " +
+         `transcript and pushes the composer off a phone screen: ${aside[0]}`);
+});
+
+check("the page with no ACP module offers no way to list sessions", (tpl) => {
+  const page = loadPage(tpl, { acpError: "No module named 'power_atlas.acp'" });
+  assertEqual(page.listingCalls().length, 0,
+              "a page whose ACP module failed to import still fetched the listing");
+  assert(/unavailable/i.test(page.el("acpRailStatus").textContent),
+         "the rail did not say why it is empty");
+  // Asserted on the attribute rather than by clicking, because `dispatch`
+  // deliberately ignores `disabled` (see the note on it). The status line alone
+  // was not the fix: Refresh's listener is registered unconditionally, so one
+  // press replaced that line with "10 of 12 workspaces" and a full rail of rows
+  // whose only action — open a session — has no module to open one with.
+  assertEqual(page.el("acpRailReload").disabled, true,
+              "Refresh was live on a page that cannot open any session it lists");
+  assertEqual(page.el("acpRailSearch").disabled, true,
+              "the filter box invites narrowing a list that must not be loaded");
+});
+
+check("a workspace that comes back on a later page merges into the one on screen",
+      async (tpl) => {
+  const store = fakeStore({ workspaces: 12, sessions: 5 });
+  const page = await railed(tpl, {
+    store,
+    answer: (url, params) => {
+      if (!url.startsWith("/api/acp/sessions") || params.group_page !== "2") return null;
+      // The reorder the rail itself causes. Workspaces come back
+      // recency-ordered, and the rail's own purpose — open a session, run a
+      // turn — moves that workspace towards the front, so the second page can
+      // legitimately re-answer with one already on screen.
+      return { body: {
+        groups: [
+          { cwd: "C:\\work\\ws-0", name: "ws-0", total: 5, session_page: 1,
+            has_more: true, sessions: store[0].sessions.slice(0, 3) },
+          { cwd: "C:\\work\\ws-11", name: "ws-11", total: 5, session_page: 1,
+            has_more: true, sessions: store[11].sessions.slice(0, 3) },
+        ],
+        group_page: 2, group_total: 12, has_more: false,
+      } };
+    },
+  });
+
+  // Page into ws-0 first, so the merge has state that must survive it.
+  page.railGroups()[0].querySelector(".acp-rail-group-more").dispatch("click");
+  await page.settle();
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 5,
+              "positive control: the per-group show-more must extend ws-0 first");
+
+  page.click("acpRailMore");
+  await page.settle();
+  const names = page.railGroups().map(
+    (g) => g.querySelector(".acp-rail-group-name").textContent);
+  assertEqual(names.filter((n) => n === "ws-0").length, 1,
+              `ws-0 was drawn twice, and each copy then carries its own ` +
+              `session_page, so its show-more extends only one of them: ${names.join(", ")}`);
+  assertEqual(page.railGroups().length, 11,
+              "the repeat was appended rather than merged");
+  assertEqual(page.railRows().length, 35,
+              "the repeat's rows were appended beside the ones already drawn");
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 5,
+              "the merge rewound ws-0 to the three rows the repeat carried, " +
+              "losing the page the user had already asked for");
+  assert(!page.railGroups()[0].querySelector(".acp-rail-group-more"),
+         "the merge took the repeat's has_more and re-offered rows already drawn");
+  assert(names.includes("ws-11"),
+         "the workspace that was genuinely new on the second page never arrived");
+});
+
+check("a second show-more with nothing settled in between is dropped, not raced",
+      async (tpl) => {
+  const page = await railed(tpl);
+  assertEqual(page.listingCalls().length, 1, "the first load made the wrong shape");
+
+  page.click("acpRailMore");
+  const busyText = page.el("acpRailStatus").textContent;
+  page.click("acpRailMore");
+  await page.settle();
+  assertEqual(page.listingCalls().length, 2,
+              "the second click went out on top of the first: two group pages in " +
+              "flight interleave into the rail in whatever order they answer");
+  assert(/loading/i.test(busyText),
+         `the dropped click landed on a rail that never said it was busy: ${busyText}`);
+
+  // The per-group axis has its own button and its own reach into the guard.
+  const before = page.listingCalls().length;
+  const more = page.railGroups()[0].querySelector(".acp-rail-group-more");
+  more.dispatch("click");
+  const groupBusyText = page.el("acpRailStatus").textContent;
+  more.dispatch("click");
+  await page.settle();
+  assertEqual(page.listingCalls().length, before + 1,
+              "a double-press on a workspace's show-more sent two overlapping " +
+              "session pages for the same workspace");
+  assert(/loading/i.test(groupBusyText),
+         `the per-group show-more is silent while it works: ${groupBusyText}`);
+});
+
+check("re-selecting a session after another one re-tries the adoption", async (tpl) => {
+  const page = await railed(tpl);
+  const a = page.railRows()[0].dataset.sid;
+  const unknown = { code: "unknown_session", message: "This server holds no such session." };
+
+  page.railRows()[0].dispatch("click");
+  page.deliver({ type: "error", sessionId: a, payload: unknown });
+  assertEqual(page.sentOf("load").length, 1,
+              "the first selection never asked the agent to load the session");
+  page.deliver({ type: "session", sessionId: a,
+                 payload: { sessionId: a, cwd: "C:\\work\\ws-0", created: false,
+                            turnActive: false, contextPercent: null } });
+
+  // A second session on the same socket, then back to the first. Phase 2's idle
+  // sweeper reclaiming A while the user works in B is the live trigger.
+  page.railRows()[3].dispatch("click");
+  page.railRows()[0].dispatch("click");
+  page.deliver({ type: "error", sessionId: a, payload: unknown });
+
+  const loads = page.sentOf("load");
+  assertEqual(loads.length, 2,
+              "adoption is keyed per connection, so the second selection of a " +
+              "session sent no load at all and the row silently does nothing");
+  assertEqual(loads[1].sessionId, a, "the retry named the wrong session");
+  assert(!page.transcript().includes("[unknown_session]"),
+         "the user got a bare protocol code and not even the recovery note, " +
+         "which fires off a `meta pending:'load'` that was never sent");
+});
+
+check("selecting a row clears the conversation that was on screen", async (tpl) => {
+  const page = await railed(tpl);
+  const a = page.railRows()[0].dataset.sid;
+  page.railRows()[0].dispatch("click");
+  page.deliver({ type: "chunk", sessionId: a,
+                 payload: { role: "agent", text: "an answer belonging to the first session" } });
+  assert(page.transcript().includes("an answer belonging to the first session"),
+         "positive control: the chunk never rendered");
+  page.railRows()[3].dispatch("click");
+  assert(!page.transcript().includes("an answer belonging to the first session"),
+         "selecting a row left the previous conversation on screen, under a header " +
+         "and a URL that both name the new session");
+});
+
+check("a rail-selected session is unsubscribed until the server answers it", async (tpl) => {
+  const page = await railed(tpl);
+  const a = page.railRows()[0].dataset.sid;
+  page.railRows()[0].dispatch("click");
+  page.deliver({ type: "session", sessionId: a,
+                 payload: { sessionId: a, cwd: "C:\\work\\ws-0", created: false,
+                            turnActive: false, contextPercent: null } });
+  // Subscribed now. The next selection is a different session on the same
+  // socket, and nothing has answered for it — so a `close_in_progress` naming
+  // it takes the terminal arm, where no `session_closed` is ever coming.
+  const b = page.railRows()[3].dataset.sid;
+  page.railRows()[3].dispatch("click");
+  page.deliver({ type: "chunk", sessionId: b,
+                 payload: { role: "agent", text: "text that arrived before the sweep" } });
+  page.deliver({ type: "error", sessionId: b,
+                 payload: { code: "close_in_progress",
+                            message: "This session is being released." } });
+  assert(!page.transcript().includes("text that arrived before the sweep"),
+         "a stale `subscribed` from the previously selected session sent this one " +
+         "down the wrong arm, leaving a transcript whose session no longer exists " +
+         "and no frame coming to say so");
+  assert(page.transcript().includes("Everything on screen belonged"),
+         "the page emptied without telling the user the session went with it");
+});
+
+check("a group's count agrees with the rows drawn beneath it", async (tpl) => {
+  const page = await railed(tpl);
+  const box = page.el("acpRailSearch");
+  box.value = "workspace 3 session 1";
+  box.dispatch("input");
+  const group = page.railGroups()[0];
+  assertEqual(group.querySelectorAll(".acp-rail-row").length, 1,
+              "positive control: the filter must narrow this group to one row");
+  const head = group.querySelector(".acp-rail-group-head").textContent;
+  assert(!/3 of 5/.test(head),
+         `the header counts the loaded set while the group draws only what matched: ${head}`);
+  assert(head.includes("1 matching"), `the header does not say what it is showing: ${head}`);
+
+  box.value = "";
+  box.dispatch("input");
+  assert(page.railGroups()[0].querySelector(".acp-rail-group-head")
+             .textContent.includes("3 of 5"),
+         "clearing the filter did not restore the loaded-of-total count");
+});
+
+check("a re-render puts keyboard focus back where the user left it", async (tpl) => {
+  const page = await railed(tpl);
+
+  // A workspace's own show-more: three sessions become five, which is all of
+  // them, so the button the user pressed does not exist after the rebuild.
+  const more = page.railGroups()[0].querySelector(".acp-rail-group-more");
+  more.focus();
+  more.dispatch("click");
+  await page.settle();
+  let now = page.focused();
+  assert(now, "the rebuild dropped focus to the document body, throwing a keyboard " +
+              "or screen-reader user out of the rail mid-task — the same population " +
+              "the locked row's `disabled` exists for");
+  assertEqual(now.dataset.sid, "sess-w0-s4",
+              "focus did not land on the rows the press revealed");
+
+  // Row selection, which re-renders to move the `current` class.
+  const sid = page.railRows()[7].dataset.sid;
+  page.railRows()[7].focus();
+  page.railRows()[7].dispatch("click");
+  now = page.focused();
+  assert(now, "selecting a row dropped focus to the document body");
+  assertEqual(now.dataset.sid, sid, "focus moved somewhere other than the row selected");
+
+  // A press that does not re-render must not leave a restore pending. Clicking
+  // the row already open returns early, and the next render is the filter's —
+  // whose box is outside the rail and must keep the focus it has.
+  page.railRows().find((r) => r.dataset.sid === sid).dispatch("click");
+  const box = page.el("acpRailSearch");
+  box.value = "ws-1";
+  box.dispatch("input");
+  assertEqual(page.focused(), null,
+              "typing in the filter pulled focus out of the box and onto a rail row");
+  box.value = "";
+  box.dispatch("input");
+
+  // The rail-wide show-more, which hides itself once the last page is in — the
+  // one render where that button cannot keep its own focus.
+  page.el("acpRailMore").focus();
+  page.click("acpRailMore");
+  await page.settle();
+  assertEqual(page.el("acpRailMore").hidden, true,
+              "positive control: there is no third page, so the button must hide");
+  now = page.focused();
+  assert(now && now.dataset.sid,
+         "the button hid itself with focus still on it, which is the document body " +
+         "as far as the keyboard is concerned");
 });
 
 // -------------------------------------------------------------------- main --
