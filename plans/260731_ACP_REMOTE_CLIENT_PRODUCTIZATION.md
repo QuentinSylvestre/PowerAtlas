@@ -491,6 +491,8 @@ A review running 24 mutation probes found the code correct on every substantive 
 **Blocked by**: ~~Phase 0's NetBird policy verification~~ — **gate overridden by user decision on 2026-07-31 (D33)**. Phase 0 measured that no restricting policy exists, and the user elected to proceed with the cookie as the sole authorization layer. **Does not block Phases 4 or 5** — they need one allowlist entry each, registered in a small integration step.
 
 > **Security posture of this phase changed after planning.** D3 designed two independent layers because "bind, Host allowlist, ACL reachability and `_ACP_TOKEN` all fail together on a misconfigured policy". One of those two layers is now absent, so every control in this phase is load-bearing in a way the original design did not require: the secret's fail-closed path, the constant-time compare, the `issued_at` expiry, the `device_id` charset bound, and the `scope["client"]` remoteness signal each go from "second line of defence" to "the line". Review this phase's diff accordingly.
+>
+> **Review scaling — scoped exception, user decision 2026-08-01.** The session-wide instruction is one generic reviewer and one cycle per phase. For **Phase 3 only**, the user approved **two reviewers, still one cycle**: the standard generic reviewer plus one scoped adversarially to the authorization boundary — forging a cookie, reaching an allowlisted path without one, making `scope["client"]` read as loopback, and reaching the app through a scope the guard does not see. The rationale is that Phases 1 and 2 both showed the *code* correct and the *tests* weak (three Phase 2 criteria were ticked with mutations that left the suite entirely green); on this phase the equivalent failure is not a green suite but a bypassable check with a passing test beside it, and an adversarial lens is a different job from "is this code correct". Reverts to one reviewer from Phase 4 onward.
 
 **Change 1 — dual bind via pre-bound sockets** (D23, D25, D27). Add `remote_bind_address: str = ""` to `Config`.
 
@@ -632,36 +634,64 @@ On Windows, "restrictive permissions" via `os.chmod` toggles only the read-only 
 `__main__.py:345` derives `server_url` from `server.servers[0].sockets[0]`; with two sockets, index 0 is merely whichever bound first, so the loopback URL must come from the loopback socket explicitly. It feeds `create_peek` (`peek.py:267`) and `run_tray` (`tray.py:47`).
 
 **Exit criteria**:
-- [ ] With the remote bind unset: exactly one listening socket, and it is loopback (SC-2)
-- [ ] With it set: exactly two sockets, on the same port number, on loopback and the configured IP
-- [ ] A zero `port` with the remote bind set is rejected at config load with a named error (SC-3b)
-- [ ] A bind failure on the remote address logs at ERROR and leaves a working loopback app — not exit 1
-- [ ] `remote_bind_address` rejects `0.0.0.0`, `::`, hostnames and zone-id forms
-- [ ] `_ALLOWED_HOSTS` admits the configured IP, still rejects single-label and lookalike hosts, and is populated without any per-request config read
-- [ ] Remoteness is derived from `scope["client"]`; a remote peer sending `Host: 127.0.0.1` is still treated as remote
-- [ ] A remote request to a non-allowlisted path is refused, verified for `/`, `/api/launchers`, `/api/settings`
-- [ ] `ws://<remote-ip>:<port>/static/style.css` is refused — the `/static` Mount bypass is closed
-- [ ] A remote `/ws/acp` upgrade without a valid cookie is closed, exercised through the socket path
-- [ ] A missing, empty or short `remote-secret` refuses **all** remote requests and logs at ERROR
-- [ ] The exchange GET and POST are reachable without a cookie and are the only such paths
-- [ ] A failed exchange logs at WARNING with the peer address; repeated failures are backed off
-- [ ] Loopback requests need no cookie and are unaffected
-- [ ] The cookie survives a PowerAtlas restart without re-entering the secret (D24)
-- [ ] `server_url` is derived from the loopback socket explicitly; peek and tray still open the dashboard
-- [ ] All three stale comments corrected (`web.py:709-711`, `:830-831`, and the fixture docstring at `tests/test_web.py:26-29`)
-- [ ] `_HOSTILE_HOSTS` still refused with the remote bind **on**
-- [ ] `X-Forwarded-For` cannot move `scope["client"]` — `proxy_headers=False` asserted at the `uvicorn.Config` site
-- [ ] The loopback socket sets `SO_EXCLUSIVEADDRUSE` on Windows and **not** `SO_REUSEADDR`; a second process cannot bind the same `127.0.0.1:<port>`
-- [ ] A loopback bind failure still falls back to a random port; the app never starts remote-only with no loopback listener
-- [ ] A websocket refusal emits `websocket.close`, not `http.response.start` — no ASGI protocol violation on the guarded path
-- [ ] The remote guard is registered after `same_origin_guard` and rejects first
-- [ ] An invalid `remote_bind_address` in `config.toml` sanitises to loopback-only and logs ERROR; it does **not** raise from `load_config()`
-- [ ] `0.0.0.0`, `::`, `::0`, `0000::`, `::ffff:0.0.0.0` and loopback literals are all rejected on parsed properties
-- [ ] The remote socket is not created at all when the secret is absent or shorter than 43 characters
-- [ ] A cookie past its `issued_at` age is rejected
-- [ ] Both bound addresses are logged at startup (uvicorn suppresses its own banner when `sockets=` is passed)
-- [ ] Tray and peek still start — the server thread scaffolding survives the socket change
-- [ ] Full suite green
+- [x] With the remote bind unset: exactly one listening socket, and it is loopback (SC-2)
+- [x] With it set: exactly two sockets, on the same port number, on loopback and the configured IP
+- [x] A zero `port` with the remote bind set is rejected at config load with a named error (SC-3b)
+- [x] A bind failure on the remote address logs at ERROR and leaves a working loopback app — not exit 1
+- [x] `remote_bind_address` rejects `0.0.0.0`, `::`, hostnames and zone-id forms
+- [x] `_ALLOWED_HOSTS` admits the configured IP, still rejects single-label and lookalike hosts, and is populated without any per-request config read
+- [x] Remoteness is derived from `scope["client"]`; a remote peer sending `Host: 127.0.0.1` is still treated as remote
+- [x] A remote request to a non-allowlisted path is refused, verified for `/`, `/api/launchers`, `/api/settings`
+- [x] `ws://<remote-ip>:<port>/static/style.css` is refused — the `/static` Mount bypass is closed
+- [x] A remote `/ws/acp` upgrade without a valid cookie is closed, exercised through the socket path
+- [x] A missing, empty or short `remote-secret` refuses **all** remote requests and logs at ERROR
+- [x] The exchange GET and POST are reachable without a cookie and are the only such paths
+- [x] A failed exchange logs at WARNING with the peer address; repeated failures are backed off
+- [x] Loopback requests need no cookie and are unaffected
+- [x] The cookie survives a PowerAtlas restart without re-entering the secret (D24)
+- [x] `server_url` is derived from the loopback socket explicitly; peek and tray still open the dashboard
+- [x] All three stale comments corrected (`web.py:709-711`, `:830-831`, and the fixture docstring at `tests/test_web.py:26-29`)
+- [x] `_HOSTILE_HOSTS` still refused with the remote bind **on**
+- [x] `X-Forwarded-For` cannot move `scope["client"]` — `proxy_headers=False` asserted at the `uvicorn.Config` site
+- [x] The loopback socket sets `SO_EXCLUSIVEADDRUSE` on Windows and **not** `SO_REUSEADDR`; a second process cannot bind the same `127.0.0.1:<port>`
+- [x] A loopback bind failure still falls back to a random port; the app never starts remote-only with no loopback listener
+- [x] A websocket refusal emits `websocket.close`, not `http.response.start` — no ASGI protocol violation on the guarded path
+- [x] The remote guard is registered after `same_origin_guard` and rejects first
+- [x] An invalid `remote_bind_address` in `config.toml` sanitises to loopback-only and logs ERROR; it does **not** raise from `load_config()`
+- [x] `0.0.0.0`, `::`, `::0`, `0000::`, `::ffff:0.0.0.0` and loopback literals are all rejected on parsed properties
+- [x] The remote socket is not created at all when the secret is absent or shorter than 43 characters
+- [x] A cookie past its `issued_at` age is rejected
+- [x] Both bound addresses are logged at startup (uvicorn suppresses its own banner when `sockets=` is passed)
+- [x] Tray and peek still start — the server thread scaffolding survives the socket change
+- [x] Full suite green
+
+#### Implementation (2026-08-01, code: 1ea84f2, 0e06b01, 951045a, fff8b21, + log-amp fix)
+
+Phase 3 makes PowerAtlas reachable on a second, non-loopback socket and puts the entire authorization boundary behind a device cookie. The security context it landed into is not the one it was written in: D3 designed two independent layers and Phase 0 measured that the first does not exist, with all 17 account peers in this host's network map. D33 records the decision to ship on that basis. Every control below is therefore the only one of its kind, and the thing behind it is `kiro-cli acp -a`.
+
+**The bind.** Both listeners are created explicitly and handed to one `uvicorn.Server` via `run(sockets=…)`. `_bind` (`__main__.py:37-63`) is written out rather than borrowing `uvicorn.Config.bind_socket`, which sets `SO_REUSEADDR` — on Windows that lets a *different local process* bind the identical `127.0.0.1:<port>` and hijack a surface serving `_ACP_TOKEN` — and `set_inheritable(True)`, handing the listener to every terminal and agent this app spawns. `_bind` uses `SO_EXCLUSIVEADDRUSE` on win32, marks the socket non-inheritable, and closes it if the bind raises. Loopback binds first and is mandatory; `port` comes from `socks[0]`, named `loopback_sock` precisely so nobody later reaches for `server.servers[0].sockets[0]`, which with two sockets is merely whichever registered first and feeds `create_peek` and `run_tray`. `_bind_remote_socket` checks the secret **before** creating the socket — a bound remote surface with structurally impossible authentication is worse than none — catches `OSError` so a NetBird interface that is not up at login degrades rather than exiting 1, and wires the startup setters only after a successful bind. `proxy_headers=False` is explicit at the one `uvicorn.Config` site, because `ProxyHeadersMiddleware` overwrites `scope["client"]` from `X-Forwarded-For` and defaults on — leaving it defaulted would make the whole remoteness model an environment variable.
+
+**The guard.** One raw-ASGI `RemoteAccessGuard`, registered after `same_origin_guard` so it ends up outermost, and the only construct that sees every scope type — `BaseHTTPMiddleware` returns early on non-`http`, and `/static` is a `Mount` whose `matches` admits websocket scopes. Remoteness is `_is_remote_peer(scope["client"])`, never the `Host` header; absent or unparseable means remote. The path allowlist is default-deny with exact matches plus a directory match for the mount, and (after review) is **scope-typed**: `/ws/acp` for `websocket` only, everything else for `http` only. `_refuse` is scope-typed too, because emitting `http.response.start` into a websocket scope is a protocol violation that surfaces as an exception rather than a refusal.
+
+**The cookie.** HMAC-SHA256 over `(device_id, issued_at)` keyed by the file secret, compared constant-time over UTF-8 **bytes** — a `str` comparison raises `TypeError` out of `compare_digest` on non-ASCII, converting a 403 on the authentication path into a 500 any unauthenticated caller can drive. `issued_at` gives expiry without a server store, bounded 90 days back and 300 s forward. `_cookie_ok` repeats the secret-length floor rather than trusting the setter, and that repetition is load-bearing: an empty secret means HMAC keyed by the empty string, which anyone can compute, so the signature check alone would verify a cookie signed under nothing. `device_id` is bounded to `[A-Za-z0-9_-]{1,64}` at three points.
+
+**Later passes.** `951045a` bounded the exchange body (4 KiB cap checked on `Content-Length` *before* awaiting, plus a streaming ceiling and a field cap), widened config test isolation to module scope, and pinned six controls that had no discriminating test. `fff8b21` added app-wide `RotatingFileHandler` (10 MiB × 3), a loopback-only `POST /api/remote-access/rotate`, and made a loopback port-fallback skip the remote bind entirely rather than binding an unbookmarkable port.
+
+**The rotate route's ordering is deliberate**: file write first, in-process update second. If the file lands and the in-process update does not, the durable state holds the new secret while the process still honours the old one — the lost device works until the next restart, which completes the rotation. Stale but converging. The reverse revokes every device now and resurrects all of them at restart when the process reloads the old secret from disk; **revocation that silently undoes itself is strictly the worse failure**.
+
+##### QA verification (2026-08-01) — verdict PASS, driven over the real NetBird interface
+
+The user explicitly authorised binding `100.78.142.124` for this test. Total exposure **34.24 s** across three binds (32.80 / 0.76 / 0.68), each wrapped in a `try/finally` that closed both sockets — including the first run, where an exception escaped the probe body and teardown still ran and reported `closed=[True, True]`. Port 4933, so the user's own instance on 4915 was untouched and confirmed alive afterwards. The real `config.toml` hashed `9dca755f…4c04c` before and after; no `remote-secret` ever existed in the real config dir; the kiro store returned to exactly 5,945 `.json`.
+
+**SC-1 was proven by execution, not inference.** A peer on the NetBird address exchanged the secret for a cookie, opened `/acp` (200, 36,997 bytes, token present), upgraded `/ws/acp` (**HTTP 101**), and drove a complete session: `meta{connected}` → `session{94e5c615-…}` → `meta{turn:start}` → `chunk{role:agent,text:"PONG"}` → `meta{turn:end,stopReason:end_turn}` → `session_closed`. A remote peer created a session, ran a turn against `kiro-cli acp -a` and received the streamed answer, while loopback stayed fully open and cookie-free.
+
+**SC-4 held with a valid cookie presented.** `/`, `/api/launchers` and `/api/settings` each returned 403 with exactly 21 bytes, `{"error":"Forbidden"}` — `RemoteAccessGuard`'s body verbatim, so the request never reached routing and no launcher `env` was assembled. The same paths on loopback with no cookie returned 200 at 88,462 / 2 / 502 bytes.
+
+**SC-5 held on all three transports** without a cookie: `/acp` 403; `/ws/acp` rejected at handshake with no 101 (uvicorn converts the pre-accept `websocket.close` 1008 into a 403 and discards the code); `ws://…/static/style.css` 403 — and also 403 **with** a valid cookie, confirming the scope-typed allowlist keeps websocket scopes away from `StaticFiles.__call__`.
+
+**Rotation worked in both directions**, its first run outside a unit test. From NetBird with a valid cookie and matching Origin: 403 — so a peer holding a stolen cookie cannot re-key the surface and lock the owner out. From loopback: 200, `devices_revoked: true`, `Cache-Control: no-store`, secret file changed and byte-matching the payload. The old cookie then returned 403 and a fresh exchange with the new secret returned 200.
+
+**Four transport-level probes confirmed D26 at the real socket**: two `Host` headers → h11 rejects with 400 before the app; spoofed `Host: 127.0.0.1` from the NetBird peer to `/api/settings` → 403; `X-Forwarded-For`/`X-Real-IP`/`Forwarded` → 403; absolute-form request line → 403. One expected non-finding recorded so it is not later mistaken for a hole: spoofed `Host: 127.0.0.1` to `/acp` **with** a valid cookie returns 200, which is the documented design — `/acp` is allowlisted, the Host allowlist admits loopback names regardless of peer, and the cookie is the control.
 
 ---
 
@@ -726,7 +756,7 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 - [ ] `node tests/acp_page.test.mjs` green, with the added checks enumerated in the phase log
 
 #### Phase 5b: Responsive layout and conversation integration [QA]
-**File scope**: `src/power_atlas/static/style.css`, `src/power_atlas/templates/acp.html`
+**File scope**: `src/power_atlas/static/style.css`, `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/index.html`
 
 **Exit criteria**:
 - [ ] Two-pane at ≥768 px; drill-down below, verified at 390 px and 768 px
@@ -735,6 +765,9 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 - [ ] Creating a new session still works from the reworked page
 - [ ] `acp.html:4`'s back link no longer points at `/`, which is loopback-only and would 403 on a phone
 - [ ] `node tests/acp_page.test.mjs` green; full pytest suite green
+- [ ] *(assigned here 2026-08-01 by user decision — Change 6's UI half, carried from Phase 3)* The settings panel renders the reachable URL and the device secret as **copyable text** (D22), reading `GET /api/remote-access`, which Phase 3 built loopback-only for exactly this purpose. Phase 3 delivered the API and no template, and no phase owned the UI — Phase 5 is the frontend phase and already touches templates, so it lands here rather than evaporating
+- [ ] The settings panel shows **restart to apply** against every key in `/api/settings`'s `restart_to_apply` list, rather than implying a live effect. Phase 3 review found `restart_required` was answering `False` for `peek_hotkey`, a key consumed once at startup with a live input in `index.html:27` — the API side is fixed, and the UI must not reintroduce the same lie
+- [ ] The panel exposes the **secret rotation** action Phase 3 added (`POST /api/remote-access/rotate`, loopback-only), and states plainly that rotating revokes **every** device at once — D24 gives up per-device revocation, so a user must not discover that consequence after the fact
 
 ---
 
@@ -749,7 +782,9 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 
 **Exit criteria**:
 - [ ] README's four sites describe the remote client, how to enable it, and the four new config keys
-- [ ] README states the NetBird policy is the primary authorization layer and the cookie the second
+- [ ] README states the security model **as shipped, per D33**: the device cookie is the **sole** authorization layer, because Phase 0 measured that no NetBird policy restricts this peer — all 17 account peers sit in its network map. *(Criterion rewritten 2026-08-01; as originally worded — "the NetBird policy is the primary authorization layer and the cookie the second" — executing it literally would have shipped documentation actively wrong about the security model.)* It must also say that creating a restricting NetBird policy re-establishes the second layer at any time, and that nothing in the implementation depends on its absence
+- [ ] README documents **revocation**: `POST /api/remote-access/rotate` (loopback-only) issues a new secret and invalidates **every** device cookie at once, and that this is the only revocation mechanism the design has — D24 knowingly gave up per-device revocation
+- [ ] README carries the accepted **outbound-cookie residual** (Phase 3, C2-3): the cookie is transmitted to every service on any port of the NetBird address, so any process bound to `0.0.0.0` on the laptop can harvest full remote access to a `-a` agent. Stated as an operational rule — do not bind other services to `0.0.0.0` while the remote bind is enabled
 - [ ] `README.md:84` records that a fixed port is required when the remote bind is on
 - [ ] `plans/ROADMAP.md` corrected at `:62`, `:66` and `:120` (three sites of the POST-only claim), `:36` ("no idle sweeper anywhere"), `:65` ("none chosen" — D4 chose), `:54` (rebuild dependency retired by D1), and the ACP entry's rebuild verdict at `:124`, `:152`, `:154`, `:160-163`
 - [ ] `plans/ROADMAP.md:200` — the `## Misc` "Local network access to mimic claude code remote control" item, which is what this plan actually ships — updated; and `:8`'s header pointer given a carve-out so it does not read as closing this
@@ -828,7 +863,7 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 | 0 | Pre-flight verification | Complete — 5 of 7 criteria | terminate re-verified; cancel measured; baselines captured. The two NetBird criteria are **refuted**, not deferred |
 | 1 | Presence fixes | **Complete — 8 of 8**, QA PASS | Skew ceiling scoped to non-kiro providers; kiro listing cache deleted. Perf criterion rewritten as a measured delta by user decision (2026-08-01) and met at ~24 ms. SC-7 verified end-to-end against the running app |
 | 2 | Session lifecycle | **Complete — 27 of 28**, QA PASS | Ceiling, sweeper, two timestamps, config plumbing. One criterion half-deferred to Phase 3 (`_SETTING_TYPES` bounds — QA confirmed the deferral is fail-closed, no write path exists). Measured: terminate does **not** reap a running tool process |
-| 3 | Remote access | Not started | Gate **overridden** (D33): no NetBird policy exists, all 17 peers reach this host, and the user elected to ship with the cookie as sole authorization layer |
+| 3 | Remote access | **Complete — 30 of 30**, QA PASS | Dual bind, default-deny raw-ASGI guard, device cookie, rotation route. Two reviewers (adversarial + correctness), 17 findings, 0 High, **not exploitable without the secret**. SC-1 driven end-to-end over the real NetBird interface. Gate **overridden** (D33): the cookie is the sole authorization layer |
 | 4 | Listing endpoint | Not started | Allowlist registration deferred to the integration step |
 | 5a | Harness + rail data binding | Not started | |
 | 5b | Responsive layout + integration | Not started | |
@@ -922,6 +957,22 @@ Phases 1, 2, 3 and 4 are logically independent but **all modify `tests/test_web.
 | P1-4 | **The store holds 857 `.lock` files, not the 841 the plan records** | Counted directly at `~/.kiro/sessions/cli` during the timing run: 857 locks among 13,953 directory entries; `_sidecar_records()` returns 859 (857 kiro + 2 claude-code). Phase 0's 841 was measured earlier the same day and the store grows as sessions are created | Recorded. Nothing in the change depends on the count, but the criterion's own wording cites it |
 | P1-5 | **D32's accepted class is slightly wider than its wording.** It names two orphan sources (a failed `session/load`, and `close_session` when terminate raises); the same mechanism also admits a *terminal* `kiro-cli` process that opens more than one session in its lifetime — each earlier lock names the still-live pid with a positive delta | Surfaced in review. Same accepted class, not a new defect and not a worsening of D32 by this implementation | Recorded for whoever maintains D32 |
 
+### From Phase 3 (2026-08-01)
+
+| # | Divergence | Rationale | Disposition |
+|---|---|---|---|
+| P3-1 | **The declared gap "`/ws/acp` is browser-only from remote by accident" is false — the constraint is zero.** `_ws_origin_ok` requires only a self-consistent `Host`+`Origin` pair, which any scripted client sets trivially, and `_host_allowed` admits loopback names **regardless of the peer's actual address** | Proven by execution: from client `100.78.116.99` with a valid cookie and token, claiming `Host: 127.0.0.1:4915` → **`WS ACCEPT`**, confirmed via `websocket.accept` and `acp.ACP_ARGS = ("acp", "-a")` | Fixed — the comment now states the truth: the device cookie and `_ACP_TOKEN` are the only controls on a remote upgrade; `_ws_origin_ok` is browser-CSRF hygiene. **A phantom control is worse than a known-absent one** — recorded as load-bearing, a later cleanup of `_ws_origin_ok` would have been priced as removing a defence that never existed |
+| P3-2 | **The config-write hazard was wider than the first fixup covered.** `0e06b01` scoped isolation to `TestSettingsSurface`; 8 more tests across 2 classes had the same exposure | A test asserting a *refusal* is the most dangerous place for an unpatched `save_config`: mutate away the guard and the refusal becomes a write. Two of them patch `load_config` to return a **default** `Config()` while leaving `save_config` real, so a bypass writes an entirely default config **over the user's populated one** | Fixed — module-level autouse fixture redirecting `CONFIG_PATH`, `CONFIG_DIR`, `REMOTE_SECRET_PATH` for every test in the file. `memory/MEMORY.md:95-97` already named this as the durable fix for the 18 read-side cases; this closes the write side of the whole class |
+| P3-3 | **`server_url` was pinned by source text, and a behaviour-preserving edit walked past it** | Appending `port = socks[-1].getsockname()[1]` left every grepped literal intact while pointing `server_url` at the *remote* listener — nothing listens on `127.0.0.1:<remote-port>`, so tray and peek would open a dead URL. Suite stayed green at 940 | Fixed — socket selection extracted to `_choose_sockets` and asserted against real bound loopback sockets, including a connect probe proving the returned port is reachable |
+| P3-4 | **A pre-existing test was passing on the wrong check.** `test_ws_static_is_refused_and_never_reaches_the_mount` sent **no cookie**, so it passed on the cookie gate rather than the path gate it was named for | It could never have caught the scope-blindness defect it appeared to cover. Two checks rejecting the same input tell you nothing about which is working | Fixed — a new test presents a valid cookie and is the discriminating one; the old test kept as a second layer |
+| P3-5 | **`restart_required` returned a positively wrong answer for `peek_hotkey`** | Consumed once at startup (`create_peek` → `PeekWindow._trigger_keys`), never re-read, with a live input at `index.html:27`. Before this phase the endpoint made no claim; after it, it claimed `False`. A field that says "no restart needed" when one is needed is worse than no field | Fixed — added to `_RESTART_TO_APPLY` after verifying `peek.py` has no re-registration path |
+| P3-6 | **Change 6's UI half was not delivered and no phase owned it** | The API (`/api/remote-access`, `restart_to_apply`) exists; `index.html` was outside Phase 3's file scope, and Phase 5 is the `/acp` rework while Phase 6 is docs | **Resolved by user decision**: assigned to Phase 5b with three explicit exit criteria and `index.html` added to its file scope |
+| P3-7 | **A loopback port-fallback bound the remote socket on the random port** | Satisfied "both sockets on one port" while defeating D25's premise — a phone cannot bookmark a port that changes every restart — leaving an exposed listener nobody could reach on purpose | **Resolved by user decision**: skip the remote bind entirely after a fallback, log at WARNING. The now-unreachable "bookmarked remote URLs will be stale" warning was deleted rather than left implying the socket still binds |
+| P3-8 | **No secret rotation path existed** | D24 gave up per-device revocation and named secret rotation as the remedy — but nothing implemented it, so the real answer for a lost phone was "delete the file by hand and restart" | **Resolved by user decision**: `POST /api/remote-access/rotate` added, loopback-only by the same default-deny mechanism `/api/remote-access` uses; documented in Phase 6 |
+| P3-9 | **Transport-layer log amplification below the application** | `Content-Length: 10` + 200,000 bytes leaves h11 in `MUST_CLOSE`; uvicorn's failed response writes ~35 lines / ~2,950 bytes per request. The app's own `_claim_throttle_warning` bound does not cover it — measured still firing on iterations returning `429`. Generic uvicorn/h11 behaviour, reproducible from loopback; Phase 3 makes it reachable by an unauthenticated peer | **Resolved by user decision**: rate-limit protocol-error records. The deciding argument was not disk space — rotation caps that at 40 MiB — but that rotation plus unbounded amplification is an **anti-forensics primitive**: ~14,000 cheap requests roll every backup off the end, erasing the record of the attacker's own earlier 403s and 429s |
+| P3-11 | **The orchestrator's own fix instruction named the wrong logger, and the implementing agent measured rather than complied.** The brief said to filter `uvicorn.error` | Attribution over one 12-request loopback run: `uvicorn.error` emitted 24 records / **1,872 bytes (5%)** — two short WARNINGs, no traceback — while `asyncio` emitted 12 records / **33,732 bytes (95%)**, the whole `LocalProtocolError` traceback. The exception escapes uvicorn's handler and surfaces through **asyncio's default exception handler**, reaching the log by propagation to the root handler. Filtering as instructed would have bounded 5%, left the primitive essentially intact (~3,700 requests still fill a segment), and **passed every test written against it** | Fixed — one shared filter on both loggers. The measurement also invalidated the first identity key: asyncio composes its message from transport/protocol/handle reprs, each carrying a **memory address**, so keying on the message mints a key per request and collapses nothing. The key became exception type + innermost traceback frame, both address-free. Measured end-to-end: 36 records / 35,275 bytes / 423 lines → **4 records / 3,172 bytes / 36 lines** |
+| P3-10 | **A Phase 6 criterion had been falsified by D33 three phases earlier** | It read "README states the NetBird policy is the primary authorization layer and the cookie the second". Executed literally, Phase 6 would have shipped documentation actively wrong about the security model | Fixed — criterion rewritten to state the model as shipped, plus two new criteria for revocation and the outbound-cookie residual. **`qvalidate` passed throughout**, because its checks are structural (filenames, checkbox counts, commit pairing), not semantic — a decision in one section can silently invalidate a criterion in another with nothing detecting it |
+
 ### From Phase 2 (2026-08-01)
 
 | # | Divergence | Rationale | Disposition |
@@ -935,6 +986,38 @@ Phases 1, 2, 3 and 4 are logically independent but **all modify `tests/test_web.
 | P2-7 | **The `_SETTING_TYPES` bounds criterion is half-deferred to Phase 3** | The startup half landed (`apply_config` names key, value and permitted range in an ERROR line). The write-path half did not: this dispatch's scope admitted `web.py` for the lifespan hook only, and Phase 3 must extend the same map for `remote_bind_address` anyway | Accepted, and **the reason is stronger than the one given**: review found the three keys are not in `_SETTING_TYPES` at all, so `/api/save-setting` already default-denies them with `Unknown setting`. There is no write path to bound yet and no settings UI to caption "restart to apply" |
 
 ## Review Log
+
+### 2026-08-01 — Implementation Review (after Phase 3, **two reviewers** per scoped user exception)
+
+Implementation health: **Green**. **17 findings (0 High, 8 Medium, 9 Low)**; all resolved. Adversarial verdict: **not exploitable** by a peer without the secret. QA verdict: **PASS**, driven over the real NetBird interface.
+
+Code, in order: `1ea84f2` (implementation), `0e06b01` (test isolation), `951045a` (13 review fixes), `fff8b21` (3 user decisions), `53413cf` (log-amp fix). Suite `1102 → 1319 → 1336 → 1348 passed, 2 skipped`; node harness 17 throughout. Re-run independently by the orchestrator at every point. **46 security controls mutation-verified** across the implementation and fix passes.
+
+**Two reviewers by scoped exception** (the session default is one): a generic correctness reviewer and one scoped adversarially to the authorization boundary. The split earned itself — the two found almost disjoint sets. The adversarial reviewer executed 31 path-normalisation variants, 23 cookie-parser abuses, 6 forgery attempts and a timing sweep, and produced the `/remote-auth` resource findings and the `/ws/acp` phantom-control correction; the correctness reviewer ran 30 mutation probes (23 caught, 7 survived) and produced the test-quality and plan-consistency findings. Neither would plausibly have found the other's set.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| P3-A | Medium | `/remote-auth` buffers an unbounded body and blocks the loop: 64 MiB → 268.7 MB peak, 1M fields → 1.03 s synchronous CPU; backoff read at entry so concurrency bypasses it | Fixed in `951045a` — `Content-Length` cap before awaiting, streaming ceiling, field cap, `limit_concurrency=128` |
+| P3-B | Medium | The declared "`/ws/acp` browser-only by accident" control does not exist; a remote peer claiming `Host: 127.0.0.1` gets `WS ACCEPT` | Fixed in `951045a` — comment corrected; the cookie and `_ACP_TOKEN` are the only controls |
+| P3-C | Medium | The config-write hazard is present in 8 more tests across 2 classes; two would write a **default** `Config()` over the user's populated one | Fixed in `951045a` — module-level autouse fixture, verified by removing a guard and hashing the real config |
+| P3-D | Medium | `server_url` pinned by source text; a behaviour-preserving edit repointed it at the remote socket with the suite green | Fixed in `951045a` — `_choose_sockets` extracted, asserted against real bound sockets with a connect probe |
+| P3-E | Medium | Change 6's UI half not delivered and owned by no phase | User: accepted — assigned to Phase 5b with three exit criteria and `index.html` added to its scope |
+| P3-F | Medium | `restart_required` answers `False` for `peek_hotkey`, which is consumed once at startup | Fixed in `951045a` — added to `_RESTART_TO_APPLY` after verifying `peek.py` has no re-registration path |
+| P3-G | Medium | Throttle WARNING is an unauthenticated disk-fill primitive; `orchestrator.log` had no rotation | User: accepted — `RotatingFileHandler` 10 MiB × 3 in `fff8b21`, plus one-line-per-lockout-window |
+| P3-H | Medium | Transport-layer amplification below the app, uncovered by the app's own bound; with rotation, an anti-forensics primitive | User: accepted — fixed in `53413cf`; see P3-11, the instruction named the wrong logger |
+| P3-I | Low | No secret rotation path exists anywhere; D24 names it as the remedy | User: accepted — `POST /api/remote-access/rotate` in `fff8b21`, loopback-only, documented in Phase 6 |
+| P3-J | Low | Loopback port fallback silently moves the remote listener to an unbookmarkable port | User: accepted — skip the remote bind after a fallback (`fff8b21`) |
+| P3-K | Low | `/api/remote-access` returns the permanent secret with no `Cache-Control: no-store` | Fixed in `951045a` |
+| P3-L | Low | `ws://…/static/…` reaches `StaticFiles` on the cookie alone → unhandled `AssertionError` | Fixed in `951045a` — scope-typed allowlist |
+| P3-M | Low | `test_every_bounded_key_is_declared` asserts both directions of the wrong invariant; an unbounded new `int` key passes | Fixed in `951045a` |
+| P3-N | Low | Two documented controls untested — `_cookie_ok`'s length floor, and peer-dict eviction | Fixed in `951045a` |
+| P3-O | Low | Criterion 2 ("same port number") has no discriminating test; `port + 1` passes | Fixed in `951045a` |
+| P3-P | Low | The IPv4-mapped comment asserts the opposite of this interpreter's behaviour | Fixed in `951045a` — reworded to name the 3.11/3.12 vs 3.13 split; code correct on both |
+| P3-Q | Low | A Phase 6 criterion was falsified by D33 three phases earlier | Fixed — criterion rewritten, plus two added for revocation and the outbound-cookie residual |
+
+**Cycle 2 was not run**, per the user's one-cycle instruction, which the two-reviewer exception did not change. Recorded rather than glossed: eight Mediums would normally force it, and this phase is the one where a fix creating the next problem was demonstrated three times over (the subscribe guard → a client gap; log rotation → amplification teeth; the log-amp brief → the wrong logger). The mitigating fact is that **every fix was individually mutation-verified by its fixing agent** — 11/11, 15/15 and 12/12 across the three passes — which is stronger per-fix evidence than a second review typically produces, but is not a fresh adversarial look at the fix diff.
+
+**Declared gaps.** Adversarial: ~80% confidence on the in-process ASGI surface, ~55% below it, with `_bind`/`SO_EXCLUSIVEADDRUSE`/socket inheritance and uvicorn's own HTTP parsing out of reach under the no-bind constraint — a gap the NetBird QA subsequently closed. Correctness: 85%, with three exit criteria resting on structural rather than behavioural evidence at review time, all since given discriminating tests. Both verified the real config untouched by hash.
 
 ### 2026-08-01 — Implementation Review (after Phase 2, persona: single generic reviewer per user scaling)
 
@@ -1118,4 +1201,5 @@ Five sub-agents: doc-impact scan, Architect (gap-critic lens), Security auditor,
 - `/qplan`'s exit criteria admit **numeric performance bounds that were never measured against the pre-change baseline**, so a phase can be blocked by a budget its own starting state already breached — Phase 1's "a full `_scan` … completes within 50 ms" was authored from a measured *delta* (~19 ms listing) plus an unmeasured *total*, and the total was ~52 ms before the phase touched anything — cost: a correct implementation returned with an unmeetable criterion, and an escalation was spent on a number rather than on the work — suggested change: require any numeric perf criterion to cite a measured pre-change baseline at plan time, or to be expressed as a permitted delta (`_scan` grows by ≤30 ms) rather than an absolute ceiling.
 - **PowerShell here-string syntax reached the Bash tool three times in one session** — once from the orchestrator and twice from sub-agents — each time corrupting a commit subject to a bare `@`, and each time discovered only after the commit existed, when the only clean repair is the `git commit --amend` that governance bans outright. The environment offers two shells with different syntax and the failure is silent: `git commit -m @'...'@` succeeds, exits 0, and produces a wrong subject — cost: two user escalations to authorize amends, plus a `qvalidate` `commit-pairing` risk that would have surfaced at `/qclose` rather than at the commit — suggested change: make `git commit -F <file>` the stated default in the commit conventions rather than one option among several, since it is the only form immune to shell-quoting differences; and have sub-agent briefs that authorize a commit say so explicitly.
 - **A phase's own review can be the thing that creates the next defect, and only an end-to-end check catches it.** Phase 2's `_handle_subscribe` guard was correct server-side and mutation-verified, but it left `acp.html` with no terminal handler for `close_in_progress`, so a page reconnecting mid-close kept a stale transcript — a regression *introduced by a review fix*, in a file outside the fixing agent's scope. The agent surfaced it because the brief asked it to check whether the refusal left the client worse off; nothing in `/qdev` Step 6 requires that question — cost: nil here, because it was asked, but the default path would have shipped it — suggested change: when an auto-fix changes a protocol response or error code, require the fixing agent to name every consumer of that response and state whether each still behaves correctly.
+- **A brief that names a specific target invites compliance instead of measurement, and the orchestrator is not a reliable source of that target.** The Phase 3 log-amplification brief said to filter `uvicorn.error`; the implementing agent measured first and found 95% of the bytes come from `asyncio`, because the exception escapes uvicorn's handler entirely. Complying would have fixed 5% of the problem and passed every test — a *green, wrong* fix that closes the finding on paper — cost: nil here, only because the agent chose to verify an instruction it had no reason to doubt — suggested change: when a brief names a specific target (a logger, a call site, a file) for a *measured* symptom, require the agent to re-derive that target from the symptom before acting, and to report the attribution either way.
 - Review sub-agents that **mutation-test their own claims** produced findings no amount of reading would have — the Phase 1 reviewer disproved a test's own docstring by deleting the guard in a scratch copy and observing the test still pass — cost: nil, it was cheaper than the prose review around it, but nothing in `/qreview` asks for it — suggested change: add "where a test is claimed to pin a specific behaviour, verify by mutating that behaviour and confirming the test fails" to the Test-coverage standard, so discriminating power is checked rather than assumed.
