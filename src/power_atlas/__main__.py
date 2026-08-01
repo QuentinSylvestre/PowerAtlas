@@ -71,6 +71,252 @@ def _build_log_handler(log_path) -> logging.Handler:
         log_path, maxBytes=_LOG_MAX_BYTES, backupCount=_LOG_BACKUP_COUNT,
         encoding="utf-8")
 
+
+# The size bound above caps the *file*; it does not cap the *rate*, and one
+# source below the application can saturate it at will.
+#
+# Measured 2026-07-31 against a real NetBird peer and reproduced identically
+# from loopback: a `POST /remote-auth` carrying `Content-Length: 10` followed
+# by 200,000 unread bytes leaves h11 in MUST_CLOSE, so uvicorn's attempt to
+# send its own 400 raises `LocalProtocolError`. The *application* is correct
+# throughout — only ten bytes reach `request.stream()` and it logs one clean
+# WARNING — but the layer beneath it writes ~35 lines / ~2,970 bytes per
+# request (measured over 12 requests on loopback, 2026-08-01).
+#
+# **Where those bytes actually come from decides where the filter goes**, and
+# the answer is not the obvious one. Attributing the same run per logger:
+#
+#     uvicorn.error   24 records   1,872 bytes   ( 5%)  two short WARNINGs
+#     asyncio         12 records  33,732 bytes   (95%)  the whole traceback
+#
+# The `LocalProtocolError` escapes uvicorn's own handler and surfaces through
+# `asyncio`'s default exception handler, so the expensive part — the traceback
+# — is logged by `asyncio` and reaches `orchestrator.log` by propagation to the
+# root handler installed in `_run_foreground`. Filtering `uvicorn.error` alone
+# would bound 5% of the amplification and read like a fix.
+#
+# `web._claim_throttle_warning` does not cover any of it. That bounds the
+# *application's* WARNING to one per lockout window per peer; these records are
+# emitted beneath the app and were confirmed still firing on iterations that
+# already returned 429. Combined with the rotation above this is an
+# anti-forensics primitive rather than mere noise: ~3,500 such requests fill a
+# segment and ~14,000 roll every backup off the end, so an attacker can
+# deliberately erase the 403s and 429s recording their own secret-guessing run.
+_PROTOCOL_ERROR_LOGGERS = ("uvicorn.error", "asyncio")
+
+# 60 s. Long enough that the residual is a bound rather than a slowdown: one
+# full record plus one summary per key per window, and two keys in the measured
+# flood, is ~3 KB/min in place of ~3 KB/request. That turns "roll the whole
+# 40 MiB in the minutes it takes to send 14,000 requests" into ~10 days of
+# uninterrupted flooding which is itself visible in the log throughout. Short
+# enough to stay a per-minute heartbeat: an ongoing attack keeps writing
+# evidence of itself, and a genuinely new incident surfaces within a minute.
+_PROTOCOL_ERROR_WINDOW_SECONDS = 60.0
+
+# The hard ceiling on distinct keys held at once. Expiry alone already bounds
+# the dict to "keys seen in the last window", which here is a handful; this
+# exists for the case where the key is *not* drawn from a closed set — a record
+# whose message carries an address or a counter would otherwise mint a fresh
+# key every time. That failure mode is safe (nothing collapses, everything is
+# logged) only because it cannot also become unbounded memory. Replacing
+# unbounded log growth with unbounded memory growth would be no fix at all,
+# which is the same reason `acp._sweep_failures` prunes to the live session set.
+_PROTOCOL_ERROR_MAX_KEYS = 64
+
+
+class _RepeatedRecordFilter(logging.Filter):
+    """Collapse repeated identical error records to one per window.
+
+    Threshold is one: the first record of a window passes in full, every
+    identical one after it is counted instead of written, and when the window
+    closes a single line states how many were suppressed. One is the right
+    threshold because the first record already carries the whole diagnostic
+    payload — the traceback — and a second copy of it adds nothing a reader can
+    use.
+
+    **Suppression is never silent.** The point of the change is that the log
+    stays trustworthy evidence, so a dropped record always survives as a count.
+
+    Identity is ``(logger, level, message-or-nothing, exception type, raise
+    site)``, and the middle term is the load-bearing one. `asyncio`'s default
+    exception handler composes its `msg` out of the transport, protocol and
+    handle *reprs*, every one of which carries a memory address — so keying on
+    the message would mint a key per request and collapse nothing, which is
+    exactly the flood being fixed. When a record carries an exception, the
+    message is therefore dropped from the key and the exception's type plus the
+    innermost frame of its traceback (file, line) stand in as identity: both are
+    address-free, both are stable across repetitions of one failure, and both
+    differ the moment the failure genuinely differs. Records without an
+    exception keep the `msg` *template* (not `record.args`, which would carry
+    the per-request peer address and defeat the collapse the same way).
+
+    The message is still *shown* — the first record's own text is kept for the
+    summary line — so normalising the key costs nothing in readability.
+
+    Records below WARNING pass through untouched and are never counted, so
+    uvicorn's startup and shutdown lines, which share `uvicorn.error`, cannot be
+    swallowed however often they repeat. They do pass through the expiry sweep,
+    so they also serve as flush points for a pending summary.
+    """
+
+    def __init__(self, window_seconds: float = _PROTOCOL_ERROR_WINDOW_SECONDS,
+                 max_keys: int = _PROTOCOL_ERROR_MAX_KEYS,
+                 clock=time.monotonic) -> None:
+        super().__init__()
+        self._window = window_seconds
+        self._max_keys = max_keys
+        self._clock = clock
+        # Both the event loop thread and the tray/sweeper threads log here.
+        self._lock = threading.Lock()
+        # key -> [window opened at, suppressed count, logger name, levelno,
+        #         human-readable detail for the summary].
+        # Insertion-ordered, which is also window-start order, so evicting the
+        # first entry evicts the window closest to expiring anyway.
+        self._windows: dict[tuple, list] = {}
+
+    @staticmethod
+    def _key(record: logging.LogRecord) -> tuple:
+        exc_info = record.exc_info
+        if isinstance(exc_info, tuple) and exc_info and exc_info[0] is not None:
+            exc_name = getattr(exc_info[0], "__name__", str(exc_info[0]))
+            # The innermost frame — where it was actually raised. Walking the
+            # traceback is O(depth) and touches no formatting, unlike the
+            # rendered text this exists to avoid producing.
+            origin = ()
+            tb = exc_info[2]
+            while tb is not None:
+                origin = (tb.tb_frame.f_code.co_filename, tb.tb_lineno)
+                tb = tb.tb_next
+            return (record.name, record.levelno, "", exc_name, origin)
+        return (record.name, record.levelno, str(record.msg), "", ())
+
+    @staticmethod
+    def _detail(record: logging.LogRecord, key: tuple) -> str:
+        """What the summary shows. Built once, from the window's first record."""
+        try:
+            first_line = record.getMessage().splitlines()[0]
+        except Exception:
+            first_line = str(record.msg)
+        detail = repr(first_line[:120])
+        if key[3]:
+            where = f" at {os.path.basename(key[4][0])}:{key[4][1]}" if key[4] else ""
+            detail += f" [{key[3]}{where}]"
+        return detail
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # A summary this filter emitted itself. Checked first so that handing
+        # it back to `Logger.handle` cannot recurse or be counted.
+        if getattr(record, "_pa_repeat_summary", False):
+            return True
+        now = self._clock()
+        counted = record.levelno >= logging.WARNING
+        key = self._key(record) if counted else None
+        with self._lock:
+            summaries = self._close_expired(now)
+            if not counted:
+                allow = True
+            elif key in self._windows:
+                self._windows[key][1] += 1
+                allow = False
+            else:
+                self._windows[key] = [now, 0, record.name, record.levelno,
+                                      self._detail(record, key)]
+                summaries.extend(self._evict_overflow())
+                allow = True
+        # Emitted outside the lock: `Logger.handle` takes the handler locks, and
+        # taking those under this one would invert the order against any other
+        # thread logging through the same handler.
+        for name, levelno, text in summaries:
+            self._emit_summary(name, levelno, text)
+        return allow
+
+    def _close_expired(self, now: float) -> list:
+        out = []
+        for key in tuple(self._windows):
+            opened, count, name, levelno, detail = self._windows[key]
+            if now - opened < self._window:
+                continue
+            del self._windows[key]
+            if count:
+                out.append(self._summary(detail, count, now - opened, name, levelno))
+        return out
+
+    def _evict_overflow(self) -> list:
+        out = []
+        while len(self._windows) > self._max_keys:
+            key = next(iter(self._windows))
+            opened, count, name, levelno, detail = self._windows.pop(key)
+            if count:
+                out.append(self._summary(
+                    detail, count, self._clock() - opened, name, levelno))
+        return out
+
+    @staticmethod
+    def _summary(detail: str, count: int, elapsed: float,
+                 name: str, levelno: int) -> tuple:
+        return (name, levelno,
+                f"{count} further identical {logging.getLevelName(levelno)} "
+                f"record(s) suppressed over {elapsed:.0f}s: {detail}")
+
+    def _emit_summary(self, name: str, levelno: int, text: str) -> None:
+        record = logging.LogRecord(name, levelno, __file__, 0, text, None, None)
+        record._pa_repeat_summary = True
+        logging.getLogger(name).handle(record)
+
+    def flush(self) -> None:
+        """Emit every pending summary now, whatever its window says.
+
+        `uvicorn.Config(log_level="warning")` leaves these loggers silent in
+        normal operation, so the sweep on the next record cannot be relied on
+        to arrive: after a flood stops, its final count would sit unwritten.
+        Called on the shutdown path so the last window is always accounted for.
+        """
+        with self._lock:
+            now = self._clock()
+            summaries = [self._summary(detail, count, now - opened, name, levelno)
+                         for (opened, count, name, levelno, detail)
+                         in self._windows.values() if count]
+            self._windows.clear()
+        for name, levelno, text in summaries:
+            self._emit_summary(name, levelno, text)
+
+
+def _install_repeat_filter(
+        logger_names=_PROTOCOL_ERROR_LOGGERS) -> "_RepeatedRecordFilter":
+    """Attach the collapse filter to every logger that carries the flood, once.
+
+    On the loggers rather than on the root handler, so `power_atlas`'s own
+    records — which have their own throttle in `web._claim_throttle_warning` —
+    are untouched. `asyncio` is not optional here: it carries 95% of the
+    measured bytes, and filtering `uvicorn.error` alone would leave the
+    traceback, and therefore the amplification, in place.
+
+    One filter instance shared across both loggers, so the key cap and the
+    shutdown flush are single. Filters run only on the logger a record was
+    emitted through, never again on ancestors during propagation, so sharing
+    cannot double-count; the logger name is part of the key regardless.
+
+    Safe to call before `uvicorn.Config` is constructed: `Config.__init__` runs
+    `dictConfig` over `uvicorn.config.LOGGING_CONFIG`, which replaces
+    `uvicorn.error`'s handlers but leaves its filters alone.
+    """
+    filt = None
+    for name in logger_names:
+        for existing in logging.getLogger(name).filters:
+            if isinstance(existing, _RepeatedRecordFilter):
+                filt = existing
+                break
+        if filt is not None:
+            break
+    if filt is None:
+        filt = _RepeatedRecordFilter()
+    for name in logger_names:
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, _RepeatedRecordFilter) for f in logger.filters):
+            logger.addFilter(filt)
+    return filt
+
+
 # The transport ceiling on an inbound WebSocket frame. uvicorn has decoded the
 # whole frame before the application sees it, so `/ws/acp`'s own 256 KiB cap
 # (``acp.MAX_MESSAGE_BYTES``) refuses frames the server has already buffered in
@@ -474,6 +720,7 @@ def _run_foreground() -> None:
         datefmt="%H:%M:%S",
         handlers=[_build_log_handler(log_path)],
     )
+    repeat_filter = _install_repeat_filter()
     log = logging.getLogger("power_atlas")
     _enable_crash_handler()
     log.info("Starting power-atlas (foreground)")
@@ -597,6 +844,11 @@ def _run_foreground() -> None:
 
     _remove_pid()
     _release_mutex()
+    # Ahead of the logging teardown below, or the last window's count is
+    # written to a closed handler and lost — the one case the
+    # sweep-on-next-record cannot reach, since `log_level="warning"` leaves
+    # this logger silent once a flood stops.
+    repeat_filter.flush()
     logging.shutdown()
 
     if should_restart:

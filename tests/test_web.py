@@ -11324,6 +11324,256 @@ class TestTheLogFileIsBounded:
             "def _enable_crash_handler")[1].split("def _run_foreground")[0]
 
 
+class TestUvicornProtocolErrorFloodIsBounded:
+    """The size bound above caps the file; it does not cap the rate.
+
+    Measured 2026-07-31 against a real NetBird peer and re-measured per logger
+    on loopback 2026-08-01: `Content-Length: 10` followed by 200,000 unread
+    bytes leaves h11 in MUST_CLOSE, and the layer beneath the application
+    writes ~35 lines / ~2,970 bytes per request. 1,872 of those bytes over 12
+    requests come from `uvicorn.error`; 33,732 — the whole `LocalProtocolError`
+    traceback — come from `asyncio`. Both are beneath the app, so
+    `web._claim_throttle_warning` bounds neither, and both were confirmed still
+    firing on iterations that returned 429. Against the rotation that is an
+    anti-forensics primitive: ~14,000 such requests roll every backup off the
+    end, erasing the 403s and 429s that record the attacker's own run.
+
+    These drive real `logging` records through the real filter on a real
+    logger. Asserting the filter class exists would pass just as happily
+    against one that suppressed everything, including the evidence.
+    """
+
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    class _Capture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.records = []
+
+        def emit(self, record):
+            self.records.append(record)
+
+    def _rig(self, name, clock=None, **kw):
+        """A private logger carrying the real filter, plus a capturing handler."""
+        main_mod = self._main()
+        logger = logging.getLogger(f"pa.repeat.{name}")
+        logger.handlers.clear()
+        logger.filters.clear()
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        cap = self._Capture()
+        logger.addHandler(cap)
+        filt = main_mod._RepeatedRecordFilter(
+            clock=clock or (lambda: 0.0), **kw)
+        logger.addFilter(filt)
+        return logger, cap, filt
+
+    @staticmethod
+    def _flood(logger, n, exc=None):
+        """`n` copies of uvicorn's actual protocol-error call."""
+        for _ in range(n):
+            logger.warning("Invalid HTTP request received.",
+                           exc_info=exc or RuntimeError("h11 MUST_CLOSE"))
+
+    @staticmethod
+    def _kept(cap):
+        return [r for r in cap.records
+                if not getattr(r, "_pa_repeat_summary", False)]
+
+    @staticmethod
+    def _summaries(cap):
+        return [r.getMessage() for r in cap.records
+                if getattr(r, "_pa_repeat_summary", False)]
+
+    def test_identical_records_collapse_to_one_per_window(self):
+        """The whole point: 500 requests must not cost 500 tracebacks."""
+        logger, cap, _ = self._rig("collapse")
+        self._flood(logger, 500)
+        assert len(self._kept(cap)) == 1, \
+            f"{len(self._kept(cap))} of 500 identical records were written"
+        assert self._summaries(cap) == [], \
+            "no window has closed yet, so nothing should be summarised"
+
+    def test_the_suppressed_count_is_written_when_the_window_closes(self):
+        """A silent drop would trade one unreliable log for another. The count
+        is the evidence that survives when the traceback does not."""
+        now = [0.0]
+        logger, cap, main_filt = self._rig("count", clock=lambda: now[0])
+        self._flood(logger, 1 + 42)
+        now[0] = main_filt._window + 1
+        self._flood(logger, 1)
+        summaries = self._summaries(cap)
+        assert len(summaries) == 1, summaries
+        assert "42 further identical WARNING record(s) suppressed" in summaries[0], \
+            summaries[0]
+        assert "Invalid HTTP request received." in summaries[0], summaries[0]
+        assert "RuntimeError" in summaries[0], \
+            f"the summary must name what was suppressed; got {summaries[0]!r}"
+
+    def test_a_different_error_is_not_suppressed(self):
+        """Same logger, same level, same uvicorn template — a different
+        exception underneath it is a different failure and must be visible.
+        Keying on the template alone would bury it."""
+        logger, cap, _ = self._rig("distinct")
+        self._flood(logger, 200, exc=RuntimeError("h11 MUST_CLOSE"))
+        self._flood(logger, 200, exc=ValueError("something else entirely"))
+        kept = self._kept(cap)
+        assert len(kept) == 2, f"expected both failures, got {len(kept)}"
+        types = {r.exc_info[0].__name__ for r in kept}
+        assert types == {"RuntimeError", "ValueError"}, types
+
+    def test_the_same_error_is_logged_again_in_the_next_window(self):
+        """Suppression must be a rate limit, not a permanent mute — an attack
+        resuming an hour later has to reappear in the log."""
+        now = [0.0]
+        logger, cap, main_filt = self._rig("rearm", clock=lambda: now[0])
+        self._flood(logger, 50)
+        assert len(self._kept(cap)) == 1
+        now[0] = main_filt._window + 0.001
+        self._flood(logger, 50)
+        assert len(self._kept(cap)) == 2, \
+            "the error stayed muted after its window expired"
+
+    def test_the_window_table_stays_bounded_under_many_distinct_keys(self):
+        """Replacing unbounded log growth with unbounded memory growth would be
+        no fix at all — the trap `acp._sweep_failures` names and avoids."""
+        main_mod = self._main()
+        logger, _cap, main_filt = self._rig("bounded")
+        for i in range(main_mod._PROTOCOL_ERROR_MAX_KEYS * 20):
+            logger.warning("distinct template %d" % i)
+        assert len(main_filt._windows) <= main_mod._PROTOCOL_ERROR_MAX_KEYS, \
+            (f"{len(main_filt._windows)} keys retained against a cap of "
+             f"{main_mod._PROTOCOL_ERROR_MAX_KEYS}")
+
+    def test_eviction_does_not_silently_drop_a_count(self):
+        """Overflow is the one path that discards a window early. It must still
+        write what it discarded, or the cap becomes a way to erase the count."""
+        main_mod = self._main()
+        logger, cap, _ = self._rig("evict")
+        self._flood(logger, 1 + 17)
+        for i in range(main_mod._PROTOCOL_ERROR_MAX_KEYS + 5):
+            logger.warning("filler template %d" % i)
+        summaries = self._summaries(cap)
+        assert any("17 further identical" in s for s in summaries), \
+            f"the evicted window's count was lost; summaries={summaries}"
+
+    def test_startup_and_shutdown_lines_are_never_suppressed(self):
+        """`uvicorn.error` is also where uvicorn's lifecycle lines go. A filter
+        that swallowed them would hide the server starting and stopping."""
+        logger, cap, main_filt = self._rig("lifecycle")
+        for _ in range(20):
+            logger.info("Application startup complete.")
+        for _ in range(20):
+            logger.info("Shutting down")
+        assert len(self._kept(cap)) == 40, \
+            f"only {len(self._kept(cap))} of 40 lifecycle lines survived"
+        assert main_filt._windows == {}, \
+            "lifecycle lines must not even occupy a window slot"
+
+    def test_a_message_carrying_a_memory_address_still_collapses(self):
+        """The measured flood's expensive record is `asyncio`'s, and its `msg`
+        is composed from the transport, protocol and handle *reprs* — each
+        carrying a distinct memory address. Keying on the message would mint a
+        key per request and collapse exactly nothing, which is why the key
+        drops the message whenever an exception is attached and stands the
+        exception's type and raise site in its place."""
+        logger, cap, _ = self._rig("addresses")
+        try:
+            raise RuntimeError("can't handle event type Response ...")
+        except RuntimeError as exc:
+            raised = exc
+        for i in range(300):
+            logger.error(
+                "Exception in callback _ProactorReadPipeTransport"
+                f"<_ProactorSocketTransport fd=%d at 0x{0x1F0A0000 + i * 64:x}>"
+                f"\nhandle: <Handle at 0x{0x2B0C0000 + i * 32:x}>", i,
+                exc_info=raised)
+        assert len(self._kept(cap)) == 1, \
+            (f"{len(self._kept(cap))} of 300 address-bearing records were "
+             "written: the key is varying with the address")
+
+    def test_a_different_raise_site_is_not_suppressed(self):
+        """Same exception type from a different line is a different bug. The
+        raise site is half of what makes the normalised key discriminating."""
+        logger, cap, _ = self._rig("raisesite")
+
+        def a():
+            raise ValueError("one")
+
+        def b():
+            raise ValueError("two")
+
+        for fn in (a, b, a, b):
+            for _ in range(50):
+                try:
+                    fn()
+                except ValueError as exc:
+                    logger.error("failed", exc_info=exc)
+        assert len(self._kept(cap)) == 2, \
+            f"expected one record per raise site, got {len(self._kept(cap))}"
+
+    def test_the_filter_covers_the_logger_that_carries_the_traceback(self):
+        """Attribution over 12 loopback requests, 2026-08-01: `uvicorn.error`
+        1,872 bytes, `asyncio` 33,732 bytes. The `LocalProtocolError` escapes
+        uvicorn's own handler and surfaces through asyncio's default exception
+        handler, so installing on `uvicorn.error` alone would bound 5% of the
+        amplification while looking like a fix."""
+        main_mod = self._main()
+        assert "asyncio" in main_mod._PROTOCOL_ERROR_LOGGERS, \
+            "the logger carrying 95% of the flood is not covered"
+        saved = {n: list(logging.getLogger(n).filters)
+                 for n in main_mod._PROTOCOL_ERROR_LOGGERS}
+        try:
+            filt = main_mod._install_repeat_filter()
+            for name in main_mod._PROTOCOL_ERROR_LOGGERS:
+                assert filt in logging.getLogger(name).filters, name
+        finally:
+            for name, pre in saved.items():
+                logging.getLogger(name).filters = pre
+
+    def test_the_filter_survives_uvicorns_own_dictconfig(self):
+        """`uvicorn.Config.__init__` runs `dictConfig` over uvicorn's
+        LOGGING_CONFIG, which replaces this logger's handlers. If it cleared
+        filters too, installing at `basicConfig` time would be a no-op in
+        production while every test above still passed."""
+        import logging.config
+        import uvicorn.config
+        main_mod = self._main()
+        saved = {n: list(logging.getLogger(n).filters)
+                 for n in main_mod._PROTOCOL_ERROR_LOGGERS}
+        try:
+            filt = main_mod._install_repeat_filter()
+            assert main_mod._install_repeat_filter() is filt, \
+                "a second install must not stack a second filter"
+            for name in main_mod._PROTOCOL_ERROR_LOGGERS:
+                assert len([f for f in logging.getLogger(name).filters
+                            if isinstance(f, main_mod._RepeatedRecordFilter)]) == 1
+            logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
+            assert filt in logging.getLogger("uvicorn.error").filters, \
+                "uvicorn's logging config dropped the filter"
+        finally:
+            for name, pre in saved.items():
+                logging.getLogger(name).filters = pre
+
+    def test_a_pending_count_is_flushed_on_the_shutdown_path(self):
+        """`log_level="warning"` leaves `uvicorn.error` silent once a flood
+        stops, so the sweep on the next record never arrives and the last
+        window's count would never be written."""
+        logger, cap, main_filt = self._rig("flush")
+        self._flood(logger, 1 + 9)
+        assert self._summaries(cap) == [], "nothing should have closed yet"
+        main_filt.flush()
+        assert any("9 further identical" in s for s in self._summaries(cap)), \
+            self._summaries(cap)
+        assert main_filt._windows == {}, "flush must also clear the table"
+        source = Path(self._main().__file__).read_text(encoding="utf-8")
+        tail = source.split("def _run_foreground")[1]
+        assert tail.index("repeat_filter.flush()") < tail.index("logging.shutdown()"), \
+            "flushing after logging.shutdown() writes the count to a closed handler"
+
+
 class TestALoopbackFallbackSkipsTheRemoteBind:
     """D25's premise is a bookmarked `http://<address>:<port>/…` on a phone. A
     loopback fallback assigns a *new* port every restart, so binding the remote
