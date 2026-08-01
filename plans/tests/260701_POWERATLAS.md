@@ -149,14 +149,27 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ## 2. Web API + UI (`web.py` + `templates/`)
 
-> **2.1–2.25 is the dashboard surface, and it is no longer the whole web surface.** The `/acp` page
-> and the `/ws/acp` WebSocket added on 2026-07-26 have no brief here, deliberately: the module behind
-> them is a throwaway prototype, and exercising it spawns a real `kiro-cli acp --trust-all-tools` and
-> writes a permanent session into the user's ~13,300-entry store — a side-effecting surface this
-> plan's probe style assumes away. Their security controls (per-process handshake token, raw-`Host`
-> allowlist, `Sec-Fetch-Site` guard on `GET /acp`, per-response CSP nonce) do have unit coverage in
-> `tests/test_web.py`. A run of this plan should report the web surface as covered **except** those
-> two routes rather than as covered outright.
+> **2.1–2.25 is the dashboard surface, and it is no longer the whole web surface.** The ACP surface —
+> `/acp`, the `/ws/acp` WebSocket, `GET /api/acp/sessions`, `/remote-auth` and the two loopback-only
+> `/api/remote-access*` routes — has no brief here. **The reason changed on 2026-08-01 and the scoping
+> did not.** It was originally scoped out as a throwaway prototype; `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION`
+> promoted it to product, so that ground is gone. What survives is the *other* half of the original
+> reason, which is the one that actually governs: exercising it spawns a real `kiro-cli acp -a` and
+> writes a permanent session into the user's ~13,300-entry store — a side-effecting surface this plan's
+> probe style assumes away. **`GET /acp?sid=` is itself state-changing**, so even "just load the page"
+> is not a read-only probe. Anyone writing briefs for it must budget store accounting (enumerate by
+> `cwd` before and after) and process teardown, not just navigation.
+>
+> Their security controls do have unit coverage in `tests/test_web.py`, and the list grew: per-process
+> handshake token, raw-`Host` allowlist, `Sec-Fetch-Site` guard on `GET /acp`, per-response CSP nonce,
+> **plus the two added by that plan — a raw-ASGI default-deny path allowlist (`RemoteAccessGuard`,
+> scope-typed so it covers `websocket` as well as `http`) and an HMAC device cookie keyed by a file
+> secret, both of which apply only to a non-loopback peer.** Note what that means for a probe run: from
+> loopback the two new controls are inert by design, so a green local run says nothing about them —
+> they are exercised remotely or not at all.
+>
+> A run of this plan should report the web surface as covered **except** the ACP routes rather than as
+> covered outright.
 
 ### 2.1 Three-panel dashboard bootstrap
 - **what**: `GET /` renders topbar + 3 panels; htmx `hx-trigger=load` fires 4 partials (launchers, pinned-sessions, pinned-workspaces, workspaces).
@@ -263,12 +276,12 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `session_cache.clear()` + `_cache.clear()` + warmup; returns `last_refresh`.
 - **risks**: full clear expensive on many workspaces.
 
-### 2.16 Lifespan: background refresh loop + ACP teardown
-- **what**: `lifespan` owns two concerns. Before the `yield`, `_background_refresh` calls `refresh_stale_entries` every 30s in an asyncio task. After the `yield`, since 2026-07-26, it tears down the ACP agent process tree.
+### 2.16 Lifespan: background refresh loop + ACP idle sweeper + ACP teardown
+- **what**: `lifespan` owns **three** concerns since 2026-08-01. Before the `yield` it starts `_background_refresh` (calls `refresh_stale_entries` every 30s in an asyncio task) and — behind an `if acp is not None` guard, so an ACP import failure disables `/acp` rather than stopping the app — the **ACP idle sweeper**. After the `yield` it cancels both tasks and awaits them in one `asyncio.gather(..., return_exceptions=True)` **inside the nested block, before** tearing down the ACP agent process tree, so nothing either task raises can skip the teardown.
 - **how-to-reach**: lifespan task; observe over a sustained window. Teardown is reached only on the tray-quit route.
-- **probes**: edit a session file, wait ≤30s, confirm UI reflects it after a card interaction; exception in refresh (logged, loop continues); no UI signal of background update; **teardown**: with an ACP session open, quit from the tray and confirm `Get-Process kiro-cli` goes to zero.
-- **oracle**: 30s cadence; exceptions swallowed/logged; no `kiro-cli` process survives a tray quit.
-- **risks**: silent updates; H3 race with request-path cache access; **teardown is a fast path, not the guarantee** — `--stop`/`--restart` and any hard kill never run `lifespan` at all and are covered instead by a Windows Job Object, so a green result here says nothing about those routes and must not be reported as covering them.
+- **probes**: edit a session file, wait ≤30s, confirm UI reflects it after a card interaction; exception in refresh (logged, loop continues); no UI signal of background update; **sweeper**: open an ACP session, close its tab, wait past `acp_idle_ttl_seconds` and confirm the session is terminated and its `.lock` removed on the next 60s tick, while a session with a tab still attached is never swept however old; a terminate that fails is a WARNING and the task survives it; **teardown**: with an ACP session open, quit from the tray and confirm `Get-Process kiro-cli` goes to zero, and that cancelling the sweeper does not overrun the 5s join.
+- **oracle**: 30s refresh cadence; 60s sweep tick; exceptions swallowed/logged; no `kiro-cli` process survives a tray quit.
+- **risks**: silent updates; H3 race with request-path cache access; a sweeper that shares the loop with every WebSocket, so a tick that blocks takes the dashboard with it; **teardown is a fast path, not the guarantee** — `--stop`/`--restart` and any hard kill never run `lifespan` at all and are covered instead by a Windows Job Object, so a green result here says nothing about those routes and must not be reported as covering them. Note the sweeper's own residual: terminating a session does **not** reap a shell subprocess the agent started, so "processes went to zero" is a property of the job object at exit, not of the sweep.
 
 ### 2.17 Unified background scheduler (client)
 - **what**: one 5s tick drives all three client-side background jobs by counter — status every tick, active-session content every 2nd tick, workspace refresh every 3rd tick while `_tick <= _BURST_TICKS` and every 6th tick after. Net cadence is 15s burst for the first 120s then 30s steady; there is no separate pinned-panel timer.
@@ -313,17 +326,18 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **risks**: H1; read-modify-write clobbers concurrent edits.
 
 ### 2.23 save-setting allowlist endpoint
-- **what**: `POST /api/save-setting` writes only allowlisted keys (`terminal_command`, `peek_hotkey`, `pinned_folders`, `pinned_sessions`) with type checks.
+- **what**: `POST /api/save-setting` writes only allowlisted keys with type checks. The allowlist is `port`, `peek_hotkey`, `default_directory`, `pinned_folders`, `pinned_sessions` and — added 2026-08-01 — `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`, `remote_bind_address`. The three `acp_*` keys carry inclusive integer bounds (1–16, 300–86400, 60–7200); `remote_bind_address` is validated as an IP literal and, on first enable, creates the device secret in the same call. The response now carries `restart_required`, true for every key read once at startup (`port`, the three `acp_*`, `remote_bind_address`, `peek_hotkey`).
 - **how-to-reach**: `POST /api/save-setting {key, value}`.
-- **probes**: valid key/type saved; unknown key rejected; wrong type rejected; list with non-str element rejected; `pinned_folders` as list[str] accepted → re-introduces legacy shape (H1).
-- **oracle**: `{ok:true}` on success; `{ok:false,error}` otherwise.
-- **risks**: shallow validation; H1 legacy shape re-introduction.
+- **probes**: valid key/type saved; unknown key rejected; wrong type rejected; **bool rejected before the int check** (`isinstance(True, int)` is true in Python); list with non-str element rejected; `pinned_folders` as list[str] accepted → re-introduces legacy shape (H1); each `acp_*` bound rejected one past each end and accepted at each end; `remote_bind_address` rejected for `0.0.0.0`, `::`, `::0`, `::ffff:0.0.0.0`, a loopback literal, a hostname, a bracketed form and a zone id; `remote_bind_address` set while `port = 0` rejected with a named error; whitespace-only address persisted as `""` rather than verbatim; `restart_required` true for `peek_hotkey` (it was answering false — a field that is positively wrong is worse than no field).
+- **oracle**: `{ok:true, restart_required:bool}` on success; `{ok:false,error}` otherwise, with the error naming the key and its permitted range.
+- **risks**: shallow validation; H1 legacy shape re-introduction; **adding a key to the type map without a matching bound** turns a fail-closed `Unknown setting` refusal into an unbounded write — the bounds map is the only range check for the `acp_*` keys, since `load_config` may not raise and `acp.apply_config` logs-and-ignores rather than clamping.
 
 ### 2.24 Session actions (resume / new / copy / open in ACP)
 - **what**: per-row resume, per-card new session, copy session id, and — added 2026-07-26, kiro-cli rows only — **open in `/acp`**, which navigates to the ACP page for that session id.
 - **how-to-reach**: hover reveal → click; `POST /api/launch` / `/api/new-session`; clipboard for copy; `GET /acp?sid=` for the ACP action.
 - **probes**: resume valid session (toast); resume hidden on stale workspace; new session (no resume flag); copy → clipboard toast; provider from card dataset may be empty string; ACP action present on kiro-cli rows and absent on claude-code rows; ACP action does **not** toggle multi-select (it sits inside `.session-actions`, the container the row's own `onclick` excludes) — the same collision that killed the terminal-focus feature.
-- **oracle**: launch toast success/error; resume hidden when stale; ACP action navigates with the row's `sid`.
+- **what the ACP action lands on changed 2026-08-01.** `/acp` is no longer a single-pane prototype: it is a session rail beside a conversation, two panes at ≥768 px and a drill-down below, and `?sid=` now selects only the *initial* session — the rail can switch to another without a navigation. So probe the arrival state, not just the navigation: with `?sid=` the page must land **on the conversation** for that session (a phone arriving on the rail has lost the session it named), and with no `?sid=` it must land on the rail and send no subscribe. Selecting a rail row for a session the server does not hold goes `subscribe` → `unknown_session` → `load`, which is the adoption path, so a probe that only checks the first frame sees a failure that is not one.
+- **oracle**: launch toast success/error; resume hidden when stale; ACP action navigates with the row's `sid` and the page opens at that conversation.
 - **risks**: empty provider dataset; clipboard permission; no loading state on button; **the ACP action is a state-changing GET** — rendering `/acp?sid=` auto-loads the session, which spawns `kiro-cli acp -a` and can write to the user's real session store, so probing it is not a read-only act.
 
 ### 2.25 App restart endpoint
@@ -486,12 +500,13 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: Popen detached; optimistic prints only.
 - **risks**: no confirmation the child actually started; orphan on early child crash.
 
-### 7.2 Foreground launch
-- **what**: `-f` runs server+tray attached; logging to `orchestrator.log`; blocks until quit.
-- **how-to-reach**: `power-atlas -f`.
+### 7.2 Foreground launch (single bind, and the dual-bind case)
+- **what**: `-f` runs server+tray attached; logging to `orchestrator.log` (rotating, 10 MiB × 3 since 2026-08-01); blocks until quit. Since 2026-08-01 the sockets are **pre-bound explicitly** and handed to one `uvicorn.Server` via `run(sockets=[...])` rather than created from `uvicorn.Config(host=)`. Loopback is bound first and is mandatory; a second socket on `remote_bind_address` is appended only when that key is set, a usable device secret exists, and the loopback bind did not fall back to a random port.
+- **how-to-reach**: `power-atlas -f`. For the dual-bind case, set `remote_bind_address` and a fixed `port` in an **isolated** config dir — never bind a non-loopback interface against the user's real config without asking, and close both sockets in a `finally`.
 - **probes**: server binds a dynamic non-zero port; `/` reachable at it; log file created + INFO written; foreground terminal shows almost nothing (no console handler); 10s ready timeout on slow start.
-- **oracle**: uvicorn port 0 → OS-assigned; ready within 10s.
-- **risks**: 10s timeout aborts a slow-but-valid start; file-only logging.
+- **dual-bind probes**: with `remote_bind_address` unset, exactly **one** listening socket and it is loopback; with it set, exactly **two**, on the same port number, one loopback and one the configured IP; both addresses appear in an explicit `Listening on ...` log line (uvicorn suppresses its own banner entirely when `sockets=` is passed, so that line is the only operator-visible record); with the address set and the secret missing or short, the remote socket is **not created at all** and the reason is logged at ERROR; with the address set to an unreachable interface, the bind fails at ERROR and the app still serves loopback rather than exiting 1; with the configured port already taken, loopback falls back to a random port and the remote bind is **skipped**; the loopback socket sets `SO_EXCLUSIVEADDRUSE` and not `SO_REUSEADDR`, so a second process cannot bind the same `127.0.0.1:<port>`.
+- **oracle**: uvicorn port 0 → OS-assigned; ready within 10s; socket count and addresses match the configuration; `server_url` (which feeds peek and tray) is derived from the **loopback** socket explicitly, not from `server.servers[0].sockets[0]` — with two sockets, index 0 is merely whichever registered first.
+- **risks**: 10s timeout aborts a slow-but-valid start; file-only logging; a probe that reads socket index 0 rather than selecting loopback will pass on a single-socket run and silently point tray/peek at a dead URL on a dual-bind one.
 
 ### 7.3 --stop / --restart
 - **what**: `--stop` reads PID and terminates; `--restart` stops, sleeps 0.5s, guards, relaunches.
@@ -557,8 +572,14 @@ Per the automatable-only scope decision, these are documented but NOT part of th
 In scope (full briefs): Data layer (1.1–1.12), Web API+UI (2.1–2.25), Launcher Windows subset (3.1–3.8),
 Icons (4.1–4.4), Config (5.1–5.5), Autostart Windows (6.1), Lifecycle Windows subset (7.1–7.6).
 Scoped-out: native tray clicks, peek native behavior, all Linux paths (see above), and the ACP surface
-(`/acp`, `/ws/acp`) — see the note under §2. **2.1–2.25 is the dashboard web surface, not the whole
-web surface**; a run that covers all of §2 must not report the web layer as fully covered.
+(`/acp`, `/ws/acp`, `GET /api/acp/sessions`, `/remote-auth`, `/api/remote-access*`) — see the note under
+§2, whose *reason* changed on 2026-08-01 while the scoping did not: that surface is product now, not a
+prototype, and it stays out because probing it spawns a real `-a` agent and writes to the user's session
+store, not because it is disposable. **2.1–2.25 is the dashboard web surface, not the whole web
+surface**; a run that covers all of §2 must not report the web layer as fully covered. Two further
+scoping notes for anyone widening this: the remote authorization controls are inert from loopback by
+design, so covering them means driving a non-loopback peer with the user's explicit authorization; and
+7.2's dual-bind probes are the one place in this plan that opens a network-reachable socket.
 
 ### Run status (2026-07-01/02)
 - **Web GUI (2.x client-side): COVERED** — driven headless via standalone Playwright (installed into the venv). Verified: bootstrap/skeleton→cards/aria-busy removal, card expand + lazy-load + no re-fetch on re-expand, session-tail hover tooltip (show/hide), provider-tab filtering (All/Kiro/Claude), debounced search + empty-state + restore, row selection + action bar, pin→toast→refresh→unpin, 4s toast auto-dismiss, zero console errors. Finding: selection is DOM-only; after an htmx swap the action bar goes **stale** (selCount stuck, bar stays visible though 0 rows selected) — `updateActionBar()` not called on `htmx:afterSwap` (`index.html`). Launch-selected safely no-ops on the phantom selection.
