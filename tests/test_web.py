@@ -10451,10 +10451,26 @@ class TestRemoteBindAddressValidation:
 
 
 class TestSettingsSurface:
-    def test_the_acp_keys_are_writable_within_bounds(self, client, tmp_path, monkeypatch):
+    @pytest.fixture(autouse=True)
+    def isolated_config(self, tmp_path, monkeypatch):
+        """Redirect config I/O for **every** test in this class, not only the
+        ones that mean to write.
+
+        A test that asserts a refusal reaches `save_config` the moment the
+        guard it probes is removed — which is exactly what a mutation run does,
+        and what wrote out-of-range values and a stray secret into the real
+        `%LOCALAPPDATA%\\power-atlas` during this phase's own verification.
+        `memory/MEMORY.md:95-97` already records 18 tests that read the
+        developer's real config.toml; these must not become 19 that write it.
+        """
         from power_atlas import config as config_mod
         monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
         monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH",
+                            tmp_path / "remote-secret")
+        return tmp_path
+
+    def test_the_acp_keys_are_writable_within_bounds(self, client):
         resp = client.post("/api/save-setting",
                            json={"key": "acp_max_sessions", "value": 8})
         assert resp.json() == {"ok": True, "restart_required": True}
@@ -10497,11 +10513,8 @@ class TestSettingsSurface:
                            json={"key": "acp_nonsense", "value": 1}).json()
         assert body == {"ok": False, "error": "Unknown setting: acp_nonsense"}
 
-    def test_enabling_the_bind_creates_the_secret(self, client, tmp_path, monkeypatch):
+    def test_enabling_the_bind_creates_the_secret(self, client, tmp_path):
         from power_atlas import config as config_mod
-        monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
-        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
-        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
         (tmp_path / "config.toml").write_text("port = 4915\n")
         body = client.post("/api/save-setting",
                            json={"key": "remote_bind_address",
