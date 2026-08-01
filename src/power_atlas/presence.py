@@ -86,21 +86,39 @@ _cached_at = 0.0
 # reliably removes them, so pids get recycled onto unrelated processes: of 785
 # kiro lock files observed on one machine, 21 named a live pid and exactly one
 # was genuine — the rest had been inherited by svchost, firefox, and friends.
-# Liveness therefore requires the pid to be alive AND its start time to match
-# the sidecar's. Observed deltas are +1.1s to +1.6s (the sidecar is written
-# just after spawn); the nearest false match was ~9500s off, so the window
-# below is deliberately generous and still leaves ~80x margin.
+# Liveness therefore requires the pid to be alive AND its start time to be
+# consistent with the sidecar's.
+#
+# Forward upper bound — claude-code ONLY, not a universal rule. One `claude`
+# process owns one session and writes its sidecar just after spawn; observed
+# deltas are +1.1s to +1.6s and the nearest false match was ~9500s off, so
+# 120s is generous and still leaves ~80x margin. It is deliberately not
+# applied to kiro-cli: PowerAtlas's ACP agent (`acp.py`) is spawned once and
+# serves sessions for the whole lifetime of the app, so its locks are
+# legitimately minutes or hours newer than the process that wrote them —
+# measured 2026-07-31, +1.88s and +23.77s for two sessions opened 21.5s apart,
+# with the lock's pid equal to the agent's. Any ceiling short enough to be
+# useful against recycled pids would hide every session opened past it.
 _SIDECAR_SKEW_S = 120.0
-# Sidecars are never written before their process starts; this small backward
-# allowance covers clock-source jitter between the provider's timestamp and
-# psutil's create_time, nothing more.
+# Backward bound — both providers, and the check that actually rejects a
+# recycled pid. A sidecar is never written before its own process starts, so a
+# negative delta means a *different* process held this pid earlier: pid
+# exclusivity guarantees the recycled writer ran before the live process
+# existed. That is why kiro-cli can safely go without an upper bound. The
+# small allowance covers clock-source jitter between the provider's timestamp
+# and psutil's create_time, nothing more.
 _SIDECAR_BACKWARD_SKEW_S = 5.0
 
 _KIRO_LOCK_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 _CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
 
-# path -> (mtime, size, parsed|None). Sidecars are written once at session
-# start, so re-parsing every one on every scan is pure waste; stat is cheap.
+# path -> (mtime, size, parsed|None). Most sidecars do not change between
+# scans, so re-parsing every one every time is pure waste; a stat is cheap.
+# They are NOT write-once, though — kiro-cli rewrites a lock in place on
+# `session/load` and claude-code rewrites its session file on every status
+# change — which is why the key is (mtime, size) rather than mere presence,
+# and why the listing that produces those stats is never cached
+# (see _list_sidecars).
 _sidecar_cache: dict[str, tuple[float, int, dict | None]] = {}
 
 
@@ -131,39 +149,21 @@ def _load_json_cached(path: Path, st: os.stat_result | None = None) -> dict | No
     return data
 
 
-# directory -> (dir_mtime, records). Enumerating the kiro lock directory means
-# walking every entry in it, and it also holds the session transcripts —
-# 13k+ entries, ~19ms, growing with the store. Sidecars are write-once, and a
-# create or delete bumps the directory's own mtime, so one stat of the
-# directory tells us whether the previous listing still holds.
-_dir_listing_cache: dict[str, tuple[float, list]] = {}
-
-
-def _list_sidecars(directory: Path, suffix: str,
-                   cache_listing: bool = True) -> list[tuple[str, os.stat_result]]:
+def _list_sidecars(directory: Path, suffix: str) -> list[tuple[str, os.stat_result]]:
     """Return (path, stat) for files in *directory* ending in *suffix*.
 
-    With *cache_listing*, the result is reused while the directory's own mtime
-    holds. That is only valid for sidecars written once and never rewritten,
-    because an in-place rewrite leaves the directory mtime untouched — and the
-    stats captured here are what ``_load_json_cached`` compares against, so a
-    stale listing pins a stale parse. kiro-cli locks qualify; claude-code
-    session files do not (they carry a mutable ``status`` and are rewritten in
-    place, observed with a file mtime 832s newer than its directory's), so
-    that directory is listed fresh each scan. It holds one file per running
-    session, so the cost is nil.
-    """
-    key = str(directory)
-    try:
-        dir_mtime = directory.stat().st_mtime
-    except OSError:
-        _dir_listing_cache.pop(key, None)
-        return []
-    if cache_listing:
-        hit = _dir_listing_cache.get(key)
-        if hit is not None and hit[0] == dir_mtime:
-            return hit[1]
+    The listing is rebuilt on every scan, deliberately. Caching it on the
+    directory's own mtime was tried and removed: an in-place rewrite of a
+    sidecar leaves the directory mtime untouched, and the stats collected here
+    are exactly what ``_load_json_cached`` compares against — so a cached
+    listing pins a stale parse for as long as no file is created or deleted.
+    Both providers rewrite in place (kiro-cli on ``session/load``, claude-code
+    on every ``status`` change), so neither directory qualified.
 
+    The kiro lock directory also holds the session transcripts, so this walks
+    13k+ entries; measured ~19ms, and it runs off the event loop behind
+    ``get_snapshot``'s TTL.
+    """
     found: list[tuple[str, os.stat_result]] = []
     try:
         with os.scandir(directory) as it:
@@ -177,8 +177,6 @@ def _list_sidecars(directory: Path, suffix: str,
                     continue
     except OSError:
         return []
-    if cache_listing:
-        _dir_listing_cache[key] = (dir_mtime, found)
     return found
 
 
@@ -216,7 +214,7 @@ def _sidecar_records() -> list[tuple[str, int, str, float, str, str, str]]:
         # candidate, which the caller has not filtered yet — defer it.
         out.append(("kiro-cli", pid, Path(lock).stem, started, "", "", ""))
 
-    for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json", cache_listing=False):
+    for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json"):
         data = _load_json_cached(Path(meta), st)
         if not data:
             continue
@@ -459,12 +457,17 @@ def _scan() -> Snapshot:
             live = provider_pids.get(pid)
             if live is None or live[0] != provider:
                 continue
-            # The sidecar is always written just after its process spawns, so
-            # only a forward offset is physically meaningful; observed values
-            # are +1.1s to +1.6s. Allowing an equal backward window would
-            # double the accidental-match surface for nothing.
+            # A sidecar is always written after its process spawns, so only a
+            # forward offset is physically meaningful. The backward bound is
+            # what rejects a recycled pid — that writer necessarily ran before
+            # the live process existed — and it applies to both providers.
             delta = started - live[1]
-            if delta < -_SIDECAR_BACKWARD_SKEW_S or delta > _SIDECAR_SKEW_S:
+            if delta < -_SIDECAR_BACKWARD_SKEW_S:
+                continue
+            # The forward ceiling is claude-code-only; a kiro-cli lock may be
+            # arbitrarily newer than its process because PowerAtlas's ACP agent
+            # serves sessions for the app's whole lifetime. See _SIDECAR_SKEW_S.
+            if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
                 continue
             key = (provider, sid)
             live_sids.add(key)

@@ -1479,7 +1479,6 @@ def _scan_with(procs, kiro_dir=None, claude_dir=None):
     from power_atlas import presence
     missing = Path(tempfile.gettempdir()) / "_pa_no_such_sidecar_dir"
     presence._sidecar_cache.clear()
-    presence._dir_listing_cache.clear()
     with patch.object(presence, "_AVAILABLE", True), \
          patch.object(presence.psutil, "process_iter", return_value=procs), \
          patch.object(presence, "_KIRO_LOCK_DIR", Path(kiro_dir) if kiro_dir else missing), \
@@ -2050,6 +2049,76 @@ def test_presence_sidecar_malformed_record_does_not_drop_others(tmp_path):
         kiro_dir=tmp_path,
     )
     assert snap.is_live("kiro-cli", "C:/work/proj", "sess-good") is True
+
+
+def test_presence_kiro_lock_far_newer_than_its_process_is_live(tmp_path):
+    """PowerAtlas's ACP agent is spawned once and opens sessions for hours.
+
+    The lock's ``started_at`` tracks session-open time, not process start, so
+    an ACP-owned session is legitimately minutes or hours newer than the agent
+    that wrote it. Measured 2026-07-31: +1.88s and +23.77s for two sessions
+    opened 21.5s apart, both against the same agent pid.
+    """
+    _write_kiro_lock(tmp_path, "sess-acp", 500, "2026-07-24T13:00:00Z",
+                     cwd="C:/work/proj")
+    agent_start = _epoch("2026-07-24T10:00:01Z")  # ~3h before the lock
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "acp", "-a"],
+                   pid=500, create_time=agent_start)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-acp") is True
+
+
+def test_presence_claude_sidecar_outside_window_is_not_live(tmp_path):
+    """The dropped forward ceiling is kiro-only; claude-code keeps its 120s.
+
+    One `claude` process owns one session and writes its sidecar just after
+    spawn, so nothing justifies widening that window — this is the test that
+    proves the scoping is real rather than incidental.
+    """
+    started_ms = 1784920809496
+    _write_claude_session(tmp_path, 700, "sess-c", started_ms, "C:/work/pa")
+    snap = _scan_with(
+        [_FakeProc("claude.exe", ["C:/u/.local/bin/claude.exe"],
+                   pid=700, create_time=started_ms / 1000.0 - 300.0)],
+        claude_dir=tmp_path,
+    )
+    assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is False
+
+
+def test_presence_kiro_lock_rewritten_in_place_is_reparsed(tmp_path):
+    """`session/load` rewrites a lock in place, leaving the directory untouched.
+
+    A directory-listing cache keyed on the directory's own mtime would hand
+    ``_load_json_cached`` the pre-rewrite stat, which matches its cache key and
+    pins the previous parse. Both scans here run without clearing the module
+    caches, which is what makes the regression observable at all.
+    """
+    from power_atlas import presence
+    started = _epoch("2026-07-24T10:00:01Z")
+    _write_kiro_lock(tmp_path, "sess-rw", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    procs = [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                       pid=500, create_time=started - 1.2)]
+    missing = Path(tempfile.gettempdir()) / "_pa_no_such_sidecar_dir"
+    presence._sidecar_cache.clear()
+    with patch.object(presence, "_AVAILABLE", True), \
+         patch.object(presence.psutil, "process_iter", return_value=procs), \
+         patch.object(presence, "_KIRO_LOCK_DIR", tmp_path), \
+         patch.object(presence, "_CLAUDE_SESSION_DIR", missing):
+        first = presence._scan()
+        assert first.is_live("kiro-cli", "C:/work/proj", "sess-rw") is True
+        dir_mtime_before = tmp_path.stat().st_mtime
+        # No create, no delete — just new bytes in an existing file, which is
+        # what leaves the directory's own mtime where it was.
+        (tmp_path / "sess-rw.lock").write_text(json.dumps({
+            "pid": 999, "started_at": "2026-07-24T10:00:01Z",
+            "note": "rewritten in place by session/load",
+        }), encoding="utf-8")
+        assert tmp_path.stat().st_mtime == dir_mtime_before
+        second = presence._scan()
+        assert second.is_live("kiro-cli", "C:/work/proj", "sess-rw") is False
 
 
 def _epoch(iso):
