@@ -333,6 +333,31 @@ script { display: none; }
 .btn-secondary:hover { border-color: var(--text-muted); color: var(--text); }
 .btn-danger { background: none; border: 1px solid #f87171; border-radius: var(--radius-sm); color: #f87171; padding: 6px 12px; font-size: 12px; cursor: pointer; }
 .btn-danger:hover { background: rgba(248,113,113,0.12); }
+
+/* Remote access panel (D22/D24). The two values it renders are a URL and a
+   credential, so they get a full-width read-only field the user can select by
+   hand rather than a truncated line of prose with a copy button beside it. */
+.remote-field { margin-bottom: 14px; }
+.remote-field-label { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.remote-field-line { display: flex; gap: 6px; align-items: center; }
+.remote-field-value { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; padding: 6px 8px; outline: none; }
+.remote-field-value:focus { border-color: var(--accent); }
+.remote-copy { flex-shrink: 0; }
+.remote-field-hint { font-size: 11px; line-height: 1.5; color: var(--text-dim); margin-top: 4px; }
+.remote-note { font-size: 12px; line-height: 1.55; color: var(--text-muted); margin-bottom: 12px; }
+/* Amber, not grey: this paragraph is the only place the user is told that
+   rotation is all-or-nothing before they press the button that does it. */
+.remote-note-warn { color: #fbbf24; }
+.remote-note-off { color: var(--text-muted); }
+.remote-rotate { margin-top: 2px; }
+.remote-restart-list { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.remote-restart-row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--card-border); }
+.remote-restart-key { flex: 1; min-width: 0; color: var(--text-muted); }
+.remote-restart-value { flex-shrink: 0; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; color: var(--text); }
+/* Sits beside the two settings the topbar exposes as live controls. Without it
+   the peek-hotkey field accepts a value, saves it, and behaves as though
+   nothing happened until the next launch. */
+.restart-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; color: #fbbf24; border: 1px solid currentColor; border-radius: 10px; padding: 1px 6px; cursor: help; flex-shrink: 0; }
 .btn-sm { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 3px 8px; font-size: 11px; cursor: pointer; }
 .btn-sm:hover { border-color: var(--accent); color: var(--text); }
 
@@ -449,8 +474,11 @@ script { display: none; }
 .acp-status { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
 .acp-status[data-state="open"] { border-color: var(--success); color: var(--success); }
 .acp-status[data-state="closed"] { border-color: #f87171; color: #f87171; }
-.acp-page { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
-.acp-toolbar { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.acp-page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; }
+/* Wraps because the toolbar is four controls and a free-text cwd field, and at
+   390 px they do not fit on one line; on a wide window nothing wraps and this
+   is inert. */
+.acp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex-shrink: 0; }
 .acp-btn { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 12px; padding: 6px 12px; cursor: pointer; transition: all 0.15s; }
 .acp-btn:hover { border-color: var(--accent); color: var(--accent); }
 .acp-btn:disabled { opacity: 0.45; cursor: default; border-color: var(--border); color: var(--text-muted); }
@@ -495,7 +523,10 @@ script { display: none; }
 .acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: vertical; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-send { padding: 6px 20px; }
-.acp-log { flex: 0 0 120px; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 10px 12px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.7; }
+/* The transport log is a debugging strip, and 120 px of it on an 844 px phone
+   is a sixth of the screen taken from the conversation. Widened back at the
+   breakpoint. */
+.acp-log { flex: 0 0 88px; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 10px 12px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.7; }
 .acp-log-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
 .acp-log-time { color: var(--text-dim); flex-shrink: 0; }
 .acp-log-body { flex: 1; }
@@ -503,4 +534,95 @@ script { display: none; }
 .acp-log-out .acp-log-body { color: var(--accent); }
 .acp-log-in .acp-log-body { color: var(--text); }
 .acp-log-error .acp-log-body { color: #f87171; }
+
+/* --- /acp layout: the session rail and the two-pane shell ----------------
+ *
+ * The first width breakpoint in this project. Everything above this comment is
+ * unconditional and desktop-shaped; this block is written **mobile-first** —
+ * the base rules are the phone layout and the single `@media (min-width:768px)`
+ * at the end is the widening. That direction is deliberate: the narrow layout
+ * is the one with no room for a mistake, so it is the one that gets no
+ * qualifier and cannot be lost by a media query that fails to match.
+ *
+ * Below 768 px: drill-down. `.acp-shell[data-view]` shows exactly one of its
+ * two children and the topbar's toggle moves between them. At 768 px and above:
+ * two panes side by side, the attribute selects nothing and the toggle is gone.
+ *
+ * `100dvh`, not `100%`. `html, body { height: 100% }` (:2) resolves against the
+ * initial containing block, which mobile browsers size to the viewport with the
+ * URL bar *retracted* — so with the bar showing, the body is taller than what
+ * is on screen and `overflow: hidden` (:2, this is an app shell) makes the
+ * bottom of it unreachable. The bottom of this page is the composer. `dvh`
+ * tracks the visible viewport as the chrome collapses and expands.
+ *
+ * Scoped with `:has()` because `base.html` owns the <body> tag and gives no
+ * per-page hook. Both the selector and the unit degrade the same way if an
+ * engine lacks them: the declaration is dropped and the page keeps `height:
+ * 100%`, i.e. exactly today's behaviour, rather than losing its height. */
+body:has(> .acp-shell) { height: 100dvh; }
+.acp-shell { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.acp-shell[data-view="rail"] > .acp-page { display: none; }
+.acp-shell[data-view="chat"] > .acp-rail { display: none; }
+/* The drill-down control. Present below the breakpoint only — above it both
+   panes are on screen and a button that moves between them would move nothing. */
+.acp-viewtoggle { flex-shrink: 0; }
+/* Reclaimed for the toggle at 390 px, where the topbar is the tightest row on
+   the page. The dashboard link is the honest thing to drop: `/` is loopback-only
+   (SC-4), so on the device this width is for it does not resolve at all. */
+.acp-back, .acp-title { display: none; }
+.acp-back-local-only { color: var(--text-dim); }
+
+.acp-rail { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
+.acp-rail-head { display: flex; gap: 8px; flex-shrink: 0; }
+.acp-rail-search { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 7px 10px; }
+.acp-rail-search:focus { outline: none; border-color: var(--accent); }
+.acp-rail-search:disabled { opacity: 0.45; cursor: default; }
+/* Reserves its line whether or not it has text, so the rows below do not jump
+   by 15 px every time the status appears and clears. */
+.acp-rail-status { flex-shrink: 0; min-height: 15px; font-size: 11px; line-height: 1.35; color: var(--text-muted); }
+/* The only scroller in the rail. Everything around it is flex-shrink: 0, so the
+   filter box and the show-more stay reachable however long the list gets. */
+.acp-rail-groups { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.acp-rail-more { flex-shrink: 0; }
+.acp-rail-empty { font-size: 12px; line-height: 1.5; color: var(--text-dim); padding: 6px 2px; }
+.acp-rail-group { display: flex; flex-direction: column; gap: 2px; }
+.acp-rail-group-head { display: flex; align-items: baseline; gap: 8px; padding: 0 4px 2px; }
+.acp-rail-group-name { font-size: 12px; font-weight: 600; letter-spacing: -0.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-rail-group-count { margin-left: auto; flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* 14 of 65 real workspaces name a directory that is gone, one of them holding
+   208 sessions. Amber rather than red: the sessions are still readable records
+   and the row is still selectable, so this is a warning and not a refusal. */
+.acp-rail-group-missing { flex-shrink: 0; font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; color: #fbbf24; border: 1px solid currentColor; border-radius: 10px; padding: 1px 6px; }
+.acp-rail-group-gone .acp-rail-row-title { color: var(--text-muted); }
+.acp-rail-group-more { align-self: flex-start; margin: 2px 0 0 4px; font-size: 11px; padding: 4px 10px; }
+/* A row is a <button>, so it needs every one of the text/background/border
+   resets below to stop looking like one. 40 px is a touch target, not a text
+   line: the rail's whole purpose is being usable with a thumb. */
+.acp-rail-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 6px 8px; cursor: pointer; }
+.acp-rail-row:hover:not(:disabled) { background: var(--surface-hover); }
+.acp-rail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.acp-rail-row-current { background: var(--surface-selected); border-color: var(--accent); }
+.acp-rail-row:disabled { opacity: 0.45; cursor: default; }
+.acp-rail-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-rail-row-when { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* D17's three states. The dot carries the colour and an aria-label; nothing
+   here is the only carrier of the meaning. */
+.acp-avail { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+.acp-avail-available { background: var(--success); }
+.acp-avail-held { background: var(--accent); }
+.acp-avail-locked { background: #f87171; }
+
+@media (min-width: 768px) {
+  .acp-shell { flex-direction: row; }
+  /* Both panes, whatever `data-view` says. The attribute keeps changing up here
+     — nothing has to be re-derived when a window crosses the breakpoint. */
+  .acp-shell[data-view="rail"] > .acp-page { display: flex; }
+  .acp-shell[data-view="chat"] > .acp-rail { display: flex; }
+  .acp-viewtoggle { display: none; }
+  .acp-back { display: inline; }
+  .acp-title { display: inline; }
+  .acp-rail { flex: 0 0 288px; border-right: 1px solid var(--border); padding: 14px 12px 14px 16px; }
+  .acp-page { padding: 14px 16px; }
+  .acp-log { flex-basis: 120px; }
+}
 

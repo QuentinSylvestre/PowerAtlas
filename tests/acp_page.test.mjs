@@ -33,9 +33,35 @@ const DEFAULT_TEMPLATE = path.join(
 // ---------------------------------------------------------------- template --
 
 function render(src, ctx) {
+  // Jinja comments first: `{# … #}` never reaches the browser, so leaving it in
+  // would put template prose into `markup` where a check scanning the rendered
+  // page would have to reason about text no viewer ever sees.
+  let out = src.replace(/\{#[\s\S]*?#\}/g, "");
+  // `{% if %}` is rendered rather than stripped, and that distinction is the
+  // whole reason this branch exists. Stripping every `{% %}` tag leaves *both*
+  // arms of a conditional in the output — so a page that renders a dashboard
+  // link for a loopback viewer and plain text for a remote one would appear to
+  // the harness to do both at once, and a check asserting either would pass
+  // against a template that had lost the other. One arm, chosen by the same
+  // value the server would choose it by.
+  //
+  // Non-nested and boolean-only: the only conditional on this page tests one
+  // context flag. A nested one would need a real parser, so it fails loudly
+  // below rather than being half-handled here.
+  const IF_RE = /\{%\s*if\s+(\w+)\s*%\}([\s\S]*?)\{%\s*endif\s*%\}/g;
+  out = out.replace(IF_RE, (_m, name, body) => {
+    if (!(name in ctx)) throw new Error(`template branches on an unknown variable: ${name}`);
+    if (/\{%\s*if\s/.test(body)) {
+      throw new Error(
+        `nested {% if %} in the template; render() handles one level only`);
+    }
+    const parts = body.split(/\{%\s*else\s*%\}/);
+    if (parts.length > 2) throw new Error("more than one {% else %} in one {% if %}");
+    return ctx[name] ? parts[0] : (parts[1] ?? "");
+  });
   // `{% extends %}` / `{% block %}` carry no content this page's script reads;
   // the block body is the whole file.
-  let out = src.replace(/\{%[^%]*%\}/g, "");
+  out = out.replace(/\{%[^%]*%\}/g, "");
   const lookup = (name) => {
     if (!(name in ctx)) throw new Error(`template reads an unknown variable: ${name}`);
     return ctx[name];
@@ -195,7 +221,12 @@ function fakeStore({ workspaces = 12, sessions = 5 } = {}) {
         availability: "available",
       });
     }
-    out.push({ cwd: `C:\\work\\ws-${w}`, name: `ws-${w}`, sessions: rows });
+    // `exists` is the endpoint's stat of the workspace directory (Phase 5b),
+    // a separate question from D17's per-session availability. Default true,
+    // because 51 of the real store's 65 workspaces are still on disk; the
+    // checks that care set it false on one group.
+    out.push({ cwd: `C:\\work\\ws-${w}`, name: `ws-${w}`, sessions: rows,
+               exists: true });
   }
   return out;
 }
@@ -246,6 +277,11 @@ function serveListing(store, params) {
         cwd: w.cwd,
         name: w.name,
         total: w.sessions.length,
+        // Sent as the boolean the route sends, never omitted: the rail treats
+        // an absent field as "no answer" rather than as "gone", and a stub that
+        // dropped it would exercise that fallback in every check instead of the
+        // real path.
+        exists: w.exists !== false,
         session_page: sessionPage,
         has_more: from + sessionSize < w.sessions.length,
         sessions: w.sessions.slice(from, from + sessionSize),
@@ -266,6 +302,9 @@ function loadPage(templatePath, opts = {}) {
     sid: opts.sid ?? "",
     acp_error: opts.acpError ?? "",
     csp_nonce: opts.nonce ?? "NONCE-1",
+    // `web.py` derives this from `scope["client"]` (D26). Defaults to the
+    // loopback reading, which is what a developer running the page sees.
+    local: opts.local ?? true,
   });
 
   // `acp.html`'s own content block only — `{% extends %}` is stripped by
@@ -972,31 +1011,183 @@ check("a listing that fails says so instead of leaving the rail blank", async (t
          "a 403 was rendered as an empty store rather than as a refusal");
 });
 
-check("the rail stays inert until Phase 5b gives it a layout", (tpl) => {
-  // `.acp-rail` is a flex child of a body that is `display:flex;
-  // flex-direction:column` (style.css:23) inside `html, body { height:100%;
-  // overflow:hidden }` (style.css:2), and style.css carries no `.acp-rail` rule
-  // at all. With none, the rail's flex `min-height` resolves to `auto` —
-  // content height, unshrinkable — while `.acp-page { flex:1; min-height:0 }`
-  // (style.css:452) has `flex-basis:0` and absorbs the whole squeeze. Measured
-  // in Chromium against this template and that stylesheet, twelve workspaces:
-  // at 1280x800 the rail takes 567 px, `.acp-page` falls from ~752 px to
-  // 185 px and `#acpTranscript` to 26 px; at 390x844 the rail is 1007 px and
-  // the transcript, prompt, Send, New session and Close are all below a
-  // viewport that `overflow:hidden` will not scroll.
+check("the rail is visible, and only because style.css now bounds it", (tpl) => {
+  // The replacement for Phase 5a's "the rail stays inert" check, which pinned
+  // `hidden` on the <aside> while style.css carried no `.acp-rail` rule at all.
+  // With none, the rail's flex `min-height` resolved to content height,
+  // unshrinkable, while `.acp-page { flex:1; min-height:0 }` has
+  // `flex-basis:0` and absorbed the whole squeeze — measured in Chromium at
+  // 1280x800 as a 26 px transcript, and at 390x844 as a composer below the fold
+  // of a viewport `overflow:hidden` will not scroll.
   //
-  // **Phase 5b deletes the attribute this pins**, as the first act of "Two-pane
-  // at >=768 px; drill-down below, verified at 390 px and 768 px", once
-  // style.css bounds the rail's height — and deletes this check with it, after
-  // that verification. Failing here is the hand-off working, not a regression;
-  // what must not happen is the attribute going without the CSS arriving.
+  // The two halves are pinned **together**, in one check, because either alone
+  // is what shipped the collapse: markup without CSS is Phase 5a's High
+  // finding, and CSS without markup is a rail nobody can see. This is a source
+  // check on both files rather than a rendered-layout check — the DOM stand-in
+  // has no box model — so the pixel evidence is the browser measurement in the
+  // phase log, and what lives here is the pairing that measurement was taken
+  // against.
   const page = loadPage(tpl);
   const aside = page.markup.match(/<aside\b[^>]*class="acp-rail"[^>]*>/);
   assert(aside, "the rail's <aside> is not where this check expects it");
-  assert(/\shidden(\s|>)/.test(aside[0]),
-         "the rail is rendered without `hidden` while style.css still has no " +
-         ".acp-rail rule, so it collapses the conversation view to a 26 px " +
-         `transcript and pushes the composer off a phone screen: ${aside[0]}`);
+  assert(!/\shidden(\s|>)/.test(aside[0]),
+         `the rail is still rendered inert: ${aside[0]}`);
+  assert(/<div\b[^>]*class="acp-shell"[^>]*data-view=/.test(page.markup),
+         "the rail and the conversation are not inside a shell carrying an " +
+         "initial data-view, so the drill-down has nothing to switch");
+
+  // **Comments stripped first.** The block this checks is heavily commented
+  // and the comments name the very things asserted below — `100dvh`, the
+  // 768 px breakpoint — so against the raw file two of these assertions matched
+  // the prose explaining the rule rather than the rule. Measured: with the
+  // media query moved to 900 px and `100dvh` reverted to `100%`, both survived.
+  // A check that passes on a stylesheet that has lost the declaration, because
+  // a sentence above it still mentions it, measures nothing.
+  const css = fs.readFileSync(
+    path.join(HERE, "..", "src", "power_atlas", "static", "style.css"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert(/^\.acp-rail\s*\{[^}]*\bmin-height:\s*0/m.test(css),
+         "style.css has no `.acp-rail` rule bounding the rail's flex height, " +
+         "which is the exact condition that collapsed the transcript to 26 px");
+  assert(/^\.acp-rail-groups\s*\{[^}]*overflow-y:\s*auto/m.test(css),
+         "nothing inside the rail scrolls, so a long list pushes the rail's " +
+         "own height past the shell instead of scrolling within it");
+  assert(/@media\s*\(min-width:\s*768px\)/.test(css),
+         "there is no 768 px breakpoint, so the two-pane layout the phase " +
+         "exists for is not expressed anywhere");
+  assert(/height:\s*100dvh/.test(css),
+         "the shell height is still viewport-percentage, which mobile browsers " +
+         "resolve against the URL-bar-retracted viewport and which therefore " +
+         "puts the composer below the fold when the bar is showing");
+});
+
+check("the drill-down moves between the rail and the conversation", async (tpl) => {
+  // Below 768 px these are the only two states the page has, and the toggle is
+  // the only way between them: the conversation's own controls are inside the
+  // pane the rail replaces.
+  const page = await railed(tpl);
+  const shell = page.el("acpShell");
+  const toggle = page.el("acpViewToggle");
+  assertEqual(shell.dataset.view, "rail",
+              "a page opened with no ?sid= landed on a conversation that has " +
+              "no session in it");
+  // The label names the destination, not the current pane — a button reading
+  // "Sessions" while the sessions are what is on screen is a button that
+  // appears to do nothing.
+  assert(/conversation/i.test(toggle.textContent),
+         `the toggle does not name where it goes: ${toggle.textContent}`);
+
+  page.railRows()[0].dispatch("click");
+  assertEqual(shell.dataset.view, "chat",
+              "picking a session left the phone looking at the rail, which is " +
+              "the drill-down not happening");
+  assert(/session/i.test(toggle.textContent),
+         `the toggle still points at the pane already shown: ${toggle.textContent}`);
+
+  toggle.dispatch("click");
+  assertEqual(shell.dataset.view, "rail",
+              "there is no way back to the session list");
+  toggle.dispatch("click");
+  assertEqual(shell.dataset.view, "chat", "the toggle does not toggle");
+});
+
+check("a page opened at a session starts on the conversation", (tpl) => {
+  const page = loadPage(tpl, { sid: "sess-from-url-01" });
+  assertEqual(page.el("acpShell").dataset.view, "chat",
+              "a URL naming a session opened the session list instead, making " +
+              "the phone's first act finding the session it already named");
+});
+
+check("only the two known views ever reach the shell attribute", async (tpl) => {
+  // `data-view` is an attribute sink selected on by CSS. Nothing payload-derived
+  // reaches it today, and this pins that: the value is narrowed to one of two
+  // literals rather than passed through.
+  const page = await railed(tpl);
+  const shell = page.el("acpShell");
+  const seen = new Set([shell.dataset.view]);
+  page.railRows()[0].dispatch("click");
+  seen.add(shell.dataset.view);
+  page.el("acpViewToggle").dispatch("click");
+  seen.add(shell.dataset.view);
+  assertEqual([...seen].sort().join(","), "chat,rail",
+              "the shell took a view value other than the two the CSS knows");
+});
+
+check("the back link is a link on loopback and inert from a remote peer", (tpl) => {
+  // `/` is not on `_REMOTE_ALLOWED_PATHS` and never will be (SC-4), so from a
+  // phone the old `<a href="/">` was a control whose only outcome was a 403
+  // with no way back.
+  const local = loadPage(tpl, { local: true });
+  const localBack = local.markup.match(/<a\b[^>]*class="acp-back"[^>]*>/);
+  assert(localBack, "the dashboard link is gone for a loopback viewer too");
+  assert(/href="\/"/.test(localBack[0]),
+         `the loopback link no longer reaches the dashboard: ${localBack[0]}`);
+
+  const remote = loadPage(tpl, { local: false });
+  assertEqual(remote.markup.match(/<a\b[^>]*class="acp-back"/g), null,
+              "a remote viewer is still handed a link to a loopback-only page");
+  assert(/class="acp-back acp-back-local-only"/.test(remote.markup),
+         "the remote page dropped the product name entirely rather than " +
+         "rendering it as text");
+  assert(!/href="\/"/.test(remote.markup),
+         "something else on the remote page still points at the dashboard");
+});
+
+check("a workspace whose directory is gone is marked in the rail", async (tpl) => {
+  // 14 of the real store's 65 workspaces name a directory that no longer
+  // exists, including the 208-session `nrf_tool` worktree. Their sessions
+  // report `available` and that is correct — D17 measures lock liveness, and
+  // nothing holds a lock on a session in a deleted tree — so without this the
+  // rail offers 208 rows that fail the moment one is tapped.
+  const store = fakeStore({ workspaces: 3, sessions: 2 });
+  store[1].exists = false;
+  const page = await railed(tpl, { store });
+  const groups = page.railGroups();
+
+  const marks = groups.map((g) => Boolean(g.querySelector(".acp-rail-group-missing")));
+  assertEqual(marks.join(","), "false,true,false",
+              "the vanished workspace is indistinguishable from the two that " +
+              "are still on disk");
+  assert(String(groups[1].className).includes("acp-rail-group-gone"),
+         `the group carries no class the stylesheet can dim: ${groups[1].className}`);
+  const badge = groups[1].querySelector(".acp-rail-group-missing");
+  assert(badge.textContent.trim().length > 0,
+         "the marker renders nothing, so it is invisible to a reader");
+  assert(/no longer exists/i.test(String(badge.title)),
+         `the marker does not say what it means: ${badge.title}`);
+
+  // Still selectable, for the same reason D17 fails open: an unmounted network
+  // drive is not a dead workspace, and a row the user cannot try is a dead end
+  // with no way to find out why.
+  const rows = groups[1].querySelectorAll(".acp-rail-row");
+  assertEqual(rows[0].disabled, false,
+              "a vanished directory disabled rows that a remounted drive would " +
+              "make openable again");
+  assertEqual(rows[0].dataset.availability, "available",
+              "the marker was implemented by rewriting availability, which " +
+              "measures a different thing");
+});
+
+check("a listing with no exists field marks nothing rather than everything",
+      async (tpl) => {
+  // The field is a boolean the endpoint always sends. An older server, or a
+  // truncated payload, means "no answer" — and `!group.exists` would read that
+  // as "gone" and badge every workspace on the page.
+  const store = fakeStore({ workspaces: 2, sessions: 2 });
+  const page = await railed(tpl, {
+    store,
+    answer: (url) => {
+      if (!url.startsWith("/api/acp/sessions")) return null;
+      const body = serveListing(store, {});
+      for (const g of body.groups) delete g.exists;
+      return { body };
+    },
+  });
+  const marked = page.railGroups()
+    .filter((g) => g.querySelector(".acp-rail-group-missing"));
+  assertEqual(marked.length, 0,
+              "a payload with no `exists` field badged every workspace as " +
+              "missing, which trains the user to ignore the badge");
 });
 
 check("the page with no ACP module offers no way to list sessions", (tpl) => {

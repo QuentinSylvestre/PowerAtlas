@@ -598,6 +598,13 @@ _ACP_PATH = "/acp"
 # about it — the routes, the remote path allowlist, and the cookie exemption.
 _REMOTE_AUTH_PATH = "/remote-auth"
 
+# The session browser's listing route. Defined up here, far from its own route,
+# for one mechanical reason: `_REMOTE_ALLOWED_PATHS` below now names it, and a
+# module-level dict is built at import time, so the name has to exist before
+# that literal is evaluated. The route, its page sizes and its rationale stay
+# together further down.
+_ACP_LISTING_PATH = "/api/acp/sessions"
+
 
 def set_remote_host(address: str) -> None:
     """Teach `_ALLOWED_HOSTS` the one non-loopback address we bind. Startup only.
@@ -942,9 +949,16 @@ def _is_remote_peer(peer: str | None) -> bool:
 
 # Default-deny (D6). A denylist over ~40 routes leaks by default on the next
 # route added; this makes every new route loopback-only until someone puts it
-# here deliberately. `_ACP_LISTING_PATH` (Phase 4) now exists and is still
-# absent from this map on purpose — adding it is Phase 5's integration step,
-# for the reason documented in the comment block directly above that constant.
+# here deliberately. `_ACP_LISTING_PATH` (Phase 4) was held out of this map
+# until the route existed and had a consumer, so that registering a path could
+# not make it remotely reachable before anything read it; Phase 5b is that
+# integration step, because the session rail is the whole reason a phone loads
+# `/acp` and a rail that 403s from the phone leaves the page unusable there.
+# Read-only, no `env`, no launcher data and no action affordances (D18), so what
+# it widens is a listing of workspace paths and session titles — weighed and
+# accepted in the route's own docstring, which notes `title` may carry prompt
+# text. Still behind the device cookie: the allowlist and the cookie are two
+# conditions, not alternatives.
 # Scope-typed, not merely path-keyed. `/ws/acp` is the only websocket entry;
 # everything else is HTTP. A path-only allowlist admitted `ws://<ip>/static/x`
 # on the cookie alone, and `StaticFiles.__call__` opens with
@@ -956,6 +970,7 @@ _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     _ACP_PATH: "http",
     "/ws/acp": "websocket",
     _REMOTE_AUTH_PATH: "http",
+    _ACP_LISTING_PATH: "http",
 }
 
 # Path-only, so the exchange route itself must reject methods other than
@@ -1219,6 +1234,18 @@ async def acp_page(request: Request, sid: str = ""):
         "acp_token": _ACP_TOKEN,
         "sid": sid,
         "csp_nonce": nonce,
+        # Whether the dashboard is reachable *for this viewer*. `/` is not on
+        # `_REMOTE_ALLOWED_PATHS` and never will be (SC-4), so the topbar's
+        # "back to PowerAtlas" link is a guaranteed 403 from a phone — a
+        # control that exists only to fail. Rendered as a link for a loopback
+        # viewer and as plain text for a remote one.
+        #
+        # From `scope["client"]` and never the `Host` header (D26): a remote
+        # peer can send `Host: 127.0.0.1:4915` and would otherwise be handed a
+        # link it cannot follow. Nothing here is a security decision — the
+        # guard already refused or admitted this request — so a wrong reading
+        # costs a link, not a boundary.
+        "local": not _is_remote_peer((request.scope.get("client") or (None,))[0]),
         # Non-empty when the guarded import above failed. The page renders the
         # reason and does not open a socket, rather than retrying against a
         # route that cannot answer.
@@ -1294,12 +1321,16 @@ async def ws_acp(ws: WebSocket) -> None:
 # leave loopback. A narrow route is also auditable against the remote
 # allowlist, which a partial that renders whatever the template grows is not.
 #
-# **This path is deliberately absent from `_REMOTE_ALLOWED_PATHS`.** Adding it
-# there is a separate integration step: registering a path before the route
-# exists would make it remotely reachable the moment it was written, which
-# inverts the default-deny the allowlist exists to provide.
-
-_ACP_LISTING_PATH = "/api/acp/sessions"
+# **This path is on `_REMOTE_ALLOWED_PATHS` as of Phase 5b**, and was held off
+# it until then: registering a path before the route existed would have made it
+# remotely reachable the moment it was written, inverting the default-deny the
+# allowlist exists to provide. It is registered now because the rail is what a
+# phone opens `/acp` for, and it stays behind the device cookie either way —
+# the allowlist and the cookie are two conditions, not two options.
+#
+# `_ACP_LISTING_PATH` itself is defined near `_REMOTE_AUTH_PATH` at the top of
+# this module, because the allowlist dict is built at import time and needs the
+# name before this point in the file is reached.
 
 # D16's defaults — 10 groups, 3 sessions each. The product of the two is what
 # bounds the per-row lock check to ~30 rather than the store's 1,207.
@@ -1379,6 +1410,34 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
     return out
 
 
+def _acp_cwd_exists(cwd: str) -> bool:
+    """Does the workspace directory still exist on disk?
+
+    A **separate question from D17's availability**, which measures lock
+    liveness and nothing else. Measured on the real store 2026-08-01: 14 of 65
+    workspaces name a directory that is gone, including the 208-session
+    `nrf_tool` worktree that is D19's own showcase — and every one of their
+    sessions reports `available`, correctly, because no process holds a lock on
+    a session in a deleted tree. The rail would otherwise offer 208 sessions
+    that fail the moment one is tapped.
+
+    The field has to come from here because **a browser cannot stat a
+    filesystem**; there is no client-side answer to substitute. Cost is one
+    `stat` per returned group — ~10-20 a page, not per row — and this function
+    body runs inside `asyncio.to_thread` with the rest of `_acp_listing`.
+
+    **Fails to `True`.** An unreadable path, a permission error or a
+    temporarily-unmounted network drive must not be reported as a vanished
+    workspace: a false "gone" badge tells the user to stop trusting rows that
+    are fine, which is the more expensive error of the two. The opposite
+    reading is merely today's behaviour.
+    """
+    try:
+        return Path(cwd).exists()
+    except OSError:
+        return True
+
+
 def _acp_listing(cwd: str, group_page: int, group_size: int,
                  session_page: int, session_size: int, held) -> dict:
     """Build the listing payload. Blocking; runs off the loop.
@@ -1451,6 +1510,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             "total": total,
             "session_page": session_page,
             "has_more": s_start + session_size < total,
+            "exists": _acp_cwd_exists(ws_cwd),
         }, page_sessions))
 
     # One call for the whole response, over exactly the ids the response
@@ -1482,10 +1542,11 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
                            session_size: int = _ACP_SESSIONS_PER_GROUP):
     """Workspace-grouped sessions for the session browser. Read-only.
 
-    Returns **only** the workspace path and display name, and per session the
-    id, title, updated timestamp and availability state. No `env`, no launcher
-    data, no action affordances — the payload is the whole audit surface, so
-    what is not here cannot leak from here.
+    Returns **only** the workspace path, display name and whether that
+    directory still exists, and per session the id, title, updated timestamp
+    and availability state. No `env`, no launcher data, no action affordances —
+    the payload is the whole audit surface, so what is not here cannot leak
+    from here.
 
     **`title` may be raw user prompt text.** `_acp_row_title` falls back to the
     first 120 characters of the session's first prompt whenever the store holds

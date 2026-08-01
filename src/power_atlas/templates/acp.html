@@ -1,7 +1,23 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="topbar">
+  {# `/` is loopback-only and always will be (SC-4: the dashboard, the launchers
+     and the settings never cross the remote boundary), so from a phone this
+     link was a control whose only possible outcome was a 403 page with no way
+     back. `local` comes from `scope["client"]`, not the Host header (D26).
+     Rendered as plain text remotely rather than dropped entirely, so the page
+     still names the product it belongs to. #}
+  {% if local %}
   <a class="acp-back" href="/">&#8592; PowerAtlas</a>
+  {% else %}
+  <span class="acp-back acp-back-local-only"
+        title="The PowerAtlas dashboard is reachable from the machine running it only">PowerAtlas</span>
+  {% endif %}
+  <!-- Below 768 px the rail and the conversation are one pane at a time
+       (drill-down), and this is the only way between them; at 768 px and above
+       both are on screen and CSS hides this button. Its label names the
+       destination, not the current view. -->
+  <button class="acp-btn acp-viewtoggle" id="acpViewToggle" type="button"></button>
   <span class="acp-title">ACP prototype</span>
   <div class="topbar-spacer"></div>
   <div class="topbar-cluster">
@@ -17,36 +33,30 @@
   </div>
 </div>
 
+<!-- The two-pane shell (Phase 5b). Both panes are children of one flex
+     container rather than siblings of the topbar, because the two layouts are
+     the same two boxes read in different directions: a row at >=768 px, and a
+     column showing exactly one child below it. `data-view` names which child
+     that is; above the breakpoint the attribute still changes and CSS ignores
+     it, so nothing has to be re-derived when the window is resized across the
+     breakpoint.
+
+     The wrapper is what makes .acp-rail safe to show at all. Before it, the
+     rail was a flex child of a body that is `display:flex;flex-direction:column`
+     (style.css:23) inside `html, body { height:100%; overflow:hidden }`
+     (style.css:2), with no `.acp-rail` rule: its flex `min-height` resolved to
+     content height, unshrinkable, while `.acp-page { flex:1; min-height:0 }`
+     has `flex-basis:0` and absorbed the entire squeeze — measured at 1280x800
+     as a 26 px transcript, and at 390x844 as a composer below the fold of a
+     viewport `overflow:hidden` will not scroll. `.acp-shell` now owns
+     `flex:1; min-height:0` and both children are bounded inside it. -->
+<div class="acp-shell" id="acpShell" data-view="rail">
+
 <!-- The session browser. Rendered client-side from GET /api/acp/sessions, never
      by Jinja: the rail pages and filters after first paint, so a server-rendered
      list would have to come back as markup and be written through a sink this
-     page forbids. Empty here and filled by renderRail(). Phase 5b owns the
-     two-pane shell and the CSS; this markup is deliberately a sibling of
-     .acp-page rather than a wrapper around it, so the existing flex layout is
-     untouched until the phase that owns it.
-
-     `hidden` — READ BEFORE REMOVING. This element is a flex child of a body that
-     is `display:flex; flex-direction:column` (style.css:23) inside
-     `html, body { height:100%; overflow:hidden }` (style.css:2), and style.css
-     carries **no .acp-rail rule at all** until 5b writes one. With none, the
-     rail's flex `min-height` resolves to `auto` — content height, unshrinkable —
-     while `.acp-page { flex:1; min-height:0 }` (style.css:452) has `flex-basis:0`
-     and absorbs the entire squeeze. Measured in Chromium against this template
-     and that stylesheet with twelve workspaces: at 1280x800 the rail takes
-     567 px, `.acp-page` falls from ~752 px to 185 px and `#acpTranscript` to
-     26 px, with `body.scrollHeight` 890 against an 800 px viewport that
-     `overflow:hidden` will not scroll; at 390x844 the rail is 1007 px tall and
-     the transcript, the prompt, Send, New session and Close all sit below the
-     fold with no scrollbar. So the rail stays inert here and the conversation
-     keeps the layout it had before 5a.
-
-     **Phase 5b deletes this attribute** as the first act of its exit criterion
-     "Two-pane at >=768 px; drill-down below, verified at 390 px and 768 px",
-     once style.css gives .acp-rail a bounded height. Deleting it before that
-     re-ships the collapse. `tests/acp_page.test.mjs` pins the attribute in
-     "the rail stays inert until Phase 5b gives it a layout"; that check is 5b's
-     to retire, together with the attribute, after the 390/768 verification. -->
-<aside class="acp-rail" id="acpRail" aria-label="Sessions" hidden>
+     page forbids. Empty here and filled by renderRail(). -->
+<aside class="acp-rail" id="acpRail" aria-label="Sessions">
   <div class="acp-rail-head">
     <input class="acp-rail-search" id="acpRailSearch" type="text" spellcheck="false"
            placeholder="Filter the sessions below"
@@ -92,6 +102,8 @@
   <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
 </div>
 
+</div><!-- /.acp-shell -->
+
 <script nonce="{{ csp_nonce }}">
 // This page is served with a nonce-based Content-Security-Policy, so this tag
 // runs and an injected script element or inline handler does not. The nonce is
@@ -134,6 +146,8 @@
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
   var contextLabel = document.getElementById('acpContextLabel');
+  var shellEl = document.getElementById('acpShell');
+  var viewToggle = document.getElementById('acpViewToggle');
   var railSearch = document.getElementById('acpRailSearch');
   var railReload = document.getElementById('acpRailReload');
   var railStatus = document.getElementById('acpRailStatus');
@@ -242,6 +256,32 @@
   var railFocus = null;
 
   if (sessionId) sidEl.textContent = 'session ' + sessionId;
+
+  // ---- the drill-down ---------------------------------------------------
+  // Below 768 px the rail and the conversation are one pane at a time; at and
+  // above it both are on screen and `data-view` selects nothing. Only two
+  // values are ever written, and they are written from here alone, so the
+  // attribute cannot pick up a third from anywhere: it is a class-and-attribute
+  // sink like every other on this page.
+  //
+  // The state is kept in the DOM rather than in a variable because the CSS is
+  // what reads it; a shadow copy in JS would be a second source of truth for
+  // the same fact. The toggle's label names where the press goes, not where
+  // the user is — "Sessions" on the conversation, "Conversation" on the rail.
+  function setView(view) {
+    var next = view === 'chat' ? 'chat' : 'rail';
+    shellEl.dataset.view = next;
+    viewToggle.textContent = next === 'chat' ? '← Sessions' : 'Conversation →';
+    viewToggle.setAttribute(
+      'aria-label',
+      next === 'chat' ? 'Back to the session list' : 'Back to the conversation');
+  }
+
+  // A page opened with ?sid= was opened *at* a conversation — landing on the
+  // rail would make the phone's first act be finding the session it already
+  // named. With no sid there is nothing to show, so the rail is the only
+  // useful first pane.
+  setView(sessionId ? 'chat' : 'rail');
 
   function setState(state, text) {
     statusEl.dataset.state = state;
@@ -737,8 +777,14 @@
   }
 
   function railGroupNode(group, sessions) {
+    // `exists === false` and nothing looser. The field is a boolean the
+    // endpoint always sends, so a missing or non-boolean value means an older
+    // server or a mangled payload — and treating "I do not know" as "gone"
+    // would badge every workspace on the page. `!group.exists` would do exactly
+    // that for an absent field.
+    var gone = group.exists === false;
     var wrap = document.createElement('div');
-    wrap.className = 'acp-rail-group';
+    wrap.className = 'acp-rail-group' + (gone ? ' acp-rail-group-gone' : '');
     wrap.dataset.cwd = group.cwd;
 
     var head = document.createElement('div');
@@ -750,6 +796,23 @@
     // that tells two workspaces with the same one apart.
     name.title = group.cwd;
     head.appendChild(name);
+    if (gone) {
+      // 14 of the real store's 65 workspaces name a directory that is gone,
+      // and one of them holds 208 sessions — so this is a normal reading of the
+      // rail and not an edge case. Those rows report `available` and that is
+      // correct: D17 measures lock liveness, and nothing holds a lock on a
+      // session in a deleted tree. The rows stay selectable for the same reason
+      // D17 fails open — a temporarily-unmounted network drive is not a dead
+      // workspace, and a row the user cannot try is a dead end with no way to
+      // find out why. What changes is that they are told first.
+      var goneTag = document.createElement('span');
+      goneTag.className = 'acp-rail-group-missing';
+      goneTag.textContent = 'folder missing';
+      goneTag.title = 'This directory no longer exists on this machine. Its '
+                    + 'sessions are still in the store, but opening one will '
+                    + 'usually fail.';
+      head.appendChild(goneTag);
+    }
     var count = document.createElement('span');
     count.className = 'acp-rail-group-count';
     // Under a filter the group draws only the rows that matched, so counting the
@@ -846,6 +909,10 @@
     // reused rather than duplicated here.
     send('subscribe', {}, sid);
     logLine('info', 'opening ' + sid + ' from the session list');
+    // Below the breakpoint the rail is the whole screen, so picking a row and
+    // being left looking at the rail is the drill-down not happening. Above it
+    // the attribute selects nothing and this line is inert.
+    setView('chat');
     renderRail();
   }
 
@@ -1213,6 +1280,9 @@
     };
   }
 
+  viewToggle.addEventListener('click', function () {
+    setView(shellEl.dataset.view === 'chat' ? 'rail' : 'chat');
+  });
   newBtn.addEventListener('click', function () {
     send('new', { cwd: cwdInput.value.trim() }, null);
   });

@@ -7,6 +7,9 @@
     <button class="topbar-profile-btn" onclick="openProfileModal()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
       ⚙️ {{ active_launch_profile.name }}
     </button>
+    <button class="topbar-profile-btn" onclick="openRemoteModal()" title="Remote access: the URL and device secret a phone needs, and which settings need a restart" aria-label="Remote access">
+      📡 Remote
+    </button>
     <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
       <span class="trust-dot"></span>Autostart
     </div>
@@ -594,6 +597,24 @@ function hideTailFromSlot(slotEl){var row=slotEl.closest('.session-row');var sid
 </script>
 {% include "partials/launcher_modal.html" %}
 {% include "partials/workspace_settings_modal.html" %}
+
+<!-- Remote access (D22). Phase 3 built `GET /api/remote-access` and
+     `POST /api/remote-access/rotate` for exactly this panel and shipped no
+     template for either, so until now the URL and the device secret were
+     reachable only by reading a file on disk, and revoking a lost phone had no
+     UI at all. Both routes are loopback-only, which is why this lives in the
+     dashboard and not on /acp: `_REMOTE_ALLOWED_PATHS` is default-deny and
+     neither path is on it, so the secret is never served over the surface it
+     authenticates. -->
+<dialog id="remoteModal" class="modal profile-modal">
+  <div class="modal-header">
+    <h2>Remote access</h2>
+    <button type="button" class="modal-close" onclick="document.getElementById('remoteModal').close()" aria-label="Close">&times;</button>
+  </div>
+  <div id="remoteAccessBody"></div>
+  <hr class="profile-divider">
+  <div id="remoteRestartBody"></div>
+</dialog>
 <script>
 var _providerSettings={{provider_settings|tojson}};
 var _globalDefaultDirectory={{default_directory|tojson}};
@@ -651,5 +672,223 @@ function navigateWsAutocomplete(dir){var ac=document.getElementById('wsTagsAutoc
 document.getElementById('wsColorPicker').addEventListener('click',function(e){var btn=e.target.closest('.color-swatch');if(!btn)return;var picker=document.getElementById('wsColorPicker');var input=document.getElementById('wsSettingsColor');picker.querySelectorAll('.color-swatch').forEach(function(s){s.classList.remove('selected')});btn.classList.add('selected');input.value=btn.dataset.color;_wsColorChanged=true});
 function saveWorkspaceSettings(e){e.preventDefault();if(_wsBulkMode){var payload={cwds:_wsBulkCwds,tags_add:_wsTagsToAdd,tags_remove:_wsTagsToRemove};if(_wsColorChanged){payload.color=document.getElementById('wsSettingsColor').value}fetch('/api/workspace-settings/save-bulk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('workspaceSettingsModal').close();refreshCards(false);initWorkspaceFilters()}).catch(function(){showToast('<div class="toast toast-error">Bulk save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});return}var cwd=document.getElementById('wsSettingsCwd').value;var color=document.getElementById('wsSettingsColor').value;fetch('/api/workspace-settings/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cwd:cwd,tags:_wsTags,color:color})}).then(function(r){return r.text()}).then(function(t){showToast(t);document.getElementById('workspaceSettingsModal').close();refreshCards(false);initWorkspaceFilters()}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 document.getElementById('workspaceSettingsModal').addEventListener('close',function(){_wsBulkMode=false;_wsBulkCwds=[];_wsTagsToAdd=[];_wsTagsToRemove=[];_wsTagsFull=[];_wsTagsPartial=[];_wsColorChanged=false;var info=document.getElementById('wsTagsInfo');if(info)info.style.display='none'});
+
+// ---- Remote access panel (D22, D24) --------------------------------------
+//
+// Built with createElement + textContent rather than this file's usual
+// innerHTML-with-_escHtml, for one reason: the largest thing rendered here is
+// the device secret, and _escHtml escapes & < > but *not* quotes, so it is safe
+// for text nodes only. A node API has no such edge to remember.
+
+// A label, a read-only field holding the value, and a Copy button. Read-only
+// rather than disabled so the text can still be selected by hand, which is
+// what D22 actually asks for — the button is the convenience on top.
+function _remoteField(label, value, hint) {
+  var row = document.createElement('div');
+  row.className = 'remote-field';
+  var head = document.createElement('div');
+  head.className = 'remote-field-label';
+  head.textContent = label;
+  row.appendChild(head);
+  var line = document.createElement('div');
+  line.className = 'remote-field-line';
+  var box = document.createElement('input');
+  box.type = 'text';
+  box.className = 'remote-field-value';
+  box.readOnly = true;
+  box.value = value;
+  box.setAttribute('aria-label', label);
+  line.appendChild(box);
+  var copy = document.createElement('button');
+  copy.type = 'button';
+  copy.className = 'btn-secondary remote-copy';
+  copy.textContent = 'Copy';
+  copy.onclick = function () {
+    // select() first and unconditionally: it is the fallback *and* the visible
+    // feedback, and it works with no permission and in any context. The
+    // clipboard API is layered on top, not relied on — this page is served over
+    // plain http and only localhost makes that a secure context.
+    box.select();
+    var done = function () { copy.textContent = 'Copied'; setTimeout(function () { copy.textContent = 'Copy'; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done, function () {});
+    } else {
+      done();
+    }
+  };
+  line.appendChild(copy);
+  row.appendChild(line);
+  if (hint) {
+    var note = document.createElement('div');
+    note.className = 'remote-field-hint';
+    note.textContent = hint;
+    row.appendChild(note);
+  }
+  return row;
+}
+
+function _remoteNote(text, level) {
+  var el = document.createElement('div');
+  el.className = 'remote-note' + (level ? ' remote-note-' + level : '');
+  el.textContent = text;
+  return el;
+}
+
+function renderRemoteAccess(d) {
+  var body = document.getElementById('remoteAccessBody');
+  body.textContent = '';
+  if (!d.enabled) {
+    body.appendChild(_remoteNote(
+      'Remote access is off. PowerAtlas is listening on loopback only. Set '
+      + '`remote_bind_address` in config.toml to the NetBird address of this '
+      + 'machine and restart to turn it on.', 'off'));
+    return;
+  }
+  body.appendChild(_remoteField(
+    'Open this on the device', d.url,
+    'Enter the secret below once, on that device. It is stored as a cookie '
+    + 'and survives a restart of PowerAtlas.'));
+  if (d.secret_present) {
+    body.appendChild(_remoteField(
+      'Device secret', d.secret,
+      'Kept in ' + d.secret_path + ', never in config.toml and never served '
+      + 'over the remote surface it authenticates.'));
+  } else {
+    body.appendChild(_remoteNote(
+      'No device secret exists yet, so no device can authenticate. Rotating '
+      + 'below creates one.', 'warn'));
+  }
+  // D24 gave up per-device revocation knowingly. The consequence has to be on
+  // screen *before* the button is pressed, not discovered afterwards by a
+  // second device that stopped working.
+  body.appendChild(_remoteNote(
+    'Rotating the secret signs out EVERY authorized device at once — there is '
+    + 'no per-device revocation. Each device must then re-enter the new '
+    + 'secret. This is the only revocation mechanism there is.', 'warn'));
+  var rotate = document.createElement('button');
+  rotate.type = 'button';
+  rotate.className = 'btn-danger remote-rotate';
+  rotate.textContent = 'Rotate device secret';
+  rotate.onclick = rotateRemoteSecret;
+  body.appendChild(rotate);
+}
+
+function rotateRemoteSecret() {
+  if (!confirm('Rotate the device secret?\n\nEvery authorized device is signed '
+               + 'out at once and must re-enter the new secret. There is no '
+               + 'per-device revocation.')) return;
+  fetch('/api/remote-access/rotate', {method: 'POST'})
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.ok) {
+        showToast('<div class="toast toast-error">' + _escHtml(d.error || 'Rotation failed') + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+        return;
+      }
+      // `applied` is the endpoint's own report of whether the running process
+      // took the new secret or only the file did; rendering "devices revoked"
+      // over the second case would claim a revocation that has not happened
+      // yet.
+      showToast('<div class="toast toast-success">' + _escHtml(d.message) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+      loadRemoteAccess();
+    })
+    .catch(function () {
+      showToast('<div class="toast toast-error">Rotation failed<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+    });
+}
+
+function loadRemoteAccess() {
+  return fetch('/api/remote-access').then(function (r) { return r.json(); })
+    .then(renderRemoteAccess)
+    .catch(function () {
+      var body = document.getElementById('remoteAccessBody');
+      body.textContent = '';
+      body.appendChild(_remoteNote('Could not read the remote access settings.', 'warn'));
+    });
+}
+
+// Every key `/api/settings` reports in `restart_to_apply`, listed with the
+// value in force. Driven off the server's list rather than a copy of it here:
+// Phase 3 found `restart_required` answering False for `peek_hotkey`, a key
+// consumed once at startup behind a live input, and a hardcoded list in the UI
+// is how that lie gets reintroduced from the other side.
+var _RESTART_KEY_LABELS = {
+  port: 'Server port',
+  peek_hotkey: 'Peek hotkey',
+  remote_bind_address: 'Remote bind address',
+  acp_max_sessions: 'ACP: maximum concurrent sessions',
+  acp_idle_ttl_seconds: 'ACP: idle session TTL (seconds)',
+  acp_prompt_silence_seconds: 'ACP: turn silence ceiling (seconds)'
+};
+
+function renderRestartKeys(settings) {
+  var body = document.getElementById('remoteRestartBody');
+  body.textContent = '';
+  var head = document.createElement('div');
+  head.className = 'remote-field-label';
+  head.textContent = 'Takes effect on restart';
+  body.appendChild(head);
+  body.appendChild(_remoteNote(
+    'These values are read once, when PowerAtlas starts. Changing one here or '
+    + 'in config.toml does nothing until the next launch.'));
+  var keys = settings.restart_to_apply || [];
+  var list = document.createElement('div');
+  list.className = 'remote-restart-list';
+  keys.forEach(function (key) {
+    var row = document.createElement('div');
+    row.className = 'remote-restart-row';
+    var name = document.createElement('span');
+    name.className = 'remote-restart-key';
+    // Falls back to the raw key rather than skipping the row: a key added
+    // server-side and not labelled here must still be shown, or the panel
+    // silently under-reports exactly the list it exists to report.
+    name.textContent = _RESTART_KEY_LABELS[key] || key;
+    row.appendChild(name);
+    var val = document.createElement('span');
+    val.className = 'remote-restart-value';
+    var current = settings[key];
+    val.textContent = (current === undefined || current === null || current === '')
+      ? '—' : String(current);
+    row.appendChild(val);
+    list.appendChild(row);
+  });
+  body.appendChild(list);
+  markRestartInputs(keys);
+}
+
+// The two keys with a live control in the topbar. Without this the hotkey field
+// accepts a new value, saves it, and behaves as though nothing happened until
+// the next launch — which is the same lie the API side was fixed for.
+function markRestartInputs(keys) {
+  var owners = {peek_hotkey: 'peek-hotkey-group', port: 'port-group'};
+  Object.keys(owners).forEach(function (key) {
+    var host = document.querySelector('.' + owners[key]);
+    if (!host) return;
+    var badge = host.querySelector('.restart-badge');
+    if (keys.indexOf(key) < 0) { if (badge) badge.remove(); return; }
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'restart-badge';
+      badge.textContent = 'restart';
+      host.appendChild(badge);
+    }
+    badge.title = 'This value is read once at startup — it takes effect on the '
+                + 'next launch of PowerAtlas.';
+  });
+}
+
+function loadRestartKeys() {
+  return fetch('/api/settings').then(function (r) { return r.json(); })
+    .then(renderRestartKeys).catch(function () {});
+}
+
+function openRemoteModal() {
+  loadRemoteAccess();
+  loadRestartKeys();
+  document.getElementById('remoteModal').showModal();
+}
+
+// The badges are the honest reading of the topbar itself, so they are applied
+// on load rather than only when the panel is opened.
+document.addEventListener('DOMContentLoaded', function () { loadRestartKeys(); });
 </script>
 {% endblock %}

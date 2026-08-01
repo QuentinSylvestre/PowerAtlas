@@ -1468,6 +1468,38 @@ class TestSingleLabelHostRejected:
         assert _ACP_TOKEN in resp.text
 
 
+class TestAcpBackLinkMatchesReachability:
+    """Phase 5b. The topbar's "back to PowerAtlas" link points at ``/``, which
+    is not on ``_REMOTE_ALLOWED_PATHS`` and never will be (SC-4) — so from a
+    phone it was a control whose only possible outcome was a 403 page with no
+    way back to the conversation.
+
+    Derived from ``scope["client"]`` and not the ``Host`` header (D26): a remote
+    peer may legitimately send ``Host: 127.0.0.1:4915``, and reading the header
+    would hand exactly that peer the link it cannot follow. Nothing here is a
+    security decision — the guard has already admitted or refused the request —
+    so a wrong reading costs a link, not a boundary.
+    """
+
+    def test_a_loopback_viewer_keeps_the_dashboard_link(self, raw_client):
+        assert '<a class="acp-back" href="/">' in raw_client.get("/acp").text
+
+    def test_a_remote_viewer_is_not_handed_a_link_they_cannot_follow(
+            self, remote_enabled):
+        status, body, _ = _peer_http(_ACP_PATH_FOR_BACKLINK, [_cookie_header()])
+        assert status == 200, "the page itself must still be served remotely"
+        text = body.decode()
+        assert 'href="/"' not in text, (
+            "the phone was handed a link to a loopback-only page")
+        assert "acp-back-local-only" in text, (
+            "the product name vanished entirely rather than rendering as text")
+        # The positive control for the whole reason this branch exists.
+        assert _peer_http("/", [_cookie_header()])[0] == 403
+
+
+_ACP_PATH_FOR_BACKLINK = "/acp"
+
+
 class TestAcpPageIsNotCacheable:
     """``GET /acp`` renders the live ACP token, so its response is a credential.
 
@@ -11778,8 +11810,11 @@ class TestAcpListingEndpoint:
         body = client.get(self._PATH).json()
         assert set(body) == {"groups", "group_page", "group_total", "has_more"}
         group = body["groups"][0]
+        # `exists` joined the group in Phase 5b. It is the one thing in this
+        # payload a browser cannot derive for itself, which is why it is served
+        # rather than computed in the rail — see `_acp_cwd_exists`.
         assert set(group) == {"cwd", "name", "total", "session_page",
-                              "has_more", "sessions"}
+                              "has_more", "sessions", "exists"}
         assert group["cwd"] == "C:\\dev\\PowerAtlas"
         assert group["name"] == "PowerAtlas"
         assert set(group["sessions"][0]) == {"id", "title", "updated_at",
@@ -12073,20 +12108,112 @@ class TestAcpListingEndpoint:
         assert ids == ["parent-1"], f"a sub-agent session reached the rail: {ids}"
         assert [g["total"] for g in body["groups"]] == [1]
 
-    def test_the_listing_is_not_yet_on_the_remote_allowlist(self, remote_enabled,
-                                                            acp_listing_store):
-        """Phase 3 left this path out of `_REMOTE_ALLOWED_PATHS` deliberately:
-        registering a path before the route existed would have made it remotely
-        reachable the moment it was written, inverting default-deny (D6).
+    def test_the_listing_is_on_the_remote_allowlist_behind_the_cookie(
+            self, remote_enabled, acp_listing_store):
+        """Phase 5b's integration step, and the pair SC-3 specifies for it.
 
-        Registration is Phase 5's integration step. **When it lands, replace
-        this test** with the cookie-present/cookie-absent pair SC-3 specifies —
-        do not simply delete it."""
+        Phase 3 held this path off `_REMOTE_ALLOWED_PATHS` deliberately —
+        registering a path before the route existed would have made it remotely
+        reachable the moment it was written, inverting default-deny (D6). The
+        rail is now the reason a phone opens `/acp` at all, so the path is
+        registered; the predecessor of this test asserted its absence and was
+        replaced here rather than deleted.
+
+        Both arms matter and neither implies the other. Without the allowlist
+        entry a cookie-bearing device is refused and the rail is dead on the
+        phone; without the cookie the entry alone would serve every workspace
+        path and session title on the account's 17-peer network to anyone who
+        can reach the port.
+
+        The HTTP scope is the whole point: `_peer_http` is the only way to set
+        `scope["client"]`, which is the one value `RemoteAccessGuard`
+        classifies on (D26)."""
         from power_atlas.web import _ACP_LISTING_PATH, _REMOTE_ALLOWED_PATHS
-        assert _ACP_LISTING_PATH not in _REMOTE_ALLOWED_PATHS
+        assert _REMOTE_ALLOWED_PATHS[_ACP_LISTING_PATH] == "http"
+        acp_listing_store["add"]("C:\\dev\\PowerAtlas", [_acp_row("s1")])
+
         status, body, _ = _peer_http(_ACP_LISTING_PATH, [_cookie_header()])
-        assert status == 403, "a valid cookie is not a substitute for the allowlist"
-        assert body == b'{"error":"Forbidden"}'
+        assert status == 200, (
+            "a device holding a valid cookie cannot reach the session rail, "
+            "which is the only reason the page is on a phone")
+        assert b'"groups"' in body
+
+        bare, refused, _ = _peer_http(_ACP_LISTING_PATH)
+        assert bare == 403, "the listing is served to any peer that reaches the port"
+        assert refused == b'{"error":"Forbidden"}'
+
+    def test_the_listing_is_not_reachable_as_a_websocket(self, remote_enabled):
+        """The allowlist is scope-typed, not merely path-keyed. `/static` taught
+        this the hard way: a path-only entry admitted `ws://<ip>/static/x` on
+        the cookie alone. This route is `http` and must stay that way.
+
+        Through `_guard_over_sentinel` and not the real app, for a reason the
+        first draft of this test got wrong: Starlette answers a websocket scope
+        with no matching route by sending `websocket.close` too, so against the
+        real app the assertion passed whether the guard refused the upgrade or
+        merely failed to route it. The sentinel makes "the guard let it through"
+        a distinguishable outcome — it raises."""
+        from power_atlas.web import _ACP_LISTING_PATH
+        sent = _peer_ws(_ACP_LISTING_PATH, [_cookie_header()],
+                        asgi_app=_guard_over_sentinel())
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+    def test_the_listing_still_passes_the_gate_over_http(self, remote_enabled):
+        """The refusal above must not have been bought by closing the path
+        outright: the same guard, the same cookie, the http scope."""
+        with pytest.raises(_Reached):
+            from power_atlas.web import _ACP_LISTING_PATH
+            _peer_http(_ACP_LISTING_PATH, [_cookie_header()],
+                       asgi_app=_guard_over_sentinel())
+
+    def test_a_vanished_workspace_directory_is_reported_as_such(
+            self, client, acp_listing_store, tmp_path):
+        """Phase 5b. Measured on the real store 2026-08-01: **14 of 65
+        workspaces** name a directory that no longer exists, including the
+        208-session `nrf_tool` worktree. Every one of their sessions reports
+        `available`, correctly — D17 measures lock liveness, and nothing holds
+        a lock on a session in a deleted tree — so without this field the rail
+        offers 208 rows that fail the moment one is tapped.
+
+        It has to be a *server* field: a browser cannot stat a filesystem.
+
+        The two workspaces are asserted in one call so the discriminating
+        property is the **difference** between them; a single vanished
+        workspace also passes against an endpoint hardcoding `False`."""
+        here = tmp_path / "still-here"
+        here.mkdir()
+        acp_listing_store["add"](str(here), [_acp_row("s1")])
+        acp_listing_store["add"](str(tmp_path / "deleted"), [_acp_row("s2")])
+        groups = client.get(self._PATH).json()["groups"]
+        assert [g["exists"] for g in groups] == [True, False]
+        # And it changed nothing about availability, which measures a different
+        # thing and is what a naive fix would have rewritten.
+        assert [s["availability"] for g in groups for s in g["sessions"]] == [
+            "available", "available"]
+
+    def test_an_unstattable_directory_is_not_reported_as_vanished(
+            self, client, acp_listing_store, monkeypatch):
+        """Fails to `True`. A permission error or a temporarily-unmounted
+        network drive raising `OSError` must not badge a live workspace as
+        gone: a false "folder missing" tells the user to stop trusting rows
+        that are fine, which is the more expensive of the two errors. The
+        opposite reading is merely the behaviour that shipped before."""
+        from power_atlas import web as web_mod
+
+        target = "C:\\dev\\unreadable"
+        real = web_mod.Path.exists
+
+        def _boom(self):
+            # Only the workspace under test. `load_config` stats its own path
+            # through the same class, and raising for everything would fail this
+            # test somewhere that has nothing to do with what it measures.
+            if str(self) == target:
+                raise OSError(1314, "A required privilege is not held by the client")
+            return real(self)
+
+        monkeypatch.setattr(web_mod.Path, "exists", _boom)
+        acp_listing_store["add"](target, [_acp_row("s1")])
+        assert client.get(self._PATH).json()["groups"][0]["exists"] is True
 
     def test_the_response_is_not_cacheable(self, client, acp_listing_store):
         """Availability is a liveness reading with a lifetime of seconds. A
