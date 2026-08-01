@@ -10728,6 +10728,84 @@ class TestRemoteBindAddressValidation:
         assert config_mod.load_config().remote_bind_address == "100.78.142.124"
 
 
+class TestEnablingRemoteAccessIsOneStep:
+    """`/api/save-setting` is the whole of enabling remote access.
+
+    The dashboard's bind-address control posts here and nowhere else, and the
+    reason it can be one control rather than a procedure is that this route
+    sets the address **and** issues the device secret in the same request. The
+    panel's behaviour is covered in ``tests/acp_page.test.mjs``; what is pinned
+    here is the contract that behaviour rests on. Split the two halves apart
+    again and the UI goes on looking correct while the surface it configures
+    comes up unauthenticable — which is precisely the state the hand-edited
+    config.toml path used to leave the user in.
+
+    ``isolated_config`` has already redirected ``CONFIG_PATH``, ``CONFIG_DIR``
+    and ``REMOTE_SECRET_PATH`` into ``tmp_path``, so nothing here can create a
+    ``remote-secret`` beside the developer's real config.
+    """
+
+    def _configured(self, tmp_path, address=""):
+        (tmp_path / "config.toml").write_text(
+            f'port = 4915\nremote_bind_address = "{address}"\n')
+
+    def test_saving_an_address_issues_the_secret_in_the_same_request(
+            self, client, isolated_config):
+        from power_atlas import config as config_mod
+        self._configured(isolated_config)
+        assert not (isolated_config / "remote-secret").exists()
+        resp = client.post("/api/save-setting",
+                           json={"key": "remote_bind_address",
+                                 "value": "100.78.142.124"})
+        assert resp.json() == {"ok": True, "restart_required": True}
+        assert config_mod.load_config().remote_bind_address == "100.78.142.124"
+        # The half that makes it one step. Without it the address binds a socket
+        # at the next launch that no device can authenticate to — or, as the
+        # startup path actually behaves, does not bind at all.
+        assert config_mod.load_remote_secret() != ""
+
+    def test_saving_an_address_does_not_rotate_an_existing_secret(
+            self, client, isolated_config):
+        from power_atlas import config as config_mod
+        self._configured(isolated_config)
+        before = config_mod.ensure_remote_secret()
+        assert before
+        client.post("/api/save-setting",
+                    json={"key": "remote_bind_address", "value": "fd00::1"})
+        assert config_mod.load_remote_secret() == before, (
+            "setting an address reissued the secret, signing out every device "
+            "already holding a cookie on a route the user thinks only sets an "
+            "address")
+
+    def test_a_refused_address_is_reported_by_name_and_writes_nothing(
+            self, client, isolated_config):
+        from power_atlas import config as config_mod
+        self._configured(isolated_config)
+        resp = client.post("/api/save-setting",
+                           json={"key": "remote_bind_address", "value": "0.0.0.0"})
+        body = resp.json()
+        assert body["ok"] is False
+        # The panel renders this string verbatim; it is the only thing on screen
+        # telling the user what to type instead.
+        assert "wildcard" in body["error"]
+        assert config_mod.load_config().remote_bind_address == ""
+        assert not (isolated_config / "remote-secret").exists(), (
+            "a refused address still created a device secret")
+
+    def test_clearing_the_address_turns_it_off_and_keeps_the_secret(
+            self, client, isolated_config):
+        from power_atlas import config as config_mod
+        self._configured(isolated_config, "100.78.142.124")
+        before = config_mod.ensure_remote_secret()
+        resp = client.post("/api/save-setting",
+                           json={"key": "remote_bind_address", "value": ""})
+        assert resp.json()["ok"] is True
+        assert config_mod.load_config().remote_bind_address == ""
+        # What the panel's hint promises: devices already enrolled work again if
+        # remote access is turned back on.
+        assert config_mod.load_remote_secret() == before
+
+
 class TestSettingsSurface:
     # Config I/O is redirected by the module-level `isolated_config` autouse
     # fixture, which covers this class and every other test in the file.

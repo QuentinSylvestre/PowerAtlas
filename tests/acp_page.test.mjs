@@ -1595,7 +1595,8 @@ const STYLESHEET = path.join(
   HERE, "..", "src", "power_atlas", "static", "style.css");
 
 const PANEL_NAMES = [
-  "_remoteField", "_remoteNote", "renderRemoteAccess", "rotateRemoteSecret",
+  "_remoteField", "_remoteNote", "_remoteAddressEditor", "_drainAddressNotice",
+  "renderRemoteAccess", "rotateRemoteSecret",
   "loadRemoteAccess", "_RESTART_KEY_LABELS", "renderRestartKeys",
   "markRestartInputs", "loadRestartKeys", "openRemoteModal",
 ];
@@ -1694,7 +1695,17 @@ function loadPanel(opts = {}) {
   return {
     sandbox, body, restartBody, modal, hosts,
     toasts, fetches, confirms, clipboard, timers, domReady,
-    fields() { return body.querySelectorAll(".remote-field"); },
+    // The *copyable value* fields — the URL and the secret — and deliberately
+    // not the bind-address editor, which shares `.remote-field` for its
+    // spacing but is an input the user types into rather than a value the page
+    // hands them. Folding it in here would shift the indices every check below
+    // addresses positionally and would make "no field for a surface that is
+    // not listening" fail on the one control that turns the surface on.
+    fields() {
+      return body.querySelectorAll(".remote-field")
+                 .filter((f) => !f.matches(".remote-address"));
+    },
+    addressRow() { return body.querySelector(".remote-address"); },
     rows() { return restartBody.querySelectorAll(".remote-restart-row"); },
     badge(sel) { return hosts.get(sel).querySelector(".restart-badge"); },
     settle() { return new Promise((resolve) => setImmediate(resolve)); },
@@ -1778,6 +1789,180 @@ check("the panel shows no secret it does not have, and no form when remote is of
   assertEqual(note.length, 1, "nothing says remote access is off");
   assert(/loopback/i.test(note[0].textContent),
          `the off note does not say what the server is doing instead: ${note[0].textContent}`);
+});
+
+// -------------------------------------------- the bind-address control --
+//
+// Phase 6 found the panel had no `remote_bind_address` input anywhere, and its
+// own off-note told the user to set the key in config.toml by hand — the one
+// path that creates no device secret, so startup then declines to bind and the
+// user gets no remote access and a log line. `POST /api/save-setting` already
+// did both halves in one request; nothing called it. These four checks are on
+// what the JS builds and does rather than on the text of a line, because the
+// mutation that survives a substring check is the one that deletes the code the
+// substring lived in.
+
+check("the panel exposes the bind address and saves it through /api/save-setting", async () => {
+  const p = loadPanel({ answer: (url) =>
+    url === "/api/save-setting" ? { body: { ok: true, restart_required: true } }
+                                : { body: {} } });
+  p.sandbox.renderRemoteAccess({ enabled: false, remote_bind_address: "" });
+  const row = p.addressRow();
+  assert(row, "there is no bind-address control, so the only documented way to " +
+              "turn remote access on is still editing config.toml by hand — " +
+              "which creates no device secret and therefore does not work");
+  const box = row.querySelector(".remote-address-input");
+  assert(box, "the bind-address row has no input to type an address into");
+  assertEqual(box.value, "",
+              "the input does not show the address in force");
+  const save = row.querySelector(".remote-address-save");
+  assert(save, "the bind-address row has no way to submit what was typed");
+
+  box.value = "  100.78.142.124  ";
+  save.onclick();
+  assertEqual(p.fetches.length >= 1, true, "pressing Save sent no request at all");
+  assertEqual(p.fetches[0].url, "/api/save-setting",
+              "the address was posted somewhere other than the route that " +
+              "issues the device secret alongside it");
+  assertEqual(String(p.fetches[0].init.method).toUpperCase(), "POST",
+              "the address was not posted");
+  const sent = JSON.parse(p.fetches[0].init.body);
+  assertEqual(sent.key, "remote_bind_address",
+              "Save wrote some other setting");
+  // Trimmed here as well as server-side: `save_setting` strips before it
+  // validates, so an untrimmed value would be accepted and stored — but the
+  // input is also read back into this field, and showing the user surrounding
+  // whitespace they cannot see is how "why was this rejected" starts.
+  assertEqual(sent.value, "100.78.142.124",
+              "the typed address reached the server untrimmed");
+  await p.settle();
+
+  // And the field is seeded from the value in force when there is one, or the
+  // panel cannot be used to *change* an address, only to set a first one.
+  const on = loadPanel();
+  on.sandbox.renderRemoteAccess({
+    enabled: true, remote_bind_address: "fd00::1", url: "http://[fd00::1]:4915/acp",
+    secret_present: true, secret: "s", secret_path: "p" });
+  assertEqual(on.addressRow().querySelector(".remote-address-input").value,
+              "fd00::1",
+              "the input is blank while an address is in force, so saving it " +
+              "unchanged would silently turn remote access off");
+});
+
+check("a refused address shows the server's own reason and claims no success", async () => {
+  // `save_setting` names why: wildcard, loopback, hostname, zone id, bracketed,
+  // non-canonical, or `port = 0`. That sentence is the only thing telling the
+  // user what to type instead, and a generic "save failed" here reproduces
+  // exactly the silent failure this control exists to end.
+  const reason = "remote_bind_address must not be a wildcard address";
+  const p = loadPanel({ answer: (url) =>
+    url === "/api/save-setting" ? { body: { ok: false, error: reason } }
+                                : { body: {} } });
+  p.sandbox.renderRemoteAccess({ enabled: false, remote_bind_address: "" });
+  const row = p.addressRow();
+  row.querySelector(".remote-address-input").value = "0.0.0.0";
+  row.querySelector(".remote-address-save").onclick();
+  await p.settle();
+
+  const status = p.addressRow().querySelector(".remote-address-status");
+  assert(status, "a rejected save left nothing on screen at all");
+  assertEqual(status.textContent, reason,
+              "the panel replaced the server's stated reason with wording of " +
+              "its own, so the user is told a save failed but not why");
+  // A rejected save must not refresh — a refresh is how the panel says "this
+  // took", and here nothing was written.
+  assertEqual(p.fetches.filter((f) => f.url === "/api/remote-access").length, 0,
+              "a refused address still triggered the success refresh");
+  assertEqual(p.fetches.filter((f) => f.url === "/api/settings").length, 0,
+              "a refused address still triggered the success refresh");
+  // The button comes back, or one typo ends the session.
+  assertEqual(p.addressRow().querySelector(".remote-address-save").disabled, false,
+              "Save stayed disabled after a rejection, so the typo cannot be fixed");
+});
+
+check("a saved address puts the secret on screen and says it needs a restart", async () => {
+  // The whole point of "one step": after the save, the credential the user needs
+  // next is already visible, without closing and reopening anything. The save
+  // route creates the secret in the same request, so the refresh is what turns
+  // that into something the user can act on.
+  const p = loadPanel({ answer: (url) => {
+    if (url === "/api/save-setting") return { body: { ok: true, restart_required: true } };
+    if (url === "/api/remote-access") return { body: {
+      enabled: true, remote_bind_address: "100.78.142.124",
+      url: "http://100.78.142.124:4915/acp",
+      secret_present: true, secret: "fresh-secret", secret_path: "p" } };
+    if (url === "/api/settings") return { body: {
+      restart_to_apply: ["remote_bind_address"], remote_bind_address: "100.78.142.124" } };
+    return { body: {} };
+  } });
+  p.sandbox.renderRemoteAccess({ enabled: false, remote_bind_address: "" });
+  p.addressRow().querySelector(".remote-address-input").value = "100.78.142.124";
+  p.addressRow().querySelector(".remote-address-save").onclick();
+  await p.settle();
+
+  const values = p.fields().map((f) => f.querySelector(".remote-field-value").value);
+  assert(values.includes("fresh-secret"),
+         `the device secret the save just issued is not on screen: ${values.join("|")}`);
+  assert(values.includes("http://100.78.142.124:4915/acp"),
+         "the URL to open on the device is not on screen after enabling");
+  // The restart section below the divider re-reads the value in force, or it
+  // goes on reporting the previous one beside the key it exists to report.
+  const rows = p.rows();
+  assertEqual(rows.length, 1, "the restart-only list was not refreshed after the save");
+  assertEqual(rows[0].querySelector(".remote-restart-value").textContent,
+              "100.78.142.124",
+              "the restart list still shows the address that was replaced");
+
+  // Honest about *when*. `remote_bind_address` is read once at startup, so a
+  // message implying the surface is up would send the user to a phone that
+  // cannot connect.
+  const said = p.body.textContent;
+  assert(/next time it starts|restart/i.test(said),
+         `nothing says the address takes effect only on restart: ${said}`);
+  assert(!/now listening|is listening on 100\.78/i.test(said),
+         `the panel claims the surface is already up: ${said}`);
+  // The confirmation survives the refresh that produced the secret — writing it
+  // into the pre-refresh body would destroy it with the render.
+  assert(/Saved/.test(said), "the successful save left no confirmation on screen");
+});
+
+check("clearing the field says what it turns off and what it keeps", async () => {
+  // Two things a user acts on. Clearing turns remote access off at the next
+  // launch — and does *not* delete the secret, so devices already enrolled work
+  // again when it is turned back on. Neither is guessable from an empty field.
+  const p = loadPanel({ answer: (url) => {
+    if (url === "/api/save-setting") return { body: { ok: true, restart_required: true } };
+    if (url === "/api/remote-access") return { body: { enabled: false, remote_bind_address: "" } };
+    return { body: { restart_to_apply: [] } };
+  } });
+  p.sandbox.renderRemoteAccess({
+    enabled: true, remote_bind_address: "100.78.142.124",
+    url: "http://100.78.142.124:4915/acp",
+    secret_present: true, secret: "s", secret_path: "p" });
+
+  // The standing hint, present before anything is pressed: this is the text the
+  // user reads *while deciding* whether to clear the field.
+  const hint = p.addressRow().querySelector(".remote-address-hint");
+  assert(hint, "the bind-address control carries no explanation at all");
+  assert(/restart/i.test(hint.textContent),
+         `the hint does not say a restart is required: ${hint.textContent}`);
+  assert(/clear/i.test(hint.textContent) && /off|loopback/i.test(hint.textContent),
+         `the hint does not say that clearing the field turns remote access off: ${hint.textContent}`);
+  assert(/not delete the secret|does not delete/i.test(hint.textContent),
+         `the hint does not say that clearing keeps the device secret, so the ` +
+         `user cannot tell whether enrolled devices survive: ${hint.textContent}`);
+
+  p.addressRow().querySelector(".remote-address-input").value = "";
+  p.addressRow().querySelector(".remote-address-save").onclick();
+  assertEqual(JSON.parse(p.fetches[0].init.body).value, "",
+              "clearing the field posted something other than an empty address");
+  await p.settle();
+  const said = p.body.textContent;
+  assert(/off/i.test(said) && /next start|restart/i.test(said),
+         `nothing says remote access goes off at the next start: ${said}`);
+  assert(/secret is kept|keeps? working|already enrolled/i.test(said),
+         `nothing says the device secret survives, so re-enabling looks like ` +
+         `it would require re-enrolling every device: ${said}`);
 });
 
 check("the rotation warning names every device, above the button that revokes them", () => {

@@ -734,16 +734,136 @@ function _remoteNote(text, level) {
   return el;
 }
 
+// Carried across the refresh a successful save triggers. `renderRemoteAccess`
+// rebuilds the whole body from `/api/remote-access`, so a message written into
+// the old body would be destroyed by the very refresh that makes the URL and
+// the secret appear — and that refresh is the point of the control: enabling is
+// one step only if the credential the user now needs is on screen without
+// reopening anything.
+var _remoteAddressNotice = null;
+
+function _drainAddressNotice(body) {
+  if (!_remoteAddressNotice) return;
+  body.appendChild(_remoteNote(_remoteAddressNotice.text,
+                               _remoteAddressNotice.level));
+  _remoteAddressNotice = null;
+}
+
+// The control that turns remote access on, and the only one there has ever
+// been. Until now nothing exposed `remote_bind_address` anywhere and the
+// off-note below told the user to set it in config.toml by hand — which is
+// exactly the path that creates no device secret, so startup finds none,
+// declines to bind the remote socket, and leaves a log line as the only
+// evidence. That made enabling a two-restart procedure whose first half was the
+// half the UI recommended. `POST /api/save-setting` sets the address and issues
+// the secret in the same request (see `save_setting`, "so 'reachable' and
+// 'authenticable' cannot come apart"), so one save here is the whole of it.
+//
+// No `restart-badge` on this row, unlike the topbar's two live controls. The
+// badge is driven off `/api/settings`'s list by `markRestartInputs`, and this
+// row does not exist until `/api/remote-access` resolves — a race with
+// `loadRestartKeys` that would silently drop the badge on the first open. The
+// hint states the restart in prose instead, and the section below the divider
+// still carries the key's row driven off the server's own list.
+function _remoteAddressEditor(d) {
+  var row = document.createElement('div');
+  row.className = 'remote-field remote-address';
+  var head = document.createElement('div');
+  head.className = 'remote-field-label';
+  head.textContent = 'Bind address';
+  row.appendChild(head);
+  var line = document.createElement('div');
+  line.className = 'remote-field-line';
+  var box = document.createElement('input');
+  box.type = 'text';
+  box.className = 'remote-field-value remote-address-input';
+  box.value = d.remote_bind_address || '';
+  box.setAttribute('aria-label', 'Remote bind address');
+  box.setAttribute('placeholder',
+                   'NetBird address of this machine — blank for loopback only');
+  line.appendChild(box);
+  var save = document.createElement('button');
+  save.type = 'button';
+  // Not `.remote-copy`, though it sits in the same flex line: that class marks
+  // the Copy buttons the harness reaches for inside a value field, and reusing
+  // it here would put a Save button where a check looks for a Copy button.
+  save.className = 'btn-secondary remote-address-save';
+  save.textContent = 'Save';
+  line.appendChild(save);
+  row.appendChild(line);
+  var status = document.createElement('div');
+  status.className = 'remote-address-status remote-field-hint';
+  row.appendChild(status);
+  var hint = document.createElement('div');
+  hint.className = 'remote-field-hint remote-address-hint';
+  hint.textContent =
+    'Read once at startup, so saving here changes nothing until PowerAtlas is '
+    + 'restarted. Saving an address also creates the device secret if there is '
+    + 'none, so the surface is reachable and authenticable together. Clearing '
+    + 'the field turns remote access off at the next launch; it does not delete '
+    + 'the secret, so devices already enrolled keep working when it is turned '
+    + 'back on.';
+  row.appendChild(hint);
+  save.onclick = function () {
+    var value = box.value.trim();
+    save.disabled = true;
+    status.className = 'remote-address-status remote-field-hint';
+    status.textContent = 'Saving…';
+    fetch('/api/save-setting', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({key: 'remote_bind_address', value: value})
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      save.disabled = false;
+      if (!res.ok) {
+        // The server's own words, not a generic failure. `save_setting` names
+        // *why* an address was refused — wildcard, loopback, hostname, zone
+        // id, bracketed, non-canonical, or a `port` of 0 — and that sentence
+        // is the only thing on screen telling the user what to type instead.
+        // Swallowing it reproduces the silent failure this control exists to
+        // end.
+        status.className = 'remote-address-status remote-field-hint remote-note-warn';
+        status.textContent = res.error || 'Could not save the bind address.';
+        return;
+      }
+      _remoteAddressNotice = {
+        text: value
+          ? 'Saved. PowerAtlas will listen on ' + value + ' the next time it '
+            + 'starts — nothing is listening there yet. The device secret '
+            + 'below is what a device enters once, on first visit.'
+          : 'Saved. Remote access is off from the next start of PowerAtlas. '
+            + 'The device secret is kept, so devices already enrolled work '
+            + 'again if you turn it back on.',
+        level: null
+      };
+      // Both, because both are now stale: the panel above renders the URL and
+      // the secret this save may have just created, and the section below
+      // renders the value in force for every restart-only key.
+      loadRemoteAccess();
+      loadRestartKeys();
+    }).catch(function () {
+      save.disabled = false;
+      status.className = 'remote-address-status remote-field-hint remote-note-warn';
+      status.textContent = 'Could not save the bind address.';
+    });
+  };
+  return row;
+}
+
 function renderRemoteAccess(d) {
   var body = document.getElementById('remoteAccessBody');
   body.textContent = '';
   if (!d.enabled) {
     body.appendChild(_remoteNote(
-      'Remote access is off. PowerAtlas is listening on loopback only. Set '
-      + '`remote_bind_address` in config.toml to the NetBird address of this '
-      + 'machine and restart to turn it on.', 'off'));
+      'Remote access is off. PowerAtlas is listening on loopback only. Enter '
+      + 'the NetBird address of this machine below and save — that sets '
+      + 'the address and issues the device secret in one step — then '
+      + 'restart PowerAtlas to turn it on.', 'off'));
+    body.appendChild(_remoteAddressEditor(d));
+    _drainAddressNotice(body);
     return;
   }
+  body.appendChild(_remoteAddressEditor(d));
+  _drainAddressNotice(body);
   body.appendChild(_remoteField(
     'Open this on the device', d.url,
     'Enter the secret below once, on that device. It is stored as a cookie '
