@@ -8663,6 +8663,49 @@ def _notify(acp_mod, method, params):
     acp_mod._supervisor._on_notification({"method": method, "params": params})
 
 
+def _run_bounded(factory, seconds=15.0):
+    """``asyncio.run`` under a wall-clock bound enforced off the event loop.
+
+    The sweeper-loop regressions this bound exists for do not fail their tests,
+    they **hang** them, and a hung test is a stuck CI job rather than a red
+    build. Moving the loop's sleep after its work starves the event loop
+    outright — with no sessions the guard `continue`s without ever yielding —
+    and widening either `except Exception` to `BaseException` swallows the
+    `CancelledError` that is the only thing that ends the task. Both were
+    measured running past a 90 s cap with no verdict.
+
+    An `asyncio.wait_for` inside the coroutine bounds neither: the first never
+    lets a timer callback run at all, and the second is the very cancellation
+    being suppressed. So the bound lives on a separate OS thread, where nothing
+    the loop does can starve it. `pytest-timeout` is not a dependency of this
+    project and this does not merit adding one.
+
+    The thread is a daemon: if it really is wedged it cannot be joined, and
+    leaving it spinning behind a failed assertion is the lesser evil against a
+    suite that never returns.
+    """
+    box = {}
+
+    def target():
+        try:
+            box["value"] = asyncio.run(factory())
+        except BaseException as exc:      # re-raised on the calling thread
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, name="bounded-asyncio-run",
+                              daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        raise AssertionError(
+            f"the sweeper loop did not finish within {seconds:.0f}s — a "
+            "starved event loop or a swallowed CancelledError, which without "
+            "this bound reads as a stuck job rather than a failing test")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 class TestAcpActivityStamp:
     """``last_activity`` and ``last_used`` answer opposed questions.
 
@@ -8780,6 +8823,101 @@ class TestAcpActivityStamp:
         assert meta["last_used"] > 0.0
         meta["last_used"] = 0.0
         acp_mod._registry.detach(conn)
+        assert meta["last_used"] > 0.0
+
+    @staticmethod
+    def _prompt(acp_mod, sid, during):
+        """Run one ``prompt()`` with ``during`` standing in for the round-trip.
+
+        ``prompt`` is the only caller that stamps *both* ends of a turn, and
+        every other test in this file that reaches a prompt goes through
+        ``_handle_prompt`` with ``_request`` replaced wholesale — so the two
+        ``touch_used`` calls inside it were reachable by nothing. This drives
+        the supervisor method directly and hands the body of the turn to the
+        caller, which is where both stamps can be observed from.
+        """
+        async def answers(self, method, params, timeout=None):
+            return await during()
+
+        with patch.object(acp_mod._Supervisor, "_request", answers), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            return asyncio.run(acp_mod._supervisor.prompt(sid, "hello"))
+
+    def test_a_prompt_stamps_use_before_the_turn_starts(self, acp_store):
+        """The stamp the Change 1 table mandates: a prompt *is* use, counted
+        the moment it is sent rather than only when it comes back. Without it
+        a session sitting on a turn that has been running since before the TTL
+        is indistinguishable from one nobody has touched."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+        meta["last_used"] = 0.0
+        seen = {}
+
+        async def during():
+            seen["at_turn_start"] = meta["last_used"]
+            return {"stopReason": "end_turn"}
+
+        assert self._prompt(acp_mod, sid, during) == {"stopReason": "end_turn"}
+        assert seen["at_turn_start"] > 0.0
+
+    def test_a_long_turn_is_not_swept_the_instant_it_finishes(self, acp_store):
+        """The turn-*end* stamp, and the reason it exists. A turn may
+        legitimately run for longer than the idle TTL — that is the whole point
+        of replacing the wall-clock ceiling — and with only the turn-start
+        stamp the sweeper would reclaim the session on the first tick after the
+        answer arrived, destroying it in front of the person who came back to
+        read it."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+
+        async def during():
+            # A turn that outlasts the TTL: by the time it answers, the stamp
+            # taken when it was sent is already older than the sweeper's limit.
+            meta["last_used"] = (time.monotonic()
+                                 - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+            return {}
+
+        self._prompt(acp_mod, sid, during)
+        assert acp_mod._sweepable(sid, meta, time.monotonic()) is False
+        # Positive control. Put the record back the way deleting the turn-end
+        # stamp would leave it and the same session really is swept, so the
+        # assertion above is about the stamp rather than about some other
+        # condition quietly holding this session back.
+        meta["last_used"] = time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1
+        assert acp_mod._sweepable(sid, meta, time.monotonic()) is True
+
+    def test_agent_chatter_inside_a_turn_moves_activity_and_not_use(
+            self, acp_store):
+        """Both fields in motion at once, which is the only place the split
+        can actually be observed. The agent talking mid-turn is liveness — the
+        ceiling must see it — and it is not *use*: if it advanced `last_used`
+        a talkative agent could hold a session past the sweeper indefinitely
+        without a person ever touching it."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+        seen = {}
+
+        async def during():
+            # Zeroed *after* the turn-start stamp landed, so anything the agent
+            # says next has to move each field visibly or not at all.
+            meta["last_used"] = 0.0
+            meta["last_activity"] = 0.0
+            _notify(acp_mod, "session/update",
+                    {"sessionId": sid,
+                     "update": {"sessionUpdate": "agent_thought_chunk"}})
+            _notify(acp_mod, acp_mod.METADATA_METHOD,
+                    {"sessionId": sid, acp_mod.CONTEXT_PERCENT_KEY: 12.5})
+            seen["activity"] = meta["last_activity"]
+            seen["used"] = meta["last_used"]
+            return {}
+
+        self._prompt(acp_mod, sid, during)
+        assert seen["activity"] > 0.0
+        assert seen["used"] == 0.0
+        # And the turn ending is use again, whatever the agent did in between.
         assert meta["last_used"] > 0.0
 
 
@@ -9075,32 +9213,46 @@ class TestAcpIdleSweeper:
         assert sid in acp_mod._supervisor.sessions
 
     def test_a_session_closed_between_snapshot_and_sweep_is_skipped(
-            self, acp_fast):
+            self, acp_fast, caplog):
         """The tuple is snapshotted once but `close_session` awaits inside the
         loop, so a user close can pop session *n* before it is reached —
-        `close_session` would then raise and log a WARNING every pass."""
+        `close_session` would then raise and log a WARNING every pass.
+
+        The wire trace alone cannot see the missing re-check: without it
+        `close_session` is still *called* for the stolen session, raises
+        `AgentRejected` before writing anything, and `_sweep_once` swallows it,
+        so the bytes on the pipe are identical either way. What differs is the
+        call count and the WARNING — the recurring log line the condition
+        exists to prevent — so both are asserted here.
+        """
         acp_mod, _ = acp_fast
         first = _live_session(acp_mod, "sweep-a")
         second = _live_session(acp_mod, "sweep-b")
         self._idle(acp_mod, first)
         self._idle(acp_mod, second)
         written = []
+        attempted = []
         real_close = acp_mod._Supervisor.close_session
 
         async def close_and_steal(self, session_id):
+            attempted.append(session_id)
             # Releasing the first session takes the second one with it, the
             # way a user close landing mid-pass would.
             acp_mod._supervisor.sessions.pop(second, None)
             return await real_close(self, session_id)
 
-        with patch.object(acp_mod._Supervisor, "close_session",
-                          close_and_steal), \
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
+                patch.object(acp_mod._Supervisor, "close_session",
+                             close_and_steal), \
                 patch.object(acp_mod._Supervisor, "_write",
                              _sent(acp_mod, written)), \
                 patch.object(acp_mod._Supervisor, "alive", lambda self: True):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert [o["params"]["sessionId"] for o in written] == [first]
+        assert attempted == [first]
+        assert [r.getMessage() for r in caplog.records
+                if r.levelno >= logging.WARNING] == []
 
     def test_a_prompt_during_the_terminate_round_trip_is_refused(self, acp_fast):
         """The claim on `closing` is taken in the synchronous prefix. Without
@@ -9224,7 +9376,7 @@ class TestAcpIdleSweeper:
                     await task
                 return still_running
 
-        assert asyncio.run(run()) is True
+        assert _run_bounded(run) is True
         assert passes == []
 
     def test_a_tick_with_no_sessions_costs_nothing_and_still_yields(
@@ -9246,7 +9398,7 @@ class TestAcpIdleSweeper:
                 with pytest.raises(asyncio.CancelledError):
                     await task
 
-        asyncio.run(run())
+        _run_bounded(run)
         assert passes == []
 
     def test_a_pass_that_raises_does_not_kill_the_loop(self, acp_fast, caplog):
@@ -9269,7 +9421,7 @@ class TestAcpIdleSweeper:
                     await task
                 return still_running
 
-        assert asyncio.run(run()) is True
+        assert _run_bounded(run) is True
         assert len(calls) > 1
         assert any(r.levelno == logging.WARNING for r in caplog.records)
 
@@ -9302,7 +9454,7 @@ class TestAcpIdleSweeper:
                 acp_mod._supervisor._loop = None
                 acp_mod._supervisor._pending.clear()
 
-        assert asyncio.run(run()) < 1.0
+        assert _run_bounded(run) < 1.0
 
 
 class TestAcpConfiguredLimits:
@@ -9377,6 +9529,14 @@ class TestAcpLifespanWiring:
     """`web.py` owns the lifecycle hook; `acp.py` owns the policy."""
 
     def test_the_sweeper_is_started_and_awaited_before_the_teardown(self):
+        """`sweeper` must be a *member* of the gather, not merely cancelled.
+
+        A fake that finished on the first loop turn would read `done=True`
+        under ordinary scheduling whether or not the gather ever named it, so
+        this one suspends on its way out — once with wall clock and again with
+        a run of bare yields. Nothing short of the gather actually awaiting
+        this task gets it to "sweeper finished" before `shutdown()` runs.
+        """
         import types
         from power_atlas import web as web_mod
 
@@ -9388,6 +9548,12 @@ class TestAcpLifespanWiring:
                 await asyncio.sleep(30)
             except asyncio.CancelledError:
                 order.append("sweeper cancelled")
+                # Teardown work with real suspension points in it — the shape
+                # of a sweeper cancelled mid-`close_session`.
+                await asyncio.sleep(0.05)
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                order.append("sweeper finished")
                 raise
 
         def start_sweeper():
@@ -9413,7 +9579,7 @@ class TestAcpLifespanWiring:
             asyncio.run(run())
 
         assert order == ["sweeper started", "serving", "sweeper cancelled",
-                         "shutdown, sweeper done=True"]
+                         "sweeper finished", "shutdown, sweeper done=True"]
 
     def test_an_acp_import_failure_still_yields_a_running_app(self):
         """`web.py` degrades an ACP import failure to "/acp disabled". An

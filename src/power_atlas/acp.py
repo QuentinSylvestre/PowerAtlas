@@ -356,8 +356,15 @@ _INACTIVITY = object()
 # this, comes to ~5.2 s worst case. The sweeper adds nothing measurable to it:
 # `lifespan` cancels it and gathers it *before* calling `shutdown()`, and a
 # cancelled task raises out of whichever `await` it was parked on immediately —
-# including one inside `close_session`, which is why the sweeper must not
-# `asyncio.shield` its close. Typical is ~0.3-0.5 s, because a killed
+# including one inside `close_session`. That last part holds with or without a
+# shield, so "a shielded close would hold teardown" is *not* why the sweeper
+# must not `asyncio.shield` its close: cancelling the awaiter of
+# `await asyncio.shield(x)` cancels the shield's own outer future and raises
+# `CancelledError` there at once (measured at ~0.1 ms), leaving only the inner
+# coroutine running. The inner coroutine is the reason. Shielded, it survives
+# as an orphan task with nothing left to await it, running a terminate
+# round-trip against an agent `shutdown()` is killing in the same breath, on a
+# loop that is about to close. Typical is ~0.3-0.5 s, because a killed
 # tree is gone long before the ceiling. The overrun is benign for exactly one
 # reason: `os._exit(0)` closes the job handle on the way out and the OS kills
 # whatever the fast path had not finished killing — which is why a spawn that
@@ -413,10 +420,23 @@ _IN_USE_MARKER = "active in another process"
 # which is this module's own format rather than the agent's.
 _OPAQUE_REFUSAL_MARKER = "(code -32603)"
 
-# The lock's own timestamp, to second resolution. `datetime.fromisoformat`
-# cannot read the value kiro-cli writes: it is RFC 3339 with *nanoseconds*
-# ("2026-06-01T21:19:24.509198600Z") and fromisoformat accepts 3 or 6 fraction
-# digits, not 9. Seconds are ample against LOCK_START_SKEW_SECONDS.
+# The lock's own timestamp, to second resolution — a prefix match feeding a
+# fixed `strptime` rather than `datetime.fromisoformat`.
+#
+# Not because fromisoformat cannot read the value. It can: kiro-cli writes RFC
+# 3339 with *nanoseconds* ("2026-06-01T21:19:24.509198600Z") and on this
+# project's interpreter (3.13.13, checked directly) fromisoformat parses that
+# string, truncating the fraction to microseconds. The three-or-six-digit
+# restriction was lifted in an earlier release than the one that runs here.
+#
+# The reason is that this file belongs to another program. It is written by
+# kiro-cli into kiro-cli's own store, its format is not ours to depend on, and
+# a whole-string parser answers any change in the tail — a different offset
+# spelling, a suffix, a trailing space — with `ValueError`, which becomes
+# `None`, which `_lock_holder` reads as "no identifiable holder" and lets a
+# genuinely held session through the pre-flight. Matching only as far as the
+# seconds field makes everything after it irrelevant. Seconds are ample against
+# LOCK_START_SKEW_SECONDS, so the precision the prefix discards costs nothing.
 _LOCK_TIME_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)")
 
 # `cwd` as it appears in a session's stored metadata, with JSON's own escaping
@@ -1664,6 +1684,19 @@ class _Supervisor:
                 # future already carries — typically the typed `AgentDied`
                 # `_detach` set on it — is what surfaces, rather than a timeout
                 # this loop invented.
+                #
+                # That final `await fut` is unbounded, and what bounds it is an
+                # invariant held elsewhere: **no path pops a session record out
+                # from under a turn in flight without first resolving that
+                # turn's pending future.** `inflight` is what enforces it —
+                # `_handle_close` refuses a session with `turn_in_progress` and
+                # the sweeper's condition 4 skips one, so neither can reach
+                # `close_session` while this loop is running. The one popper
+                # that can is `_detach`, and it sets `AgentDied` on every
+                # pending future *before* clearing `sessions`. Add a route that
+                # drops the record without settling the future and this line
+                # hangs forever, holding `inflight` — and therefore the
+                # session's close and its sweep — with it.
                 break
             last = meta.get("last_activity")
             if last is not None:
@@ -3070,10 +3103,17 @@ async def _sweep_once() -> None:
             idle = now - meta.get("last_used", now)
             log.info("ACP sweeper: releasing session %s, idle %.0fs",
                      session_id, idle)
-            # Deliberately not shielded. A shielded close would hold shutdown
-            # for up to REQUEST_TIMEOUT_SECONDS against `__main__.py`'s 5 s
-            # server-thread join; a cancelled one raises out of its await at
-            # once, which is what makes the teardown budget hold.
+            # Deliberately not shielded — and not because a shield would hold
+            # this task. It would not: cancelling the sweeper cancels the
+            # shield's *outer* future and `CancelledError` raises here at once
+            # (~0.1 ms measured), so the teardown budget is met either way.
+            # What a shield would actually buy is an orphan. The inner
+            # `close_session` would keep running with nothing awaiting it,
+            # issuing a terminate round-trip against an agent that
+            # `acp.shutdown()` is killing in the same breath, on a loop that is
+            # about to close — a stray task racing the job-object kill and
+            # logging into a torn-down world. Letting the cancel reach the
+            # close is what keeps teardown to one sequence.
             await _supervisor.close_session(session_id)
         except Exception:
             # WARNING and carry on, never a dead task: if a kiro-cli build
