@@ -533,11 +533,17 @@
       return;
     }
     if (type === 'session_closed') {
+      // These clears are repeated by the terminal `close_in_progress` arm
+      // below rather than shared through a helper: tests/test_web.py pins them
+      // as literal text *inside this branch*, so hoisting them silently breaks
+      // that test. Change one arm, change the other.
       sessionId = null;
       setTurn(false);
       setContext(null);
       setPending(false);
       sidEl.textContent = '';
+      // The transcript stays: the user pressed Close on a conversation they
+      // were just reading, and it is still worth reading afterwards.
       addMessage('note', payload.message + ' The conversation itself is still '
         + "in the agent's own store, so it can be reopened from the "
         + 'PowerAtlas dashboard.');
@@ -570,6 +576,37 @@
       // Re-asserting the turn state the page already holds costs nothing and
       // repaints both buttons from it.
       setTurn(turnActive);
+      if (payload.code === 'close_in_progress' && sessionId &&
+          frame.sessionId === sessionId) {
+        // Terminal here or never. A socket refused this was never added to the
+        // registry's subscribers, so the broadcast that follows the close never
+        // reaches it and no `session_closed` is coming to do these clears. A
+        // page that reconnected into the close window would otherwise sit on a
+        // transcript whose session no longer exists, with ?sid= still in the
+        // URL ready to re-adopt it on the next reload. The id guard is the
+        // point of the condition: a refusal naming some other session must not
+        // wipe this one.
+        setLoading(null);
+        // Same clears as `session_closed`, deliberately duplicated — see the
+        // note there.
+        sessionId = null;
+        setTurn(false);
+        setContext(null);
+        setPending(false);
+        sidEl.textContent = '';
+        history.replaceState(null, '', location.pathname);
+        // Unlike `session_closed`, the transcript goes too. Nothing arrived to
+        // put it there on this connection — it is whatever survived the drop,
+        // and there is now nothing behind it.
+        clearTranscript();
+        addMessage('note', payload.message + ' Everything on screen belonged '
+          + 'to that session, so the transcript went with it; the conversation '
+          + "is still in the agent's own store and can be reopened from the "
+          + 'PowerAtlas dashboard.');
+        if (!replaying) restorePendingPrompt(payload.code);
+        logLine('error', '← error [close_in_progress] ' + payload.message);
+        return;
+      }
       if (payload.code === 'unknown_session' && sessionId &&
           frame.sessionId === sessionId && !loadTried['s:' + sessionId]) {
         // This server does not hold the session, so there is nothing to replay

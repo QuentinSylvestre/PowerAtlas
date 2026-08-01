@@ -12,7 +12,7 @@
 // only assertions on any of it were `str in src` substring checks from Python —
 // which pin the *text* of a line, not what it does. The two High findings from
 // the Phase 4 review and four Mediums from Phase 5 live entirely in this file;
-// 5 of the 15 checks below fail against `e8cb4df`, the commit those fixes
+// 5 of the checks below fail against `e8cb4df`, the commit those fixes
 // landed on top of, which is what makes them evidence rather than assertion.
 //
 // The template is rendered here rather than read raw: the script under test is
@@ -443,6 +443,44 @@ check("session_closed clears the session id out of the URL", (tpl) => {
   assertEqual(page.urls[page.urls.length - 1], "/acp",
               "the ?sid= survived the close, so a reload re-adopts the session and " +
               "spends again the memory the Close press existed to free");
+});
+
+check("a close_in_progress for the held session empties the page", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  page.deliver({
+    type: "chunk", sessionId: live,
+    payload: { role: "agent", text: "an answer from before the sweep" },
+  });
+  // Negative control first: a refusal naming a different session is somebody
+  // else's close and must leave this page exactly as it was.
+  page.deliver({
+    type: "error", sessionId: "sess-someone-else",
+    payload: { code: "close_in_progress", message: "This session is being released." },
+  });
+  assert(page.transcript().includes("an answer from before the sweep"),
+         "a close_in_progress naming another session wiped this one's transcript");
+  assertEqual(page.urls[page.urls.length - 1], `/acp?sid=${encodeURIComponent(live)}`,
+              "a close_in_progress naming another session stripped this one's ?sid=");
+
+  page.deliver({
+    type: "error", sessionId: live,
+    payload: { code: "close_in_progress",
+               message: "This session is being released. Wait a moment and load it again." },
+  });
+  assert(!page.transcript().includes("an answer from before the sweep"),
+         "the transcript survived a terminal close_in_progress: the session it " +
+         "belongs to is being swept and this socket was never subscribed, so no " +
+         "session_closed is coming and the stale content stays on screen forever");
+  assert(page.transcript().includes("This session is being released"),
+         "the page emptied without saying why");
+  assertEqual(page.el("acpSid").textContent, "",
+              "the header still names a session the server has released");
+  assertEqual(page.urls[page.urls.length - 1], "/acp",
+              "?sid= survived, so a reload re-adopts a session that is gone");
+  page.click("acpReconnect");
+  page.open();
+  assertEqual(page.sentOf("subscribe").length, 0,
+              "the page still held the id and resubscribed to the released session");
 });
 
 check("Send with no session sends nothing and keeps the text", (tpl) => {
