@@ -3048,6 +3048,23 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
 # -- the idle sweeper ------------------------------------------------------
 
 
+# session id -> consecutive failed close attempts. Exists so a session the
+# agent will never release logs one traceback rather than one a minute for the
+# application's lifetime: measured against kiro-cli with
+# ``_kiro.dev/session/terminate`` removed, one stuck session failed 23 times in
+# 120 s at a 5 s interval, each with a full traceback, into a log this path does
+# not rotate.
+#
+# **Bounded by construction, and it has to be**: replacing unbounded log growth
+# with unbounded memory growth would be no fix at all. `_sweep_once` drops every
+# key that is no longer a live session before it does anything else, so the dict
+# can only ever hold ids drawn from `_supervisor.sessions` — at most
+# MAX_SESSIONS (<= 16) entries. That covers every way a session leaves without
+# its close ever succeeding: swept by another path, closed by a user, or dropped
+# wholesale by `_detach` when the agent dies.
+_sweep_failures: dict[str, int] = {}
+
+
 def _sweepable(session_id: str, meta: dict, now: float) -> bool:
     """Whether one session may be reclaimed on this tick.
 
@@ -3102,6 +3119,12 @@ async def _sweep_once() -> None:
     Recorded here so the sweeper's claim is not read as more than it is.
     """
     now = time.monotonic()
+    # Forget the failure counts of sessions that are no longer here, whatever
+    # took them — this is what keeps `_sweep_failures` bounded by the live
+    # session count rather than growing for the application's lifetime.
+    for gone in tuple(_sweep_failures):
+        if gone not in _supervisor.sessions:
+            del _sweep_failures[gone]
     # `close_session` mutates `sessions`, and a live iterator over a dict that
     # changes size raises RuntimeError.
     for session_id, meta in tuple(_supervisor.sessions.items()):
@@ -3130,12 +3153,29 @@ async def _sweep_once() -> None:
             # logging into a torn-down world. Letting the cancel reach the
             # close is what keeps teardown to one sequence.
             await _supervisor.close_session(session_id)
+            # This session is released; nothing is owed to the next failure.
+            _sweep_failures.pop(session_id, None)
         except Exception:
             # WARNING and carry on, never a dead task: if a kiro-cli build
             # drops the private terminate method, the sweeper degrades to
             # memory growth rather than taking itself out on the first tick.
-            log.warning("ACP sweeper: releasing session %s failed",
-                        session_id, exc_info=True)
+            #
+            # The traceback is worth its size exactly once per session. A
+            # session that cannot be released fails again on every tick, and at
+            # SWEEP_INTERVAL_SECONDS that is one multi-line traceback a minute,
+            # per stuck session, forever. So: the whole thing the first time,
+            # and one countable line after it, which is what a reader needs to
+            # tell "still stuck" from "stuck again for a new reason".
+            failures = _sweep_failures[session_id] = (
+                _sweep_failures.get(session_id, 0) + 1)
+            if failures == 1:
+                log.warning("ACP sweeper: releasing session %s failed",
+                            session_id, exc_info=True)
+            else:
+                log.warning(
+                    "ACP sweeper: releasing session %s failed again "
+                    "(%d consecutive; traceback logged on the first)",
+                    session_id, failures)
             continue
         finally:
             _supervisor.closing.discard(session_id)
@@ -3197,10 +3237,14 @@ def apply_config(config) -> None:
     is what keeps every existing reader — and every test that patches
     ``acp.MAX_SESSIONS`` — working unchanged.
 
-    Out-of-range values are clamped and logged rather than raised on: this runs
-    inside startup, and refusing to boot over a hand-edited number would trade
-    a wrong session cap for no application at all. The write path is where a
-    bad value is refused by name.
+    An out-of-range value is **logged and ignored, not clamped**: the value
+    already in force is kept, so `acp_idle_ttl_seconds = 10` leaves the TTL at
+    1800.0 rather than snapping it to the 300 bound. Retaining beats snapping
+    because a hand-edited number is as likely to be a typo as an intent, and
+    the working value is the one the application was known to run with.
+    Neither is raised on: this runs inside startup, and refusing to boot over a
+    hand-edited number would trade a wrong session cap for no application at
+    all. The write path is where a bad value is refused by name.
     """
     global MAX_SESSIONS, ACP_IDLE_TTL_SECONDS, PROMPT_SILENCE_SECONDS
     MAX_SESSIONS = _clamped(config, "acp_max_sessions", MAX_SESSIONS, 1, 16)

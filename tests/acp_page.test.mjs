@@ -462,6 +462,13 @@ check("a close_in_progress for the held session empties the page", (tpl) => {
   assertEqual(page.urls[page.urls.length - 1], `/acp?sid=${encodeURIComponent(live)}`,
               "a close_in_progress naming another session stripped this one's ?sid=");
 
+  // The socket drops and the page reconnects into the close window. The
+  // resubscribe is refused, so this socket is in nobody's subscriber set — the
+  // path where the refusal really is terminal.
+  page.click("acpReconnect");
+  page.open();
+  assertEqual(page.sentOf("subscribe")[0]?.sessionId, live,
+              "the reconnect did not resubscribe, so there is nothing to refuse");
   page.deliver({
     type: "error", sessionId: live,
     payload: { code: "close_in_progress",
@@ -481,6 +488,45 @@ check("a close_in_progress for the held session empties the page", (tpl) => {
   page.open();
   assertEqual(page.sentOf("subscribe").length, 0,
               "the page still held the id and resubscribed to the released session");
+});
+
+check("a close_in_progress on a subscribed socket leaves the transcript alone", (tpl) => {
+  // The other two emitters of this code — a prompt refused mid-close, and a
+  // second Close — answer a socket that *is* in the session's subscribers, so
+  // the close's own `session_closed` is still coming. That frame deliberately
+  // keeps the transcript, and clearing it here would take the conversation off
+  // screen a beat before the frame that exists to preserve it.
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  page.deliver({
+    type: "chunk", sessionId: live,
+    payload: { role: "agent", text: "an answer the user is still reading" },
+  });
+  page.type("a prompt that will be refused");
+  page.click("acpSend");
+  page.deliver({
+    type: "error", sessionId: live,
+    payload: { code: "close_in_progress",
+               message: "This session is being closed. Create a new one to carry on." },
+  });
+  assert(page.transcript().includes("an answer the user is still reading"),
+         "a close_in_progress on a subscribed socket wiped the transcript that " +
+         "the session_closed still to come deliberately keeps");
+  assert(page.transcript().includes("This session is being closed"),
+         "the refusal was not explained in the transcript");
+  // The rest of the clears are right on both paths: the session is going away.
+  assertEqual(page.el("acpSid").textContent, "",
+              "the header still names a session the server has released");
+  assertEqual(page.urls[page.urls.length - 1], "/acp",
+              "?sid= survived, so a reload re-adopts a session that is gone");
+  assertEqual(page.el("acpPrompt").value, "a prompt that will be refused",
+              "the refused prompt was not put back in the textarea");
+
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "This session was closed." },
+  });
+  assert(page.transcript().includes("an answer the user is still reading"),
+         "session_closed dropped the transcript it exists to keep");
 });
 
 check("Send with no session sends nothing and keeps the text", (tpl) => {

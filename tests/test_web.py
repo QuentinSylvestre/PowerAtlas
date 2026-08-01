@@ -3102,6 +3102,11 @@ def acp_store(tmp_path, monkeypatch):
         # their "a load is in flight" branch on a session that does not exist,
         # which reads as the code under test silently doing nothing.
         acp_mod._registry.loading.clear()
+        # The sweeper's per-session failure counts are keyed by session id, and
+        # these tests reuse ids: a count left behind would make the next test's
+        # first failure log the short "failed again" line instead of the
+        # traceback it asserts.
+        acp_mod._sweep_failures.clear()
 
 
 def _acp_conn(acp_mod):
@@ -9398,6 +9403,88 @@ class TestAcpIdleSweeper:
         # be permanently unpromptable as well as unswept.
         assert first not in acp_mod._supervisor.closing
         assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def _always_refuse(self, acp_mod):
+        async def refuse(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("Method not found (code -32601)")
+        return refuse
+
+    def _failing_sweeps(self, acp_mod, sid, passes, caplog):
+        """Run `passes` sweeps against a session whose terminate always fails."""
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
+                patch.object(acp_mod._Supervisor, "_request",
+                             self._always_refuse(acp_mod)), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            self._idle(acp_mod, sid)
+            for _ in range(passes):
+                _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+        return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_a_stuck_session_logs_one_traceback_not_one_a_minute(
+            self, acp_fast, caplog):
+        """Measured against kiro-cli with `_kiro.dev/session/terminate`
+        removed: one session failed 23 times in 120 s at a 5 s interval, each
+        with a full traceback. At the shipped 60 s interval that is one
+        multi-line traceback a minute, per stuck session, for the application's
+        lifetime, into a log with no rotation on this path. The failure still
+        has to be visible on every tick — it is just not worth a stack trace
+        after the first, and the count is what tells "still stuck" apart from
+        "stuck again"."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod, "sweep-stuck")
+        records = self._failing_sweeps(acp_mod, sid, 3, caplog)
+
+        assert len(records) == 3
+        assert [r.exc_info is not None for r in records] == [True, False, False]
+        assert "2 consecutive" in records[1].getMessage()
+        assert "3 consecutive" in records[2].getMessage()
+        assert sid in records[1].getMessage()
+        # Still there and still promptable, which is the degradation the
+        # WARNING path exists to keep.
+        assert sid in acp_mod._supervisor.sessions
+        assert sid not in acp_mod._supervisor.closing
+
+    def test_a_session_that_closes_forgets_its_earlier_failures(
+            self, acp_fast, caplog):
+        """The counter is per session and consecutive: a close that finally
+        succeeds means the next failure is a new fault and deserves its
+        traceback. Reachable because a session id outlives a close —
+        `session/load` re-registers the same id from the agent's own store."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod, "sweep-recovers")
+        self._failing_sweeps(acp_mod, sid, 2, caplog)
+        assert acp_mod._sweep_failures[sid] == 2
+
+        written = []
+        self._sweep(acp_mod, written)
+        assert sid not in acp_mod._supervisor.sessions
+        assert sid not in acp_mod._sweep_failures
+
+        # The same id comes back — a load of the session from the agent's store
+        # — and fails to close again. A stale count would swallow the traceback.
+        caplog.clear()
+        _live_session(acp_mod, sid)
+        records = self._failing_sweeps(acp_mod, sid, 1, caplog)
+        assert len(records) == 1
+        assert records[0].exc_info is not None
+
+    def test_the_failure_counts_cannot_outlive_the_sessions(self, acp_fast,
+                                                            caplog):
+        """The trap in the fix: a per-session counter that is never pruned
+        trades unbounded log growth for unbounded memory growth. A session can
+        leave `sessions` without its close ever succeeding — swept by another
+        path, closed by a user, or dropped by `_detach` when the agent dies."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod, "sweep-vanishes")
+        self._failing_sweeps(acp_mod, sid, 1, caplog)
+        assert sid in acp_mod._sweep_failures
+
+        # Gone by some other path, with its close still never having succeeded.
+        acp_mod._supervisor.sessions.pop(sid, None)
+        acp_mod._supervisor.sessions["sweep-other"] = (
+            acp_mod._new_session_record(r"C:\scratch"))
+        self._sweep(acp_mod, [])
+        assert acp_mod._sweep_failures == {}
 
     def test_the_loop_sleeps_before_it_works(self, acp_fast):
         """A `continue` placed before the sleep never yields, and this task

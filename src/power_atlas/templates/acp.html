@@ -108,6 +108,13 @@
   // The message body consecutive agent chunks are appended to. Null between
   // turns, so the next chunk opens a new bubble instead of extending the old.
   var agentBody = null;
+  // Whether *this* connection has been answered with a `session` frame, which
+  // is the only thing the server sends when it adds a socket to a session's
+  // subscribers. It is the page's read on whether a `session_closed` is coming:
+  // a subscribed socket is in the fan-out and will be told, an unsubscribed one
+  // never will. Reset by connect(), because a socket that dropped took its
+  // subscription with it and the new one holds nothing until it is answered.
+  var subscribed = false;
   // True while a `history` frame is being fed back through handle(). The
   // frames in it are real and render normally; what would be wrong is
   // narrating a replay into the transport log as if it were live traffic.
@@ -512,6 +519,9 @@
       setLoading(null);
       loadFailed = false;
       sessionId = payload.sessionId;
+      // This socket is now in the session's subscribers, so every frame the
+      // session broadcasts — `session_closed` included — will reach it.
+      subscribed = true;
       clearTranscript();
       // The server's answer, not an inference from whatever survived in the
       // buffer. A turn longer than the buffer replays without its start
@@ -578,14 +588,19 @@
       setTurn(turnActive);
       if (payload.code === 'close_in_progress' && sessionId &&
           frame.sessionId === sessionId) {
-        // Terminal here or never. A socket refused this was never added to the
-        // registry's subscribers, so the broadcast that follows the close never
-        // reaches it and no `session_closed` is coming to do these clears. A
-        // page that reconnected into the close window would otherwise sit on a
-        // transcript whose session no longer exists, with ?sid= still in the
-        // URL ready to re-adopt it on the next reload. The id guard is the
-        // point of the condition: a refusal naming some other session must not
-        // wipe this one.
+        // The session named here is being released, so the page must stop
+        // holding it either way. The id guard is the point of the condition: a
+        // refusal naming some other session must not wipe this one.
+        //
+        // `subscribed` is what separates the two ways this frame arrives. A
+        // refused `subscribe` or `load` was never added to the registry's
+        // subscribers, so the broadcast that follows the close never reaches
+        // it and **no `session_closed` is coming** — this arm is the only one
+        // that will ever run, and a page that reconnected into the close
+        // window would otherwise sit on a transcript whose session no longer
+        // exists, with ?sid= still in the URL ready to re-adopt it on the next
+        // reload. A refused `prompt`, or a second `close`, is the opposite
+        // case: that socket *is* subscribed and a `session_closed` will follow.
         setLoading(null);
         // Same clears as `session_closed`, deliberately duplicated — see the
         // note there.
@@ -595,14 +610,24 @@
         setPending(false);
         sidEl.textContent = '';
         history.replaceState(null, '', location.pathname);
-        // Unlike `session_closed`, the transcript goes too. Nothing arrived to
-        // put it there on this connection — it is whatever survived the drop,
-        // and there is now nothing behind it.
-        clearTranscript();
-        addMessage('note', payload.message + ' Everything on screen belonged '
-          + 'to that session, so the transcript went with it; the conversation '
-          + "is still in the agent's own store and can be reopened from the "
-          + 'PowerAtlas dashboard.');
+        if (subscribed) {
+          // `session_closed` keeps the transcript on purpose — the user was
+          // reading that conversation a moment ago and it is still worth
+          // reading — so clearing it here would take it away a beat before the
+          // frame that deliberately preserves it.
+          addMessage('note', payload.message + ' The conversation itself is '
+            + "still in the agent's own store, so it can be reopened from the "
+            + 'PowerAtlas dashboard.');
+        } else {
+          // Nothing arrived to put this transcript here on this connection —
+          // it is whatever survived the drop, and there is now nothing behind
+          // it and nothing coming to say so.
+          clearTranscript();
+          addMessage('note', payload.message + ' Everything on screen belonged '
+            + 'to that session, so the transcript went with it; the conversation '
+            + "is still in the agent's own store and can be reopened from the "
+            + 'PowerAtlas dashboard.');
+        }
         if (!replaying) restorePendingPrompt(payload.code);
         logLine('error', '← error [close_in_progress] ' + payload.message);
         return;
@@ -679,6 +704,8 @@
     reconnectBtn.hidden = true;
     reloadBtn.hidden = true;
     opened = false;
+    // A new socket subscribes to nothing until the server answers it.
+    subscribed = false;
     loadTried = Object.create(null);
     loadingSid = null;
     loadFailed = false;
