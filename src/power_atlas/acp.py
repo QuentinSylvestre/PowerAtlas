@@ -54,6 +54,7 @@ deadlocks the child once ~64 KB accumulates in it.
 
 import asyncio
 import collections
+import contextlib
 import itertools
 import json
 import logging
@@ -248,31 +249,103 @@ DRAIN_TIMEOUT_SECONDS = 2.0
 KIRO_BINARY = "kiro-cli"
 ACP_ARGS = ("acp", "-a")
 
-# ACP protocol version, confirmed against kiro-cli 2.14.1 on this machine:
-# `initialize` answers `{"protocolVersion": 1, ...}` in ~1.1 s.
+# ACP protocol version. Re-confirmed against kiro-cli 2.16.0 on 2026-08-01
+# (it was first measured on 2.14.1): `initialize` still answers
+# `{"protocolVersion": 1, ...}`, and `agentInfo.version` is where the build
+# number comes from.
 PROTOCOL_VERSION = 1
 
-# Each live session costs exactly five processes and ~254 MB of MCP servers —
-# the model is ``~2 + 5N`` processes and ``~283 + 254N`` MB, and it lives in
-# ``plans/ROADMAP.md``. Nothing in this prototype sweeps idle sessions. Three is
-# about as much as a developer machine should carry while a browser and an IDE
-# are also running.
-MAX_SESSIONS = 3
+# How many sessions one agent may hold at once.
+#
+# **A module-level rebindable name on purpose.** `apply_config` rewrites it at
+# startup from `Config.acp_max_sessions`; `at_capacity()` and
+# `_session_limit_message()` read it at call time, so the rebind reaches both
+# without either of them touching the disk. Moving it onto `_Supervisor` would
+# read better and break every test site that patches `acp.MAX_SESSIONS`.
+#
+# The default moved 3 -> 8 once the idle sweeper existed to reclaim what an
+# unattended session holds. Re-measured 2026-08-01 against kiro-cli 2.16.0
+# rather than carried forward: the earlier ``~254 MB`` per session was a
+# two-session reading of a build two versions back. See
+# ``plans/260731_ACP_REMOTE_CLIENT_PRODUCTIZATION.md`` for the eight-session
+# measurement this default rests on; ``plans/ROADMAP.md`` holds the cost model.
+MAX_SESSIONS = 8
+
+# How long a session may sit unused before the sweeper releases it, and how
+# often the sweeper looks. "Unused" is `last_used` — prompts and subscriber
+# attach/detach — deliberately *not* `last_activity`, which any agent
+# notification advances. See `_stamp_activity` for why the two cannot share a
+# field. Both are rebound by `apply_config`/rebindable by tests.
+ACP_IDLE_TTL_SECONDS = 1800.0
+SWEEP_INTERVAL_SECONDS = 60.0
 
 # Wall-clock ceilings on JSON-RPC requests. Every pending future carries one:
 # an agent that has stopped answering is otherwise indistinguishable from one
-# that is merely slow, and `session/new` is genuinely slow — ~5.4 s for the
-# first session of a process, spawn included, and ~2.5 s for each one after
-# (``plans/ROADMAP.md``), so the ceiling has to be far above both.
+# that is merely slow, and `session/new` used to be genuinely slow — ~5.4 s for
+# the first session of a process and ~2.5 s for each one after, on 2.14.x. On
+# 2.16.0, measured across eight consecutive sessions on one agent, it is 1.1 s
+# for the first and ~0.5 s thereafter. The ceiling stays where it is: it is
+# sized for the pathological case, and a build that regresses this is exactly
+# what it is for.
 INITIALIZE_TIMEOUT_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 90.0
 
-# A prompt is the one request whose duration is the model's, not the channel's.
-# The measured trivial turn took ~24 s end to end, and a turn that runs tools
-# under `-a` is minutes rather than seconds — so the ordinary ceiling would
-# abandon working turns. Ten minutes still bounds it, which is the point: a
-# request with no ceiling makes a dead agent indistinguishable from a slow one.
-PROMPT_TIMEOUT_SECONDS = 600.0
+# A prompt is the one request whose duration is the model's, not the channel's,
+# and it is the one request bounded by **silence** rather than by wall clock.
+#
+# The wall-clock ceiling this replaces (600 s) answered the wrong question. A
+# turn running tools under `-a` is legitimately minutes to hours, so the bound
+# abandoned working turns; and because `_request` popped the future and raised
+# without sending any cancellation, the agent carried on working while
+# `_handle_prompt`'s finally cleared `inflight` — the session read idle while
+# actively running. What the ceiling exists for is detecting an agent that has
+# *stopped*, and silence is what that actually looks like.
+#
+# `PROMPT_TICK_SECONDS` is how often the wait wakes to re-read the deadline, so
+# worst-case cancel latency is `silence + tick`. `PROMPT_SILENCE_SECONDS` is
+# the window with no notification of any kind that condemns a turn.
+PROMPT_TICK_SECONDS = 15.0
+PROMPT_SILENCE_SECONDS = 900.0
+
+# The safety property the wall clock used to provide, kept deliberately.
+#
+# Without it a turn emitting one chunk just under the silence window runs
+# forever — and `inflight` makes that session simultaneously un-closable
+# (`_handle_close` refuses `turn_in_progress`) and un-sweepable (sweep
+# condition 3), so its memory and its processes are unreclaimable for the
+# app's lifetime with no operator path short of a restart. "Long turns" means
+# generous, not unbounded.
+PROMPT_ABSOLUTE_MAX_SECONDS = 14400.0
+
+# How long the ceiling waits, after writing `session/cancel`, for the
+# outstanding `session/prompt` to answer before giving up on it.
+#
+# Sized against a measurement rather than a worst case. On kiro-cli 2.16.0 the
+# cancel is honoured at the protocol layer and the prompt answers
+# `{"stopReason":"cancelled"}` **9 ms** later, as a *matched* response on the
+# pending future — so `_on_response`'s "late or unmatched" drop is not on this
+# route at all and the window `inflight` guards is ~9 ms, not open-ended. Three
+# seconds is ~330x the measured latency: ample margin for a loaded machine or a
+# slower future build, and short enough that a wedged agent does not hold the
+# turn boundary the page reads. It was 30 s when the hazard was assumed rather
+# than measured.
+#
+# What this grace does **not** buy is the tool's OS children. Measured
+# 2026-08-01: neither `session/cancel` nor `_kiro.dev/session/terminate` kills
+# them — a `pwsh.exe`/`PING.EXE` pair survived both, and only the Windows job
+# object closing at process exit reaped them. See `_await_inactivity`.
+CANCEL_GRACE_SECONDS = 3.0
+
+# What the prompt path passes in `timeout` to ask for the inactivity ceiling
+# instead of a wall-clock one.
+#
+# A sentinel in the existing slot rather than a new parameter, and the reason is
+# the test suite rather than taste: ~19 fixed-signature `_request` stubs would
+# raise `TypeError` the moment the signature grew a parameter, and they are
+# replacing the very function whose new behaviour is under test. `_request`
+# branches on it with `is` *before* its try block, because the wall-clock arm
+# formats `{timeout:.0f}` into its message and a sentinel would blow up there.
+_INACTIVITY = object()
 
 # How long the tree-kill fast path waits for the tree to actually go, so that
 # teardown has a post-condition rather than only an intent.
@@ -280,7 +353,11 @@ PROMPT_TIMEOUT_SECONDS = 600.0
 # It is *not* bounded inside `__main__.py`'s 5 s server-thread join, and the
 # arithmetic says so: uvicorn's 0.1 s shutdown poll, plus the fixed 0.1 s sleep
 # in `Server.shutdown`, plus up to DRAIN_TIMEOUT_SECONDS of socket drain, plus
-# this, comes to ~5.2 s worst case. Typical is ~0.3-0.5 s, because a killed
+# this, comes to ~5.2 s worst case. The sweeper adds nothing measurable to it:
+# `lifespan` cancels it and gathers it *before* calling `shutdown()`, and a
+# cancelled task raises out of whichever `await` it was parked on immediately —
+# including one inside `close_session`, which is why the sweeper must not
+# `asyncio.shield` its close. Typical is ~0.3-0.5 s, because a killed
 # tree is gone long before the ceiling. The overrun is benign for exactly one
 # reason: `os._exit(0)` closes the job handle on the way out and the OS kills
 # whatever the fast path had not finished killing — which is why a spawn that
@@ -828,6 +905,8 @@ class _Registry:
         self.detach(conn)
         conn.session_id = session_id
         self.subscribers.setdefault(session_id, set()).add(conn)
+        # A tab opening on a session is a person using it.
+        _supervisor.touch_used(session_id)
 
     def detach(self, conn: _Connection) -> None:
         sid = conn.session_id
@@ -840,6 +919,11 @@ class _Registry:
         peers.discard(conn)
         if not peers:
             del self.subscribers[sid]
+        # And a tab *closing* is what starts the idle clock. Stamping on the
+        # way out is what makes the TTL mean "unattended for this long" rather
+        # than "attached this long ago": a session watched for an hour and then
+        # abandoned would otherwise be swept on the very next tick.
+        _supervisor.touch_used(sid)
 
     def broadcast(self, session_id: str, frame: dict) -> None:
         """Queue a frame on every socket attached to a session."""
@@ -1063,16 +1147,42 @@ def _session_limit_message() -> str:
     asserts this text is *true*, only that it names a remedy, so it is worth
     re-reading whenever the set of controls changes.
     """
-    return (f"At most {MAX_SESSIONS} sessions at once (~254 MB each). Close "
+    return (f"At most {MAX_SESSIONS} sessions at once (~178 MB each). Close "
             "one from its tab to free a slot; restarting PowerAtlas releases "
-            "them all.")
+            "them all. Sessions left idle are reclaimed on their own.")
+
+
+def _new_session_record(cwd: str) -> dict:
+    """The metadata a session carries from the moment it is registered.
+
+    Both timestamps are written **at construction**, in both constructors, and
+    that is not tidiness. The sweeper reads ``last_used`` on every tick, and a
+    session created but never prompted — the ``_handle_new`` "socket went away"
+    case, which also has no subscriber — would otherwise be missing the key
+    entirely and be the first thing the sweeper touched.
+
+    ``created`` is wall-clock and only ever rendered. ``last_used`` and
+    ``last_activity`` are monotonic and only ever subtracted. Two clocks in one
+    record, stated here rather than left to be rediscovered.
+    """
+    now = time.monotonic()
+    return {
+        "cwd": cwd,
+        "created": time.time(),
+        "last_used": now,
+        "last_activity": now,
+    }
 
 
 class _Supervisor:
     """The single ``kiro-cli acp`` process, and the JSON-RPC channel to it.
 
     Lazily spawned on the first session request — never at import and never at
-    startup, so a PowerAtlas launch that never opens ``/acp`` pays nothing.
+    startup, so a PowerAtlas launch that never opens ``/acp`` pays nothing. The
+    idle sweeper amends that by exactly one wakeup a minute: `_sweep_loop`
+    starts with the application, but its first act after each sleep is to
+    return on an empty `sessions` dict, so no agent is spawned and no work is
+    done for a session that does not exist.
 
     Threading shape: the event loop owns ``_pending``, ``sessions`` and the
     spawn path; one dedicated OS thread owns the blocking read of ``stdout`` and
@@ -1474,7 +1584,12 @@ class _Supervisor:
 
     async def _request(self, method: str, params: dict,
                        timeout: float = REQUEST_TIMEOUT_SECONDS):
-        """Send a request and await its result. Always bounded."""
+        """Send a request and await its result. Always bounded.
+
+        ``timeout`` carries either a number of seconds or the ``_INACTIVITY``
+        sentinel, which asks for the silence-based ceiling instead. The
+        signature is unchanged on purpose — see ``_INACTIVITY``.
+        """
         loop = self._loop
         if loop is None:
             raise AgentDied("The agent channel is not open.")
@@ -1484,14 +1599,99 @@ class _Supervisor:
         self._pending[request_id] = fut
         payload = {"jsonrpc": "2.0", "id": request_id,
                    "method": method, "params": params}
+        # Read with `is` and read *here*, above the try: the wall-clock arm
+        # below formats `{timeout:.0f}` into its message, which a sentinel
+        # cannot survive.
+        inactivity = timeout is _INACTIVITY
         try:
             await asyncio.to_thread(self._write, payload)
-            return await asyncio.wait_for(fut, timeout)
-        except asyncio.TimeoutError:
-            raise AgentTimeout(
-                f"The agent did not answer '{method}' within {timeout:.0f}s.")
+            if inactivity:
+                return await self._await_inactivity(
+                    fut, method, params.get("sessionId"))
+            try:
+                return await asyncio.wait_for(fut, timeout)
+            except asyncio.TimeoutError:
+                raise AgentTimeout(
+                    f"The agent did not answer '{method}' within "
+                    f"{timeout:.0f}s.")
         finally:
             self._pending.pop(request_id, None)
+
+    async def _await_inactivity(self, fut: asyncio.Future, method: str,
+                                session_id):
+        """Await a request bounded by agent *silence* rather than wall clock.
+
+        Three properties are load-bearing and none of them is obvious.
+
+        **The future is shielded on every pass.** ``asyncio.wait_for`` cancels
+        the future it is given when its timeout expires, so handing it the bare
+        pending future would destroy it on the first tick and the real answer
+        would arrive to a future nobody holds — dropped by ``_on_response`` as
+        "late or unmatched". ``shield`` detaches its callback when the outer
+        wait is cancelled, so the callbacks do not accumulate across a
+        four-hour turn either.
+
+        **The deadline is seeded locally at send time, not read from
+        ``last_activity``.** A session idle for twenty minutes with a tab
+        attached is unswept but already "silent" by the shared stamp, so
+        seeding from it would kill that session's next prompt on the first tick
+        before the agent had any chance to answer.
+
+        **There is a hard stop as well.** See ``PROMPT_ABSOLUTE_MAX_SECONDS``.
+
+        On expiry the turn is cancelled agent-side rather than merely
+        abandoned. What that does and does not achieve is measured, not
+        assumed: on kiro-cli 2.16.0 the ACP turn really does end (the
+        outstanding prompt answers ``cancelled`` in ~9 ms), and the tool's OS
+        children really do not die — a shell the agent started keeps running,
+        invisible to ``inflight``, to the sweeper and to the per-session memory
+        figure, until PowerAtlas exits and its job object takes the whole tree.
+        That orphan is a recorded residual of this design, not an oversight.
+        """
+        started = time.monotonic()
+        deadline = started + PROMPT_SILENCE_SECONDS
+        hard_stop = started + PROMPT_ABSOLUTE_MAX_SECONDS
+        while True:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(fut), PROMPT_TICK_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            meta = self.sessions.get(session_id)
+            if meta is None:
+                # Closed under us, or `_detach` cleared the whole dict when the
+                # agent died. Fall through to a bare `await` so whatever the
+                # future already carries — typically the typed `AgentDied`
+                # `_detach` set on it — is what surfaces, rather than a timeout
+                # this loop invented.
+                break
+            last = meta.get("last_activity")
+            if last is not None:
+                deadline = max(deadline, last + PROMPT_SILENCE_SECONDS)
+            now = time.monotonic()
+            if now <= deadline and now <= hard_stop:
+                continue
+            capped = now > hard_stop
+            log.warning(
+                "ACP %s: cancelling session=%s after %.0fs (%s); the agent's "
+                "own tool processes are NOT reaped by this",
+                method, session_id, now - started,
+                "absolute ceiling" if capped else "silence")
+            await self._notify("session/cancel", {"sessionId": session_id})
+            # Bounded grace. An honoured cancel lands its final frame inside
+            # it, and `_handle_prompt` then releases `inflight` behind a turn
+            # that has really ended — without it, prompt #2 can interleave with
+            # turn #1 in one transcript with no turn id to separate them.
+            with contextlib.suppress(asyncio.TimeoutError):
+                return await asyncio.wait_for(
+                    asyncio.shield(fut), CANCEL_GRACE_SECONDS)
+            raise AgentTimeout(
+                f"The agent went silent for {PROMPT_SILENCE_SECONDS:.0f}s "
+                f"during '{method}'; the turn was cancelled."
+                if not capped else
+                f"'{method}' ran past the {PROMPT_ABSOLUTE_MAX_SECONDS:.0f}s "
+                "ceiling and was cancelled.")
+        return await fut
 
     async def _notify(self, method: str, params: dict) -> None:
         """Send a JSON-RPC notification: no id, so no answer is possible.
@@ -1666,12 +1866,71 @@ class _Supervisor:
             log.warning("ACP: could not deliver the refusal of '%s' (id=%r): %s",
                         method, request_id, exc)
 
+    def _stamp_activity(self, session_id) -> None:
+        """Record that the agent has just said *something* about a session.
+
+        Keyed on **"does this notification carry a session id"**, not on a
+        method allowlist, and stamped above the branch dispatch rather than
+        inside it. Both readings were measured against kiro-cli 2.16.0 rather
+        than chosen:
+
+        * ``_kiro.dev/session/update`` exists as a method *distinct* from
+          ``session/update``, carries a ``sessionId`` and a
+          ``tool_call_chunk``, and falls through this function's dispatch
+          entirely. It is genuine agent liveness. A method allowlist naming
+          ``session/update`` and ``METADATA_METHOD`` would miss it.
+        * At least six ``sessionUpdate`` kinds exist and only three have
+          branches here, so a turn emitting nothing but ``agent_thought_chunk``
+          or ``plan`` for the silence window would be judged silent and
+          cancelled — a working turn killed by its own ceiling.
+        * ``_kiro.dev/subagent/list_update`` carries **no** ``sessionId`` at
+          all, which is why the null path below is a real case rather than
+          defensive padding.
+
+        This advances ``last_activity`` and deliberately **not** ``last_used``.
+        They answer opposed questions — "is the agent still working?" versus
+        "has nobody used this session?" — and sharing one field would let a
+        chatty agent keep its own sessions permanently unsweepable, defeating
+        the sweeper with no error anywhere.
+
+        ``time.monotonic`` and not ``time.time``: both readers compare elapsed
+        intervals and must not be moved by a clock adjustment. That does put
+        two clocks in one record — ``created`` is wall-clock and is only ever
+        rendered, never subtracted.
+        """
+        if not isinstance(session_id, str):
+            return
+        meta = self.sessions.get(session_id)
+        if meta is None:
+            # Closed, or detached when the agent died. Never recreate the
+            # record: `at_capacity()` would count the resurrected entry against
+            # MAX_SESSIONS forever and the sweeper would re-issue terminate for
+            # it every tick. `record()` and `_note_context()` model the idiom.
+            return
+        meta["last_activity"] = time.monotonic()
+
+    def touch_used(self, session_id) -> None:
+        """Record that a *person* used this session. Resets the sweeper clock.
+
+        Advanced by a prompt and by a subscriber attaching or detaching —
+        never by an agent notification, for the reason ``_stamp_activity``
+        gives. Same non-resurrecting write, same monotonic clock.
+        """
+        if not isinstance(session_id, str):
+            return
+        meta = self.sessions.get(session_id)
+        if meta is None:
+            return
+        meta["last_used"] = time.monotonic()
+
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
         params = msg.get("params") or {}
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
+        # Above every branch below, including the fall-through at the end.
+        self._stamp_activity(session_id)
         if method == METADATA_METHOD:
             percent = _context_percent(params)
             if percent is not None and isinstance(session_id, str):
@@ -1792,10 +2051,7 @@ class _Supervisor:
                 raise AgentRejected(
                     "The agent returned an unusable sessionId: "
                     f"{session_id!r:.200}")
-            self.sessions[session_id] = {
-                "cwd": cwd,
-                "created": time.time(),
-            }
+            self.sessions[session_id] = _new_session_record(cwd)
             self.history[session_id] = _History()
         finally:
             # Every path releases the slot, including cancellation: the session
@@ -1843,10 +2099,7 @@ class _Supervisor:
                 # instead left the loser an error frame it could not act on.
                 live = self.sessions[session_id]
                 return {"sessionId": session_id, "cwd": live.get("cwd", cwd)}
-            self.sessions[session_id] = {
-                "cwd": cwd,
-                "created": time.time(),
-            }
+            self.sessions[session_id] = _new_session_record(cwd)
             self.history[session_id] = _History()
             # Recorded, so the slot it reserved is now counted by `sessions`.
             # Released without suspending in between, which is what makes the
@@ -1888,12 +2141,23 @@ class _Supervisor:
             raise AgentRejected("That session no longer exists on this agent.")
         if not self.alive():
             raise AgentDied("The agent is not running.")
-        result = await self._request(
-            "session/prompt",
-            {"sessionId": session_id,
-             "prompt": [{"type": "text", "text": text}]},
-            timeout=PROMPT_TIMEOUT_SECONDS,
-        )
+        # Both ends of the turn count as use. The start is obvious; the end
+        # matters because a turn can legitimately outlast the idle TTL, and
+        # stamping only at the start would have the sweeper reclaim a session
+        # the instant a long task finished — before the person who left it
+        # running could come back to read the answer. Neither stamp is
+        # agent-driven: they fire once per prompt a person sent, so no amount
+        # of agent chatter can push them.
+        self.touch_used(session_id)
+        try:
+            result = await self._request(
+                "session/prompt",
+                {"sessionId": session_id,
+                 "prompt": [{"type": "text", "text": text}]},
+                timeout=_INACTIVITY,
+            )
+        finally:
+            self.touch_used(session_id)
         return result or {}
 
     async def cancel(self, session_id: str) -> None:
@@ -2347,6 +2611,25 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
         # guard then stopped it retrying.
         _defer_until_loaded(conn, session_id)
         return
+    if session_id in _supervisor.closing:
+        # A release is in flight. `close_session` leaves the session in
+        # `sessions` for the whole terminate round-trip, so without this the
+        # branch below would hand this socket a live-looking session and a full
+        # replay, and the close would then tell it `session_closed` a moment
+        # later — a load that appears to work and immediately unwinds.
+        #
+        # Unreachable before the sweeper existed and reachable now: a close
+        # used to require a subscribed socket pressing Close, and that socket
+        # is by definition not the one arriving here. The sweeper closes
+        # sessions nobody is watching, which is precisely the state a `load`
+        # addresses. Same code and same wording as `_handle_prompt`'s guard.
+        conn.send(error_frame(
+            "close_in_progress",
+            "This session is being released. Wait a moment and load it "
+            "again.", session_id))
+        log.warning("ACP load refused: [close_in_progress] session=%s",
+                    session_id)
+        return
     if session_id in _supervisor.sessions:
         # Already live here, so the buffer is the better answer: a second
         # agent-side replay would append the whole conversation to itself.
@@ -2447,9 +2730,10 @@ async def _handle_new(conn: _Connection, payload: dict) -> None:
         log.warning("ACP session/new refused: [%s] at the session cap",
                     SessionLimit.code)
         return
-    # `session/new` takes ~5.4 s for the first session of a process and ~2.5 s
-    # after (``plans/ROADMAP.md``). Without this the page looks broken for the
-    # whole of it.
+    # `session/new` takes ~1.1 s for the first session of a process and ~0.5 s
+    # after on kiro-cli 2.16.0 (it was 5.4 s / 2.5 s on 2.14.x). Faster than it
+    # was, still not instant, and a spawn on a cold machine is unbounded —
+    # without this the page looks broken for the whole of it.
     conn.send(envelope("meta", {"pending": "new"}))
     try:
         # Off the loop. Both halves of `_resolve_session_cwd` block on the
@@ -2531,8 +2815,8 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # race. A close claims `closing` before its first await and leaves the
         # session in `sessions` until the agent answers, so a prompt arriving
         # in that window starts a turn on a session that is being released:
-        # the `session/prompt` future then sits in `_pending` for the whole of
-        # PROMPT_TIMEOUT_SECONDS — the exact cost the close guard exists to
+        # the `session/prompt` future then sits in `_pending` until the
+        # inactivity ceiling gives up on it — the exact cost the close guard exists to
         # prevent — while `close_session` discards its `inflight` marker and
         # the close drops the ring buffer and detaches every watcher. The
         # surviving turn's chunks and tool calls then reach neither the page
@@ -2676,8 +2960,10 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
         return
     if session_id in _supervisor.inflight:
         # Closing under a live turn would leave the `session/prompt` future
-        # waiting on a session the agent no longer has, for the whole of
-        # PROMPT_TIMEOUT_SECONDS.
+        # waiting on a session the agent no longer has until the inactivity
+        # ceiling expires — up to PROMPT_SILENCE_SECONDS plus one tick, and up
+        # to PROMPT_ABSOLUTE_MAX_SECONDS if the agent keeps talking about a
+        # session it no longer holds.
         refuse("turn_in_progress",
                "This session is still answering. Stop the turn first, then "
                "close it.")
@@ -2709,3 +2995,187 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
     for target in tuple(_registry.subscribers.get(session_id, ())):
         target.send(frame)
         _registry.detach(target)
+
+
+# -- the idle sweeper ------------------------------------------------------
+
+
+def _sweepable(session_id: str, meta: dict, now: float) -> bool:
+    """Whether one session may be reclaimed on this tick.
+
+    Six conditions, and each one is a separate way this has already gone wrong
+    in review:
+
+    1. **Still registered.** The iteration snapshots ``sessions`` once but
+       awaits inside the loop, so by the time session *n* is reached a user
+       close may have popped it — and ``close_session`` would then raise
+       ``AgentRejected`` and log a WARNING on every pass.
+    2. **Idle past the TTL**, measured on ``last_used``.
+    3. **No attached subscriber.** A tab watching a session means leave it
+       alone whatever its age.
+    4. **No turn in flight.**
+    5. **No close in flight.**
+    6. **No load in flight.** The one the original four missed: a session
+       mid-``session/load`` is registered before its round-trip and has zero
+       subscribers *by construction*, so it satisfied every other condition and
+       would have been terminated mid-load — after which the load's own failure
+       path pops an already-removed session and ``_deliver_load`` replays a
+       dead one to the sockets parked on it.
+    """
+    if session_id not in _supervisor.sessions:
+        return False
+    last_used = meta.get("last_used")
+    if last_used is None or now - last_used <= ACP_IDLE_TTL_SECONDS:
+        return False
+    if _registry.subscribers.get(session_id):
+        return False
+    if session_id in _supervisor.inflight:
+        return False
+    if session_id in _supervisor.closing:
+        return False
+    if session_id in _registry.loading:
+        return False
+    return True
+
+
+async def _sweep_once() -> None:
+    """One pass over the live sessions. Reclaims what nobody is using.
+
+    What sweeping actually recovers is measured, and it is less than the word
+    implies: ``_kiro.dev/session/terminate`` frees the session's own MCP
+    processes (3 processes / ~141-178 MB on kiro-cli 2.16.0) and removes its
+    ``.lock`` within ~0.3 s, and it leaves the ``.json`` and ``.jsonl``
+    transcripts intact so the session stays resumable by ``session/load``. It
+    does **not** kill a tool subprocess the agent left running — measured
+    2026-08-01, a ``pwsh.exe``/``PING.EXE`` pair outlived terminate by the whole
+    observation window. Such an orphan can only arise after a turn ended or was
+    cancelled, since condition 4 keeps a session with a live turn off this path
+    entirely, and it is reaped when PowerAtlas exits and its job object closes.
+    Recorded here so the sweeper's claim is not read as more than it is.
+    """
+    now = time.monotonic()
+    # `close_session` mutates `sessions`, and a live iterator over a dict that
+    # changes size raises RuntimeError.
+    for session_id, meta in tuple(_supervisor.sessions.items()):
+        if not _sweepable(session_id, meta, now):
+            continue
+        # Claimed in the synchronous prefix, before the first await, exactly as
+        # `_handle_close` does. Without it `close_session` leaves the session
+        # in `sessions` and out of `closing` for the whole terminate
+        # round-trip, so a prompt arriving in that window passes every guard
+        # and starts a turn on a session being released — the window
+        # `_handle_prompt`'s `close_in_progress` refusal exists to close.
+        _supervisor.closing.add(session_id)
+        try:
+            idle = now - meta.get("last_used", now)
+            log.info("ACP sweeper: releasing session %s, idle %.0fs",
+                     session_id, idle)
+            # Deliberately not shielded. A shielded close would hold shutdown
+            # for up to REQUEST_TIMEOUT_SECONDS against `__main__.py`'s 5 s
+            # server-thread join; a cancelled one raises out of its await at
+            # once, which is what makes the teardown budget hold.
+            await _supervisor.close_session(session_id)
+        except Exception:
+            # WARNING and carry on, never a dead task: if a kiro-cli build
+            # drops the private terminate method, the sweeper degrades to
+            # memory growth rather than taking itself out on the first tick.
+            log.warning("ACP sweeper: releasing session %s failed",
+                        session_id, exc_info=True)
+            continue
+        finally:
+            _supervisor.closing.discard(session_id)
+        # `_handle_close`'s notification half, reproduced rather than shared:
+        # its `not_subscribed` guard protects a real case ("a socket not
+        # watching a session has no business releasing what another tab
+        # holds") and the sweeper has no socket, so relaxing that guard to
+        # reach this code would weaken a check for a caller that never needed
+        # it. Condition 3 means this loop is normally empty; it is not
+        # unreachable, because `_handle_subscribe` can attach during the
+        # terminate round-trip above.
+        frame = _session_closed_frame(session_id)
+        for target in tuple(_registry.subscribers.get(session_id, ())):
+            target.send(frame)
+            _registry.detach(target)
+
+
+async def _sweep_loop() -> None:
+    """Run ``_sweep_once`` forever. Cancelled by ``lifespan`` at shutdown.
+
+    **Sleeps first, always.** A `continue` placed before the sleep never
+    yields, and this task runs on the same loop as every websocket and every
+    dashboard render — a tight loop here takes the whole application with it.
+    The zero-session guard therefore sits *after* the sleep, which is what
+    keeps `_Supervisor`'s "a launch that never opens /acp pays nothing"
+    promise true in substance: the task exists, and it costs one wakeup a
+    minute and nothing else.
+    """
+    while True:
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        if not _supervisor.sessions:
+            continue
+        try:
+            await _sweep_once()
+        except Exception:
+            # `CancelledError` is a BaseException since 3.8 and is deliberately
+            # not caught here: swallowing it would hold teardown for as long as
+            # the pass took.
+            log.warning("ACP sweeper: pass failed", exc_info=True)
+
+
+def start_sweeper() -> asyncio.Task:
+    """Start the idle sweeper. Called from ``web.py``'s ``lifespan``.
+
+    ACP owns the policy; `web.py` owns only the lifecycle hook, the same split
+    `shutdown()` already uses. It cannot live in `shutdown()` on the other
+    side, because that function is synchronous and cannot await a task
+    cancellation.
+    """
+    return asyncio.create_task(_sweep_loop())
+
+
+def apply_config(config) -> None:
+    """Rebind this module's tunables from configuration. **Startup only.**
+
+    Called once from ``__main__`` with the ``Config`` that was already loaded
+    there, so no route ever pays for a TOML parse to answer `at_capacity()`.
+    Rebinding module-level names rather than storing them on ``_Supervisor``
+    is what keeps every existing reader — and every test that patches
+    ``acp.MAX_SESSIONS`` — working unchanged.
+
+    Out-of-range values are clamped and logged rather than raised on: this runs
+    inside startup, and refusing to boot over a hand-edited number would trade
+    a wrong session cap for no application at all. The write path is where a
+    bad value is refused by name.
+    """
+    global MAX_SESSIONS, ACP_IDLE_TTL_SECONDS, PROMPT_SILENCE_SECONDS
+    MAX_SESSIONS = _clamped(config, "acp_max_sessions", MAX_SESSIONS, 1, 16)
+    ACP_IDLE_TTL_SECONDS = float(_clamped(
+        config, "acp_idle_ttl_seconds", ACP_IDLE_TTL_SECONDS, 300, 86400))
+    PROMPT_SILENCE_SECONDS = float(_clamped(
+        config, "acp_prompt_silence_seconds", PROMPT_SILENCE_SECONDS,
+        60, 7200))
+    log.info("ACP config applied: max_sessions=%d idle_ttl=%.0fs "
+             "prompt_silence=%.0fs", MAX_SESSIONS, ACP_IDLE_TTL_SECONDS,
+             PROMPT_SILENCE_SECONDS)
+
+
+def _clamped(config, name: str, fallback, low: int, high: int):
+    """One configured integer, or the value already in force if it is unusable.
+
+    Returns ``fallback`` unchanged rather than coercing it, so a caller that
+    rebound the name to something finer than an integer — the test suite does,
+    to avoid burning 900 s of wall clock on one branch — is not quietly
+    truncated to zero by a rejected config value.
+    """
+    value = getattr(config, name, None)
+    if isinstance(value, bool) or not isinstance(value, int):
+        # `isinstance(True, int)` is True in Python, and `acp_max_sessions =
+        # true` in a hand-edited TOML would otherwise become a cap of 1.
+        log.warning("ACP config: %s is not an integer (%r); keeping %r",
+                    name, value, fallback)
+        return fallback
+    if not (low <= value <= high):
+        log.error("ACP config: %s=%d is outside %d-%d; keeping %r",
+                  name, value, low, high, fallback)
+        return fallback
+    return value

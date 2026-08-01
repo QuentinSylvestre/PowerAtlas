@@ -497,20 +497,32 @@ log = logging.getLogger("power_atlas.web")
 @asynccontextmanager
 async def lifespan(app_instance):
     task = asyncio.create_task(_background_refresh())
+    # Guarded exactly as the teardown below is. An `acp` import failure is
+    # designed to degrade to "/acp disabled" (see the import at the top of this
+    # module); an unguarded start here would promote it to "the application
+    # will not start".
+    sweeper = acp.start_sweeper() if acp is not None else None
     try:
         yield
     finally:
         task.cancel()
+        if sweeper is not None:
+            sweeper.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            # One gather for both, with `return_exceptions=True`, and inside
+            # this block rather than as two bare awaits. That is what makes the
+            # nested teardown below unconditional: `gather` in this mode cannot
+            # propagate whatever either task raised on its way out, so there is
+            # no exception here that could skip `acp.shutdown()`.
+            await asyncio.gather(
+                *(t for t in (task, sweeper) if t is not None),
+                return_exceptions=True)
         finally:
             # Nested, so that the ACP teardown is not conditional on how the
-            # await above ends. The `except` arm catches only `CancelledError`;
-            # anything else the refresh task raises on its way out would
-            # otherwise propagate from here and skip the teardown entirely,
-            # which is the one thing on this path that must always run.
+            # gather above ends — and both tasks are cancelled *and* awaited
+            # before it runs, because `acp.shutdown()` is synchronous and a
+            # sweeper still parked inside `close_session` when the agent is
+            # killed would be a close racing its own teardown.
             #
             # ACP teardown is the *fast* path only. The Windows job object that
             # `acp` assigns the agent to is what actually guarantees no orphans:

@@ -2053,10 +2053,12 @@ def acp_session():
         acp_mod._supervisor.sessions.pop(sid, None)
         acp_mod._supervisor.history.pop(sid, None)
         acp_mod._supervisor.inflight.discard(sid)
+        acp_mod._supervisor.closing.discard(sid)
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
         acp_mod._registry.connections.clear()
         acp_mod._registry.subscribers.clear()
+        acp_mod._registry.loading.clear()
 
 
 class TestAcpServerTypeGuard:
@@ -2652,10 +2654,15 @@ class TestAcpPromptDispatch:
                 patch.object(acp_mod._Supervisor, "alive", lambda self: True):
             asyncio.run(acp_mod._handle_prompt(conn_a, sid, {"prompt": "ping"}))
 
+        # The third element is the `_INACTIVITY` sentinel, not a number: the
+        # prompt path is the one request bounded by agent silence rather than
+        # by wall clock, and it asks for that through the existing `timeout`
+        # slot so `_request`'s signature — and the ~19 fixed-signature stubs
+        # in this file that replace it — stay valid.
         assert calls == [("session/prompt",
                           {"sessionId": sid,
                            "prompt": [{"type": "text", "text": "ping"}]},
-                          acp_mod.PROMPT_TIMEOUT_SECONDS)]
+                          acp_mod._INACTIVITY)]
         expected = [
             ("chunk", {"role": "user", "text": "ping"}),
             ("meta", {"turn": "start"}),
@@ -3084,11 +3091,17 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.sessions.clear()
         acp_mod._supervisor.history.clear()
         acp_mod._supervisor.inflight.clear()
+        acp_mod._supervisor.closing.clear()
         acp_mod._supervisor._reserved = 0
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
         acp_mod._registry.connections.clear()
         acp_mod._registry.subscribers.clear()
+        # `loading` was leaking between tests: a session left in it makes the
+        # next test's `_handle_close`, `_handle_load` and now the sweeper take
+        # their "a load is in flight" branch on a session that does not exist,
+        # which reads as the code under test silently doing nothing.
+        acp_mod._registry.loading.clear()
 
 
 def _acp_conn(acp_mod):
@@ -3720,11 +3733,19 @@ class TestAcpLoadSlotAccounting:
     its record never overlap. ``load_session`` must record first, and holding
     the reservation as well counted the loading session twice: reproduced with
     one pre-existing session, where a concurrent ``new`` was refused
-    ``too_many_sessions`` while only two existed. MAX_SESSIONS is 3.
+    ``too_many_sessions`` while only two existed.
+
+    The cap is pinned to 3 inside these tests rather than read from the module.
+    It was 3 when they were written and is 8 now, and it is configurable from
+    this release on — so the arithmetic they check ("one pre-existing session
+    plus one loading plus one new fills exactly three slots") has to name its
+    own number instead of tracking a default that moves.
     """
 
-    def test_an_in_flight_load_takes_one_slot_not_two(self, acp_store):
+    def test_an_in_flight_load_takes_one_slot_not_two(self, acp_store,
+                                                      monkeypatch):
         acp_mod, store = acp_store
+        monkeypatch.setattr(acp_mod, "MAX_SESSIONS", 3)
         sid = "load-slot-001"
         _stored_session(store, sid)
         acp_mod._supervisor.sessions["already-live"] = {"cwd": ""}
@@ -4023,11 +4044,13 @@ class TestAcpSessionCapMessage:
         text = payload["message"].lower()
         assert "close" in text
         # The figure this message quotes, pinned to the measurement rather than
-        # to whatever it said last. It has been wrong in both directions before,
-        # and ~306 MB — the round-2 model — was ~20% high: three concurrent
-        # sessions measured 17 processes / 1045.5 MB against a 283 MB one-agent
-        # baseline, and one close dropped 5 processes and 253.4 MB, twice.
-        assert "254 mb" in text, payload["message"]
+        # to whatever it said last. Re-measured 2026-08-01 against kiro-cli
+        # 2.16.0 at the cap that now ships: eight sessions on one agent cost 26
+        # processes and 1501.2 MB against a 2-process / 78.8 MB bare-agent
+        # baseline — 3.0 processes and 177.8 MB marginal per session. The older
+        # ~254 MB was a two-session reading of 2.14.x and is ~40% high.
+        assert "178 mb" in text, payload["message"]
+        assert "254" not in text, payload["message"]
         assert "306" not in text, payload["message"]
         # The two claims this message has actually shipped falsely, pinned by
         # their own words. A generic "mentions closing" assertion passes on
@@ -4481,7 +4504,9 @@ class TestAcpSessionClose:
 
     def test_close_during_a_turn_is_refused(self, acp_session):
         """The outstanding `session/prompt` would sit on a session the agent no
-        longer has for the whole of PROMPT_TIMEOUT_SECONDS."""
+        longer has until the inactivity ceiling gives up on it — up to
+        PROMPT_SILENCE_SECONDS plus a tick, and up to
+        PROMPT_ABSOLUTE_MAX_SECONDS if the agent keeps talking."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor.inflight.add(sid)
@@ -5030,7 +5055,8 @@ class TestAcpSessionRecordHoldsNoDeadState:
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", verbose):
             asyncio.run(acp_mod._supervisor.new_session(str(store)))
-        assert set(acp_mod._supervisor.sessions["records-0001"]) == {"cwd", "created"}
+        assert set(acp_mod._supervisor.sessions["records-0001"]) == {
+            "cwd", "created", "last_used", "last_activity"}
 
     def test_a_loaded_session_records_only_what_is_read(self, acp_store):
         acp_mod, store = acp_store
@@ -5041,7 +5067,8 @@ class TestAcpSessionRecordHoldsNoDeadState:
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", answers):
             asyncio.run(acp_mod._supervisor.load_session("records-0002", str(store)))
-        assert set(acp_mod._supervisor.sessions["records-0002"]) == {"cwd", "created"}
+        assert set(acp_mod._supervisor.sessions["records-0002"]) == {
+            "cwd", "created", "last_used", "last_activity"}
 
     def test_the_supervisor_keeps_no_agent_info(self):
         from power_atlas import acp as acp_mod
@@ -8593,3 +8620,809 @@ def test_session_row_renders_the_waiting_reason():
                        provider_color="", status="waiting")
     assert 'title="Waiting — needs your input"' in plain
     assert "data-waiting" not in plain
+
+
+# --- ACP session lifecycle: activity stamps, inactivity ceiling, sweeper ---
+
+
+@pytest.fixture
+def acp_fast(acp_store):
+    """The lifecycle constants rebound small, restored afterwards.
+
+    Every timing behaviour in this section is measured in the real constants'
+    units — 900 s of silence, a 4 h ceiling, a 30 min TTL, a 60 s sweep — so a
+    test that honoured them would burn 600-900 s of wall clock to assert one
+    branch. They are module-level rebindable names for exactly this reason, and
+    the ratios between them are preserved: tick << silence << absolute max.
+    """
+    acp_mod, store = acp_store
+    saved = {name: getattr(acp_mod, name) for name in (
+        "PROMPT_TICK_SECONDS", "PROMPT_SILENCE_SECONDS",
+        "PROMPT_ABSOLUTE_MAX_SECONDS", "CANCEL_GRACE_SECONDS",
+        "ACP_IDLE_TTL_SECONDS", "SWEEP_INTERVAL_SECONDS", "MAX_SESSIONS")}
+    acp_mod.PROMPT_TICK_SECONDS = 0.01
+    acp_mod.PROMPT_SILENCE_SECONDS = 0.08
+    acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 30.0
+    acp_mod.CANCEL_GRACE_SECONDS = 0.05
+    acp_mod.ACP_IDLE_TTL_SECONDS = 0.05
+    acp_mod.SWEEP_INTERVAL_SECONDS = 0.01
+    try:
+        yield acp_mod, store
+    finally:
+        for name, value in saved.items():
+            setattr(acp_mod, name, value)
+
+
+def _live_session(acp_mod, sid="lifecycle-01", cwd=r"C:\scratch"):
+    acp_mod._supervisor.sessions[sid] = acp_mod._new_session_record(cwd)
+    acp_mod._supervisor.history[sid] = acp_mod._History()
+    return sid
+
+
+def _notify(acp_mod, method, params):
+    acp_mod._supervisor._on_notification({"method": method, "params": params})
+
+
+class TestAcpActivityStamp:
+    """``last_activity`` and ``last_used`` answer opposed questions.
+
+    "Is the agent still working?" is asked by the inactivity ceiling and must
+    count *any* sign of life. "Has nobody used this session?" is asked by the
+    sweeper and must ignore agent-generated noise entirely. One field serving
+    both would let a chatty agent keep its own sessions permanently
+    unsweepable, with no error anywhere to say so.
+    """
+
+    def test_a_new_session_carries_both_stamps_before_any_notification(
+            self, acp_store):
+        """The sweeper reads ``last_used`` on every tick, so a session created
+        and never prompted — the "socket went away during session/new" case,
+        which also has no subscriber — must not be the one entry missing it."""
+        acp_mod, store = acp_store
+
+        async def answers(self, method, params, timeout=None):
+            return {"sessionId": "never-prompted-1"}
+
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", answers):
+            asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        meta = acp_mod._supervisor.sessions["never-prompted-1"]
+        assert isinstance(meta["last_used"], float)
+        assert isinstance(meta["last_activity"], float)
+
+    def test_a_loaded_session_carries_both_stamps(self, acp_store):
+        acp_mod, store = acp_store
+
+        async def answers(self, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                patch.object(acp_mod._Supervisor, "_request", answers):
+            asyncio.run(acp_mod._supervisor.load_session("loaded-1", str(store)))
+        meta = acp_mod._supervisor.sessions["loaded-1"]
+        assert isinstance(meta["last_used"], float)
+        assert isinstance(meta["last_activity"], float)
+
+    @pytest.mark.parametrize("method, update", [
+        # The three kinds the dispatch below the stamp actually branches on.
+        ("session/update", {"sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "x"}}),
+        # No `status` key on purpose: kiro-cli 2.16.0 does not send one on a
+        # `tool_call` frame, so anything deciding "a tool is running" from
+        # `update["status"]` reads None every time.
+        ("session/update", {"sessionUpdate": "tool_call", "toolCallId": "t1",
+                            "title": "Running: ping", "kind": "execute"}),
+        # The fall-through: at least six update kinds exist and three have
+        # branches, so a turn emitting only these would be judged silent.
+        ("session/update", {"sessionUpdate": "agent_thought_chunk"}),
+        ("session/update", {"sessionUpdate": "plan"}),
+        ("session/update", {"sessionUpdate": "current_mode_update"}),
+        # Measured on kiro-cli 2.16.0: a method *distinct* from
+        # `session/update`, carrying a sessionId and a `tool_call_chunk`, which
+        # falls through the dispatch entirely. A method allowlist would miss
+        # it and could cancel a working turn.
+        ("_kiro.dev/session/update", {"sessionUpdate": "tool_call_chunk"}),
+    ])
+    def test_any_notification_carrying_a_session_id_advances_last_activity(
+            self, acp_store, method, update):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+        meta["last_activity"] = 0.0
+        _notify(acp_mod, method, {"sessionId": sid, "update": update})
+        assert meta["last_activity"] > 0.0
+
+    def test_the_metadata_method_advances_activity_but_not_use(self, acp_store):
+        """The whole point of two fields. `_kiro.dev/metadata` is agent
+        bookkeeping; counting it as *use* would make an idle session with a
+        talkative agent unsweepable forever."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+        meta["last_activity"] = 0.0
+        meta["last_used"] = 0.0
+        _notify(acp_mod, acp_mod.METADATA_METHOD,
+                {"sessionId": sid, acp_mod.CONTEXT_PERCENT_KEY: 12.5})
+        assert meta["last_activity"] > 0.0
+        assert meta["last_used"] == 0.0
+
+    def test_a_notification_with_no_session_id_is_a_real_null_path(
+            self, acp_store):
+        """`_kiro.dev/subagent/list_update` is the observed case: the one
+        `_kiro.dev/*` notification measured without a sessionId at all."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.sessions[sid]["last_activity"] = 0.0
+        _notify(acp_mod, "_kiro.dev/subagent/list_update", {"subagents": []})
+        _notify(acp_mod, "session/update",
+                {"update": {"sessionUpdate": "agent_thought_chunk"}})
+        assert acp_mod._supervisor.sessions[sid]["last_activity"] == 0.0
+
+    def test_a_notification_after_the_record_is_gone_does_not_recreate_it(
+            self, acp_store):
+        """A resurrected record is counted against MAX_SESSIONS forever and
+        re-terminated by the sweeper every minute."""
+        acp_mod, _ = acp_store
+        _notify(acp_mod, "session/update",
+                {"sessionId": "already-closed",
+                 "update": {"sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "late"}}})
+        acp_mod._supervisor.touch_used("already-closed")
+        assert "already-closed" not in acp_mod._supervisor.sessions
+
+    def test_attaching_and_detaching_a_socket_counts_as_use(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        meta = acp_mod._supervisor.sessions[sid]
+        conn = _acp_conn(acp_mod)
+        meta["last_used"] = 0.0
+        acp_mod._registry.attach(conn, sid)
+        assert meta["last_used"] > 0.0
+        meta["last_used"] = 0.0
+        acp_mod._registry.detach(conn)
+        assert meta["last_used"] > 0.0
+
+
+class TestAcpInactivityCeiling:
+    """The turn ceiling, driven directly.
+
+    It lives inside ``_request``, and ~30 doubles in this file replace that
+    function wholesale — so nothing reaching ``_handle_prompt`` exercises a
+    line of it. Every test here drives ``_request`` itself with a fake
+    ``_write`` and a hand-driven pending future.
+    """
+
+    def _drive(self, acp_mod, sid, scenario):
+        """Run one ``_request`` in inactivity mode alongside ``scenario``.
+
+        Returns ``(outcome, written)`` where ``outcome`` is the result or the
+        exception the request raised, and ``written`` is every JSON-RPC object
+        the supervisor put on the wire — the cancel notification included.
+        """
+        written = []
+
+        def fake_write(self, obj):
+            written.append(obj)
+
+        async def run():
+            sup = acp_mod._supervisor
+            sup._loop = asyncio.get_running_loop()
+            try:
+                with patch.object(acp_mod._Supervisor, "_write", fake_write):
+                    task = asyncio.ensure_future(sup._request(
+                        "session/prompt", {"sessionId": sid},
+                        timeout=acp_mod._INACTIVITY))
+                    # Let the request register its pending future and reach the
+                    # wait; `scenario` reads `_pending` on its first line.
+                    await asyncio.sleep(0)
+                    try:
+                        await scenario(sup, task, written)
+                    except BaseException:
+                        task.cancel()
+                        raise
+                    try:
+                        return await asyncio.wait_for(task, 10)
+                    except Exception as exc:
+                        return exc
+            finally:
+                sup._loop = None
+                sup._pending.clear()
+
+        return asyncio.run(run()), written
+
+    @staticmethod
+    def _pending(sup):
+        return next(iter(sup._pending.values()))
+
+    def test_a_turn_that_keeps_streaming_outlives_the_old_wall_clock(
+            self, acp_fast):
+        """The behaviour SC-8 exists for. The old bound was 600 s of wall
+        clock whatever the agent was doing; this turn runs for many multiples
+        of its silence window and completes, because something kept arriving.
+        """
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            for _ in range(30):
+                await asyncio.sleep(acp_mod.PROMPT_TICK_SECONDS / 2)
+                _notify(acp_mod, "session/update",
+                        {"sessionId": sid,
+                         "update": {"sessionUpdate": "agent_thought_chunk"}})
+            assert not task.done()
+            self._pending(sup).set_result({"stopReason": "end_turn"})
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert outcome == {"stopReason": "end_turn"}
+        assert [o.get("method") for o in written] == ["session/prompt"]
+
+    def test_only_unhandled_update_kinds_still_count_as_life(self, acp_fast):
+        """`agent_thought_chunk`, `plan` and `current_mode_update` reach no
+        branch in `_on_notification`, and `_kiro.dev/session/update` reaches
+        none either. Stamping above the dispatch on the *presence of a session
+        id* is what stops a turn emitting nothing else being cancelled."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            for kind in ("plan", "current_mode_update", "agent_thought_chunk",
+                         "plan", "current_mode_update", "tool_call_chunk"):
+                await asyncio.sleep(acp_mod.PROMPT_SILENCE_SECONDS / 3)
+                _notify(acp_mod, "_kiro.dev/session/update",
+                        {"sessionId": sid, "update": {"sessionUpdate": kind}})
+            assert not task.done()
+            self._pending(sup).set_result({"stopReason": "end_turn"})
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert outcome == {"stopReason": "end_turn"}
+        assert "session/cancel" not in [o.get("method") for o in written]
+
+    def test_silence_past_the_window_cancels_agent_side_and_raises(
+            self, acp_fast):
+        """The other half of SC-8. The old path popped the future and raised
+        without telling the agent anything, so it kept working while the
+        session read idle."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            return
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert isinstance(outcome, acp_mod.AgentTimeout)
+        assert "silent" in str(outcome)
+        cancels = [o for o in written if o.get("method") == "session/cancel"]
+        assert cancels and cancels[0]["params"] == {"sessionId": sid}
+        # A notification, not a request: a cancel that itself awaited an answer
+        # would be a Stop button that hangs.
+        assert "id" not in cancels[0]
+
+    def test_a_cancel_honoured_inside_the_grace_returns_the_real_answer(
+            self, acp_fast):
+        """Measured at 9 ms on kiro-cli 2.16.0, and matched on the pending
+        future rather than dropped — which is why `CANCEL_GRACE_SECONDS` is
+        seconds rather than the 30 s an unmeasured worst case bought."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            fut = self._pending(sup)
+            for _ in range(400):
+                if any(o.get("method") == "session/cancel" for o in written):
+                    break
+                await asyncio.sleep(acp_mod.PROMPT_TICK_SECONDS / 4)
+            fut.set_result({"stopReason": "cancelled"})
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert outcome == {"stopReason": "cancelled"}
+        assert [o.get("method") for o in written] == [
+            "session/prompt", "session/cancel"]
+
+    def test_a_prompt_on_a_long_idle_session_gets_a_full_window(self, acp_fast):
+        """The deadline is seeded locally at send time. Reading the shared
+        `last_activity` as the baseline would kill the first prompt on any
+        session idle longer than the silence window — a session idle 20 minutes
+        with a tab attached is unswept and already "silent"."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.sessions[sid]["last_activity"] = (
+            time.monotonic() - 10 * acp_mod.PROMPT_SILENCE_SECONDS)
+
+        async def scenario(sup, task, written):
+            # Several ticks, and comfortably inside one silence window: the
+            # naive version dies on the very first tick.
+            await asyncio.sleep(acp_mod.PROMPT_SILENCE_SECONDS / 3)
+            assert not task.done(), "cancelled before the agent could answer"
+            self._pending(sup).set_result({"stopReason": "end_turn"})
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert outcome == {"stopReason": "end_turn"}
+        assert "session/cancel" not in [o.get("method") for o in written]
+
+    def test_a_turn_past_the_absolute_ceiling_is_cancelled_even_while_talking(
+            self, acp_fast):
+        """Without this a turn emitting one chunk just under the silence
+        window runs forever, and `inflight` makes that session simultaneously
+        un-closable and un-sweepable for the app's lifetime."""
+        acp_mod, _ = acp_fast
+        acp_mod.PROMPT_SILENCE_SECONDS = 30.0
+        acp_mod.PROMPT_ABSOLUTE_MAX_SECONDS = 0.05
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            for _ in range(60):
+                if task.done():
+                    return
+                await asyncio.sleep(acp_mod.PROMPT_TICK_SECONDS / 2)
+                _notify(acp_mod, "session/update",
+                        {"sessionId": sid,
+                         "update": {"sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "."}}})
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert isinstance(outcome, acp_mod.AgentTimeout)
+        assert "ceiling" in str(outcome)
+        assert "session/cancel" in [o.get("method") for o in written]
+
+    def test_agent_death_during_a_turn_surfaces_the_typed_error(self, acp_fast):
+        """`_detach` clears `sessions` and fails every pending future. The
+        ceiling must fall through to the future rather than inventing a
+        timeout, or the page gets an `internal_error` where a typed
+        `agent_died` belongs."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+
+        async def scenario(sup, task, written):
+            fut = self._pending(sup)
+            sup.sessions.pop(sid)
+            await asyncio.sleep(acp_mod.PROMPT_TICK_SECONDS * 4)
+            fut.set_exception(acp_mod.AgentDied("the channel closed"))
+
+        outcome, written = self._drive(acp_mod, sid, scenario)
+        assert isinstance(outcome, acp_mod.AgentDied)
+        assert "session/cancel" not in [o.get("method") for o in written]
+
+    def test_the_request_signature_is_unchanged(self):
+        """19 fixed-signature stubs in this file replace `_request` wholesale.
+        A new parameter would raise `TypeError` in every one of them, which is
+        why the inactivity mode travels in the existing `timeout` slot."""
+        import inspect
+        from power_atlas import acp as acp_mod
+        params = list(inspect.signature(
+            acp_mod._Supervisor._request).parameters)
+        assert params == ["self", "method", "params", "timeout"]
+
+    def test_a_wall_clock_request_still_reports_its_ceiling_in_seconds(
+            self, acp_fast):
+        """The sentinel is read with `is` above the try for exactly this
+        reason: the wall-clock arm formats `{timeout:.0f}` into its message and
+        a sentinel would blow up there."""
+        acp_mod, _ = acp_fast
+
+        def fake_write(self, obj):
+            pass
+
+        async def run():
+            sup = acp_mod._supervisor
+            sup._loop = asyncio.get_running_loop()
+            try:
+                with patch.object(acp_mod._Supervisor, "_write", fake_write):
+                    await sup._request("session/new", {}, timeout=0.01)
+            finally:
+                sup._loop = None
+                sup._pending.clear()
+
+        with pytest.raises(acp_mod.AgentTimeout) as exc:
+            asyncio.run(run())
+        assert "within 0s" in str(exc.value)
+
+
+class TestAcpIdleSweeper:
+    """Six conditions, one synchronous claim, and a failure mode that must
+    never take the task out."""
+
+    def _idle(self, acp_mod, sid):
+        acp_mod._supervisor.sessions[sid]["last_used"] = (
+            time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+
+    def _sweep(self, acp_mod, written):
+        with patch.object(acp_mod._Supervisor, "_write",
+                          _sent(acp_mod, written)), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+    def test_an_idle_unattended_session_is_terminated(self, acp_fast):
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        self._idle(acp_mod, sid)
+        written = []
+        self._sweep(acp_mod, written)
+        assert [o["method"] for o in written] == [acp_mod.CLOSE_METHOD]
+        assert written[0]["params"] == {"sessionId": sid}
+        assert sid not in acp_mod._supervisor.sessions
+        assert sid not in acp_mod._supervisor.history
+
+    def test_a_session_inside_the_ttl_is_left_alone(self, acp_fast):
+        acp_mod, _ = acp_fast
+        _live_session(acp_mod)
+        written = []
+        self._sweep(acp_mod, written)
+        assert written == []
+
+    @pytest.mark.parametrize("blocker", [
+        "subscriber", "inflight", "closing", "loading"])
+    def test_each_remaining_condition_protects_the_session(self, acp_fast,
+                                                           blocker):
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        if blocker == "subscriber":
+            # An attached tab means leave it alone regardless of age. Attaching
+            # stamps `last_used`, so the ageing comes after it.
+            acp_mod._registry.attach(_acp_conn(acp_mod), sid)
+        elif blocker == "inflight":
+            acp_mod._supervisor.inflight.add(sid)
+        elif blocker == "closing":
+            acp_mod._supervisor.closing.add(sid)
+        else:
+            # The condition the original four missed: a session mid-load has
+            # zero subscribers *by construction*, so it satisfied every other
+            # condition and would have been terminated mid-load.
+            acp_mod._registry.loading[sid] = []
+        self._idle(acp_mod, sid)
+        written = []
+        self._sweep(acp_mod, written)
+        assert written == []
+        assert sid in acp_mod._supervisor.sessions
+
+    def test_a_session_closed_between_snapshot_and_sweep_is_skipped(
+            self, acp_fast):
+        """The tuple is snapshotted once but `close_session` awaits inside the
+        loop, so a user close can pop session *n* before it is reached —
+        `close_session` would then raise and log a WARNING every pass."""
+        acp_mod, _ = acp_fast
+        first = _live_session(acp_mod, "sweep-a")
+        second = _live_session(acp_mod, "sweep-b")
+        self._idle(acp_mod, first)
+        self._idle(acp_mod, second)
+        written = []
+        real_close = acp_mod._Supervisor.close_session
+
+        async def close_and_steal(self, session_id):
+            # Releasing the first session takes the second one with it, the
+            # way a user close landing mid-pass would.
+            acp_mod._supervisor.sessions.pop(second, None)
+            return await real_close(self, session_id)
+
+        with patch.object(acp_mod._Supervisor, "close_session",
+                          close_and_steal), \
+                patch.object(acp_mod._Supervisor, "_write",
+                             _sent(acp_mod, written)), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        assert [o["params"]["sessionId"] for o in written] == [first]
+
+    def test_a_prompt_during_the_terminate_round_trip_is_refused(self, acp_fast):
+        """The claim on `closing` is taken in the synchronous prefix. Without
+        it a prompt arriving mid-terminate passes every guard and starts a turn
+        on a session being released."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        self._idle(acp_mod, sid)
+        conn = _acp_conn(acp_mod)
+        # Attached from the socket's point of view but not registered as a
+        # subscriber — otherwise condition 3 would keep the session off this
+        # path entirely and there would be nothing to test.
+        conn.session_id = sid
+        seen = []
+
+        async def slow_terminate(self, method, params, timeout=None):
+            await asyncio.sleep(0)
+            # Mid-round-trip: the session is still registered, and the claim is
+            # the only thing standing between it and a new turn.
+            assert params["sessionId"] in self.sessions
+            await acp_mod._handle_prompt(conn, sid, {"prompt": "hello"})
+            seen.extend(f["payload"].get("code") for f in _queued(conn))
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", slow_terminate), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        assert seen == ["close_in_progress"]
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_a_load_during_the_terminate_round_trip_is_refused(self, acp_fast):
+        """C2-32. Unreachable before the sweeper existed: a close needed a
+        subscribed socket pressing Close, and that socket is by definition not
+        the one arriving here asking to adopt the session."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod, "aaaabbbb-cccc-dddd-eeee-ffff00001111")
+        self._idle(acp_mod, sid)
+        conn = _acp_conn(acp_mod)
+        seen = []
+
+        async def slow_terminate(self, method, params, timeout=None):
+            await asyncio.sleep(0)
+            await acp_mod._handle_load(conn, sid)
+            seen.extend(f["payload"].get("code") for f in _queued(conn))
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", slow_terminate), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        assert seen == ["close_in_progress"]
+
+    def test_a_swept_session_tells_any_watcher_it_is_gone(self, acp_fast):
+        """`_handle_close`'s notification half, reproduced rather than reached
+        by relaxing its `not_subscribed` guard — the sweeper has no socket, and
+        that guard protects a real case."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        self._idle(acp_mod, sid)
+        conn = _acp_conn(acp_mod)
+
+        async def attach_mid_flight(self, method, params, timeout=None):
+            await asyncio.sleep(0)
+            acp_mod._registry.attach(conn, sid)
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", attach_mid_flight), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        assert [f["type"] for f in _queued(conn)] == ["session_closed"]
+        assert conn.session_id is None
+
+    def test_a_failing_terminate_is_a_warning_not_a_dead_task(self, acp_fast,
+                                                              caplog):
+        """If a kiro-cli build drops the private terminate method the sweeper
+        must degrade to memory growth, never to a crashed task."""
+        acp_mod, _ = acp_fast
+        first = _live_session(acp_mod, "sweep-boom")
+        second = _live_session(acp_mod, "sweep-ok")
+        self._idle(acp_mod, first)
+        self._idle(acp_mod, second)
+
+        async def refuse_one(self, method, params, timeout=None):
+            if params["sessionId"] == first:
+                raise acp_mod.AgentRejected("Method not found (code -32601)")
+            return {}
+
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
+                patch.object(acp_mod._Supervisor, "_request", refuse_one), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        assert first in acp_mod._supervisor.sessions
+        assert second not in acp_mod._supervisor.sessions
+        # Claimed and released even on the failure path, or the session would
+        # be permanently unpromptable as well as unswept.
+        assert first not in acp_mod._supervisor.closing
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_the_loop_sleeps_before_it_works(self, acp_fast):
+        """A `continue` placed before the sleep never yields, and this task
+        shares its loop with every websocket and every render — a tight loop
+        here takes the whole application down."""
+        acp_mod, _ = acp_fast
+        acp_mod.SWEEP_INTERVAL_SECONDS = 5.0
+        _live_session(acp_mod)
+        passes = []
+
+        async def record():
+            passes.append(1)
+
+        async def run():
+            with patch.object(acp_mod, "_sweep_once", record):
+                task = acp_mod.start_sweeper()
+                await asyncio.sleep(0.05)
+                still_running = not task.done()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                return still_running
+
+        assert asyncio.run(run()) is True
+        assert passes == []
+
+    def test_a_tick_with_no_sessions_costs_nothing_and_still_yields(
+            self, acp_fast):
+        acp_mod, _ = acp_fast
+        passes = []
+
+        async def record():
+            passes.append(1)
+
+        async def run():
+            with patch.object(acp_mod, "_sweep_once", record):
+                task = acp_mod.start_sweeper()
+                # Many intervals' worth of wall clock, and no sessions. Getting
+                # here at all is the yield half of the assertion.
+                await asyncio.sleep(acp_mod.SWEEP_INTERVAL_SECONDS * 20)
+                assert not task.done()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        asyncio.run(run())
+        assert passes == []
+
+    def test_a_pass_that_raises_does_not_kill_the_loop(self, acp_fast, caplog):
+        acp_mod, _ = acp_fast
+        _live_session(acp_mod)
+        calls = []
+
+        async def boom():
+            calls.append(1)
+            raise RuntimeError("something the sweeper did not expect")
+
+        async def run():
+            with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
+                    patch.object(acp_mod, "_sweep_once", boom):
+                task = acp_mod.start_sweeper()
+                await asyncio.sleep(acp_mod.SWEEP_INTERVAL_SECONDS * 20)
+                still_running = not task.done()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                return still_running
+
+        assert asyncio.run(run()) is True
+        assert len(calls) > 1
+        assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+    def test_cancelling_the_sweeper_mid_close_returns_at_once(self, acp_fast):
+        """`CancelledError` is a BaseException and is deliberately not caught,
+        and the close is deliberately not shielded — either would hold teardown
+        for up to REQUEST_TIMEOUT_SECONDS against `__main__.py`'s 5 s join."""
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        self._idle(acp_mod, sid)
+
+        async def never_answers(self, method, params, timeout=None):
+            await asyncio.sleep(30)
+
+        async def run():
+            acp_mod._supervisor._loop = asyncio.get_running_loop()
+            try:
+                with patch.object(acp_mod._Supervisor, "_request",
+                                  never_answers), \
+                        patch.object(acp_mod._Supervisor, "alive",
+                                     lambda self: True):
+                    task = acp_mod.start_sweeper()
+                    await asyncio.sleep(acp_mod.SWEEP_INTERVAL_SECONDS * 5)
+                    started = time.monotonic()
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                    return time.monotonic() - started
+            finally:
+                acp_mod._supervisor._loop = None
+                acp_mod._supervisor._pending.clear()
+
+        assert asyncio.run(run()) < 1.0
+
+
+class TestAcpConfiguredLimits:
+    """`MAX_SESSIONS` and the two new timings come from configuration, read
+    once at startup and rebound as module-level names."""
+
+    def test_the_shipped_default_is_eight(self):
+        from power_atlas import acp as acp_mod
+        from power_atlas.config import Config
+        assert acp_mod.MAX_SESSIONS == 8
+        assert Config().acp_max_sessions == 8
+        assert Config().acp_idle_ttl_seconds == 1800
+        assert Config().acp_prompt_silence_seconds == 900
+
+    def test_it_stays_a_module_attribute(self):
+        """Nine sites in this file read `acp.MAX_SESSIONS`; moving it onto
+        `_Supervisor` would break every one with `AttributeError`."""
+        from power_atlas import acp as acp_mod
+        assert "MAX_SESSIONS" in vars(acp_mod)
+        assert not hasattr(acp_mod._supervisor, "MAX_SESSIONS")
+
+    def test_apply_config_rebinds_all_three(self, acp_fast):
+        acp_mod, _ = acp_fast
+        from power_atlas.config import Config
+        acp_mod.apply_config(Config(acp_max_sessions=5,
+                                    acp_idle_ttl_seconds=600,
+                                    acp_prompt_silence_seconds=120))
+        assert acp_mod.MAX_SESSIONS == 5
+        assert acp_mod.ACP_IDLE_TTL_SECONDS == 600.0
+        assert acp_mod.PROMPT_SILENCE_SECONDS == 120.0
+        # The refusal the operator reads has to quote the cap in force.
+        assert "5 sessions" in acp_mod._session_limit_message()
+
+    @pytest.mark.parametrize("field, attr, bad", [
+        ("acp_max_sessions", "MAX_SESSIONS", 0),
+        ("acp_max_sessions", "MAX_SESSIONS", 17),
+        ("acp_max_sessions", "MAX_SESSIONS", True),
+        ("acp_idle_ttl_seconds", "ACP_IDLE_TTL_SECONDS", 299),
+        ("acp_idle_ttl_seconds", "ACP_IDLE_TTL_SECONDS", 86401),
+        ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 59),
+        ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 7201),
+    ])
+    def test_an_out_of_range_value_is_named_and_the_value_in_force_kept(
+            self, acp_fast, caplog, field, attr, bad):
+        """Named and kept rather than raised on: this runs inside startup, and
+        refusing to boot over a hand-edited number would trade a wrong session
+        cap for no application at all."""
+        acp_mod, _ = acp_fast
+        from power_atlas.config import Config
+        before = getattr(acp_mod, attr)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            acp_mod.apply_config(Config(**{field: bad}))
+        assert getattr(acp_mod, attr) == before
+        assert any(field in r.getMessage() for r in caplog.records)
+
+    def test_the_cap_check_touches_no_disk(self):
+        """`at_capacity()` runs on the event loop and `load_config()` is an
+        uncached whole-file TOML parse — reading it there reproduces the exact
+        stall `_handle_new` already threads out to avoid."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import config as config_mod
+
+        def explode():
+            raise AssertionError("at_capacity must not read config from disk")
+
+        with patch.object(config_mod, "load_config", explode):
+            acp_mod._supervisor.at_capacity()
+            acp_mod._session_limit_message()
+
+
+class TestAcpLifespanWiring:
+    """`web.py` owns the lifecycle hook; `acp.py` owns the policy."""
+
+    def test_the_sweeper_is_started_and_awaited_before_the_teardown(self):
+        import types
+        from power_atlas import web as web_mod
+
+        order = []
+        state = {}
+
+        async def forever():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                order.append("sweeper cancelled")
+                raise
+
+        def start_sweeper():
+            state["task"] = asyncio.ensure_future(forever())
+            order.append("sweeper started")
+            return state["task"]
+
+        def shutdown():
+            # The sweeper must be finished before the agent is killed: one
+            # still parked inside `close_session` would be racing its own
+            # teardown, and `acp.shutdown()` is synchronous so it cannot wait.
+            order.append("shutdown, sweeper done=%s" % state["task"].done())
+
+        fake = types.SimpleNamespace(start_sweeper=start_sweeper,
+                                     shutdown=shutdown)
+
+        async def run():
+            async with web_mod.lifespan(None):
+                order.append("serving")
+                await asyncio.sleep(0.01)
+
+        with patch.object(web_mod, "acp", fake):
+            asyncio.run(run())
+
+        assert order == ["sweeper started", "serving", "sweeper cancelled",
+                         "shutdown, sweeper done=True"]
+
+    def test_an_acp_import_failure_still_yields_a_running_app(self):
+        """`web.py` degrades an ACP import failure to "/acp disabled". An
+        unguarded sweeper start would promote it to "will not start"."""
+        from power_atlas import web as web_mod
+
+        async def run():
+            async with web_mod.lifespan(None):
+                return "started"
+
+        with patch.object(web_mod, "acp", None):
+            assert asyncio.run(run()) == "started"

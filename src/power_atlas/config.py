@@ -62,6 +62,20 @@ class Config:
     workspace_settings: dict[str, dict] = field(default_factory=dict)
     tag_settings: dict[str, dict] = field(default_factory=dict)
     notifications: dict = field(default_factory=lambda: {"enabled": False})
+    # ACP session-lifecycle tunables. Read **once at startup** and pushed into
+    # `acp` as module-level names (`acp.apply_config`), never read per call:
+    # `at_capacity()` runs on the event loop and `load_config()` is an uncached
+    # whole-file TOML parse, so a read there reproduces the stall `_handle_new`
+    # already threads out to avoid. The consequence a settings UI has to state
+    # is that changing any of the three needs a restart to take effect.
+    #
+    # 8 is the measured default, not a guess: one agent carrying eight sessions
+    # was measured 2026-08-01 (`plans/260731_ACP_REMOTE_CLIENT_PRODUCTIZATION.md`).
+    # Bounds live on the write path, not here — `load_config` is documented as
+    # never raising, and ~16 routes call it on the loop.
+    acp_max_sessions: int = 8
+    acp_idle_ttl_seconds: int = 1800
+    acp_prompt_silence_seconds: int = 900
 
 
 def get_workspace_settings(config: Config, cwd: str) -> dict:

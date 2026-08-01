@@ -292,7 +292,17 @@ def _run_foreground() -> None:
     config = load_config()
 
     # Import the real app
-    from .web import app
+    from .web import acp as acp_module, app
+
+    # ACP's tunables, read from configuration exactly once and pushed in as
+    # module-level names. `at_capacity()` runs on the event loop and
+    # `load_config()` is an uncached whole-file TOML parse, so reading them
+    # per call would reproduce the stall `_handle_new` already threads out to
+    # avoid. Reusing `web`'s guarded import rather than importing `acp` here
+    # keeps the "an ACP import failure disables /acp, it does not stop the
+    # app" property in one place.
+    if acp_module is not None:
+        acp_module.apply_config(config)
 
     # Determine port: 0 = random, >0 = attempt static with random fallback
     desired_port = config.port
