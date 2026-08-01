@@ -6680,13 +6680,16 @@ def test_search_with_status_filter(mock_discover, mock_config, mock_snap, mock_s
     assert "dead-proj" not in resp.text
     assert mock_snap.call_count == 3
 
-    # status=all and the no-status path both skip the presence scan entirely.
+    # status=all and the no-status path skip the status *filter*, but still
+    # take one snapshot each: the per-card hover actions need workspace_status
+    # on every card, so get_snapshot moved out of the status guard to an
+    # unconditional call (web.py:1464). Two requests, two snapshots, 3 -> 5.
     for url in ("/search?q=proj&status=all", "/search?q=proj"):
         resp = client.get(url)
         assert resp.status_code == 200
         assert "live-proj" in resp.text
         assert "dead-proj" in resp.text
-    assert mock_snap.call_count == 3
+    assert mock_snap.call_count == 5
 
 
 @patch("power_atlas.web.data.get_sessions")
