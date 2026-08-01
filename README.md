@@ -196,15 +196,34 @@ loopback. Setting it to this machine's NetBird IP adds a **second** socket on th
 laptop keeps using `http://127.0.0.1:<port>` unchanged while a phone on the same NetBird network can
 reach the agent surface.
 
-**Enabling it.** In `config.toml`, set a fixed non-zero `port` and set `remote_bind_address` to this
-machine's NetBird IP literal, then restart.
+**Enabling it — one save, one restart.** Open the topbar's **Remote** button to reach the *Remote
+access* panel, type this machine's NetBird IP literal into **Bind address**, and press **Save**. That
+one request sets `remote_bind_address` *and* issues the device secret if none exists, and it refuses
+the whole write if the secret cannot be created — so the surface cannot become reachable without also
+becoming authenticable. The panel re-reads itself on success, so the URL to open and the secret to
+paste are on screen straight away. Restart PowerAtlas once and the second socket is bound.
 
-Authentication needs a device secret, kept at `%LOCALAPPDATA%\power-atlas\remote-secret` (Linux:
+The address is accepted only alongside a fixed non-zero `port`: with `port = 0` the OS assigns a
+number per bind call, so the two sockets would land on different ports and a phone cannot bookmark an
+ephemeral one anyway. Set **Port** to *Static* in the topbar first. If you forget, the save is
+refused and the panel shows the server's own sentence saying so — as it does for a wildcard,
+loopback, multicast, bracketed, zone-id'd, non-canonical or non-literal address, so the refusal
+always names what to type instead.
+
+Clearing **Bind address** and saving turns remote access off from the next launch. The device secret
+is kept, so devices already enrolled work again if you turn it back on.
+
+Authentication needs that device secret, kept at `%LOCALAPPDATA%\power-atlas\remote-secret` (Linux:
 `~/.config/power-atlas/remote-secret`) — never in `config.toml`, and never served over the remote
 surface it authenticates. **If no secret exists the remote socket is deliberately not bound at all**,
 with the reason logged: a listener that nothing can authenticate against is worse than no listener.
-Create one from the topbar's *Remote access* panel with **Rotate device secret**, then restart once
-more. That panel then shows the URL to open and the secret to paste.
+
+*Setting `remote_bind_address` in `config.toml` by hand still works, and it is the one route that
+issues no secret* — it leaves you with an address that is refused a listener for exactly the reason
+above, visible only in the log. To recover, open the panel: the field already holds the address you
+typed, so pressing **Save** issues the missing secret and touches nothing else. Do **not** reach for
+**Rotate device secret** to create a first one. Rotation is the revocation control described below,
+and it signs out every enrolled device at once.
 
 On the device, open `http://<netbird-ip>:<port>/remote-auth`, enter the secret once, and it is
 exchanged for a device cookie valid for 90 days that survives a PowerAtlas restart. Failed attempts are

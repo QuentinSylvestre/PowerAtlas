@@ -416,8 +416,10 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
     a port nothing listens on at ``127.0.0.1``, so tray and peek open a dead
     URL. Only a test holding real sockets can see that.
 
-    Raises ``OSError`` when no loopback listener can be created at all; the
-    caller turns that into a clean exit. The remote bind never raises — it
+    Raises ``OSError`` when no loopback listener can be created at all, having
+    first logged **which** binds were attempted — this is the only frame that
+    knows whether the random fallback ran, so the caller turns the exception
+    into a clean exit without restating it. The remote bind never raises — it
     degrades to loopback-only by design (D27), and is skipped entirely when the
     loopback bind fell back to an OS-assigned port.
     """
@@ -436,11 +438,19 @@ def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
         socks = [_bind("127.0.0.1", desired_port)]
     except OSError as exc:
         if desired_port <= 0:
+            # No fallback exists on this path: the OS was already asked for any
+            # free port and had none to give. Saying so here is what lets the
+            # caller stop claiming a fallback it cannot see was never tried.
             log.error("Loopback bind on an OS-assigned port failed: %s", exc)
             raise
         log.warning("Port %d unavailable (%s), falling back to random port",
                     desired_port, exc)
-        socks = [_bind("127.0.0.1", 0)]
+        try:
+            socks = [_bind("127.0.0.1", 0)]
+        except OSError as fallback_exc:
+            log.error("Loopback bind failed on port %d and on the random "
+                      "fallback: %s", desired_port, fallback_exc)
+            raise
         fell_back = True
     # Read from the loopback socket explicitly, never from `server.servers[0]`:
     # with two sockets, index 0 is merely whichever one uvicorn happened to
@@ -756,9 +766,14 @@ def _run_foreground() -> None:
 
     try:
         socks, port = _choose_sockets(log, config, desired_port)
-    except OSError as exc:
-        log.error("Loopback bind failed on port %d and on the random "
-                  "fallback: %s", desired_port, exc)
+    except OSError:
+        # `_choose_sockets` has already logged which binds it attempted and why
+        # the last one failed. This line claimed "on port %d and on the random
+        # fallback" unconditionally, which is false on the `port = 0` path —
+        # that path raises before any fallback is attempted, because there is
+        # none to attempt. The distinction lives where it is known; here we log
+        # only the consequence.
+        log.error("No loopback listener could be bound; exiting")
         print("ERROR: Server failed to start", file=sys.stderr)
         _remove_pid()
         sys.exit(1)

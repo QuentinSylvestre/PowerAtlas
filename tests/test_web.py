@@ -4478,13 +4478,13 @@ class TestAcpCancel:
 
 
 class TestAcpSessionClose:
-    """The lever the whole memory budget rests on: §4 and §6 accept ~254 MB a
+    """The lever the whole memory budget rests on: §4 and §6 accept ~178 MB a
     session on the strength of a close control existing.
 
-    Measured on kiro-cli 2.14.2 — closing one session took the agent's tree from
-    17 processes / 1045.5 MB to 12 / 792.1 MB, and removed the session's
-    ``.lock``. ``session/close`` is **not** the method that does it: the agent
-    answers that one ``-32601 Method not found``.
+    Re-measured in Phase 2 on kiro-cli 2.16.0 — closing one session released 3
+    processes and 169.7 MB, and removed the session's ``.lock``.
+    ``session/close`` is **not** the method that does it: the agent answers
+    that one ``-32601 Method not found``.
     """
 
     def _conn(self, acp_mod, sid=None):
@@ -4523,7 +4523,7 @@ class TestAcpSessionClose:
     def test_a_failed_close_keeps_the_session(self, acp_session):
         """A kiro-cli without the extension method answers -32601. Dropping our
         own record then would report a memory saving that did not happen and
-        leave ~5 processes unreachable for the agent's whole life."""
+        leave ~3 processes unreachable for the agent's whole life."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         _queued(conn)
@@ -4698,7 +4698,7 @@ class TestAcpSessionClose:
 
     def test_the_closed_session_frees_a_slot(self, acp_session):
         """Which is the entire point: the cap is the only thing between one
-        socket and memory exhaustion at ~254 MB a session."""
+        socket and memory exhaustion at ~178 MB a session."""
         acp_mod, sid = acp_session
         for i in range(acp_mod.MAX_SESSIONS - 1):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
@@ -4718,7 +4718,7 @@ class TestAcpSessionClose:
 
     def test_the_page_clears_the_session_and_the_url(self):
         """A ?sid= left in place makes a reload re-adopt the session through
-        `load` and spend the ~254 MB again — undoing the button."""
+        `load` and spend the ~178 MB again — undoing the button."""
         from power_atlas.web import templates
         src = templates.env.loader.get_source(templates.env, "acp.html")[0]
         branch = src.split("type === 'session_closed'", 1)[1].split(
@@ -11360,6 +11360,65 @@ class TestChooseSocketsReturnsTheLoopbackPort:
             for s in socks:
                 s.close()
             squatter.close()
+
+
+class TestChooseSocketsNamesTheBindsItTried:
+    """A bind failure has to name the attempts that were actually made.
+
+    Extracting `_choose_sockets` left the caller in `_run_foreground` logging
+    "failed on port %d and on the random fallback" for *every* OSError out of
+    it — but on the `port = 0` path no fallback is attempted at all, because
+    the OS has already been asked for any free port and had none to give.
+    Which binds ran is visible only inside this function, so this is where it
+    is said; the caller logs the consequence and nothing about the attempts.
+
+    No socket is bound here: `_bind` is replaced by one that refuses, which is
+    also what records the attempts.
+    """
+
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def _cfg(self, **kw):
+        from power_atlas.config import Config
+        return Config(**kw)
+
+    def _refusing_bind(self, attempts):
+        def _refuse(host, port):
+            attempts.append((host, port))
+            raise OSError("no port available")
+        return _refuse
+
+    def test_the_zero_port_failure_does_not_claim_a_fallback(
+            self, monkeypatch, caplog):
+        main_mod = self._main()
+        attempts = []
+        monkeypatch.setattr(main_mod, "_bind", self._refusing_bind(attempts))
+        with caplog.at_level(logging.DEBUG, logger="t"):
+            with pytest.raises(OSError):
+                main_mod._choose_sockets(
+                    logging.getLogger("t"), self._cfg(port=0), 0)
+        assert attempts == [("127.0.0.1", 0)], \
+            "the zero-port path has no second attempt to make"
+        assert "OS-assigned port failed" in caplog.text
+        assert "fallback" not in caplog.text, \
+            "no fallback ran, so no log line may report one"
+
+    def test_a_failed_fallback_reports_both_attempts(
+            self, monkeypatch, caplog):
+        """The message the caller used to emit unconditionally is true here
+        and only here — both binds were tried and both failed."""
+        main_mod = self._main()
+        attempts = []
+        monkeypatch.setattr(main_mod, "_bind", self._refusing_bind(attempts))
+        with caplog.at_level(logging.DEBUG, logger="t"):
+            with pytest.raises(OSError):
+                main_mod._choose_sockets(
+                    logging.getLogger("t"), self._cfg(port=51999), 51999)
+        assert attempts == [("127.0.0.1", 51999), ("127.0.0.1", 0)], \
+            "the static attempt and then the random fallback"
+        assert "on the random fallback" in caplog.text
 
 
 class TestTheLogFileIsBounded:

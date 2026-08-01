@@ -224,8 +224,9 @@ CONTEXT_PERCENT_KEY = "contextUsagePercentage"
 # plan's own wording implies and which the ACP spec does not define: kiro-cli
 # 2.14.2 answers it ``-32601 Method not found``. This kiro-private extension
 # method is the one that works, and it is the whole basis of the per-session
-# memory budget §4 and §6 accept — measured across two runs, one close released
-# 5 processes and 253.4 MB of MCP servers and removed the session's ``.lock``.
+# memory budget §4 and §6 accept — re-measured in Phase 2 on kiro-cli 2.16.0,
+# one close released 3 processes and 169.7 MB of MCP servers and removed the
+# session's ``.lock`` (an earlier run read 3 processes and 172.6 MB).
 # ``plans/ROADMAP.md`` holds the cost model those figures feed and is where a
 # re-measurement lands; a copy here drifts from it within the day.
 #
@@ -2212,7 +2213,7 @@ class _Supervisor:
         """Release one session on the agent, and everything it holds here.
 
         The local state is dropped **only after** the agent has answered. Each
-        session costs 5 processes and the memory ``plans/ROADMAP.md`` records,
+        session costs ~3 processes and the memory ``plans/ROADMAP.md`` records,
         all of it inside the agent rather than here, so dropping our own record
         of one the agent still holds would report a memory saving that did not
         happen — and would leave those processes unreachable for the agent's
