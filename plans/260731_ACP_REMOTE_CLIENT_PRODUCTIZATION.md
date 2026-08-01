@@ -1,7 +1,7 @@
 # ACP Remote Client Productization
 
 > **Date**: 2026-07-31
-> **Status**: In Progress — Phase 0 complete; Phase 3 blocked on an absent NetBird policy  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 0 complete; Phases 1-6 pending  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Promote the throwaway `/acp` prototype into a NetBird-reachable remote client that dispatches, drives and resumes kiro-cli sessions PowerAtlas creates, with a Zed-style session browser, an idle sweeper, and a security model that survives leaving loopback.
 > **Estimated effort**: 9-13.5 days (revised from 6-9 after review cycle 1; see Review Log)
@@ -122,6 +122,7 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 | D30 Inactivity ceiling mechanism | Preserve `_request`'s signature; reuse the `timeout` slot with a sentinel meaning "inactivity mode"; re-wait on `asyncio.shield(fut)` each iteration; session id from `params["sessionId"]` | A new `_request` parameter; a watchdog task cancelling `_pending[id]` | **19** fixed-signature `_request` stubs in `tests/test_web.py` (7 `boom`, 5 `fake_request`, 5 `refused`, 2 multi-line) would raise `TypeError` on a new parameter; 4 tolerant `lambda *a, **k` patches would not. And `asyncio.wait_for` **cancels** the future on expiry (`acp.py:1489`), so a naive re-wait loop destroys the pending future and the real answer is dropped as "late or unmatched" (`:1630`) — `shield` is required, not optional |
 | D31 Sweeper vs a backgrounded phone | **No grace period.** A swept session stays resumable via `session/load` | A detach-keyed grace window; never sweep a session that ever had a subscriber | While the agent streams, `last_used` advances, so a *running* task is never swept whatever happened to the socket. The only affected case is returning >30 min after the task finished, and terminate leaves `.json`/`.jsonl` intact — cost is one reload. A grace window would add state for a case the activity stamp already covers |
 | D32 Agent-orphaned-lock false-live | **Accepted and recorded** | Gate acceptance on `_supervisor.sessions` | `session/load` makes our own agent write a lock naming itself (`acp.py:1006-1011`); a lock orphaned by a failed load, or by `close_session` when terminate raises, has `pid == live agent pid` and a forward delta — so with the ceiling gone it reads live for the agent's whole life, where today it self-heals after 120 s. The only fix is reading `_supervisor.sessions` from presence, which D9 forbids; accepting is the honest option |
+| D33 Phase 3 without its ACL layer | **Ship Phase 3 with the device cookie as the *sole* authorization layer** | Wait for a restricting NetBird policy (the plan's own Phase 0 gate); abandon remote access | ***User decision, 2026-07-31***, taken after Phase 0 measured the gate as failing and the consequence was stated explicitly. No policy restricts this peer — all 17 account peers sit in its network map — so D3's "primary" layer does not exist, and the cookie is not the second of two independent controls but the only one. **Consequence, recorded so a later reader does not mistake the shipped state for the designed one**: every cookie defect is now directly exploitable rather than defence-in-depth, and the thing behind it is a `-a` agent, i.e. arbitrary command execution as the user. Phase 3's cookie code carries the entire model alone. This overrides Phase 0's "Phase 3 does not start until one does" |
 
 *D1-D18 and D20-D22 carry forward from `/qexplore`'s resolved decisions and its assumptions ledger (surfaced and un-vetoed at the exploration assumptions checkpoint). D19 is a deterministic open item resolved by planner judgment. D23-D32 are cycle-1 review outcomes: D23-D25 and D31 are user decisions or planner calls on escalated findings; D26-D30 and D32 are corrections to defects the review found.*
 
@@ -391,7 +392,9 @@ Do **not** call `load_config()` from `at_capacity()` — it runs on the loop and
 **Goal**: Make PowerAtlas reachable on the NetBird interface with a default-deny path allowlist enforced on both HTTP and WebSocket, behind a device secret.
 **File scope**: `src/power_atlas/web.py`, `src/power_atlas/__main__.py`, `src/power_atlas/config.py`, `tests/test_web.py`
 **Covers**: SC-1, SC-2, SC-3, SC-3b, SC-4, SC-5
-**Blocked by**: Phase 0's NetBird policy verification. **Does not block Phases 4 or 5** — they need one allowlist entry each, registered in a small integration step.
+**Blocked by**: ~~Phase 0's NetBird policy verification~~ — **gate overridden by user decision on 2026-07-31 (D33)**. Phase 0 measured that no restricting policy exists, and the user elected to proceed with the cookie as the sole authorization layer. **Does not block Phases 4 or 5** — they need one allowlist entry each, registered in a small integration step.
+
+> **Security posture of this phase changed after planning.** D3 designed two independent layers because "bind, Host allowlist, ACL reachability and `_ACP_TOKEN` all fail together on a misconfigured policy". One of those two layers is now absent, so every control in this phase is load-bearing in a way the original design did not require: the secret's fail-closed path, the constant-time compare, the `issued_at` expiry, the `device_id` charset bound, and the `scope["client"]` remoteness signal each go from "second line of defence" to "the line". Review this phase's diff accordingly.
 
 **Change 1 — dual bind via pre-bound sockets** (D23, D25, D27). Add `remote_bind_address: str = ""` to `Config`.
 
@@ -675,7 +678,7 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 | A bind failure on the configured remote address kills startup | High: app will not start after a NetBird hiccup, since `__main__.py:322`'s retry covers only port-in-use | D27 — bind loopback first, log and continue on remote failure |
 | Our own agent's orphaned locks read live indefinitely once the skew ceiling is dropped | Medium: a session the agent does not hold shows a live dot and a `locked` indicator, for the agent's whole life | **Accepted** (D32) — the only alternative is the `presence → acp` coupling D9 forbids |
 | `_ALLOWED_HOSTS` populated by a per-request config read puts an uncached TOML parse on the hot path | Medium: the stall D15 forbids elsewhere | Startup setter mirroring D15; exit criterion forbids a per-request read |
-| NetBird account has 17 peers; reachability is not authorization | High: a colleague's device reaches the instance | Phase 0 gates Phase 3 on policy verification; the cookie survives policy drift |
+| NetBird account has 17 peers; reachability is not authorization | **High, and no longer mitigated in depth.** Phase 0 measured all 17 peers in this host's network map, so every one of them can reach the port. A colleague's device *does* reach the instance; only the cookie stops it | ~~Phase 0 gates Phase 3 on policy verification~~ (gate overridden, D33). **The cookie is now the sole control.** Residual accepted by the user 2026-07-31 with the consequence stated. Re-mitigate by creating a restricting NetBird policy at any time — nothing in the implementation depends on its absence |
 | `-a` behind a remote surface is arbitrary command execution as the user | High, accepted knowingly | Two independent layers (policy + cookie); default-deny allowlist; bind off by default |
 | Random-port fallback reverts to loopback if only `__main__.py:308` changes | Medium: silent loss of remote access, or worse, a silent bind mismatch | Explicit exit criterion that both sites read one value |
 | `custom_launchers[].env` remains readable | Medium, accepted (D4) | Loopback-only routing is the sole protection; no remote-reachable route returns it |
@@ -729,7 +732,7 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 | 0 | Pre-flight verification | Complete — 5 of 7 criteria | terminate re-verified; cancel measured; baselines captured. The two NetBird criteria are **refuted**, not deferred |
 | 1 | Presence fixes | Not started | |
 | 2 | Session lifecycle | Not started | Design amendments pending from Phase 0's cancel measurement |
-| 3 | Remote access | **Blocked** | No NetBird policy restricts this peer: all 17 account peers are in this host's network map (measured 2026-07-31). D3's primary authorization layer is absent |
+| 3 | Remote access | Not started | Gate **overridden** (D33): no NetBird policy exists, all 17 peers reach this host, and the user elected to ship with the cookie as sole authorization layer |
 | 4 | Listing endpoint | Not started | Allowlist registration deferred to the integration step |
 | 5a | Harness + rail data binding | Not started | |
 | 5b | Responsive layout + integration | Not started | |
@@ -827,8 +830,10 @@ Per-phase review deferred per `/qdev` Step 5's Skip rule (no executable code in 
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
-| P0-A | High | No NetBird policy restricts this peer: all 17 account peers sit in its network map, so D3's primary authorization layer is absent | Escalated — Phase 3 marked blocked; a restricting policy must exist before it runs |
-| P0-B | Medium | SC-11 requires green `pytest`, but `test_search_with_status_filter` fails deterministically from a stale assertion left by `e4fced3` | Escalated — recommend a scoped two-line fix in its own non-plan commit |
+| P0-A | High | No NetBird policy restricts this peer: all 17 account peers sit in its network map, so D3's primary authorization layer is absent | User: accepted — build Phase 3 anyway with the cookie as sole authorization layer (D33); gate overridden, consequence recorded |
+| P0-B | Medium | SC-11 requires green `pytest`, but `test_search_with_status_filter` fails deterministically from a stale assertion left by `e4fced3` | Fixed — assertion and its comment corrected in `1980b52`, committed outside the plan slug; suite now 1043 passed, 2 skipped |
+
+Both escalations were resolved by the user in the same turn. P0-A was presented with the security consequence stated plainly — a `-a` agent is arbitrary command execution as the user, reachable by 17 peers if the cookie has any flaw — and the user reaffirmed, so it is recorded as D33 rather than treated as an unexamined default. P0-B's fix restores a green baseline, which is what makes "full suite green" a usable exit criterion at every later phase boundary rather than a number to ignore.
 
 On P0-A the measurement is stronger than the plan's criterion anticipated: the criterion asked whether a restricting policy exists and expected the answer to be unobtainable without console access, but the policy's *effect* is visible locally through NetBird's network-map distribution. The answer is negative rather than unknown. The narrower residual — a policy admitting all 17 peers at the network layer while restricting protocol or port — is not settleable from here and does not move the gate.
 
