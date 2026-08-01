@@ -107,6 +107,55 @@ def _bind_remote_socket(log, config, socks: list, port: int) -> bool:
     return True
 
 
+def _choose_sockets(log, config, desired_port: int) -> tuple[list, int]:
+    """Bind every listener and report the port ``server_url`` must name.
+
+    Extracted from ``main`` so the returned port can be asserted against real
+    bound sockets rather than against the source text. The invariant is narrow
+    and easy to break silently: **the returned port is the port of
+    ``socks[0]``, the loopback listener** — never the remote one, and never
+    whichever socket uvicorn happens to register first. Appending
+    ``port = socks[-1].getsockname()[1]`` after the remote bind leaves every
+    source-text assertion in this suite intact while making ``server_url`` name
+    a port nothing listens on at ``127.0.0.1``, so tray and peek open a dead
+    URL. Only a test holding real sockets can see that.
+
+    Raises ``OSError`` when no loopback listener can be created at all; the
+    caller turns that into a clean exit. The remote bind never raises — it
+    degrades to loopback-only by design (D27).
+    """
+    # Both listeners are created here and handed to ONE `uvicorn.Server` via
+    # `run(sockets=…)` (D23). `uvicorn.Config(host=)` takes a single address, so
+    # two addresses meant either `0.0.0.0` — a listener on every network this
+    # laptop ever joins — or two `Server` instances, which would run lifespan
+    # twice: two background-refresh loops, two sweepers racing on the same
+    # sessions, and `acp.shutdown()` called twice.
+    #
+    # Loopback is MANDATORY and keeps its port-in-use fallback. Only the remote
+    # bind may degrade: a remote-only listener with no loopback is a state the
+    # whole model assumes cannot exist.
+    try:
+        socks = [_bind("127.0.0.1", desired_port)]
+    except OSError as exc:
+        if desired_port <= 0:
+            log.error("Loopback bind on an OS-assigned port failed: %s", exc)
+            raise
+        log.warning("Port %d unavailable (%s), falling back to random port",
+                    desired_port, exc)
+        socks = [_bind("127.0.0.1", 0)]
+    # Read from the loopback socket explicitly, never from `server.servers[0]`:
+    # with two sockets, index 0 is merely whichever one uvicorn happened to
+    # register first, and this value becomes the URL tray and peek open.
+    loopback_sock = socks[0]
+    port = loopback_sock.getsockname()[1]
+
+    _bind_remote_socket(log, config, socks, port)
+
+    log.info("Listening on %s",
+             [s.getsockname()[:2] for s in socks])
+    return socks, port
+
+
 def _write_pid() -> None:
     """Write current PID to file for stop/restart commands."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -388,44 +437,14 @@ def _run_foreground() -> None:
             evt.set()
         return _patched
 
-    # Both listeners are created here and handed to ONE `uvicorn.Server` via
-    # `run(sockets=…)` (D23). `uvicorn.Config(host=)` takes a single address, so
-    # two addresses meant either `0.0.0.0` — a listener on every network this
-    # laptop ever joins — or two `Server` instances, which would run lifespan
-    # twice: two background-refresh loops, two sweepers racing on the same
-    # sessions, and `acp.shutdown()` called twice.
-    #
-    # Loopback is MANDATORY and keeps its port-in-use fallback. Only the remote
-    # bind may degrade: a remote-only listener with no loopback is a state the
-    # whole model assumes cannot exist.
     try:
-        socks = [_bind("127.0.0.1", desired_port)]
+        socks, port = _choose_sockets(log, config, desired_port)
     except OSError as exc:
-        if desired_port <= 0:
-            log.error("Loopback bind on an OS-assigned port failed: %s", exc)
-            print("ERROR: Server failed to start", file=sys.stderr)
-            _remove_pid()
-            sys.exit(1)
-        log.warning("Port %d unavailable (%s), falling back to random port",
-                    desired_port, exc)
-        try:
-            socks = [_bind("127.0.0.1", 0)]
-        except OSError as exc2:
-            log.error("Loopback bind failed on port %d and on the random "
-                      "fallback: %s", desired_port, exc2)
-            print("ERROR: Server failed to start", file=sys.stderr)
-            _remove_pid()
-            sys.exit(1)
-    # Read from the loopback socket explicitly, never from `server.servers[0]`:
-    # with two sockets, index 0 is merely whichever one uvicorn happened to
-    # register first, and this value becomes the URL tray and peek open.
-    loopback_sock = socks[0]
-    port = loopback_sock.getsockname()[1]
-
-    _bind_remote_socket(log, config, socks, port)
-
-    log.info("Listening on %s",
-             [s.getsockname()[:2] for s in socks])
+        log.error("Loopback bind failed on port %d and on the random "
+                  "fallback: %s", desired_port, exc)
+        print("ERROR: Server failed to start", file=sys.stderr)
+        _remove_pid()
+        sys.exit(1)
 
     uv_config = uvicorn.Config(app, host="127.0.0.1", port=port,
                                log_level="warning",
@@ -439,7 +458,22 @@ def _run_foreground() -> None:
                                # loopback and skip both the path allowlist and
                                # the cookie — the exact class of bug D26 exists
                                # to close. PowerAtlas is never behind a proxy.
-                               proxy_headers=False)
+                               proxy_headers=False,
+                               # A ceiling on simultaneously-open connections,
+                               # so an unauthenticated remote peer cannot open
+                               # arbitrarily many at once. It is the process
+                               # sibling of `_REMOTE_AUTH_MAX_BODY`: that caps
+                               # one request, this caps how many can be in
+                               # flight. 128 cannot starve normal use — a
+                               # single dashboard holds one websocket plus a
+                               # handful of short-lived fetches, and the
+                               # remote client the same, so real usage sits in
+                               # the low tens even with several devices open.
+                               # uvicorn answers 503 past the ceiling rather
+                               # than queueing, which is the right failure: a
+                               # refused connection is recoverable, an
+                               # exhausted event loop is not.
+                               limit_concurrency=128)
     server = uvicorn.Server(uv_config)
     ready_event = threading.Event()
     server.startup = _make_patched_startup(server, ready_event)

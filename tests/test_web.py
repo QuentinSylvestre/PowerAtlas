@@ -19,6 +19,42 @@ from power_atlas.web import app
 from power_atlas import launcher
 
 
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path, monkeypatch):
+    """Redirect config I/O for **every** test in this file, regardless of intent.
+
+    Module-level and unconditional on purpose. Scoping this to the tests that
+    mean to write is the shape that already failed: a test asserting a
+    *refusal* reaches `save_config` the moment the guard it probes is removed,
+    which is precisely what a mutation run does. This phase's own verification
+    wrote `acp_max_sessions = 17`, `acp_idle_ttl_seconds = 86401`,
+    `acp_prompt_silence_seconds = 7201` and a stray `remote-secret` into the
+    real `%LOCALAPPDATA%\\power-atlas` that way.
+
+    Three separate exposures motivate the widening past `TestSettingsSurface`:
+
+    * `TestSameOriginGuard`'s four refusal tests and
+      `test_guard_applies_to_multiple_endpoints` POST real payloads to
+      `/api/save-setting` and ~7 other routes with `save_config` unpatched.
+    * `test_save_setting_port_bool_rejected` and
+      `test_save_setting_port_out_of_range` patch `load_config` to return a
+      **default** `Config()` while leaving `save_config` real — so a bypass
+      there does not write one wrong key, it writes an entirely default config
+      over the user's populated one, destroying custom launchers, pinned
+      sessions and pinned folders.
+    * `memory/MEMORY.md` already records 18 tests that *read* the developer's
+      real config.toml and names "a shared autouse fixture" as the durable fix.
+
+    A test that wants a populated config still writes one into `tmp_path`; a
+    test that wants the real one no longer gets it by accident.
+    """
+    from power_atlas import config as config_mod
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
+    return tmp_path
+
+
 @pytest.fixture
 def client():
     """TestClient with default Origin header for same-origin guard.
@@ -9939,7 +9975,7 @@ class TestRemotePathAllowlistIsDefaultDeny:
         assert status == 403
 
     @pytest.mark.parametrize("path", [
-        "/acp", "/ws/acp", "/remote-auth", "/static/style.css",
+        "/acp", "/remote-auth", "/static/style.css",
         "/static/deep/nested.js",
     ])
     def test_allowlisted_paths_pass_the_path_gate(self, path, remote_enabled):
@@ -9949,10 +9985,41 @@ class TestRemotePathAllowlistIsDefaultDeny:
     def test_the_static_mount_is_matched_as_a_directory(self, remote_enabled):
         """A bare `startswith("/static")` also admits `/staticfoo`."""
         from power_atlas.web import _remote_path_allowed
-        assert _remote_path_allowed("/static") is True
-        assert _remote_path_allowed("/static/style.css") is True
-        assert _remote_path_allowed("/staticfoo") is False
-        assert _remote_path_allowed("/staticfoo/style.css") is False
+        assert _remote_path_allowed("/static", "http") is True
+        assert _remote_path_allowed("/static/style.css", "http") is True
+        assert _remote_path_allowed("/staticfoo", "http") is False
+        assert _remote_path_allowed("/staticfoo/style.css", "http") is False
+
+    def test_the_allowlist_is_scope_typed(self, remote_enabled):
+        """Each entry admits the protocol it was written for and no other.
+
+        `/ws/acp` is the only websocket entry. A path-only allowlist let a
+        websocket upgrade to `/static/...` through on the cookie alone, and
+        `StaticFiles.__call__` opens with `assert scope["type"] == "http"` —
+        so the mount entry turned an upgrade into an unhandled `AssertionError`
+        instead of a refusal. Post-authentication, so noise rather than a
+        boundary failure, but `/static` + websocket is the stated reason this
+        guard exists.
+        """
+        from power_atlas.web import _remote_path_allowed
+        assert _remote_path_allowed("/ws/acp", "websocket") is True
+        assert _remote_path_allowed("/ws/acp", "http") is False
+        for path in ("/acp", "/remote-auth", "/static", "/static/style.css"):
+            assert _remote_path_allowed(path, "http") is True, path
+            assert _remote_path_allowed(path, "websocket") is False, path
+
+    def test_a_websocket_upgrade_to_the_static_mount_is_refused(self, remote_enabled):
+        """End-to-end through the guard, because the unit test above cannot
+        show that the guard passes the scope type at all."""
+        sent = _peer_ws("/static/style.css", [_cookie_header()],
+                        asgi_app=_guard_over_sentinel())
+        assert sent == [{"type": "websocket.close", "code": 1008}]
+
+    def test_the_websocket_route_still_passes_the_gate(self, remote_enabled):
+        """The refusal above must not have been bought by closing `/ws/acp`."""
+        with pytest.raises(_Reached):
+            _peer_ws("/ws/acp", [_cookie_header()],
+                     asgi_app=_guard_over_sentinel())
 
 
 class TestRemoteRequestsNeedTheCookie:
@@ -10110,6 +10177,40 @@ class TestDeviceCookieVerification:
         from power_atlas import web as web_mod
         scope = {"headers": [_cookie_header(secret="X" * 43)]}
         assert web_mod._cookie_ok(scope) is False
+
+    def test_a_short_secret_refuses_every_cookie(self, remote_enabled):
+        """`_cookie_ok` re-checks the length floor `set_remote_secret` already
+        applied. Reducing it to `if not secret:` left the whole suite green,
+        because the only test that claimed to justify it set the secret to `""`
+        — which exercises the *emptiness* branch and says nothing about the
+        floor.
+
+        The floor is what makes a truncated secret file fail closed rather than
+        becoming a short, brute-forceable HMAC key. Set a non-empty
+        under-length secret directly, and mint the cookie with that same
+        secret, so the refusal cannot be attributed to a signature mismatch.
+        """
+        from power_atlas import web as web_mod
+        short = "short"
+        assert 0 < len(short) < web_mod.REMOTE_SECRET_MIN_LEN
+        header = _cookie_header(secret=short)
+        web_mod._REMOTE_SECRET = short
+        try:
+            assert web_mod._cookie_ok({"headers": [header]}) is False
+        finally:
+            web_mod.set_remote_secret(_TEST_SECRET)
+
+    def test_a_secret_at_the_floor_is_accepted(self, remote_enabled):
+        """Positive control: the refusal above is the length check, not an
+        unrelated failure in the mint helper."""
+        from power_atlas import web as web_mod
+        exact = "Y" * web_mod.REMOTE_SECRET_MIN_LEN
+        header = _cookie_header(secret=exact)
+        web_mod._REMOTE_SECRET = exact
+        try:
+            assert web_mod._cookie_ok({"headers": [header]}) is True
+        finally:
+            web_mod.set_remote_secret(_TEST_SECRET)
 
     def test_the_cookie_survives_a_restart(self, remote_enabled):
         """D24's whole premise: verifiable with no server-side store, so the
@@ -10318,6 +10419,103 @@ class TestSecretExchange:
         assert self._post(_TEST_SECRET, peer=peer)[0] == 200
         assert peer not in web_mod._exchange_failures
 
+    def test_the_failure_table_is_bounded(self, remote_enabled):
+        """`_exchange_failures` is keyed by peer address, and `/remote-auth` is
+        reachable unauthenticated, so an attacker cycling source addresses
+        grows it once per address. Deleting `_EXCHANGE_MAX_TRACKED_PEERS`
+        entirely left the suite green — the eviction was documented and
+        unpinned.
+
+        600 distinct peers against a 512 ceiling: the table must not have
+        grown past the ceiling, and must still be tracking (not cleared).
+        """
+        from power_atlas import web as web_mod
+        web_mod._exchange_failures.clear()
+        for i in range(600):
+            web_mod._record_exchange_failure(f"100.64.{i // 256}.{i % 256}")
+        assert len(web_mod._exchange_failures) <= web_mod._EXCHANGE_MAX_TRACKED_PEERS
+        assert len(web_mod._exchange_failures) == web_mod._EXCHANGE_MAX_TRACKED_PEERS
+        web_mod._exchange_failures.clear()
+
+    def test_eviction_is_oldest_first_and_keeps_the_recent_peer(self, remote_enabled):
+        """Evicting the *newest* entry would let an attacker who overflows the
+        table clear their own backoff, which is the failure mode the bound is
+        supposed to close rather than open."""
+        from power_atlas import web as web_mod
+        web_mod._exchange_failures.clear()
+        first = "100.64.255.254"
+        web_mod._record_exchange_failure(first)
+        for i in range(web_mod._EXCHANGE_MAX_TRACKED_PEERS + 10):
+            web_mod._record_exchange_failure(f"100.65.{i // 256}.{i % 256}")
+        assert first not in web_mod._exchange_failures, "oldest should be evicted"
+        assert "100.65.2.9" in web_mod._exchange_failures, "newest must survive"
+        web_mod._exchange_failures.clear()
+
+    def test_an_oversized_declared_body_is_refused_before_it_is_read(self, remote_enabled):
+        """`/remote-auth` is the ONE path an unauthenticated remote peer can
+        reach, so an unbounded `await request.body()` there is a remote
+        resource-exhaustion primitive. Measured unbounded: 64 MiB drove
+        268.7 MB of peak RSS.
+
+        The per-peer backoff does not bound it — it is read at request entry,
+        so concurrent oversized POSTs from an already-throttled peer are all
+        buffered before any records a failure.
+        """
+        from power_atlas import web as web_mod
+        oversized = web_mod._REMOTE_AUTH_MAX_BODY + 1
+        status, _, _ = _peer_http(
+            "/remote-auth", method="POST", client=("100.64.200.1", 4444),
+            body=b"x" * oversized,
+            headers=[(b"content-type", b"application/x-www-form-urlencoded"),
+                     (b"content-length", str(oversized).encode()),
+                     (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())])
+        assert status == 413
+        web_mod._exchange_failures.clear()
+
+    def test_a_lying_content_length_is_caught_while_streaming(self, remote_enabled):
+        """`Content-Length` is attacker-controlled, and a chunked request
+        carries none at all, so the declared-length check cannot be the only
+        one. `_peer_http` sends the body regardless of the header."""
+        from power_atlas import web as web_mod
+        status, _, _ = _peer_http(
+            "/remote-auth", method="POST", client=("100.64.200.2", 4444),
+            body=b"x" * (web_mod._REMOTE_AUTH_MAX_BODY + 1),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded"),
+                     (b"content-length", b"12"),
+                     (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())])
+        assert status == 413
+        web_mod._exchange_failures.clear()
+
+    def test_a_field_flood_is_refused_rather_than_parsed(self, remote_enabled):
+        """`parse_qsl` builds every pair before anything inspects them: a body
+        of 1,000,000 fields cost 1.03 s of **synchronous** CPU on the event
+        loop, stalling every websocket and the dashboard. `max_num_fields`
+        reports the overflow by raising, which must surface as a refusal and
+        not as a 500 an unauthenticated peer can drive.
+        """
+        from power_atlas import web as web_mod
+        flood = b"&".join(b"a=1" for _ in range(web_mod._REMOTE_AUTH_MAX_FIELDS + 5))
+        assert len(flood) <= web_mod._REMOTE_AUTH_MAX_BODY, \
+            "must overflow on field count, not on bytes"
+        status, _, _ = _peer_http(
+            "/remote-auth", method="POST", client=("100.64.200.3", 4444),
+            body=flood,
+            headers=[(b"content-type", b"application/x-www-form-urlencoded"),
+                     (b"content-length", str(len(flood)).encode()),
+                     (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())])
+        assert status == 413
+        web_mod._exchange_failures.clear()
+
+    def test_a_normal_sized_body_still_authenticates(self, remote_enabled):
+        """Positive control: the caps above are not simply refusing everything.
+        The real form posts well under 200 bytes."""
+        from power_atlas import web as web_mod
+        body = f"device_id=phone&secret={_TEST_SECRET}".encode()
+        assert len(body) < 200
+        status, _, _ = self._post(_TEST_SECRET, peer="100.64.200.4")
+        assert status == 200
+        web_mod._exchange_failures.clear()
+
     def test_the_exchange_post_still_needs_a_same_origin(self, remote_enabled):
         """`_COOKIE_EXEMPT` exempts the cookie, not `same_origin_guard`."""
         status, _, _ = _peer_http(
@@ -10451,24 +10649,8 @@ class TestRemoteBindAddressValidation:
 
 
 class TestSettingsSurface:
-    @pytest.fixture(autouse=True)
-    def isolated_config(self, tmp_path, monkeypatch):
-        """Redirect config I/O for **every** test in this class, not only the
-        ones that mean to write.
-
-        A test that asserts a refusal reaches `save_config` the moment the
-        guard it probes is removed — which is exactly what a mutation run does,
-        and what wrote out-of-range values and a stray secret into the real
-        `%LOCALAPPDATA%\\power-atlas` during this phase's own verification.
-        `memory/MEMORY.md:95-97` already records 18 tests that read the
-        developer's real config.toml; these must not become 19 that write it.
-        """
-        from power_atlas import config as config_mod
-        monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
-        monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
-        monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH",
-                            tmp_path / "remote-secret")
-        return tmp_path
+    # Config I/O is redirected by the module-level `isolated_config` autouse
+    # fixture, which covers this class and every other test in the file.
 
     def test_the_acp_keys_are_writable_within_bounds(self, client):
         resp = client.post("/api/save-setting",
@@ -10488,8 +10670,24 @@ class TestSettingsSurface:
 
     def test_every_bounded_key_is_declared(self):
         """Adding a key to `_SETTING_TYPES` without a bound is what would turn
-        the fail-closed `Unknown setting` refusal into an unbounded write."""
+        the fail-closed `Unknown setting` refusal into an unbounded write.
+
+        The assertion that matters runs in that direction: **every int key in
+        `_SETTING_TYPES` must carry a bound**. The two set-equality checks
+        below only restate that the declared bounds are declared, which no
+        realistic regression violates — adding `"acp_future_knob": int` to
+        `_SETTING_TYPES` and nothing to `_SETTING_BOUNDS` left them both green,
+        which is exactly the regression this docstring warns about.
+
+        `port` is excluded because it carries its own range check in
+        `save_setting` (0 for random, else 1024-65535), which a single
+        inclusive `(lo, hi)` pair cannot express.
+        """
         from power_atlas.web import _SETTING_BOUNDS, _SETTING_TYPES
+        unbounded = {k for k, t in _SETTING_TYPES.items() if t is int} - {"port"}
+        assert unbounded == set(_SETTING_BOUNDS), (
+            "int settings without a bound: "
+            f"{sorted(unbounded - set(_SETTING_BOUNDS))}")
         assert set(_SETTING_BOUNDS) == {
             "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds"}
         assert set(_SETTING_BOUNDS) <= set(_SETTING_TYPES)
@@ -10502,11 +10700,49 @@ class TestSettingsSurface:
         body = client.get("/api/settings").json()
         assert set(body["restart_to_apply"]) == set(_RESTART_TO_APPLY)
 
+    def test_peek_hotkey_says_restart_to_apply(self, client):
+        """`peek_hotkey` is read once, at startup:
+        `create_peek(server_url, config.peek_hotkey)` hands it to
+        `PeekWindow.__init__`, which parses it into `self._trigger_keys`.
+        Nothing re-reads the config or re-registers the listener afterwards,
+        while `index.html` offers a live input for it.
+
+        Omitting it from `_RESTART_TO_APPLY` did not make the endpoint silent —
+        it made it answer `restart_required: False`, which is a positively wrong
+        answer the user acts on. A field that lies is worse than an absent one.
+        """
+        from power_atlas.web import _RESTART_TO_APPLY
+        assert "peek_hotkey" in _RESTART_TO_APPLY
+        body = client.post("/api/save-setting",
+                           json={"key": "peek_hotkey", "value": "ctrl+shift+p"}).json()
+        assert body == {"ok": True, "restart_required": True}
+
     def test_an_invalid_remote_bind_address_is_refused_by_name(self, client):
         body = client.post("/api/save-setting",
                            json={"key": "remote_bind_address", "value": "0.0.0.0"}).json()
         assert body["ok"] is False
         assert "wildcard" in body["error"]
+
+    def test_a_whitespace_only_bind_address_is_persisted_stripped(self, client, tmp_path):
+        """`value = value.strip()` sat *inside* `if value.strip():`, so it never
+        ran for a whitespace-only value and `"   "` was written to config.toml
+        verbatim. `load_config` strips it again on read, so the effect was
+        cosmetic — but the stored value disagreed with the effective one, and a
+        later reader resolves that gap in whichever direction they happen to
+        look.
+        """
+        from power_atlas import config as config_mod
+        (tmp_path / "config.toml").write_text("port = 4915\n")
+        body = client.post("/api/save-setting",
+                           json={"key": "remote_bind_address", "value": "   "}).json()
+        assert body["ok"] is True
+        assert config_mod.CONFIG_PATH.read_text(encoding="utf-8").count('"   "') == 0
+        assert config_mod.load_config().remote_bind_address == ""
+        # The stored text itself, not just what `load_config` makes of it.
+        assert 'remote_bind_address = ""' in \
+            config_mod.CONFIG_PATH.read_text(encoding="utf-8")
+        # Disabling must not have created a secret as a side effect.
+        assert not (tmp_path / "remote-secret").exists()
 
     def test_unknown_settings_are_still_default_denied(self, client):
         body = client.post("/api/save-setting",
@@ -10524,6 +10760,18 @@ class TestSettingsSurface:
 
     def test_the_secret_route_is_loopback_only(self, remote_enabled):
         assert _peer_http("/api/remote-access", [_cookie_header()])[0] == 403
+
+    def test_the_secret_route_is_not_cacheable(self, client):
+        """This body carries the **permanent** device secret, where `/acp`
+        carries the strictly weaker per-launch rotating `_ACP_TOKEN` — and
+        `/acp` already sets these headers. Nothing fetches this route yet,
+        which is why the header goes on before a consumer exists to cache it.
+        """
+        resp = client.get("/api/remote-access")
+        assert resp.status_code == 200
+        assert "secret" in resp.json(), "the assertion below would be vacuous"
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.headers["pragma"] == "no-cache"
 
 
 class TestBindSockets:
@@ -10686,7 +10934,14 @@ class TestRemoteSocketBinding:
         from power_atlas import web as web_mod
         monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
         made = object()
-        monkeypatch.setattr(main_mod, "_bind", lambda h, p: made)
+        # Capture the arguments rather than discarding them. With
+        # `lambda h, p: made` the stub could not tell `_bind(address, port)`
+        # from `_bind(address, port + 1)`, so "two sockets, on the same port
+        # number" — criterion 2 — was earned by reading the source, not by any
+        # assertion. The unusable-secret test above already captures this way.
+        calls = []
+        monkeypatch.setattr(main_mod, "_bind",
+                            lambda h, p: (calls.append((h, p)), made)[1])
         loopback = object()
         socks = [loopback]
         try:
@@ -10695,6 +10950,7 @@ class TestRemoteSocketBinding:
                 self._cfg(port=4915, remote_bind_address="100.78.142.124"),
                 socks, 4915)
             assert socks == [loopback, made]
+            assert calls == [("100.78.142.124", 4915)]
         finally:
             web_mod.set_remote_host("")
             web_mod.set_remote_secret("")
@@ -10704,7 +10960,9 @@ class TestRemoteSocketBinding:
         from power_atlas import web as web_mod
         monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
         made = object()
-        monkeypatch.setattr(main_mod, "_bind", lambda h, p: made)
+        calls = []
+        monkeypatch.setattr(main_mod, "_bind",
+                            lambda h, p: (calls.append((h, p)), made)[1])
         socks = []
         try:
             ok = main_mod._bind_remote_socket(
@@ -10712,11 +10970,126 @@ class TestRemoteSocketBinding:
                 self._cfg(port=4915, remote_bind_address="100.78.142.124"),
                 socks, 4915)
             assert ok is True and socks == [made]
+            # The remote listener must be on the loopback listener's port, not
+            # a neighbour of it: the phone's bookmarked URL and the laptop's
+            # `server_url` name the same number by construction.
+            assert calls == [("100.78.142.124", 4915)]
             assert web_mod._host_allowed("100.78.142.124:4915") is True
             assert web_mod._REMOTE_SECRET == _TEST_SECRET
         finally:
             web_mod.set_remote_host("")
             web_mod.set_remote_secret("")
+
+    def test_the_remote_bind_uses_the_actual_loopback_port_after_a_fallback(
+            self, monkeypatch):
+        """When the configured port is taken, loopback lands on an OS-assigned
+        one — and the remote socket must follow it there. Binding the
+        *configured* port instead would split the two listeners across
+        different ports with nothing failing."""
+        main_mod = self._main()
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+        calls = []
+        monkeypatch.setattr(main_mod, "_bind",
+                            lambda h, p: (calls.append((h, p)), object())[1])
+        socks = [object()]
+        try:
+            main_mod._bind_remote_socket(
+                logging.getLogger("t"),
+                self._cfg(port=4915, remote_bind_address="100.78.142.124"),
+                socks, 51234)
+            assert calls == [("100.78.142.124", 51234)]
+        finally:
+            web_mod.set_remote_host("")
+            web_mod.set_remote_secret("")
+
+
+class TestChooseSocketsReturnsTheLoopbackPort:
+    """`server_url` is the URL tray and peek open, and it is built from the port
+    `_choose_sockets` returns. Every existing assertion about that was a
+    substring check against `__main__.py`'s source text, which a
+    behaviour-preserving edit walks straight past: appending
+    `port = socks[-1].getsockname()[1]` after the remote bind left every literal
+    those tests grep for intact, made `server_url` name the **remote** listener
+    — nothing listens on `127.0.0.1:<remote-port>`, so tray and peek open a
+    dead URL — and kept the suite green.
+
+    Only a test holding real bound sockets can see it, so these bind them.
+    Loopback only: `127.0.0.1` twice on two OS-assigned ports is enough to make
+    `socks[0]` and `socks[-1]` differ, and no non-loopback interface is touched.
+    """
+
+    def _main(self):
+        from power_atlas import __main__ as main_mod
+        return main_mod
+
+    def _cfg(self, **kw):
+        from power_atlas.config import Config
+        return Config(**kw)
+
+    def test_the_returned_port_is_the_first_sockets_port(self, monkeypatch):
+        main_mod = self._main()
+        from power_atlas import web as web_mod
+        import socket as _socket
+        monkeypatch.setattr(main_mod, "load_remote_secret", lambda: _TEST_SECRET)
+        extra = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        extra.bind(("127.0.0.1", 0))
+        extra.listen()
+        # Stand in for the remote listener with a second *loopback* socket on a
+        # different OS-assigned port, so socks[0] and socks[-1] disagree.
+        monkeypatch.setattr(main_mod, "_bind_remote_socket",
+                            lambda log, config, socks, port: socks.append(extra) or True)
+        socks = []
+        try:
+            socks, port = main_mod._choose_sockets(
+                logging.getLogger("t"), self._cfg(port=0), 0)
+            assert len(socks) == 2, "the stand-in remote socket was appended"
+            assert socks[0].getsockname()[1] != socks[-1].getsockname()[1], \
+                "the two ports must differ or this test cannot discriminate"
+            assert port == socks[0].getsockname()[1]
+            assert port != socks[-1].getsockname()[1]
+        finally:
+            for s in socks:
+                s.close()
+            extra.close()
+            web_mod.set_remote_host("")
+            web_mod.set_remote_secret("")
+
+    def test_the_returned_port_is_where_loopback_actually_listens(self, monkeypatch):
+        """The port is not merely `socks[0]`'s by identity — it is the one a
+        client can connect to on 127.0.0.1, which is what `server_url` promises.
+        """
+        main_mod = self._main()
+        import socket as _socket
+        socks = []
+        try:
+            socks, port = main_mod._choose_sockets(
+                logging.getLogger("t"), self._cfg(port=0), 0)
+            probe = _socket.create_connection(("127.0.0.1", port), timeout=2)
+            probe.close()
+        finally:
+            for s in socks:
+                s.close()
+
+    def test_a_taken_port_falls_back_and_reports_the_fallback(self, monkeypatch):
+        """The random-port fallback must be reflected in the returned port, or
+        `server_url` names the port that was already taken by something else."""
+        main_mod = self._main()
+        import socket as _socket
+        squatter = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        squatter.bind(("127.0.0.1", 0))
+        squatter.listen()
+        taken = squatter.getsockname()[1]
+        socks = []
+        try:
+            socks, port = main_mod._choose_sockets(
+                logging.getLogger("t"), self._cfg(port=taken), taken)
+            assert port != taken, "the fallback port must not be the taken one"
+            assert port == socks[0].getsockname()[1]
+        finally:
+            for s in socks:
+                s.close()
+            squatter.close()
 
 
 class TestGuardOrdering:

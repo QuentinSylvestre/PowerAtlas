@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -944,7 +944,18 @@ def _is_remote_peer(peer: str | None) -> bool:
 # route added; this makes every new route loopback-only until someone puts it
 # here deliberately. Phase 4's listing endpoint is the next intended entry and
 # is deliberately absent until it exists.
-_REMOTE_ALLOWED_PATHS = frozenset({_ACP_PATH, "/ws/acp", _REMOTE_AUTH_PATH})
+# Scope-typed, not merely path-keyed. `/ws/acp` is the only websocket entry;
+# everything else is HTTP. A path-only allowlist admitted `ws://<ip>/static/x`
+# on the cookie alone, and `StaticFiles.__call__` opens with
+# `assert scope["type"] == "http"` — so the guard's own mount entry produced an
+# unhandled `AssertionError` on a websocket scope. Post-authentication, so it
+# was noise rather than a boundary failure, but the docstring below names
+# `/static` + websocket as the reason this function exists at all.
+_REMOTE_ALLOWED_PATHS: dict[str, str] = {
+    _ACP_PATH: "http",
+    "/ws/acp": "websocket",
+    _REMOTE_AUTH_PATH: "http",
+}
 
 # Path-only, so the exchange route itself must reject methods other than
 # GET/POST — which FastAPI does by registering only those two.
@@ -953,15 +964,25 @@ _COOKIE_EXEMPT = frozenset({_REMOTE_AUTH_PATH})
 _FORBIDDEN_BODY = b'{"error":"Forbidden"}'
 
 
-def _remote_path_allowed(path: str) -> bool:
+def _remote_path_allowed(path: str, scope_type: str) -> bool:
     """Exact match for the fixed paths; prefix match only for the mount.
 
     `startswith("/static")` alone would also admit `/staticfoo`, so the mount
     is matched as the directory it is.
+
+    The scope type is part of the key, not an afterthought: an entry admits the
+    protocol it was written for and no other. `/ws/acp` is websocket-only;
+    `/acp`, `/remote-auth` and the `/static` mount are http-only. Without this,
+    a websocket upgrade to `/static/anything` passed the guard on the cookie
+    alone and reached `StaticFiles.__call__`, whose first statement asserts an
+    http scope.
     """
-    if path in _REMOTE_ALLOWED_PATHS:
-        return True
-    return path == "/static" or path.startswith("/static/")
+    allowed = _REMOTE_ALLOWED_PATHS.get(path)
+    if allowed is not None:
+        return scope_type == allowed
+    if path == "/static" or path.startswith("/static/"):
+        return scope_type == "http"
+    return False
 
 
 async def _refuse(scope, send) -> None:
@@ -1025,7 +1046,7 @@ class RemoteAccessGuard:
         if scope["type"] in ("http", "websocket"):
             if _is_remote_peer((scope.get("client") or (None,))[0]):
                 path = scope.get("path") or ""
-                if not _remote_path_allowed(path):
+                if not _remote_path_allowed(path, scope["type"]):
                     await _refuse(scope, send)
                     return
                 if path not in _COOKIE_EXEMPT and not _cookie_ok(scope):
@@ -1228,6 +1249,24 @@ async def ws_acp(ws: WebSocket) -> None:
     Past the handoff this route is an opaque router: ``acp`` owns the frames
     and this function never inspects a ``type``, which is what lets later
     phases add message types without touching ``web.py``.
+
+    **From a remote peer the only controls on this upgrade are the device
+    cookie and ``_ACP_TOKEN``.** An earlier note claimed ``/ws/acp`` was
+    incidentally browser-only from remote, on the grounds that ``_ws_origin_ok``
+    demands an ``Origin`` that non-browser clients do not send. That is false
+    and was disproved by execution, not by reading: ``_ws_origin_ok`` requires
+    only a *self-consistent* ``Host``/``Origin`` pair, which any scripted
+    client sets in one line, and ``_host_allowed`` admits loopback names
+    without reference to the peer's actual address — so a remote client may
+    simply claim ``Host: 127.0.0.1:4915``. A non-browser client on a remote
+    address, presenting a valid cookie and token, reaches ``accept()`` and
+    ``acp.serve_socket``.
+
+    Recorded here because a phantom control is worse than a missing one: a
+    later cleanup of ``_ws_origin_ok`` would otherwise be priced as removing a
+    real defence against non-browser clients when it removes nothing of the
+    sort. ``_ws_origin_ok`` is browser-CSRF hygiene — it stops a *web page* on
+    another origin from opening this socket — and nothing more.
     """
     if not _acp_token_ok(ws.query_params.get("t", "")):
         await ws.close(code=1008)
@@ -1259,6 +1298,30 @@ _EXCHANGE_MAX_BACKOFF_SECONDS = 300.0
 # single-address attacker nothing at all.
 _EXCHANGE_MAX_TRACKED_PEERS = 512
 _exchange_failures: dict[str, tuple[int, float]] = {}
+
+# `/remote-auth` is the ONE path an unauthenticated remote peer can reach, so
+# it is the one path where an unbounded `await request.body()` is a remote
+# resource-exhaustion primitive rather than a local footgun. Measured on the
+# unbounded version: a 64 MiB body drove 268.7 MB of peak RSS, and a body of
+# 1,000,000 fields cost 1.03 s of **synchronous** CPU inside `parse_qsl` —
+# which is time the event loop is not serving any websocket or the dashboard.
+#
+# The per-peer backoff does not bound either one. It is consulted at request
+# entry, so 20 concurrent 8 MiB POSTs from an already-throttled peer are all
+# buffered (160 MiB) before a single one records a failure.
+#
+# 4096 bytes: the real form posts `device_id` (<=64) + `secret` (43 chars of
+# `token_urlsafe(32)`) + field names and percent-encoding — under 200 bytes.
+# 4 KiB is a >20x margin for a browser that adds hidden fields or a UTF-8
+# device name that expands under percent-encoding, while being far too small
+# to be worth sending as an attack.
+_REMOTE_AUTH_MAX_BODY = 4096
+# `parse_qsl` builds a list of every separator-delimited pair before anything
+# looks at it, so field *count* is a cost axis of its own. Under a 4 KiB
+# ceiling a body of bare `&`s tops out around 4096 fields anyway; 64 is a
+# generous ceiling for a two-field form and makes the bound explicit rather
+# than incidental to the byte cap.
+_REMOTE_AUTH_MAX_FIELDS = 64
 
 _EXCHANGE_FORM = """<!doctype html>
 <title>PowerAtlas remote access</title>
@@ -1342,8 +1405,38 @@ async def remote_auth_exchange(request: Request):
         log.error("remote auth attempted from %s with no usable device secret",
                   peer)
         return HTMLResponse("Remote access is not configured", status_code=503)
-    raw = await request.body()
-    fields = dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+    # Refuse on the declared length **before** awaiting a byte, so an oversized
+    # body is never buffered. `Content-Length` is attacker-controlled, hence the
+    # streaming ceiling below rather than trust in this check alone.
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > _REMOTE_AUTH_MAX_BODY:
+        _record_exchange_failure(peer)
+        log.warning("remote auth from %s rejected: body declares %s bytes",
+                    peer, declared)
+        return HTMLResponse("Request body too large", status_code=413)
+    # Stream with a running ceiling for the cases the header does not cover: a
+    # chunked request carries no `Content-Length` at all, and a stated one may
+    # simply be a lie. Bail on the first chunk that crosses the cap rather than
+    # reading to the end to find out how big it was.
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > _REMOTE_AUTH_MAX_BODY:
+            _record_exchange_failure(peer)
+            log.warning("remote auth from %s rejected: body exceeded %d bytes",
+                        peer, _REMOTE_AUTH_MAX_BODY)
+            return HTMLResponse("Request body too large", status_code=413)
+    try:
+        pairs = parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True,
+                          max_num_fields=_REMOTE_AUTH_MAX_FIELDS)
+    except ValueError:
+        # `max_num_fields` reports the overflow by raising. This is a refusal,
+        # not a 500: an unauthenticated peer must not be able to drive a
+        # traceback out of the authentication path.
+        _record_exchange_failure(peer)
+        log.warning("remote auth from %s rejected: too many fields", peer)
+        return HTMLResponse("Request body too large", status_code=413)
+    fields = dict(pairs)
     supplied = fields.get("secret", "")
     device_id = fields.get("device_id", "")
     # Validate the identifier before it reaches a cookie or a log line: a ";"
@@ -2366,6 +2459,14 @@ _SETTING_BOUNDS: dict[str, tuple[int, int]] = {
 _RESTART_TO_APPLY = frozenset({
     "port", "acp_max_sessions", "acp_idle_ttl_seconds",
     "acp_prompt_silence_seconds", "remote_bind_address",
+    # `peek_hotkey` is consumed once, at startup, by
+    # `create_peek(server_url, config.peek_hotkey)`; `PeekWindow.__init__`
+    # parses it into `self._trigger_keys` and nothing re-reads or re-registers
+    # it afterwards. `index.html` offers a live input for it, so omitting it
+    # here made the endpoint answer `restart_required: False` for a key that
+    # genuinely needs one — a field that is positively wrong is worse than no
+    # field, because the user acts on it.
+    "peek_hotkey",
 })
 
 
@@ -2408,7 +2509,14 @@ async def save_setting(request: Request):
         reason = validate_remote_bind_address(value, config.port)
         if reason:
             return {"ok": False, "error": reason}
-        if value.strip():
+        # Strip **before** the branch, not inside it. Nested under
+        # `if value.strip():` the assignment never ran for a whitespace-only
+        # value, so `"   "` was persisted verbatim into config.toml.
+        # `load_config` strips it again on read, so the effect was cosmetic —
+        # but the stored value disagreed with the effective one, which is the
+        # kind of gap a later reader resolves in the wrong direction.
+        value = value.strip()
+        if value:
             # First enable: create the device secret in the same step that
             # turns the surface on, so "reachable" and "authenticable" cannot
             # come apart. An existing secret is returned untouched \u2014 issuing a
@@ -2425,7 +2533,7 @@ async def save_setting(request: Request):
 
 
 @app.get("/api/remote-access")
-async def api_remote_access():
+async def api_remote_access(response: Response):
     """The remote URL and device secret, as copyable text (D22).
 
     Its own route rather than a field on `/api/settings`: that payload is
@@ -2433,7 +2541,15 @@ async def api_remote_access():
     Both routes are loopback-only \u2014 they are absent from
     `_REMOTE_ALLOWED_PATHS`, and the allowlist is default-deny \u2014 so the secret
     is never served over the remote surface it authenticates.
+
+    `no-store` for the same reason `/acp` sets it, only more so: this body
+    carries the **permanent** device secret, where `/acp` carries the strictly
+    weaker per-launch rotating `_ACP_TOKEN`. Nothing fetches this route yet,
+    which is exactly why the header goes on now — before a consumer exists to
+    start caching it.
     """
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     config = load_config()
     secret = load_remote_secret()
     address = config.remote_bind_address

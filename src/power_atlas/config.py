@@ -192,9 +192,19 @@ def validate_remote_bind_address(raw: object, port: int) -> str:
     except ValueError:
         return ("remote_bind_address must be a literal IP address, "
                 "not a hostname")
-    # An IPv4-mapped IPv6 address carries its properties on the embedded v4
-    # address, so `::ffff:0.0.0.0` is NOT `is_unspecified` and `::ffff:127.0.0.1`
-    # is NOT `is_loopback`. Unwrap before asking.
+    # Unwrap an IPv4-mapped IPv6 address before asking about its properties.
+    # Whether this is load-bearing depends on the interpreter, and
+    # `pyproject.toml` still says `requires-python = ">=3.11"`:
+    #
+    # * On 3.11 and 3.12 `IPv6Address.is_loopback` / `is_unspecified` test the
+    #   128-bit value directly, so `::ffff:127.0.0.1` is NOT `is_loopback` and
+    #   `::ffff:0.0.0.0` is NOT `is_unspecified`. Without the unwrap both slip
+    #   through as valid remote bind addresses.
+    # * On 3.13 those properties delegate through `ipv4_mapped`, so both
+    #   already answer True and the unwrap is a no-op. Verified on 3.13.13.
+    #
+    # Keep it either way: it is correct on both, and it is the only thing
+    # making the check version-agnostic across the supported range.
     checked = getattr(parsed, "ipv4_mapped", None) or parsed
     if checked.is_unspecified:
         return "remote_bind_address must not be a wildcard address"
