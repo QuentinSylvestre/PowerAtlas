@@ -17,6 +17,25 @@
   </div>
 </div>
 
+<!-- The session browser. Rendered client-side from GET /api/acp/sessions, never
+     by Jinja: the rail pages and filters after first paint, so a server-rendered
+     list would have to come back as markup and be written through a sink this
+     page forbids. Empty here and filled by renderRail(). Phase 5b owns the
+     two-pane shell and the CSS; this markup is deliberately a sibling of
+     .acp-page rather than a wrapper around it, so the existing flex layout is
+     untouched until the phase that owns it. -->
+<aside class="acp-rail" id="acpRail" aria-label="Sessions">
+  <div class="acp-rail-head">
+    <input class="acp-rail-search" id="acpRailSearch" type="text" spellcheck="false"
+           placeholder="Filter the sessions below"
+           aria-label="Filter the sessions listed below">
+    <button class="acp-btn" id="acpRailReload" type="button">Refresh</button>
+  </div>
+  <div class="acp-rail-status" id="acpRailStatus" role="status" aria-live="polite"></div>
+  <div class="acp-rail-groups" id="acpRailGroups"></div>
+  <button class="acp-btn acp-rail-more" id="acpRailMore" type="button" hidden>More workspaces</button>
+</aside>
+
 <div class="acp-page">
   <div class="acp-toolbar">
     <button class="acp-btn" id="acpNew" type="button">New session</button>
@@ -93,6 +112,11 @@
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
   var contextLabel = document.getElementById('acpContextLabel');
+  var railSearch = document.getElementById('acpRailSearch');
+  var railReload = document.getElementById('acpRailReload');
+  var railStatus = document.getElementById('acpRailStatus');
+  var railGroupsEl = document.getElementById('acpRailGroups');
+  var railMore = document.getElementById('acpRailMore');
   var ws = null;
   // Whether the most recent attempt ever reached onopen. A close without one
   // means the handshake was rejected, which is a different failure from a
@@ -143,6 +167,38 @@
   // without this the page is a dead end whose only pressable control is Enter,
   // which reaches the server and is refused with advice for a different case.
   var loadFailed = false;
+
+  // ---- the session rail ------------------------------------------------
+  // D16: ten workspaces shown with a show-more, three sessions inside each
+  // with its own show-more. The two page sizes are the defaults the listing
+  // endpoint already uses; they are sent explicitly anyway, because the rail's
+  // layout depends on them and a server-side default change should not silently
+  // reshape the page.
+  var RAIL_GROUP_SIZE = 10;
+  var RAIL_SESSION_SIZE = 3;
+  // The three states GET /api/acp/sessions can report (D17), as a closed set.
+  // The value comes off the wire and ends up in a class name and a data
+  // attribute, both of which are attribute sinks — so it is narrowed to one of
+  // these literals first, the same discipline `addMessage` applies to `role`.
+  var RAIL_AVAILABILITY = {
+    available: 'available',
+    held: 'held',
+    locked: 'locked'
+  };
+  var RAIL_AVAILABILITY_LABEL = {
+    available: 'available',
+    held: 'held by this PowerAtlas',
+    locked: 'in use by another process — cannot be opened here'
+  };
+  // Every group fetched so far, in fetch order, each carrying the sessions
+  // fetched for it so far. Accumulated rather than replaced: "show more" is
+  // additive on both axes, and a page that dropped what it had would lose the
+  // row the user was reading towards.
+  var railGroups = [];
+  var railGroupPage = 0;
+  var railHasMore = false;
+  var railFilter = '';
+  var railBusy = false;
 
   if (sessionId) sidEl.textContent = 'session ' + sessionId;
 
@@ -380,6 +436,262 @@
     transcriptEl.textContent = '';
     agentBody = null;
     toolRows = Object.create(null);
+  }
+
+  function railUrl(params) {
+    var qs = [];
+    for (var key in params) {
+      var value = params[key];
+      if (value === null || value === undefined || value === '') continue;
+      qs.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
+    }
+    return '/api/acp/sessions' + (qs.length ? '?' + qs.join('&') : '');
+  }
+
+  function railFetch(params) {
+    // `no-store` for the same reason the endpoint sends it: availability is a
+    // liveness reading with a lifetime of seconds, and a cached `available` for
+    // a session another process has taken is exactly the wrong thing to keep.
+    return fetch(railUrl(params), { cache: 'no-store', credentials: 'same-origin' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      });
+  }
+
+  function railFailed(what, err) {
+    railBusy = false;
+    var why = (err && err.message) || String(err);
+    railStatus.textContent = what + ' (' + why + ')';
+    logLine('error', 'session list: ' + why);
+  }
+
+  function loadGroupPage(page) {
+    // One request in flight at a time. Both show-more buttons and Refresh reach
+    // this, and two overlapping pages would interleave into `railGroups` in
+    // whatever order they answered.
+    if (railBusy) return;
+    railBusy = true;
+    railStatus.textContent = page > 1 ? 'loading more workspaces…' : 'loading sessions…';
+    railFetch({
+      group_page: page,
+      group_size: RAIL_GROUP_SIZE,
+      session_page: 1,
+      session_size: RAIL_SESSION_SIZE
+    }).then(function (data) {
+      railBusy = false;
+      // Page 1 is a reload, every later page is an append.
+      if (page === 1) railGroups = [];
+      var groups = (data && data.groups) || [];
+      for (var i = 0; i < groups.length; i++) {
+        groups[i].sessions = groups[i].sessions || [];
+        railGroups.push(groups[i]);
+      }
+      railGroupPage = page;
+      railHasMore = !!(data && data.has_more);
+      var total = (data && data.group_total) || railGroups.length;
+      railStatus.textContent = railGroups.length
+        ? railGroups.length + ' of ' + total + ' workspaces'
+        : 'no sessions found';
+      renderRail();
+    }).catch(function (err) {
+      railFailed('could not load the session list', err);
+    });
+  }
+
+  function loadGroupSessions(group) {
+    if (railBusy) return;
+    railBusy = true;
+    var next = (group.session_page || 1) + 1;
+    // `cwd` selects one workspace and bypasses the group axis, so paging deep
+    // into a 208-session workspace costs that workspace rather than the page.
+    railFetch({
+      cwd: group.cwd,
+      session_page: next,
+      session_size: RAIL_SESSION_SIZE
+    }).then(function (data) {
+      railBusy = false;
+      var got = ((data && data.groups) || [])[0];
+      if (!got) {
+        // The workspace answered nothing — it was hidden, or emptied since the
+        // page loaded. Stop offering more rather than looping on the button.
+        group.has_more = false;
+        renderRail();
+        return;
+      }
+      var rows = got.sessions || [];
+      for (var i = 0; i < rows.length; i++) group.sessions.push(rows[i]);
+      group.session_page = next;
+      group.has_more = !!got.has_more;
+      if (typeof got.total === 'number') group.total = got.total;
+      renderRail();
+    }).catch(function (err) {
+      railFailed('could not load more sessions', err);
+    });
+  }
+
+  function railAvailability(value) {
+    return RAIL_AVAILABILITY[value] || 'available';
+  }
+
+  function railWhen(value) {
+    // The store's timestamps are ISO strings. Anything else is shown as it came
+    // rather than parsed into an `Invalid Date`, which would read as a defect in
+    // the rail rather than in the record.
+    var text = String(value || '');
+    if (text.length >= 16 && text.charAt(10) === 'T') {
+      return text.slice(0, 10) + ' ' + text.slice(11, 16);
+    }
+    return text;
+  }
+
+  function railMatches(group, session) {
+    if (!railFilter) return true;
+    // Workspace name and path are part of the haystack: "the sessions in
+    // nrf_tool" is the query a rail grouped by workspace invites.
+    var hay = ((session.title || '') + ' ' + (group.name || '') + ' ' +
+               (group.cwd || '')).toLowerCase();
+    return hay.indexOf(railFilter) !== -1;
+  }
+
+  function railRowNode(session) {
+    var state = railAvailability(session.availability);
+    var locked = state === 'locked';
+    var row = document.createElement('button');
+    // Class names are literals plus the narrowed state, never the raw field.
+    row.className = 'acp-rail-row acp-rail-row-' + state +
+                    (session.id === sessionId ? ' acp-rail-row-current' : '');
+    row.type = 'button';
+    row.dataset.sid = session.id;
+    row.dataset.availability = state;
+    // Greyed is a colour; disabled is the only version of "not selectable" that
+    // a keyboard and a screen reader also get. D17: a session locked by a live
+    // foreign process cannot be loaded, and offering it costs a round trip and
+    // an error the user cannot act on.
+    row.disabled = locked;
+
+    var dot = document.createElement('span');
+    dot.className = 'acp-avail acp-avail-' + state;
+    // The dot carries no text, so without this it is an indicator with no
+    // accessible name.
+    dot.setAttribute('aria-label', RAIL_AVAILABILITY_LABEL[state]);
+    dot.title = RAIL_AVAILABILITY_LABEL[state];
+    row.appendChild(dot);
+
+    var title = document.createElement('span');
+    title.className = 'acp-rail-row-title';
+    // 185 of the real store's 1,210 sessions carry neither a title nor a first
+    // prompt to fall back to, so a blank one is a normal reading and not an
+    // edge case; a row with nothing in it is unclickable in practice.
+    title.textContent = String(session.title || '').trim() || 'untitled session';
+    row.appendChild(title);
+
+    var when = document.createElement('span');
+    when.className = 'acp-rail-row-when';
+    when.textContent = railWhen(session.updated_at);
+    row.appendChild(when);
+
+    row.addEventListener('click', function () {
+      // A browser fires no click on a disabled button; this guard covers
+      // everything else that can reach the handler, including a later refactor
+      // that stops drawing the row as one.
+      if (locked) return;
+      selectSession(session.id);
+    });
+    return row;
+  }
+
+  function railGroupNode(group, sessions) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-rail-group';
+    wrap.dataset.cwd = group.cwd;
+
+    var head = document.createElement('div');
+    head.className = 'acp-rail-group-head';
+    var name = document.createElement('span');
+    name.className = 'acp-rail-group-name';
+    name.textContent = group.name || group.cwd;
+    // The folder name is what fits in the rail; the full path is the only thing
+    // that tells two workspaces with the same one apart.
+    name.title = group.cwd;
+    head.appendChild(name);
+    var count = document.createElement('span');
+    count.className = 'acp-rail-group-count';
+    count.textContent = group.sessions.length + ' of ' + group.total;
+    head.appendChild(count);
+    wrap.appendChild(head);
+
+    for (var i = 0; i < sessions.length; i++) {
+      wrap.appendChild(railRowNode(sessions[i]));
+    }
+
+    if (group.has_more) {
+      var more = document.createElement('button');
+      more.className = 'acp-btn acp-rail-group-more';
+      more.type = 'button';
+      more.textContent = 'More in ' + (group.name || 'this workspace');
+      more.addEventListener('click', function () { loadGroupSessions(group); });
+      wrap.appendChild(more);
+    }
+    return wrap;
+  }
+
+  function renderRail() {
+    // Emptied by textContent rather than innerHTML: same effect, and it keeps
+    // the no-innerHTML rule true of every line on this page without exception.
+    railGroupsEl.textContent = '';
+    var shown = 0;
+    for (var i = 0; i < railGroups.length; i++) {
+      var group = railGroups[i];
+      var sessions = [];
+      var all = group.sessions || [];
+      for (var j = 0; j < all.length; j++) {
+        if (railMatches(group, all[j])) sessions.push(all[j]);
+      }
+      // A workspace with nothing left after the filter is not drawn at all —
+      // an empty group header is noise in a list whose whole job is narrowing.
+      if (sessions.length === 0) continue;
+      railGroupsEl.appendChild(railGroupNode(group, sessions));
+      shown += sessions.length;
+    }
+    if (shown === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'acp-rail-empty';
+      empty.textContent = railFilter
+        ? 'nothing listed matches that — the filter narrows the sessions already '
+          + 'loaded, so load more workspaces to widen it'
+        : 'no sessions to show';
+      railGroupsEl.appendChild(empty);
+    }
+    railMore.hidden = !railHasMore;
+  }
+
+  function selectSession(sid) {
+    if (!sid || sid === sessionId) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      logLine('error', 'not connected — reconnect before opening a session');
+      return;
+    }
+    sessionId = sid;
+    // A new session on the same socket: nothing about the old one survives, and
+    // `subscribed` in particular must not, or a `close_in_progress` for this one
+    // would take the wrong arm.
+    subscribed = false;
+    loadFailed = false;
+    setLoading(null);
+    clearTranscript();
+    setContext(null);
+    setTurn(false);
+    sidEl.textContent = 'session ' + sid;
+    history.replaceState(null, '',
+      location.pathname + '?sid=' + encodeURIComponent(sid));
+    // `subscribe` first. The server answers `unknown_session` for a session it
+    // does not hold, and the error branch above turns that into a `load` from
+    // the agent's own store — the same path the dashboard's row action opens,
+    // reused rather than duplicated here.
+    send('subscribe', {}, sid);
+    logLine('info', 'opening ' + sid + ' from the session list');
+    renderRail();
   }
 
   function sendPrompt() {
@@ -765,6 +1077,18 @@
     closeBtn.disabled = true;
     closeBtn.textContent = 'Closing…';
   });
+  railSearch.addEventListener('input', function () {
+    // Client-side, over the rows already loaded. The listing endpoint has no
+    // search parameter, and the alternative — a request per keystroke against a
+    // route whose per-row cost is a file read plus a psutil query — is an
+    // amplification lever, not a feature.
+    railFilter = String(railSearch.value || '').trim().toLowerCase();
+    renderRail();
+  });
+  railMore.addEventListener('click', function () {
+    loadGroupPage(railGroupPage + 1);
+  });
+  railReload.addEventListener('click', function () { loadGroupPage(1); });
   reconnectBtn.addEventListener('click', connect);
   reloadBtn.addEventListener('click', function () { location.reload(); });
   sendBtn.addEventListener('click', sendPrompt);
@@ -784,8 +1108,13 @@
                     'normally. Fix the import and restart the server.');
     newBtn.disabled = true;
     promptInput.disabled = true;
+    // The rail's only action is to open a session, and there is no ACP module
+    // to open one with, so listing them would be an invitation to a dead end.
+    railStatus.textContent = 'the session list is unavailable while the ACP '
+      + 'module is not loaded';
   } else {
     connect();
+    loadGroupPage(1);
   }
 })();
 </script>
