@@ -358,7 +358,13 @@ Signature preservation is not cosmetic: **19** fixed-signature `_request` stubs 
 
 *A third by-design test edit*: `tests/test_web.py:2658` asserts the exact `_request` call tuple including `acp_mod.PROMPT_TIMEOUT_SECONDS`. `:4484`'s docstring and `:3723`'s "MAX_SESSIONS is 3" also go stale.
 
-*Honest scope of the cancel*: `_handle_prompt`'s `finally` (`:2570-2574`) still clears `inflight` and emits `turn end`, so a user can immediately send a second prompt while the agent may still be finishing the first, and the eventual response is dropped as "late or unmatched" (`:1630`). Cancel-on-timeout **mitigates** the orphaned turn; it does not eliminate it. Phase 0 verifies whether kiro-cli honours cancel mid-tool at all.
+*Honest scope of the cancel — rewritten 2026-08-01 from Phase 0's measurement, which came out differently from either outcome this paragraph anticipated.*
+
+**The orphaned turn is much smaller than assumed.** kiro-cli 2.16.0 honours `session/cancel` at the protocol layer and answers the outstanding `session/prompt` with `{"stopReason":"cancelled"}` **9 ms** after the notification is written — a *matched* response on the pending future, so `acp.py:1630`'s "late or unmatched" drop is not exercised on this route at all. The interleaving window `inflight` guards is therefore ~9 ms, not open-ended. `CANCEL_GRACE_SECONDS = 30.0` was sized for a hazard three orders of magnitude larger than the measured one and should be reduced accordingly (a few seconds still leaves ample margin over 9 ms).
+
+**The orphaned *process* is the real hazard, and this plan did not name it.** Cancel stops the ACP turn and does **not** kill the tool's OS children. Measured: with the agent running `ping -n 91 127.0.0.1` through its `shell` tool, `pwsh.exe` (63864) and `PING.EXE` (73648) were both alive when the prompt answered and still alive 20 s later; they died only when the probe closed its Windows job object. So after the inactivity ceiling fires, a shell subprocess can keep running for arbitrarily long — invisible to `inflight`, to all six sweep conditions, and to SC-10b's per-session RSS figure, which is a floor rather than a ceiling for any session cancelled mid-tool.
+
+Whether `_kiro.dev/session/terminate` reaps such an orphan is **unmeasured**: Phase 0's terminate probe operated on an *idle* session. This phase must measure it rather than assume it, because the answer decides whether the sweeper actually reclaims what it claims to reclaim.
 
 **Change 3 — the idle sweeper** (discipline per D28). Owned by `acp.py`, started from `lifespan` **guarded** (`if acp is not None:`, exactly as the teardown at `web.py:526` is) — `acp.shutdown()` is synchronous and cannot await a task cancellation.
 
@@ -417,6 +423,10 @@ Do **not** call `load_config()` from `at_capacity()` — it runs on the loop and
 - [ ] The sweeper task sleeps before its first work item; a tick with zero sessions still yields to the loop
 - [ ] A session closed by the user between snapshot and sweep is skipped, not re-terminated with a WARNING
 - [ ] Sweeper and refresh tasks are cancelled and awaited inside the nested `finally`, before `acp.shutdown()`
+- [ ] *(from Phase 0 divergence P0-1)* Whether `_kiro.dev/session/terminate` reaps a session's **still-running tool process** is **measured** and the answer recorded either way. Phase 0 measured terminate on an idle session only, so the sweeper's reclamation claim is currently unproven for the case that matters most — a session swept while a shell subprocess is still running. If terminate does **not** reap it, say so plainly and record the residual rather than softening the claim
+- [ ] *(from Phase 0 divergence P0-3)* The activity stamp fires for `_kiro.dev/session/update` — a method **distinct** from `session/update` that carries a `sessionId` and a `tool_call_chunk`, and that falls through today's dispatch at `acp.py:1712-1714`. Keying the stamp on a method allowlist rather than on the presence of a session id would miss it and could cancel a working turn
+- [ ] *(from Phase 0 divergence P0-4)* A notification carrying **no** `sessionId` — `_kiro.dev/subagent/list_update` is the observed case — takes a real null path rather than raising or mis-attributing
+- [ ] *(from Phase 0 divergence P0-2)* `CANCEL_GRACE_SECONDS` is sized against the **measured** 9 ms cancel-to-response latency, not the assumed worst case
 
 ---
 
