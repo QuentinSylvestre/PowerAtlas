@@ -1284,6 +1284,199 @@ async def ws_acp(ws: WebSocket) -> None:
     await acp.serve_socket(ws)
 
 
+# --- The session browser's data source -----------------------------------
+#
+# A purpose-built read-only listing (D18) rather than a reuse of
+# `/partials/all-sessions`: that partial renders `partials/session_row.html`,
+# which is hover-driven and carries the launch-action cluster — dashboard
+# markup that is useless on a phone and undesirable on a surface intended to
+# leave loopback. A narrow route is also auditable against the remote
+# allowlist, which a partial that renders whatever the template grows is not.
+#
+# **This path is deliberately absent from `_REMOTE_ALLOWED_PATHS`.** Adding it
+# there is a separate integration step: registering a path before the route
+# exists would make it remotely reachable the moment it was written, which
+# inverts the default-deny the allowlist exists to provide.
+
+_ACP_LISTING_PATH = "/api/acp/sessions"
+
+# D16's defaults — 10 groups, 3 sessions each. The product of the two is what
+# bounds the per-row lock check to ~30 rather than the store's 1,207.
+_ACP_GROUPS_PER_PAGE = 10
+_ACP_SESSIONS_PER_GROUP = 3
+# A caller-supplied page size is an amplification lever on a route whose cost
+# is one `.lock` read plus one `psutil` query per returned row, so both axes are
+# clamped. 50x50 is 2,500 rows worst case and still finite; the defaults above
+# are what the rail actually asks for.
+_ACP_MAX_GROUPS_PER_PAGE = 50
+_ACP_MAX_SESSIONS_PER_GROUP = 50
+
+# Bounds the payload, not the store: a kiro-cli title is free text and a first
+# prompt can be thousands of characters, and neither belongs in a rail row.
+_ACP_TITLE_MAX_CHARS = 120
+
+# kiro-cli only, and not by omission: ACP is v2-only (see the plan's scope
+# boundaries), so a row this endpoint served for another provider would be a
+# session the browser cannot resume.
+_ACP_LISTING_PROVIDER = "kiro-cli"
+
+
+def _acp_row_title(session) -> str:
+    """The rail's label for a session.
+
+    `data_kiro` stamps `"<untitled>"` when the store carries no title, and the
+    `session-tab-title` steering rework that would populate it is out of scope
+    for this plan — so the honest fallback is the raw first prompt, which is
+    what the user actually typed and what they will recognise.
+    """
+    title = (session.title or "").strip()
+    if not title or title == "<untitled>":
+        title = (session.first_prompt or "").strip()
+    return title[:_ACP_TITLE_MAX_CHARS]
+
+
+def _acp_availability(session_ids, held) -> dict[str, str]:
+    """D17's three states for **these** ids and no others.
+
+    Blocking — one bounded file read plus a `psutil` query per id — so this runs
+    under `asyncio.to_thread`, never on the loop.
+
+    `held` is a snapshot taken on the loop and passed in; this function must not
+    reach for `_supervisor.sessions` itself. `_supervisor` state is loop-owned
+    and unlocked by design, and D9 forbids reading it from a worker thread:
+    iterating it here while the loop mutates gives a torn read or an outright
+    `RuntimeError: dictionary changed size during iteration`.
+
+    **Fails open to `available`.** A wrongly-greyed session is unreachable from
+    the UI with no way for the user to find out why; a wrongly-available one
+    costs one click and gets the agent's own typed in-use refusal at load. The
+    hint may only add a refusal, never grant one — the same rule
+    `acp._lock_holder` states for itself.
+    """
+    out: dict[str, str] = {}
+    for sid in session_ids:
+        if sid in held:
+            out[sid] = "held"
+            continue
+        state = "available"
+        try:
+            if acp is not None and acp._lock_holder(sid) is not None:
+                state = "locked"
+        except Exception:  # pragma: no cover - fail-open path, no way to force
+            state = "available"
+        out[sid] = state
+    return out
+
+
+def _acp_listing(cwd: str, group_page: int, group_size: int,
+                 session_page: int, session_size: int, held) -> dict:
+    """Build the listing payload. Blocking; runs off the loop.
+
+    Paginated **independently at both levels** (D19). The existing listing
+    filters all set `has_more = False` (`partials_all_sessions`), i.e. they
+    filter the loaded page and then declare there is nothing after it —
+    inheriting that here would silently truncate this store's 208-session
+    workspace at whatever the first page happened to hold. So each group
+    carries its own `total`/`has_more` computed from its own session list, and
+    the group axis carries its own, and moving one does not move the other.
+
+    A `cwd` selects a single workspace and bypasses the group axis entirely:
+    that is the shape the rail's per-group "show more" needs, and it is what
+    makes paging a 208-session workspace cost one workspace's sessions rather
+    than the whole page's.
+    """
+    from .data import _normalize_path
+
+    workspaces = data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
+
+    if cwd:
+        target = _normalize_path(cwd)
+        matched = [w for w in workspaces if _normalize_path(w[0]) == target]
+        page_groups = matched[:1]
+        group_total = len(matched)
+        group_page = 1
+        groups_has_more = False
+    else:
+        group_total = len(workspaces)
+        start = (group_page - 1) * group_size
+        page_groups = workspaces[start:start + group_size]
+        groups_has_more = start + group_size < group_total
+
+    rows: list[tuple[dict, list]] = []
+    sids: list[str] = []
+    for ws_cwd, _count, _updated, _prov in page_groups:
+        try:
+            sessions = data.get_sessions(ws_cwd, _ACP_LISTING_PROVIDER)
+        except Exception:
+            log.exception("ACP listing: could not read sessions for %s", ws_cwd)
+            sessions = []
+        total = len(sessions)
+        s_start = (session_page - 1) * session_size
+        page_sessions = sessions[s_start:s_start + session_size]
+        sids.extend(s.session_id for s in page_sessions)
+        rows.append(({
+            "cwd": ws_cwd,
+            "name": Path(ws_cwd).name or ws_cwd,
+            "total": total,
+            "session_page": session_page,
+            "has_more": s_start + session_size < total,
+        }, page_sessions))
+
+    # One call for the whole response, over exactly the ids the response
+    # contains — ~30 by default, not the store's 1,207.
+    availability = _acp_availability(sids, held)
+
+    groups = []
+    for meta, page_sessions in rows:
+        meta["sessions"] = [{
+            "id": s.session_id,
+            "title": _acp_row_title(s),
+            "updated_at": s.updated_at,
+            "availability": availability.get(s.session_id, "available"),
+        } for s in page_sessions]
+        groups.append(meta)
+
+    return {
+        "groups": groups,
+        "group_page": group_page,
+        "group_total": group_total,
+        "has_more": groups_has_more,
+    }
+
+
+@app.get(_ACP_LISTING_PATH)
+async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 1,
+                           group_size: int = _ACP_GROUPS_PER_PAGE,
+                           session_page: int = 1,
+                           session_size: int = _ACP_SESSIONS_PER_GROUP):
+    """Workspace-grouped sessions for the session browser. Read-only.
+
+    Returns **only** the workspace path and display name, and per session the
+    id, title, updated timestamp and availability state. No `env`, no launcher
+    data, no action affordances — the payload is the whole audit surface, so
+    what is not here cannot leak from here.
+
+    Sub-agent sessions are absent because `data_kiro.load_sessions` skips any
+    record carrying `parent_session_id`; that filter removes 4,734 of the
+    store's 5,941 files and this route inherits it rather than re-deriving it.
+
+    `no-store`: availability is a liveness reading with a lifetime of seconds,
+    and a phone rendering a cached `available` for a session another process
+    took in the meantime is exactly the wrong failure to cache.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    # **On the loop, synchronously, before the thread hop** (D9). `sessions` is
+    # loop-owned and unlocked; a worker thread iterating it races every mutation
+    # the loop makes. `frozenset` also makes the snapshot un-mutable by anything
+    # downstream, so the thread cannot write back into loop-owned state either.
+    held = frozenset(acp._supervisor.sessions) if acp is not None else frozenset()
+    return await asyncio.to_thread(
+        _acp_listing, cwd,
+        max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
+        max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
+        held)
+
+
 # --- The secret exchange -------------------------------------------------
 #
 # The only two cookie-exempt remote paths. Without them no remote device could

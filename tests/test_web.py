@@ -11678,3 +11678,348 @@ class TestGuardOrdering:
         start = next(m for m in sent if m["type"] == "http.response.start")
         assert dict(start["headers"])[b"content-type"] == b"application/json"
         assert body == b'{"error":"Forbidden"}'
+
+
+def _acp_row(sid, *, title="", first="", updated="2026-07-31T12:00:00Z",
+             cwd="C:\\dev\\ws"):
+    """A `data.Session` with only the fields the listing endpoint reads."""
+    return Session(session_id=sid, title=title, cwd=cwd,
+                   created_at="2026-07-01T00:00:00Z", updated_at=updated,
+                   first_prompt=first, last_prompt="", last_reply_tail="")
+
+
+class _LoopBoundSessions(dict):
+    """A `_supervisor.sessions` stand-in that records *where* it was iterated.
+
+    `asyncio.get_running_loop()` succeeds only on the thread running the loop,
+    so the check is exact rather than a proxy: a snapshot taken in the route
+    body registers zero off-loop reads, and the same snapshot moved inside
+    `asyncio.to_thread` registers one. Both `__iter__` and `keys` record,
+    because `frozenset(d)` and `frozenset(d.keys())` are the same intent
+    written two ways and only one of them would otherwise be caught.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.reads = 0
+        self.off_loop_reads = 0
+
+    def _record(self):
+        self.reads += 1
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self.off_loop_reads += 1
+
+    def __iter__(self):
+        self._record()
+        return super().__iter__()
+
+    def keys(self):
+        self._record()
+        return super().keys()
+
+
+@pytest.fixture
+def acp_listing_store(monkeypatch):
+    """A synthetic kiro-cli store behind the listing endpoint.
+
+    Patches the two data-layer entry points the route uses and `_lock_holder`,
+    recording every lock read so "availability is computed only for returned
+    rows" is a **count** rather than a shape assertion — a response-shape check
+    passes whether the endpoint walked 30 rows or all 1,207.
+    """
+    from power_atlas import acp as acp_mod
+    from power_atlas import data as data_mod
+
+    state = {
+        "workspaces": [],
+        "sessions": {},
+        "lock_calls": [],
+        "locked": set(),
+    }
+
+    def _discover(provider=None):
+        assert provider == "kiro-cli", (
+            f"the browser is ACP's, and ACP is v2 kiro-cli only; got {provider!r}")
+        return list(state["workspaces"])
+
+    def _get_sessions(cwd, provider="kiro-cli"):
+        return list(state["sessions"].get(cwd, []))
+
+    def _holder(sid):
+        state["lock_calls"].append(sid)
+        return 4242 if sid in state["locked"] else None
+
+    def _add(cwd, sessions, updated="2026-07-31T00:00:00Z"):
+        state["workspaces"].append((cwd, len(sessions), updated, "kiro-cli"))
+        state["sessions"][cwd] = sessions
+
+    state["add"] = _add
+    monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", _discover)
+    monkeypatch.setattr(data_mod, "get_sessions", _get_sessions)
+    monkeypatch.setattr(acp_mod, "_lock_holder", _holder)
+    monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
+    return state
+
+
+class TestAcpListingEndpoint:
+    """Phase 4. A purpose-built read-only listing (D18) feeding the session
+    browser, paginated independently at both levels (D19), with D17's
+    three-state availability computed only for the rows it returns."""
+
+    _PATH = "/api/acp/sessions"
+
+    def test_the_payload_carries_exactly_the_documented_fields(self, client, acp_listing_store):
+        """The payload **is** the audit surface: what is not in this key set
+        cannot leak from this route. Asserted as equality, not containment, so
+        a field added later fails here rather than reaching a phone."""
+        acp_listing_store["add"]("C:\\dev\\PowerAtlas", [_acp_row("s1", title="a title")])
+        body = client.get(self._PATH).json()
+        assert set(body) == {"groups", "group_page", "group_total", "has_more"}
+        group = body["groups"][0]
+        assert set(group) == {"cwd", "name", "total", "session_page",
+                              "has_more", "sessions"}
+        assert group["cwd"] == "C:\\dev\\PowerAtlas"
+        assert group["name"] == "PowerAtlas"
+        assert set(group["sessions"][0]) == {"id", "title", "updated_at",
+                                             "availability"}
+
+    def test_no_env_launcher_or_action_field_appears_anywhere(self, client, acp_listing_store):
+        """D18's reason for a new route rather than reusing
+        `/partials/all-sessions`: that partial renders the hover-driven launch
+        cluster. Substring-matched over the serialized body, so a nested
+        structure cannot hide one."""
+        acp_listing_store["add"]("C:\\dev\\PowerAtlas",
+                         [_acp_row("s1", title="a title", first="a prompt")])
+        raw = client.get(self._PATH).text.lower()
+        for banned in ("env", "launcher", "custom_launchers", "args", "command",
+                       "cmd", "token", "secret", "onclick", "href", "action",
+                       "first_prompt", "last_prompt", "last_reply_tail"):
+            assert banned not in raw, f"{banned!r} reached the remote-facing payload"
+
+    def test_availability_is_computed_only_for_returned_rows(self, client, acp_listing_store):
+        """D17: ~30 rows, not 1,207. The assertion is the exact call list, so
+        computing availability for a whole group — or the whole store — fails
+        on a count even though the response shape would be identical."""
+        for i in range(6):
+            acp_listing_store["add"](f"C:\\dev\\w{i}",
+                             [_acp_row(f"w{i}s{j}") for j in range(40)])
+        body = client.get(self._PATH).json()
+        returned = [row["id"] for g in body["groups"] for row in g["sessions"]]
+        assert len(returned) == 18, "6 groups x 3 sessions is the default window"
+        assert acp_listing_store["lock_calls"] == returned, (
+            f"{len(acp_listing_store['lock_calls'])} lock checks for {len(returned)} "
+            f"returned rows; the store holds 240")
+
+    def test_the_supervisor_snapshot_happens_on_the_loop(self, client, acp_listing_store,
+                                                         monkeypatch):
+        """D9. `_supervisor.sessions` is loop-owned and unlocked, so a worker
+        thread iterating it races every mutation the loop makes — a torn read,
+        or `RuntimeError: dictionary changed size during iteration`. Asserting
+        the right output does not discriminate: the output is identical whether
+        the read was safe or not."""
+        from power_atlas import acp as acp_mod
+        live = _LoopBoundSessions({"held-1": {"cwd": "C:\\dev\\ws"}})
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", live)
+        acp_listing_store["locked"].add("locked-1")
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("held-1"), _acp_row("locked-1"),
+                                         _acp_row("free-1")])
+        body = client.get(self._PATH).json()
+        rows = {r["id"]: r["availability"] for r in body["groups"][0]["sessions"]}
+        assert rows == {"held-1": "held", "locked-1": "locked",
+                        "free-1": "available"}, "the snapshot was never consulted"
+        assert live.reads >= 1, "the supervisor was not read at all"
+        assert live.off_loop_reads == 0, (
+            f"{live.off_loop_reads} of {live.reads} reads of loop-owned state "
+            f"happened on a worker thread")
+
+    def test_the_lock_checks_run_off_the_event_loop(self, client, acp_listing_store,
+                                                    monkeypatch):
+        """D17 again: a bounded file read plus a `psutil` query per row, ~30
+        times. On the loop that is a stall on every other request the app is
+        serving, and no output assertion can see the difference."""
+        from power_atlas import web as web_mod
+        real = web_mod._acp_availability
+        where = []
+
+        def _spy(session_ids, held):
+            try:
+                asyncio.get_running_loop()
+                where.append("loop")
+            except RuntimeError:
+                where.append("thread")
+            return real(session_ids, held)
+
+        monkeypatch.setattr(web_mod, "_acp_availability", _spy)
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        assert client.get(self._PATH).status_code == 200
+        assert where == ["thread"], f"availability was resolved on the {where}"
+
+    def test_it_fails_open_to_available_when_the_lock_check_raises(
+            self, client, acp_listing_store, monkeypatch):
+        """D17's fail-open. A wrongly-greyed session is unreachable from the UI
+        with no way for the user to find out why; a wrongly-available one costs
+        one click and gets the agent's own typed in-use refusal at load."""
+        from power_atlas import acp as acp_mod
+
+        def _boom(sid):
+            raise OSError("psutil is having a day")
+
+        monkeypatch.setattr(acp_mod, "_lock_holder", _boom)
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1"), _acp_row("s2")])
+        response = client.get(self._PATH)
+        assert response.status_code == 200
+        rows = response.json()["groups"][0]["sessions"]
+        assert [r["availability"] for r in rows] == ["available", "available"]
+
+    def test_a_208_session_workspace_pages_to_the_end(self, client, acp_listing_store):
+        """D19. Every existing listing filter sets `has_more = False`, i.e.
+        filters the loaded page and then declares nothing follows it. Walking
+        to the end is what distinguishes real paging from a truncation that
+        happens to render."""
+        sessions = [_acp_row(f"s{i:03d}") for i in range(208)]
+        acp_listing_store["add"]("C:\\dev\\Big", sessions)
+        seen, page = [], 1
+        while True:
+            body = client.get(self._PATH, params={
+                "cwd": "C:\\dev\\Big", "session_page": page, "session_size": 3,
+            }).json()
+            group = body["groups"][0]
+            assert group["total"] == 208
+            assert group["session_page"] == page
+            seen.extend(r["id"] for r in group["sessions"])
+            if not group["has_more"]:
+                break
+            page += 1
+            assert page <= 70, "paging did not terminate"
+        assert page == 70, f"208 rows at 3 a page is 70 pages, not {page}"
+        assert seen == [s.session_id for s in sessions], (
+            f"{len(seen)} of 208 rows survived paging, "
+            f"{len(set(seen))} of them distinct")
+
+    def test_group_paging_and_session_paging_are_independent(self, client, acp_listing_store):
+        """"Independently at both levels" is the whole of D19: moving one axis
+        must not move or reset the other."""
+        for i in range(25):
+            acp_listing_store["add"](f"C:\\dev\\w{i:02d}",
+                             [_acp_row(f"w{i:02d}s{j}") for j in range(9)])
+        first = client.get(self._PATH, params={"group_page": 1}).json()
+        second = client.get(self._PATH, params={"group_page": 2}).json()
+        assert first["group_total"] == second["group_total"] == 25
+        assert first["has_more"] is True and second["has_more"] is True
+        assert [g["cwd"] for g in first["groups"]] == [f"C:\\dev\\w{i:02d}" for i in range(10)]
+        assert [g["cwd"] for g in second["groups"]] == [f"C:\\dev\\w{i:02d}" for i in range(10, 20)]
+        for group in first["groups"] + second["groups"]:
+            assert group["session_page"] == 1
+            assert group["has_more"] is True
+            assert len(group["sessions"]) == 3
+
+        # Paging deep inside one group leaves the group axis where it was.
+        deep = client.get(self._PATH, params={
+            "cwd": "C:\\dev\\w00", "session_page": 3}).json()
+        assert [r["id"] for r in deep["groups"][0]["sessions"]] == [
+            "w00s6", "w00s7", "w00s8"]
+        assert deep["groups"][0]["has_more"] is False
+        assert deep["group_total"] == 1 and deep["has_more"] is False
+
+        again = client.get(self._PATH, params={"group_page": 2}).json()
+        assert [g["cwd"] for g in again["groups"]] == [g["cwd"] for g in second["groups"]]
+        assert all(g["session_page"] == 1 for g in again["groups"])
+
+        last = client.get(self._PATH, params={"group_page": 3}).json()
+        assert len(last["groups"]) == 5 and last["has_more"] is False
+
+    def test_page_sizes_are_clamped_and_pages_are_floored(self, client, acp_listing_store):
+        """The cost of a row is a file read plus a `psutil` query, so a
+        caller-supplied page size is an amplification lever, not a preference."""
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row(f"s{i:03d}") for i in range(200)])
+        body = client.get(self._PATH, params={
+            "group_page": 0, "session_page": -3,
+            "group_size": 9999, "session_size": 9999}).json()
+        assert body["group_page"] == 1
+        group = body["groups"][0]
+        assert group["session_page"] == 1
+        assert len(group["sessions"]) == 50, "session_size must clamp to 50"
+        assert len(acp_listing_store["lock_calls"]) == 50
+
+    def test_sub_agent_sessions_are_absent(self, client, tmp_path, monkeypatch):
+        """4,734 of the store's 5,941 files carry `parent_session_id`. The
+        route inherits `data_kiro.load_sessions`'s filter rather than
+        re-deriving it, so this runs against a real on-disk store — a mocked
+        data layer would assert the mock, not the filter."""
+        from power_atlas import data as data_mod
+        from power_atlas import data_kiro
+
+        store = tmp_path / "cli"
+        store.mkdir()
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+
+        def _write(sid, extra=None):
+            record = {"session_id": sid, "title": f"t-{sid}", "cwd": str(workspace),
+                      "created_at": "2026-07-31T00:00:00Z",
+                      "updated_at": "2026-07-31T00:00:00Z"}
+            record.update(extra or {})
+            (store / f"{sid}.json").write_text(json.dumps(record), encoding="utf-8")
+
+        _write("parent-1")
+        _write("child-1", {"parent_session_id": "parent-1"})
+        _write("child-2", {"parent_session_id": "parent-1"})
+
+        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
+        monkeypatch.setattr(data_kiro, "SQLITE_PATH", tmp_path / "absent.db")
+        monkeypatch.setattr(data_kiro, "_meta_cache", {})
+        monkeypatch.setattr(data_kiro, "_cwd_index", {})
+        monkeypatch.setattr(data_kiro, "_cwd_index_mtime", None)
+        monkeypatch.setattr(data_mod, "_cache", {})
+        monkeypatch.setattr(data_mod, "session_cache", data_mod.SessionCache())
+
+        body = client.get(self._PATH).json()
+        ids = [r["id"] for g in body["groups"] for r in g["sessions"]]
+        assert ids == ["parent-1"], f"a sub-agent session reached the rail: {ids}"
+        assert [g["total"] for g in body["groups"]] == [1]
+
+    def test_the_listing_is_not_yet_on_the_remote_allowlist(self, remote_enabled,
+                                                            acp_listing_store):
+        """Phase 3 left this path out of `_REMOTE_ALLOWED_PATHS` deliberately:
+        registering a path before the route existed would have made it remotely
+        reachable the moment it was written, inverting default-deny (D6).
+
+        Registration is Phase 5's integration step. **When it lands, replace
+        this test** with the cookie-present/cookie-absent pair SC-3 specifies —
+        do not simply delete it."""
+        from power_atlas.web import _ACP_LISTING_PATH, _REMOTE_ALLOWED_PATHS
+        assert _ACP_LISTING_PATH not in _REMOTE_ALLOWED_PATHS
+        status, body, _ = _peer_http(_ACP_LISTING_PATH, [_cookie_header()])
+        assert status == 403, "a valid cookie is not a substitute for the allowlist"
+        assert body == b'{"error":"Forbidden"}'
+
+    def test_the_response_is_not_cacheable(self, client, acp_listing_store):
+        """Availability is a liveness reading with a lifetime of seconds. A
+        phone rendering a cached `available` for a session another process took
+        in the meantime is the wrong failure to cache."""
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        response = client.get(self._PATH)
+        assert response.headers["cache-control"] == "no-store"
+
+    def test_a_title_falls_back_to_the_first_prompt(self, client, acp_listing_store):
+        """`data_kiro` stamps `"<untitled>"` when the store carries no title,
+        and the `session-tab-title` steering rework is out of this plan's
+        scope — so the rail shows what the user actually typed."""
+        acp_listing_store["add"]("C:\\dev\\ws", [
+            _acp_row("s1", title="<untitled>", first="fix the sweeper"),
+            _acp_row("s2", title="", first="x" * 300),
+            _acp_row("s3", title="a real title", first="ignored"),
+        ])
+        rows = client.get(self._PATH).json()["groups"][0]["sessions"]
+        assert [r["title"] for r in rows] == [
+            "fix the sweeper", "x" * 120, "a real title"]
+
+    def test_an_unknown_workspace_is_an_empty_listing_not_an_error(self, client,
+                                                                   acp_listing_store):
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        body = client.get(self._PATH, params={"cwd": "C:\\dev\\gone"}).json()
+        assert body == {"groups": [], "group_page": 1, "group_total": 0,
+                        "has_more": False}
+        assert acp_listing_store["lock_calls"] == []
