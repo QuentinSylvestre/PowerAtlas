@@ -1,7 +1,7 @@
 # ACP Remote Client Productization
 
 > **Date**: 2026-07-31
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 0 complete; Phase 3 blocked on an absent NetBird policy  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Promote the throwaway `/acp` prototype into a NetBird-reachable remote client that dispatches, drives and resumes kiro-cli sessions PowerAtlas creates, with a Zed-style session browser, an idle sweeper, and a security model that survives leaving loopback.
 > **Estimated effort**: 9-13.5 days (revised from 6-9 after review cycle 1; see Review Log)
@@ -154,13 +154,37 @@ Bind PowerAtlas to the NetBird interface behind a default-deny path allowlist an
 4. **Capture green baselines** — `pytest` (full), and `node tests/acp_page.test.mjs`. Record counts; `tests/test_data.py` has ~8 known timing-flaky tests (`memory/MEMORY.md:89-93`), so re-run standalone before attributing a failure.
 
 **Exit criteria**:
-- [ ] NetBird policy verified: the admitting policy is named, and the groups it admits are recorded
-- [ ] The policy admits the user's own devices only — `iphone-quentin` (`100.78.26.204`) and `ipad-quentin` (`100.78.66.16`) — and not the other 14 account peers
-- [ ] If no such policy exists, Phase 3 is marked blocked in the Progress Tracker with the reason, and Phases 1, 2, 4 and 5 proceed
-- [ ] `_kiro.dev/session/terminate` re-verified on the installed version, with the version recorded
-- [ ] `session/cancel` mid-tool behaviour observed and recorded, either way
-- [ ] Full `pytest` baseline recorded (count + any pre-existing failures)
-- [ ] `node tests/acp_page.test.mjs` baseline recorded
+- [ ] NetBird policy verified: the admitting policy is named, and the groups it admits are recorded — **not ticked**: naming the policy needs console access. Its *effect* was measured locally instead (see notes)
+- [ ] The policy admits the user's own devices only — `iphone-quentin` (`100.78.26.204`) and `ipad-quentin` (`100.78.66.16`) — and not the other 14 account peers — **refuted by measurement, not merely unverified**
+- [x] If no such policy exists, Phase 3 is marked blocked in the Progress Tracker with the reason, and Phases 1, 2, 4 and 5 proceed
+- [x] `_kiro.dev/session/terminate` re-verified on the installed version, with the version recorded
+- [x] `session/cancel` mid-tool behaviour observed and recorded, either way
+- [x] Full `pytest` baseline recorded (count + any pre-existing failures)
+- [x] `node tests/acp_page.test.mjs` baseline recorded
+
+#### Implementation (2026-07-31, code: none — verification-only phase)
+
+Phase 0 ran four measurements against kiro-cli 2.16.0 (`kiro-cli --version` reports `kiro-cli-chat 2.16.0`; the ACP `initialize` handshake reports `agentInfo.version` `2.16.0`). Two new probe scripts were written into the existing spike harness: `run8_terminate.py` and `run9_cancel.py`, with results in `verdict_run8_terminate.json`, `verdict_run9_cancel.json` and the raw wire trace `traces\run9_cancel.jsonl`. The kiro session store at `~/.kiro/sessions/cli` held 5,945 `.json` files before the work and 5,945 after; all three probe sessions were deleted, verified by globbing each session id and finding no residue, and no `PING.EXE` or `kiro-cli.exe` process survived either run.
+
+`_kiro.dev/session/terminate` was re-verified and all four claims hold, this time measured independently rather than inferred. Two sessions were created against one agent (pid 70012); session 2 was terminated and session 1 was left alone. The method returned exactly `{}` with no error in 0.0038 s. Its `.lock` (59 bytes) was gone afterwards while session 1's `.lock` survived, so the removal is per-session rather than agent-wide. The process tree fell from 8 processes / 608.3 MB to 5 / 438.6 MB — 3 processes and 169.7 MB freed, matching the earlier 3 / 172.6 MB reading closely enough to call the model stable. The `.json` transcript was byte-identical before and after (1,341 bytes, unchanged mtime) and the `.jsonl` survived too, which is what D31's "a swept session stays resumable" rests on. Session 1 answered a prompt with `end_turn` afterwards; the terminated session returned `-32603 / "No session found with id"`. Worth noting that run 4 — the measurement the plan cites — never looked at the session store at all, so the lock-removal and transcript-intact claims were being asserted from a run that could not have seen them. They are now measured.
+
+The cancel probe is where the plan changes. The design deliberately required two independent signals before cancelling, so a cancel landing before any tool started could not be mistaken for a result: a protocol-level `session/update` of kind `tool_call`, and a new OS process under the agent that was absent from the pre-prompt baseline. Both fired — the agent ran `ping -n 91 127.0.0.1` via its `shell` tool and streamed ten `tool_call_update` frames at roughly one-second intervals, while `pwsh.exe` and `PING.EXE` appeared under the agent. After a ten-second dwell, `session/cancel` was written as a notification. The `session/prompt` request answered nine milliseconds later with `stopReason: "cancelled"`. That is a genuinely honoured cancel and it is faster than the plan expects: because the response is matched to the pending future rather than dropped, `acp.py:1630`'s "late or unmatched" path is not exercised on the cancel route, and `CANCEL_GRACE_SECONDS = 30.0` is protecting a window that measured at 9 ms.
+
+The surprise is what did not happen. Neither tool process died. `pwsh.exe` (63864) and `PING.EXE` (73648) were alive when the prompt answered and were still alive after a further twenty seconds of watching — `tool_pid_deaths_s_after_cancel` is an empty dict, and the tree remained at 7 processes / 557.7 MB against a 5 / 454.4 MB baseline. `ping -n 91` was simply left to run out its ninety seconds; the processes were only reaped when the probe closed its Windows job object. So the ACP turn is cancelled and the OS work is not. The plan's Phase 2 names exactly one residual hazard — an orphaned turn — and the honest position after this measurement is that the orphaned turn is the smaller of the two problems and the orphaned *process* is the one nobody has accounted for. A session whose turn the inactivity ceiling cancels can be holding a shell subprocess that runs for arbitrarily long afterwards, invisible to `inflight`, to the sweeper's six conditions, and to SC-10b's RSS figure. Whether `_kiro.dev/session/terminate` reaps such an orphan is unmeasured — run 8 terminated an idle session — and that gap deserves its own Phase 2 exit criterion rather than an assumption.
+
+Three smaller protocol facts came out of the trace and bear directly on Phase 2's Change 1. `_kiro.dev/subagent/list_update` carries no `sessionId`, making it the one observed `_kiro.dev/*` notification that cannot be attributed to a session, so the stamping helper needs a real null path. `_kiro.dev/session/update` exists as a method separate from `session/update`, carries a `sessionId` and a `tool_call_chunk` update, and today falls through `acp.py`'s dispatch — it is agent-liveness evidence that the inactivity ceiling must count, which the "stamp above the branch dispatch" design gets right only if the stamp keys on the presence of a session id rather than on a method allowlist (`acp.py:1675` names only `METADATA_METHOD`). And over the twenty-second idle window after the turn ended, no notification of any kind arrived, with all eleven `_kiro.dev/*` frames clustered at session start, turn start and turn end — weak but real evidence that these are turn-scoped rather than a heartbeat, bounded by the short observation. Separately, `tool_call` frames on 2.16.0 carry no `status` field at all, so any check for "a tool is running" must key on `sessionUpdate == "tool_call"`.
+
+The baselines are recorded and one of them is not green. Full `pytest` collects 1,045 tests and reports `1 failed, 1042 passed, 2 skipped, 1 warning in 7.34s`. The failure is `tests/test_web.py::test_search_with_status_filter` at `tests/test_web.py:6689` (`assert mock_snap.call_count == 3`, actual 5), and it reproduces standalone in 0.76 s, so it is deterministic and pre-existing on HEAD `e4fced3` — not the documented `tests/test_data.py` flake class, which did not fire at all (that file passed 135/135 standalone and contributed no failures to the full run). SC-11 as written requires a green `pytest`, and it cannot be met without either fixing this test or carving it out explicitly. `node tests/acp_page.test.mjs` is clean at 15 passed, 0 failed. The two NetBird exit criteria remain unverifiable from here: they need the NetBird console, which is administered by others, and nothing on this machine or in the repo records the policy set — so the Phase 3 gate is untouched by this phase's work.
+
+##### Orchestrator addenda (not the phase sub-agent's work)
+
+**The NetBird gate is answered — negatively — without console access.** The sub-agent correctly reported the policy set as unreadable from the repo, but the policy's *effect* is observable locally. NetBird's management server distributes to each peer only the network-map entries for peers some policy connects it to. `netbird status` on this host reports `Peers count: 4/17 Connected` and `netbird status -d` enumerates **all 17**, including machines that are plainly not the user's: `akita`, `akita-169-122`, `paros-g`, `ec2amaz-tv495hp`, `nuc-chicago`, `ps-tls-p-2302-mustafa`, `macbook-air-de-polestar`, `ps-tls-p-2503`, `ps-tls-p-2304`, `ip-10-0-1-165`, `vm-tls-desktop`, `hostname`, `polestar`, `moto-g75-c123`. Had a policy restricted this peer to `iphone-quentin` (`100.78.26.204`) and `ipad-quentin` (`100.78.66.16`), the other fourteen would not be in this host's network map at all.
+
+So Phase 0's second exit criterion is **refuted**, not deferred: no restricting policy is in force today. The residual uncertainty is narrower than the criterion's wording — a policy could admit all 17 peers at the network layer while restricting protocol or port, which `netbird status` does not show (`Forwarding rules: 0`). That distinction cannot be settled from here and does not change the gate: Phase 3 stays blocked either way, because D3's premise is that the ACL is the *primary* authorization layer and it is currently admitting the whole account.
+
+**The pytest failure is a stale assertion, not a product defect.** Traced to `e4fced3` ("fix: hover provider actions missing in search results"), which deliberately hoisted `snap = await asyncio.to_thread(presence.get_snapshot)` out of the `if grouped and status and status != "all"` guard to an unconditional call at `web.py:1464`, because the per-card `ws_status` render needs it on every card. The test at `tests/test_web.py:6689` still asserts the optimization that change traded away — its own comment, "status=all and the no-status path both skip the presence scan entirely", is now false. The count moves 3 → 5 because the two remaining URLs each now cost one snapshot. The product behaviour is intentional and shipped; only the assertion and its comment are stale. Fixing it is a two-line edit, but it is **outside this plan's scope** and belongs in its own commit, so it is escalated rather than absorbed.
+
+**Per-phase review deferred to Step 9**: Phase 0 produced no tracked-file changes. Its deliverable is measurement recorded in this file, and the probe scripts live in the session scratchpad.
 
 ---
 
@@ -702,10 +726,10 @@ Responsive without a build step: two-pane at **≥768 px**, drill-down below it 
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pre-flight verification | Not started | Gates Phase 3 only |
+| 0 | Pre-flight verification | Complete — 5 of 7 criteria | terminate re-verified; cancel measured; baselines captured. The two NetBird criteria are **refuted**, not deferred |
 | 1 | Presence fixes | Not started | |
-| 2 | Session lifecycle | Not started | |
-| 3 | Remote access | Not started | Blocked by Phase 0's NetBird policy check |
+| 2 | Session lifecycle | Not started | Design amendments pending from Phase 0's cancel measurement |
+| 3 | Remote access | **Blocked** | No NetBird policy restricts this peer: all 17 account peers are in this host's network map (measured 2026-07-31). D3's primary authorization layer is absent |
 | 4 | Listing endpoint | Not started | Allowlist registration deferred to the integration step |
 | 5a | Harness + rail data binding | Not started | |
 | 5b | Responsive layout + integration | Not started | |
@@ -774,9 +798,39 @@ Phases 1, 2, 3 and 4 are logically independent but **all modify `tests/test_web.
 - `src/power_atlas/peek.py` and `tray.py` — **behaviourally** unchanged, but both consume `server_url` from `__main__.py:345` (`peek.py:267`, `tray.py:47`), so they must be re-verified after the socket change rather than assumed untouched
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation>
+
+### From Phase 0 (2026-07-31)
+
+| # | Divergence | Rationale | Lands in |
+|---|---|---|---|
+| P0-1 | **A second orphan class exists that the plan does not name.** `session/cancel` stops the ACP turn but does **not** kill the tool's OS child processes — `pwsh.exe` (63864) and `PING.EXE` (73648) were both alive at response time and still alive 20 s later | Phase 2 names exactly one residual hazard, an orphaned *turn*. Measurement shows the orphaned *process* is the larger problem: after the inactivity ceiling fires, a shell subprocess keeps running under the agent, invisible to `inflight`, to the sweeper's six conditions, and to SC-10b's RSS figure | Phase 2 — amend "Honest scope of the cancel"; add an exit criterion measuring whether `terminate` reaps a running tool (run 8 terminated an *idle* session, so this is unmeasured) |
+| P0-2 | **The orphaned-turn risk is smaller than asserted, in the opposite direction from the one the plan anticipated.** `session/prompt` answered `{"stopReason":"cancelled"}` 0.009 s after the cancel — a matched response on the pending future, not a dropped one | Phase 2 warns the eventual response is dropped as "late or unmatched" (`acp.py:1630`) and that a second prompt can interleave. On 2.16.0 the interleaving window is ~9 ms, so `CANCEL_GRACE_SECONDS = 30.0` is generous by roughly three orders of magnitude | Phase 2 — soften the paragraph; `CANCEL_GRACE_SECONDS` may drop substantially |
+| P0-3 | **The stamp must key on "has a `sessionId`", not on a method allowlist.** `_kiro.dev/session/update` exists as a method distinct from `session/update`, carries a `sessionId` and a `tool_call_chunk` update, and today falls through `acp.py:1712-1714` | Phase 2's "stamp above the branch dispatch" design is correct only under the session-id reading. `acp.py:1675` names only `METADATA_METHOD`, so a method allowlist would miss this liveness evidence and could cancel a working turn — the regression SC-8 forbids | Phase 2 Change 1 |
+| P0-4 | **`_kiro.dev/subagent/list_update` carries no `sessionId`** — the only `_kiro.dev/*` notification observed without one | The stamping helper needs a real null path, not a defensive one. Previously unknown | Phase 2 Change 1 |
+| P0-5 | **`tool_call` frames on 2.16.0 carry no `status` field at all** (the dict is `sessionUpdate`/`toolCallId`/`title`/`kind`/`rawInput`/`_meta`) | Any code or test deciding "a tool is running" from `update["status"]` gets `None` on every frame. Detection must key on `sessionUpdate == "tool_call"` | Phase 2 tests |
+| P0-6 | **`_kiro.dev/*` notifications look turn-scoped, weakening (not refuting) one leg of the two-field argument.** Zero notifications of any kind arrived over a 20 s post-turn idle window; all 11 `_kiro.dev/*` frames clustered at session start, turn start and turn end | Phase 2 Change 1 justified the `last_activity`/`last_used` split partly on "nothing in Phase 0 verifying that `_kiro.dev/*` notifications are turn-scoped". They now look turn-scoped, bounded by a short observation. The split still stands on its other argument — a prompt-sent/attach signal is semantically different from an agent-liveness signal — but the chatty-agent scenario is weaker evidence than the plan implies | Phase 2 Change 1 — rationale wording only; no design change |
+| P0-7 | **The pytest baseline is not green**, so SC-11 is unmeetable as written. `tests/test_web.py::test_search_with_status_filter` fails deterministically (`assert 5 == 3`), reproducibly standalone in 0.76 s | Traced to `e4fced3`, which intentionally hoisted `get_snapshot` out of the status guard so hover actions get `workspace_status` on every card. The assertion and its comment encode the optimization that change traded away. Product behaviour is correct; the test is stale — but the fix is outside this plan's scope | **Escalated to the user** — see Review Log |
+
+*Every divergence above is a measurement contradicting a plan assertion, not an implementation choice. P0-1 and P0-3 change Phase 2's design; P0-2 and P0-6 change its rationale; P0-7 changes a success criterion.*
 
 ## Review Log
+
+### 2026-07-31 — Implementation Review (after Phase 0, review deferred to Step 9)
+
+Implementation health: **Green** — there is no tracked-file diff to review. Phase 0's deliverable is measurement, recorded in its implementation notes above; its probe scripts live in the session scratchpad.
+
+Per-phase review deferred per `/qdev` Step 5's Skip rule (no executable code in the repo, no tracked-file change). Step 9's holistic review covers the plan amendments this phase forces.
+
+**Review scaling — user override, recorded per `shared/AGENTS.md § Continuous Improvement`.** The default for a Major-tier plan is a persona set per phase (`/qreview` persona-selection rules) with a two-cycle auto-fix loop, and a multi-persona final review. The user directed **one generic sub-agent per phase review, one for the final review, and a single review cycle each**. Recorded as a (default, override) pair; the reduction in assurance is deliberate and acknowledged, and is worth revisiting specifically for Phase 3, whose diff is the security boundary.
+
+2 findings escalated (1 High, 1 Medium). Both are external to the implementation — neither is a defect in work done this phase.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| P0-A | High | No NetBird policy restricts this peer: all 17 account peers sit in its network map, so D3's primary authorization layer is absent | Escalated — Phase 3 marked blocked; a restricting policy must exist before it runs |
+| P0-B | Medium | SC-11 requires green `pytest`, but `test_search_with_status_filter` fails deterministically from a stale assertion left by `e4fced3` | Escalated — recommend a scoped two-line fix in its own non-plan commit |
+
+On P0-A the measurement is stronger than the plan's criterion anticipated: the criterion asked whether a restricting policy exists and expected the answer to be unobtainable without console access, but the policy's *effect* is visible locally through NetBird's network-map distribution. The answer is negative rather than unknown. The narrower residual — a policy admitting all 17 peers at the network layer while restricting protocol or port — is not settleable from here and does not move the gate.
 
 ### 2026-07-31 — Cycle 2 (via /qplan Step 4)
 
@@ -885,3 +939,5 @@ Five sub-agents: doc-impact scan, Architect (gap-critic lens), Security auditor,
 - The mandatory Step 1.5 dispatch gate fired correctly, but the load-bearing unknown both sub-agents flagged (`started_at` semantics) was resolvable in ~90 seconds with a runtime probe the sub-agents could not run — cost: two agents each spent a paragraph hedging an answer a probe settled outright — suggested change: let the trio return a "decidable by probe" list the orchestrator runs before the interview, rather than folding those into `[unverified]` prose.
 - `/qexplore` Step 3's filename spec says `{YYMMDD}_{NAME}.md` while this repo's archive convention is `{YYMMDD}-{HHMM}_{NAME}.md`, with the `-HHMM` added at `/qclose` time — cost: one commit-log check to confirm which applies at creation — suggested change: note in the skill that the time component may be archive-time only, so the slug stays stable across the lifecycle.
 - `/qplan`'s parallel-annotation rule keys on file-scope overlap, but a single-test-file repo makes every phase overlap on `tests/test_web.py`, so no phase is ever `[P:N]`-eligible however independent its production code is — cost: parallel dispatch unavailable for three genuinely independent phases — suggested change: let the rule consider production-file scope and test-file scope separately, or allow `[P:N]` when only the test file overlaps and phases append disjoint test classes.
+- A pre-flight phase's exit criteria are checkboxes, which have only two states, but a spike's whole purpose is that a premise may be **refuted** — Phase 0's "the policy admits the user's own devices only" was disproven by measurement, which is neither ticked nor deferred, and `/qdev` Step 8's gate ("unchecked exit criteria remain … without an explicit deferral entry") reads a refutation as unfinished work — cost: the strongest result the phase produced had to be encoded in prose beside a permanently-unticked box, and the auto-continue gate had to be reasoned around rather than applied — suggested change: give spike/pre-flight phases a third exit-criterion state (`- [~]` refuted, or a `**Refuted**:` prefix convention) that satisfies the completeness gate while recording that the premise failed.
+- `/qdev` Step 8 makes `tests: fail` an unconditional stop, which is right for a phase that changed code but mis-fires on a **pre-flight baseline phase**, whose job is precisely to discover a pre-existing red suite — cost: the stop fired on a failure the phase could not have caused and that no phase in the plan is scoped to fix, and distinguishing "you broke it" from "it was already broken" fell to prose — suggested change: let the baseline-capture case report `tests: fail` as a recorded starting state without tripping the auto-continue gate, provided the phase produced no code diff.
