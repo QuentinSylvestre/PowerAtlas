@@ -11789,28 +11789,53 @@ class TestAcpListingEndpoint:
         """D18's reason for a new route rather than reusing
         `/partials/all-sessions`: that partial renders the hover-driven launch
         cluster. Substring-matched over the serialized body, so a nested
-        structure cannot hide one."""
-        acp_listing_store["add"]("C:\\dev\\PowerAtlas",
-                         [_acp_row("s1", title="a title", first="a prompt")])
-        raw = client.get(self._PATH).text.lower()
+        structure cannot hide one.
+
+        The second row is untitled **on purpose**. `_acp_row_title` falls back
+        to the first prompt, and 267 of the real store's 1,210 sessions (22.1%)
+        take that fallback — so a body scanned with every row titled never sees
+        the payload's largest free-text field. `first_prompt` is deliberately
+        not in the banned list: the *key* is absent but the *value* ships under
+        `title` by design (see the route docstring), so banning the substring
+        read as protection against a disclosure this route makes on purpose."""
+        acp_listing_store["add"]("C:\\dev\\PowerAtlas", [
+            _acp_row("s1", title="a title", first="a prompt"),
+            _acp_row("s2", title="", first="fix the sweeper"),
+        ])
+        response = client.get(self._PATH)
+        titles = [r["title"] for r in response.json()["groups"][0]["sessions"]]
+        assert titles == ["a title", "fix the sweeper"], (
+            "the prompt fallback never fired, so the scan below inspected a "
+            "body without a prompt-derived title in it")
+        raw = response.text.lower()
         for banned in ("env", "launcher", "custom_launchers", "args", "command",
                        "cmd", "token", "secret", "onclick", "href", "action",
-                       "first_prompt", "last_prompt", "last_reply_tail"):
+                       "last_prompt", "last_reply_tail"):
             assert banned not in raw, f"{banned!r} reached the remote-facing payload"
 
     def test_availability_is_computed_only_for_returned_rows(self, client, acp_listing_store):
-        """D17: ~30 rows, not 1,207. The assertion is the exact call list, so
-        computing availability for a whole group — or the whole store — fails
-        on a count even though the response shape would be identical."""
+        """D17: ~30 rows, not 1,207. The discriminating property is *which* ids
+        were checked, not the order they were checked in: an exact ordered list
+        also fails on a per-group call, an sid dedup or any reordering that
+        changes nothing observable, and it silently assumes the `held`
+        short-circuit never fires — one held session in the fixture would break
+        it for a reason unrelated to what it measures. The expectation is
+        derived from the response instead: every returned row that is not
+        already `held` is checked exactly once, and nothing else is."""
         for i in range(6):
             acp_listing_store["add"](f"C:\\dev\\w{i}",
                              [_acp_row(f"w{i}s{j}") for j in range(40)])
         body = client.get(self._PATH).json()
         returned = [row["id"] for g in body["groups"] for row in g["sessions"]]
         assert len(returned) == 18, "6 groups x 3 sessions is the default window"
-        assert acp_listing_store["lock_calls"] == returned, (
-            f"{len(acp_listing_store['lock_calls'])} lock checks for {len(returned)} "
-            f"returned rows; the store holds 240")
+        needs_a_check = {row["id"] for g in body["groups"] for row in g["sessions"]
+                         if row["availability"] != "held"}
+        calls = acp_listing_store["lock_calls"]
+        assert set(calls) == needs_a_check, (
+            f"{len(set(calls))} distinct ids checked for {len(needs_a_check)} "
+            f"returned rows needing a check; the store holds 240")
+        assert len(calls) == len(set(calls)), (
+            f"{len(calls)} lock reads for {len(set(calls))} distinct ids")
 
     def test_the_supervisor_snapshot_happens_on_the_loop(self, client, acp_listing_store,
                                                          monkeypatch):
@@ -11942,6 +11967,74 @@ class TestAcpListingEndpoint:
         assert group["session_page"] == 1
         assert len(group["sessions"]) == 50, "session_size must clamp to 50"
         assert len(acp_listing_store["lock_calls"]) == 50
+
+    def test_the_group_axis_clamps_at_twenty(self, client, acp_listing_store):
+        """The clamp above cannot see the group axis: its fixture holds one
+        workspace, so `group_size=9999` and `group_size=1` return the same
+        thing. Raising `_ACP_MAX_GROUPS_PER_PAGE` to `10**9` left the entire
+        file green.
+
+        The group axis is the expensive one — a group costs a full session load
+        for its `total` on top of a lock read per returned row — so this asserts
+        a **literal**, not the constant. A test that reads the constant it is
+        meant to pin passes for whatever the constant is mutated to."""
+        for i in range(25):
+            acp_listing_store["add"](f"C:\\dev\\w{i:02d}", [_acp_row(f"w{i:02d}s0")])
+        body = client.get(self._PATH, params={"group_size": 9999}).json()
+        assert len(body["groups"]) == 20, (
+            f"group_size must clamp to 20; {len(body['groups'])} groups came back")
+        assert body["group_total"] == 25
+        assert body["has_more"] is True, "5 workspaces are still unreturned"
+        assert len(acp_listing_store["lock_calls"]) == 20
+
+    def test_a_hidden_workspace_is_excluded_and_unreachable_by_cwd(
+            self, client, acp_listing_store, monkeypatch):
+        """`hidden` is the user saying "not on my dashboard", and a phone is not
+        an exemption — `/partials/all-sessions` honours the tag and so does this.
+
+        The exclusion was first skipped as "needs `load_config()`, which D15
+        forbids on the loop". D15 forbids it **on the event loop**; `_acp_listing`
+        runs entirely inside `asyncio.to_thread` and `load_config` is
+        `threading.Lock`-guarded, so this is the one listing route where the
+        config read is free. Requesting the hidden workspace by `cwd` is checked
+        too: a filter applied only to the group axis would leave the exact path
+        the rail already knows as a way around it."""
+        from power_atlas import web as web_mod
+        from power_atlas.config import Config
+
+        acp_listing_store["add"]("C:\\dev\\Visible", [_acp_row("v1")])
+        acp_listing_store["add"]("C:\\dev\\Hidden", [_acp_row("h1")])
+        monkeypatch.setattr(web_mod, "load_config", lambda: Config(
+            workspace_settings={"C:\\dev\\Hidden": {"tags": ["hidden"], "color": ""}}))
+
+        body = client.get(self._PATH).json()
+        assert [g["cwd"] for g in body["groups"]] == ["C:\\dev\\Visible"]
+        assert body["group_total"] == 1, "a hidden workspace still counted"
+        assert acp_listing_store["lock_calls"] == ["v1"], (
+            "a hidden workspace's sessions were loaded and lock-checked anyway")
+
+        direct = client.get(self._PATH, params={"cwd": "C:\\dev\\Hidden"}).json()
+        assert direct["groups"] == [] and direct["group_total"] == 0, (
+            "a hidden workspace was reachable by naming its path")
+
+    def test_a_disabled_kiro_cli_lists_nothing(self, client, acp_listing_store,
+                                               monkeypatch):
+        """The same `_enabled(config, "kiro-cli")` flag every dashboard listing
+        honours. A provider the user switched off should not be listable, least
+        of all from the surface intended to leave loopback. The empty payload is
+        asserted alongside an untouched lock-call recorder, so an implementation
+        that walks the store and then filters the rendered rows fails here."""
+        from power_atlas import web as web_mod
+        from power_atlas.config import Config
+
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        monkeypatch.setattr(web_mod, "load_config", lambda: Config(
+            provider_settings={"kiro-cli": {"enabled": False}}))
+
+        body = client.get(self._PATH).json()
+        assert body["groups"] == [] and body["group_total"] == 0
+        assert body["has_more"] is False
+        assert acp_listing_store["lock_calls"] == []
 
     def test_sub_agent_sessions_are_absent(self, client, tmp_path, monkeypatch):
         """4,734 of the store's 5,941 files carry `parent_session_id`. The

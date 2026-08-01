@@ -942,8 +942,9 @@ def _is_remote_peer(peer: str | None) -> bool:
 
 # Default-deny (D6). A denylist over ~40 routes leaks by default on the next
 # route added; this makes every new route loopback-only until someone puts it
-# here deliberately. Phase 4's listing endpoint is the next intended entry and
-# is deliberately absent until it exists.
+# here deliberately. `_ACP_LISTING_PATH` (Phase 4) now exists and is still
+# absent from this map on purpose — adding it is Phase 5's integration step,
+# for the reason documented in the comment block directly above that constant.
 # Scope-typed, not merely path-keyed. `/ws/acp` is the only websocket entry;
 # everything else is HTTP. A path-only allowlist admitted `ws://<ip>/static/x`
 # on the cookie alone, and `StaticFiles.__call__` opens with
@@ -1304,11 +1305,21 @@ _ACP_LISTING_PATH = "/api/acp/sessions"
 # bounds the per-row lock check to ~30 rather than the store's 1,207.
 _ACP_GROUPS_PER_PAGE = 10
 _ACP_SESSIONS_PER_GROUP = 3
-# A caller-supplied page size is an amplification lever on a route whose cost
-# is one `.lock` read plus one `psutil` query per returned row, so both axes are
-# clamped. 50x50 is 2,500 rows worst case and still finite; the defaults above
-# are what the rail actually asks for.
-_ACP_MAX_GROUPS_PER_PAGE = 50
+# A caller-supplied page size is an amplification lever, so both axes are
+# clamped — but they are not equally expensive. A row costs one `.lock` read
+# plus one `psutil` query; a *group* costs that for its rows **plus a full
+# session load**, because the group's `total` needs its whole list. The group
+# axis is therefore the amplification axis: measured against the real store,
+# the previous 50-group ceiling answered a single 50x50 request with 472 rows
+# and 975 of the store's 1,210 sessions loaded.
+#
+# 20 is twice what the product asks for — the rail shows 10 groups with a
+# show-more — which leaves headroom for a client wanting a larger first page
+# while halving the worst-case group fan-out. The session axis stays at 50: an
+# extra row there costs one slice of an already-loaded list plus one lock read,
+# and paging a 208-session workspace is a real use. This route becomes remotely
+# reachable in Phase 5, so both numbers are bounds, not preferences.
+_ACP_MAX_GROUPS_PER_PAGE = 20
 _ACP_MAX_SESSIONS_PER_GROUP = 50
 
 # Bounds the payload, not the store: a kiro-cli title is free text and a first
@@ -1362,7 +1373,7 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
         try:
             if acp is not None and acp._lock_holder(sid) is not None:
                 state = "locked"
-        except Exception:  # pragma: no cover - fail-open path, no way to force
+        except Exception:
             state = "available"
         out[sid] = state
     return out
@@ -1384,10 +1395,30 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     that is the shape the rail's per-group "show more" needs, and it is what
     makes paging a 208-session workspace cost one workspace's sessions rather
     than the whole page's.
+
+    **Honours the `hidden` workspace tag and the provider's enabled flag**, the
+    same two config-driven exclusions `/partials/all-sessions` applies — a
+    workspace the user hid from the dashboard has not asked to be visible from
+    a phone, and a disabled provider is not a listing this route may serve. The
+    config read costs an uncached TOML parse, which is exactly why D15 forbids
+    it in `at_capacity()`; D15's ban is **on the event loop**, and this function
+    body runs entirely inside `asyncio.to_thread`. `load_config` is guarded by a
+    `threading.Lock` (`config.py:_lock`) and returns a fresh `Config` per call,
+    so it is safe to call from a worker thread. Unlike the dashboard routes this
+    one takes no `tag` parameter: there is no "show hidden" view to reveal them,
+    so `hidden` here means hidden.
     """
+    from .config import get_workspace_settings
     from .data import _normalize_path
 
-    workspaces = data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
+    config = load_config()
+    if _enabled(config, _ACP_LISTING_PROVIDER):
+        workspaces = [
+            w for w in data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
+            if "hidden" not in get_workspace_settings(config, w[0])["tags"]
+        ]
+    else:
+        workspaces = []
 
     if cwd:
         target = _normalize_path(cwd)
@@ -1455,6 +1486,18 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     id, title, updated timestamp and availability state. No `env`, no launcher
     data, no action affordances — the payload is the whole audit surface, so
     what is not here cannot leak from here.
+
+    **`title` may be raw user prompt text.** `_acp_row_title` falls back to the
+    first 120 characters of the session's first prompt whenever the store holds
+    no title or the literal `"<untitled>"` — 267 of the real store's 1,210
+    sessions, 22.1%. That is deliberate (the `session-tab-title` rework that
+    would populate the field is out of this plan's scope, and the first prompt
+    is what the user will recognise), but it means one field of this payload
+    carries free-form text the user typed. Anyone deciding what may cross the
+    remote boundary should weigh `title` as prompt content, not as a label.
+
+    Workspaces tagged `hidden` and a disabled `kiro-cli` provider are excluded;
+    see `_acp_listing`.
 
     Sub-agent sessions are absent because `data_kiro.load_sessions` skips any
     record carrying `parent_session_id`; that filter removes 4,734 of the
