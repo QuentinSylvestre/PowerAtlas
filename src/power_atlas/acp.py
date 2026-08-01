@@ -2433,7 +2433,22 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         log.warning("ACP subscribe refused: [unknown_session] session=%s",
                     session_id)
         return
-    # Below the two refusals rather than above them: each of those costs one
+    if session_id in _supervisor.closing:
+        # A release is in flight, and `close_session` leaves the session in
+        # `sessions` for the whole terminate round-trip. Without this the attach
+        # below would stamp `last_used` on a record about to be popped and
+        # replay a whole transcript the close tears down a moment later — the
+        # broadcast does reach this socket, but only after it has been shown a
+        # session that was already gone. Same code and same wording as
+        # `_handle_load`'s guard: both entry points refuse a session mid-close.
+        conn.send(error_frame(
+            "close_in_progress",
+            "This session is being released. Wait a moment and load it "
+            "again.", session_id))
+        log.warning("ACP subscribe refused: [close_in_progress] session=%s",
+                    session_id)
+        return
+    # Below the three refusals rather than above them: each of those costs one
     # small frame and the send queue already bounds them, while the replay is
     # the expensive answer and the one worth rationing. A throttled frame
     # leaves the socket attached to whatever it already was, which for the one

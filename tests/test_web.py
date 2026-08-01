@@ -9306,6 +9306,51 @@ class TestAcpIdleSweeper:
 
         assert seen == ["close_in_progress"]
 
+    def test_a_subscribe_during_the_terminate_round_trip_is_refused(
+            self, acp_fast):
+        """The mirror of the `load` guard, and the reason the asymmetry closed.
+
+        Attaching mid-terminate does self-heal — the broadcast below reaches
+        whoever is attached at that instant — but not before the attach has
+        stamped `last_used` on a record about to be popped and handed the socket
+        a full replay that unwinds ~0.26 s later. Both halves are asserted from
+        outside the sweep: `_sweep_once` swallows every exception raised inside
+        `close_session`, so an assert in the patched round-trip would degrade to
+        a log line rather than a failure.
+        """
+        acp_mod, _ = acp_fast
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.record(sid, acp_mod.envelope(
+            "chunk", {"role": "agent", "text": "hello"}, sid))
+        self._idle(acp_mod, sid)
+        stamped = acp_mod._supervisor.sessions[sid]["last_used"]
+        conn = _acp_conn(acp_mod)
+        during = []
+        attached = []
+        stamps = []
+
+        async def slow_terminate(self, method, params, timeout=None):
+            await asyncio.sleep(0)
+            acp_mod._handle_subscribe(conn, sid)
+            during.extend(_queued(conn))
+            attached.append(conn.session_id)
+            stamps.append(self.sessions[sid]["last_used"])
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", slow_terminate), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._sweep_once())
+
+        assert [f["type"] for f in during] == ["error"]
+        assert [f["payload"]["code"] for f in during] == ["close_in_progress"]
+        # Refused, so nothing to attach and nothing to tear down: no replay was
+        # built, the idle clock was not restarted on a doomed record, and the
+        # broadcast has no socket to tell.
+        assert attached == [None]
+        assert stamps == [stamped]
+        assert _queued(conn) == []
+        assert sid not in acp_mod._supervisor.sessions
+
     def test_a_swept_session_tells_any_watcher_it_is_gone(self, acp_fast):
         """`_handle_close`'s notification half, reproduced rather than reached
         by relaxing its `not_subscribed` guard — the sweeper has no socket, and
