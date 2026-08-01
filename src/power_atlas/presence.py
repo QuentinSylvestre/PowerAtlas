@@ -107,6 +107,19 @@ _SIDECAR_SKEW_S = 120.0
 # existed. That is why kiro-cli can safely go without an upper bound. The
 # small allowance covers clock-source jitter between the provider's timestamp
 # and psutil's create_time, nothing more.
+#
+# That guarantee is conditional on a monotone, same-machine clock. started_at
+# is stamped from the wall clock when the lock is written, while create_time
+# derives from the process's absolute creation FILETIME — so if the clock steps
+# *backward* between a stale write and the recycling process's spawn (NTP
+# correction, VM resume, dual-boot with a local-time RTC), the delta comes out
+# positive and the kiro-cli branch admits a lock the 120s ceiling used to
+# reject. Accepted rather than overlooked: plan
+# 260731_ACP_REMOTE_CLIENT_PRODUCTIZATION D10 and its risk row "Clock skew
+# stamping a lock in the future is no longer rejected once the upper bound is
+# dropped" (rated Low). D32 records the other accepted residual — a lock our
+# own long-lived ACP agent orphaned reads live for that agent's lifetime. The
+# guard set is deliberately good enough, not airtight.
 _SIDECAR_BACKWARD_SKEW_S = 5.0
 
 _KIRO_LOCK_DIR = Path.home() / ".kiro" / "sessions" / "cli"
@@ -464,9 +477,13 @@ def _scan() -> Snapshot:
             delta = started - live[1]
             if delta < -_SIDECAR_BACKWARD_SKEW_S:
                 continue
-            # The forward ceiling is claude-code-only; a kiro-cli lock may be
-            # arbitrarily newer than its process because PowerAtlas's ACP agent
-            # serves sessions for the app's whole lifetime. See _SIDECAR_SKEW_S.
+            # The forward ceiling applies to every provider except kiro-cli,
+            # whose locks may be arbitrarily newer than their process because
+            # PowerAtlas's ACP agent serves sessions for the app's whole
+            # lifetime. Exempting by name rather than naming the providers that
+            # keep the ceiling is deliberate: a provider added later inherits
+            # the conservative bound until someone makes kiro-cli's case for
+            # it. See _SIDECAR_SKEW_S.
             if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
                 continue
             key = (provider, sid)

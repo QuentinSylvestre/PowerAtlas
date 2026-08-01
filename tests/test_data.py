@@ -2074,8 +2074,13 @@ def test_presence_claude_sidecar_outside_window_is_not_live(tmp_path):
     """The dropped forward ceiling is kiro-only; claude-code keeps its 120s.
 
     One `claude` process owns one session and writes its sidecar just after
-    spawn, so nothing justifies widening that window — this is the test that
-    proves the scoping is real rather than incidental.
+    spawn, so nothing justifies widening that window. This test pins one
+    direction only: it fails if the ceiling is deleted for both providers, but
+    it still passes if the ``provider != "kiro-cli"`` conjunct is removed while
+    the ceiling stays. That mutation is caught by
+    ``test_presence_kiro_lock_far_newer_than_its_process_is_live`` instead. The
+    pair, failing in opposite directions, is what makes the scoping real rather
+    than incidental — neither test proves it alone.
     """
     started_ms = 1784920809496
     _write_claude_session(tmp_path, 700, "sess-c", started_ms, "C:/work/pa")
