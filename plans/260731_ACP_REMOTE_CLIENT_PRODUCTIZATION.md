@@ -1191,6 +1191,33 @@ Five sub-agents: doc-impact scan, Architect (gap-critic lens), Security auditor,
 
 **Corrected during verification, not carried as findings**: the Architect's claim that dropping the skew ceiling admits *recycled-pid* false-lives is wrong — pid exclusivity means a dead writer held the pid before the live process existed, so the `-5 s` lower bound still rejects it (D10 stands). The real regression is finding 15, which the Reliability reviewer identified precisely. Also verified as non-issues: `cache_listing=False` has no other consumers, and its ~19 ms cost is off-loop behind a 3 s TTL at all five call sites.
 
+## Deferred Follow-ups — review before `/qclose`
+
+Items surfaced during implementation that are **not** covered by any remaining phase and would otherwise evaporate when this plan archives. Each names why it was not actioned. Nothing here blocks the plan; all of it is a decision someone should take deliberately rather than by default.
+
+**Operational — outside this codebase, live right now**
+
+| # | Item | Why deferred | Cost to act |
+|---|---|---|---|
+| F-1 | **No NetBird access policy restricts this peer.** All 17 account peers are in this host's network map (measured 2026-07-31, `netbird status -d`). D33 ships the cookie as the sole authorization layer on that basis | External, administered by others, and the user elected to proceed. Nothing in the implementation depends on its absence | ~5 min in the console: app.netbird.io → Access Control → Policies, group laptop + `iphone-quentin` + `ipad-quentin`, disable the stock `Default` (All → All). Re-run `netbird status` to verify the peer count collapses. Restores the second layer with no code change |
+| F-2 | **TCP 139 (NetBIOS Session Service) listens on `100.78.142.124`**, owned by Windows `System` (pid 4), reachable by all 17 peers | Predates this work entirely and is unrelated to PowerAtlas. Found incidentally during Phase 3's socket census | Unknown — worth a look independent of this plan. F-1 would also cover it |
+| F-3 | **The real `config.toml` now carries four keys that were previously absent** — `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`, `remote_bind_address` | Written during a Phase 3 mutation run that escaped test isolation, then repaired to exact defaults and hash-verified. Benign: `save_config` writes the full field set, so any settings change after Phase 3 would have added them | None. Recorded only so it is not mistaken later for something the user did |
+
+**Code — measured, accepted, no home in a remaining phase**
+
+| # | Item | Why deferred | Notes |
+|---|---|---|---|
+| F-4 | **Orphaned tool processes are unrecoverable.** Neither `session/cancel` nor `_kiro.dev/session/terminate` reaps a shell subprocess the agent started; measured alive 20-25 s after each, dying only when the Windows job object closes at exit | kiro-cli behaviour, not ours. Bounded — sweep condition 4 keeps live-turn sessions off the sweep path, so the sweeper only meets orphans from turns that already ended | **SC-10b's per-session RSS is a floor, not a ceiling**, for anything cancelled mid-tool. Recorded in `_sweep_once`'s and `_await_inactivity`'s docstrings |
+| F-5 | **D32 residual is now live behaviour.** With the skew ceiling dropped, a lock our own agent orphaned names the live agent pid with a forward delta, so it reads live for the agent's whole lifetime where it previously self-healed after 120 s | The only fix is reading `_supervisor.sessions` from `presence`, which D9 forbids. Accepted in the plan | A session showing a live dot with no supervisor record is D32, not a new defect |
+| F-6 | **`_cookie_ok` uses `time.time()` while the exchange backoff uses `time.monotonic()`** | Not attacker-reachable; surfaced by the adversarial reviewer as a residual | A backward system-clock step extends cookie validity past the 90-day ceiling; a forward step expires cookies early |
+| F-7 | **`_exchange_failures` is per-process** — a restart clears every peer's backoff | Immaterial against a 256-bit secret (steady state ≈ one guess per 300 s per address), but the control is weaker than it reads | Would need persistence to fix; almost certainly not worth it |
+| F-8 | **No idle or header timeouts on the uvicorn config**, so slowloris-shaped pre-auth connection exhaustion is available independently of the body cap | Reasoned from the config by the adversarial reviewer, **not executed**. `limit_concurrency=128` bounds the blast radius but does not stop slow connections holding slots | Verify before acting — it may already be adequately bounded |
+| F-9 | **`tests/test_web.py::TestAcpSessionClose::test_the_page_clears_the_session_and_the_url` pins template *text***, not behaviour: it splits the template on `type === 'session_closed'` and asserts literal source strings inside that branch | It actively blocked a legitimate refactor twice this session — the shared-clear helper in `acp.html` had to be reverted to duplication because of it | The mjs harness already covers the same property behaviourally. Retiring the Python test would unblock the hoist; it has no unique coverage |
+| F-10 | **Upstream candidate**: uvicorn's 400 on a `MUST_CLOSE` connection raises `LocalProtocolError` and logs a full traceback, and its body is chunk-framed on a connection already closing | Worked around locally in `53413cf` (the repeat filter). Arguably an upstream bug worth filing | A minimal reproduction exists in the Phase 3 QA scratchpad |
+| F-11 | **`memory/MEMORY.md:95-97` needs updating** — it records 18 tests that *read* the real `config.toml`. The **write** side is now closed for `tests/test_web.py` by a module-level autouse fixture, but the entry does not say so, and other test files are unassessed | Memory edits must be proposed to the user, not written by a phase | Phase 6 already carries a related proposal for `memory/MEMORY.md:149-153` |
+
+**Reminder cadence**: re-surface this section at the end of Phase 6 and again at `/qclose`, where each item takes a Promote / Accept-and-note / Skip decision alongside the harness items below.
+
 ## Harness Improvement Opportunities
 
 - The mandatory Step 1.5 dispatch gate fired correctly, but the load-bearing unknown both sub-agents flagged (`started_at` semantics) was resolvable in ~90 seconds with a runtime probe the sub-agents could not run — cost: two agents each spent a paragraph hedging an answer a probe settled outright — suggested change: let the trio return a "decidable by probe" list the orchestrator runs before the interview, rather than folding those into `[unverified]` prose.
