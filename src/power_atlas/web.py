@@ -967,12 +967,89 @@ def _is_remote_peer(peer: str | None) -> bool:
 # unhandled `AssertionError` on a websocket scope. Post-authentication, so it
 # was noise rather than a boundary failure, but the docstring below names
 # `/static` + websocket as the reason this function exists at all.
+#
+# The `/static` mount is an entry here rather than a literal inside the matcher
+# below, and that placement is load-bearing rather than tidy: it makes this map
+# the *whole* statement of what a remote peer may reach, with nothing left in
+# the matcher able to admit a path on its own. An empty map is therefore an
+# empty surface — the single property the runtime stop switch below is built on.
+_REMOTE_STATIC_MOUNT = "/static"
+
 _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     _ACP_PATH: "http",
     "/ws/acp": "websocket",
     _REMOTE_AUTH_PATH: "http",
     _ACP_LISTING_PATH: "http",
+    _REMOTE_STATIC_MOUNT: "http",
 }
+
+# --- The runtime stop switch ---------------------------------------------
+#
+# "Refuse every remote request now", chosen deliberately over closing the
+# socket: the port stays bound until this process restarts, and what stops is
+# that anything arriving on it is refused.
+#
+# Written as a *surface*, not as a flag, because the failure direction is the
+# whole design. `if _remote_stopped: refuse` reads correctly and fails the
+# wrong way: that flag becomes the only thing standing between a remote peer
+# and the app, so an unset, inverted, shadowed or half-applied flag leaves
+# remote access live while the user believes it is off — fail-open, silently.
+#
+# Here there is no second condition to get wrong. Stopping installs the empty
+# map into the variable `_remote_path_allowed` already reads, and that lookup
+# is default-deny (D6). Every way this can break — `_remote_surface` never
+# assigned the live map, cleared, rebound to `None` by a bad edit, set to
+# something that is not a mapping — answers "no path is allowed", which is the
+# guard's existing refusal. A bug disables remote access; it cannot disable the
+# guard.
+#
+# It is also the only state there is: `remote_stopped()` is *derived* from this
+# same variable rather than tracked beside it, so the panel cannot report
+# "stopped" while the guard is admitting traffic.
+#
+# Never persisted. `remote_bind_address` in `config.toml` is what a restart
+# reads and this switch deliberately does not touch it: a kill switch that
+# rewrites the configuration is one the user has to undo twice, and the user
+# asked for a runtime switch, not a configuration change.
+_REMOTE_SURFACE_STOPPED: dict[str, str] = {}
+
+_remote_surface: dict[str, str] = _REMOTE_ALLOWED_PATHS
+
+
+def _live_remote_surface() -> dict[str, str]:
+    """The surface in force, or the empty one when it is not a mapping.
+
+    The `isinstance` is not defensive noise. This variable is the entirety of
+    the kill switch, and the one outcome that must be impossible is a corrupt
+    value raising out of `_remote_path_allowed` — which runs on the `websocket`
+    scope too, where an exception is a broken handshake rather than a 500, and
+    would have to be caught somewhere that could as easily let the request pass.
+    """
+    surface = _remote_surface
+    return surface if isinstance(surface, dict) else _REMOTE_SURFACE_STOPPED
+
+
+def set_remote_stopped(stopped: object) -> None:
+    """Stop or resume the remote surface, in this process only.
+
+    Resuming takes an exact `False` and nothing else. Every other value —
+    `None`, `0`, `""`, `"false"`, a field the request body never carried —
+    stops, because the caller is an HTTP route and an argument it could not
+    make sense of must not be the one that re-opens the boundary.
+    """
+    global _remote_surface
+    _remote_surface = (_REMOTE_ALLOWED_PATHS if stopped is False
+                       else _REMOTE_SURFACE_STOPPED)
+
+
+def remote_stopped() -> bool:
+    """Whether the surface in force admits nothing at all. Derived, not stored.
+
+    Reading the same variable the guard reads is what keeps the reported state
+    and the enforced state from drifting apart.
+    """
+    return not _live_remote_surface()
+
 
 # Path-only, so the exchange route itself must reject methods other than
 # GET/POST — which FastAPI does by registering only those two.
@@ -984,8 +1061,16 @@ _FORBIDDEN_BODY = b'{"error":"Forbidden"}'
 def _remote_path_allowed(path: str, scope_type: str) -> bool:
     """Exact match for the fixed paths; prefix match only for the mount.
 
+    Reads the surface *in force* rather than `_REMOTE_ALLOWED_PATHS` directly,
+    which is how the runtime stop switch above works: stopping swaps in the
+    empty map and this answers False for every path, so the guard emits the
+    refusal it already emits, on every remote scope type, with no branch added
+    to it.
+
     `startswith("/static")` alone would also admit `/staticfoo`, so the mount
-    is matched as the directory it is.
+    is matched as the directory it is — and its verdict is read out of the same
+    map, so emptying the map empties it too. That is why the mount is an entry
+    rather than a literal here.
 
     The scope type is part of the key, not an afterthought: an entry admits the
     protocol it was written for and no other. `/ws/acp` is websocket-only;
@@ -994,12 +1079,11 @@ def _remote_path_allowed(path: str, scope_type: str) -> bool:
     alone and reached `StaticFiles.__call__`, whose first statement asserts an
     http scope.
     """
-    allowed = _REMOTE_ALLOWED_PATHS.get(path)
-    if allowed is not None:
-        return scope_type == allowed
-    if path == "/static" or path.startswith("/static/"):
-        return scope_type == "http"
-    return False
+    surface = _live_remote_surface()
+    allowed = surface.get(path)
+    if allowed is None and path.startswith(_REMOTE_STATIC_MOUNT + "/"):
+        allowed = surface.get(_REMOTE_STATIC_MOUNT)
+    return allowed is not None and scope_type == allowed
 
 
 async def _refuse(scope, send) -> None:
@@ -3013,6 +3097,11 @@ async def api_remote_access(response: Response):
         "secret_path": str(REMOTE_SECRET_PATH),
         # Read once at startup: the bind happens before the app exists.
         "restart_required": True,
+        # The runtime stop switch, read out of the surface the guard itself
+        # consults rather than out of a second variable tracking it — so this
+        # field cannot report "running" while every remote request is being
+        # refused, or the reverse.
+        "stopped": remote_stopped(),
     }
 
 
@@ -3084,6 +3173,74 @@ async def api_remote_access_rotate(response: Response):
                     if applied else
                     "The new secret is saved but takes effect on restart; "
                     "remote access is not running in this process."),
+    }
+
+
+_STOP_MESSAGE = (
+    "Remote access is stopped. Every request arriving from a remote address is "
+    "refused from now on. The port stays bound until PowerAtlas restarts — the "
+    "socket was not closed — and config.toml was not changed, so a restart "
+    "comes back up according to the bind address."
+)
+
+_RESUME_MESSAGE = (
+    "Remote access is running again. Requests from remote addresses are served "
+    "exactly as before, subject to the same path allowlist and device cookie."
+)
+
+
+@app.post("/api/remote-access/stop")
+async def api_remote_access_stop(request: Request, response: Response):
+    """Stop or resume the remote surface at runtime, without a restart.
+
+    The user asked to be able to disable remote control of this machine
+    *immediately*, and chose "refuse every remote request" over "close the
+    socket" knowing the consequence: the listener stays bound until the process
+    restarts, so a device gets a refusal rather than a connection error. That is
+    the honest description and it is what the panel says.
+
+    Loopback-only by the same mechanism as `/api/remote-access` and
+    `/api/remote-access/rotate`, not a second one: this path is absent from
+    `_REMOTE_ALLOWED_PATHS`, and that allowlist is default-deny (D6), so
+    `RemoteAccessGuard` refuses it from any non-loopback peer before routing.
+    Both directions need that. A remote peer must not be able to resume a
+    surface its owner stopped — and, less obviously, must not be able to *stop*
+    it either, which would be a denial of service against the owner's own phone
+    driven from a peer that never authenticated.
+
+    POST, so `same_origin_guard`'s Origin/Referer check applies: the same CSRF
+    protection every other mutating route here gets.
+
+    **Only an exact `{"stopped": false}` resumes.** A body that is not JSON, is
+    not an object, omits the field, or sends something other than a boolean,
+    stops — the ambiguous direction here is the one that refuses remote
+    requests. `set_remote_stopped` enforces that, in one place, rather than each
+    caller deciding; the reply then reports the state actually in force rather
+    than the state that was asked for.
+
+    Nothing is written to `config.toml`. This is process state by design: a
+    restart reads `remote_bind_address` and comes back up according to it.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        body = await request.json()
+    except Exception:
+        # An unparseable body is exactly the case that must not resume, so it
+        # is not an error path — it falls into the stopping direction below.
+        body = None
+    set_remote_stopped(body.get("stopped") if isinstance(body, dict) else None)
+    stopped = remote_stopped()
+    log.warning("remote access %s at runtime; the listening socket is "
+                "unchanged and config.toml is unchanged",
+                "STOPPED" if stopped else "resumed")
+    return {
+        "ok": True,
+        # Read back out of the guard's own surface, not echoed from the
+        # request: a caller is told what is in force, not what it asked for.
+        "stopped": stopped,
+        "persisted": False,
+        "socket_closed": False,
+        "message": _STOP_MESSAGE if stopped else _RESUME_MESSAGE,
     }
 
 

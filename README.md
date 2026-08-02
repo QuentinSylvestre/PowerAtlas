@@ -164,6 +164,8 @@ Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hot
 
 ## Agent sessions (`/acp`)
 
+Reached from the **Agents** button in the dashboard topbar, or by opening `/acp` directly.
+
 `/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp` process holds every session PowerAtlas
 opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by
 default, each axis paging independently — and marks every visible row *available*, *held by PowerAtlas*,
@@ -273,6 +275,21 @@ directory conventions — read it as a disclosure and decide deliberately; if th
 panel or `POST /api/remote-access/rotate` (loopback-only, so a peer holding a stolen cookie cannot
 re-key the surface around you). Rotation issues a new secret and invalidates **every** device cookie at
 once — there is no per-device revocation, so each remaining device must re-enter the new secret.
+
+**Turning it off right now, without a restart.** The *Remote access* panel carries a **Stop remote
+access now** button. Pressing it makes every request arriving from a remote address refused
+immediately — the same 403 an unlisted path gets — while loopback is untouched, so the dashboard you
+pressed it from keeps working. **It does not close the socket**: the port stays bound until PowerAtlas
+restarts, so a phone sees a refusal rather than a connection error. That trade was chosen deliberately;
+closing the listener would need a restart, which is the thing the control exists to avoid.
+
+Nothing is written to `config.toml`. This is process state, so a restart brings the surface back
+according to `remote_bind_address` — use **Bind address** above it, and a restart, for a change that
+sticks. **Resume remote access** puts it back immediately and asks for confirmation first. The switch
+is `POST /api/remote-access/stop`, loopback-only by the same default-deny allowlist the other two
+remote-access routes rely on, so a peer can neither resume a surface you stopped nor stop one you are
+using. Only an exact `{"stopped": false}` resumes — any other body stops, because the ambiguous
+direction here is the one that refuses.
 
 **One operational rule, because the design does not mitigate it.** Do not bind other services to
 `0.0.0.0` on this machine while the remote bind is enabled. Cookies are scoped to a host, not a port, so

@@ -1501,6 +1501,57 @@ class TestAcpBackLinkMatchesReachability:
 _ACP_PATH_FOR_BACKLINK = "/acp"
 
 
+class TestTheDashboardLinksToTheAgentPage:
+    """The other half of the pair above. `/acp` has linked back to `/` since
+    Phase 5b; nothing linked forward, so reaching the agent surface from the
+    dashboard meant knowing the path and typing it — which is how a shipped
+    feature ends up believed absent.
+
+    Read off the parsed topbar rather than out of a substring of the page,
+    because a substring pins the text of a line and not its effect. What has to
+    hold is that the anchor is **in the topbar**, that its target is **a route
+    that answers**, and that it is an anchor at all — a `<button>` with
+    `location.href` looks identical in the markup diff and silently drops
+    middle-click, Ctrl-click and "copy link address".
+    """
+
+    _LINK = re.compile(r'<a\b([^>]*\bhref="/acp"[^>]*)>(.*?)</a>', re.S)
+
+    def _topbar(self, client):
+        page = client.get("/").text
+        start = page.find('<div class="topbar">')
+        end = page.find('<div class="search-area">')
+        assert start >= 0 and end > start, \
+            "the dashboard's topbar could not be located; this check is measuring nothing"
+        return page[start:end]
+
+    def test_the_topbar_carries_a_link_to_the_agent_page(self, client):
+        found = self._LINK.findall(self._topbar(client))
+        assert len(found) == 1, (
+            "the dashboard topbar has no link to /acp, so the agent surface is "
+            "reachable only by typing the path")
+        attrs, label = found[0]
+        assert "topbar-profile-btn" in attrs, (
+            "the link does not wear the topbar's control shape, so it reads as "
+            "stray text beside two pill buttons")
+        assert "aria-label=" in attrs, "the link is unlabelled for a screen reader"
+        assert label.strip(), "the link renders no visible label at all"
+
+    def test_the_link_points_at_a_route_that_answers(self, raw_client):
+        """The half a substring check cannot make: the href has to name a live
+        route. A typo'd path is a link to a 404 and looks correct in a diff."""
+        href = self._LINK.findall(self._topbar(raw_client))[0][0]
+        target = re.search(r'href="([^"]+)"', href).group(1)
+        assert raw_client.get(target).status_code == 200, \
+            f"the topbar links to {target}, which does not serve"
+
+    def test_the_link_is_absent_from_the_page_it_points_at(self, raw_client):
+        """`/acp` has its own back link and does not need a forward one to
+        itself. This is the positive control for the check above: without it,
+        a page-wide search would pass on `/acp`'s own markup."""
+        assert 'href="/acp"' not in raw_client.get("/acp").text
+
+
 class TestAcpPageIsNotCacheable:
     """``GET /acp`` renders the live ACP token, so its response is a credential.
 
@@ -10115,6 +10166,326 @@ class TestRemotePathAllowlistIsDefaultDeny:
         with pytest.raises(_Reached):
             _peer_ws("/ws/acp", [_cookie_header()],
                      asgi_app=_guard_over_sentinel())
+
+
+def _stop_switch_reset():
+    """Restore the surface, whatever a test did to the variable holding it."""
+    from power_atlas import web as web_mod
+    web_mod.set_remote_stopped(False)
+
+
+class TestTheRuntimeStopSwitchFailsClosed:
+    """Disabling remote control without restarting PowerAtlas.
+
+    The user chose *refuse every remote request immediately* over *close the
+    socket*, understanding that the port stays bound until the process
+    restarts. So what is pinned here is refusal, never a closed listener.
+
+    **The failure direction is the whole design**, which is why most of these
+    checks are not "stopping stops" but "every way this can break refuses".
+    Written the obvious way — `if _remote_stopped: refuse` — that flag becomes
+    the only thing between a remote peer and the app, so an unset, inverted,
+    shadowed or half-applied flag leaves remote access live while the user
+    believes it is off. Fail-open, silently, on the one control that exists for
+    the moment the user wants the machine off the network.
+
+    The implementation instead installs the empty map into the allowlist
+    `_remote_path_allowed` already reads, and that lookup is default-deny (D6).
+    A broken switch is therefore a surface that admits nothing: a bug disables
+    remote access, not the guard.
+    """
+
+    # Every path a remote peer can reach when the surface is serving. Listed
+    # rather than derived from `_REMOTE_ALLOWED_PATHS`, because deriving it
+    # from the same map the switch empties would make the stopped half of each
+    # check iterate over nothing and pass vacuously.
+    _SERVED = ["/acp", "/remote-auth", "/api/acp/sessions",
+               "/static", "/static/style.css", "/static/deep/nested.js"]
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        _stop_switch_reset()
+        yield
+        _stop_switch_reset()
+
+    def test_every_path_the_guard_admitted_is_refused_once_stopped(
+            self, remote_enabled):
+        """The pass half first, so the refusal half cannot be bought by a path
+        that was never reachable. Inverting the stop check, or never folding it
+        into the guard's condition at all, fails here."""
+        from power_atlas import web as web_mod
+        for path in self._SERVED:
+            with pytest.raises(_Reached):
+                _peer_http(path, [_cookie_header()],
+                           asgi_app=_guard_over_sentinel())
+        web_mod.set_remote_stopped(True)
+        for path in self._SERVED:
+            status, body, _ = _peer_http(path, [_cookie_header()],
+                                         asgi_app=_guard_over_sentinel())
+            assert status == 403, f"{path} still served a remote peer while stopped"
+            assert body == web_mod._FORBIDDEN_BODY
+
+    def test_the_refusal_is_the_guards_own_and_not_a_second_one(
+            self, remote_enabled):
+        """21 bytes of `{"error":"Forbidden"}` with a matching Content-Length.
+        A stopped surface has to be byte-indistinguishable from a path that was
+        never on the allowlist, or the switch is itself a probe telling an
+        unauthenticated peer which state the machine is in."""
+        from power_atlas import web as web_mod
+        web_mod.set_remote_stopped(True)
+        status, body, sent = _peer_http("/acp", [_cookie_header()])
+        assert status == 403
+        assert body == b'{"error":"Forbidden"}'
+        assert len(body) == 21
+        start = next(m for m in sent if m["type"] == "http.response.start")
+        assert (b"content-length", b"21") in start["headers"]
+        assert _peer_http("/api/settings", [_cookie_header()])[1] == body, \
+            "a stopped path answers differently from an unlisted one"
+
+    def test_a_stopped_websocket_gets_the_scope_typed_close(self, remote_enabled):
+        """Emitting `http.response.start` into a `websocket` scope is an ASGI
+        protocol violation that surfaces as a uvicorn exception rather than a
+        refusal — and `/ws/acp` is the path this switch matters most on, since
+        it is the one that drives the agent."""
+        from power_atlas import web as web_mod
+        with pytest.raises(_Reached):
+            _peer_ws("/ws/acp", [_cookie_header()],
+                     asgi_app=_guard_over_sentinel())
+        web_mod.set_remote_stopped(True)
+        assert _peer_ws("/ws/acp", [_cookie_header()],
+                        asgi_app=_guard_over_sentinel()) == [
+            {"type": "websocket.close", "code": 1008}]
+
+    def test_loopback_is_untouched_by_the_stop(self, remote_enabled):
+        """The switch disables *remote* access. A dashboard that stopped
+        working when the user pressed it would be a different feature — and the
+        panel holding the button is itself served over loopback, so a switch
+        that took loopback with it could not be undone from the UI."""
+        from power_atlas import web as web_mod
+        web_mod.set_remote_stopped(True)
+        for path in ("/", "/api/settings", "/acp", "/api/remote-access"):
+            with pytest.raises(_Reached):
+                _peer_http(path, [_cookie_header()], client=("127.0.0.1", 1),
+                           asgi_app=_guard_over_sentinel())
+
+    def test_resuming_restores_the_surface_and_widens_nothing(self, remote_enabled):
+        from power_atlas import web as web_mod
+        web_mod.set_remote_stopped(True)
+        web_mod.set_remote_stopped(False)
+        for path in self._SERVED:
+            with pytest.raises(_Reached):
+                _peer_http(path, [_cookie_header()],
+                           asgi_app=_guard_over_sentinel())
+        # Resume must restore the surface, not invent a wider one: default-deny
+        # still holds afterwards, including over the switch's own route.
+        for path in ("/", "/api/settings", "/staticfoo",
+                     "/api/remote-access", "/api/remote-access/stop"):
+            assert _peer_http(path, [_cookie_header()],
+                              asgi_app=_guard_over_sentinel())[0] == 403, path
+
+    @pytest.mark.parametrize("value", [
+        None, 0, "", "false", "no", 1, True, [], {}, ("no",),
+    ])
+    def test_only_an_exact_false_resumes(self, value, remote_enabled):
+        """The mutation this exists to catch: a switch whose *default* — an
+        absent field, an unparseable body, any falsy value — reads as "not
+        stopped". That is the fail-open direction, and it is reachable from the
+        HTTP route by sending `{}`, so it is not hypothetical.
+        """
+        from power_atlas import web as web_mod
+        web_mod.set_remote_stopped(value)
+        assert web_mod.remote_stopped() is True, \
+            f"{value!r} resumed the remote surface"
+        assert _peer_http("/acp", [_cookie_header()],
+                          asgi_app=_guard_over_sentinel())[0] == 403
+
+    @pytest.mark.parametrize("corrupt", [None, "", "/acp", 0, 123, ()])
+    def test_a_surface_that_is_not_a_mapping_refuses_rather_than_raising(
+            self, corrupt, remote_enabled, monkeypatch):
+        """Every way a bad edit can leave this variable — never assigned,
+        cleared, rebound to something that is not a mapping — has to land on
+        refusal. A raise would be as bad as a pass: `_remote_path_allowed` runs
+        on the `websocket` scope, where an exception is a broken handshake
+        rather than a 500, and the `except` that would have to catch it is a
+        second place to accidentally let traffic through.
+        """
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_remote_surface", corrupt)
+        assert web_mod._remote_path_allowed("/acp", "http") is False
+        assert web_mod.remote_stopped() is True
+        status, body, _ = _peer_http("/acp", [_cookie_header()])
+        assert status == 403
+        assert body == web_mod._FORBIDDEN_BODY
+        assert _peer_ws("/ws/acp", [_cookie_header()],
+                        asgi_app=_guard_over_sentinel()) == [
+            {"type": "websocket.close", "code": 1008}]
+
+    def test_the_reported_state_is_read_out_of_the_guards_own_surface(
+            self, remote_enabled, monkeypatch):
+        """There is no second variable, and this is what says so. The mutation
+        it catches is tracking "stopped" in a boolean beside the surface, which
+        can then disagree with what the guard enforces — a panel reading
+        STOPPED over a surface that is still serving is exactly the failure the
+        switch exists to prevent."""
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "_remote_surface", {})
+        assert web_mod.remote_stopped() is True
+        assert _peer_http("/acp", [_cookie_header()],
+                          asgi_app=_guard_over_sentinel())[0] == 403
+        monkeypatch.setattr(web_mod, "_remote_surface",
+                            web_mod._REMOTE_ALLOWED_PATHS)
+        assert web_mod.remote_stopped() is False
+        with pytest.raises(_Reached):
+            _peer_http("/acp", [_cookie_header()],
+                       asgi_app=_guard_over_sentinel())
+
+    def test_the_static_mount_goes_with_the_surface(self, remote_enabled):
+        """The mount is an entry in the map rather than a literal inside the
+        matcher, and that placement is what makes an empty map an empty
+        surface. A `startswith("/static")` branch outside the map keeps serving
+        the stylesheet and every page asset to a remote peer after the switch
+        was pressed — and the page they belong to would look half-alive."""
+        from power_atlas import web as web_mod
+        assert web_mod._REMOTE_ALLOWED_PATHS[web_mod._REMOTE_STATIC_MOUNT] == "http"
+        web_mod.set_remote_stopped(True)
+        for path in ("/static", "/static/style.css", "/static/deep/nested.js"):
+            assert web_mod._remote_path_allowed(path, "http") is False, path
+            assert _peer_http(path, [_cookie_header()],
+                              asgi_app=_guard_over_sentinel())[0] == 403, path
+
+
+class TestTheStopRoute:
+    """`POST /api/remote-access/stop`, the loopback-only control for the switch
+    above. Loopback-only by the same default-deny allowlist `/api/remote-access`
+    and `/api/remote-access/rotate` rely on, not a second mechanism."""
+
+    _PATH = "/api/remote-access/stop"
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        _stop_switch_reset()
+        yield
+        _stop_switch_reset()
+
+    def test_the_route_is_loopback_only(self, remote_enabled):
+        """Both directions matter. A remote peer must not resume a surface its
+        owner stopped — and must not be able to *stop* it either, which would
+        be a denial of service against the owner's own phone, driven from a
+        peer that never authenticated. Adding this path to
+        `_REMOTE_ALLOWED_PATHS` makes this fail."""
+        from power_atlas import web as web_mod
+        assert self._PATH not in web_mod._REMOTE_ALLOWED_PATHS
+        status, body, _ = _peer_http(
+            self._PATH,
+            [_cookie_header(),
+             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode()),
+             (b"content-type", b"application/json")],
+            method="POST", body=b'{"stopped": true}')
+        assert status == 403
+        assert b"Forbidden" in body
+        assert web_mod.remote_stopped() is False, \
+            "a remote peer reached the switch"
+
+    def test_the_route_stops_and_resumes_the_running_process(
+            self, client, remote_enabled):
+        from power_atlas import web as web_mod
+        body = client.post(self._PATH, json={"stopped": True}).json()
+        assert body["ok"] is True and body["stopped"] is True
+        assert web_mod.remote_stopped() is True
+        assert _peer_http("/acp", [_cookie_header()],
+                          asgi_app=_guard_over_sentinel())[0] == 403
+        body = client.post(self._PATH, json={"stopped": False}).json()
+        assert body["stopped"] is False
+        with pytest.raises(_Reached):
+            _peer_http("/acp", [_cookie_header()],
+                       asgi_app=_guard_over_sentinel())
+
+    @pytest.mark.parametrize("payload", [
+        {}, {"stopped": None}, {"stopped": "false"}, {"stopped": 0},
+        {"stoped": False}, {"stopped": []}, [], "false", 0,
+    ])
+    def test_anything_but_an_explicit_false_stops(
+            self, client, payload, remote_enabled):
+        """The route's fail-closed direction, driven from a real request. A
+        typo'd field name, a string `"false"` from a hand-rolled client, a body
+        that is not an object — none of them may re-open the boundary."""
+        from power_atlas import web as web_mod
+        body = client.post(self._PATH, json=payload).json()
+        assert body["stopped"] is True, f"{payload!r} resumed remote access"
+        assert web_mod.remote_stopped() is True
+        assert _peer_http("/acp", [_cookie_header()],
+                          asgi_app=_guard_over_sentinel())[0] == 403
+
+    @pytest.mark.parametrize("raw", [b"{not json", b"", b"null"])
+    def test_a_body_that_is_not_an_object_stops(self, client, raw, remote_enabled):
+        """An unparseable body is not an error path here: it is precisely the
+        case that must not resume, so it falls into the stopping direction
+        rather than into a 400 the caller might retry differently."""
+        from power_atlas import web as web_mod
+        resp = client.post(self._PATH, content=raw,
+                           headers={"Content-Type": "application/json"})
+        assert resp.status_code == 200
+        assert resp.json()["stopped"] is True
+        assert web_mod.remote_stopped() is True
+
+    def test_the_reply_reports_what_is_in_force_not_what_was_asked(
+            self, client, remote_enabled):
+        """`stopped` is read back out of the guard's surface rather than echoed
+        from the request, so a caller that sent nonsense is told what actually
+        happened."""
+        body = client.post(self._PATH, json={"stopped": "nope"}).json()
+        assert body["stopped"] is True
+        assert body["persisted"] is False
+        assert body["socket_closed"] is False, \
+            "the reply claims a closed socket; the port stays bound until restart"
+        assert "restart" in body["message"] and "config.toml" in body["message"]
+
+    def test_the_switch_never_writes_config_toml(
+            self, client, isolated_config, remote_enabled):
+        """A runtime switch, by the user's explicit choice.
+        `remote_bind_address` is what a restart reads and this route
+        deliberately leaves it alone — a kill switch that rewrites the
+        configuration is one the user has to undo twice, and a restart would
+        then come back up refusing everything with nothing on screen saying
+        why."""
+        from power_atlas import config as config_mod
+        config_mod.save_config(config_mod.load_config())
+        path = isolated_config / "config.toml"
+        before = path.read_bytes()
+        assert client.post(self._PATH, json={"stopped": True}).json()["stopped"] is True
+        assert client.post(self._PATH, json={"stopped": False}).json()["stopped"] is False
+        assert path.read_bytes() == before, \
+            "the runtime switch wrote to config.toml"
+
+    def test_the_secret_route_reports_the_state_in_force(
+            self, client, remote_enabled):
+        """The panel renders off this payload, so the field has to be here or
+        the button cannot know which of Stop and Resume to draw."""
+        assert client.get("/api/remote-access").json()["stopped"] is False
+        client.post(self._PATH, json={"stopped": True})
+        assert client.get("/api/remote-access").json()["stopped"] is True
+
+    def test_the_route_needs_a_post(self, client):
+        """POST is what puts it under `same_origin_guard`'s Origin/Referer
+        check; a GET would be reachable by a cross-origin `<img src>`."""
+        assert client.get(self._PATH).status_code == 405
+
+    def test_the_route_is_csrf_protected(self, raw_client, remote_enabled):
+        """A page on another origin must not be able to stop — or resume — the
+        surface. The resume direction is the one that matters most."""
+        from power_atlas import web as web_mod
+        web_mod.set_remote_stopped(True)
+        resp = raw_client.post(self._PATH, json={"stopped": False},
+                               headers={"Origin": "http://evil.example"})
+        assert resp.status_code == 403
+        assert web_mod.remote_stopped() is True, \
+            "a cross-origin POST resumed the surface anyway"
+
+    def test_the_route_is_not_cacheable(self, client):
+        resp = client.post(self._PATH, json={"stopped": True})
+        assert resp.status_code == 200
+        assert "stopped" in resp.json(), "the assertion below would be vacuous"
+        assert resp.headers["cache-control"] == "no-store"
 
 
 class TestRemoteRequestsNeedTheCookie:

@@ -10,6 +10,12 @@
     <button class="topbar-profile-btn" onclick="openRemoteModal()" title="Remote access: the URL and device secret a phone needs, and which settings need a restart" aria-label="Remote access">
       📡 Remote
     </button>
+    <!-- An anchor, not a button with `location.href`: it is a plain navigation
+         to another page of this app, and the anchor is what makes middle-click,
+         Ctrl-click and "copy link" work. `/acp` links back here the same way. -->
+    <a class="topbar-profile-btn topbar-link" href="/acp" title="Agent sessions: create and drive kiro-cli sessions over ACP, without a terminal" aria-label="Agent sessions">
+      🤖 Agents
+    </a>
     <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
       <span class="trust-dot"></span>Autostart
     </div>
@@ -849,6 +855,77 @@ function _remoteAddressEditor(d) {
   return row;
 }
 
+// The runtime stop switch, and the sentence that has to go with it. What it is
+// NOT is the part a user gets wrong on their own: it does not close the socket.
+// The port stays bound until PowerAtlas restarts; what stops is that anything
+// arriving on it is refused, so a device sees a refusal rather than a
+// connection error. And it is process state — nothing is written to
+// config.toml, so a restart comes back up according to the bind address.
+//
+// Deliberately not `.remote-field`. That class marks the copyable value rows
+// the node harness addresses positionally; folding a control into it would
+// shift every index those checks use, and this is a control, not a value.
+function _remoteStopSection(d) {
+  var wrap = document.createElement('div');
+  wrap.className = 'remote-stop';
+  // `=== true` rather than truthiness: a server that has not been taught this
+  // field yet must read as running, which is what the panel then offers to
+  // stop. Guessing "stopped" from an absent field would show a Resume button
+  // for a switch that does not exist.
+  var stopped = d.stopped === true;
+  wrap.appendChild(_remoteNote(
+    stopped
+      ? 'Remote access is STOPPED. Every request from a remote address is '
+        + 'refused right now; loopback is unaffected. The socket was not '
+        + 'closed — the port stays bound until PowerAtlas restarts, so a '
+        + 'device gets a refusal rather than a connection error. Nothing was '
+        + 'written to config.toml: a restart brings the surface back according '
+        + 'to the bind address below.'
+      : 'Remote access is serving. Stopping refuses every request from a '
+        + 'remote address immediately, with no restart; loopback is '
+        + 'unaffected. It does not close the socket — the port stays bound '
+        + 'until PowerAtlas restarts. Nothing is written to config.toml, so a '
+        + 'restart returns to whatever the bind address below says.',
+    stopped ? 'warn' : null));
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = stopped ? 'btn-secondary remote-resume'
+                          : 'btn-danger remote-stop-btn';
+  btn.textContent = stopped ? 'Resume remote access' : 'Stop remote access now';
+  btn.onclick = function () { setRemoteStopped(!stopped); };
+  wrap.appendChild(btn);
+  return wrap;
+}
+
+function setRemoteStopped(stopped) {
+  // Only the direction that re-opens the boundary asks. Stopping is the safe
+  // half and a gate on it would be friction on the control the user reached
+  // for in a hurry; resuming puts the machine back on the network.
+  if (!stopped && !confirm('Resume remote access?\n\nRequests from remote '
+      + 'addresses will be served again, subject to the device cookie.')) return;
+  fetch('/api/remote-access/stop', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({stopped: stopped})
+  }).then(function (r) { return r.json(); })
+    .then(function (d) {
+      showToast('<div class="toast toast-success">' + _escHtml(d.message || '')
+        + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+      loadRemoteAccess();
+    })
+    .catch(function () {
+      // A failed *stop* is the dangerous half: the user has pressed the kill
+      // switch and would otherwise walk away believing it took. Name which
+      // direction failed, and refresh so the panel shows what is in force
+      // rather than what was asked for.
+      showToast('<div class="toast toast-error">' + _escHtml(stopped
+        ? 'Remote access was NOT stopped — the request failed. It is still '
+          + 'serving remote requests.'
+        : 'Remote access was not resumed — the request failed.')
+        + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+      loadRemoteAccess();
+    });
+}
+
 function renderRemoteAccess(d) {
   var body = document.getElementById('remoteAccessBody');
   body.textContent = '';
@@ -862,6 +939,10 @@ function renderRemoteAccess(d) {
     _drainAddressNotice(body);
     return;
   }
+  // First, because it is the only thing here about what is happening *now* —
+  // everything below it describes the next start of PowerAtlas or what a
+  // device needs once the surface is serving.
+  body.appendChild(_remoteStopSection(d));
   body.appendChild(_remoteAddressEditor(d));
   _drainAddressNotice(body);
   body.appendChild(_remoteField(

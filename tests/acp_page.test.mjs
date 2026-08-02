@@ -1748,6 +1748,7 @@ const STYLESHEET = path.join(
 
 const PANEL_NAMES = [
   "_remoteField", "_remoteNote", "_remoteAddressEditor", "_drainAddressNotice",
+  "_remoteStopSection", "setRemoteStopped",
   "renderRemoteAccess", "rotateRemoteSecret",
   "loadRemoteAccess", "_RESTART_KEY_LABELS", "renderRestartKeys",
   "markRestartInputs", "loadRestartKeys", "openRemoteModal",
@@ -2123,6 +2124,148 @@ check("clearing the field says what it turns off and what it keeps", async () =>
   assert(/secret is kept|keeps? working|already enrolled/i.test(said),
          `nothing says the device secret survives, so re-enabling looks like ` +
          `it would require re-enrolling every device: ${said}`);
+});
+
+// ------------------------------------------- the runtime stop switch --
+//
+// A kill switch for remote control that needs no restart. The user chose
+// "refuse every remote request" over "close the socket", so the panel's job is
+// to say that and not the comfortable version of it: the port stays bound
+// until PowerAtlas restarts, nothing is written to config.toml, and loopback
+// is unaffected. On what the JS builds and does rather than on the text of a
+// line — the mutation that survives a substring check is the one that deletes
+// the code the substring lived in.
+
+const SERVING = {
+  enabled: true, stopped: false, remote_bind_address: "100.78.142.124",
+  url: "http://100.78.142.124:4915/acp",
+  secret_present: true, secret: "s", secret_path: "p",
+};
+const STOPPED = Object.assign({}, SERVING, { stopped: true });
+
+check("the panel can stop remote access, and posts a stop to do it", async () => {
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess(SERVING);
+  const stop = p.body.querySelector(".remote-stop-btn");
+  assert(stop, "there is no way to stop remote access from the panel, so the " +
+               "only way to take the machine off the network is a restart");
+  assertEqual(p.body.querySelectorAll(".remote-resume").length, 0,
+              "a Resume button was drawn over a surface that is already serving");
+  stop.onclick();
+  assertEqual(p.confirms.length, 0,
+              "stopping asked for confirmation; the refusing direction is the " +
+              "safe one and the one the user reached for in a hurry");
+  assert(p.fetches.length >= 1, "pressing Stop sent no request at all");
+  assertEqual(p.fetches[0].url, "/api/remote-access/stop",
+              "Stop posted somewhere other than the runtime switch");
+  assertEqual(String(p.fetches[0].init.method).toUpperCase(), "POST",
+              "the switch was not posted, so the CSRF check never applies to it");
+  assertEqual(JSON.parse(p.fetches[0].init.body).stopped, true,
+              "Stop posted something other than a request to stop");
+  await p.settle();
+  // Re-read rather than repainted from the press: the server's answer is the
+  // only thing that knows whether the switch took.
+  assertEqual(p.fetches.filter((f) => f.url === "/api/remote-access").length, 1,
+              "the panel repainted from the button press rather than from the " +
+              "state the server reports");
+});
+
+check("the stopped panel states what stopped and what did not", () => {
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess(STOPPED);
+  const section = p.body.querySelector(".remote-stop");
+  assert(section, "the stop switch is not on screen at all");
+  const said = section.textContent;
+  assert(/stopped/i.test(said), `nothing says the surface is stopped: ${said}`);
+  assert(/refus/i.test(said),
+         `nothing says what happens to a remote request now: ${said}`);
+  // The three things a user infers wrongly on their own, each of which the
+  // user explicitly accepted when choosing this design over closing the socket.
+  assert(/(stays|still) bound|was not closed|does not close/i.test(said),
+         `the panel does not say the port is still bound: ${said}`);
+  assert(/restart/i.test(said),
+         `the panel does not say what a restart does to this: ${said}`);
+  assert(/config\.toml/i.test(said),
+         `the panel does not say this was not written to config.toml, so the ` +
+         `user cannot tell whether a restart undoes it: ${said}`);
+  assert(/loopback/i.test(said),
+         `the panel does not say the dashboard itself is unaffected: ${said}`);
+  // And it must not claim the listener went away, which is the one thing that
+  // did not happen.
+  assert(!/no longer listening|port is closed|socket is closed|stopped listening/i.test(said),
+         `the panel implies the socket was closed, which it was not: ${said}`);
+  const resume = section.querySelector(".remote-resume");
+  assert(resume, "a stopped surface offers no way back short of a restart");
+  assertEqual(p.body.querySelectorAll(".remote-stop-btn").length, 0,
+              "a Stop button was drawn over a surface that is already stopped");
+});
+
+check("the live state is stated above the settings that only apply next launch", () => {
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess(STOPPED);
+  const nodes = p.body.childNodes;
+  const stopAt = nodes.indexOf(p.body.querySelector(".remote-stop"));
+  const addressAt = nodes.indexOf(p.addressRow());
+  assert(stopAt >= 0, "the stop section is not a section of the panel body");
+  assert(addressAt >= 0, "the bind-address row vanished");
+  assert(stopAt < addressAt,
+         "the only thing on this panel describing what the server is doing " +
+         "right now sits below a form about the next launch");
+});
+
+check("resuming asks first, and a declined confirm resumes nothing", async () => {
+  const declined = loadPanel({ confirm: false });
+  declined.sandbox.renderRemoteAccess(STOPPED);
+  declined.body.querySelector(".remote-resume").onclick();
+  assertEqual(declined.confirms.length, 1,
+              "resuming put the machine back on the network without asking");
+  assertEqual(declined.fetches.length, 0,
+              "declining the confirm resumed remote access anyway");
+
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess(STOPPED);
+  p.body.querySelector(".remote-resume").onclick();
+  assertEqual(p.fetches[0].url, "/api/remote-access/stop",
+              "Resume posted somewhere other than the runtime switch");
+  assertEqual(JSON.parse(p.fetches[0].init.body).stopped, false,
+              "Resume posted something other than a request to resume — an " +
+              "exact `false` is the only value the route accepts as a resume");
+  await p.settle();
+});
+
+check("a failed stop says so rather than leaving the panel looking stopped", async () => {
+  // The dangerous half. A user who pressed the kill switch and saw nothing
+  // walks away believing the machine is off the network while it is serving.
+  const p = loadPanel({ answer: (url) =>
+    url === "/api/remote-access/stop" ? { reject: "offline" } : { body: {} } });
+  p.sandbox.renderRemoteAccess(SERVING);
+  p.body.querySelector(".remote-stop-btn").onclick();
+  await p.settle();
+  const toast = p.toasts.join("|");
+  assert(/toast-error/.test(toast),
+         `a failed stop was reported as anything but a failure: ${toast}`);
+  assert(/not stopped/i.test(toast),
+         `the failure does not say which direction failed: ${toast}`);
+  assert(/still serving|still.{0,20}remote/i.test(toast),
+         `the failure does not say the surface is still up, which is the whole ` +
+         `reason this message exists: ${toast}`);
+  assertEqual(p.fetches.filter((f) => f.url === "/api/remote-access").length, 1,
+              "a failed stop left the panel showing what was asked for rather " +
+              "than re-reading what is in force");
+});
+
+check("a server that never heard of the switch reads as serving, not stopped", () => {
+  // `stopped` absent from the payload. Guessing "stopped" from a missing field
+  // draws a Resume button for a control that does not exist and tells the user
+  // the machine is off the network when nothing said so.
+  const p = loadPanel();
+  p.sandbox.renderRemoteAccess({
+    enabled: true, url: "u", secret_present: true, secret: "s", secret_path: "p" });
+  assert(p.body.querySelector(".remote-stop-btn"),
+         "an absent `stopped` field left the panel with no control at all");
+  assertEqual(p.body.querySelectorAll(".remote-resume").length, 0,
+              "an absent `stopped` field was read as stopped, so the panel " +
+              "claims the machine is off the network when nothing said so");
 });
 
 check("the rotation warning names every device, above the button that revokes them", () => {

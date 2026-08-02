@@ -48,6 +48,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .topbar-select:hover { border-color: var(--accent); color: var(--text); }
 .topbar-profile-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; color: var(--text-muted); padding: 6px 12px; font-size: 12px; cursor: pointer; transition: all 0.2s; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .topbar-profile-btn:hover { border-color: var(--accent); color: var(--text); }
+/* `.topbar-profile-btn` was written for <button>, whose UA styles already give
+   it a box and no underline. An <a> wearing the same class needs both back, or
+   the pill's padding does not lay out and the label renders underlined. */
+.topbar-link { display: inline-flex; align-items: center; text-decoration: none; }
 .trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s; }
 .trust-toggle.active .trust-dot, .topbar-toggle.active .trust-dot { background: var(--success); }
 
@@ -350,6 +354,11 @@ script { display: none; }
 .remote-note-warn { color: #fbbf24; }
 .remote-note-off { color: var(--text-muted); }
 .remote-rotate { margin-top: 2px; }
+/* The runtime stop switch. Boxed and set apart from the rest of the panel
+   because it is the only control here that changes what the server is doing
+   right now — everything else on this panel takes effect at the next launch. */
+.remote-stop { border: 1px solid var(--card-border); border-radius: var(--radius-sm); padding: 10px 12px 12px; margin-bottom: 16px; }
+.remote-stop .remote-note { margin-bottom: 10px; }
 .remote-restart-list { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
 .remote-restart-row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--card-border); }
 .remote-restart-key { flex: 1; min-width: 0; color: var(--text-muted); }
