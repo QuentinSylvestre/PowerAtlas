@@ -2199,6 +2199,10 @@ def acp_session():
         acp_mod._supervisor.history.pop(sid, None)
         acp_mod._supervisor.inflight.discard(sid)
         acp_mod._supervisor.closing.discard(sid)
+        # The half-finished bubble a test left open. Module-global like the two
+        # above, and prose left in it would be prepended to the next test's
+        # first rendering.
+        acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
         acp_mod._registry.connections.clear()
@@ -2812,6 +2816,12 @@ class TestAcpPromptDispatch:
             ("chunk", {"role": "user", "text": "ping"}),
             ("meta", {"turn": "start"}),
             ("chunk", {"role": "agent", "text": "answer"}),
+            # The bubble's markdown, parsed once at the end of it. The chunk
+            # above still carries the plain text and still arrives first: the
+            # page streams exactly what it always did and reflows afterwards.
+            ("rendered", {"tokens": [
+                {"type": "paragraph",
+                 "children": [{"type": "text", "raw": "answer"}]}]}),
             ("meta", {"turn": "end", "stopReason": "end_turn"}),
         ]
         # Both tabs see the same turn, including the prompt neither of them
@@ -2840,6 +2850,337 @@ class TestAcpPromptDispatch:
         assert frames[2]["payload"]["code"] == "agent_timeout"
         assert frames[3]["payload"] == {"turn": "end", "stopReason": "error"}
         assert sid not in acp_mod._supervisor.inflight
+
+
+class TestAcpMarkdownRendering:
+    """The agent writes markdown; the transcript used to show it as source.
+
+    Parsing happens **here, into a token tree**, and the tree is built into
+    elements on the page. The split is the security control rather than a
+    layering preference: ``/acp`` is reachable off the loopback, it fronts an
+    agent running with every tool pre-approved, and the page's one hard rule is
+    that nothing on it parses markup. A tree of tokens can be walked with
+    ``createElement`` and ``textContent``; a string of HTML cannot, and a
+    server that emitted HTML would have to be trusted line by line forever
+    instead of being checked once by a regex over the template.
+
+    Nothing on this side sanitizes anything. ``create_markdown(renderer=None)``
+    never reaches ``escape=`` (that argument belongs to ``HTMLRenderer``) and
+    never applies ``safe_url()`` (it lives in the HTML renderer too), so raw
+    ``<script>`` and ``javascript:`` URLs arrive on the wire intact. The page's
+    allowlist is the entire boundary, and
+    ``test_the_tree_is_not_sanitized_and_the_page_is_the_boundary`` pins that
+    so nobody relaxes the allowlist on the strength of a filter here.
+    """
+
+    def _attached(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    @staticmethod
+    def _says(text, role="agent"):
+        return {"sessionUpdate": "%s_message_chunk" % role,
+                "content": {"type": "text", "text": text}}
+
+    @staticmethod
+    def _calls(tool_id):
+        return {"sessionUpdate": "tool_call", "toolCallId": tool_id,
+                "title": "shell", "kind": "execute", "status": "pending"}
+
+    def _notify(self, acp_mod, sid, update):
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": update},
+        })
+
+    def _turn(self, acp_mod, sid, conn, script, stop="end_turn"):
+        """One real ``_handle_prompt`` whose agent emits ``script`` mid-request.
+
+        The stub sits at the JSON-RPC transport, so every notification travels
+        the real path and the turn's boundaries are the real ones.
+        """
+        async def fake_request(self_, method, params, timeout=None):
+            for update in script:
+                self_._on_notification({
+                    "method": "session/update",
+                    "params": {"sessionId": sid, "update": update},
+                })
+            return {"stopReason": stop}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "go"}))
+        return _queued(conn)
+
+    def test_the_end_of_a_turn_renders_the_bubble(self, acp_session):
+        """The whole feature, at its ordinary shape.
+
+        The ``rendered`` frame sits immediately in front of the turn-end
+        marker, and that position is load-bearing: the page applies it to
+        whichever bubble is open, and the end marker is what closes that
+        bubble. Behind it, the frame reaches a bubble that no longer exists.
+        """
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        frames = self._turn(acp_mod, sid, conn, [self._says(
+            "# Findings\n\nIt is **fine**, see `run.py`:\n\n"
+            "```py\nx = 1\n```\n\n- first\n- second\n")])
+        types = [f["type"] for f in frames]
+        assert types == ["chunk", "meta", "chunk", "rendered", "meta"]
+        assert frames[-1]["payload"]["turn"] == "end"
+        tokens = frames[3]["payload"]["tokens"]
+        kinds = [t["type"] for t in tokens]
+        assert "heading" in kinds, kinds
+        assert "block_code" in kinds, kinds
+        assert "list" in kinds, kinds
+        para = next(t for t in tokens if t["type"] == "paragraph")
+        inline = [k["type"] for k in para["children"]]
+        assert "strong" in inline and "codespan" in inline, inline
+        # The plain text is still streamed exactly as it was, and the rendering
+        # is an addition to it rather than a replacement for it: a client that
+        # ignores the new frame renders precisely what it rendered before.
+        assert frames[2]["payload"]["text"].startswith("# Findings")
+        # And the accumulator is empty again, so a session cannot carry one
+        # turn's prose into the next.
+        assert sid not in acp_mod._bubbles
+
+    def test_a_tool_call_splits_one_turn_into_two_bubbles(self, acp_session):
+        """A **bubble** is the unit, not a turn.
+
+        A bubble is what the page's ``agentBody`` tracks, and a tool call ends
+        one: ``addToolCall`` nulls it so the prose after a call is a new
+        paragraph rather than a continuation of the sentence it interrupted.
+        Parsing per turn instead would hand the page one tree for two boxes —
+        the second bubble would be rendered with the first one's content in it
+        and the reader would see the first answer twice.
+
+        It also decides how a code fence that spans a tool call is read: as two
+        unterminated documents, which is exactly what was on the screen.
+        """
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        frames = self._turn(acp_mod, sid, conn, [
+            self._says("Running it:\n\n```sh\nls -la\n"),
+            self._calls("t1"),
+            self._says("It printed **three** files.\n"),
+        ])
+        assert [f["type"] for f in frames] == [
+            "chunk", "meta", "chunk", "rendered", "tool_call", "chunk",
+            "rendered", "meta"]
+        first = frames[3]["payload"]["tokens"]
+        second = frames[6]["payload"]["tokens"]
+        # The first bubble's fence is never closed, and mistune reads it as a
+        # code block running to the end of the bubble — the same thing a reader
+        # watching the stream saw.
+        assert [t["raw"] for t in first if t["type"] == "block_code"] == ["ls -la\n"]
+        # And the prose after the call is its own document. Accumulated per
+        # turn it would have landed *inside* that block instead, never
+        # emphasised and never a paragraph.
+        para = next(t for t in second if t["type"] == "paragraph")
+        assert any(k["type"] == "strong" for k in para["children"]), para
+        assert not any(t["type"] == "block_code" for t in second), second
+        # Nothing of the first bubble is in the second one.
+        assert "ls -la" not in json.dumps(second)
+
+    def test_a_tool_update_does_not_split_a_bubble(self, acp_session):
+        """The mirror of the check above, and the reason it is ``tool_call``
+        alone. ``addToolCall`` returns early for an id it already drew, leaving
+        the open bubble alone — so flushing on an update would split a bubble
+        the page never split, and the second half would render into a box the
+        first half is still in.
+        """
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        frames = self._turn(acp_mod, sid, conn, [
+            self._says("Working"),
+            {"sessionUpdate": "tool_call_update", "toolCallId": "t1",
+             "status": "completed"},
+            self._says(" on **it**."),
+        ])
+        assert [f["type"] for f in frames] == [
+            "chunk", "meta", "chunk", "tool_update", "chunk", "rendered",
+            "meta"]
+        assert "Working on " in json.dumps(frames[5]["payload"]["tokens"])
+
+    def test_a_failed_turn_still_renders_what_arrived(self, acp_session):
+        """In the ``finally``, above the end marker, for the same reason
+        ``stop_reason`` defaults to ``interrupted``: a turn that was cancelled
+        or that died mid-answer leaves real text on the page, and refusing to
+        render it would make failure the one case where the transcript is
+        worse than it used to be."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+
+        async def boom(self_, method, params, timeout=None):
+            self_._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid,
+                           "update": self._says("Partial **answer**")},
+            })
+            raise acp_mod.AgentTimeout("the agent did not answer")
+
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "go"}))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == [
+            "chunk", "meta", "chunk", "error", "rendered", "meta"]
+        assert frames[-1]["payload"] == {"turn": "end", "stopReason": "error"}
+        assert "answer" in json.dumps(frames[4]["payload"]["tokens"])
+
+    def test_the_text_streams_as_it_did_and_renders_once(self, acp_session):
+        """Measured against a real turn: 185 chunks, a median of 10 characters
+        each, 17 ms apart — and **156 of the 184 boundaries between them fell
+        inside an open code fence**. Rendering per chunk would therefore have
+        been parsing an unterminated document 85% of the time, so it is not
+        merely cheaper to wait for the end of the bubble, it is the only point
+        at which there is a document to parse. The chunks themselves are
+        untouched."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        pieces = ["```py\n", "x", " = ", "1", "\n", "```", "\n"]
+        frames = self._turn(acp_mod, sid, conn,
+                            [self._says(piece) for piece in pieces])
+        assert [f["payload"]["text"] for f in frames
+                if f["type"] == "chunk"][1:] == pieces
+        rendered = [f for f in frames if f["type"] == "rendered"]
+        assert len(rendered) == 1
+        assert [t["raw"] for t in rendered[0]["payload"]["tokens"]
+                if t["type"] == "block_code"] == ["x = 1\n"]
+
+    def test_a_user_chunk_closes_the_bubble_on_the_replay_path(self, acp_session):
+        """``session/load`` replays a whole conversation as alternating chunks
+        with no turn marker anywhere in it, so the user's own message is the
+        only boundary between one answer and the next — and it is one the page
+        already observes (``appendChunk`` hands a non-agent role to
+        ``addMessage`` and nulls ``agentBody``). Without it the first answer
+        would be re-rendered into the second answer's bubble, and a reader
+        coming back to a loaded session would see it twice."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, self._says("First **answer**."))
+        self._notify(acp_mod, sid, self._says("next question", role="user"))
+        self._notify(acp_mod, sid, self._says("Second *answer*."))
+        # What `_handle_load` does once the agent's replay is complete: the
+        # last bubble has no boundary behind it and is the one being read.
+        acp_mod._flush_bubble(sid)
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == [
+            "chunk", "rendered", "chunk", "chunk", "rendered"]
+        assert "First" in json.dumps(frames[1]["payload"]["tokens"])
+        assert "First" not in json.dumps(frames[4]["payload"]["tokens"])
+        assert "Second" in json.dumps(frames[4]["payload"]["tokens"])
+
+    def test_the_tree_is_not_sanitized_and_the_page_is_the_boundary(self, acp_session):
+        """Two halves of one property, both asserted rather than commented.
+
+        **No HTML on the wire**: nothing in the frame is a string of markup, so
+        the page never has anything to parse — which is why token mode was
+        chosen over server-rendered HTML for a surface this exposed.
+
+        **No sanitizing here**: with ``renderer=None`` mistune's ``escape=``
+        and ``safe_url()`` are both out of the path, so the raw ``<script>``
+        and the ``javascript:`` URL are *present in the tree*. Pinned because a
+        reader who assumed this side filtered would be free to relax the page's
+        allowlist, which is the only thing that actually refuses them.
+        """
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        frames = self._turn(acp_mod, sid, conn, [self._says(
+            "<script>alert(1)</script>\n\n[x](javascript:alert(1))\n")])
+        tokens = frames[3]["payload"]["tokens"]
+        raw = next(t for t in tokens if t["type"] == "block_html")
+        assert raw["raw"] == "<script>alert(1)</script>\n"
+        link = next(k for t in tokens if t["type"] == "paragraph"
+                    for k in t["children"] if k["type"] == "link")
+        assert link["attrs"]["url"] == "javascript:alert(1)"
+        # Every token is a typed node. Nothing here is a rendered fragment the
+        # page would have to trust.
+        assert all(isinstance(t, dict) and isinstance(t.get("type"), str)
+                   for t in tokens)
+
+    def test_without_mistune_the_transcript_is_what_it_always_was(
+            self, acp_session, monkeypatch, caplog):
+        """The import is guarded like ``web.py``'s import of this module, and
+        for the same reason. Absent, ``/acp`` loses the rendering and keeps the
+        conversation.
+
+        And it loses it *quietly*. The explicit ``_markdown is None`` test looks
+        redundant beside the ``except Exception`` below it — without the test,
+        calling ``None`` raises and the same handler swallows it — but the two
+        are not the same outcome: the handler logs, so a machine missing an
+        optional dependency would write a traceback per bubble per turn into
+        ``orchestrator.log`` for the life of the process. A degradation is
+        supposed to be invisible, not merely survivable.
+        """
+        acp_mod, sid = acp_session
+        monkeypatch.setattr(acp_mod, "_markdown", None)
+        conn = self._attached(acp_mod, sid)
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            frames = self._turn(acp_mod, sid, conn, [self._says("# still here")])
+        assert [f["type"] for f in frames] == ["chunk", "meta", "chunk", "meta"]
+        assert frames[2]["payload"]["text"] == "# still here"
+        assert [r.getMessage() for r in caplog.records] == []
+
+    def test_a_parser_failure_costs_the_rendering_and_nothing_else(
+            self, acp_session, monkeypatch, caplog):
+        """The flush runs inside ``_handle_prompt``'s ``finally``. Raising
+        there would replace the turn's end marker with a traceback and leave
+        the page's Send button disabled for the rest of the session."""
+        acp_mod, sid = acp_session
+
+        def explode(_text):
+            raise RuntimeError("the parser fell over")
+
+        monkeypatch.setattr(acp_mod, "_markdown", explode)
+        conn = self._attached(acp_mod, sid)
+        with caplog.at_level(logging.ERROR, logger="power_atlas.acp"):
+            frames = self._turn(acp_mod, sid, conn, [self._says("hello")])
+        assert [f["type"] for f in frames] == ["chunk", "meta", "chunk", "meta"]
+        assert frames[-1]["payload"] == {"turn": "end", "stopReason": "end_turn"}
+        assert any("the parser fell over" in r.getMessage() or r.exc_info
+                   for r in caplog.records)
+
+    def test_a_bubble_over_the_cap_stays_plain_text(self, acp_session,
+                                                    monkeypatch, caplog):
+        """``_markdown`` runs on the event loop and the tree it produces is
+        recorded in the replay buffer beside the chunks it summarises, so the
+        accumulator is bounded. Over the cap the bubble keeps the plain text it
+        already has, which is a rendering nobody gets rather than a page that
+        breaks."""
+        acp_mod, sid = acp_session
+        monkeypatch.setattr(acp_mod, "MAX_BUBBLE_CHARS", 8)
+        conn = self._attached(acp_mod, sid)
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            frames = self._turn(acp_mod, sid, conn,
+                                [self._says("**far past the cap**")])
+        assert [f["type"] for f in frames] == ["chunk", "meta", "chunk", "meta"]
+        assert any("over the" in r.getMessage() for r in caplog.records)
+        assert sid not in acp_mod._bubbles
+
+    def test_closing_a_session_drops_its_half_written_bubble(self, acp_session):
+        """The accumulator is keyed by session id and nothing else reaches it,
+        so one left behind is agent-authored text resident for the life of the
+        process with no path that could ever read or drop it — the same
+        argument the ring buffer is released on."""
+        acp_mod, sid = acp_session
+        acp_mod._bubble_append(sid, "half an answer")
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", answered), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._supervisor.close_session(sid))
+        assert sid not in acp_mod._bubbles
+
+    def test_a_dead_agent_drops_every_bubble(self, acp_session):
+        acp_mod, sid = acp_session
+        acp_mod._bubble_append(sid, "half an answer")
+        acp_mod._supervisor._detach("the agent stopped answering")
+        assert acp_mod._bubbles == {}
 
 
 class _BlockReader:
@@ -3454,6 +3795,14 @@ class TestAcpSessionLoad:
                 for e in frames[2]["payload"]["events"]] == [
             ("chunk", {"role": "user", "text": "what is 2+2"}),
             ("chunk", {"role": "agent", "text": "4"}),
+            # The replay's own last answer, rendered. Nothing behind it closes
+            # the bubble — the agent sends the conversation and stops — so
+            # `_handle_load` flushes once the replay is complete. Without it
+            # the one bubble a returning reader is looking at is the one still
+            # showing markdown source.
+            ("rendered", {"tokens": [
+                {"type": "paragraph",
+                 "children": [{"type": "text", "raw": "4"}]}]}),
         ]
 
     def test_a_replayed_tool_call_survives_the_load(self, acp_store):
@@ -3640,7 +3989,9 @@ class TestAcpSessionLoad:
             asyncio.run(acp_mod._handle_load(conn, sid))
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["meta", "session", "history"]
-        assert len(frames[2]["payload"]["events"]) == 1
+        # The one replayed chunk, plus the rendering of the bubble it closed.
+        assert [e["type"] for e in frames[2]["payload"]["events"]] == [
+            "chunk", "rendered"]
 
     def test_the_session_cap_still_binds(self, acp_store):
         acp_mod, store = acp_store
@@ -3754,9 +4105,12 @@ class TestAcpLoadServesOneReplayToEverySocket:
         # Both halves of the property. The head proves the replay was not
         # started late; the tail proves the events broadcast after this socket
         # asked were not merely dropped.
-        assert len(events) == self.EVENTS
+        # Every replayed chunk, and behind them the one `rendered` frame the
+        # completed load flushes for the bubble the whole replay is.
+        assert len(events) == self.EVENTS + 1
         assert events[0]["payload"]["text"] == "e0"
-        assert events[-1]["payload"]["text"] == "e%d" % (self.EVENTS - 1)
+        assert events[-1]["type"] == "rendered"
+        assert events[-2]["payload"]["text"] == "e%d" % (self.EVENTS - 1)
         assert second._overflowed is False
         assert second.session_id == sid
 
@@ -3776,7 +4130,8 @@ class TestAcpLoadServesOneReplayToEverySocket:
             asyncio.run(acp_mod._handle_load(loader, sid))
         frames = _queued(loader)
         assert [f["type"] for f in frames] == ["meta", "session", "history"]
-        assert len(frames[2]["payload"]["events"]) == 4
+        # Four replayed chunks and the rendering of the bubble they built.
+        assert len(frames[2]["payload"]["events"]) == 5
 
     def test_nothing_is_attached_while_the_load_runs(self, acp_store):
         """The invariant the ``_registry.loading`` key carries, asserted where

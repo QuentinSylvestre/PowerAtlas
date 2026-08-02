@@ -547,6 +547,235 @@
     return wrap;
   }
 
+  // ---- the agent's markdown ---------------------------------------------
+  //
+  // The server parses a finished bubble's prose with mistune and sends the
+  // **token tree**, never HTML. Everything below turns that tree into elements
+  // with createElement + textContent, so the no-HTML-parser rule at the top of
+  // this file survives markdown rendering intact — there is still not one sink
+  // on this page that parses markup.
+  //
+  // **This allowlist is the entire security boundary.** None of mistune's
+  // sanitizing is on the wire path: with `renderer=None` its `escape=` option
+  // is never consulted (it belongs to `HTMLRenderer`) and `safe_url()` lives in
+  // its HTML renderer too, so a raw script element the agent wrote arrives
+  // verbatim in a `block_html` token and `[x](javascript:…)` arrives as a
+  // `link` whose `attrs.url` is the `javascript:` URL. Nothing
+  // upstream of here has looked at either. Agent output is
+  //
+  // (Nothing on this page — comment, string, anything — may spell a script
+  // tag, opening or closing. A closing one ends this element at the HTML
+  // parser, whatever JavaScript context it appears to be inside, and
+  // everything after it becomes page text; an opening one is counted by the
+  // server-side check that the served page carries exactly two script tags.
+  // Both were measured here: the first took all 71 browser checks down at
+  // once, the second one Python test.)
+  //
+  // attacker-influenced — repo files, fetched pages, commit messages — and the
+  // agent runs trust-all-tools, so treat every field below as hostile.
+  //
+  // Every map is `Object.create(null)` and every one of them is load-bearing
+  // for the same reason `RAIL_AVAILABILITY` is: on an object literal every
+  // `Object.prototype` key is a hit, so a token typed `"constructor"` would
+  // find the Object constructor in `MD_TAG` and hand it to `createElement`.
+  // These are closed sets, and a prototype-less map is what closes them.
+
+  // Refused outright rather than escaped and shown. Showing raw HTML as text
+  // is safe here — textContent parses nothing — but it is not *useful*: what
+  // the reader would learn from a page of escaped markup is nothing, and the
+  // rule is easier to hold true when it has no "unless" in it. `image` goes
+  // with them because a remote URL in an <img> is a request this page would be
+  // making on the agent's say-so.
+  var MD_DROPPED = Object.create(null);
+  MD_DROPPED.block_html = true;
+  MD_DROPPED.inline_html = true;
+  MD_DROPPED.image = true;
+
+  // Tokens that are a wrapper in the tree and nothing on the page. `block_text`
+  // is what mistune puts inside a tight list item; rendering it as an element
+  // would put a block box inside every <li>.
+  var MD_TRANSPARENT = Object.create(null);
+  MD_TRANSPARENT.block_text = true;
+
+  // token type -> the element it becomes. Every value here is a literal, which
+  // is what keeps `createElement` off the wire.
+  var MD_TAG = Object.create(null);
+  MD_TAG.paragraph = 'p';
+  MD_TAG.text = 'span';
+  MD_TAG.strong = 'strong';
+  MD_TAG.emphasis = 'em';
+  MD_TAG.codespan = 'code';
+  MD_TAG.list_item = 'li';
+  MD_TAG.linebreak = 'br';
+
+  // Keyed by the heading level as a string, because `attrs.level` is a wire
+  // value like any other and `'h' + level` would be a tag name built by
+  // concatenation from it. A level this does not know falls back to a
+  // paragraph: the text still renders, at the wrong weight rather than not
+  // at all.
+  var MD_HEADING = Object.create(null);
+  MD_HEADING['1'] = 'h1';
+  MD_HEADING['2'] = 'h2';
+  MD_HEADING['3'] = 'h3';
+  MD_HEADING['4'] = 'h4';
+  MD_HEADING['5'] = 'h5';
+  MD_HEADING['6'] = 'h6';
+
+  // The only scheme an <a href> may carry. An allowlist and not a `javascript:`
+  // denylist: `data:`, `vbscript:`, and a leading-whitespace or
+  // mixed-case spelling of any of them all defeat a denylist, and the set of
+  // schemes worth linking to from a conversation is two.
+  var MD_LINK_SCHEME = /^https?:\/\//i;
+
+  /** Every character a token subtree would show, for the fall-through arm. */
+  function mdText(token) {
+    if (!token || typeof token !== 'object') return '';
+    var type = typeof token.type === 'string' ? token.type : '';
+    if (MD_DROPPED[type]) return '';
+    var kids = token.children;
+    if (kids && typeof kids.length === 'number') {
+      var out = '';
+      for (var i = 0; i < kids.length; i++) out += mdText(kids[i]);
+      return out;
+    }
+    return typeof token.raw === 'string' ? token.raw : '';
+  }
+
+  /** Fill one built element from its token: children if it has them, its own
+   *  raw text otherwise (`text` and `codespan` carry no children). */
+  function mdFill(el, token) {
+    var kids = token.children;
+    if (kids && typeof kids.length === 'number') {
+      mdAppend(el, kids);
+      return;
+    }
+    el.textContent = typeof token.raw === 'string' ? token.raw : '';
+  }
+
+  function mdAppend(parent, tokens) {
+    if (!tokens || typeof tokens.length !== 'number') return;
+    for (var i = 0; i < tokens.length; i++) mdNode(parent, tokens[i]);
+  }
+
+  function mdNode(parent, token) {
+    if (!token || typeof token !== 'object') return;
+    var type = typeof token.type === 'string' ? token.type : '';
+    if (MD_DROPPED[type]) return;
+
+    if (type === 'link') {
+      var url = token.attrs && token.attrs.url;
+      if (typeof url === 'string' && MD_LINK_SCHEME.test(url)) {
+        var a = document.createElement('a');
+        a.setAttribute('href', url);
+        // The two go together: without a target the link navigates /acp away
+        // and takes the live socket with it, and with one, `noopener` is what
+        // stops the opened page reaching back through `window.opener`.
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+        mdAppend(a, token.children);
+        parent.appendChild(a);
+        return;
+      }
+      // Anything else — `javascript:`, `data:`, a bare word — renders as its
+      // own text. The reader still sees what the agent wrote; it is just not
+      // a thing that can be clicked.
+      mdAppend(parent, token.children);
+      return;
+    }
+
+    if (type === 'block_code') {
+      var pre = document.createElement('pre');
+      var code = document.createElement('code');
+      code.textContent = typeof token.raw === 'string' ? token.raw : '';
+      pre.appendChild(code);
+      parent.appendChild(pre);
+      return;
+    }
+
+    if (type === 'list') {
+      var ordered = !!(token.attrs && token.attrs.ordered);
+      var list = document.createElement(ordered ? 'ol' : 'ul');
+      mdAppend(list, token.children);
+      parent.appendChild(list);
+      return;
+    }
+
+    if (type === 'heading') {
+      var level = token.attrs && token.attrs.level;
+      var heading = document.createElement(MD_HEADING[String(level)] || 'p');
+      mdFill(heading, token);
+      parent.appendChild(heading);
+      return;
+    }
+
+    if (type === 'softbreak') {
+      // A newline inside one paragraph, which every markdown renderer collapses
+      // to a space. A span and not a text node because this harness — and the
+      // rule this page keeps — allow createElement and textContent only.
+      var gap = document.createElement('span');
+      gap.textContent = ' ';
+      parent.appendChild(gap);
+      return;
+    }
+
+    if (MD_TRANSPARENT[type]) {
+      mdAppend(parent, token.children);
+      return;
+    }
+
+    var tag = MD_TAG[type];
+    if (tag) {
+      var el = document.createElement(tag);
+      mdFill(el, token);
+      parent.appendChild(el);
+      return;
+    }
+
+    // Everything else — a blockquote, a table the parser left as prose, a
+    // token type a future mistune adds. Its text, with none of its structure,
+    // and nothing at all when it has no text (`blank_line`,
+    // `thematic_break`). Never an element named after it.
+    var text = mdText(token);
+    if (!text) return;
+    var span = document.createElement('span');
+    span.textContent = text;
+    parent.appendChild(span);
+  }
+
+  /** The tokens as a flat list of built elements, or an empty list. Built
+   *  detached so a tree that renders to nothing — an answer that was only an
+   *  <img>, say — leaves the bubble's plain text alone instead of blanking it.
+   *  The sink is duck-typed rather than a container element because moving
+   *  children out of one is the one DOM operation this page has no use for
+   *  anywhere else. */
+  function mdBuild(tokens) {
+    var built = [];
+    mdAppend({ appendChild: function (node) { built.push(node); return node; } },
+             tokens);
+    return built;
+  }
+
+  function renderMarkdown(tokens) {
+    // The bubble this applies to is whichever one is open, and the frame
+    // always arrives immediately before the frame that closes it. Taken and
+    // cleared first: a frame that arrives with no bubble open — a replay whose
+    // chunks were evicted out from under it — must still not leave a stale one
+    // behind for the next answer to be rendered into.
+    var body = agentBody;
+    agentBody = null;
+    if (!body) return;
+    var built = mdBuild(tokens);
+    if (built.length === 0) return;
+    var stick = stuckToBottom();
+    // Emptied by textContent for the reason `clearTranscript` gives.
+    body.textContent = '';
+    // A literal, and the class the stylesheet hangs the block spacing off —
+    // `.acp-msg-body`'s `white-space: pre-wrap` would double every margin.
+    body.className = 'acp-msg-body acp-msg-md';
+    for (var i = 0; i < built.length; i++) body.appendChild(built[i]);
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
   function appendChunk(role, text) {
     if (role === 'agent' && agentBody) {
       var stick = stuckToBottom();
@@ -1134,6 +1363,16 @@
     }
     if (type === 'chunk') {
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+      return;
+    }
+    if (type === 'rendered') {
+      // The bubble that just closed, reflowed from plain text into markup. It
+      // arrives once per bubble at the end of it, never per chunk: 156 of 184
+      // chunk boundaries in a measured turn fell *inside* an open code fence,
+      // so parsing as it streamed would have been parsing an unterminated
+      // document 85% of the time. Text streams exactly as it did before and
+      // reflows once when there is a whole document to parse.
+      renderMarkdown(payload.tokens);
       return;
     }
     if (type === 'tool_call' || type === 'tool_update') {

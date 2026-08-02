@@ -37,9 +37,9 @@ that exists in the agent's own store but not in this process), ``prompt``,
 ``cancel``, ``close``.
 
 Server to client: ``session`` (id and metadata after ``new``/``subscribe``),
-``chunk``, ``tool_call``, ``tool_update``, ``meta``, ``error``, ``agent_died``,
-``session_closed``, ``history_truncated``, ``history`` (the whole replay,
-coalesced into one frame). ``envelope`` refuses any type not in
+``chunk``, ``rendered``, ``tool_call``, ``tool_update``, ``meta``, ``error``,
+``agent_died``, ``session_closed``, ``history_truncated``, ``history`` (the
+whole replay, coalesced into one frame). ``envelope`` refuses any type not in
 ``SERVER_TYPES``.
 
 Session identity survives a reload because the page carries ``?sid=…`` and
@@ -110,9 +110,38 @@ except Exception:  # pragma: no cover - only reached if uvicorn moves the symbol
     class ClientDisconnected(OSError):
         """Placeholder so the ``except`` arm below still names a real type."""
 
+try:
+    # The markdown the agent writes, parsed to a **token tree** and never to
+    # HTML. `renderer=None` is what selects that mode, and it is the whole
+    # reason this page can keep its no-HTML-parser property: the client walks
+    # the tree with createElement + textContent and never parses markup.
+    #
+    # It also means none of mistune's sanitizing applies here, and that is
+    # measured rather than assumed against the installed 3.3.4. `escape=` is
+    # consumed only by `HTMLRenderer(escape=escape)` (`mistune/__init__.py`),
+    # and `safe_url()` lives in `renderers/html.py` — neither is on this path.
+    # With `renderer=None`, `<script>alert(1)</script>` comes back as a
+    # `block_html` token holding that exact string and
+    # `[x](javascript:alert(1))` as a `link` whose `attrs.url` is the
+    # `javascript:` URL. **The client's allowlist is the entire security
+    # boundary**; this side does no sanitizing at all and must not be read as
+    # if it did.
+    #
+    # Guarded like `web.py`'s import of this module, and for the same reason: a
+    # dependency declared in pyproject.toml but absent from the running
+    # interpreter has broken this project before. Absent, `/acp` degrades to
+    # exactly the plain-text transcript it had before this existed.
+    import mistune
+    _markdown = mistune.create_markdown(renderer=None)
+except Exception as _e:  # pragma: no cover - only when the dep is missing
+    mistune = None
+    _markdown = None
+    log.warning("mistune unavailable — /acp renders the agent's markdown as "
+                "plain text: %s", _e)
+
 CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close"})
 SERVER_TYPES = frozenset({
-    "session", "chunk", "tool_call", "tool_update", "meta", "error",
+    "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history",
 })
 
@@ -220,6 +249,20 @@ LOAD_MIN_INTERVAL_SECONDS = 1.0
 # replay buffer, and is rendered into the DOM. A clipped command says so on
 # the page rather than looking complete.
 MAX_TOOL_INPUT_CHARS = 4000
+
+# The most agent prose one bubble may accumulate before this module stops
+# offering to render it. Past the cap the bubble stays exactly the plain text
+# it already is on the page — the degradation is invisible rather than broken.
+#
+# Two costs sit behind it. `_markdown` runs on the event loop, so parsing is
+# time uvicorn is not serving anything else with; and the token tree is emitted
+# as a frame that goes into the replay buffer beside the chunks it summarises.
+# A measured 2,251-character answer produced a 2,548-byte token frame against
+# the 23,018 bytes of the 185 chunk frames carrying it, so the tree is roughly
+# a tenth of what it describes and 128 KiB of prose is a bounded few hundred
+# KiB of tokens — while an answer that large is already far outside anything
+# observed (the largest measured turn is under 3 KB).
+MAX_BUBBLE_CHARS = 128 * 1024
 
 # The kiro-private notification carrying a turn's token accounting, and the
 # field in it that answers "how full is the context window".
@@ -1531,6 +1574,10 @@ class _Supervisor:
         self.history.clear()
         self.inflight.clear()
         self.closing.clear()
+        # Same reason the buffers go: nothing can ever read a bubble whose
+        # session no longer exists, and the text in it is agent-authored and
+        # unbounded until the cap.
+        _bubbles.clear()
         for fut in tuple(self._pending.values()):
             if not fut.done():
                 fut.set_exception(AgentDied(reason))
@@ -2011,8 +2058,20 @@ class _Supervisor:
             role = "user" if kind == "user_message_chunk" else "agent"
             text = _content_text(update.get("content"))
             if text and isinstance(session_id, str):
+                if role == "user":
+                    # A user chunk closes the agent bubble on the page —
+                    # `appendChunk` hands any non-agent role to `addMessage`
+                    # and nulls `agentBody`. Live turns reach that boundary
+                    # through `_handle_prompt` instead; this arm is the
+                    # `session/load` replay, where a whole conversation of
+                    # alternating chunks arrives with no turn markers at all
+                    # and this is the *only* thing separating one answer from
+                    # the next.
+                    _flush_bubble(session_id)
                 _emit(session_id, envelope(
                     "chunk", {"role": role, "text": text}, session_id))
+                if role == "agent":
+                    _bubble_append(session_id, text)
             return
         if kind in ("tool_call", "tool_call_update"):
             payload = _tool_payload(update)
@@ -2021,6 +2080,14 @@ class _Supervisor:
                      payload["status"], payload["title"], payload["kind"],
                      payload["command"])
             if isinstance(session_id, str):
+                if kind == "tool_call":
+                    # A tool call ends the open agent bubble (`addToolCall`
+                    # nulls `agentBody`), so the prose either side of it is
+                    # parsed as two documents. `tool_call_update` does *not*:
+                    # it rewrites the row its id already opened and leaves the
+                    # bubble alone, so flushing on one would split a bubble the
+                    # page never split.
+                    _flush_bubble(session_id)
                 # Rendered, not only logged. `-a` removes the permission gate
                 # and the justification for removing it was a human watching
                 # the run; a tool call that reaches nothing but a log file the
@@ -2260,6 +2327,7 @@ class _Supervisor:
         # could ever read or evict it.
         self.history.pop(session_id, None)
         self.inflight.discard(session_id)
+        _bubbles.pop(session_id, None)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
 
 
@@ -2277,6 +2345,68 @@ def _emit(session_id: str, frame: dict) -> None:
     """
     _supervisor.record(session_id, frame)
     _registry.broadcast(session_id, frame)
+
+
+# session id -> the agent prose accumulated for the **bubble** currently open on
+# the page, in the order it was streamed. Not per turn: a bubble is what the
+# page's `agentBody` tracks, and it is closed by a tool call as well as by a
+# turn boundary. Markdown is therefore parsed per bubble, so a fence the agent
+# opened before a tool call and closed after it is two unterminated fences —
+# which is correct, because that is exactly what the reader saw.
+#
+# A plain dict on the event loop. Every writer below runs there: the reader
+# thread hands notifications over with `call_soon_threadsafe`, and the two
+# handler call sites are coroutines the loop drives. Dropped for a session by
+# `_Supervisor.close_session` and for every session by `_Supervisor._detach`,
+# which is the only other place a session's buffered state is released.
+_bubbles: dict[str, list[str]] = {}
+
+
+def _bubble_append(session_id: str, text: str) -> None:
+    """Record agent prose against the bubble the page currently has open."""
+    _bubbles.setdefault(session_id, []).append(text)
+
+
+def _flush_bubble(session_id: str) -> None:
+    """Close the open bubble and emit what its markdown parses to.
+
+    Called immediately **before** every frame that closes a bubble on the page,
+    because the client applies a ``rendered`` frame to whatever body is open
+    when it arrives. The four boundaries are the ones the page itself uses: a
+    ``tool_call``, a user chunk, a turn start, and a turn end. A turn that was
+    cancelled or that failed still passes through the last of those, so what
+    arrived before the failure is still rendered.
+
+    Emits nothing at all when there is nothing to render, when mistune is
+    absent, or when parsing raises — in each case the bubble keeps the plain
+    text the chunks already put there, which is the pre-existing behaviour of
+    this whole page. A rendering is an upgrade to a transcript that is already
+    correct, so no failure here may cost the transcript.
+    """
+    parts = _bubbles.pop(session_id, None)
+    if not parts or _markdown is None:
+        return
+    text = "".join(parts)
+    if not text.strip():
+        return
+    if len(text) > MAX_BUBBLE_CHARS:
+        log.info("ACP markdown: %d chars in one bubble is over the %d cap; "
+                 "session=%s stays plain text", len(text), MAX_BUBBLE_CHARS,
+                 session_id)
+        return
+    try:
+        tokens = _markdown(text)
+    except Exception:
+        # Never fatal. This runs inside `_on_notification` and inside
+        # `_handle_prompt`'s `finally`; raising in the second would replace a
+        # turn's end marker with a traceback and leave the page's Send button
+        # disabled for good.
+        log.exception("ACP markdown: parsing a bubble failed; session=%s",
+                      session_id)
+        return
+    if not isinstance(tokens, list) or not tokens:
+        return
+    _emit(session_id, envelope("rendered", {"tokens": tokens}, session_id))
 
 
 def _note_context(session_id: str, percent: float) -> None:
@@ -2775,6 +2905,13 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
                 conn.send(_load_pending_frame(session_id))
                 cwd = await asyncio.to_thread(_load_session_cwd, session_id)
                 await _supervisor.load_session(session_id, cwd)
+                # The replay's own last answer has no boundary behind it: the
+                # agent sends the conversation and stops. Without this it would
+                # come back as the one bubble on the page still in plain text,
+                # and it is the one the reader is looking at. Inside the
+                # `loading` claim, so the frame is in the buffer before
+                # `_deliver_load` coalesces it into the `history` reply.
+                _flush_bubble(session_id)
         except AcpError as exc:
             failure = _load_failure(
                 exc, await asyncio.to_thread(_lock_holder, session_id))
@@ -2916,6 +3053,12 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     _supervisor.inflight.add(session_id)
     log.info("ACP turn start: session=%s (%d chars)", session_id, len(text))
 
+    # Before the user's own chunk, which is the first of the two frames that
+    # close the previous bubble on the page. Live turns almost never have
+    # anything pending here; a session adopted with `load` does — its last
+    # answer arrived with no turn marker behind it, so this is where that
+    # bubble finally renders.
+    _flush_bubble(session_id)
     _emit(session_id, envelope("chunk", {"role": "user", "text": text}, session_id))
     _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
     # Names the state a reload would find if this task never reaches its own
@@ -2938,6 +3081,12 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     finally:
         _supervisor.inflight.discard(session_id)
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
+        # In the `finally` and above the end marker, so the markdown of a turn
+        # that was cancelled or that errored is still rendered — `stop_reason`
+        # defaults to `interrupted` for exactly the same reason. The end marker
+        # is the frame that closes this bubble on the page, so the rendering
+        # has to be in front of it.
+        _flush_bubble(session_id)
         _emit(session_id, envelope(
             "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
 

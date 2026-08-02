@@ -776,6 +776,251 @@ check("a later tool_update rewrites the same row", (tpl) => {
   assert(page.transcript().includes("completed"), "the new status never rendered");
 });
 
+// ------------------------------------------------- the agent's markdown --
+//
+// The server parses a finished bubble with mistune and sends the **token
+// tree**; the page walks it with createElement + textContent. Every fixture
+// below is the tree mistune 3.3.4 really produces for the markdown named
+// above it — captured from the installed parser, not invented — so these
+// checks measure the page against the wire it actually meets.
+//
+// **The page's allowlist is the entire security boundary**, and that is
+// measured rather than assumed: `create_markdown(renderer=None)` never
+// consults `escape=` (it belongs to `HTMLRenderer`) and never applies
+// `safe_url()` (it lives in the HTML renderer too), so `<script>` arrives raw
+// and `javascript:` arrives as a link URL. Nothing upstream has looked at
+// either. Each of the four refusals below therefore has a check that fails if
+// the rule is removed — a rule with no failing mutation behind it is a comment.
+
+// `# Findings` + bold/italic/inline code + a fenced block + both list kinds.
+const MD_FORMATTED = [{"type":"heading","attrs":{"level":1},"style":"atx","children":[{"type":"text","raw":"Findings"}]},{"type":"blank_line"},{"type":"paragraph","children":[{"type":"text","raw":"It is "},{"type":"strong","children":[{"type":"text","raw":"bold"}]},{"type":"text","raw":", "},{"type":"emphasis","children":[{"type":"text","raw":"slanted"}]},{"type":"text","raw":", see "},{"type":"codespan","raw":"run.py"},{"type":"text","raw":":"}]},{"type":"blank_line"},{"type":"block_code","raw":"x = 1\n","style":"fenced","marker":"```","attrs":{"info":"py"}},{"type":"blank_line"},{"type":"list","children":[{"type":"list_item","children":[{"type":"block_text","children":[{"type":"text","raw":"one"}]}]},{"type":"list_item","children":[{"type":"block_text","children":[{"type":"text","raw":"two"}]}]}],"tight":true,"bullet":"-","attrs":{"depth":0,"ordered":false}},{"type":"list","children":[{"type":"list_item","children":[{"type":"block_text","children":[{"type":"text","raw":"first"}]}]},{"type":"list_item","children":[{"type":"block_text","children":[{"type":"text","raw":"second"}]}]}],"tight":true,"bullet":".","attrs":{"depth":0,"ordered":true}}];
+
+// `Hello **there**` / `<script>alert(1)</script>` / `Bye`. The prose either
+// side is what makes the check meaningful: with only the script tag in it the
+// bubble would render to nothing and keep its plain text, and the check would
+// fail against correct behaviour.
+const MD_BLOCK_HTML = [{"type":"paragraph","children":[{"type":"text","raw":"Hello "},{"type":"strong","children":[{"type":"text","raw":"there"}]}]},{"type":"blank_line"},{"type":"block_html","raw":"<script>alert(1)</script>\n"},{"type":"blank_line"},{"type":"paragraph","children":[{"type":"text","raw":"Bye"}]}];
+
+// `Inline <img src=x onerror=alert(1)> here.`
+const MD_INLINE_HTML = [{"type":"paragraph","children":[{"type":"text","raw":"Inline "},{"type":"inline_html","raw":"<img src=x onerror=alert(1)>"},{"type":"text","raw":" here."}]}];
+
+// `Look: ![alt text](http://evil.example/x.png) done.`
+const MD_IMAGE = [{"type":"paragraph","children":[{"type":"text","raw":"Look: "},{"type":"image","children":[{"type":"text","raw":"alt text"}],"attrs":{"url":"http://evil.example/x.png"}},{"type":"text","raw":" done."}]}];
+
+// `[safe](https://example.com/a), [bad](javascript:alert(1)), [rel](/local/path)`
+const MD_LINKS = [{"type":"paragraph","children":[{"type":"link","children":[{"type":"text","raw":"safe"}],"attrs":{"url":"https://example.com/a"}},{"type":"text","raw":", "},{"type":"link","children":[{"type":"text","raw":"bad"}],"attrs":{"url":"javascript:alert(1)"}},{"type":"text","raw":", "},{"type":"link","children":[{"type":"text","raw":"rel"}],"attrs":{"url":"/local/path"}}]}];
+
+// Two lines of one paragraph.
+const MD_SOFTBREAK = [{"type":"paragraph","children":[{"type":"text","raw":"line one"},{"type":"softbreak"},{"type":"text","raw":"line two"}]}];
+
+// Every element name the page is allowed to build from a token tree. Anything
+// else in the bubble is a tag name that came off the wire.
+const MD_TAGS = new Set([
+  "DIV", "SPAN", "P", "H1", "H2", "H3", "H4", "H5", "H6",
+  "UL", "OL", "LI", "PRE", "CODE", "STRONG", "EM", "BR", "A",
+]);
+
+/** Stream `text` into a fresh agent bubble and then render `tokens` into it,
+ *  which is the order and the framing the server really emits. */
+function answered(page, live, text, tokens) {
+  page.deliver({ type: "chunk", sessionId: live,
+                 payload: { role: "agent", text } });
+  page.deliver({ type: "rendered", sessionId: live, payload: { tokens } });
+}
+
+/** The rendered bubble: the last `.acp-msg-body` in the transcript. */
+function bubble(page) {
+  const bodies = page.all("acpTranscript", ".acp-msg-body");
+  assert(bodies.length > 0, "the transcript has no message body at all");
+  return bodies[bodies.length - 1];
+}
+
+function tagsIn(el) {
+  return el.descendants().map((n) => n.tagName);
+}
+
+check("a finished bubble is rebuilt as markup, not left as source", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live,
+           "# Findings\n\nIt is **bold**, *slanted*, see `run.py`:\n\n" +
+           "```py\nx = 1\n```\n\n- one\n- two\n\n1. first\n2. second\n",
+           MD_FORMATTED);
+  const body = bubble(page);
+  const tags = tagsIn(body);
+  for (const want of ["H1", "P", "STRONG", "EM", "CODE", "PRE", "UL", "OL", "LI"]) {
+    assert(tags.includes(want),
+           `the rendered bubble has no <${want}>; it built ${tags.join(",")}`);
+  }
+  // Ordered and unordered are different elements, not one with a bullet
+  // rewritten — the numbering is the list's, not the agent's text.
+  assertEqual(tags.filter((t) => t === "OL").length, 1, "the numbered list is not an <ol>");
+  assertEqual(tags.filter((t) => t === "LI").length, 4, "the two lists lost items");
+  // The markdown's own punctuation is gone from the text, which is the whole
+  // point: `**bold**` reads as bold rather than as four asterisks.
+  const text = body.textContent;
+  assert(!text.includes("**") && !text.includes("```") && !text.includes("# "),
+         `markdown source survived into the rendered bubble: ${text}`);
+  assert(text.includes("x = 1"), "the code block lost its code");
+  // The class the stylesheet needs to turn `white-space: pre-wrap` off. With
+  // it left on, every rendered block is double-spaced.
+  assert(body.className.split(/\s+/).includes("acp-msg-md"),
+         `the rendered bubble is not marked for the markdown rules: ${body.className}`);
+});
+
+check("a rendered bubble closes, so the next answer starts its own", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "first", [
+    { type: "paragraph", children: [{ type: "text", raw: "first" }] }]);
+  page.deliver({ type: "chunk", sessionId: live,
+                 payload: { role: "agent", text: "second" } });
+  const bodies = page.all("acpTranscript", ".acp-msg-body");
+  assertEqual(bodies.length, 2,
+              "the text after a rendering was appended to the bubble that was " +
+              "just rebuilt, so it lands inside the rendered markup");
+  assertEqual(bodies[1].textContent, "second",
+              "the second answer did not open a bubble of its own");
+});
+
+check("raw HTML in the agent's markdown is dropped, not shown", (tpl) => {
+  // `block_html`. The agent's output is attacker-influenced — repo files,
+  // fetched pages, commit messages — and this page's socket drives an agent
+  // running with every tool approved, so an injection here is not a defaced
+  // page, it is a shell. mistune with `renderer=None` does not escape it:
+  // the token arrives holding `<script>alert(1)</script>` verbatim.
+  const { page, live } = connected(tpl);
+  answered(page, live, "Hello **there**\n\n<script>alert(1)</script>\n\nBye\n",
+           MD_BLOCK_HTML);
+  const body = bubble(page);
+  assert(body.textContent.includes("Hello") && body.textContent.includes("Bye"),
+         "the prose around the raw HTML was lost with it");
+  assert(!body.textContent.includes("<script"),
+         `raw HTML reached the bubble: ${body.textContent}`);
+  assert(!body.textContent.includes("alert(1)"),
+         `the script body reached the bubble: ${body.textContent}`);
+});
+
+check("inline raw HTML is dropped too", (tpl) => {
+  // `inline_html` is a separate token type from `block_html` and needs its own
+  // rule; an allowlist that dropped only the block form would pass every
+  // check above while letting `<img onerror=…>` straight through.
+  const { page, live } = connected(tpl);
+  answered(page, live, "Inline <img src=x onerror=alert(1)> here.\n",
+           MD_INLINE_HTML);
+  const body = bubble(page);
+  assert(body.textContent.includes("Inline") && body.textContent.includes("here."),
+         "the text around the inline HTML was lost with it");
+  assert(!/onerror|<img/.test(body.textContent),
+         `inline raw HTML reached the bubble: ${body.textContent}`);
+});
+
+check("an image is dropped rather than requested", (tpl) => {
+  // An <img> with an agent-chosen URL is a request this page makes to a host
+  // the agent picked, on page load, with the viewer's IP and referrer — from a
+  // surface that is reachable off the loopback. The alt text goes with it: it
+  // is the image's own label and showing it alone reads as prose the agent
+  // did not write.
+  const { page, live } = connected(tpl);
+  answered(page, live, "Look: ![alt text](http://evil.example/x.png) done.\n",
+           MD_IMAGE);
+  const body = bubble(page);
+  assert(!tagsIn(body).includes("IMG"), "the page built an <img> from a token");
+  assert(!body.textContent.includes("alt text"),
+         `the image's alt text was rendered as prose: ${body.textContent}`);
+  assert(body.textContent.includes("Look:") && body.textContent.includes("done."),
+         "the text around the image was lost with it");
+});
+
+check("a link is an element only for http(s), and its text otherwise", (tpl) => {
+  // `safe_url()` is in mistune's HTML renderer, which is not on this path, so
+  // `javascript:alert(1)` arrives in `attrs.url` exactly as the agent wrote
+  // it. An allowlist of two schemes rather than a `javascript:` denylist:
+  // `data:`, `vbscript:` and a leading-whitespace spelling of either defeat a
+  // denylist, and a conversation has no use for a third scheme.
+  const { page, live } = connected(tpl);
+  answered(page, live,
+           "[safe](https://example.com/a), [bad](javascript:alert(1)), " +
+           "[rel](/local/path)\n", MD_LINKS);
+  const body = bubble(page);
+  const anchors = body.descendants().filter((n) => n.tagName === "A");
+  assertEqual(anchors.length, 1,
+              "exactly one of the three links has an http(s) URL, so exactly " +
+              "one of them may be an <a>");
+  assertEqual(anchors[0].getAttribute("href"), "https://example.com/a",
+              "the wrong link became an element");
+  assertEqual(anchors[0].getAttribute("rel"), "noopener noreferrer",
+              "the opened page can reach back through window.opener");
+  for (const node of body.descendants()) {
+    const href = node.getAttribute("href");
+    assert(href === null || /^https?:\/\//i.test(href),
+           `a non-http(s) URL reached an href: ${href}`);
+  }
+  // Refused as a link, kept as text: the reader still sees what the agent
+  // wrote, it just is not a thing that can be clicked.
+  assert(body.textContent.includes("bad") && body.textContent.includes("rel"),
+         `the refused links lost their text: ${body.textContent}`);
+});
+
+check("a token type off Object.prototype cannot name an element", (tpl) => {
+  // The reason every map in the renderer is `Object.create(null)`, and the
+  // same reason `RAIL_AVAILABILITY` is: on an object literal every
+  // `Object.prototype` key is a hit, so `MD_TAG['constructor']` answers the
+  // Object constructor and `createElement` is handed a function whose
+  // `String()` becomes the tag name. The token type and the heading level both
+  // come off the wire, so both maps are probed here.
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", [
+    { type: "constructor", raw: "CANARY" },
+    { type: "heading", attrs: { level: "constructor" },
+      children: [{ type: "text", raw: "LEVEL" }] },
+  ]);
+  const body = bubble(page);
+  for (const tag of tagsIn(body)) {
+    assert(MD_TAGS.has(tag),
+           `a wire value reached createElement and became a tag: ${tag}`);
+  }
+  // An unknown type still shows its text — dropping it silently would lose
+  // agent output to a parser upgrade. `CANARY` and the streamed `plain` differ
+  // so that a bubble which was never rebuilt cannot pass this.
+  assert(body.textContent.includes("CANARY"),
+         `an unknown token type lost its text: ${body.textContent}`);
+  assert(body.textContent.includes("LEVEL"),
+         `a heading with an unusable level lost its text: ${body.textContent}`);
+  assert(!body.textContent.includes("plain"),
+         "the bubble was never rebuilt, so this check proves nothing");
+});
+
+check("a bubble that renders to nothing keeps the text it had", (tpl) => {
+  // Every token dropped. Blanking the bubble would remove text the reader
+  // watched arrive; keeping it leaves the pre-markdown behaviour, which is a
+  // transcript that was already correct.
+  const { page, live } = connected(tpl);
+  answered(page, live, "<script>alert(1)</script>", [
+    { type: "block_html", raw: "<script>alert(1)</script>\n" }]);
+  assertEqual(bubble(page).textContent, "<script>alert(1)</script>",
+              "a bubble whose every token was refused came out empty");
+});
+
+check("a rendered frame with no bubble open changes nothing", (tpl) => {
+  // Reachable in a replay: the ring buffer evicts oldest-first, so a `history`
+  // can carry a rendering whose chunks are gone. It must not attach itself to
+  // whatever bubble happens to be open next.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+  page.deliver({ type: "rendered", sessionId: live, payload: { tokens: MD_FORMATTED } });
+  assert(!page.transcript().includes("Findings"),
+         "a rendering with no bubble open was drawn into the transcript anyway");
+  page.deliver({ type: "chunk", sessionId: live, payload: { role: "agent", text: "next" } });
+  assertEqual(bubble(page).textContent, "next",
+              "the orphaned rendering leaked into the next answer's bubble");
+});
+
+check("a line break inside a paragraph stays a gap between words", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "line one\nline two\n", MD_SOFTBREAK);
+  assert(bubble(page).textContent.includes("line one line two"),
+         `the two lines were welded together: ${bubble(page).textContent}`);
+});
+
 check("session_closed clears the session id out of the URL", (tpl) => {
   const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
   page.deliver({
