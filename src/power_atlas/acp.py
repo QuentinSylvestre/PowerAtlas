@@ -126,10 +126,24 @@ SERVER_TYPES = frozenset({
 # the one a client actually meets.
 MAX_MESSAGE_BYTES = 256 * 1024
 
-# A single-user local UI: one tab in practice, two while comparing, plus
-# sockets that linger for a moment either side of a reload. Eight leaves room
-# for that while bounding what a local page can pin — one send queue now, and
-# from Phase 3b one fan-out target per socket on every agent event.
+# A single-user UI in which **one socket drives many sessions**. The session
+# rail lists every session on the machine and switches between them in place,
+# so one tab is the normal case however many sessions are live. The reading
+# this comment used to give — "one tab in practice, two while comparing" — was
+# written when MAX_SESSIONS was 3 and a session effectively meant a tab; it
+# survived the rail unchanged and described a world that no longer exists.
+#
+# Eight is kept, and deliberately not re-derived from MAX_SESSIONS. What this
+# number has to cover is a socket per *viewer*, not per session: the tab in
+# front of you, a second one while comparing two conversations, a phone on the
+# remote surface, and the sockets that linger for a moment either side of a
+# reload. That is a handful, and eight sits comfortably above it while still
+# bounding what a page can pin — one send queue per socket, and one fan-out
+# target on every agent event of the session it is attached to.
+#
+# Tying it to MAX_SESSIONS would re-assert the one-tab-per-session model the
+# rail removed, and would make a change to the session cap silently move a
+# socket cap that answers a different question. The two are independent.
 MAX_CONNECTIONS = 8
 
 # Per-socket outbound queue, bounded on both count and bytes so that one
@@ -1160,17 +1174,32 @@ def _load_session_cwd(session_id: str) -> str:
 def _session_limit_message() -> str:
     """Why the cap refused, and what actually frees a slot.
 
-    This message has now been wrong in both directions. It said "close one
+    This message has now been wrong in three directions. It said "close one
     first" while ``close`` still answered ``not_implemented``, and was
     corrected in Phase 5 to name a PowerAtlas restart — which Phase 6's close
     control then made wrong the other way, since a restart is no longer the
-    only lever and is by far the more expensive one. Nothing in the test suite
-    asserts this text is *true*, only that it names a remedy, so it is worth
-    re-reading whenever the set of controls changes.
+    only lever and is by far the more expensive one. The third was subtler and
+    is corrected here: "close one from its tab" presumed one tab per session,
+    which was true when MAX_SESSIONS was 3 and stopped being true when the rail
+    arrived. Followed literally at the shipped cap it is also self-defeating —
+    eight sessions in eight tabs is eight sockets, and the ninth is refused by
+    MAX_CONNECTIONS, so the page that would explain this cap cannot connect.
+    One tab reaches every session, so the remedy names the rail.
+
+    Nothing in the test suite asserts this text is *true*, only that it names a
+    remedy and quotes the measured figure, so it is worth re-reading whenever
+    the set of controls changes.
+
+    The per-session figure is the final-QA measurement at the shipped default
+    of eight concurrent sessions: 24 processes and 1288.6 MiB over eight above
+    a 5-process / 531.6 MiB baseline, i.e. 3.0 processes and 161.1 MiB each.
+    The ~178 MB it replaces was an earlier eight-session run.
     """
-    return (f"At most {MAX_SESSIONS} sessions at once (~178 MB each). Close "
-            "one from its tab to free a slot; restarting PowerAtlas releases "
-            "them all. Sessions left idle are reclaimed on their own.")
+    return (f"At most {MAX_SESSIONS} sessions at once (~3 processes and "
+            "~161 MB each). Close one from the session list to free a slot — "
+            "open it and press Close; one tab reaches them all. Restarting "
+            "PowerAtlas releases every session, and sessions left idle are "
+            "reclaimed on their own.")
 
 
 def _new_session_record(cwd: str) -> dict:
@@ -3115,7 +3144,8 @@ async def _sweep_once() -> None:
 
     What sweeping actually recovers is measured, and it is less than the word
     implies: ``_kiro.dev/session/terminate`` frees the session's own MCP
-    processes (3 processes / ~141-178 MB on kiro-cli 2.16.0) and removes its
+    processes (~3 processes / ~161 MB on kiro-cli 2.16.0, the final-QA
+    eight-session measurement — see ``_session_limit_message``) and removes its
     ``.lock`` within ~0.3 s, and it leaves the ``.json`` and ``.jsonl``
     transcripts intact so the session stays resumable by ``session/load``. It
     does **not** kill a tool subprocess the agent left running — measured

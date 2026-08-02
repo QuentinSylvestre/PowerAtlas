@@ -57,7 +57,16 @@
      list would have to come back as markup and be written through a sink this
      page forbids. Empty here and filled by renderRail(). -->
 <aside class="acp-rail" id="acpRail" aria-label="Sessions">
+  <!-- `New session` is here and not only in the conversation pane's toolbar
+       because below 768 px that toolbar is `display: none` and the rail is the
+       whole page. Measured on a cold `GET /acp` at 390x844 with no `?sid=`:
+       #acpNew, #acpCwd, #acpPrompt and #acpSend all report 0x0, and the only
+       visible control on the page was the drill-down toggle reading
+       "Conversation →". SC-1 names *create* as one of the five verbs a phone
+       has to reach — it was one tap away, but the tap was labelled as
+       somewhere to go rather than as the thing it does. -->
   <div class="acp-rail-head">
+    <button class="acp-btn acp-rail-new" id="acpRailNew" type="button">New session</button>
     <input class="acp-rail-search" id="acpRailSearch" type="text" spellcheck="false"
            placeholder="Filter the sessions below"
            aria-label="Filter the sessions listed below">
@@ -82,7 +91,7 @@
     <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
     <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
     <!-- The lever the memory budget rests on: each live session costs ~3
-         processes and ~178 MB of MCP servers inside the agent, measured across
+         processes and ~161 MB of MCP servers inside the agent, measured across
          eight concurrent sessions on kiro-cli 2.16.0. The idle sweeper
          reclaims unattended sessions on its own; this is the control for
          releasing one now. plans/ROADMAP.md carries the cost model. -->
@@ -151,6 +160,7 @@
   var shellEl = document.getElementById('acpShell');
   var viewToggle = document.getElementById('acpViewToggle');
   var railSearch = document.getElementById('acpRailSearch');
+  var railNew = document.getElementById('acpRailNew');
   var railReload = document.getElementById('acpRailReload');
   var railStatus = document.getElementById('acpRailStatus');
   var railGroupsEl = document.getElementById('acpRailGroups');
@@ -214,6 +224,35 @@
   // reshape the page.
   var RAIL_GROUP_SIZE = 10;
   var RAIL_SESSION_SIZE = 3;
+  // How often the rail re-reads availability, and why it re-reads it at all.
+  //
+  // A row's `availability` is a reading of the world at fetch time, and the
+  // world moves without the page: the idle sweeper releases an unattended
+  // session every `acp.SWEEP_INTERVAL_SECONDS` and deletes its `.lock`, and a
+  // kiro-cli the user runs in a terminal takes or drops one whenever it likes.
+  // Measured before this existed — a browser left on /acp for 500 s across 25
+  // samples kept three rows on a blue "held by this PowerAtlas" dot at every
+  // single sample while the sweeper reclaimed all three beneath it. One press
+  // of Refresh corrected all three at once, which is the whole defect: the
+  // indicator asserted something false and had no way to learn otherwise.
+  //
+  // **A poll and not a broadcast, and that is a finding rather than a taste.**
+  // `session_closed` is fanned out to `_registry.subscribers[sessionId]` and
+  // nowhere else — `_sweep_once` and `_handle_close` in acp.py each walk
+  // exactly that set — so it reaches sockets *attached to that session* only,
+  // and the rail's entire purpose is showing sessions this socket has never
+  // subscribed to. The frames the page already receives therefore cannot carry
+  // this, and widening the server's fan-out to every connection would be wrong
+  // twice: the `session_closed` arm in `handle()` is unconditional, so a socket
+  // reading session B would be torn down when A was reclaimed, and `locked` ->
+  // `available` is a *foreign* process dropping its `.lock`, which produces no
+  // frame here at any fan-out. One poll fixes all three states; a protocol
+  // change would fix one of them and break a second.
+  //
+  // 60 s because that is the sweeper's own cadence: the display converges
+  // within one tick of the thing that moves it, and asking faster would only
+  // spend requests between two states that cannot differ.
+  var RAIL_REFRESH_MS = 60000;
   // The three states GET /api/acp/sessions can report (D17), as a closed set.
   // The value comes off the wire and ends up in a class name and a data
   // attribute, both of which are attribute sinks — so it is narrowed to one of
@@ -333,13 +372,18 @@
 
   function setPending(pending) {
     // The button is the only thing stopping a second session/new landing while
-    // the first is still in flight, and each one costs ~178 MB and is a
+    // the first is still in flight, and each one costs ~161 MB and is a
     // permanent entry in the real kiro-cli store. Creation takes ~1.1 s for the
     // first session of an agent process and ~0.5 s for each one after on
     // kiro-cli 2.16.0, and a cold spawn is unbounded — wide enough to
     // double-click through by accident either way.
     newBtn.disabled = pending;
     newBtn.textContent = pending ? 'Creating…' : 'New session';
+    // The rail's copy of the control is the same control and gets the same
+    // guard. Left out, the one button a phone can actually see would be the
+    // one that is not stopped from landing a second `new`.
+    railNew.disabled = pending;
+    railNew.textContent = newBtn.textContent;
   }
 
   function setLoading(sid) {
@@ -632,6 +676,73 @@
       renderRail();
     }).catch(function (err) {
       railFailed('could not load the session list', err);
+    });
+  }
+
+  function railRefreshStates(incoming) {
+    // Availability only, and nothing else on the row. Titles, timestamps and
+    // the workspace's own fields are not what goes stale in seconds, and
+    // rewriting them would let a background poll rename or reorder a row under
+    // a thumb already travelling towards it. Returns whether anything moved,
+    // so a tick that finds the world unchanged does not rebuild the rail and
+    // does not throw away focus for nothing.
+    var group = railGroupsByCwd['c:' + incoming.cwd];
+    if (!group) return false;
+    var fresh = Object.create(null);
+    var rows = incoming.sessions || [];
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      fresh['s:' + rows[i].id] = railAvailability(rows[i].availability);
+    }
+    var changed = false;
+    for (i = 0; i < group.sessions.length; i++) {
+      var next = fresh['s:' + group.sessions[i].id];
+      if (next === undefined) continue;
+      if (next === railAvailability(group.sessions[i].availability)) continue;
+      group.sessions[i].availability = next;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function railRefresh() {
+    // Deliberately not `loadGroupPage(1)`, which is what Refresh presses. That
+    // empties `railGroups`, so an automatic one would collapse a rail the user
+    // had paged into once a minute — a worse defect than the one it fixes.
+    // This re-reads the pages already on screen and writes the fresh
+    // `availability` onto the rows drawn from them, adding and removing
+    // nothing.
+    //
+    // `group_size` covers every workspace page pulled so far in one request.
+    // The server clamps it at `_ACP_MAX_GROUPS_PER_PAGE` (20), so a user who
+    // has paged past 20 workspaces refreshes the first 20; and rows past a
+    // per-group show-more are outside `session_size` and keep the state they
+    // were fetched with. Both keep their staleness until Refresh, which is a
+    // narrower gap than the one measured and costs one request instead of one
+    // per group.
+    if (railBusy) return;
+    if (!railGroups.length) return;
+    railBusy = true;
+    railFetch({
+      group_page: 1,
+      group_size: RAIL_GROUP_SIZE * Math.max(1, railGroupPage),
+      session_page: 1,
+      session_size: RAIL_SESSION_SIZE
+    }).then(function (data) {
+      railBusy = false;
+      var groups = (data && data.groups) || [];
+      var changed = false;
+      for (var i = 0; i < groups.length; i++) {
+        if (railRefreshStates(groups[i])) changed = true;
+      }
+      if (changed) renderRail();
+    }).catch(function () {
+      // Silent on purpose, and this is the one place on the page where that is
+      // right. Nobody pressed anything, so a failed poll is not news: the
+      // status line belongs to whatever the user last did, and overwriting it
+      // would report a problem against the wrong action. `railBusy` is cleared
+      // so the next tick tries again — which is the whole recovery needed.
+      railBusy = false;
     });
   }
 
@@ -1095,7 +1206,7 @@
         + "in the agent's own store, so it can be reopened from the "
         + 'PowerAtlas dashboard.');
       // The id leaves the URL with the session. Left in place, a reload would
-      // re-adopt the session through `load` and spend the ~178 MB again —
+      // re-adopt the session through `load` and spend the ~161 MB again —
       // silently undoing the one thing the user pressed the button for.
       history.replaceState(null, '', location.pathname);
       logLine('info', '← session_closed ' + payload.sessionId);
@@ -1289,6 +1400,21 @@
   newBtn.addEventListener('click', function () {
     send('new', { cwd: cwdInput.value.trim() }, null);
   });
+  railNew.addEventListener('click', function () {
+    // The same frame the toolbar's button sends, read off the same cwd field.
+    // One creation path, so the pending guard, the `meta pending` frame and
+    // the `session` handler cannot drift between two entry points. The cwd
+    // field lives in the pane this button exists because a phone cannot see:
+    // blank there is the agent's own neutral cwd, which is both the documented
+    // meaning of an empty field and the only value a rail-first user could
+    // have supplied.
+    if (!send('new', { cwd: cwdInput.value.trim() }, null)) return;
+    // The session arrives in the conversation pane, so the press goes there —
+    // otherwise the phone presses create and stays looking at a list that will
+    // not show it for another minute. Above 768 px both panes are on screen
+    // and CSS ignores the attribute, exactly as the toggle's presses do.
+    setView('chat');
+  });
   stopBtn.addEventListener('click', function () {
     if (!sessionId || !turnActive) return;
     if (!send('cancel', {}, sessionId)) return;
@@ -1350,11 +1476,32 @@
     // screen reader also get.
     railReload.disabled = true;
     railSearch.disabled = true;
+    // And the rail's create button, for the same reason: it is the only
+    // creation control a phone can see, and there is no ACP module to create
+    // anything with.
+    railNew.disabled = true;
     railStatus.textContent = 'the session list is unavailable while the ACP '
       + 'module is not loaded';
   } else {
     connect();
     loadGroupPage(1);
+    // Coming back to the tab refreshes at once, which is the moment a stale
+    // dot would otherwise be believed — a phone returns to this page far more
+    // often than it leaves it open for a full interval.
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'hidden') railRefresh();
+    });
+    setInterval(function () {
+      // Only while the page is being looked at. A poll is one request per
+      // interval per open tab against a route whose per-row cost is a file
+      // read plus a psutil query, and a backgrounded tab would be spending it
+      // to keep a picture nobody is reading correct. The comparison is against
+      // `'hidden'` rather than for `'visible'` so a browser that reports
+      // neither still refreshes: failing towards a correct rail is the right
+      // direction for a check whose whole subject is a stale one.
+      if (document.visibilityState === 'hidden') return;
+      railRefresh();
+    }, RAIL_REFRESH_MS);
   }
 })();
 </script>

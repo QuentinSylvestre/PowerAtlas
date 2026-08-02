@@ -4143,14 +4143,25 @@ class TestAcpSessionCapMessage:
         text = payload["message"].lower()
         assert "close" in text
         # The figure this message quotes, pinned to the measurement rather than
-        # to whatever it said last. Re-measured 2026-08-01 against kiro-cli
-        # 2.16.0 at the cap that now ships: eight sessions on one agent cost 26
-        # processes and 1501.2 MB against a 2-process / 78.8 MB bare-agent
-        # baseline — 3.0 processes and 177.8 MB marginal per session. The older
-        # ~254 MB was a two-session reading of 2.14.x and is ~40% high.
-        assert "178 mb" in text, payload["message"]
+        # to whatever it said last. Re-measured in the plan's final QA against
+        # kiro-cli 2.16.0 at the cap that now ships: eight sessions cost 24
+        # processes and 1288.6 MiB above a 5-process / 531.6 MiB baseline —
+        # 3.0 processes and 161.1 MiB marginal per session. The ~178 MB it
+        # replaces was an earlier eight-session run; the ~254 MB before that
+        # was a two-session reading of 2.14.x.
+        assert "161 mb" in text, payload["message"]
+        assert "178" not in text, payload["message"]
         assert "254" not in text, payload["message"]
         assert "306" not in text, payload["message"]
+        # The message must not instruct an arrangement that exhausts the socket
+        # budget. "Close one from its tab" presumed one tab per session, which
+        # was true at MAX_SESSIONS = 3 and false once the rail let one socket
+        # drive many sessions: eight sessions in eight tabs is eight sockets,
+        # and the ninth is refused by MAX_CONNECTIONS with close code 1013 — so
+        # the page that would explain *this* cap cannot connect. The remedy has
+        # to be reachable from the tab the reader already has.
+        assert "from its tab" not in text, payload["message"]
+        assert "session list" in text, payload["message"]
         # The two claims this message has actually shipped falsely, pinned by
         # their own words. A generic "mentions closing" assertion passes on
         # "nothing closes a session yet", which is the wording being retired.
@@ -4191,6 +4202,56 @@ class TestAcpSessionCapMessage:
             asyncio.run(acp_mod._handle_load(conn, "load-cap-0001"))
         self._assert_names_the_close_control(
             acp_mod, self._only_error(acp_mod, conn))
+
+    def test_the_socket_cap_is_documented_for_the_world_the_rail_made(self):
+        """``MAX_CONNECTIONS``'s comment and the cap message have to describe
+        the same model, and for two phases they did not.
+
+        The comment ("one tab in practice, two while comparing") was written
+        when ``MAX_SESSIONS`` was 3 and a session effectively meant a tab. The
+        rail made one socket drive many sessions, so one tab became the normal
+        case regardless of how many sessions are live — and the message that
+        still said "close one from its tab" was describing an arrangement that
+        exhausts this very cap. The number is not what went stale; the reading
+        of it was. Pinned here because a comment is the only thing that carries
+        why a constant is the value it is, and this one has now been read
+        wrongly once.
+        """
+        import inspect
+
+        from power_atlas import acp as acp_mod
+
+        src = inspect.getsource(acp_mod)
+        comment = src.split("MAX_CONNECTIONS = ")[0].rsplit("\n\n", 1)[-1]
+        assert comment.lstrip().startswith("#"), (
+            "the block before MAX_CONNECTIONS is not a comment, so this test "
+            "is reading the wrong thing")
+        assert "rail" in comment.lower(), (
+            "the socket cap's comment does not mention the rail, so it is "
+            "still explaining a one-tab-per-session world")
+        # The retired reading may still appear — quoting it in order to retract
+        # it is more useful to the next reader than deleting it, and is what
+        # this comment now does. What must not survive is the phrase standing
+        # as the claim, which is the state that shipped.
+        retired = "one tab in practice, two while comparing"
+        if retired in comment:
+            assert f'"{retired}"' in comment, (
+                "the retired reading appears unquoted, i.e. as the claim this "
+                "comment is still making")
+            assert "no longer exists" in comment, (
+                "the retired reading is quoted with nothing retracting it, so "
+                "a reader gets it as the current one")
+        # And the two must not be silently coupled: tying the socket cap to the
+        # session cap would re-assert exactly the model the rail removed.
+        assert acp_mod.MAX_CONNECTIONS == 8
+        acp_mod_sessions = acp_mod.MAX_SESSIONS
+        try:
+            acp_mod.MAX_SESSIONS = 3
+            assert acp_mod.MAX_CONNECTIONS == 8, (
+                "the socket cap moved with the session cap; they answer "
+                "different questions and are independent by design")
+        finally:
+            acp_mod.MAX_SESSIONS = acp_mod_sessions
 
 
 class TestAcpLoadPageRecovery:
@@ -4478,7 +4539,7 @@ class TestAcpCancel:
 
 
 class TestAcpSessionClose:
-    """The lever the whole memory budget rests on: §4 and §6 accept ~178 MB a
+    """The lever the whole memory budget rests on: §4 and §6 accept ~161 MB a
     session on the strength of a close control existing.
 
     Re-measured in Phase 2 on kiro-cli 2.16.0 — closing one session released 3
@@ -4698,7 +4759,7 @@ class TestAcpSessionClose:
 
     def test_the_closed_session_frees_a_slot(self, acp_session):
         """Which is the entire point: the cap is the only thing between one
-        socket and memory exhaustion at ~178 MB a session."""
+        socket and memory exhaustion at ~161 MB a session."""
         acp_mod, sid = acp_session
         for i in range(acp_mod.MAX_SESSIONS - 1):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
@@ -4718,7 +4779,7 @@ class TestAcpSessionClose:
 
     def test_the_page_clears_the_session_and_the_url(self):
         """A ?sid= left in place makes a reload re-adopt the session through
-        `load` and spend the ~178 MB again — undoing the button."""
+        `load` and spend the ~161 MB again — undoing the button."""
         from power_atlas.web import templates
         src = templates.env.loader.get_source(templates.env, "acp.html")[0]
         branch = src.split("type === 'session_closed'", 1)[1].split(
@@ -11957,6 +12018,57 @@ class TestAcpListingEndpoint:
         assert group["name"] == "PowerAtlas"
         assert set(group["sessions"][0]) == {"id", "title", "updated_at",
                                              "availability"}
+
+    def test_the_documented_extent_is_the_whole_store_not_the_first_page(self):
+        """The disclosure this route makes, stated at its true size.
+
+        The user chose documentation over capping, which makes the wording the
+        entire control — so it is pinned here like any other control. Both
+        surfaces have to carry it: the route docstring, for whoever is reading
+        the code, and the README's remote-access section, for whoever is
+        deciding whether to switch remote access on.
+
+        What the final QA measured over the real remote surface: `group_total`
+        is 61 with `has_more: true`, so an authorized peer that keeps paging
+        reaches **every** workspace path and **every** session title on the
+        machine — not the 10x3 the rail happens to draw first. The 22.1%
+        fallback rate reads as a bounded sample and is not one; it says how
+        often `title` is raw prompt text, not how much of the store is
+        reachable. This test fails if either surface loses the extent
+        statement, or if the percentage is left standing as the only figure.
+        """
+        from power_atlas.web import api_acp_sessions
+
+        def flatten(text):
+            # Both surfaces wrap at ~79 columns and both emphasise with `**`,
+            # so a raw `in` check is really asking "did the sentence happen to
+            # break in the same place today". Neither is what is being pinned.
+            return " ".join(text.replace("*", "").lower().split())
+
+        doc = flatten(api_acp_sessions.__doc__ or "")
+        readme = flatten((Path(__file__).resolve().parents[1] / "README.md")
+                         .read_text(encoding="utf-8"))
+        for name, text in (("route docstring", doc), ("README", readme)):
+            assert "every workspace path and every session title" in text, (
+                f"the {name} no longer states the full extent of the listing")
+            assert "group_total" in text and "61" in text, (
+                f"the {name} dropped the measurement the extent rests on")
+            assert "not a bound" in text or "not the 10" in text, (
+                f"the {name} no longer separates the page size from the extent, "
+                "which is the exact misreading — 10x3 as a ceiling — that this "
+                "wording exists to prevent")
+            # The percentage may stay — it is true about the *fallback* — but
+            # only alongside something that stops it being read as a ceiling,
+            # and that retraction has to be *next to it*. Scanning the whole
+            # document instead was measured passing against a copy whose
+            # retraction had been deleted, because an unrelated "not a bound"
+            # elsewhere answered for it — a check that cannot fail is worse
+            # than no check, since it reads as coverage.
+            if "22.1%" in text:
+                near = text[text.index("22.1%"):][:260]
+                assert "not a bound" in near or "not bound" in near, (
+                    f"the {name} quotes 22.1% with nothing beside it to stop "
+                    f"the figure reading as the size of the exposure: {near!r}")
 
     def test_no_env_launcher_or_action_field_appears_anywhere(self, client, acp_listing_store):
         """D18's reason for a new route rather than reusing

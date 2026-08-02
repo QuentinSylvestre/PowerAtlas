@@ -357,7 +357,14 @@ function serveListing(store, params) {
         exists: w.exists !== false,
         session_page: sessionPage,
         has_more: from + sessionSize < w.sessions.length,
-        sessions: w.sessions.slice(from, from + sessionSize),
+        // Copied, because a real answer crosses JSON and the page never holds
+        // a reference into the server's store. Handed out by reference this
+        // stub silently aliases: a check that moves a session's availability in
+        // the fixture to model the sweeper reclaiming it would move the rail's
+        // own copy at the same instant, so the rail would appear to have
+        // noticed before it fetched anything — and a freshness check written
+        // against that passes on a page with no freshness mechanism at all.
+        sessions: w.sessions.slice(from, from + sessionSize).map((s) => ({ ...s })),
       };
     }),
     group_page: single ? 1 : groupPage,
@@ -446,12 +453,29 @@ function loadPage(templatePath, opts = {}) {
     close() { this.readyState = 3; }
   }
 
+  // The rail's freshness poll. Nothing on this page used a timer before it, so
+  // the sandbox had neither — a page that called `setInterval` would have
+  // thrown at load and every check below would have failed at once rather than
+  // the one that cares. Held rather than run: a real interval in a test process
+  // is a race, so `page.tick()` fires them by hand and each check decides how
+  // many ticks it wants.
+  const intervals = [];
+  const docListeners = new Map();
+  let visibility = opts.visibility ?? "visible";
+
   const sandbox = {
     document: {
       createElement: (tag) => new El(tag),
       getElementById: (id) => byId.get(id) ?? null,
+      addEventListener: (type, fn) => {
+        if (!docListeners.has(type)) docListeners.set(type, []);
+        docListeners.get(type).push(fn);
+      },
+      get visibilityState() { return visibility; },
       write: () => HTML_SINK("document.write"),
     },
+    setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
+    clearInterval: () => {},
     location: {
       protocol: "http:",
       host: "127.0.0.1:4915",
@@ -505,6 +529,17 @@ function loadPage(templatePath, opts = {}) {
     },
     listingCalls() {
       return page.fetches.filter((f) => f.url.startsWith("/api/acp/sessions"));
+    },
+    intervals,
+    /** Fire every registered interval once, as the browser would on a tick. */
+    tick() { for (const t of intervals) t.fn(); },
+    /** Move the tab between foreground and background, notifying the page the
+     *  way a browser does. Two steps because the page reads the property and
+     *  listens for the event, and a helper that only did one would let a check
+     *  pass against a page that only did the other. */
+    setVisibility(state) {
+      visibility = state;
+      for (const fn of docListeners.get("visibilitychange") ?? []) fn();
     },
     // Null is this harness's <body>: nothing in the rail holds focus.
     focused() { return ACTIVE; },
@@ -1495,6 +1530,123 @@ check("a re-render puts keyboard focus back where the user left it", async (tpl)
          "as far as the keyboard is concerned");
 });
 
+// ------------------------------------------- the rail's freshness (D15) --
+//
+// The defect these three measure: a browser sat on /acp for 500 s across 25
+// samples and kept three rows on a blue "held by this PowerAtlas" dot at every
+// sample, while the idle sweeper reclaimed all three beneath it and deleted
+// their `.lock` files. The counts were identical at t=0.0 and t=400.1, and one
+// press of Refresh corrected all three at once — the rail had the right answer
+// available and no way to learn it had gone stale.
+
+check("a stale held row corrects itself on a tick, without a press", async (tpl) => {
+  const store = fakeStore({ workspaces: 2, sessions: 2 });
+  store[0].sessions[0].availability = "held";
+  const page = await railed(tpl, { store });
+  const held = () => page.railRows().filter(
+    (r) => r.dataset.availability === "held").length;
+  assertEqual(held(), 1, "the fixture's held row did not render as held");
+
+  // The sweeper reclaims it. Nothing is pressed, and no frame arrives — this is
+  // exactly the situation `session_closed` cannot reach, because the socket is
+  // not subscribed to this session and acp.py fans that frame out to
+  // `_registry.subscribers[sessionId]` and nowhere else.
+  store[0].sessions[0].availability = "available";
+  assertEqual(held(), 1,
+              "positive control: the rail must not read the store directly");
+  page.tick();
+  await page.settle();
+  assertEqual(held(), 0,
+              "the rail still asserts `held` for a session the sweeper released — " +
+              "the state it showed for 500 s in the measurement this check is for");
+});
+
+check("the freshness poll keeps the rail's paging and costs one request", async (tpl) => {
+  const store = fakeStore({ workspaces: 25, sessions: 2 });
+  const page = await railed(tpl, { store });
+  page.click("acpRailMore");
+  await page.settle();
+  const paged = page.railGroups().length;
+  assertEqual(paged, 20, "the second workspace page did not land");
+
+  const before = page.listingCalls().length;
+  page.tick();
+  await page.settle();
+  assertEqual(page.listingCalls().length - before, 1,
+              "a tick cost more than one request; a poll per group is the shape " +
+              "this was written to avoid");
+  assertEqual(page.railGroups().length, paged,
+              "the poll collapsed the rail back to page one — an automatic " +
+              "`loadGroupPage(1)` would do this once a minute, which is worse " +
+              "than the staleness it fixes");
+  // Both workspace pages are covered by the one request, not just the first.
+  const last = page.listingCalls().at(-1).params;
+  assertEqual(Number(last.group_size), 20,
+              "the poll asked for one page's worth, so the workspaces the user " +
+              "paged to keep their stale dots");
+});
+
+check("a backgrounded tab stops polling and refreshes on return", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  const page = await railed(tpl, { store });
+  const calls = () => page.listingCalls().length;
+
+  page.setVisibility("hidden");
+  const hidden = calls();
+  page.tick();
+  await page.settle();
+  assertEqual(calls(), hidden,
+              "a hidden tab is still polling — one request a minute per open tab " +
+              "against a route whose per-row cost is a file read plus a psutil " +
+              "query, spent on a picture nobody is looking at");
+
+  page.setVisibility("visible");
+  await page.settle();
+  assertEqual(calls(), hidden + 1,
+              "coming back to the tab did not refresh, so the first thing the " +
+              "user sees is the stale rail the poll was paused on");
+});
+
+// ------------------------------------- creating a session from the rail (SC-1) --
+
+check("the rail carries a labelled create control", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  // Read off the markup, not the element: `byId` builds a bare stand-in per id
+  // and no static label reaches it, so an element assertion here would measure
+  // the harness. This is the string a cold page actually paints — nothing calls
+  // `setPending` before the first press.
+  const button = page.markup.match(
+    /<button[^>]*id="acpRailNew"[^>]*>([^<]*)<\/button>/);
+  assert(button, "the rail has no create control at all");
+  assertEqual(button[1].trim(), "New session",
+              "the rail's create control is not labelled as what it does; on a " +
+              "cold 390x844 load the whole conversation pane is `display: none` " +
+              "and the only visible control was a toggle reading 'Conversation →'");
+  assert(page.markup.split('id="acpRail"')[1].split("</aside>")[0]
+             .includes('id="acpRailNew"'),
+         "the create control is not inside the rail, so the pane a phone lands " +
+         "on still does not carry it");
+  page.click("acpRailNew");
+  const sent = page.sentOf("new");
+  assertEqual(sent.length, 1, "the rail's create control sent no `new` frame");
+  assertEqual(page.el("acpShell").dataset.view, "chat",
+              "the press stayed on the rail, so a phone that pressed create is " +
+              "looking at a list that will not show the session for a minute");
+});
+
+check("the rail's create control is guarded like the toolbar's", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  page.deliver({ type: "meta", payload: { pending: "new" } });
+  assertEqual(page.el("acpRailNew").disabled, true,
+              "the one create control a phone can see is not stopped from landing " +
+              "a second `new` while the first is in flight");
+  // And it is off entirely when there is no ACP module to create anything with,
+  // which is the same reason Refresh and the filter box are.
+  const dead = loadPage(tpl, { acpError: "no module named acp" });
+  assertEqual(dead.el("acpRailNew").disabled, true,
+              "the rail offers a create control while the ACP module is not loaded");
+});
+
 // ----------------------------------------------- render(), as its own subject --
 //
 // Everything above renders one template and asserts on the page. These three
@@ -2057,6 +2209,41 @@ check("every key the server reports as restart-only gets a row and a badge", () 
   assertEqual(p.badge(".peek-hotkey-group"), null,
               "the badge outlived the server's report of the key");
   assert(p.badge(".port-group"), "the still-reported key lost its badge");
+});
+
+check("the status pill is the one thing in the topbar that cannot be squeezed", () => {
+  // CSS is the code here for the same reason as the check below: this harness
+  // has no box model, so the pixel evidence is the browser measurement in the
+  // phase log — #acpStatus running from 353 px to 434 px against a 390 px
+  // viewport, with `documentElement.scrollWidth` at 390 and `body.scrollWidth`
+  // at 434, i.e. clipped and not scrollable — and what lives here is the rule
+  // that measurement was taken against.
+  const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const body = (selector) => {
+    const rules = [...css.matchAll(/([^{}]*)\{([^{}]*)\}/g)].filter(
+      (m) => m[1].split(",").some((s) => s.trim().replace(/\s+/g, " ") === selector));
+    return rules.map((m) => m[2]).join(";");
+  };
+  assert(/flex-shrink:\s*0/.test(body(".acp-status")),
+         "the status pill can be shrunk by the flex row it sits in, which is how " +
+         "'connected' became 'conn' at 390 px — and it is the only element on the " +
+         "page that says whether the socket is up");
+  assert(/white-space:\s*nowrap/.test(body(".acp-status")),
+         "the pill may wrap, so a longer state ('reconnecting') breaks the topbar's " +
+         "line box instead of staying one pill");
+  // Something has to absorb the shortfall, or an unshrinkable pill just moves
+  // the overflow rather than removing it. The back link is the designated one.
+  const back = body(".acp-back");
+  assert(/min-width:\s*0/.test(back) && /text-overflow:\s*ellipsis/.test(back),
+         "nothing in the topbar is allowed to give way, so pinning the pill only " +
+         "moves the 44 px overflow onto whichever item is last in the line box");
+  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(back),
+         "the back link shrinks only in proportion to its width, so the cluster " +
+         "holding the pill — the widest item — gives up the most, which is the " +
+         "opposite of the intended order");
+  assert(/min-width:\s*\d+px/.test(body(".acp-context-track")),
+         "the context meter's track has no floor, so it collapses to nothing " +
+         "before the back link has finished giving way");
 });
 
 check("the dashboard link is hidden from the remote viewer, not from a narrow window", () => {

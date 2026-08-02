@@ -474,6 +474,33 @@ script { display: none; }
 .acp-status { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
 .acp-status[data-state="open"] { border-color: var(--success); color: var(--success); }
 .acp-status[data-state="closed"] { border-color: #f87171; color: #f87171; }
+/* The topbar at 390 px, where it is the tightest row on the page. Measured
+   before these five declarations: #acpStatus ran from 353 px to 434 px against
+   a 390 px viewport — 44 px over — and `html, body { overflow: hidden }` (:2)
+   clips rather than scrolls, so `documentElement.scrollWidth` stayed 390 while
+   `body.scrollWidth` was 434. The green "connected" border was cut off
+   mid-pill, and once the context meter populates the pill read as "conn". A
+   longer state ("reconnecting", "unavailable") would lose more of the word.
+   The row's items all default to `min-width: auto`, i.e. min-content, so
+   nothing could give and the deficit simply ran off the end of the viewport.
+   What is set here is the *order of sacrifice*, which is the part a browser
+   cannot guess — flex distributes a shortfall in proportion to base size, so
+   left alone the widest item gives the most, which here is the cluster holding
+   the pill:
+     1. the back link's text, which ellipses. `flex-shrink: 999` is what puts
+        it first rather than in proportion — its target stays tappable at any
+        width and the label is a courtesy;
+     2. the context meter, whose track is a proportion and still reads at
+        24 px;
+     3. the status pill, which never shrinks at all. It is the only element on
+        the page that says whether the socket is up, and a truncated one is
+        worse than none: "conn" is indistinguishable from "connecting".
+   Every selector here is `.acp-*`; nothing in this block reaches the shared
+   topbar the dashboard also renders. */
+.acp-back { min-width: 0; flex-shrink: 999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-context { min-width: 0; }
+.acp-context-track { min-width: 24px; }
+.acp-status { flex-shrink: 0; white-space: nowrap; }
 .acp-page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; }
 /* Wraps because the toolbar is four controls and a free-text cwd field, and at
    390 px they do not fit on one line; on a wide window nothing wraps and this
@@ -583,7 +610,16 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-back-local-only { color: var(--text-dim); }
 
 .acp-rail { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
-.acp-rail-head { display: flex; gap: 8px; flex-shrink: 0; }
+/* Three controls on a 390 px line: create, filter, refresh. `wrap` is the
+   guard rather than the layout — at 390 px they fit on one line and it is
+   inert; below ~320 px the filter box drops to a second line instead of
+   squeezing the two buttons past their labels. */
+.acp-rail-head { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+/* The rail's own create control. Below 768 px the conversation pane — and with
+   it the toolbar's `New session` — is `display: none`, so this is the only
+   labelled way to create a session on a phone. It keeps its label at every
+   width; the filter box beside it is the elastic one. */
+.acp-rail-new { flex-shrink: 0; }
 .acp-rail-search { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 7px 10px; }
 .acp-rail-search:focus { outline: none; border-color: var(--accent); }
 .acp-rail-search:disabled { opacity: 0.45; cursor: default; }

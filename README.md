@@ -108,7 +108,7 @@ remote_bind_address = ""  # "" = loopback only (the default; a version bump neve
 
 # ACP session limits. All three are read once at startup, so a change needs a restart; the settings
 # panel says so rather than pretending a live effect.
-acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 processes and ~178 MB
+acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 processes and ~161 MB
                       # (measured on kiro-cli 2.16.0), so 8 is roughly 1.5 GB at the cap.
 acp_idle_ttl_seconds = 1800  # 300-86400. A session with no attached tab, no running turn and no
                              # in-flight load is terminated after this long idle, on a 60 s sweep.
@@ -249,10 +249,25 @@ the NetBird console re-establishes the second layer at any time and takes about 
 in the implementation depends on its absence**, so it is worth doing.
 
 Weigh that against what is behind the cookie. `/acp` runs its agent with `-a`, so a peer holding a valid
-cookie can execute arbitrary commands on this machine as you. It also sees **every workspace path and
-every session title on the machine** through the listing endpoint — and a session's title is the raw
-text of its first prompt for roughly a fifth of sessions, which in practice includes filesystem paths
-and URLs.
+cookie can execute arbitrary commands on this machine as you.
+
+**It also reads out the name of everything you have worked on.** `GET /api/acp/sessions` is paged, and
+paging is all there is: `group_page` walks the workspaces and `session_page` walks the sessions inside
+each one, with no ceiling other than the data running out. On this machine `group_total` is 61 with
+`has_more: true`, so a peer that keeps asking enumerates **every workspace path and every session title
+on the machine** — not the 10 workspaces by 3 sessions the page happens to show first. That first page
+alone carried an employer name, four client and project names, the directory layout of the whole
+machine, a colleague's first name and the subject line of an email. Session titles are the raw text of
+the first prompt whenever the store has no title of its own (267 of 1,210 sessions here, 22.1%) — that
+proportion is how often the fallback fires, not a bound on what is reachable, because the peer can page
+to all 1,210.
+
+This is stated rather than capped: the listing is what makes the phone usable, and truncating it would
+break the feature rather than fix the exposure. **The decision it asks of you is whether the machine's
+project names are things you are willing to publish to every peer holding a device cookie.** On a
+personal machine that is usually yes. On a work laptop — client names, internal hostnames, an employer's
+directory conventions — read it as a disclosure and decide deliberately; if the answer is no, leave
+`remote_bind_address` unset, which is the default.
 
 **Revoking a device.** There is exactly one mechanism: rotate the secret, from the *Remote access*
 panel or `POST /api/remote-access/rotate` (loopback-only, so a peer holding a stolen cookie cannot

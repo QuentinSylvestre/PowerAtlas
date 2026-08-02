@@ -1649,14 +1649,33 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     the payload is the whole audit surface, so what is not here cannot leak
     from here.
 
+    **The whole store is reachable through this route, not a sample of it.**
+    Paging is the entire access-control story here: `group_page` walks the
+    workspace axis and `session_page` walks the sessions inside each one, and
+    neither has a ceiling other than the data running out. Measured over the
+    real remote surface, `group_total` is 61 with `has_more: true` — so an
+    authorized peer that keeps asking enumerates **every workspace path and
+    every session title on this machine**. The rail's default 10 workspaces by
+    3 sessions is a page size, not a bound, and reading the numbers below as a
+    bounded sample is the mistake this paragraph exists to prevent.
+
     **`title` may be raw user prompt text.** `_acp_row_title` falls back to the
     first 120 characters of the session's first prompt whenever the store holds
     no title or the literal `"<untitled>"` — 267 of the real store's 1,210
-    sessions, 22.1%. That is deliberate (the `session-tab-title` rework that
-    would populate the field is out of this plan's scope, and the first prompt
-    is what the user will recognise), but it means one field of this payload
-    carries free-form text the user typed. Anyone deciding what may cross the
-    remote boundary should weigh `title` as prompt content, not as a label.
+    sessions, 22.1%. That proportion describes how often the fallback fires; it
+    does **not** bound the exposure, because the peer can page to all 1,210.
+    The fallback is deliberate (the `session-tab-title` rework that would
+    populate the field is out of this plan's scope, and the first prompt is
+    what the user will recognise), but it means one field of this payload
+    carries free-form text the user typed.
+
+    What that is in practice, from page one of the real listing: an employer
+    name, four client and project names, the directory layout of the whole
+    machine, a colleague's first name and the subject line of an email. Anyone
+    deciding whether to enable remote access — on a work laptop especially —
+    should read this route as publishing the *names of everything you have
+    worked on*, to every peer holding a valid device cookie, and decide on that
+    basis rather than on the 22.1%.
 
     Workspaces tagged `hidden` and a disabled `kiro-cli` provider are excluded;
     see `_acp_listing`.
