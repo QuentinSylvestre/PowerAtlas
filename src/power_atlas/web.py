@@ -1532,6 +1532,52 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
     return out
 
 
+def _acp_status_for_held(sessions) -> dict[str, str]:
+    """The dashboard's verdict for the sessions this PowerAtlas is driving.
+
+    Blocking — a transcript-tail classify per session — so this runs inside
+    `_acp_listing`'s thread hop, beside `_acp_availability`.
+
+    **Held sessions and no others, which is also what bounds the cost.** The
+    rail draws a dot only where this ACP holds the session, so a row nothing
+    here holds needs no verdict: a `locked` one is live in a foreign process
+    this cannot ask, and an `available` one has no live process at all. That
+    caps the work at `MAX_SESSIONS` (8) however many rows the page shows.
+
+    `_resolved_session_status`, and deliberately not `_session_status`. The
+    latter opens with a liveness gate that asks `presence` whether a process is
+    running — which for a held session is answered first-hand, because we *are*
+    that process — and it can answer `closed`, which for a held session is not a
+    state but a lag in a 3 s-cached process scan. `_resolved_session_status`
+    takes liveness as given and settles among errored/waiting/working, the same
+    precedence `session_row.html` settles its own dot through, so the two
+    surfaces cannot disagree about a session both of them are showing.
+    """
+    if not sessions:
+        return {}
+    # One scan for the whole response. It contributes nothing for kiro-cli
+    # today — only claude-code writes a self-reported status, and
+    # `presence._sidecar_records` pushes "" for every kiro record — but passing
+    # it is what keeps this on the shared code path instead of a local
+    # re-implementation that would drift the first time that stops being true.
+    snapshot = presence.get_snapshot()
+    out: dict[str, str] = {}
+    for session in sessions:
+        try:
+            semantic = get_semantic_status(
+                session.session_id, _ACP_LISTING_PROVIDER, session.cwd)
+            out[session.session_id] = _resolved_session_status(
+                snapshot, _ACP_LISTING_PROVIDER, session.session_id, semantic)
+        except Exception:
+            log.exception("ACP listing: could not settle status for %s",
+                          session.session_id)
+            # The direction `_resolved_session_status` itself fails in when
+            # nothing classifies. A session this process holds is running, and
+            # a quieter-looking verdict would be a wrong one on a live row.
+            out[session.session_id] = "working"
+    return out
+
+
 # Error codes that mean **"there is nothing at that path"**. Everything not
 # named here — including everything Windows and POSIX have to say about a host
 # that did not answer — reads as *unknown*, and unknown fails open to present.
@@ -1739,6 +1785,11 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     # One call for the whole response, over exactly the ids the response
     # contains — ~30 by default, not the store's 1,207.
     availability = _acp_availability(sids, held)
+    # Bounded by the session cap rather than by the page: only a held row
+    # carries a dot, so only a held row needs a verdict behind it.
+    statuses = _acp_status_for_held([
+        s for _meta, page_sessions in rows for s in page_sessions
+        if availability.get(s.session_id) == "held"])
 
     groups = []
     for meta, page_sessions in rows:
@@ -1747,6 +1798,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             "title": _acp_row_title(s),
             "updated_at": s.updated_at,
             "availability": availability.get(s.session_id, "available"),
+            # "" for every row this ACP does not hold. The rail draws no dot
+            # there, so there is no verdict to carry and none is invented.
+            "status": statuses.get(s.session_id, ""),
         } for s in page_sessions]
         groups.append(meta)
 
@@ -1774,10 +1828,16 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     """Workspace-grouped sessions for the session browser. Read-only.
 
     Returns **only** the workspace path, display name and whether that
-    directory still exists, and per session the id, title, updated timestamp
-    and availability state. No `env`, no launcher data, no action affordances —
-    the payload is the whole audit surface, so what is not here cannot leak
-    from here.
+    directory still exists, and per session the id, title, updated timestamp,
+    availability state and — for a held session alone — the semantic status the
+    dashboard would show for it. No `env`, no launcher data, no action
+    affordances — the payload is the whole audit surface, so what is not here
+    cannot leak from here.
+
+    `status` is `""` for every session this ACP does not hold, and that is a
+    narrowing rather than an omission: it is a reading of a transcript's last
+    lines, and the sessions worth spending that on are the ones the rail draws
+    a dot for. See `_acp_status_for_held`.
 
     **The whole store is reachable through this route, not a sample of it.**
     Paging is the entire access-control story here: `group_page` walks the

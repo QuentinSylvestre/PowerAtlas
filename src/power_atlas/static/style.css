@@ -774,12 +774,20 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-picker-ws { border-color: transparent; }
 .acp-picker-ws:hover:not(:disabled) { border-color: var(--accent); }
 
-/* D17's three states. The dot carries the colour and an aria-label; nothing
-   here is the only carrier of the meaning. */
-.acp-avail { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
-.acp-avail-available { background: var(--success); }
-.acp-avail-held { background: var(--accent); }
-.acp-avail-locked { background: #f87171; }
+/* The rail's live dot is the dashboard's, reused rather than restated. A row
+   draws `.session-status.status-*` when — and only when — this ACP holds the
+   session, so the hue, the halo and the working pulse cannot drift between the
+   two surfaces the way `--success` green and `#4ade80` green already had.
+   Nothing is defined here on purpose: a rail-local override would be exactly
+   the drift this removes.
+
+   `available` and `locked` rows carry no dot at all. The first is an ordinary
+   openable row with nothing live to report; the second is greyed by
+   `.acp-rail-row:disabled` above, and says why on the row's own title. They
+   keep the dot's width so the title column does not step in and out between
+   marked and unmarked rows — same 8 px as `.session-status`, and it has to
+   stay that way. */
+.acp-rail-row-pad { flex-shrink: 0; width: 8px; }
 
 @media (min-width: 768px) {
   .acp-shell { flex-direction: row; }

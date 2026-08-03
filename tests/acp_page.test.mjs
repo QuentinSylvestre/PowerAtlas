@@ -541,6 +541,11 @@ function loadPage(templatePath, opts = {}) {
   // is a race, so `page.tick()` fires them by hand and each check decides how
   // many ticks it wants.
   const intervals = [];
+  // The open/close refresh's retry. Held on the same terms and for the same
+  // reason as the intervals above: `railRefreshSoon` only reaches for a timer
+  // when a rail request is already in flight, and a real one firing on its own
+  // schedule would make every check that closes a session racy.
+  const timers = [];
   const docListeners = new Map();
   let visibility = opts.visibility ?? "visible";
 
@@ -557,6 +562,8 @@ function loadPage(templatePath, opts = {}) {
     },
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     clearInterval: () => {},
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimeout: () => {},
     location: {
       protocol: "http:",
       host: "127.0.0.1:4915",
@@ -624,6 +631,15 @@ function loadPage(templatePath, opts = {}) {
     intervals,
     /** Fire every registered interval once, as the browser would on a tick. */
     tick() { for (const t of intervals) t.fn(); },
+    timers,
+    /** Fire every timer queued so far, once. Drained before running so a retry
+     *  that queues another timer does not extend the loop it is inside — the
+     *  caller decides how many rounds it wants by calling this again. */
+    runTimers() {
+      const due = timers.splice(0, timers.length);
+      for (const t of due) t.fn();
+      return due.length;
+    },
     /** Move the tab between foreground and background, notifying the page the
      *  way a browser does. Two steps because the page reads the property and
      *  listens for the event, and a helper that only did one would let a check
@@ -1447,55 +1463,119 @@ check("a workspace's own show-more pages that workspace alone", async (tpl) => {
          "the workspace is fully shown and must stop offering more");
 });
 
-check("the availability indicator renders all three states", async (tpl) => {
-  const store = fakeStore({ workspaces: 3, sessions: 3 });
+check("the live dot is drawn for a held session and for nothing else", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 3 });
   store[0].sessions[0].availability = "available";
   store[0].sessions[1].availability = "held";
+  store[0].sessions[1].status = "waiting";
   store[0].sessions[2].availability = "locked";
-  // Off the wire and into a class name and a data attribute — both attribute
-  // sinks, and this page's rule is that nothing payload-derived reaches one.
-  //
-  // The first of these is an *own-property* miss and passes any lookup. The
-  // other three are the reason the map has to be prototype-less: on an object
-  // literal every `Object.prototype` key is a hit, so `map[value] || 'available'`
-  // answers with the inherited value and never reaches the default. Measured on
-  // the literal: "constructor" puts `acp-rail-row-function Object() { [native
-  // code] }` into className and dataset.availability and makes the indicator's
-  // aria-label the literal string "undefined"; "__proto__" gives
-  // `acp-rail-row-[object Object]`; "toString" the same shape.
-  store[1].sessions[0].availability = 'locked" onload=x';
-  store[1].sessions[1].availability = "constructor";
-  store[1].sessions[2].availability = "__proto__";
-  store[2].sessions[0].availability = "toString";
   const page = await railed(tpl, { store });
-
   const rows = page.railRows();
-  assertEqual(rows.map((r) => r.dataset.availability).slice(0, 3).join(","),
+
+  assertEqual(rows.map((r) => r.dataset.availability).join(","),
               "available,held,locked",
               "the three states did not survive the trip to the row");
   for (const [i, want] of [[0, "available"], [1, "held"], [2, "locked"]]) {
     assert(String(rows[i].className).includes(`acp-rail-row-${want}`),
            `row ${i} carries no ${want} class: ${rows[i].className}`);
-    const dot = rows[i].querySelector(".acp-avail");
-    assert(dot, `row ${i} has no availability indicator at all`);
-    assert(String(dot.className).includes(`acp-avail-${want}`),
-           `the indicator is not distinguishable for ${want}: ${dot.className}`);
-    assert(dot.getAttribute("aria-label"),
-           `the ${want} indicator has no accessible name, and it carries no text`);
   }
-  for (const [i, sent] of [[3, 'locked" onload=x'], [4, "constructor"],
-                           [5, "__proto__"], [6, "toString"]]) {
+
+  // The dot's *presence* is what says this ACP is driving the session. That is
+  // the whole reason its colour is free to mean what the dashboard's means —
+  // green used to say "free to open" here and "the agent is working" there.
+  assert(!rows[0].querySelector(".session-status"),
+         "an available session was given a live dot, which claims this ACP is " +
+         "driving a session nothing here holds");
+  assert(!rows[2].querySelector(".session-status"),
+         "a locked session was given a live dot, which claims this ACP is " +
+         "driving a session another process has taken");
+
+  const dot = rows[1].querySelector(".session-status");
+  assert(dot, "the held session has no live dot, so nothing on the row says " +
+              "this ACP is the thing driving it");
+  // The dashboard's own class, not a rail-local restatement of it. A rail rule
+  // that repeated the hue would drift the first time either surface moved.
+  assert(String(dot.className).includes("status-waiting"),
+         `the dot does not carry the dashboard's waiting class: ${dot.className}`);
+  assert(dot.getAttribute("aria-label"),
+         "the dot has no accessible name, and it carries no text of its own");
+});
+
+check("a state or a status off the wire is narrowed before it reaches an attribute", async (tpl) => {
+  const store = fakeStore({ workspaces: 3, sessions: 3 });
+  // Off the wire and into a class name and a data attribute — both attribute
+  // sinks, and this page's rule is that nothing payload-derived reaches one.
+  //
+  // The first of these is an *own-property* miss and passes any lookup. The
+  // other three are the reason the maps have to be prototype-less: on an object
+  // literal every `Object.prototype` key is a hit, so `map[value] || 'default'`
+  // answers with the inherited value and never reaches the default. Measured on
+  // the literal: "constructor" puts `acp-rail-row-function Object() { [native
+  // code] }` into className and dataset.availability and makes the indicator's
+  // aria-label the literal string "undefined"; "__proto__" gives
+  // `acp-rail-row-[object Object]`; "toString" the same shape.
+  store[0].sessions[0].availability = 'locked" onload=x';
+  store[0].sessions[1].availability = "constructor";
+  store[0].sessions[2].availability = "__proto__";
+  store[1].sessions[0].availability = "toString";
+  // The dot's own field reaches a class name by the same route, so it is
+  // narrowed on the same terms. Held, because a status is only ever read where
+  // a dot is drawn.
+  for (const [i, sent] of [[0, 'working" onload=x'], [1, "constructor"],
+                           [2, "__proto__"]]) {
+    store[2].sessions[i].availability = "held";
+    store[2].sessions[i].status = sent;
+  }
+  const page = await railed(tpl, { store });
+  const rows = page.railRows();
+
+  for (const [i, sent] of [[0, 'locked" onload=x'], [1, "constructor"],
+                           [2, "__proto__"], [3, "toString"]]) {
     assertEqual(rows[i].dataset.availability, "available",
                 `the state ${JSON.stringify(sent)} was passed through rather ` +
                 "than narrowed to one of the three literals");
     assert(/^acp-rail-row acp-rail-row-(available|held|locked)$/.test(
              String(rows[i].className)),
            `${JSON.stringify(sent)} reached a class name: ${rows[i].className}`);
-    assertEqual(rows[i].querySelector(".acp-avail").getAttribute("aria-label"),
-                "available",
-                `${JSON.stringify(sent)} left the indicator without a real ` +
+    assert(!rows[i].querySelector(".session-status"),
+           `${JSON.stringify(sent)} narrowed to available but still drew a ` +
+           "dot, which says this ACP is driving it");
+  }
+  for (const [i, sent] of [[6, 'working" onload=x'], [7, "constructor"],
+                           [8, "__proto__"]]) {
+    const dot = rows[i].querySelector(".session-status");
+    assert(dot, `row ${i} is held and was given no dot to narrow`);
+    assertEqual(String(dot.className), "session-status status-working",
+                `the status ${JSON.stringify(sent)} reached a class name ` +
+                `rather than narrowing to the fallback: ${dot.className}`);
+    assertEqual(dot.getAttribute("aria-label"),
+                "open in this PowerAtlas — the agent is working",
+                `${JSON.stringify(sent)} left the dot without a real ` +
                 "accessible name, and it carries no text of its own");
   }
+});
+
+check("a locked row says why it cannot be opened, not only that it cannot", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 2 });
+  store[0].sessions[1].availability = "locked";
+  const page = await railed(tpl, { store });
+  const rows = page.railRows();
+
+  // The reason used to live on the availability dot, which a locked row no
+  // longer has. Greying is a colour, and a colour is not an answer to "why can
+  // I not open this one?" — without this the row reads as broken, not as taken.
+  assert(/another process/i.test(String(rows[1].title)),
+         `the locked row does not say what has it: ${JSON.stringify(rows[1].title)}`);
+  // `aria-label` replaces the accessible name outright, so the session's own
+  // title has to survive into it or the row announces its refusal and never
+  // which session is refusing.
+  const label = String(rows[1].getAttribute("aria-label"));
+  assert(/another process/i.test(label),
+         `a screen reader is told nothing about the refusal: ${label}`);
+  assert(label.includes(store[0].sessions[1].title),
+         `the refusal replaced the row's name instead of joining it: ${label}`);
+  assertEqual(rows[0].getAttribute("aria-label"), null,
+              "an available row was given a refusal label it has no reason for");
 });
 
 check("a locked row is greyed off and cannot be selected", async (tpl) => {
@@ -2099,6 +2179,94 @@ check("a stale held row corrects itself on a tick, without a press", async (tpl)
   assertEqual(held(), 0,
               "the rail still asserts `held` for a session the sweeper released — " +
               "the state it showed for 500 s in the measurement this check is for");
+});
+
+check("a held row's dot follows the turn, not just the holding", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "working";
+  const page = await railed(tpl, { store });
+  const dotClass = () => String(
+    page.railRows()[0].querySelector(".session-status").className);
+  assert(dotClass().includes("status-working"), "the fixture did not render working");
+
+  // The turn ends. Availability has not moved — this ACP holds the session
+  // either way — so a refresh that carried availability alone would leave the
+  // working pulse running on a session that had stopped.
+  store[0].sessions[0].status = "waiting";
+  page.tick();
+  await page.settle();
+  assert(dotClass().includes("status-waiting"),
+         `the dot still claims the agent is working: ${dotClass()}`);
+});
+
+check("the poll moves the open-session counter with the dots", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "held";
+  store.capacity = { held: 1, max: 8 };
+  const page = await railed(tpl, { store });
+  assert(/1\/8 sessions open/.test(page.el("acpRailStatus").textContent),
+         `the fixture's counter did not render: ${page.el("acpRailStatus").textContent}`);
+
+  // The sweeper reclaims it. Every other loader ends in `railSetCapacity`; this
+  // one did not, so the dot went green while the header went on claiming the
+  // slot was taken — two widgets contradicting each other about one fact.
+  store[0].sessions[0].availability = "available";
+  store.capacity = { held: 0, max: 8 };
+  page.tick();
+  await page.settle();
+  assert(/0\/8 sessions open/.test(page.el("acpRailStatus").textContent),
+         "the counter still claims a slot the rail has already drawn as free: " +
+         page.el("acpRailStatus").textContent);
+});
+
+check("closing a session refreshes the rail instead of waiting out the tick", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "held";
+  const page = await railed(tpl, { store, sid: "sess-w0-s0" });
+  const before = page.listingCalls().length;
+
+  // No tick, and no `session_closed` reaching any other socket: this is the
+  // page that did the closing, and the row it just freed is its own.
+  store[0].sessions[0].availability = "available";
+  page.deliver({
+    type: "session_closed", sessionId: "sess-w0-s0",
+    payload: { sessionId: "sess-w0-s0", message: "This session was closed." },
+  });
+  await page.settle();
+
+  assertEqual(page.listingCalls().length - before, 1,
+              "closing asked the server nothing, so the row the user just " +
+              "freed goes on claiming to be open for up to a minute");
+  assertEqual(page.railRows().filter(
+                (r) => r.dataset.availability === "held").length, 0,
+              "the closed session is still drawn as held by this PowerAtlas");
+});
+
+check("adopting a session refreshes the rail instead of waiting out the tick", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  const page = await railed(tpl, { store });
+  const before = page.listingCalls().length;
+
+  // `created: false` — a load, or a re-subscribe. The row is already on the
+  // rail; what changed is that this ACP now holds it, and that is a fact only
+  // the server has, since `held` is read from `_supervisor.sessions`.
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "working";
+  page.deliver({
+    type: "session", sessionId: "sess-w0-s0",
+    payload: { sessionId: "sess-w0-s0", cwd: "C:\\work\\ws-0", created: false,
+               turnActive: false, contextPercent: null },
+  });
+  await page.settle();
+
+  assertEqual(page.listingCalls().length - before, 1,
+              "adopting a session asked the server nothing, so its row stays " +
+              "drawn as free until the 60 s tick");
+  const dot = page.railRows()[0].querySelector(".session-status");
+  assert(dot && String(dot.className).includes("status-working"),
+         "the adopted row carries no live dot, so nothing on it says this ACP " +
+         "is now the thing driving it");
 });
 
 check("the freshness poll keeps the rail's paging and costs one request", async (tpl) => {

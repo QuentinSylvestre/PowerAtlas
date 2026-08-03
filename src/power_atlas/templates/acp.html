@@ -352,10 +352,28 @@
   RAIL_AVAILABILITY.available = 'available';
   RAIL_AVAILABILITY.held = 'held';
   RAIL_AVAILABILITY.locked = 'locked';
-  var RAIL_AVAILABILITY_LABEL = Object.create(null);
-  RAIL_AVAILABILITY_LABEL.available = 'available';
-  RAIL_AVAILABILITY_LABEL.held = 'held by this PowerAtlas';
-  RAIL_AVAILABILITY_LABEL.locked = 'in use by another process — cannot be opened here';
+  // What a held row's dot says, as a closed set on exactly the terms above and
+  // for the same reason: `status` comes off the wire and ends up in a class
+  // name. The three values are the dashboard's own semantic vocabulary, so the
+  // narrowing here and `_STATUS_PRIORITY` in web.py describe one set.
+  //
+  // `working` is the fallback rather than a neutral fourth state. A session
+  // this ACP holds is by definition running, so a verdict that did not arrive
+  // is a failure to classify and never evidence of quiet — the direction
+  // `_resolved_session_status` fails in on the server, kept identical here so a
+  // missing field cannot make the two surfaces disagree.
+  var RAIL_STATUS = Object.create(null);
+  RAIL_STATUS.working = 'working';
+  RAIL_STATUS.waiting = 'waiting';
+  RAIL_STATUS.errored = 'errored';
+  var RAIL_STATUS_LABEL = Object.create(null);
+  RAIL_STATUS_LABEL.working = 'open in this PowerAtlas — the agent is working';
+  RAIL_STATUS_LABEL.waiting = 'open in this PowerAtlas — waiting for you';
+  RAIL_STATUS_LABEL.errored = 'open in this PowerAtlas — something went wrong';
+  // Why a locked row cannot be picked. It lives on the row now rather than on
+  // an indicator, because the dot is drawn for held sessions only: a row that
+  // is greyed out and does not say why reads as broken rather than as taken.
+  var RAIL_LOCKED_REASON = 'in use by another process — cannot be opened here';
   // Every group fetched so far, in fetch order, each carrying the sessions
   // fetched for it so far. Accumulated rather than replaced: "show more" is
   // additive on both axes, and a page that dropped what it had would lose the
@@ -576,6 +594,15 @@
     // re-adopt the session through `load` and spend the ~161 MB again --
     // silently undoing the one thing the user pressed the button for.
     history.replaceState(null, '', location.pathname);
+    // The rail is showing this session as held by a page that has just let go
+    // of it, and the counter is showing the slot as taken. Both are now wrong,
+    // and neither corrects itself before the next tick — which is up to a
+    // minute of the row the user just closed still claiming to be open.
+    //
+    // Placed here rather than in either caller for the reason this function
+    // exists: both release arms have to agree, and one that refreshed while
+    // the other did not is exactly the divergence hoisting them prevented.
+    railRefreshSoon();
   }
 
   function reportLoadFailure() {
@@ -1001,6 +1028,14 @@
     return !!railCapacity && railCapacity.held >= railCapacity.max;
   }
 
+  function railCapacityText() {
+    // A comparable rendering of the pair, so "the number moved" can be told
+    // from "the number did not" without two nullable reads at each call site.
+    // Null keeps its own value rather than collapsing into "0/0": nobody having
+    // said is not the same as having been told nothing is open.
+    return railCapacity ? railCapacity.held + '/' + railCapacity.max : '';
+  }
+
   function railSetCapacity(data) {
     // Both numbers, both finite, both non-negative, `max` positive — or the
     // whole pair is discarded. This value ends up gating a control, so a
@@ -1104,27 +1139,48 @@
   }
 
   function railRefreshStates(incoming) {
-    // Availability only, and nothing else on the row. Titles, timestamps and
-    // the workspace's own fields are not what goes stale in seconds, and
-    // rewriting them would let a background poll rename or reorder a row under
-    // a thumb already travelling towards it. Returns whether anything moved,
-    // so a tick that finds the world unchanged does not rebuild the rail and
-    // does not throw away focus for nothing.
+    // Availability and a held row's status, and nothing else on the row.
+    // Titles, timestamps and the workspace's own fields are not what goes stale
+    // in seconds, and rewriting them would let a background poll rename or
+    // reorder a row under a thumb already travelling towards it. Returns
+    // whether anything moved, so a tick that finds the world unchanged does not
+    // rebuild the rail and does not throw away focus for nothing.
+    //
+    // `status` earns its place on that list by being the other half of one
+    // indicator: a held session that finishes its turn moves working ->
+    // waiting with its availability unchanged, so a refresh carrying only
+    // availability would leave the working pulse running on a session that had
+    // stopped — the same "asserted something false with no way to learn
+    // otherwise" this poll exists to prevent.
     var group = railGroupsByCwd['c:' + incoming.cwd];
     if (!group) return false;
     var fresh = Object.create(null);
     var rows = incoming.sessions || [];
     var i;
     for (i = 0; i < rows.length; i++) {
-      fresh['s:' + rows[i].id] = railAvailability(rows[i].availability);
+      fresh['s:' + rows[i].id] = {
+        availability: railAvailability(rows[i].availability),
+        status: railRowStatus(rows[i].status)
+      };
     }
     var changed = false;
     for (i = 0; i < group.sessions.length; i++) {
       var next = fresh['s:' + group.sessions[i].id];
       if (next === undefined) continue;
-      if (next === railAvailability(group.sessions[i].availability)) continue;
-      group.sessions[i].availability = next;
-      changed = true;
+      var row = group.sessions[i];
+      if (next.availability !== railAvailability(row.availability)) {
+        row.availability = next.availability;
+        changed = true;
+      }
+      // Only where the dot is actually drawn. Every non-held row narrows to the
+      // same `working` fallback, so writing it through would set `changed` on a
+      // field nothing renders and rebuild the whole rail for a difference
+      // nobody can see.
+      if (next.availability === 'held' &&
+          next.status !== railRowStatus(row.status)) {
+        row.status = next.status;
+        changed = true;
+      }
     }
     return changed;
   }
@@ -1159,6 +1215,17 @@
       for (var i = 0; i < groups.length; i++) {
         if (railRefreshStates(groups[i])) changed = true;
       }
+      // The counter moves with the dots or it contradicts them. Every other
+      // loader already ends in `railSetCapacity`; this one did not, so the
+      // sweeper reclaiming a session turned its row green on the next tick
+      // while the header went on claiming the slot was still taken.
+      var capBefore = railCapacityText();
+      railSetCapacity(data);
+      // Only when something moved, and that restraint is the reason this is
+      // safe to add here. `railSummary` owns the status line, and the line
+      // belongs to whatever the user last did — a poll that rewrote it on every
+      // tick would erase their own last message once a minute for no news.
+      if (changed || railCapacityText() !== capBefore) railSummary();
       if (changed) renderRail();
     }).catch(function () {
       // Silent on purpose, and this is the one place on the page where that is
@@ -1168,6 +1235,39 @@
       // so the next tick tries again — which is the whole recovery needed.
       railBusy = false;
     });
+  }
+
+  // How long a refresh waits on an in-flight rail request before trying again,
+  // and how many times. `railRefresh` drops a request made while `railBusy` is
+  // set, which is right for the 60 s tick — the next one is a minute away and
+  // nothing is lost — and wrong for the hooks below, where the user has just
+  // opened or closed a session and is watching the row they acted on.
+  //
+  // Bounded rather than persistent. Every loader clears `railBusy` in both its
+  // arms, so 2 s is far longer than a settling request needs, and the periodic
+  // tick remains the backstop for anything stranger than that.
+  var RAIL_REFRESH_SOON_MS = 250;
+  var RAIL_REFRESH_SOON_TRIES = 8;
+  var railRefreshTimer = null;
+
+  function railRefreshSoon() {
+    // The entry point for "the rail just moved because of something this page
+    // did" — a session loaded, closed, or lost with the agent. It differs from
+    // the tick in one way only: it will not quietly give up on a busy rail.
+    //
+    // Collapses rather than queues. Two of these in the same moment describe
+    // one world, and the answer to the second would be the answer to the first.
+    if (railRefreshTimer) return;
+    railRefreshRetry(RAIL_REFRESH_SOON_TRIES);
+  }
+
+  function railRefreshRetry(left) {
+    if (!railBusy) { railRefresh(); return; }
+    if (left <= 0) return;
+    railRefreshTimer = setTimeout(function () {
+      railRefreshTimer = null;
+      railRefreshRetry(left - 1);
+    }, RAIL_REFRESH_SOON_MS);
   }
 
   function loadGroupSessions(group) {
@@ -1215,6 +1315,13 @@
     return RAIL_AVAILABILITY[value] || 'available';
   }
 
+  // Named for the row rather than the rail because `railStatus` is already the
+  // status *line* under the list — two different things one letter apart, and
+  // the shadowing would be silent.
+  function railRowStatus(value) {
+    return RAIL_STATUS[value] || 'working';
+  }
+
   function railWhen(value) {
     // The store's timestamps are ISO strings. Anything else is shown as it came
     // rather than parsed into an `Invalid Date`, which would read as a defect in
@@ -1258,20 +1365,53 @@
     // an error the user cannot act on.
     row.disabled = locked;
 
-    var dot = document.createElement('span');
-    dot.className = 'acp-avail acp-avail-' + state;
-    // The dot carries no text, so without this it is an indicator with no
-    // accessible name.
-    dot.setAttribute('aria-label', RAIL_AVAILABILITY_LABEL[state]);
-    dot.title = RAIL_AVAILABILITY_LABEL[state];
-    row.appendChild(dot);
-
-    var title = document.createElement('span');
-    title.className = 'acp-rail-row-title';
     // 185 of the real store's 1,210 sessions carry neither a title nor a first
     // prompt to fall back to, so a blank one is a normal reading and not an
     // edge case; a row with nothing in it is unclickable in practice.
-    title.textContent = String(session.title || '').trim() || 'untitled session';
+    var titleText = String(session.title || '').trim() || 'untitled session';
+
+    // **A dot means this ACP is driving the session, and nothing else does.**
+    // Its presence is the marker; its colour is then free to mean what the
+    // dashboard's means, which is what a green row used to contradict — green
+    // said "free to open" here and "the agent is working" there.
+    //
+    // The classes are the dashboard's own, taken rather than copied: a rail
+    // rule that restated the hue would drift the first time either moved.
+    if (state === 'held') {
+      var status = railRowStatus(session.status);
+      var dot = document.createElement('span');
+      dot.className = 'session-status status-' + status;
+      // The dot carries no text, so without this it is an indicator with no
+      // accessible name.
+      dot.setAttribute('aria-label', RAIL_STATUS_LABEL[status]);
+      dot.title = RAIL_STATUS_LABEL[status];
+      row.appendChild(dot);
+    } else {
+      // Holds the dot's width open so the titles line up down the list. A dot
+      // drawn on some rows and not others otherwise pushes those titles 16 px
+      // right of their neighbours', and a column that steps in and out reads as
+      // ragged rather than as marked — which would spend the attention the dot
+      // is there to attract. `aria-hidden` because it is spacing and says
+      // nothing: an empty element in the accessibility tree is one more stop
+      // for a screen reader and no information at the end of it.
+      var pad = document.createElement('span');
+      pad.className = 'acp-rail-row-pad';
+      pad.setAttribute('aria-hidden', 'true');
+      row.appendChild(pad);
+      if (locked) {
+        // Disabled is what stops the press; this is what explains it. Both are
+        // needed: the greying is a colour, and a colour is not an answer to
+        // "why can I not open this one?". `aria-label` replaces the accessible
+        // name outright, so the title has to be carried into it or the row
+        // announces only its refusal and never which session is refusing.
+        row.title = RAIL_LOCKED_REASON;
+        row.setAttribute('aria-label', titleText + ' — ' + RAIL_LOCKED_REASON);
+      }
+    }
+
+    var title = document.createElement('span');
+    title.className = 'acp-rail-row-title';
+    title.textContent = titleText;
     row.appendChild(title);
 
     var when = document.createElement('span');
@@ -2112,7 +2252,19 @@
       // already lists or has on a page nobody loaded, and re-fetching its
       // workspace on every reconnect would spend a request per socket for a row
       // that is already there.
-      if (payload.created) railAdoptCreated(payload.cwd);
+      if (payload.created) {
+        // Which already ends in `railSetCapacity`/`railSummary` for the
+        // workspace it pulls, so a second refresh behind it would ask the same
+        // question twice.
+        railAdoptCreated(payload.cwd);
+      } else {
+        // The row is already on the rail; what changed is that this ACP now
+        // holds it. That moves it available -> held and the counter with it,
+        // and neither is something the page can write for itself: `held` is
+        // read from `_supervisor.sessions` on the server, and the dot's status
+        // is a verdict only the listing carries.
+        railRefreshSoon();
+      }
       return;
     }
     if (type === 'session_closed') {
@@ -2146,6 +2298,10 @@
       restorePendingPrompt('the agent exited');
       logLine('error', '← agent_died (exit ' + payload.exitCode + ') ' +
                        payload.message);
+      // Every held session went with the agent, not just this one — so this is
+      // the one hook where the rail is wrong about rows the page was never
+      // reading. The counter goes to 0 with them.
+      railRefreshSoon();
       return;
     }
     if (type === 'error') {

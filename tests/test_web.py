@@ -13124,8 +13124,86 @@ class TestAcpListingEndpoint:
                               "has_more", "sessions", "exists"}
         assert group["cwd"] == "C:\\dev\\PowerAtlas"
         assert group["name"] == "PowerAtlas"
+        # `status` joined the row in 2026-08-03. It is the dashboard's semantic
+        # verdict, carried so the rail can draw the same dot for a session both
+        # surfaces are showing — and it is `""` for every row this ACP does not
+        # hold, because that is the only row the rail draws a dot for.
         assert set(group["sessions"][0]) == {"id", "title", "updated_at",
-                                             "availability"}
+                                             "availability", "status"}
+
+    def _held_rows(self, client, acp_listing_store, monkeypatch, semantic):
+        """One workspace holding a free, a held and a foreign-locked session,
+        with the classifier replaced by *semantic*. Returns `(rows_by_id,
+        classified_ids)`."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import presence as presence_mod
+        from power_atlas import web as web_mod
+
+        acp_listing_store["add"]("C:\\dev\\ws", [
+            _acp_row("free"), _acp_row("mine"), _acp_row("theirs")])
+        acp_listing_store["locked"].add("theirs")
+        acp_mod._supervisor.sessions["mine"] = {"cwd": "C:\\dev\\ws"}
+
+        asked = []
+
+        def _classify(session_id, provider, cwd):
+            asked.append(session_id)
+            return semantic(session_id)
+
+        monkeypatch.setattr(web_mod, "get_semantic_status", _classify)
+        # No process scan in a unit test, and none needed: kiro-cli reports no
+        # status of its own, so an empty snapshot is what the real one carries
+        # for this provider anyway.
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+        try:
+            rows = client.get(self._PATH).json()["groups"][0]["sessions"]
+        finally:
+            acp_mod._supervisor.sessions.pop("mine", None)
+        return {r["id"]: r for r in rows}, asked
+
+    def test_status_is_settled_only_for_the_rows_this_acp_holds(
+            self, client, acp_listing_store, monkeypatch):
+        """A dot means "this ACP is driving it", so a verdict is spent on
+        exactly those rows and no others.
+
+        The count is the assertion rather than the shape. Classifying a whole
+        page to render at most `MAX_SESSIONS` dots is the cost this narrowing
+        exists to avoid, and a response-shape check passes either way.
+        """
+        from power_atlas.status_classifier import SemanticStatus
+        rows, asked = self._held_rows(
+            client, acp_listing_store, monkeypatch,
+            lambda _sid: SemanticStatus.WAITING)
+
+        assert rows["mine"]["status"] == "waiting"
+        # `""` and not a verdict: a locked session is live in a process this
+        # cannot ask, and an available one has no live process at all.
+        assert rows["free"]["status"] == ""
+        assert rows["theirs"]["status"] == ""
+        assert asked == ["mine"], (
+            "a transcript was read for a row that draws no dot; the tail parse "
+            f"is the cost being avoided here — classified {asked}")
+
+    @pytest.mark.parametrize("semantic", [
+        pytest.param(lambda _sid: None, id="nothing-classifiable"),
+        pytest.param(
+            lambda _sid: (_ for _ in ()).throw(RuntimeError("tail unreadable")),
+            id="classifier-raised"),
+    ])
+    def test_a_held_row_nothing_can_classify_still_reads_as_working(
+            self, client, acp_listing_store, monkeypatch, semantic):
+        """The direction this fails in is the load-bearing part.
+
+        A session this process holds is running by definition — we *are* the
+        process — so an unreadable transcript is a failure to classify and never
+        evidence of quiet. Both arms land on `working`: the one
+        `_resolved_session_status` takes for the dashboard's own row, and the
+        one the `except` here takes when the classifier raises outright.
+        """
+        rows, _asked = self._held_rows(
+            client, acp_listing_store, monkeypatch, semantic)
+        assert rows["mine"]["status"] == "working"
 
     def test_capacity_counts_held_sessions_and_the_cap(self, client,
                                                        acp_listing_store):
