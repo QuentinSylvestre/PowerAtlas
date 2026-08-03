@@ -266,6 +266,19 @@ script { display: none; }
 .tail-md li { margin: 1px 0; }
 .tail-md strong { font-weight: 600; }
 .tail-md em { font-style: italic; }
+/* GFM tables. `display: block` + `width: max-content` is what lets a wide table
+   scroll inside the tooltip instead of pushing it past the 800px cap on
+   `.session-tail-tooltip`; CSS regenerates the anonymous table boxes, so the
+   columns still line up. `nowrap` on cells suits what these tables actually
+   hold — model names, timings, counts — and the horizontal scroll is what pays
+   for it; a table of prose would want `white-space: normal` and a cell
+   max-width instead. Cell alignment arrives as an inline `text-align` from the
+   `:---:` delimiter and correctly beats the declaration here. */
+.tail-md table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 4px 0; font-size: 10px; }
+.tail-md th, .tail-md td { border: 1px solid var(--border); padding: 2px 6px; text-align: left; white-space: nowrap; }
+.tail-md th { background: rgba(255,255,255,0.05); color: var(--text); font-weight: 600; }
+.tail-md td { color: var(--text-muted); }
+.tail-md tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
 .tail-empty { font-size: 11px; color: var(--text-dim); padding: 4px 8px; font-style: italic; }
 
 

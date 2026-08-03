@@ -61,7 +61,16 @@ try:
     # escape=True causes mistune to HTML-entity-encode raw HTML tags (e.g. <script> → &lt;script&gt;)
     # rather than passing them through. JS-URL hrefs (javascript:) are sanitized via
     # mistune's HTMLRenderer.safe_url() unconditionally. This makes output safe for | safe filter.
-    _md = mistune.create_markdown(escape=True)
+    #
+    # `table` is a plugin because pipe tables are GFM and not CommonMark, and
+    # mistune ships only the latter by default. Without it a table renders as
+    # the literal pipes, collapsed onto one line by `.tail-md`'s
+    # `white-space: normal` — and agent transcripts are full of tables.
+    # Both sanitizing guarantees above still hold inside cells: `escape=` is
+    # consumed by the `HTMLRenderer` this path uses, and the plugin adds one
+    # attribute, `style="text-align:…"`, whose value comes from the `:---:`
+    # delimiter and not from cell text.
+    _md = mistune.create_markdown(escape=True, plugins=["table"])
 except Exception:  # noqa: BLE001
     import html as _html
     import logging as _logging

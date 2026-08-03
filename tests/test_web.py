@@ -613,6 +613,35 @@ def test_session_tail_returns_messages(mock_tail, mock_first, mock_cache, client
 
 
 @patch("power_atlas.web.data.session_cache")
+@patch("power_atlas.web.data.get_first_prompt", return_value="")
+@patch("power_atlas.web.data.get_session_tail")
+def test_session_tail_renders_markdown_table(mock_tail, mock_first, mock_cache, client):
+    """Pipe tables reach the tooltip as a table, which needs mistune's `table` plugin.
+
+    Tables are GFM and not CommonMark, so `create_markdown()` alone leaves them
+    as literal pipes that `.tail-md`'s `white-space: normal` then collapses onto
+    one line — which is what an agent's benchmark table looked like in the
+    tooltip before the plugin was enabled. Asserting the delimiter row is gone
+    is the half that fails if the plugin is ever dropped: the cell text itself
+    survives either way.
+    """
+    mock_tail.return_value = [
+        "Here is the breakdown:\n\n"
+        "| model | p50 | p90 |\n"
+        "|---|---|---|\n"
+        "| claude-sonnet-4.6 | 1.46 | 2.85 |\n"
+    ]
+    mock_cache.get.return_value = None
+    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789&cwd=C%3A%5CTest")
+    assert resp.status_code == 200
+    assert "<table>" in resp.text
+    assert "<th>model</th>" in resp.text
+    assert "<td>claude-sonnet-4.6</td>" in resp.text
+    assert "|---|" not in resp.text        # delimiter row consumed, not shown as prose
+    assert "Here is the breakdown" in resp.text  # prose around the table survives
+
+
+@patch("power_atlas.web.data.session_cache")
 @patch("power_atlas.web.data.get_first_prompt", return_value="hello user")
 @patch("power_atlas.web.data.get_session_tail")
 def test_session_tail_graceful_no_cache(mock_tail, mock_first, mock_cache, client):
@@ -645,14 +674,26 @@ def test_session_tail_empty(mock_tail, mock_first, mock_cache, client):
 @patch("power_atlas.web.data.get_first_prompt", return_value="<script>alert(1)</script>")
 @patch("power_atlas.web.data.get_session_tail")
 def test_session_tail_xss_stripped(mock_tail, mock_first, mock_cache, client):
-    """mistune escape=True entity-encodes raw HTML tags; JS-URL hrefs (javascript:) are sanitized via mistune's HTMLRenderer.safe_url() unconditionally. Output is safe for | safe filter."""
-    mock_tail.return_value = ["<script>evil()</script>", "[click](javascript:alert(1))"]
+    """mistune escape=True entity-encodes raw HTML tags; JS-URL hrefs (javascript:) are sanitized via mistune's HTMLRenderer.safe_url() unconditionally. Output is safe for | safe filter.
+
+    The third message puts both payloads inside table cells. A new container is
+    exactly where an allowlist gets bypassed, so the guarantees are asserted on
+    the path the `table` plugin added rather than only on the paragraph path
+    they were first measured on.
+    """
+    mock_tail.return_value = [
+        "<script>evil()</script>",
+        "[click](javascript:alert(1))",
+        "| a | b |\n|---|---|\n| <script>cell()</script> | [x](javascript:alert(2)) |\n",
+    ]
     mock_cache.get.return_value = None
     resp = client.get("/partials/session-tail?sid=deadbeef-dead-beef-dead-beefdeadbeef&cwd=C%3A%5CTest")
     assert resp.status_code == 200
     assert "<script>" not in resp.text          # raw tags not present
     assert "&lt;script&gt;" in resp.text        # entity-encoded form IS present (confirms _md was invoked)
     assert "javascript:alert" not in resp.text  # mistune's HTMLRenderer.safe_url() replaces javascript: href with #harmful-link
+    assert "<td>" in resp.text                  # the table branch really ran, so the three assertions above cover it too
+    assert "&lt;script&gt;cell()" in resp.text  # the in-cell payload specifically, entity-encoded
 
 
 def test_session_tail_invalid_sid(client):
