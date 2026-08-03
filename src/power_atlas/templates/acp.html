@@ -277,6 +277,11 @@
   // fetched for it so far. Accumulated rather than replaced: "show more" is
   // additive on both axes, and a page that dropped what it had would lose the
   // row the user was reading towards.
+  // `{held, max}` from the listing endpoint, or null before the first answer.
+  // Null and "0 of 8" are different states and the rail must not conflate
+  // them: null means nobody has said, and rendering a guess there would put a
+  // number on screen that no measurement produced.
+  var railCapacity = null;
   var railGroups = [];
   // cwd -> the entry in `railGroups` for it, so a workspace that comes back on
   // a later page merges into the copy on screen instead of being drawn beside
@@ -852,9 +857,45 @@
   function railSummary() {
     // Both loaders end here, so the status never keeps a "loading…" line that
     // the answer has already made false.
-    railStatus.textContent = railGroups.length
+    var text = railGroups.length
       ? railGroups.length + ' of ' + railGroupTotal + ' workspaces'
       : 'no sessions found';
+    // The session cap, stated before it is hit rather than after. The rail can
+    // reach it in eight taps and used to show neither the count nor a way to
+    // free a slot, so the ninth tap was the first mention of a limit — and it
+    // arrived *after* the transcript had been cleared.
+    //
+    // Only rendered from a server-supplied pair. Counting `held` rows on
+    // screen would be a lower bound, because the rail is paged and a held
+    // session can sit on a page nobody has loaded — and a cap indicator that
+    // silently under-reports is worse than none.
+    if (railCapacity) {
+      text += ' · ' + railCapacity.held + '/' + railCapacity.max + ' sessions open';
+      if (railCapacity.held >= railCapacity.max) {
+        text += ' (at the limit — close one to open another)';
+      }
+    }
+    railStatus.textContent = text;
+  }
+
+  function railAtCapacity() {
+    return !!railCapacity && railCapacity.held >= railCapacity.max;
+  }
+
+  function railSetCapacity(data) {
+    // Both numbers, both finite, both non-negative, `max` positive — or the
+    // whole pair is discarded. This value ends up gating a control, so a
+    // half-parsed one that made `held >= max` true by accident would lock the
+    // rail against a server that is perfectly willing to serve. Same closed
+    // reading the availability set gets, for the same reason: it comes off the
+    // wire.
+    var cap = data && data.capacity;
+    if (!cap || typeof cap.held !== 'number' || typeof cap.max !== 'number' ||
+        !isFinite(cap.held) || !isFinite(cap.max) || cap.held < 0 || cap.max <= 0) {
+      railCapacity = null;
+      return;
+    }
+    railCapacity = { held: cap.held, max: cap.max };
   }
 
   function railMergeSessions(group, rows) {
@@ -927,6 +968,7 @@
       railGroupPage = page;
       railHasMore = !!(data && data.has_more);
       railGroupTotal = (data && data.group_total) || railGroups.length;
+      railSetCapacity(data);
       railSummary();
       renderRail();
     }).catch(function (err) {
@@ -1104,7 +1146,10 @@
       // that stops drawing the row as one.
       if (locked) return;
       railFocus = { sid: session.id };
-      selectSession(session.id);
+      // `state`, not `session.availability`: the narrowed value, so the cap
+      // guard reads the same closed set the class name does and cannot be
+      // handed `__proto__` or an unknown string off the wire.
+      selectSession(session.id, state);
     });
     return row;
   }
@@ -1243,10 +1288,34 @@
     railRestoreFocus();
   }
 
-  function selectSession(sid) {
+  function selectSession(sid, availability) {
     if (!sid || sid === sessionId) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       logLine('error', 'not connected — reconnect before opening a session');
+      return;
+    }
+    // Refuse here, before anything is spent. Everything below this line is
+    // committed optimistically — the transcript is cleared, `sessionId` is
+    // repointed and `?sid=` is rewritten — and that is correct when the server
+    // is going to serve the session. At the cap it is not: `load` is refused
+    // with `session_limit`, and by then the conversation the user was reading
+    // has already gone. The state is recoverable by re-tapping the previous
+    // row, which is precisely the kind of recovery a user should never have to
+    // discover.
+    //
+    // Scoped to sessions that need a *new* slot. A row already `held` by this
+    // PowerAtlas is in `_supervisor.sessions` already, so `subscribe` answers
+    // it without spending anything and the cap is irrelevant — refusing those
+    // would make the cap look like it locks the rail rather than bounding it.
+    // A row whose availability is unknown is treated as needing a slot, since
+    // the alternative is guessing in the direction that loses the transcript.
+    if (availability !== 'held' && railAtCapacity()) {
+      addMessage('note', 'Not opening this session: ' + railCapacity.held +
+        ' of ' + railCapacity.max + ' are already open, which is the limit. ' +
+        'Open one of them and press Close to free a slot — sessions left idle ' +
+        'are also reclaimed on their own.');
+      logLine('error', 'not opening ' + sid + ' — at the session limit (' +
+                       railCapacity.held + '/' + railCapacity.max + ')');
       return;
     }
     sessionId = sid;

@@ -1621,7 +1621,8 @@ def _acp_exists_flags(cwds: list[str]) -> list[bool]:
 
 
 def _acp_listing(cwd: str, group_page: int, group_size: int,
-                 session_page: int, session_size: int, held) -> dict:
+                 session_page: int, session_size: int, held,
+                 capacity: dict) -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     Paginated **independently at both levels** (D19). The existing listing
@@ -1717,6 +1718,14 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         "group_page": group_page,
         "group_total": group_total,
         "has_more": groups_has_more,
+        # How full the session cap is. The rail can reach `MAX_SESSIONS` in
+        # eight taps and had no way to say so: the ninth was refused by the
+        # server *after* `selectSession` had already cleared the transcript and
+        # repointed `?sid=`, so the cost of finding out was losing what you were
+        # reading. Carried on the listing rather than on a websocket frame
+        # because the rail already re-fetches this every 60 s, so the number
+        # converges without a new protocol surface.
+        "capacity": capacity,
     }
 
 
@@ -1778,11 +1787,20 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     # the loop makes. `frozenset` also makes the snapshot un-mutable by anything
     # downstream, so the thread cannot write back into loop-owned state either.
     held = frozenset(acp._supervisor.sessions) if acp is not None else frozenset()
+    # Same loop-side snapshot rule as `held`, and the same reason. `_reserved`
+    # counts creations in flight, and `at_capacity()` is
+    # `len(sessions) + _reserved >= MAX_SESSIONS` — so counting `held` alone
+    # would report a free slot during the ~0.5-1.1 s a `session/new` is
+    # resolving, which is exactly when a second tap arrives.
+    capacity = {
+        "held": (len(held) + acp._supervisor._reserved) if acp is not None else 0,
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held)
+        held, capacity)
 
 
 # --- The secret exchange -------------------------------------------------

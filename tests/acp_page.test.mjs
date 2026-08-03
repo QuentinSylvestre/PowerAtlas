@@ -370,6 +370,15 @@ function serveListing(store, params) {
     group_page: single ? 1 : groupPage,
     group_total: single ? matched.length : store.length,
     has_more: single ? false : start + groupSize < store.length,
+    // The session cap, as the route reports it. Served on every answer, so a
+    // check that never sets `store.capacity` still exercises the normal path
+    // rather than the "server said nothing" fallback.
+    //
+    // Keyed on presence, not truthiness: a check that sets `capacity` to null
+    // or to a half-formed pair is modelling a server that answered badly, and
+    // `||` would quietly hand it a healthy default instead — testing the stub's
+    // fallback rather than the page's.
+    capacity: "capacity" in store ? store.capacity : { held: 0, max: 8 },
   };
 }
 
@@ -1412,6 +1421,94 @@ check("selecting an available row opens that session", async (tpl) => {
   assertEqual(page.sentOf("subscribe").length, 1,
               "re-selecting the open session resubscribed and wiped its transcript");
 });
+
+check("the rail says how many sessions are open before the limit is hit", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 3 });
+  store.capacity = { held: 3, max: 8 };
+  const page = await railed(tpl, { store });
+  const status = page.el("acpRailStatus").textContent;
+  assert(status.includes("3/8"),
+         `the rail never says how full the session cap is: ${status}`);
+  assert(!status.includes("at the limit"),
+         `three of eight is not the limit, but the rail says it is: ${status}`);
+});
+
+check("at the limit the rail says so and refuses a row that needs a slot", async (tpl) => {
+  // The defect: the rail reaches MAX_SESSIONS in eight taps, and the ninth was
+  // refused by the *server* — after selectSession had already cleared the
+  // transcript and repointed ?sid=. So the cost of discovering the limit was
+  // losing the conversation you were reading, recoverable only by knowing to
+  // re-tap the previous row.
+  const store = fakeStore({ workspaces: 1, sessions: 3 });
+  store.capacity = { held: 8, max: 8 };
+  const page = await railed(tpl, { store });
+  assert(page.el("acpRailStatus").textContent.includes("at the limit"),
+         "the rail is at the cap and does not say so");
+
+  page.railRows()[0].dispatch("click");
+  assertEqual(page.sentOf("subscribe").length, 0,
+              "the row was opened at the session cap, spending a slot the server " +
+              "would have refused");
+  assertEqual(page.el("acpSid").textContent, "",
+              "the page adopted a session it was never going to be given");
+  assertEqual(page.urls.length, 0,
+              "?sid= was repointed at a session the server refuses, so a reload " +
+              "strands the page on it");
+  assert(page.transcript().includes("8 of 8"),
+         "the refusal did not say what the limit is");
+  assert(page.transcript().includes("Close"),
+         "the refusal did not name the remedy, which is the whole complaint " +
+         "F-14 records: closeBtn lives in the conversation pane, so a phone " +
+         "user has to be told where to go");
+});
+
+check("at the limit a session already held still opens", async (tpl) => {
+  // The cap bounds *new* slots. A row already held by this PowerAtlas is in
+  // _supervisor.sessions already, so subscribe answers it without spending
+  // anything — refusing those would make the cap look like it locks the rail
+  // rather than bounding it, and the session you most want at the cap is one
+  // of the eight already open.
+  const store = fakeStore({ workspaces: 1, sessions: 3 });
+  store.capacity = { held: 8, max: 8 };
+  store[0].sessions[1].availability = "held";
+  const page = await railed(tpl, { store });
+  page.railRows()[1].dispatch("click");
+  assertEqual(page.sentOf("subscribe").length, 1,
+              "a session this PowerAtlas already holds was refused at the cap, " +
+              "though opening it spends nothing");
+});
+
+// Null and "0 of 8" are different states. A rail that guessed would either put
+// a number on screen no measurement produced, or — worse — gate a control on
+// it: a half-parsed pair that made `held >= max` true by accident would lock
+// the rail against a server perfectly willing to serve.
+//
+// The numeric-strings case is the one that isolates the `typeof` check, and it
+// is here because a mutation run found the first fixture did not. `{held: "8",
+// max: null}` is already rejected by the `max <= 0` arm, so deleting the type
+// checks left the harness green. `{held: "8", max: "8"}` survives every other
+// arm — `isFinite` coerces, `"8" < 0` is false, `"8" <= 0` is false — and then
+// `"8" >= "8"` compares as strings and is **true**, so without `typeof` the
+// rail would refuse every row on a server reporting eight of eight hundred.
+for (const [label, capacity] of [
+  ["a half-formed pair", { held: "8", max: null }],
+  ["numeric strings", { held: "8", max: "8" }],
+  ["a missing field", { held: 3 }],
+  ["nothing at all", null],
+]) {
+  check(`a capacity that is ${label} is not invented or acted on`, async (tpl) => {
+    const store = fakeStore({ workspaces: 1, sessions: 3 });
+    store.capacity = capacity;
+    const page = await railed(tpl, { store });
+    const status = page.el("acpRailStatus").textContent;
+    assert(!status.includes("sessions open"),
+           `the rail rendered a cap from an unusable payload: ${status}`);
+    page.railRows()[0].dispatch("click");
+    assertEqual(page.sentOf("subscribe").length, 1,
+                "an unusable capacity payload locked the rail; with no answer " +
+                "the server is still the authority and the tap must go through");
+  });
+}
 
 check("a session with no title renders a placeholder, not a blank row", async (tpl) => {
   const store = fakeStore({ workspaces: 1, sessions: 3 });

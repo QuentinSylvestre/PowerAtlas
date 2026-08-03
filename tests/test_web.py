@@ -12849,7 +12849,13 @@ class TestAcpListingEndpoint:
         a field added later fails here rather than reaching a phone."""
         acp_listing_store["add"]("C:\\dev\\PowerAtlas", [_acp_row("s1", title="a title")])
         body = client.get(self._PATH).json()
-        assert set(body) == {"groups", "group_page", "group_total", "has_more"}
+        # `capacity` joined in 2026-08-03 (F-14). It is the only field here that
+        # describes this PowerAtlas rather than the store, and it is deliberate:
+        # the rail could reach MAX_SESSIONS in eight taps while showing neither
+        # the count nor a way to free a slot. It carries no session content.
+        assert set(body) == {"groups", "group_page", "group_total", "has_more",
+                             "capacity"}
+        assert set(body["capacity"]) == {"held", "max"}
         group = body["groups"][0]
         # `exists` joined the group in Phase 5b. It is the one thing in this
         # payload a browser cannot derive for itself, which is why it is served
@@ -12860,6 +12866,65 @@ class TestAcpListingEndpoint:
         assert group["name"] == "PowerAtlas"
         assert set(group["sessions"][0]) == {"id", "title", "updated_at",
                                              "availability"}
+
+    def test_capacity_counts_held_sessions_and_the_cap(self, client,
+                                                       acp_listing_store):
+        """What the rail renders as `N/8 sessions open`."""
+        from power_atlas import acp as acp_mod
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        acp_mod._supervisor.sessions["a"] = {"cwd": "C:\\dev\\ws"}
+        acp_mod._supervisor.sessions["b"] = {"cwd": "C:\\dev\\ws"}
+        try:
+            body = client.get(self._PATH).json()
+        finally:
+            acp_mod._supervisor.sessions.pop("a", None)
+            acp_mod._supervisor.sessions.pop("b", None)
+        assert body["capacity"] == {"held": 2, "max": acp_mod.MAX_SESSIONS}
+
+    def test_capacity_counts_a_creation_still_in_flight(self, client,
+                                                        acp_listing_store):
+        """`_reserved`, not just `sessions` — and the difference is the whole
+        race the number exists to cover.
+
+        `at_capacity()` is `len(sessions) + _reserved >= MAX_SESSIONS`, so a
+        `session/new` that is still resolving already holds a slot the rail
+        cannot see in `sessions`. Counting only `sessions` would report a free
+        slot for the ~0.5-1.1 s a creation takes — which is exactly the window
+        in which a second tap arrives, and exactly the tap this number exists
+        to stop.
+        """
+        from power_atlas import acp as acp_mod
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        acp_mod._supervisor.sessions["a"] = {"cwd": "C:\\dev\\ws"}
+        acp_mod._supervisor._reserved += 1
+        try:
+            body = client.get(self._PATH).json()
+        finally:
+            acp_mod._supervisor.sessions.pop("a", None)
+            acp_mod._supervisor._reserved -= 1
+        assert body["capacity"]["held"] == 2
+
+    def test_capacity_agrees_with_at_capacity_at_the_boundary(self, client,
+                                                             acp_listing_store):
+        """The rail's `held >= max` and the server's `at_capacity()` must be the
+        same predicate, or the page refuses a tap the server would have served
+        (or the reverse, which loses a transcript).
+        """
+        from power_atlas import acp as acp_mod
+        acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
+        for i in range(acp_mod.MAX_SESSIONS):
+            acp_mod._supervisor.sessions["s%d" % i] = {"cwd": "C:\\dev\\ws"}
+        try:
+            assert acp_mod._supervisor.at_capacity()
+            cap = client.get(self._PATH).json()["capacity"]
+            assert cap["held"] >= cap["max"]
+            acp_mod._supervisor.sessions.pop("s0")
+            assert not acp_mod._supervisor.at_capacity()
+            cap = client.get(self._PATH).json()["capacity"]
+            assert cap["held"] < cap["max"]
+        finally:
+            for i in range(acp_mod.MAX_SESSIONS):
+                acp_mod._supervisor.sessions.pop("s%d" % i, None)
 
     def test_the_documented_extent_is_the_whole_store_not_the_first_page(self):
         """The disclosure this route makes, stated at its true size.
@@ -13335,10 +13400,12 @@ class TestAcpListingEndpoint:
 
     def test_an_unknown_workspace_is_an_empty_listing_not_an_error(self, client,
                                                                    acp_listing_store):
+        from power_atlas import acp as acp_mod
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
         body = client.get(self._PATH, params={"cwd": "C:\\dev\\gone"}).json()
         assert body == {"groups": [], "group_page": 1, "group_total": 0,
-                        "has_more": False}
+                        "has_more": False,
+                        "capacity": {"held": 0, "max": acp_mod.MAX_SESSIONS}}
         assert acp_listing_store["lock_calls"] == []
 
 
