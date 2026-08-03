@@ -509,6 +509,19 @@ async def lifespan(app_instance):
     # designed to degrade to "/acp disabled" (see the import at the top of this
     # module); an unguarded start here would promote it to "the application
     # will not start".
+    # Connect the two modules that deliberately do not know about each other.
+    # `acp` states an isolation boundary in its own header and `presence` runs
+    # on worker threads that D9 keeps away from loop-owned state, so neither
+    # imports the other; this module already imports both, which makes it the
+    # only place the wire can be run. Closes D32 — see `presence._acp_live`.
+    #
+    # Before `start_sweeper`, and published once immediately, so the very first
+    # `_scan` after a restart sees an empty live set rather than no answer:
+    # every kiro lock on disk at that moment is by definition an orphan of a
+    # previous process, and the ones naming a pid we have since reused are the
+    # case this exists to reject.
+    if acp is not None:
+        acp.set_sessions_changed_hook(presence.publish_acp_sessions)
     sweeper = acp.start_sweeper() if acp is not None else None
     try:
         yield

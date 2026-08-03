@@ -448,6 +448,45 @@ MAX_SESSION_ID_CHARS = 128
 # cannot turn one refusal into a large frame.
 MAX_ERROR_DETAIL_CHARS = 512
 
+# Called with `(frozenset of live session ids, agent pid or None)` whenever the
+# set of sessions this supervisor holds changes. `None` until something wires
+# it, which is the state for every test that does not opt in.
+#
+# **A hook and not an import, for a reason this module states about itself.**
+# The header above declares an isolation boundary — exactly two names from the
+# rest of the package — and a plan exit criterion greps this file for module
+# names to keep it honest. The consumer is `presence`, which needs to know
+# which locks written by *our* agent are orphans (D32). Importing it here would
+# break that boundary; importing `acp` from `presence` is the direction D9
+# rejected, because `presence` runs on worker threads and `sessions` is
+# loop-owned. So neither module knows the other exists and `web.py` — which
+# already imports both — connects them.
+#
+# Only ever called from the event loop, so the callee can rebind a global
+# without a lock.
+#
+# Set it through `set_sessions_changed_hook`, not by assignment: the initial
+# publish matters and is easy to forget.
+sessions_changed_hook = None
+
+
+def set_sessions_changed_hook(hook) -> None:
+    """Install the hook and publish the current set once, immediately.
+
+    The immediate publish is the point of having a function at all. Without it
+    the consumer holds its "nothing published" default until the first session
+    is created or closed — which on a fresh start is indefinitely, since a
+    PowerAtlas nobody has opened `/acp` on never mutates `sessions`. That
+    default has to mean "no answer" rather than "no sessions", so the consumer
+    stays conservative, and the two states are only distinguishable if someone
+    says so.
+
+    Loop-thread only, like the hook itself.
+    """
+    global sessions_changed_hook
+    sessions_changed_hook = hook
+    _supervisor._publish_live()
+
 # How much of a session's `<sid>.json` is read to recover the directory it was
 # created against. `cwd` is that file's second key, while the rest of it is the
 # whole conversation state and runs to megabytes — `presence.py` parses it
@@ -1359,6 +1398,26 @@ class _Supervisor:
         proc = self._proc
         return self._ready and proc is not None and proc.poll() is None
 
+    def _publish_live(self) -> None:
+        """Tell whoever is listening which sessions this agent holds.
+
+        Call after **every** mutation of ``sessions``. There are five, plus a
+        backstop on the sweeper tick — so a sixth added later converges within
+        one tick instead of drifting silently, which is the failure mode a
+        publish-at-each-site design otherwise has.
+
+        Swallows everything the hook raises. This runs on the paths that create,
+        load and close sessions; a consumer that throws must degrade to a stale
+        dashboard dot, never to a session that could not be opened.
+        """
+        hook = sessions_changed_hook
+        if hook is None:
+            return
+        try:
+            hook(frozenset(self.sessions), self.agent_pid())
+        except Exception:
+            log.exception("ACP: publishing the live session set failed")
+
     def agent_pid(self) -> int | None:
         """The pid of the process this supervisor is bound to, if any.
 
@@ -1583,6 +1642,7 @@ class _Supervisor:
         job, self._job = self._job, None
         self._ready = False
         self.sessions.clear()
+        self._publish_live()
         self.history.clear()
         self.inflight.clear()
         self.closing.clear()
@@ -2219,6 +2279,7 @@ class _Supervisor:
                     "The agent returned an unusable sessionId: "
                     f"{session_id!r:.200}")
             self.sessions[session_id] = _new_session_record(cwd)
+            self._publish_live()
             self.history[session_id] = _History()
         finally:
             # Every path releases the slot, including cancellation: the session
@@ -2267,6 +2328,7 @@ class _Supervisor:
                 live = self.sessions[session_id]
                 return {"sessionId": session_id, "cwd": live.get("cwd", cwd)}
             self.sessions[session_id] = _new_session_record(cwd)
+            self._publish_live()
             self.history[session_id] = _History()
             # Recorded, so the slot it reserved is now counted by `sessions`.
             # Released without suspending in between, which is what makes the
@@ -2279,6 +2341,7 @@ class _Supervisor:
                     {"sessionId": session_id, "cwd": cwd, "mcpServers": []})
             except BaseException:
                 self.sessions.pop(session_id, None)
+                self._publish_live()
                 self.history.pop(session_id, None)
                 raise
         finally:
@@ -2358,6 +2421,7 @@ class _Supervisor:
             raise AgentDied("The agent is not running.")
         await self._request(CLOSE_METHOD, {"sessionId": session_id})
         self.sessions.pop(session_id, None)
+        self._publish_live()
         # The ring buffer goes with it. It is keyed by session id and nothing
         # else reaches it, so a buffer left behind here is up to
         # HISTORY_MAX_BYTES resident for the app's lifetime with no path that
@@ -3360,6 +3424,14 @@ async def _sweep_once() -> None:
     Recorded here so the sweeper's claim is not read as more than it is.
     """
     now = time.monotonic()
+    # Backstop for `_publish_live`. Every mutation of `sessions` calls it, but
+    # that is a property of five call sites rather than of the type, and a
+    # sixth added later would drift silently — the symptom being a dashboard
+    # dot that is wrong for as long as the agent lives, which is exactly the
+    # bug this mechanism exists to fix. Republishing on the tick makes any such
+    # miss self-heal within one sweep interval instead of never. Costs one
+    # frozenset of a dict that is at most MAX_SESSIONS long.
+    _supervisor._publish_live()
     # Forget the failure counts of sessions that are no longer here, whatever
     # took them — this is what keeps `_sweep_failures` bounded by the live
     # session count rather than growing for the application's lifetime.

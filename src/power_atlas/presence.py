@@ -122,6 +122,57 @@ _SIDECAR_SKEW_S = 120.0
 # guard set is deliberately good enough, not airtight.
 _SIDECAR_BACKWARD_SKEW_S = 5.0
 
+# What PowerAtlas's own ACP agent currently holds: `(live session ids, agent
+# pid)`, or `(frozenset(), None)` when nothing has published — which is the
+# state for a plain `presence` import, every test that does not opt in, and any
+# build where `acp` failed to import.
+#
+# **This closes D32, and the shape is the point.** `session/load` makes our own
+# agent write a lock naming *itself*, so a lock orphaned by a failed load, or by
+# a close whose terminate raised, carries `pid == the live agent` and a forward
+# delta. D10 dropped the forward ceiling for kiro-cli — legitimately, since the
+# agent serves sessions for the whole life of the app — and with it went the
+# only thing that used to expire such an orphan after 120 s. It now reads live
+# for the agent's entire lifetime.
+#
+# D9 forbids the obvious fix, and rightly: `presence` runs on worker threads and
+# `_supervisor.sessions` is loop-owned and unlocked, so iterating it here races
+# every mutation the loop makes. What is read instead is a **published
+# snapshot** — an immutable `frozenset` rebound by the loop, never mutated in
+# place. A reader sees the old set or the new one, never a half-built one, and
+# `presence` still touches no loop-owned structure.
+#
+# Neither module imports the other. `acp` states an isolation boundary in its
+# own header — two names from the package, with a plan exit criterion grepping
+# for module names — and `presence -> acp` is the direction D9 rejected. So the
+# publisher is injected by `web.py`, which already imports both.
+#
+# Fails safe in the direction that matters. With nothing published the pid is
+# `None`, no record is ever suppressed, and this file behaves exactly as it did
+# before — a wrong "live" dot, which is today's accepted D32 residual, rather
+# than a session wrongly hidden from the dashboard.
+_acp_live: tuple[frozenset, int | None] = (frozenset(), None)
+
+
+def publish_acp_sessions(session_ids, agent_pid) -> None:
+    """Publish what the ACP supervisor holds. Called from the event loop only.
+
+    Rebinding a module global is atomic under the GIL, so no lock is needed and
+    none is taken: a worker thread mid-scan holds a reference to the previous
+    tuple and finishes against a consistent view of it.
+
+    Copied into a `frozenset` rather than stored as given. The caller's argument
+    is derived from loop-owned state, and storing a live view would hand worker
+    threads the very object D9 exists to keep away from them.
+    """
+    global _acp_live
+    try:
+        ids = frozenset(session_ids or ())
+    except TypeError:
+        ids = frozenset()
+    _acp_live = (ids, agent_pid if isinstance(agent_pid, int) else None)
+
+
 _KIRO_LOCK_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 _CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
 
@@ -462,6 +513,10 @@ def _scan() -> Snapshot:
     except Exception:  # pragma: no cover - sidecars are best-effort
         log.exception("sidecar enumeration failed")
         records = []
+    # One read for the whole pass. Re-reading per record would let a mid-scan
+    # publish show one snapshot for one session and a newer one for the next,
+    # which is the inconsistency the immutable snapshot exists to prevent.
+    acp_sids, acp_pid = _acp_live
     for provider, pid, sid, started, cwd, status, reason in records:
         # Per-record isolation: one unparseable or oddly-typed sidecar must
         # not drop the remaining sessions, which would silently regress to
@@ -485,6 +540,24 @@ def _scan() -> Snapshot:
             # the conservative bound until someone makes kiro-cli's case for
             # it. See _SIDECAR_SKEW_S.
             if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
+                continue
+            # D32, closed. A lock naming *our own* ACP agent for a session that
+            # agent no longer holds is an orphan it left behind — a failed
+            # `session/load`, or a close whose terminate raised. Dropping the
+            # forward ceiling above is what made those permanent: the pid is
+            # genuinely live and the delta is genuinely forward, so every other
+            # check here passes.
+            #
+            # Read once, outside the try, so a scan cannot see one tuple for
+            # one record and a newer one for the next.
+            #
+            # Only ever *removes* a claim, and only for a pid we own. A foreign
+            # kiro-cli's lock is untouched — its pid is not the agent's — and a
+            # session the agent really holds is in the published set. The
+            # residual it replaces is the opposite direction and worse: a live
+            # dot on a card for a session nothing can open.
+            if (provider == "kiro-cli" and acp_pid is not None
+                    and pid == acp_pid and sid not in acp_sids):
                 continue
             key = (provider, sid)
             live_sids.add(key)

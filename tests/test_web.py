@@ -3176,6 +3176,111 @@ class TestAcpMarkdownRendering:
             asyncio.run(acp_mod._supervisor.close_session(sid))
         assert sid not in acp_mod._bubbles
 
+    def test_closing_a_session_publishes_the_new_live_set(self, acp_session):
+        """The publish that closes D32, driven through the real close path.
+
+        `presence` can only reject a lock our own agent orphaned if it is told
+        which sessions that agent still holds. That telling is five call sites
+        rather than a property of the type, so it is asserted where it matters
+        — after a real `close_session`, not by reading the source.
+        """
+        acp_mod, sid = acp_session
+        published = []
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        previous = acp_mod.sessions_changed_hook
+        try:
+            acp_mod.set_sessions_changed_hook(
+                lambda ids, pid: published.append((ids, pid)))
+            assert published and sid in published[-1][0], (
+                "installing the hook did not publish the current set, so a "
+                "consumer holds its no-answer default until something changes")
+            with patch.object(acp_mod._Supervisor, "_request", answered), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+                asyncio.run(acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod.sessions_changed_hook = previous
+        assert sid not in published[-1][0], (
+            "the session was closed and nothing was published, so presence "
+            "keeps reporting its orphaned lock live for the agent's lifetime")
+
+    def test_a_failed_load_republishes_after_rolling_back(self, acp_store):
+        """The single most D32-shaped path there is.
+
+        `session/load` makes the agent write a lock naming itself, and *then*
+        the request can fail. The rollback drops the record; if nothing is
+        published, `presence` still believes the agent holds that session, so
+        the lock it just orphaned is not suppressed and reads live for the
+        agent's whole lifetime — which is D32 exactly, reinstated by the one
+        code path that creates it.
+        """
+        acp_mod, store = acp_store
+        published = []
+
+        async def refuses(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("nope")
+
+        previous = acp_mod.sessions_changed_hook
+        try:
+            acp_mod.sessions_changed_hook = lambda ids, pid: published.append(ids)
+            with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                    patch.object(acp_mod._Supervisor, "_request", refuses), \
+                    pytest.raises(acp_mod.AgentRejected):
+                asyncio.run(acp_mod._supervisor.load_session(
+                    "rollback-0001", str(store)))
+        finally:
+            acp_mod.sessions_changed_hook = previous
+            acp_mod._supervisor.sessions.pop("rollback-0001", None)
+            acp_mod._supervisor.history.pop("rollback-0001", None)
+        assert published, "a failed load published nothing at all"
+        assert "rollback-0001" not in published[-1], (
+            "the rolled-back session is still in the published set, so the "
+            "lock the agent wrote for it is not recognised as an orphan")
+
+    def test_a_hook_that_raises_cannot_break_a_close(self, acp_session):
+        """This runs on the create/load/close paths. A consumer that throws
+        must cost a stale dashboard dot, never a session that will not close."""
+        acp_mod, sid = acp_session
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        def boom(ids, pid):
+            raise RuntimeError("the consumer is broken")
+
+        previous = acp_mod.sessions_changed_hook
+        try:
+            acp_mod.set_sessions_changed_hook(boom)
+            with patch.object(acp_mod._Supervisor, "_request", answered), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+                asyncio.run(acp_mod._supervisor.close_session(sid))
+        finally:
+            acp_mod.sessions_changed_hook = previous
+        assert sid not in acp_mod._supervisor.sessions
+
+    def test_the_sweeper_republishes_as_a_backstop(self, acp_session):
+        """Every mutation publishes, but that is five call sites and a sixth
+        added later would drift silently — with the symptom being a wrong dot
+        for as long as the agent lives. The tick makes any miss self-heal."""
+        acp_mod, sid = acp_session
+        published = []
+        previous = acp_mod.sessions_changed_hook
+        try:
+            acp_mod.sessions_changed_hook = lambda ids, pid: published.append(ids)
+            # Mutate behind the mechanism's back, exactly as a missed call site
+            # would, then run one tick.
+            acp_mod._supervisor.sessions["sneaked-in"] = {"cwd": "C:\\x"}
+            asyncio.run(acp_mod._sweep_once())
+        finally:
+            acp_mod.sessions_changed_hook = previous
+            acp_mod._supervisor.sessions.pop("sneaked-in", None)
+        assert published, "the sweeper tick published nothing"
+        assert "sneaked-in" in published[0], (
+            "the backstop did not republish, so a missed call site stays wrong "
+            "until the process restarts")
+
     def test_a_dead_agent_drops_every_bubble(self, acp_session):
         acp_mod, sid = acp_session
         acp_mod._bubble_append(sid, "half an answer")
@@ -5725,6 +5830,39 @@ class TestAcpSessionRecordHoldsNoDeadState:
     agent-authored dicts of no bounded size, held for the session's whole life
     for nobody.
     """
+
+    def test_a_created_session_is_published_before_the_call_returns(self, acp_store):
+        """The create half of the D32 publish, driven through `new_session`.
+
+        Ordering is the substance. `presence` scans on a worker thread at a
+        cadence nothing here controls, so a session that exists but has not
+        been published is a window in which its own freshly-written lock — pid
+        equal to our agent's, forward delta — is indistinguishable from an
+        orphan and gets suppressed. That is a *missing* live dot for a live
+        session, which is the failure direction this whole mechanism was
+        careful to avoid everywhere else.
+        """
+        acp_mod, store = acp_store
+        published = []
+
+        async def created(self, method, params, timeout=None):
+            return {"sessionId": "published-0001"}
+
+        previous = acp_mod.sessions_changed_hook
+        try:
+            acp_mod.sessions_changed_hook = lambda ids, pid: published.append(ids)
+            with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                    patch.object(acp_mod._Supervisor, "_request", created):
+                asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        finally:
+            acp_mod.sessions_changed_hook = previous
+            acp_mod._supervisor.sessions.pop("published-0001", None)
+            acp_mod._supervisor.history.pop("published-0001", None)
+        assert published, "creating a session published nothing"
+        assert "published-0001" in published[-1], (
+            "the new session was not in the published set, so presence would "
+            "read its own agent's fresh lock as an orphan and hide a live "
+            "session from the dashboard")
 
     def test_a_created_session_records_only_what_is_read(self, acp_store):
         acp_mod, store = acp_store
@@ -10376,8 +10514,14 @@ class TestAcpLifespanWiring:
             # teardown, and `acp.shutdown()` is synchronous so it cannot wait.
             order.append("shutdown, sweeper done=%s" % state["task"].done())
 
+        # `set_sessions_changed_hook` is part of what lifespan requires of the
+        # acp module, so the stub carries it: the wiring that closes D32 runs
+        # here, before the sweeper starts, and a stub missing it would fail for
+        # a reason unrelated to the ordering this test is about.
+        hooked = []
         fake = types.SimpleNamespace(start_sweeper=start_sweeper,
-                                     shutdown=shutdown)
+                                     shutdown=shutdown,
+                                     set_sessions_changed_hook=hooked.append)
 
         async def run():
             async with web_mod.lifespan(None):

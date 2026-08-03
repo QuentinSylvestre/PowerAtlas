@@ -1,5 +1,6 @@
 """Tests for data module."""
 
+import contextlib
 import itertools
 import json
 import os
@@ -2005,6 +2006,110 @@ def test_presence_sidecar_rejects_pid_recycled_onto_same_binary(tmp_path):
         kiro_dir=tmp_path,
     )
     assert snap.is_live("kiro-cli", "C:/work/proj", "sess-old") is False
+
+
+@contextlib.contextmanager
+def _acp_published(session_ids, agent_pid):
+    """Publish an ACP live-set for the duration of one test, then restore.
+
+    Restored rather than left set: `_acp_live` is a module global and a test
+    that leaked one would silently change what every later presence test sees.
+    """
+    from power_atlas import presence
+    previous = presence._acp_live
+    presence.publish_acp_sessions(session_ids, agent_pid)
+    try:
+        yield
+    finally:
+        presence._acp_live = previous
+
+
+def test_presence_hides_a_lock_our_own_agent_orphaned(tmp_path):
+    """D32, closed.
+
+    `session/load` makes PowerAtlas's own ACP agent write a lock naming
+    *itself*. A lock left behind by a failed load, or by a close whose
+    terminate raised, therefore has `pid == the live agent` and a *forward*
+    delta — so every other check in the sidecar pass passes it, and since D10
+    dropped the forward ceiling for kiro-cli there is nothing left to expire
+    it. It read live for the agent's whole lifetime.
+    """
+    _write_kiro_lock(tmp_path, "sess-orphan", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    agent = _FakeProc("kiro-cli.exe", ["kiro-cli.exe", "acp", "-a"],
+                      pid=500, create_time=started - 600.0)
+    # The agent holds a different session; this lock's is not among them.
+    with _acp_published({"sess-other"}, 500):
+        snap = _scan_with([agent], kiro_dir=tmp_path)
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-orphan") is False
+
+    # Positive control, same fixture: once the agent does hold it, it is live.
+    with _acp_published({"sess-orphan"}, 500):
+        snap = _scan_with([agent], kiro_dir=tmp_path)
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-orphan") is True
+
+
+def test_presence_leaves_a_foreign_kiro_lock_alone(tmp_path):
+    """The suppression is scoped to *our* agent's pid and nothing else.
+
+    A kiro-cli the user started in a terminal holds its own sessions, and this
+    process has no idea which. Suppressing on session id alone would hide every
+    terminal session from the dashboard — the opposite of what presence is for.
+    """
+    _write_kiro_lock(tmp_path, "sess-terminal", 700, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    foreign = _FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                        pid=700, create_time=started - 1.2)
+    # Our agent is pid 500 and holds nothing. 700 is somebody else's.
+    with _acp_published(set(), 500):
+        snap = _scan_with([foreign], kiro_dir=tmp_path)
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-terminal") is True
+
+
+def test_presence_suppresses_nothing_until_something_publishes(tmp_path):
+    """No answer must not read as "no sessions".
+
+    A plain `presence` import, a test that does not opt in, and a build where
+    `acp` failed to import all leave the default in place. Failing that way
+    round restores today's accepted D32 residual — a wrong live dot — rather
+    than hiding a session the dashboard should show.
+    """
+    from power_atlas import presence
+    assert presence._acp_live == (frozenset(), None)
+    _write_kiro_lock(tmp_path, "sess-a", 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "acp", "-a"],
+                   pid=500, create_time=started - 600.0)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli", "C:/work/proj", "sess-a") is True
+
+
+def test_publish_acp_sessions_copies_and_survives_bad_input():
+    """The stored set must not alias the caller's, and must not raise.
+
+    The argument is derived from loop-owned state; storing a live view would
+    hand worker threads exactly what D9 keeps away from them.
+    """
+    from power_atlas import presence
+    previous = presence._acp_live
+    try:
+        live = {"a", "b"}
+        presence.publish_acp_sessions(live, 42)
+        live.add("c")
+        assert presence._acp_live[0] == frozenset({"a", "b"})
+        assert presence._acp_live[1] == 42
+        # A non-iterable, and a pid that is not an int, are both survivable:
+        # this runs on the session create/close paths and must never raise
+        # there.
+        presence.publish_acp_sessions(object(), "not-a-pid")
+        assert presence._acp_live == (frozenset(), None)
+    finally:
+        presence._acp_live = previous
 
 
 def test_presence_sidecar_rejects_sidecar_predating_its_process(tmp_path):
