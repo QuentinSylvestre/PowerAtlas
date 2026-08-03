@@ -1032,6 +1032,92 @@ check("session_closed clears the session id out of the URL", (tpl) => {
               "spends again the memory the Close press existed to free");
 });
 
+// Every other clear `session_closed` performs, each pinned by the effect a user
+// would see rather than by the statement that produces it.
+//
+// These exist because a mutation run found the arm almost unguarded here.
+// Deleting `sessionId = null`, `setContext(null)`, `setTurn(false)` or
+// `sidEl.textContent = ''` from the branch one at a time left this harness
+// fully green -- only `history.replaceState` above was killed. The single thing
+// covering the other four was a Python test asserting their *source text*
+// inside the branch, which is why hoisting them into a shared helper broke it
+// twice: it pinned where the statements were written, not what they did.
+// Behavioural checks first, then that test goes and the hoist is free.
+check("session_closed lets go of the session id itself", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "This session was closed." },
+  });
+  // Reconnecting is the observable: the page resubscribes to whatever id it
+  // still holds. Holding a released one re-adopts a session the server has
+  // already torn down -- the same waste the URL clear exists to prevent, by a
+  // route the URL assertion cannot see.
+  page.click("acpReconnect");
+  page.open();
+  assertEqual(page.sentOf("subscribe").length, 0,
+              "the page still held the closed session's id and resubscribed to it");
+});
+
+check("session_closed stands the controls down", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01", turnActive: true });
+  assertEqual(page.el("acpStop").hidden, false,
+              "the fixture is wrong: no turn is running, so there is nothing to stand down");
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "This session was closed." },
+  });
+  // A turn cannot outlive the session it ran in. Leaving Stop on screen offers
+  // a cancel that names a session the agent no longer has.
+  assertEqual(page.el("acpStop").hidden, true,
+              "Stop survived the close, so the page still offers to cancel a turn " +
+              "in a session that no longer exists");
+  assert(page.el("acpSend").disabled,
+         "Send came back enabled against a closed session");
+  assertEqual(page.el("acpClose").hidden, true,
+              "Close survived the close of the session it would have closed");
+});
+
+check("session_closed takes the context meter and the header id down", (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  page.deliver({
+    type: "meta", sessionId: live,
+    payload: { contextPercent: 42 },
+  });
+  assertEqual(page.el("acpContext").hidden, false,
+              "the fixture is wrong: the meter never came up, so hiding it proves nothing");
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "This session was closed." },
+  });
+  assertEqual(page.el("acpContext").hidden, true,
+              "the context meter still reports a percentage for a session that is gone");
+  assertEqual(page.el("acpSid").textContent, "",
+              "the header still names the closed session");
+});
+
+check("session_closed gives the New-session buttons back", (tpl) => {
+  // The sixth clear in the branch, and the one no test reached: a close that
+  // arrives while a `new` is in flight must release both copies of the button.
+  // Left disabled they read "Creating…" forever, and the rail's copy is the
+  // only one a phone can see -- so the recovery from a close is a page reload.
+  const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
+  // The server acknowledges a `new` before the session exists, and that ack is
+  // what disables the buttons -- the click alone does not.
+  page.deliver({ type: "meta", payload: { pending: "new" } });
+  assert(page.el("acpNew").disabled && page.el("acpRailNew").disabled,
+         "the fixture is wrong: no `new` is in flight, so releasing it proves nothing");
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "This session was closed." },
+  });
+  assert(!page.el("acpNew").disabled,
+         "New session stayed disabled after the close, reading 'Creating…' with " +
+         "nothing coming to release it");
+  assert(!page.el("acpRailNew").disabled,
+         "the rail's New session -- the only copy a phone can reach -- stayed disabled");
+});
+
 check("a close_in_progress for the held session empties the page", (tpl) => {
   const { page, live } = connected(tpl, { sid: "sess-from-url-01" });
   page.deliver({

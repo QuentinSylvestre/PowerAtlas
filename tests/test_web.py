@@ -5183,17 +5183,19 @@ class TestAcpSessionClose:
             for i in range(acp_mod.MAX_SESSIONS - 1):
                 acp_mod._supervisor.sessions.pop("filler%d" % i, None)
 
-    def test_the_page_clears_the_session_and_the_url(self):
-        """A ?sid= left in place makes a reload re-adopt the session through
-        `load` and spend the ~161 MB again — undoing the button."""
-        from power_atlas.web import templates
-        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
-        branch = src.split("type === 'session_closed'", 1)[1].split(
-            "return;", 1)[0]
-        assert "sessionId = null" in branch
-        assert "history.replaceState(null, '', location.pathname)" in branch
-        assert "setContext(null)" in branch
-
+    # `test_the_page_clears_the_session_and_the_url` used to sit here. It split
+    # the template on `type === 'session_closed'` and asserted that three
+    # statements appeared as literal source text inside that branch, which
+    # pinned *where the code was written* rather than what it did — so the
+    # duplication between that arm and the terminal `close_in_progress` one
+    # could not be hoisted without breaking it, and twice was not.
+    #
+    # Retired once the property was covered by behaviour instead. The six
+    # clears now live in `releaseSession()` and are driven end to end in
+    # tests/acp_page.test.mjs, each verified by deleting it from the branch and
+    # confirming the harness goes red — which this test could not have done,
+    # since deleting a statement is exactly what it was watching for and
+    # nothing else was.
     def test_close_is_off_while_a_turn_runs(self):
         from power_atlas.web import templates
         src = templates.env.loader.get_source(templates.env, "acp.html")[0]

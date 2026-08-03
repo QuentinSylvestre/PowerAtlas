@@ -428,6 +428,32 @@
     contextLabel.textContent = 'context ' + percent + '%';
   }
 
+  function releaseSession() {
+    // Everything that stops being true when this page lets go of a session.
+    //
+    // Called from both arms that release one: `session_closed`, and the
+    // terminal `close_in_progress` refusal where no `session_closed` is coming.
+    // Those two must agree, and for a while they only agreed by hand -- the
+    // clears were written out twice with a comment on each telling the next
+    // reader to change both. That instruction is exactly the thing a shared
+    // function makes unnecessary.
+    //
+    // It was duplicated for a reason that has now gone: a test asserted these
+    // statements as literal source text *inside* the `session_closed` branch,
+    // so hoisting them broke it -- twice. It has been replaced by checks in
+    // tests/acp_page.test.mjs that drive the frame and read the effects, each
+    // one verified to fail when its clear is removed.
+    sessionId = null;
+    setTurn(false);
+    setContext(null);
+    setPending(false);
+    sidEl.textContent = '';
+    // The id leaves the URL with the session. Left in place, a reload would
+    // re-adopt the session through `load` and spend the ~161 MB again --
+    // silently undoing the one thing the user pressed the button for.
+    history.replaceState(null, '', location.pathname);
+  }
+
   function reportLoadFailure() {
     // The recovery exists — back to the dashboard, or reload — but nothing
     // said so, and the two buttons that offer it are unhidden only from
@@ -1430,24 +1456,12 @@
       return;
     }
     if (type === 'session_closed') {
-      // These clears are repeated by the terminal `close_in_progress` arm
-      // below rather than shared through a helper: tests/test_web.py pins them
-      // as literal text *inside this branch*, so hoisting them silently breaks
-      // that test. Change one arm, change the other.
-      sessionId = null;
-      setTurn(false);
-      setContext(null);
-      setPending(false);
-      sidEl.textContent = '';
+      releaseSession();
       // The transcript stays: the user pressed Close on a conversation they
       // were just reading, and it is still worth reading afterwards.
       addMessage('note', payload.message + ' The conversation itself is still '
         + "in the agent's own store, so it can be reopened from the "
         + 'PowerAtlas dashboard.');
-      // The id leaves the URL with the session. Left in place, a reload would
-      // re-adopt the session through `load` and spend the ~161 MB again —
-      // silently undoing the one thing the user pressed the button for.
-      history.replaceState(null, '', location.pathname);
       logLine('info', '← session_closed ' + payload.sessionId);
       return;
     }
@@ -1489,14 +1503,7 @@
         // reload. A refused `prompt`, or a second `close`, is the opposite
         // case: that socket *is* subscribed and a `session_closed` will follow.
         setLoading(null);
-        // Same clears as `session_closed`, deliberately duplicated — see the
-        // note there.
-        sessionId = null;
-        setTurn(false);
-        setContext(null);
-        setPending(false);
-        sidEl.textContent = '';
-        history.replaceState(null, '', location.pathname);
+        releaseSession();
         if (subscribed) {
           // `session_closed` keeps the transcript on purpose — the user was
           // reading that conversation a moment ago and it is still worth
