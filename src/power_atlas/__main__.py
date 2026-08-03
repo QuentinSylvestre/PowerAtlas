@@ -753,6 +753,16 @@ def _run_foreground() -> None:
     if acp_module is not None:
         acp_module.apply_config(config)
 
+    # The same "read once at startup" values, snapshotted so the settings panel
+    # can tell what this process is running from what is merely on disk.
+    # Deliberately outside the `acp_module` guard above: three of the six keys
+    # are ACP's, but `port`, `peek_hotkey` and `remote_bind_address` are not,
+    # and an ACP import failure must not leave the panel unable to say what is
+    # in force for the other three. Before the server binds, so nothing can
+    # serve `/api/settings` ahead of the snapshot.
+    from .web import set_startup_config
+    set_startup_config(config)
+
     # Determine port: 0 = random, >0 = attempt static with random fallback
     desired_port = config.port
 

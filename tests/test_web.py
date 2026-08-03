@@ -1237,7 +1237,8 @@ def test_api_settings_returns_expected_keys(mock_load, mock_autostart, client):
     body = resp.json()
     expected_keys = {"active_launch_profile", "launch_profiles", "peek_hotkey", "port", "default_directory", "provider_settings", "custom_launchers", "autostart",
                      "acp_max_sessions", "acp_idle_ttl_seconds", "acp_prompt_silence_seconds",
-                     "remote_bind_address", "restart_to_apply"}
+                     "remote_bind_address", "restart_to_apply", "in_force",
+                     "restart_pending"}
     assert set(body.keys()) == expected_keys
     assert body["autostart"] is False
     assert "terminal_command" not in body
@@ -11945,6 +11946,80 @@ class TestSettingsSurface:
                 "port"} <= _RESTART_TO_APPLY
         body = client.get("/api/settings").json()
         assert set(body["restart_to_apply"]) == set(_RESTART_TO_APPLY)
+
+    def test_without_a_startup_snapshot_every_restart_key_reads_pending(self, client):
+        """No snapshot is not the same as nothing pending, and must not read
+        as it.
+
+        A test importing the app, or an entry point that never calls
+        `set_startup_config`, leaves `_STARTUP_VALUES` at None. Reporting an
+        empty `restart_pending` there would tell the user every value is live
+        when nothing knows whether it is — the same positively-wrong-field
+        failure `peek_hotkey` already cost once. Over-warning is the safe
+        direction.
+        """
+        import power_atlas.web as web_mod
+        saved = web_mod._STARTUP_VALUES
+        web_mod._STARTUP_VALUES = None
+        try:
+            body = client.get("/api/settings").json()
+        finally:
+            web_mod._STARTUP_VALUES = saved
+        assert body["in_force"] == {}
+        assert set(body["restart_pending"]) == set(web_mod._RESTART_TO_APPLY)
+
+    @patch("power_atlas.web.autostart.is_enabled", return_value=False)
+    @patch("power_atlas.web.load_config")
+    def test_only_the_keys_the_process_is_not_running_read_pending(
+            self, mock_load, _mock_autostart, client):
+        """The badge's whole reason for existing: stored != in force.
+
+        Before the snapshot the endpoint could not tell the two apart, so the
+        page badged every restart-only key unconditionally and no restart ever
+        cleared it.
+        """
+        import power_atlas.web as web_mod
+        from power_atlas.config import Config
+        started = Config()
+        mock_load.return_value = started
+        saved = web_mod._STARTUP_VALUES
+        try:
+            web_mod.set_startup_config(started)
+            # Nothing touched yet: the process is running what is stored.
+            body = client.get("/api/settings").json()
+            assert body["restart_pending"] == []
+            assert body["in_force"]["acp_max_sessions"] == started.acp_max_sessions
+
+            # One value edited on disk. Only that key is now unapplied, and
+            # `in_force` keeps reporting what the process actually runs.
+            changed = Config()
+            changed.acp_max_sessions = started.acp_max_sessions + 4
+            mock_load.return_value = changed
+            body = client.get("/api/settings").json()
+            assert body["restart_pending"] == ["acp_max_sessions"]
+            assert body["acp_max_sessions"] == started.acp_max_sessions + 4
+            assert body["in_force"]["acp_max_sessions"] == started.acp_max_sessions
+        finally:
+            web_mod._STARTUP_VALUES = saved
+
+    def test_the_startup_snapshot_copies_values_rather_than_holding_the_config(self):
+        """`save_config` rewrites the config in place on any settings change.
+
+        A snapshot holding the object would track those edits and report every
+        value as in force — the exact bug it exists to prevent, and invisible
+        because the endpoint would look like it was working.
+        """
+        import power_atlas.web as web_mod
+        from power_atlas.config import Config
+        config = Config()
+        saved = web_mod._STARTUP_VALUES
+        try:
+            web_mod.set_startup_config(config)
+            config.acp_max_sessions += 4
+            assert web_mod._STARTUP_VALUES["acp_max_sessions"] != config.acp_max_sessions
+            assert web_mod._restart_pending(config) == ["acp_max_sessions"]
+        finally:
+            web_mod._STARTUP_VALUES = saved
 
     def test_peek_hotkey_says_restart_to_apply(self, client):
         """`peek_hotkey` is read once, at startup:

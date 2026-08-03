@@ -2766,7 +2766,9 @@ check("every key the server reports as restart-only gets a row and a badge", () 
 
   // The two keys with a live control in the topbar get the badge on the control
   // itself. Without it the hotkey field accepts a new value, saves it, and
-  // behaves as though nothing happened until the next launch.
+  // behaves as though nothing happened until the next launch. No `in_force` and
+  // no `restart_pending` above, which is an older server: the page must
+  // over-warn rather than go silent, so every restart-only key reads pending.
   for (const sel of [".peek-hotkey-group", ".port-group"]) {
     const badge = p.badge(sel);
     assert(badge, `${sel} carries no restart badge`);
@@ -2780,6 +2782,55 @@ check("every key the server reports as restart-only gets a row and a badge", () 
   assertEqual(p.badge(".peek-hotkey-group"), null,
               "the badge outlived the server's report of the key");
   assert(p.badge(".port-group"), "the still-reported key lost its badge");
+});
+
+check("the badge marks what is not in force, not what could ever need a restart", () => {
+  const p = loadPanel();
+  // `port` is running what is stored; `peek_hotkey` is not. Only the second is
+  // unfinished business, and before this the badge sat on both forever — no
+  // restart could clear it, which is what made it read as a permanent nag.
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey"],
+    restart_pending: ["peek_hotkey"],
+    in_force: { port: 4915, peek_hotkey: "ctrl+shift+z" },
+    port: 4915,
+    peek_hotkey: "ctrl+alt+p",
+  });
+  assertEqual(p.badge(".port-group"), null,
+              "a value the process is actually running was badged as pending");
+  assert(p.badge(".peek-hotkey-group"),
+         "a saved-but-unapplied value was not badged");
+
+  // The rows show what is RUNNING, not what is stored. This is the half that
+  // was quietly wrong: the panel says "takes effect on restart" and then
+  // rendered the stored value, so a changed setting displayed as though it had
+  // already taken effect.
+  const values = p.rows().map(
+    (r) => r.querySelector(".remote-restart-value").textContent);
+  assertEqual(values[1], "ctrl+shift+z",
+              "the row showed the stored value where it promised the one in force");
+
+  // The disagreement is stated on the row too, naming the stored value, so the
+  // panel does not force a comparison against the field the user just edited.
+  const rowBadge = p.rows()[1].querySelector(".restart-badge");
+  assert(rowBadge, "the row that disagrees with the store said nothing about it");
+  assert(/ctrl\+alt\+p/.test(String(rowBadge.title)),
+         `the row badge does not name the saved value: ${rowBadge.title}`);
+  assertEqual(p.rows()[0].querySelector(".restart-badge"), null,
+              "a row in force was marked as pending");
+
+  // Nothing pending is the state after a relaunch, and it must clear both.
+  p.sandbox.renderRestartKeys({
+    restart_to_apply: ["port", "peek_hotkey"],
+    restart_pending: [],
+    in_force: { port: 4915, peek_hotkey: "ctrl+alt+p" },
+    port: 4915,
+    peek_hotkey: "ctrl+alt+p",
+  });
+  assertEqual(p.badge(".peek-hotkey-group"), null,
+              "the badge survived the relaunch that applied the value");
+  assertEqual(p.rows()[1].querySelector(".restart-badge"), null,
+              "the row badge survived the relaunch that applied the value");
 });
 
 check("the status pill is the one thing in the topbar that cannot be squeezed", () => {

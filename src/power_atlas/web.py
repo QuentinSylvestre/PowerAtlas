@@ -2741,7 +2741,16 @@ async def api_settings():
         "acp_prompt_silence_seconds": config.acp_prompt_silence_seconds,
         # The address only; the secret is served by `/api/remote-access` alone.
         "remote_bind_address": config.remote_bind_address,
+        # Which keys are restart-only. A property of the setting, unchanging.
         "restart_to_apply": sorted(_RESTART_TO_APPLY),
+        # What this process is actually running, for those same keys, and which
+        # of them the stored config no longer agrees with. The two are separate
+        # because the panel needs both: the value in force to display, and the
+        # disagreement to badge. `in_force` is `{}` when no snapshot was taken,
+        # in which case `restart_pending` lists everything — see
+        # `_STARTUP_VALUES` for why that direction is the safe one.
+        "in_force": dict(_STARTUP_VALUES or {}),
+        "restart_pending": _restart_pending(config),
     }
 
 
@@ -3043,6 +3052,50 @@ _RESTART_TO_APPLY = frozenset({
     # field, because the user acts on it.
     "peek_hotkey",
 })
+
+# The restart-only values as this process actually read them, captured once
+# before the app serves anything. Everything else the settings endpoint returns
+# is `config.X` — the value **on disk** — and for a restart-only key those two
+# are the same only until someone edits one. Without this snapshot the panel
+# that exists to say what is in force was rendering the stored value instead,
+# so changing `acp_max_sessions` from 8 to 12 made it report 12 while the
+# running app was still capping at 8.
+#
+# `None` means never captured, which is not the same as "nothing pending" and
+# must not be reported as such: a test importing the app, or an entry point
+# that does not call the setter, would otherwise have the page conclude every
+# value is live. That case falls back to the old unconditional behaviour —
+# every restart-only key reads as pending — because over-warning is the safe
+# direction here and under-warning is the bug this whole block is about.
+_STARTUP_VALUES: dict | None = None
+
+
+def set_startup_config(config) -> None:
+    """Record the restart-only values this process started with.
+
+    A startup setter mirroring `set_remote_host` and `acp.apply_config`, called
+    from `__main__` beside the latter. Snapshots by value rather than holding
+    the config object, which `save_config` rewrites in place on any settings
+    change — a held reference would track the edits and report every value as
+    in force, which is precisely the failure it exists to prevent.
+    """
+    global _STARTUP_VALUES
+    _STARTUP_VALUES = {key: getattr(config, key, None)
+                       for key in _RESTART_TO_APPLY}
+    log.info("startup snapshot of restart-only settings: %s", _STARTUP_VALUES)
+
+
+def _restart_pending(config) -> list:
+    """Which restart-only keys hold a stored value the process is not running.
+
+    Falls back to *every* restart-only key when no snapshot was taken — see
+    `_STARTUP_VALUES`. Comparison is by equality on the loaded value, so a
+    config rewritten with an identical value does not read as pending.
+    """
+    if _STARTUP_VALUES is None:
+        return sorted(_RESTART_TO_APPLY)
+    return sorted(key for key in _RESTART_TO_APPLY
+                  if getattr(config, key, None) != _STARTUP_VALUES.get(key))
 
 
 @app.post("/api/save-setting")

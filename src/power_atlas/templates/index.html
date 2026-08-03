@@ -33,7 +33,14 @@
         <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
                onfocus="this.parentElement.classList.add('focused')"
                onblur="this.parentElement.classList.remove('focused')"
-               onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})})">
+               onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
+        <!-- The `.then(loadRestartKeys)` is load-bearing now that the badge is
+             conditional. This field is the only restart-only control that
+             saves and stays on the page: `savePortAndRestart` restarts and
+             navigates away, and the bind address already refreshes. Without
+             it, saving a hotkey leaves the badge absent until a reload — the
+             field accepting a value and behaving as though nothing happened,
+             which is the exact failure the badge exists to prevent. -->
       </div>
     </div>
   </div>
@@ -1037,6 +1044,11 @@ function renderRestartKeys(settings) {
     'These values are read once, when PowerAtlas starts. Changing one here or '
     + 'in config.toml does nothing until the next launch.'));
   var keys = settings.restart_to_apply || [];
+  // Which of those keys the process is not actually running. Falls back to all
+  // of them when the server does not report the field, matching the server's
+  // own no-snapshot fallback: an older build talking to this page should
+  // over-warn, not go silent.
+  var pending = settings.restart_pending || keys;
   var list = document.createElement('div');
   list.className = 'remote-restart-list';
   keys.forEach(function (key) {
@@ -1051,32 +1063,47 @@ function renderRestartKeys(settings) {
     row.appendChild(name);
     var val = document.createElement('span');
     val.className = 'remote-restart-value';
-    var current = settings[key];
+    // The value **in force**, which is what this panel says it shows and what
+    // it did not show before: `settings[key]` is the stored value, and for a
+    // restart-only key the two diverge the moment someone edits one. `in_force`
+    // is absent when the server took no startup snapshot, and only then does
+    // the stored value stand in for it.
+    var inForce = settings.in_force || {};
+    var current = (key in inForce) ? inForce[key] : settings[key];
     val.textContent = (current === undefined || current === null || current === '')
       ? '—' : String(current);
     row.appendChild(val);
+    // Say so on the row where the two disagree, rather than leaving the reader
+    // to compare this panel against the field they just edited.
+    if (pending.indexOf(key) >= 0) {
+      var note = document.createElement('span');
+      note.className = 'restart-badge';
+      note.textContent = 'on relaunch';
+      note.title = 'Saved as ' + String(settings[key]) + ', but this process '
+                 + 'is still running the value shown here.';
+      row.appendChild(note);
+    }
     list.appendChild(row);
   });
   body.appendChild(list);
-  markRestartInputs(keys);
+  markRestartInputs(pending);
 }
 
 // The two keys with a live control in the topbar. Without this the hotkey field
 // accepts a new value, saves it, and behaves as though nothing happened until
 // the next launch — which is the same lie the API side was fixed for.
 //
-// The badge reads "on relaunch", not "restart", because it is a **property of
-// the setting** and not a pending-change indicator. `restart_to_apply` is a
-// static frozenset (`_RESTART_TO_APPLY` in `web.py`), so these two keys are in
-// the list on every request and the badge is unconditional — no restart clears
-// it and none ever will. Labelled "restart" it read as unfinished business the
-// user could act on, which is exactly the "positively wrong field" the
-// `peek_hotkey` comment beside that frozenset warns about. The wording now
-// matches the title text, which was always phrased as a property.
+// Takes the **pending** keys, not the restart-only ones. The badge used to key
+// off `restart_to_apply`, a static frozenset in `web.py`, so it was on for
+// `peek_hotkey` and `port` on every request and no restart could clear it —
+// which is how it came to read as unfinished business that never finished.
+// `restart_pending` compares the stored value against `web.py`'s startup
+// snapshot, so the badge now appears only while the two genuinely disagree and
+// goes away on the relaunch that applies the change.
 //
-// Making it conditional is a real feature, not a rename: `/api/settings`
-// returns only stored values (`config.X`) with no startup snapshot, so nothing
-// here can tell a changed-but-unapplied value from an applied one.
+// The label stays "on relaunch" because it answers the question the badge is
+// there to answer — when does my saved change take effect — and reads
+// correctly whether or not the reader knows it is conditional.
 function markRestartInputs(keys) {
   var owners = {peek_hotkey: 'peek-hotkey-group', port: 'port-group'};
   Object.keys(owners).forEach(function (key) {
@@ -1090,8 +1117,8 @@ function markRestartInputs(keys) {
       badge.textContent = 'on relaunch';
       host.appendChild(badge);
     }
-    badge.title = 'This value is read once at startup — it takes effect on the '
-                + 'next launch of PowerAtlas.';
+    badge.title = 'Saved, but not in force: this value is read once at startup, '
+                + 'so it takes effect on the next launch of PowerAtlas.';
   });
 }
 
