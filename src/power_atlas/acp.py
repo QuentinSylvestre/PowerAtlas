@@ -271,9 +271,10 @@ MAX_BUBBLE_CHARS = 128 * 1024
 # directly below it in `_on_notification`. Both rules are measured rather than
 # chosen: `session/update` is one method carrying at least six different update
 # kinds, so only `update.sessionUpdate` separates them — while every
-# `_kiro.dev/*` notification observed on kiro-cli 2.14.2 arrives with no
-# `sessionUpdate` field at all, so keying those off the update would drop every
-# one of them.
+# `_kiro.dev/*` notification arrives with no `sessionUpdate` field at all, so
+# keying those off the update would drop every one of them. First measured on
+# 2.14.2; **re-measured on 2.16.0, 2026-08-03** — 5 `_kiro.dev/*` frames across
+# one turn, none carrying `sessionUpdate`.
 METADATA_METHOD = "_kiro.dev/metadata"
 CONTEXT_PERCENT_KEY = "contextUsagePercentage"
 
@@ -439,6 +440,14 @@ KIRO_SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 # (so no traversal), the cap refuses a path component no filesystem accepts.
 MAX_SESSION_ID_CHARS = 128
 
+# How much of a JSON-RPC error's `data` field is carried into the exception
+# text. `data` is agent-controlled and ends up in a message the user reads, so
+# it is bounded rather than trusted; 512 is generous against the only shape
+# measured (72 characters, `Failed to start session: Session is active in
+# another process (PID n)`) and small enough that a hostile or looping agent
+# cannot turn one refusal into a large frame.
+MAX_ERROR_DETAIL_CHARS = 512
+
 # How much of a session's `<sid>.json` is read to recover the directory it was
 # created against. `cwd` is that file's second key, while the rest of it is the
 # whole conversation state and runs to megabytes — `presence.py` parses it
@@ -470,8 +479,9 @@ LOCK_START_SKEW_SECONDS = 5.0
 # the only one the operator can act on.
 _IN_USE_MARKER = "active in another process"
 
-# The JSON-RPC code kiro-cli 2.14.2 refuses a busy `session/load` with. It is
-# the generic "internal error" code, so on its own it names nothing — but it is
+# The JSON-RPC code kiro-cli refuses a busy `session/load` with — 2.14.2 and
+# **re-measured on 2.16.0, 2026-08-03**. It is the generic "internal error"
+# code, so on its own it names nothing — but it is
 # the only refusal this method has been observed answering with, and forwarding
 # it verbatim reaches the page as "Internal error", which says neither what
 # happened nor what to do. Matched against the string `_on_response` builds,
@@ -578,9 +588,11 @@ def error_frame(code: str, message: str, session_id: str | None = None) -> dict:
 def _content_text(content) -> str:
     """Pull the text out of an ACP content block, or a list of them.
 
-    Measured against kiro-cli 2.14.2: ``agent_message_chunk`` carries a single
-    ``{"type": "text", "text": …}`` object, not the list the spec's content
-    blocks suggest elsewhere. Both are accepted because only one of them is
+    ``agent_message_chunk`` carries a single ``{"type": "text", "text": …}``
+    object, not the list the spec's content blocks suggest elsewhere. First
+    measured on kiro-cli 2.14.2; **re-measured on 2.16.0, 2026-08-03** — every
+    chunk in a driven turn carried an object. Both are accepted because only
+    one of them is
     what this build happens to send.
     """
     if isinstance(content, str):
@@ -1941,8 +1953,32 @@ class _Supervisor:
             return
         if "error" in msg:
             err = msg.get("error") or {}
-            fut.set_exception(AgentRejected(
-                f"{err.get('message', 'agent error')} (code {err.get('code')})"))
+            # `data` is where kiro-cli 2.16.0 puts the half that identifies the
+            # failure. Measured 2026-08-03, a busy `session/load` answers:
+            #
+            #   {"code": -32603, "message": "Internal error",
+            #    "data": "Failed to start session: Session is active in
+            #             another process (PID 22264)"}
+            #
+            # and the pid named is the real holder. `message` alone is
+            # "Internal error", which says only that something went wrong.
+            #
+            # Dropping `data` is why `_IN_USE_MARKER` could never match: the
+            # one string it exists to recognise was discarded here, two frames
+            # before the code that reads the lock file again and runs psutil to
+            # reconstruct the pid the agent had just supplied. The path that
+            # consumes a spoken refusal was written for an earlier build that
+            # named the holder, went defensive when that stopped, and is
+            # reachable again now — see `_load_failure`.
+            detail = err.get("data")
+            text = str(err.get("message", "agent error"))
+            if isinstance(detail, str) and detail.strip():
+                # Bounded because this is agent-controlled text on its way to a
+                # user-visible message. Generous against the measured string
+                # (72 characters) and far short of anything that could crowd a
+                # frame.
+                text = detail.strip()[:MAX_ERROR_DETAIL_CHARS]
+            fut.set_exception(AgentRejected(f"{text} (code {err.get('code')})"))
         else:
             fut.set_result(msg.get("result"))
 
@@ -2051,9 +2087,10 @@ class _Supervisor:
             # conversation: `session/load` replays both halves of it, and
             # without this arm the transcript would come back as the agent
             # talking to itself. It is not a second source for a live turn —
-            # `_handle_prompt` emits the user's own text, and kiro-cli 2.14.2
-            # was measured emitting no `user_message_chunk` during
-            # `session/prompt`. A build that started emitting one would render
+            # `_handle_prompt` emits the user's own text, and no
+            # `user_message_chunk` is emitted during `session/prompt`. First
+            # measured on 2.14.2; **re-measured on 2.16.0, 2026-08-03** — zero
+            # across a driven turn. A build that started emitting one would render
             # the prompt twice, which is the thing to look for if that appears.
             role = "user" if kind == "user_message_chunk" else "agent"
             text = _content_text(update.get("content"))
@@ -2675,6 +2712,14 @@ def _unattributed_in_use_message() -> str:
     bare string "Internal error". State the cause that has actually been
     measured and both remedies, without claiming an attribution we do not have.
 
+    **Reachable far less often since 2.16.0** (measured 2026-08-03). That build
+    puts the attribution in the error's ``data`` field — ``"Failed to start
+    session: Session is active in another process (PID n)"`` — which
+    ``_on_response`` now carries into the exception text, so the spoken branch
+    in ``_load_failure`` answers first. This stays as the floor for a build
+    that says nothing, which is what 2.14.2 did and what the next one may do
+    again.
+
     The sentence names no kiro-cli version, unlike the comments around it. A
     reader of a comment can check which build the observation came from; a user
     reading this on screen cannot, so a version there either reads as "this does
@@ -2707,12 +2752,22 @@ def _load_failure(exc: AcpError, holder: int | None) -> tuple[str, str]:
     operator can act on back into a sentence. It also covers a lock taken
     between the pre-flight and the request.
 
-    The message match stays below it for builds that do say so: the plan
-    recorded ``-32603 … "Session is active in another process (PID n)"``,
-    measured before the agent self-updated. The last branch is what keeps the
-    whole path from resting on a third-party file format: a kiro-cli that
-    stopped writing locks, or wrote them differently, would otherwise revert
-    every in-use refusal to "Internal error".
+    **That claim no longer holds on the shipping binary, and the direction is
+    worth stating.** Re-measured on 2.16.0, 2026-08-03: the refusal now carries
+    ``data`` = ``"Failed to start session: Session is active in another process
+    (PID 22264)"``, and the pid named was the real holder. So the agent
+    identifies the process itself and the lock re-read is no longer the only
+    source — it is the fallback. Two builds now bracket the behaviour: 2.14.2
+    said nothing, 2.16.0 says everything, so neither branch is dead code and
+    the ordering below is what makes the difference invisible to the user.
+
+    The message match handles the speaking build: ``-32603 … "Session is active
+    in another process (PID n)"``. It sits below the ``holder`` branch because
+    a lock this machine can read is checked against a live process, while the
+    agent's sentence is taken on trust. The last branch is what keeps the whole
+    path from resting on a third-party file format: a kiro-cli that stopped
+    writing locks, or wrote them differently, would otherwise revert every
+    in-use refusal to "Internal error".
     """
     if isinstance(exc, AgentRejected):
         text = str(exc)

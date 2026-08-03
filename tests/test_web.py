@@ -3850,6 +3850,120 @@ class TestAcpSessionLoad:
         assert _queued(stale) == []
         assert stale.session_id is None
 
+    def test_the_wire_error_shape_2160_answers_with_carries_the_pid(self):
+        """The refusal as 2.16.0 actually sends it, through `_on_response`.
+
+        The test below hand-builds the `AgentRejected`, which is how the drift
+        this covers went unnoticed: it asserted what `_load_failure` does with
+        a message shape, and nothing asserted that the client could *produce*
+        that shape from the wire. It could not. `_on_response` built its text
+        from `message` and `code` only and dropped `data`, so `_IN_USE_MARKER`
+        — the constant that exists to match this exact string — was
+        unmatchable, and every in-use refusal fell through to the unattributed
+        branch.
+
+        The frame here is the one measured on kiro-cli 2.16.0 on 2026-08-03,
+        copied from the probe output rather than imagined.
+        """
+        from power_atlas import acp as acp_mod
+        sup = acp_mod._Supervisor.__new__(acp_mod._Supervisor)
+        sup._pending = {}
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            sup._pending[7] = fut
+            sup._on_response({
+                "jsonrpc": "2.0", "id": 7,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": "Failed to start session: Session is active in "
+                            "another process (PID 22264)",
+                },
+            })
+            with pytest.raises(acp_mod.AgentRejected) as caught:
+                fut.result()
+        finally:
+            loop.close()
+        text = str(caught.value)
+        assert acp_mod._IN_USE_MARKER in text, (
+            "the marker that exists to recognise this refusal still cannot "
+            "match what the agent actually sends")
+        assert "22264" in text, "the pid the agent supplied was dropped"
+        assert "(code -32603)" in text
+        # And the whole point: `_load_failure` now attributes it with no lock
+        # file involved at all.
+        code, message = acp_mod._load_failure(caught.value, None)
+        assert code == "session_in_use"
+        assert "22264" in message
+
+    def test_an_error_without_data_still_reads_as_before(self):
+        """A build that says nothing must be unchanged — 2.14.2 did exactly
+        this, so the fallback is a live path and not legacy."""
+        from power_atlas import acp as acp_mod
+        sup = acp_mod._Supervisor.__new__(acp_mod._Supervisor)
+        sup._pending = {}
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            sup._pending[1] = fut
+            sup._on_response({"jsonrpc": "2.0", "id": 1,
+                              "error": {"code": -32603,
+                                        "message": "Internal error"}})
+            with pytest.raises(acp_mod.AgentRejected) as caught:
+                fut.result()
+        finally:
+            loop.close()
+        assert str(caught.value) == "Internal error (code -32603)"
+        assert acp_mod._IN_USE_MARKER not in str(caught.value)
+
+    def test_the_error_detail_is_bounded(self):
+        """`data` is agent-controlled text on its way to a message the user
+        reads, so a hostile or looping agent cannot make one refusal large."""
+        from power_atlas import acp as acp_mod
+        sup = acp_mod._Supervisor.__new__(acp_mod._Supervisor)
+        sup._pending = {}
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            sup._pending[2] = fut
+            sup._on_response({"jsonrpc": "2.0", "id": 2,
+                              "error": {"code": -32603, "message": "Internal error",
+                                        "data": "x" * 50_000}})
+            with pytest.raises(acp_mod.AgentRejected) as caught:
+                fut.result()
+        finally:
+            loop.close()
+        assert str(caught.value).count("x") == acp_mod.MAX_ERROR_DETAIL_CHARS
+
+    @pytest.mark.parametrize("data", [{"pid": 1}, ["a"], 42, None, "", "   "])
+    def test_a_data_field_that_is_not_usable_text_is_ignored(self, data):
+        """`data` is typed `any` by JSON-RPC, so it is not necessarily a string.
+
+        The `isinstance` guard is not defensive noise: without it a dict or a
+        list reaches `.strip()` and raises **inside `_on_response`**, which runs
+        on the reader thread's callback path — so the failure is not a bad
+        message, it is an exception where the code that delivers every response
+        lives. Falling back to `message` is the same text this built before
+        `data` was read at all.
+        """
+        from power_atlas import acp as acp_mod
+        sup = acp_mod._Supervisor.__new__(acp_mod._Supervisor)
+        sup._pending = {}
+        loop = asyncio.new_event_loop()
+        try:
+            fut = loop.create_future()
+            sup._pending[3] = fut
+            err = {"code": -32603, "message": "Internal error"}
+            if data is not None:
+                err["data"] = data
+            sup._on_response({"jsonrpc": "2.0", "id": 3, "error": err})
+            with pytest.raises(acp_mod.AgentRejected) as caught:
+                fut.result()
+        finally:
+            loop.close()
+        assert str(caught.value) == "Internal error (code -32603)"
+
     def test_a_spoken_in_use_refusal_becomes_a_readable_message(
             self, acp_store):
         """The plan recorded the agent naming the holder itself, measured
