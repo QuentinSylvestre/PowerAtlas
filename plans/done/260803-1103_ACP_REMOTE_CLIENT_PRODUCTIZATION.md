@@ -1,10 +1,99 @@
 # ACP Remote Client Productization
 
 > **Date**: 2026-07-31
-> **Status**: Complete — all phases implemented, reviewed and QA-verified; awaiting /qclose  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-08-03 15:20
 > **Scope**: Promote the throwaway `/acp` prototype into a NetBird-reachable remote client that dispatches, drives and resumes kiro-cli sessions PowerAtlas creates, with a Zed-style session browser, an idle sweeper, and a security model that survives leaving loopback.
 > **Estimated effort**: 9-13.5 days (revised from 6-9 after review cycle 1; see Review Log)
+
+---
+
+## Completion Summary
+
+Archived 2026-08-03. Every phase implemented, reviewed and QA-verified; the
+final suite is **1477 pytest passed / 3 skipped** and **88 node checks**, both
+re-run by the orchestrator rather than taken on report.
+
+**`/qclose` did not simply archive this.** Of the 14 deferred follow-ups, the
+user took seven as **Fix now**, and they were implemented, mutation-verified and
+committed before the archive — F-5, F-8, F-9, F-11, F-12, F-13 and F-14. The
+tables above carry each item's outcome; the four findings worth reading twice:
+
+- **F-9's own premise was false, and mutation is what said so.** It recorded that
+  a brittle text-pinning test "has no unique coverage" and could be deleted.
+  Deleting each of the five clears it guarded, one at a time, left the node
+  harness fully green for four of them. The ugly test was the only thing holding
+  two properties it claimed. Behavioural coverage was built first, verified 6/6,
+  and only then was the test retired and the blocked refactor landed.
+- **F-13 found a protocol claim that moved, and a defect behind it.** Nine of ten
+  version-pinned claims still hold on kiro-cli 2.16.0. One did not: a busy
+  `session/load` now carries `data` naming the holding PID. `_on_response` was
+  discarding `data`, which made `_IN_USE_MARKER` — the constant that exists to
+  match exactly that string — permanently unmatchable, so every in-use refusal
+  fell through to a branch that re-reads the lock file and runs psutil to
+  reconstruct the pid the agent had just supplied.
+- **F-5 closed D32 without the read D9 forbids.** The plan framed it as accept-or-
+  violate. D9's actual rationale — worker threads must not touch loop-owned
+  state — admits a third shape: an immutable snapshot published by the loop.
+  Neither module imports the other (acp's isolation boundary and D9 rule out both
+  directions), so `web.py` runs the wire.
+- **F-8's fix did not exist.** The exposure is real and measured — 127 silent
+  sockets deny service, nothing reaps them — but uvicorn 0.49 has no header-read
+  timeout, and `timeout_keep_alive` provably does not apply. Recorded rather than
+  worked around with internals-dependent code, by user decision.
+
+Two `qvalidate` checks were addressed rather than overridden blindly:
+`doc-updates` FAILed on 10 of 13 rows, all false — the checker reduced a target
+to a basename without stripping its `:line` anchor, so `README.md:3` was
+searched for literally in `--name-only` output that never contains line numbers.
+Fixed in the playbook repo and verified still discriminating against injected
+bogus rows.
+
+### Acknowledged at archival
+
+- **Guard override — `qvalidate completeness` FAIL, 3 unticked boxes.** Two are
+  Phase 0 premises **refuted by measurement**, which is a result rather than
+  unfinished work and which the checkbox grammar has no state for (recorded
+  below as a harness item). The third is Phase 5b's soft-keyboard check, left
+  unticked deliberately because no physical phone was reachable — the `100dvh`
+  half is measured, the keyboard half is not, and claiming it would have been
+  the only unmeasured tick in the plan. Reason stated here per qvalidate's
+  Guard-override discipline. The fourth box was ticked at archival: Phase 4's
+  allowlist criterion was substantively satisfied in Phase 5b (`web.py:982`,
+  tests at `test_web.py:13107-13142`) and had only been left unticked when the
+  work moved phases.
+- `Accepted`: **F-1** — no NetBird access policy restricts this peer. User
+  decision 2026-08-03: the NetBird account is shared for other purposes and
+  cannot be restricted; the peers are trusted and the device cookie is
+  sufficient. This supersedes the `[SECURITY — open]` framing on the roadmap,
+  which is corrected to record a decision rather than a pending action.
+- `Accepted`: **F-2** — corrected above and closed as no-action. The original
+  wording overstated it; the measured residual is hostname disclosure to the
+  same trusted peers.
+- `Accepted`: **F-3** (four config keys written by an escaped mutation run, since
+  repaired and hash-verified), **F-4** (orphaned tool processes are unrecoverable
+  — kiro-cli behaviour, bounded by sweep condition 4), **F-6** (`_cookie_ok` uses
+  wall-clock time while the backoff uses monotonic — inherent to a persistent
+  90-day expiry), **F-7** (`_exchange_failures` is per-process — immaterial
+  against a 256-bit secret), **F-10** (a uvicorn upstream candidate, worked
+  around locally and measured effective).
+- `Accepted (harness opportunity)`: `git commit -F` as the stated commit default;
+  a third exit-criterion state for refuted spike premises; `/qexplore`'s filename
+  spec versus the archive convention; `[P:N]` eligibility in a single-test-file
+  repo; numeric perf criteria requiring a measured baseline; `/qdev` Step 8's
+  `tests: fail` stop on a pre-flight baseline phase. Six items, retained here for
+  `/qdream`'s harvest — a second occurrence in another plan promotes them.
+- `Promoted: mutate a behaviour to prove its test discriminates` — `/qreview`
+  Test-coverage standard.
+- `Promoted: name every consumer when an auto-fix changes a shared value` —
+  `/qdev` Step 6.
+- `Promoted: re-derive a named target from the symptom before acting` — `/qdev`
+  Step 6.
+- `Promoted: return a decidable-by-probe list from the Step 1.5 trio` —
+  `/qexplore`, all six trio briefs.
+- All four promotions landed in the playbook repo as `741d7c8`; they are a
+  separate commit rather than part of the archive commit because they live in a
+  different repository. `/qconfig-sync` propagates them.
 
 ---
 
@@ -723,7 +812,7 @@ Reuses `data.discover_workspaces_with_counts` (`data.py:189`) and `data_kiro.loa
 - [x] `_supervisor.sessions` is snapshotted on the loop; no worker thread iterates it
 - [x] Availability computation runs off the event loop and fails open to `available`
 - [x] Sub-agent sessions are absent
-- [ ] Endpoint reachable with a cookie and refused without, once registered on the allowlist (integration step, gated on Phase 3) — *deferred to Phase 5, 2026-08-01*: registration is the integration step this phase deliberately excludes, since listing a path before the route exists makes it remotely reachable the moment it is written. `TestAcpListingEndpoint::test_the_listing_is_not_yet_on_the_remote_allowlist` pins the current absence and names itself as the thing to replace when registration lands
+- [x] Endpoint reachable with a cookie and refused without, once registered on the allowlist (integration step, gated on Phase 3) — *deferred to Phase 5, 2026-08-01*: registration is the integration step this phase deliberately excludes, since listing a path before the route exists makes it remotely reachable the moment it is written. `TestAcpListingEndpoint::test_the_listing_is_not_yet_on_the_remote_allowlist` pins the current absence and names itself as the thing to replace when registration lands. **Ticked at `/qclose`, 2026-08-02**: it landed. `_ACP_LISTING_PATH` is on `_REMOTE_ALLOWED_PATHS` scope-typed `http` (`web.py:982`), the placeholder test is gone as its own docstring instructed, and the replacement covers both halves plus the websocket-scope refusal (`tests/test_web.py:13107-13142`). Phase 5b carries the paired criterion; this box tracked the same fact from the other side and was left unticked when the work moved phases
 
 #### Implementation (2026-08-01, code: 0db0e7e)
 
@@ -1442,7 +1531,7 @@ Items surfaced during implementation that are **not** covered by any remaining p
 | # | Item | Why deferred | Cost to act |
 |---|---|---|---|
 | F-1 | **No NetBird access policy restricts this peer.** All 17 account peers are in this host's network map (measured 2026-07-31, `netbird status -d`). D33 ships the cookie as the sole authorization layer on that basis | External, administered by others, and the user elected to proceed. Nothing in the implementation depends on its absence | ~5 min in the console: app.netbird.io → Access Control → Policies, group laptop + `iphone-quentin` + `ipad-quentin`, disable the stock `Default` (All → All). Re-run `netbird status` to verify the peer count collapses. Restores the second layer with no code change |
-| F-2 | **TCP 139 (NetBIOS Session Service) listens on `100.78.142.124`**, owned by Windows `System` (pid 4), reachable by all 17 peers | Predates this work entirely and is unrelated to PowerAtlas. Found incidentally during Phase 3's socket census | Unknown — worth a look independent of this plan. F-1 would also cover it |
+| F-2 | ~~**TCP 139 … reachable by all 17 peers**~~ — **measured 2026-08-03 and the premise is wrong.** 139/137/138 are bound to `100.78.142.124` (created at boot 09:00:59), but **all 19 inbound File and Printer Sharing rules are disabled**, including both `NB-Session-In` rules — the only ones admitting TCP 139. So 139 is bound and *unreachable*; "reachable by all 17 peers" was inferred from the listening socket and never measured. The real residual is **UDP 137/138**, admitted by two enabled `Network Discovery` rules scoped to the **Private** profile, which is what `wt0` is classified as — i.e. NetBIOS *name* and *datagram* service, hostname disclosure, no file access | Predates this work entirely and is unrelated to PowerAtlas. Found incidentally during Phase 3's socket census | **Closed as no-action, by user decision 2026-08-03.** The exposure is hostname disclosure to the same 17 peers F-1 accepted as trusted — strictly less than what the device cookie protects. The one-line fix (`Set-NetConnectionProfile -InterfaceIndex 2 -NetworkCategory Public`) was proposed and withdrawn: Private is what permits local network discovery between the user's own devices, NetBird may reset the classification on tunnel re-establish, and the downside outweighs the finding. Recorded because the *original* wording overstates it. Also measured: `wt0` already carries `NetbiosOptions = 2`, yet the sockets bound anyway — NetBT binds at interface-up, so the setting needs an adapter re-bind to take effect |
 | F-3 | **The real `config.toml` now carries four keys that were previously absent** — `acp_max_sessions`, `acp_idle_ttl_seconds`, `acp_prompt_silence_seconds`, `remote_bind_address` | Written during a Phase 3 mutation run that escaped test isolation, then repaired to exact defaults and hash-verified. Benign: `save_config` writes the full field set, so any settings change after Phase 3 would have added them | None. Recorded only so it is not mistaken later for something the user did |
 
 **Code — measured, accepted, no home in a remaining phase**
@@ -1453,7 +1542,7 @@ Items surfaced during implementation that are **not** covered by any remaining p
 | F-5 | **D32 residual is now live behaviour.** With the skew ceiling dropped, a lock our own agent orphaned names the live agent pid with a forward delta, so it reads live for the agent's whole lifetime where it previously self-healed after 120 s | The only fix is reading `_supervisor.sessions` from `presence`, which D9 forbids. Accepted in the plan | A session showing a live dot with no supervisor record is D32, not a new defect |
 | F-6 | **`_cookie_ok` uses `time.time()` while the exchange backoff uses `time.monotonic()`** | Not attacker-reachable; surfaced by the adversarial reviewer as a residual | A backward system-clock step extends cookie validity past the 90-day ceiling; a forward step expires cookies early |
 | F-7 | **`_exchange_failures` is per-process** — a restart clears every peer's backoff | Immaterial against a 256-bit secret (steady state ≈ one guess per 300 s per address), but the control is weaker than it reads | Would need persistence to fix; almost certainly not worth it |
-| F-8 | **No idle or header timeouts on the uvicorn config**, so slowloris-shaped pre-auth connection exhaustion is available independently of the body cap | Reasoned from the config by the adversarial reviewer, **not executed**. `limit_concurrency=128` bounds the blast radius but does not stop slow connections holding slots | Verify before acting — it may already be adequately bounded |
+| F-8 | **No idle or header timeouts on the uvicorn config**, so slowloris-shaped pre-auth connection exhaustion is available independently of the body cap | Reasoned from the config by the adversarial reviewer, **not executed**. `limit_concurrency=128` bounds the blast radius but does not stop slow connections holding slots | **Executed 2026-08-03 against a throwaway uvicorn carrying the same kwargs: the exposure is real.** 127 sockets that complete the TCP handshake and send *zero bytes* exhaust the pool; every subsequent request gets HTTP 503. Served at 120 held, refused at 127. `timeout_keep_alive=5` does **not** reap them — still 503 at t+16 s — because it governs an idle keep-alive connection *between completed requests*, and these never completed one. **And the suggested fix does not exist**: uvicorn 0.49.0 offers no header-read timeout (`limit_concurrency`, `timeout_keep_alive`, `timeout_notify`, `h11_max_incomplete_event_size`, `backlog` — none applies to a connection sending nothing). **Closed as record-only by user decision**: a reaper over `server_state.connections` / `H11Protocol.cycle` is feasible but depends on uvicorn internals that are not public API, which is disproportionate to an availability-only fault on a single-user desktop app — no data loss, no privilege gain, immediate recovery on release, and reachable only by the 17 trusted peers of F-1 plus local processes |
 | F-9 | **`tests/test_web.py::TestAcpSessionClose::test_the_page_clears_the_session_and_the_url` pins template *text***, not behaviour: it splits the template on `type === 'session_closed'` and asserts literal source strings inside that branch | It actively blocked a legitimate refactor twice this session — the shared-clear helper in `acp.html` had to be reverted to duplication because of it | The mjs harness already covers the same property behaviourally. Retiring the Python test would unblock the hoist; it has no unique coverage |
 | F-10 | **Upstream candidate**: uvicorn's 400 on a `MUST_CLOSE` connection raises `LocalProtocolError` and logs a full traceback, and its body is chunk-framed on a connection already closing | Worked around locally in `53413cf` (the repeat filter). Arguably an upstream bug worth filing | A minimal reproduction exists in the Phase 3 QA scratchpad |
 | F-11 | **`memory/MEMORY.md:95-97` needs updating** — it records 18 tests that *read* the real `config.toml`. The **write** side is now closed for `tests/test_web.py` by a module-level autouse fixture, but the entry does not say so, and other test files are unassessed | Memory edits must be proposed to the user, not written by a phase | Phase 6 already carries a related proposal for `memory/MEMORY.md:149-153` |
