@@ -329,6 +329,46 @@ function clampSize(raw, fallback, ceiling) {
   return Math.max(1, Math.min(Number.isFinite(n) ? n : fallback, ceiling));
 }
 
+// The two ACP data routes, named once. The delete path is a *prefix* of nothing
+// but is *prefixed by* the listing path, which is the trap `fakeFetch` documents.
+const LISTING_URL = "/api/acp/sessions";        // web.py:_ACP_LISTING_PATH
+const DELETE_URL = "/api/acp/sessions/delete";  // web.py:_ACP_DELETE_PATH
+const WORKSPACES_URL = "/api/acp/workspaces";   // web.py:_ACP_WORKSPACES_PATH
+
+/** The create picker's workspace list, derived from the same fixture.
+ *
+ *  Carries `capacity` because the real route does — the picker refuses at the
+ *  cap before spending anything, so it needs the pair on the answer it already
+ *  makes rather than a second request for it. `missing` is the count of
+ *  workspaces whose folder is gone, which the route excludes and reports; the
+ *  fixture has none unless a check sets one. */
+function serveWorkspaces(store) {
+  return {
+    workspaces: store.map((w) => ({
+      cwd: w.cwd, name: w.name, sessions: w.sessions.length,
+    })),
+    missing: store.missing ?? 0,
+    // Read off the fixture the same way `serveListing` reads it, and keyed on
+    // presence for the same reason: a check that sets `capacity` to null is
+    // testing the page's handling of a malformed pair, not asking for a default.
+    capacity: "capacity" in store ? store.capacity : { held: 0, max: 8 },
+  };
+}
+
+/** The delete route's success shape: every id asked for, deleted.
+ *
+ *  The refusal shapes are reached through `opts.answer`, because a refusal is
+ *  a property of the *session* (held, locked, gone) and this stub holds no
+ *  model of that — inventing one would be a second implementation of
+ *  `_acp_delete_many` for checks to pass against instead of the real one. */
+function serveDelete(init) {
+  let ids = [];
+  try {
+    ids = JSON.parse((init && init.body) || "{}").session_ids || [];
+  } catch { ids = []; }
+  return { deleted: ids, failed: [] };
+}
+
 function serveListing(store, params) {
   const groupSize = clampSize(params.group_size, 10, MAX_GROUP_SIZE);
   const sessionSize = clampSize(params.session_size, 3, MAX_SESSION_SIZE);
@@ -412,16 +452,40 @@ function loadPage(templatePath, opts = {}) {
   const scriptBody = scripts[0][2];
   const markup = html.replace(/<script[\s\S]*?<\/script>/g, "");
 
+  // Every element the static markup gives an id, with its real tag name and its
+  // initial `hidden` state.
+  //
+  // Both of those used to be dropped — every stand-in was a `div` with
+  // `hidden: false`, whatever the markup said. That was survivable only because
+  // every hidden control on this page was also hidden programmatically before
+  // anything read it (`connect()` re-hides the recovery buttons, `setContext`
+  // the meter). The create picker is the first element whose markup `hidden` IS
+  // its initial state, and under the old sweep it loaded *open*: the first
+  // Escape closed a dialog nobody had opened instead of the row menu that was.
   const byId = new Map();
-  for (const m of markup.matchAll(/\bid="([^"]+)"/g)) byId.set(m[1], new El("div"));
+  for (const tag of markup.matchAll(/<([a-zA-Z][\w-]*)\b([^>]*)>/g)) {
+    const attrs = tag[2];
+    const id = /\bid="([^"]+)"/.exec(attrs);
+    if (!id) continue;
+    const el = new El(tag[1]);
+    // Boolean attribute: `hidden`, `hidden=""` and `hidden="hidden"` all mean
+    // hidden, and nothing on this page writes any other form.
+    if (/\bhidden\b/.test(attrs)) el.hidden = true;
+    byId.set(id[1], el);
+  }
   ACTIVE = null;
 
   const sockets = [];
   const urls = [];
   const fetches = [];
+  // Every `confirm` the page raised, in order. Recorded rather than merely
+  // answered: a destructive action's whole safety story is that it asked first
+  // and did nothing when told no, and neither half is observable from the
+  // return value alone. `opts.confirm === false` is the declining user.
+  const confirms = [];
   const store = opts.store ?? fakeStore();
   const page = { html, markup, scriptAttrs, scriptBody, sockets, urls, fetches,
-                 store, reloaded: false };
+                 confirms, store, reloaded: false };
 
   // A fetch with a body. The old stub answered `{ok: true}` and nothing else,
   // which is enough for the stale-token diagnosis (the only caller before the
@@ -438,9 +502,17 @@ function loadPage(templatePath, opts = {}) {
     }
     const ok = override ? override.ok !== false : true;
     const status = override && override.status ? override.status : (ok ? 200 : 500);
+    // The delete path is matched **before** the listing, and by equality rather
+    // than prefix. `/api/acp/sessions/delete` starts with `/api/acp/sessions`,
+    // so a prefix test served it a listing payload — which carries no `deleted`
+    // array, so the page read every successful deletion as a refusal and left
+    // the row on screen. Silent, and in the direction that makes a broken
+    // delete look like a working guard.
     const body = override && "body" in override
       ? override.body
-      : (url.startsWith("/api/acp/sessions") ? serveListing(store, params) : {});
+      : (url === DELETE_URL ? serveDelete(init)
+         : url.startsWith(WORKSPACES_URL) ? serveWorkspaces(store)
+         : url.startsWith(LISTING_URL) ? serveListing(store, params) : {});
     return Promise.resolve({
       ok,
       status,
@@ -495,6 +567,12 @@ function loadPage(templatePath, opts = {}) {
     history: { replaceState: (_s, _t, u) => urls.push(u) },
     WebSocket: FakeWs,
     fetch: fakeFetch,
+    // The page's confirmation gate. A real one blocks the thread, which is
+    // exactly the property the delete path relies on — nothing after it runs
+    // until the user has answered — so answering synchronously here models it
+    // correctly. Absent from this sandbox until session deletion existed; a
+    // page that reached for it before would have thrown at the call site.
+    confirm: (text) => { confirms.push(text); return opts.confirm !== false; },
     console: { log() {}, warn() {}, error() {} },
   };
   sandbox.window = sandbox;
@@ -537,7 +615,11 @@ function loadPage(templatePath, opts = {}) {
         (row) => row.querySelector(".acp-rail-row-title").textContent);
     },
     listingCalls() {
-      return page.fetches.filter((f) => f.url.startsWith("/api/acp/sessions"));
+      // Excludes the delete route, which the prefix would otherwise swallow —
+      // the same collision `fakeFetch` guards against, and here it would let a
+      // check counting listing requests silently count deletions too.
+      return page.fetches.filter(
+        (f) => f.url.startsWith(LISTING_URL) && f.url !== DELETE_URL);
     },
     intervals,
     /** Fire every registered interval once, as the browser would on a tick. */
@@ -552,6 +634,36 @@ function loadPage(templatePath, opts = {}) {
     },
     // Null is this harness's <body>: nothing in the rail holds focus.
     focused() { return ACTIVE; },
+    /** Fire a document-level listener, the way a bubbling event would.
+     *
+     *  This harness does not bubble — `El.dispatch` calls one node's own
+     *  listeners and stops — so a menu that closes on a document click is
+     *  invisible to a check that only presses buttons. Firing the listener
+     *  directly measures the handler; what it cannot measure is that a real
+     *  press reaches it, which is why the page guards that path with a flag
+     *  rather than with stopPropagation. */
+    fireDoc(type, ev) {
+      const fns = docListeners.get(type) ?? [];
+      if (fns.length === 0) throw new Error(`nothing listens for document '${type}'`);
+      for (const fn of fns) fn(ev ?? {});
+    },
+    pickerRows() { return page.all("acpPickerList", ".acp-picker-ws"); },
+    pickerNames() {
+      // The label, not the whole name row: the row also carries the session
+      // count, and `textContent` on the parent concatenates the two into
+      // "ws-01 session".
+      return page.pickerRows().map(
+        (r) => r.querySelector(".acp-picker-option-label").textContent);
+    },
+    /** Open the picker and let its workspace fetch land. */
+    async openPicker(which = "acpRailNew") {
+      page.click(which);
+      await page.settle();
+    },
+    railMenuButtons() { return page.all("acpRailGroups", ".acp-rail-menu-btn"); },
+    railMenus() { return page.all("acpRailGroups", ".acp-rail-menu"); },
+    openMenus() { return page.railMenus().filter((m) => !m.hidden); },
+    deleteCalls() { return page.fetches.filter((f) => f.url === DELETE_URL); },
     // Everything the rail does hangs off a promise chain, so a check that
     // asserted straight after the click would be asserting on the frame before
     // the one it cares about. `setImmediate` runs after the microtask queue has
@@ -2054,9 +2166,25 @@ check("the rail carries a labelled create control", async (tpl) => {
              .includes('id="acpRailNew"'),
          "the create control is not inside the rail, so the pane a phone lands " +
          "on still does not carry it");
+  // It opens the picker rather than creating; creating is what the picker's
+  // options do. Both `New session` buttons go through it, so the directory a
+  // trust-all-tools agent runs in is chosen rather than inherited from a text
+  // box the rail could not see.
   page.click("acpRailNew");
+  assertEqual(page.el("acpPicker").hidden, false,
+              "the rail's create control opened no picker");
+  assertEqual(page.sentOf("new").length, 0,
+              "the rail's create control created a session before the user had " +
+              "said where");
+  await page.settle();
+  page.click("acpPickerNeutral");
   const sent = page.sentOf("new");
-  assertEqual(sent.length, 1, "the rail's create control sent no `new` frame");
+  assertEqual(sent.length, 1, "choosing the agent's own folder created nothing");
+  assertEqual(sent[0].payload.cwd, "",
+              "the neutral option named a directory; blank is what selects the " +
+              "agent's own");
+  assertEqual(page.el("acpPicker").hidden, true,
+              "the picker stayed open over the session it had just created");
   assertEqual(page.el("acpShell").dataset.view, "chat",
               "the press stayed on the rail, so a phone that pressed create is " +
               "looking at a list that will not show the session for a minute");
@@ -2073,6 +2201,363 @@ check("the rail's create control is guarded like the toolbar's", async (tpl) => 
   const dead = loadPage(tpl, { acpError: "no module named acp" });
   assertEqual(dead.el("acpRailNew").disabled, true,
               "the rail offers a create control while the ACP module is not loaded");
+});
+
+// ------------------------------------------------------- creating a session --
+//
+// Both `New session` buttons now open a picker instead of creating against
+// whatever a text box held. Each check below is one of the four frictions that
+// replaced: which folder, finding what you created, losing your place, and
+// hitting the cap blind.
+
+check("the picker lists workspaces and creates in the one chosen", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 3, sessions: 1 }) });
+  await page.openPicker();
+  assertEqual(page.pickerNames().join(","), "ws-0,ws-1,ws-2",
+              "the picker did not list the workspaces the machine has");
+  page.pickerRows()[1].dispatch("click");
+  const sent = page.sentOf("new");
+  assertEqual(sent.length, 1, "choosing a workspace created nothing");
+  assertEqual(sent[0].payload.cwd, "C:\\work\\ws-1",
+              "the session was created against the wrong directory — under -a " +
+              "this is where the agent's tools actually run");
+});
+
+check("the picker's filter narrows the list without a request", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 4, sessions: 1 }) });
+  await page.openPicker();
+  const before = page.fetches.length;
+  page.el("acpPickerSearch").value = "ws-2";
+  page.el("acpPickerSearch").dispatch("input");
+  assertEqual(page.pickerNames().join(","), "ws-2",
+              "the filter did not narrow the list");
+  assertEqual(page.fetches.length, before,
+              "the filter spent a request per keystroke against a route that " +
+              "stats every workspace");
+});
+
+check("at the cap both create controls are off and say why", async (tpl) => {
+  const store = fakeStore({ workspaces: 2, sessions: 1 });
+  store.capacity = { held: 8, max: 8 };
+  const page = await railed(tpl, { store });
+  for (const id of ["acpNew", "acpRailNew"]) {
+    assertEqual(page.el(id).disabled, true,
+                `${id} is still pressable at 8/8; the press buys a round trip ` +
+                "and comes back as a red error the rail's own status line " +
+                "already predicted");
+    assert(/limit/i.test(page.el(id).title),
+           `${id} is disabled without saying why: ${page.el(id).title}`);
+  }
+});
+
+check("a freed slot re-arms the create controls", async (tpl) => {
+  // The direction that matters: a page that disabled at the cap and never
+  // re-enabled would need a reload to create again.
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store.capacity = { held: 8, max: 8 };
+  const page = await railed(tpl, { store });
+  assertEqual(page.el("acpRailNew").disabled, true, "the fixture is not at the cap");
+  store.capacity = { held: 7, max: 8 };
+  page.click("acpRailReload");
+  await page.settle();
+  assertEqual(page.el("acpRailNew").disabled, false,
+              "a slot came free and the create controls stayed off");
+  assertEqual(page.el("acpRailNew").title, "",
+              "the cap's explanation outlived the cap");
+});
+
+check("the picker offers to close the open session, and says what it costs",
+      async (tpl) => {
+  const { page } = connected(tpl, { sid: "sess-w0-s0" });
+  await page.settle();
+  await page.openPicker();
+  assertEqual(page.el("acpPickerKeepRow").hidden, false,
+              "the picker said nothing about the session already open, which " +
+              "keeps a slot and ~161 MB for the full idle TTL");
+  assert(/slot/i.test(page.el("acpPickerKeepText").textContent),
+         "the offer does not name what leaving it open costs: " +
+         page.el("acpPickerKeepText").textContent);
+  assertEqual(page.el("acpPickerCloseCurrent").checked, false,
+              "closing the current session is on by default; leaving a long " +
+              "turn running while starting another session is a real use");
+});
+
+check("with nothing open the picker makes no offer to close anything", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  await page.openPicker();
+  assertEqual(page.el("acpPickerKeepRow").hidden, true,
+              "the picker offered to close a session that does not exist");
+});
+
+check("the close-first offer is off during a turn, which the server would refuse",
+      async (tpl) => {
+  const { page } = connected(tpl, { sid: "sess-w0-s0", turnActive: true });
+  await page.settle();
+  await page.openPicker();
+  assertEqual(page.el("acpPickerCloseCurrent").disabled, true,
+              "the picker offered to close a session mid-turn; `_handle_close` " +
+              "refuses that with turn_in_progress");
+  assert(/still answering/i.test(page.el("acpPickerKeepText").textContent),
+         "the disabled offer does not say why it is disabled");
+});
+
+check("closing first closes, and creates only once the slot is free", async (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-w0-s0" });
+  await page.settle();
+  await page.openPicker();
+  page.el("acpPickerCloseCurrent").checked = true;
+  page.click("acpPickerNeutral");
+  assertEqual(page.sentOf("close").length, 1, "nothing was closed");
+  assertEqual(page.sentOf("new").length, 0,
+              "the create went out before the close landed — at the cap that is " +
+              "a refusal by a limit one frame from having room");
+  page.deliver({ type: "session_closed", sessionId: live,
+                 payload: { sessionId: live, message: "This session was closed." } });
+  assertEqual(page.sentOf("new").length, 1,
+              "the close landed and the create it was holding never ran");
+});
+
+check("a refused close abandons the create rather than half-doing it", async (tpl) => {
+  const { page, live } = connected(tpl, { sid: "sess-w0-s0" });
+  await page.settle();
+  await page.openPicker();
+  page.el("acpPickerCloseCurrent").checked = true;
+  page.click("acpPickerNeutral");
+  page.deliver({ type: "error", sessionId: live, payload: {
+    code: "turn_in_progress", message: "This session is still answering." } });
+  assertEqual(page.sentOf("new").length, 0,
+              "the close was refused and the session was created anyway — the " +
+              "user asked for one action, not the half that spends a slot");
+  assert(/no new one was created/i.test(page.transcript()),
+         "nothing said the create had been abandoned");
+});
+
+check("a created session reaches the rail without a Refresh", async (tpl) => {
+  const store = fakeStore({ workspaces: 2, sessions: 1 });
+  const page = await railed(tpl, { store });
+  assertEqual(page.railTitles().length, 2, "the fixture did not load as expected");
+  // The agent has created it, so the store now has it. This is the state the
+  // rail could not see: `renderRail` draws from `railGroups`, which only the
+  // paging loaders extend, and the 60 s poll updates availability alone.
+  store[0].sessions.unshift({
+    id: "sess-brand-new", title: "brand new", availability: "held",
+    updated_at: "2026-08-03T12:00:00",
+  });
+  page.deliver({ type: "session", sessionId: "sess-brand-new", payload: {
+    sessionId: "sess-brand-new", cwd: "C:\\work\\ws-0", created: true } });
+  await page.settle();
+  assert(page.railTitles().includes("brand new"),
+         "the session just created is not in the rail; before the picker it " +
+         "took a manual Refresh to find what you had just made");
+});
+
+check("cancelling the picker creates nothing and leaves the page alone", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  await page.openPicker();
+  page.click("acpPickerCancel");
+  assertEqual(page.el("acpPicker").hidden, true, "Cancel left the picker open");
+  assertEqual(page.sentOf("new").length, 0, "Cancel created a session");
+  // And Escape is the other way out, closing the picker rather than a row menu.
+  await page.openPicker();
+  page.fireDoc("keydown", { key: "Escape" });
+  assertEqual(page.el("acpPicker").hidden, true, "Escape left the picker open");
+  assertEqual(page.sentOf("new").length, 0, "Escape created a session");
+});
+
+// --------------------------------------------------------- deleting a session --
+//
+// The one destructive action on this page, and the only thing PowerAtlas does
+// that writes to kiro-cli's store. Every check below exists because the
+// alternative behaviour is either data loss or a control that lies about what
+// it will do.
+
+/** A rail whose first workspace holds one session in a chosen state. */
+async function railedOne(tpl, { availability = "available", opts = {} } = {}) {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = availability;
+  const page = await railed(tpl, { store, ...opts });
+  return page;
+}
+
+check("a remote viewer is offered no delete control at all", async (tpl) => {
+  const remote = await railed(tpl, {
+    local: false, store: fakeStore({ workspaces: 1, sessions: 2 }) });
+  assertEqual(remote.railRows().length, 2,
+              "the remote rail lost its rows, so this check is measuring nothing");
+  assertEqual(remote.railMenuButtons().length, 0,
+              "the remote viewer is offered a row menu; the delete route is " +
+              "loopback-only, so every press of it would 403");
+  // And the loopback viewer is, or the check above passes on a page with no
+  // menu anywhere.
+  const local = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 2 }) });
+  assertEqual(local.railMenuButtons().length, 2,
+              "the loopback viewer has no row menu");
+});
+
+check("the menu opens on its own row and closes the one before it", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 3 }) });
+  const buttons = page.railMenuButtons();
+  assertEqual(page.openMenus().length, 0, "a menu was open before anything was pressed");
+  buttons[0].dispatch("click");
+  assertEqual(page.openMenus().length, 1, "pressing the menu button opened nothing");
+  assertEqual(buttons[0].getAttribute("aria-expanded"), "true",
+              "the open menu's button does not report itself expanded");
+  buttons[2].dispatch("click");
+  assertEqual(page.openMenus().length, 1,
+              "two menus are open at once; the rail is a list of forty rows and " +
+              "each one leaving its menu behind would bury the list");
+  assertEqual(buttons[0].getAttribute("aria-expanded"), "false",
+              "the menu that closed still reports itself expanded");
+  // Pressing the same button again is a toggle, not a re-open.
+  buttons[2].dispatch("click");
+  assertEqual(page.openMenus().length, 0, "the menu button does not toggle its own menu shut");
+});
+
+check("an open menu closes on Escape and on a click elsewhere", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 2 }) });
+  page.railMenuButtons()[0].dispatch("click");
+  page.fireDoc("keydown", { key: "Escape" });
+  assertEqual(page.openMenus().length, 0, "Escape left the menu open");
+
+  page.railMenuButtons()[0].dispatch("click");
+  assertEqual(page.openMenus().length, 1, "the menu did not re-open");
+  // The press that opened it is still notionally travelling to the document.
+  // That one must be ignored, or the menu would never survive its own gesture.
+  page.fireDoc("click");
+  assertEqual(page.openMenus().length, 1,
+              "the document handler closed the menu on the very press that " +
+              "opened it");
+  page.fireDoc("click");
+  assertEqual(page.openMenus().length, 0, "a click elsewhere left the menu open");
+});
+
+check("deleting asks first, and a declined confirm deletes nothing", async (tpl) => {
+  const page = await railedOne(tpl, { opts: { confirm: false } });
+  page.railMenuButtons()[0].dispatch("click");
+  page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
+  await page.settle();
+  assertEqual(page.confirms.length, 1, "the delete asked nothing before deleting");
+  assert(/permanently/i.test(page.confirms[0]),
+         `the confirm does not say the deletion is permanent: ${page.confirms[0]}`);
+  // Close is reversible and this is not; a confirm that did not separate them
+  // would be read as the one the user has already pressed a hundred times.
+  assert(/close/i.test(page.confirms[0]),
+         `the confirm does not distinguish itself from Close: ${page.confirms[0]}`);
+  assertEqual(page.deleteCalls().length, 0,
+              "declining the confirm deleted the session anyway");
+  assertEqual(page.railRows().length, 1, "the declined delete removed the row");
+});
+
+check("a confirmed delete posts the id and takes the row away", async (tpl) => {
+  const page = await railedOne(tpl);
+  page.railMenuButtons()[0].dispatch("click");
+  page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
+  await page.settle();
+  const calls = page.deleteCalls();
+  assertEqual(calls.length, 1, "the confirmed delete sent no request");
+  assertEqual(calls[0].init.method, "POST", "the delete was not a POST");
+  assertEqual(JSON.parse(calls[0].init.body).session_ids[0], "sess-w0-s0",
+              "the delete named the wrong session");
+  assertEqual(page.railRows().length, 0, "the deleted row is still on screen");
+  assert(/deleted/i.test(page.el("acpRailStatus").textContent),
+         "nothing on screen says the deletion happened");
+});
+
+check("a refused delete keeps the row and shows the server's reason", async (tpl) => {
+  const page = await railedOne(tpl, { opts: {
+    answer: (url) => url === "/api/acp/sessions/delete" ? { body: {
+      deleted: [],
+      failed: [{ id: "sess-w0-s0", code: "locked",
+                 message: "Another process (pid 21344) is using this session." }],
+    } } : null,
+  } });
+  page.railMenuButtons()[0].dispatch("click");
+  page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
+  await page.settle();
+  assertEqual(page.railRows().length, 1,
+              "a refused delete removed the row anyway — the rail would then be " +
+              "claiming a deletion the store never made");
+  const said = page.el("acpRailStatus").textContent;
+  assert(/pid 21344/.test(said),
+         `the refusal does not carry the server's own reason: ${said}`);
+});
+
+check("a delete the server never answered says so and keeps the row", async (tpl) => {
+  const page = await railedOne(tpl, { opts: {
+    answer: (url) => url === "/api/acp/sessions/delete"
+      ? { reject: "network down" } : null,
+  } });
+  page.railMenuButtons()[0].dispatch("click");
+  page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
+  await page.settle();
+  assertEqual(page.railRows().length, 1, "a failed delete removed the row");
+  assert(/could not delete/i.test(page.el("acpRailStatus").textContent),
+         "a failed delete left the rail claiming nothing went wrong");
+});
+
+check("delete is off for a session the server would refuse", async (tpl) => {
+  for (const [availability, why] of [["held", /close/i], ["locked", /another process/i]]) {
+    const page = await railedOne(tpl, { availability });
+    page.railMenuButtons()[0].dispatch("click");
+    const item = page.one("acpRailGroups", ".acp-rail-menu-item");
+    assertEqual(item.disabled, true,
+                `delete is offered on a ${availability} row, which the server refuses`);
+    assert(why.test(item.title),
+           `the ${availability} row's delete does not name the remedy: ${item.title}`);
+    // Disabled and *inert*: a browser fires no click on a disabled button, but
+    // the harness deliberately does, so the page's own guard is what is being
+    // measured here.
+    item.dispatch("click");
+    await page.settle();
+    assertEqual(page.confirms.length, 0,
+                `a disabled delete on a ${availability} row still asked to delete`);
+    assertEqual(page.deleteCalls().length, 0,
+                `a disabled delete on a ${availability} row still sent a request`);
+  }
+});
+
+check("deleting the session this page is holding lets go of it", async (tpl) => {
+  // Reachable despite the `held` guard: a session named by ?sid= that never
+  // loaded is not held by this server, so it deletes cleanly while the URL
+  // still points at it.
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  const page = await railed(tpl, { store, sid: "sess-w0-s0" });
+  page.railMenuButtons()[0].dispatch("click");
+  page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
+  await page.settle();
+  assertEqual(page.deleteCalls().length, 1, "the delete never went out");
+  assertEqual(page.urls[page.urls.length - 1], "/acp",
+              "?sid= still names the deleted session, so a reload would try to " +
+              "adopt a session whose files are gone");
+  assert(/deleted from the store/i.test(page.transcript()),
+         "the transcript does not say its session no longer exists");
+});
+
+check("deleting the last loaded row leaves the rest of the workspace reachable",
+      async (tpl) => {
+  // One workspace, five sessions, three of them loaded. Deleting all three used
+  // to take the whole workspace off the rail — and with it the only control
+  // that could reach the other two.
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 5 }) });
+  assertEqual(page.railRows().length, 3, "the fixture did not page as expected");
+  for (let i = 0; i < 3; i++) {
+    page.railMenuButtons()[0].dispatch("click");
+    page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
+    await page.settle();
+  }
+  assertEqual(page.railRows().length, 0, "the rows were not all deleted");
+  assertEqual(page.railGroups().length, 1,
+              "the workspace vanished from the rail while the server still has " +
+              "two of its sessions, so nothing can reach them");
+  assert(page.one("acpRailGroups", ".acp-rail-group-more") !== null,
+         "the emptied workspace kept no way to load the sessions it still has");
+  // And that control asks for the first page, not the page after the rows that
+  // no longer exist.
+  page.one("acpRailGroups", ".acp-rail-group-more").dispatch("click");
+  await page.settle();
+  const last = page.listingCalls()[page.listingCalls().length - 1];
+  assertEqual(last.params.session_page, "1",
+              "the emptied workspace resumed paging past rows that were deleted");
 });
 
 // ----------------------------------------------- render(), as its own subject --

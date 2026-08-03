@@ -63,9 +63,10 @@ or by opening `/acp` directly.
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Drive kiro-cli sessions from the browser at `/acp`, with no terminal — create a session or resume an
-  exited one over ACP, stream the agent's output, cancel a turn, close the session. A workspace-grouped
-  session browser lists what is resumable and greys out sessions another process currently holds. See
-  *Agent sessions* below
+  exited one over ACP, stream the agent's output, cancel a turn, close the session. Creating asks which
+  workspace first; each row's `⋯` menu can permanently delete a session from the kiro-cli store, from
+  this machine only. A workspace-grouped session browser lists what is resumable and greys out sessions
+  another process currently holds. See *Agent sessions* below
 - Optional remote access over NetBird — off by default. When enabled, `/acp` and its listing endpoint
   are reachable from your own devices behind a device secret, while the dashboard, launchers and
   settings stay loopback-only. See *Remote access* below
@@ -172,6 +173,24 @@ default, each axis paging independently — and marks every visible row *availab
 or *locked* by another process. Selecting a row resumes that session and replays its history; sessions
 whose workspace directory no longer exists are marked so, since they cannot be resumed usefully.
 
+**Creating a session asks where first.** *New session* — in the rail and in the conversation toolbar —
+opens a picker offering the agent's own scratch folder, for general local work that lights up no
+workspace in the dashboard, or any workspace that already has kiro-cli sessions, with a filter box.
+Workspaces whose folder is no longer on this machine are left out and counted, because a session cannot
+be created in a directory that does not exist. If you already have a session open, the picker says so —
+it keeps one of the `acp_max_sessions` slots until closed or reclaimed — and offers to close it first;
+that offer is off by default, so leaving a long turn running while you start another session still
+works. At the session limit both create controls are disabled and say why, rather than failing after
+the press.
+
+**Deleting a session is possible, from this machine only.** Each rail row carries a `⋯` menu whose
+*Delete session* erases that conversation from kiro-cli's own store — the transcript, its metadata, its
+lock and its task files — after a confirmation. This is not the same as *Close*, which only releases
+the memory and leaves the conversation resumable. It cannot be undone, there is no trash, and it is
+refused for a session PowerAtlas has open (close it first) or one another process is using. The menu is
+not shown at all to a remote viewer and its endpoint is not on the remote path allowlist, so deletion
+is reachable only from the machine running PowerAtlas.
+
 Three things are worth knowing before leaving a long task running:
 
 - **A turn is bounded by silence, not by duration.** A turn that keeps streaming runs as long as it
@@ -237,7 +256,11 @@ was already taken — so loopback fell back to a random one — the remote bind 
 exposing a listener on a port that changes every restart.
 
 **What is reachable remotely**, and nothing else: `/acp`, its WebSocket `/ws/acp`, the read-only session
-listing `GET /api/acp/sessions`, `/static/*`, and the `/remote-auth` exchange page. The path allowlist is
+listing `GET /api/acp/sessions`, the workspace list `GET /api/acp/workspaces` that the create picker
+reads (paths and session counts, no session content — a strict subset of what the listing already
+discloses), `/static/*`, and the `/remote-auth` exchange page. **Session deletion is deliberately not on
+that list**: `POST /api/acp/sessions/delete` is refused from the remote address, and `/acp` does not
+render the row menu for a remote viewer. The path allowlist is
 default-deny, so any route added later is loopback-only until deliberately listed. The dashboard `/`,
 `/api/launchers` (which carries custom-launcher environment variables in cleartext) and `/api/settings`
 are refused from the remote address with a 403 before routing.

@@ -60,11 +60,16 @@
   <!-- `New session` is here and not only in the conversation pane's toolbar
        because below 768 px that toolbar is `display: none` and the rail is the
        whole page. Measured on a cold `GET /acp` at 390x844 with no `?sid=`:
-       #acpNew, #acpCwd, #acpPrompt and #acpSend all report 0x0, and the only
-       visible control on the page was the drill-down toggle reading
-       "Conversation →". SC-1 names *create* as one of the five verbs a phone
-       has to reach — it was one tap away, but the tap was labelled as
-       somewhere to go rather than as the thing it does. -->
+       #acpNew, the directory field beside it, #acpPrompt and #acpSend all
+       reported 0x0, and the only visible control on the page was the drill-down
+       toggle reading "Conversation →". SC-1 names *create* as one of the five
+       verbs a phone has to reach — it was one tap away, but the tap was
+       labelled as somewhere to go rather than as the thing it does.
+
+       That directory field is gone now, and the measurement is why it could
+       be: it was the one input this button could not reach, so the rail's
+       create always ran against whatever the invisible pane happened to hold.
+       The picker both buttons now open is the same overlay on both panes. -->
   <div class="acp-rail-head">
     <button class="acp-btn acp-rail-new" id="acpRailNew" type="button">New session</button>
     <input class="acp-rail-search" id="acpRailSearch" type="text" spellcheck="false"
@@ -79,15 +84,21 @@
 
 <div class="acp-page">
   <div class="acp-toolbar">
+    <!-- Opens the picker rather than creating anything. Every session created
+         here is a permanent entry in the real kiro-cli store and under -a the
+         agent's tools run for real in whatever directory it names, so the
+         directory is chosen deliberately rather than inherited from whatever a
+         text box happened to hold.
+
+         The free-text box this replaces is gone rather than kept beside the
+         picker: it was the only way to name a directory PowerAtlas has no
+         sessions for, and that case was scoped out — a workspace has to exist
+         in the store to be offered. Its other properties were all costs: it
+         lived in this pane, so a phone on the rail could not see the value it
+         was about to create against; it was validated only by the server, so a
+         typo arrived as a red error after the fact; and it was a free-text path
+         handed to an agent running trust-all-tools. -->
     <button class="acp-btn" id="acpNew" type="button">New session</button>
-    <!-- Every session created here is a permanent entry in the real kiro-cli
-         store, and under -a the agent's tools run for real in whatever
-         directory it names, so the cwd is worth being explicit about rather
-         than implicit. Blank means the agent's own neutral cwd, which lights
-         up no real workspace in the dashboard's process scan. -->
-    <input class="acp-btn acp-input" id="acpCwd" type="text" spellcheck="false"
-           placeholder="session directory — blank for the agent's neutral cwd"
-           aria-label="Directory to create the session against">
     <button class="acp-btn" id="acpReconnect" type="button" hidden>Reconnect</button>
     <button class="acp-btn" id="acpReload" type="button" hidden>Reload page</button>
     <!-- The lever the memory budget rests on: each live session costs ~3
@@ -115,6 +126,52 @@
 
 </div><!-- /.acp-shell -->
 
+<!-- The create flow. Both `New session` buttons open this instead of creating
+     immediately, so the directory a trust-all-tools agent will run its tools in
+     is a choice the user makes rather than the last thing left in a text box.
+
+     An overlay built from static markup rather than a <dialog>: index.html uses
+     <dialog>/showModal() and that is the house precedent, but this page's rule
+     is createElement + textContent with no HTML parser anywhere, and the rows
+     inside are built at runtime from a fetched list. A plain element toggled
+     with `hidden` needs nothing this page does not already do.
+
+     `role="dialog"` + `aria-modal` because it is one for a screen reader even
+     though it is not one to the layout engine. Escape closes it and focus goes
+     to the filter on open; the pane behind it stays where it was, so cancelling
+     costs nothing. -->
+<div class="acp-picker" id="acpPicker" hidden role="dialog" aria-modal="true"
+     aria-labelledby="acpPickerTitle">
+  <div class="acp-picker-panel">
+    <div class="acp-picker-head">
+      <span class="acp-picker-title" id="acpPickerTitle">New session — where?</span>
+      <button class="acp-btn" id="acpPickerCancel" type="button">Cancel</button>
+    </div>
+    <!-- Carries the cap, the reason creation is refused, or nothing at all.
+         Reserves no space when empty. -->
+    <div class="acp-picker-note" id="acpPickerNote" role="status" aria-live="polite"></div>
+    <!-- Shown only when this page is holding a session. Pressing New used to
+         leave that session open, holding one of the eight slots and ~161 MB for
+         the full idle TTL, and say nothing about it — the transcript simply
+         cleared. Unchecked by default: leaving a long turn running while
+         starting another session is a real use, not an accident. -->
+    <label class="acp-picker-keep" id="acpPickerKeepRow" hidden>
+      <input type="checkbox" id="acpPickerCloseCurrent">
+      <span id="acpPickerKeepText"></span>
+    </label>
+    <button class="acp-btn acp-picker-option" id="acpPickerNeutral" type="button">
+      <span class="acp-picker-option-name">The agent's own folder</span>
+      <span class="acp-picker-option-hint acp-picker-neutral-hint">General local
+        work. Lights up no workspace in the dashboard, and the agent's tools run
+        in a scratch directory rather than in a project.</span>
+    </button>
+    <input class="acp-rail-search acp-picker-search" id="acpPickerSearch" type="text"
+           spellcheck="false" placeholder="Filter workspaces"
+           aria-label="Filter the workspaces listed below">
+    <div class="acp-picker-list" id="acpPickerList"></div>
+  </div>
+</div>
+
 <script nonce="{{ csp_nonce }}">
 // This page is served with a nonce-based Content-Security-Policy, so this tag
 // runs and an injected script element or inline handler does not. The nonce is
@@ -141,12 +198,32 @@
   // only pays off if this page says why it is dead instead of looking merely
   // disconnected.
   var ACP_ERROR = {{ acp_error | tojson }};
+  // Whether this page is being viewed from the machine running it. Same value
+  // the topbar's dashboard link branches on, and it comes from
+  // `scope["client"]` rather than the Host header (D26), so a remote peer
+  // cannot claim it.
+  //
+  // Read here for one reason: session deletion is loopback-only. The route is
+  // absent from `_REMOTE_ALLOWED_PATHS`, so a remote press would be refused by
+  // the guard anyway — but a control that exists only to fail is the dead end
+  // this page already refuses to draw elsewhere (the dashboard link renders as
+  // plain text remotely; a `locked` row is `disabled` rather than clickable and
+  // then refused). So the menu is not built at all when this is false.
+  var ACP_LOCAL = {{ local | tojson }};
 
   var statusEl = document.getElementById('acpStatus');
   var logEl = document.getElementById('acpLog');
   var sidEl = document.getElementById('acpSid');
   var newBtn = document.getElementById('acpNew');
-  var cwdInput = document.getElementById('acpCwd');
+  var picker = document.getElementById('acpPicker');
+  var pickerCancel = document.getElementById('acpPickerCancel');
+  var pickerNote = document.getElementById('acpPickerNote');
+  var pickerKeepRow = document.getElementById('acpPickerKeepRow');
+  var pickerKeepText = document.getElementById('acpPickerKeepText');
+  var pickerCloseCurrent = document.getElementById('acpPickerCloseCurrent');
+  var pickerNeutral = document.getElementById('acpPickerNeutral');
+  var pickerSearch = document.getElementById('acpPickerSearch');
+  var pickerList = document.getElementById('acpPickerList');
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
   var transcriptEl = document.getElementById('acpTranscript');
@@ -224,6 +301,12 @@
   // reshape the page.
   var RAIL_GROUP_SIZE = 10;
   var RAIL_SESSION_SIZE = 3;
+  // Where a row's Delete goes. A sibling of the listing route rather than a
+  // verb on it, and **deliberately not on `_REMOTE_ALLOWED_PATHS`** — that
+  // allowlist is default-deny, so this path 403s for a remote peer without a
+  // line of code here relying on it. `ACP_LOCAL` is what keeps a remote viewer
+  // from being offered the control in the first place.
+  var RAIL_DELETE_PATH = '/api/acp/sessions/delete';
   // How often the rail re-reads availability, and why it re-reads it at all.
   //
   // A row's `availability` is a reading of the world at fetch time, and the
@@ -375,20 +458,52 @@
     return true;
   }
 
+  // Whether a `session/new` is in flight. Held as state rather than applied
+  // directly, because it is one of three independent reasons the create
+  // controls are off and the last writer would otherwise win — the cap used to
+  // be enforced only by the server, so a `setPending(false)` after a refused
+  // creation re-enabled a button the cap still forbade.
+  var creating = false;
+
   function setPending(pending) {
-    // The button is the only thing stopping a second session/new landing while
-    // the first is still in flight, and each one costs ~161 MB and is a
-    // permanent entry in the real kiro-cli store. Creation takes ~1.1 s for the
-    // first session of an agent process and ~0.5 s for each one after on
-    // kiro-cli 2.16.0, and a cold spawn is unbounded — wide enough to
-    // double-click through by accident either way.
-    newBtn.disabled = pending;
-    newBtn.textContent = pending ? 'Creating…' : 'New session';
+    creating = pending;
+    refreshCreateControls();
+  }
+
+  function refreshCreateControls() {
+    // Three reasons a session cannot be created, resolved in one place.
+    //
+    // 1. A creation is already in flight. The button is the only thing stopping
+    //    a second `session/new` landing, and each one costs ~161 MB and is a
+    //    permanent entry in the real kiro-cli store. Creation takes ~1.1 s for
+    //    the first session of an agent process and ~0.5 s after on kiro-cli
+    //    2.16.0, and a cold spawn is unbounded — wide enough to double-click
+    //    through by accident either way.
+    // 2. The session cap is full. The page has known this number since the
+    //    listing started carrying `capacity`, and `selectSession` has refused
+    //    on it since — before spending anything, precisely so a refusal does
+    //    not cost the transcript. Creation did not: at 8/8 the press bought a
+    //    round trip and came back as a red error, while the rail's own status
+    //    line was already reading "8/8 sessions open (at the limit)".
+    // 3. There is no ACP module to create anything with.
+    var atCap = railAtCapacity();
+    var off = creating || atCap || !!ACP_ERROR;
+    newBtn.disabled = off;
+    newBtn.textContent = creating ? 'Creating…' : 'New session';
     // The rail's copy of the control is the same control and gets the same
     // guard. Left out, the one button a phone can actually see would be the
     // one that is not stopped from landing a second `new`.
-    railNew.disabled = pending;
+    railNew.disabled = off;
     railNew.textContent = newBtn.textContent;
+    // Why, on the control itself. A disabled button with no explanation is the
+    // same dead end as one that fails — the user can see it is off and not why.
+    var why = '';
+    if (!creating && atCap) {
+      why = railCapacity.held + ' of ' + railCapacity.max + ' sessions are '
+          + 'already open, which is the limit. Close one to make room.';
+    }
+    newBtn.title = why;
+    railNew.title = why;
   }
 
   function setLoading(sid) {
@@ -415,6 +530,10 @@
     closeBtn.hidden = !sessionId;
     closeBtn.disabled = active || !sessionId;
     closeBtn.textContent = 'Close session';
+    // A turn starting while the picker is open makes its "close this one first"
+    // offer false — the server refuses a close under a live turn — so the row
+    // is re-derived rather than left saying something that is no longer true.
+    if (picker && !picker.hidden) pickerRenderKeepRow();
   }
 
   function setContext(percent) {
@@ -893,9 +1012,17 @@
     if (!cap || typeof cap.held !== 'number' || typeof cap.max !== 'number' ||
         !isFinite(cap.held) || !isFinite(cap.max) || cap.held < 0 || cap.max <= 0) {
       railCapacity = null;
+      // Also re-armed, and this is the direction that matters: discarding a
+      // half-parsed pair must *release* a control the previous pair had
+      // disabled, or a single malformed answer locks creation until reload.
+      refreshCreateControls();
       return;
     }
     railCapacity = { held: cap.held, max: cap.max };
+    // Every answer that carries the pair re-arms the controls that depend on
+    // it — the listing's, and the picker's own. Nothing else knows the number
+    // has moved.
+    refreshCreateControls();
   }
 
   function railMergeSessions(group, rows) {
@@ -1050,7 +1177,12 @@
     // here the per-group show-more is silent both when it works and when it is
     // dropped for a request already in flight.
     railStatus.textContent = 'loading more sessions…';
-    var next = (group.session_page || 1) + 1;
+    // `|| 0` and not `|| 1`. The endpoint always sends `session_page`, so the
+    // fallback is dead for a server-supplied group — but `railForgetSession`
+    // sets it to 0 when a deletion empties a workspace that still has pages
+    // behind it, and that has to mean "the next press fetches page 1", not
+    // page 2. Paging here is an offset into a list that just got shorter.
+    var next = (group.session_page || 0) + 1;
     // `cwd` selects one workspace and bypasses the group axis, so paging deep
     // into a 208-session workspace costs that workspace rather than the page.
     railFetch({
@@ -1103,9 +1235,16 @@
     return hay.indexOf(railFilter) !== -1;
   }
 
-  function railRowNode(session) {
+  function railRowNode(session, group) {
     var state = railAvailability(session.availability);
     var locked = state === 'locked';
+    // The row and its menu are siblings inside a wrapper, and that shape is
+    // forced rather than chosen: the row is a <button>, and a <button> inside a
+    // <button> is invalid — the HTML parser closes the outer one at the inner
+    // start tag, so the menu would end up beside the row rather than in it and
+    // the row would lose everything drawn after it.
+    var item = document.createElement('div');
+    item.className = 'acp-rail-item';
     var row = document.createElement('button');
     // Class names are literals plus the narrowed state, never the raw field.
     row.className = 'acp-rail-row acp-rail-row-' + state +
@@ -1146,12 +1285,208 @@
       // that stops drawing the row as one.
       if (locked) return;
       railFocus = { sid: session.id };
+      // Picking a row is navigation, and a menu left hanging over the list the
+      // user has just navigated away from would outlive what it belonged to.
+      railCloseMenus();
       // `state`, not `session.availability`: the narrowed value, so the cap
       // guard reads the same closed set the class name does and cannot be
       // handed `__proto__` or an unknown string off the wire.
       selectSession(session.id, state);
     });
-    return row;
+    item.appendChild(row);
+    if (ACP_LOCAL) item.appendChild(railMenuNode(session, group, state));
+    return item;
+  }
+
+  // ---- the row menu -----------------------------------------------------
+  //
+  // Built per row and toggled in place rather than through renderRail(): a
+  // rebuild empties and recreates every node the rail owns, which would drop
+  // focus to <body> the instant the menu opened — the same defect `railFocus`
+  // exists to repair for the rebuilds that are unavoidable. Opening a menu is
+  // not one of them.
+
+  /** The session id whose menu is open, or null. Only ever one. */
+  var railMenuOpen = null;
+  // Set by a press on the menu button, cleared by the document-level handler it
+  // is about to reach. Without it, the click that opens a menu bubbles to the
+  // document and closes it again in the same gesture — the menu would never
+  // appear. Not `stopPropagation`, because that would also hide the press from
+  // anything else that legitimately listens on the way up.
+  var railMenuGuard = false;
+  // One delete at a time. The menu closes the moment Delete is pressed, so a
+  // second press has to come from another row — and two deletions in flight
+  // would race each other's `renderRail()` against the same `railGroups`.
+  var railDeleting = false;
+
+  function railCloseMenus() {
+    var menus = railGroupsEl.querySelectorAll('.acp-rail-menu');
+    for (var i = 0; i < menus.length; i++) menus[i].hidden = true;
+    var buttons = railGroupsEl.querySelectorAll('.acp-rail-menu-btn');
+    for (i = 0; i < buttons.length; i++) {
+      buttons[i].setAttribute('aria-expanded', 'false');
+    }
+    railMenuOpen = null;
+  }
+
+  function railMenuNode(session, group, state) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-rail-menu-wrap';
+
+    var button = document.createElement('button');
+    button.className = 'acp-btn acp-rail-menu-btn';
+    button.type = 'button';
+    // The glyph carries no accessible name, so the label is the whole of it for
+    // a screen reader — and it names the session, because a rail of forty rows
+    // otherwise announces forty controls called "more".
+    var label = String(session.title || '').trim() || 'untitled session';
+    button.setAttribute('aria-label', 'Actions for ' + label);
+    button.setAttribute('aria-haspopup', 'menu');
+    button.setAttribute('aria-expanded', 'false');
+    button.textContent = '⋯';
+
+    var menu = document.createElement('div');
+    menu.className = 'acp-rail-menu';
+    menu.hidden = true;
+    menu.setAttribute('role', 'menu');
+
+    var del = document.createElement('button');
+    del.className = 'acp-rail-menu-item acp-rail-menu-danger';
+    del.type = 'button';
+    del.setAttribute('role', 'menuitem');
+    del.textContent = 'Delete session';
+    // The two states the server refuses. Disabled rather than absent, and
+    // rather than offered-then-refused: `disabled` is the version of "not
+    // available" a keyboard and a screen reader also get — the same reading
+    // D17 gives a `locked` row — and a missing item would leave the user
+    // wondering whether deletion exists at all.
+    //
+    // **A hint and not the gate.** `availability` is a reading taken at fetch
+    // time and refreshed once a minute, so it is routinely a minute stale — a
+    // session closed thirty seconds ago still reads `held` here. The server
+    // re-checks both states for itself and refuses on its own authority; this
+    // only spares the round trip in the common case.
+    if (state === 'held') {
+      del.disabled = true;
+      del.title = 'PowerAtlas has this session open. Open it and press Close '
+                + 'first.';
+    } else if (state === 'locked') {
+      del.disabled = true;
+      del.title = 'Another process is using this session.';
+    }
+    del.addEventListener('click', function () {
+      if (del.disabled) return;
+      railCloseMenus();
+      railDeleteSession(session, group);
+    });
+    menu.appendChild(del);
+
+    button.addEventListener('click', function () {
+      var wasOpen = railMenuOpen === session.id && !menu.hidden;
+      railCloseMenus();
+      if (!wasOpen) {
+        menu.hidden = false;
+        button.setAttribute('aria-expanded', 'true');
+        railMenuOpen = session.id;
+      }
+      railMenuGuard = true;
+    });
+
+    wrap.appendChild(button);
+    wrap.appendChild(menu);
+    return wrap;
+  }
+
+  function railDeleteSession(session, group) {
+    if (railDeleting) return;
+    var label = String(session.title || '').trim() || 'untitled session';
+    // `confirm` and not an in-page dialog, for the same reason the dashboard's
+    // destructive actions use it (index.html's secret rotation and batch
+    // launch): it is the one control on the web platform that cannot be
+    // click-throughed by a gesture aimed at the row underneath, which on a
+    // 40 px touch target beside the row you meant to open is the actual hazard.
+    //
+    // The wording names what is destroyed and what is not. "The session" is
+    // ambiguous here — this page also has a Close button, and Close is
+    // reversible while this is not.
+    if (!confirm('Delete "' + label + '" permanently?\n\n'
+        + 'This erases the conversation from kiro-cli’s own store — the '
+        + 'transcript, its metadata and its task files. It cannot be undone, '
+        + 'and it is not the same as Close, which only frees the memory.')) {
+      return;
+    }
+    railDeleting = true;
+    railStatus.textContent = 'deleting “' + label + '”…';
+    fetch(RAIL_DELETE_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      cache: 'no-store',
+      // A list, because the route takes one — the UI sends a single id and the
+      // shape leaves bulk deletion a change to this page rather than to the
+      // protocol.
+      body: JSON.stringify({ session_ids: [session.id] })
+    }).then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }).then(function (data) {
+      railDeleting = false;
+      var deleted = (data && data.deleted) || [];
+      var failed = (data && data.failed) || [];
+      if (deleted.indexOf(session.id) === -1) {
+        // Refused. The server's own message names the reason and the remedy,
+        // so it is shown rather than replaced with a generic one — "another
+        // process (pid 21344) is using this session" is not something this
+        // page could reconstruct.
+        var why = failed.length && failed[0].message
+          ? failed[0].message : 'the server refused the deletion';
+        railStatus.textContent = 'not deleted: ' + why;
+        logLine('error', 'delete refused for ' + session.id + ' — ' + why);
+        return;
+      }
+      railForgetSession(session.id, group);
+      logLine('info', 'deleted ' + session.id + ' from the store');
+      railStatus.textContent = 'deleted “' + label + '”';
+    }).catch(function (err) {
+      railDeleting = false;
+      railFailed('could not delete the session', err);
+    });
+  }
+
+  /** Drop a deleted session from what the rail is drawing. */
+  function railForgetSession(sid, group) {
+    for (var i = 0; i < group.sessions.length; i++) {
+      if (group.sessions[i].id !== sid) continue;
+      group.sessions.splice(i, 1);
+      // The header reads "3 of 47" — the loaded count and the workspace's
+      // total — so both move, or it starts claiming a session that is gone.
+      // Floored at the loaded count rather than at zero: `total` comes from the
+      // server and a client-side decrement that ran twice must not drive it
+      // below what is on screen.
+      if (typeof group.total === 'number') {
+        group.total = Math.max(group.sessions.length, group.total - 1);
+      }
+      break;
+    }
+    if (group.sessions.length === 0 && group.has_more) {
+      // Every row this workspace had loaded is gone and the server says there
+      // are more. The offsets the next page would be read at now point past
+      // rows that moved down, so the next "More in …" starts again from the
+      // first page rather than resuming into a gap.
+      group.session_page = 0;
+    }
+    if (sid === sessionId) {
+      // Reachable despite the `held` refusal: a session this page holds a
+      // `?sid=` for but never managed to load is not in `_supervisor.sessions`,
+      // so it deletes cleanly while the URL still points at it. Left alone, the
+      // next reload would try to adopt a session whose files are gone.
+      releaseSession();
+      addMessage('note', 'This session was deleted from the store. The '
+        + 'transcript above is all that is left of it, and it will not survive '
+        + 'a reload.');
+    }
+    renderRail();
+    railSummary();
   }
 
   function railLastRow(root) {
@@ -1240,7 +1575,7 @@
     wrap.appendChild(head);
 
     for (var i = 0; i < sessions.length; i++) {
-      wrap.appendChild(railRowNode(sessions[i]));
+      wrap.appendChild(railRowNode(sessions[i], group));
     }
 
     if (group.has_more) {
@@ -1271,7 +1606,14 @@
       }
       // A workspace with nothing left after the filter is not drawn at all —
       // an empty group header is noise in a list whose whole job is narrowing.
-      if (sessions.length === 0) continue;
+      //
+      // The `group.total` arm is the deletion case and reads the other way.
+      // Deleting the last *loaded* row of a workspace that has 44 more on pages
+      // nobody has opened would otherwise remove the whole workspace from the
+      // rail, and with it the only control that could reach those 44 — the
+      // per-group "More in …". So a workspace the server still says has
+      // sessions keeps its header even when the rail is holding none of them.
+      if (sessions.length === 0 && (railFilter || !group.total)) continue;
       railGroupsEl.appendChild(railGroupNode(group, sessions));
       shown += sessions.length;
     }
@@ -1352,6 +1694,250 @@
     // the attribute selects nothing and this line is inert.
     setView('chat');
     renderRail();
+  }
+
+  // ---- the create picker ------------------------------------------------
+  //
+  // Both `New session` buttons open this; neither creates anything on its own
+  // any more. What it replaces is a free-text directory box whose value was
+  // whatever was last typed into it, on a pane a phone could not see while
+  // looking at the rail.
+
+  var PICKER_WORKSPACES_PATH = '/api/acp/workspaces';
+  // Workspaces as of the last time the picker was opened, or null before the
+  // first fetch. Re-fetched on every open rather than cached for the session:
+  // the list is small, the request is one warm call, and a picker offering a
+  // workspace whose folder was deleted an hour ago would fail at create time
+  // with a message about a directory the user did not choose in this gesture.
+  var pickerWorkspaces = null;
+  var pickerMissing = 0;
+  var pickerFilter = '';
+  var pickerBusy = false;
+  // A create waiting for the current session to finish closing, or null. The
+  // close is a round trip to the agent, and creating before it lands would
+  // spend a slot the close is about to free — at the cap, that is the create
+  // being refused by a limit that was about to have room.
+  var pendingCreate = null;
+
+  function pickerOpen() {
+    if (ACP_ERROR) return;
+    picker.hidden = false;
+    pickerFilter = '';
+    pickerSearch.value = '';
+    pickerCloseCurrent.checked = false;
+    pickerRenderKeepRow();
+    pickerNote.textContent = 'loading workspaces…';
+    pickerRender();
+    // The filter, not the first option: the list is the long part and typing is
+    // how it gets short. Escape and Cancel both leave without creating.
+    if (pickerSearch.focus) pickerSearch.focus();
+    pickerLoad();
+  }
+
+  function pickerClose() {
+    picker.hidden = true;
+  }
+
+  function pickerRenderKeepRow() {
+    // Only meaningful while this page holds a session. `turnActive` is the
+    // second condition and it is not cosmetic: `_handle_close` refuses a close
+    // under a live turn with `turn_in_progress`, so offering the checkbox there
+    // would offer an action the server will not perform.
+    if (!sessionId) {
+      pickerKeepRow.hidden = true;
+      return;
+    }
+    pickerKeepRow.hidden = false;
+    pickerCloseCurrent.disabled = turnActive;
+    pickerKeepText.textContent = turnActive
+      ? 'The session you have open is still answering, so it cannot be closed '
+        + 'yet. It stays open and keeps its slot.'
+      : 'Close the session I have open first — otherwise it stays open, holding '
+        + 'one of the ' + (railCapacity ? railCapacity.max : 8) + ' slots until '
+        + 'it is closed or reclaimed.';
+  }
+
+  function pickerLoad() {
+    if (pickerBusy) return;
+    pickerBusy = true;
+    fetch(PICKER_WORKSPACES_PATH, { cache: 'no-store', credentials: 'same-origin' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      }).then(function (data) {
+        pickerBusy = false;
+        pickerWorkspaces = (data && data.workspaces) || [];
+        pickerMissing = (data && data.missing) || 0;
+        // The same pair the listing carries, from the same snapshot, so the
+        // picker and the rail cannot disagree about whether there is room.
+        railSetCapacity(data);
+        pickerRender();
+      }).catch(function (err) {
+        pickerBusy = false;
+        pickerWorkspaces = [];
+        pickerNote.textContent = 'could not load the workspace list ('
+          + ((err && err.message) || String(err)) + ')';
+        pickerRender();
+      });
+  }
+
+  function pickerNote_() {
+    // What the note says, in priority order: the cap first, because it is the
+    // one state in which nothing in the list can be pressed.
+    if (railAtCapacity()) {
+      return railCapacity.held + ' of ' + railCapacity.max + ' sessions are '
+        + 'already open, which is the limit. Close one — from its row menu or '
+        + 'the Close button — to make room.';
+    }
+    if (pickerWorkspaces === null) return 'loading workspaces…';
+    var text = pickerWorkspaces.length + ' workspace'
+      + (pickerWorkspaces.length === 1 ? '' : 's');
+    if (railCapacity) {
+      text += ' · ' + railCapacity.held + '/' + railCapacity.max + ' sessions open';
+    }
+    if (pickerMissing) {
+      // Stated rather than silently dropped: a list that quietly shows 51 of 65
+      // reads as broken, and the reason is worth one clause.
+      text += ' · ' + pickerMissing + ' hidden (folder no longer on this machine)';
+    }
+    return text;
+  }
+
+  function pickerRender() {
+    var atCap = railAtCapacity();
+    pickerNote.textContent = pickerNote_();
+    pickerNeutral.disabled = atCap;
+    pickerList.textContent = '';
+    var rows = pickerWorkspaces || [];
+    var shown = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var ws = rows[i];
+      if (pickerFilter) {
+        var hay = ((ws.name || '') + ' ' + (ws.cwd || '')).toLowerCase();
+        if (hay.indexOf(pickerFilter) === -1) continue;
+      }
+      pickerList.appendChild(pickerRowNode(ws, atCap));
+      shown++;
+    }
+    if (shown === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'acp-picker-empty';
+      empty.textContent = rows.length
+        ? 'no workspace matches that'
+        : 'no workspaces with kiro-cli sessions on this machine';
+      pickerList.appendChild(empty);
+    }
+  }
+
+  function pickerRowNode(ws, atCap) {
+    var row = document.createElement('button');
+    row.className = 'acp-btn acp-picker-option acp-picker-ws';
+    row.type = 'button';
+    row.disabled = atCap;
+    row.dataset.cwd = ws.cwd;
+    // The folder name is what fits and what is recognised; the count sits at the
+    // end of the same line so it cannot be pushed off by a long path.
+    var name = document.createElement('span');
+    name.className = 'acp-picker-option-name';
+    var label = document.createElement('span');
+    label.className = 'acp-picker-option-label';
+    label.textContent = ws.name || ws.cwd;
+    name.appendChild(label);
+    var count = document.createElement('span');
+    count.className = 'acp-picker-option-count';
+    count.textContent = ws.sessions + ' session' + (ws.sessions === 1 ? '' : 's');
+    name.appendChild(count);
+    row.appendChild(name);
+    var hint = document.createElement('span');
+    hint.className = 'acp-picker-option-hint';
+    hint.textContent = ws.cwd;
+    row.appendChild(hint);
+    // The full path on the row, because the clipped line above cannot show the
+    // middle of it — and the middle is exactly what tells two workspaces called
+    // `src` apart. Same answer the rail's group header gives (`name.title`).
+    row.title = ws.cwd;
+    row.addEventListener('click', function () {
+      if (row.disabled) return;
+      pickerCreate(ws.cwd);
+    });
+    return row;
+  }
+
+  /** Create against `cwd`, closing the current session first if asked to. */
+  function pickerCreate(cwd) {
+    if (railAtCapacity()) {
+      // Belt and braces: every control in the picker is already disabled at the
+      // cap. What this covers is the cap being reached between the render and
+      // the press — by another tab, or by the sweeper releasing nothing while a
+      // creation lands.
+      pickerNote.textContent = pickerNote_();
+      return;
+    }
+    var wantsClose = !pickerKeepRow.hidden && pickerCloseCurrent.checked
+                     && !!sessionId && !turnActive;
+    pickerClose();
+    if (!wantsClose) {
+      send('new', { cwd: cwd }, null);
+      setView('chat');
+      return;
+    }
+    // Close, then create when the close lands. `session_closed` is the frame
+    // that says the slot is free; `close_in_progress` is the other way this
+    // ends and is handled on the same latch.
+    pendingCreate = { cwd: cwd };
+    if (!send('close', {}, sessionId)) {
+      pendingCreate = null;
+      return;
+    }
+    closeBtn.disabled = true;
+    closeBtn.textContent = 'Closing…';
+    logLine('info', 'closing the current session before creating the next');
+    setView('chat');
+  }
+
+  /** Run a create that was waiting for a close, if there is one. */
+  function pickerRunPending() {
+    var want = pendingCreate;
+    pendingCreate = null;
+    if (!want) return;
+    send('new', { cwd: want.cwd }, null);
+  }
+
+  /** Put a just-created session into the rail, without a full reload.
+   *
+   *  The rail draws from `railGroups`, which only the two paging loaders
+   *  extend, and the 60 s freshness poll deliberately updates availability and
+   *  nothing else — so before this, a session you had just created was absent
+   *  from the list until you pressed Refresh, and then arrived inside whichever
+   *  workspace group it belonged to, possibly on a page you had not loaded.
+   *
+   *  One `cwd`-scoped request rather than `loadGroupPage(1)`: that empties
+   *  `railGroups`, so creating a session would collapse a rail the user had
+   *  paged into — the same reason `railRefresh` does not use it either. */
+  function railAdoptCreated(cwd) {
+    if (!cwd) return;
+    var isNew = !railGroupsByCwd['c:' + cwd];
+    railFetch({ cwd: cwd, session_page: 1, session_size: RAIL_SESSION_SIZE })
+      .then(function (data) {
+        var got = ((data && data.groups) || [])[0];
+        if (!got) return;
+        railMergeGroup(got);
+        if (isNew) {
+          // A workspace nobody had loaded arrives at the end of the list, which
+          // for a rail sorted by recency is the wrong end: it now holds the
+          // most recent session on the machine. Moved to the front so the thing
+          // just created is where the eye already is.
+          var moved = railGroups.pop();
+          if (moved) railGroups.unshift(moved);
+        }
+        railSetCapacity(data);
+        railSummary();
+        renderRail();
+      }).catch(function () {
+        // Silent, like the freshness poll's own failure arm and for the same
+        // reason: nobody pressed this, and the session was created either way.
+        // Refresh is the fallback, exactly as it was before this existed.
+      });
   }
 
   function sendPrompt() {
@@ -1522,6 +2108,11 @@
       // is not a navigation step and Back should still leave the page.
       history.replaceState(null, '',
         location.pathname + '?sid=' + encodeURIComponent(payload.sessionId));
+      // Only on `created`. A `subscribe` answer is a session the rail either
+      // already lists or has on a page nobody loaded, and re-fetching its
+      // workspace on every reconnect would spend a request per socket for a row
+      // that is already there.
+      if (payload.created) railAdoptCreated(payload.cwd);
       return;
     }
     if (type === 'session_closed') {
@@ -1532,10 +2123,18 @@
         + "in the agent's own store, so it can be reopened from the "
         + 'PowerAtlas dashboard.');
       logLine('info', '← session_closed ' + payload.sessionId);
+      // The slot this close just freed is the one a waiting create was told to
+      // wait for. Run it here rather than optimistically at the press: at the
+      // cap, creating first would be refused by a limit that was one frame away
+      // from having room.
+      pickerRunPending();
       return;
     }
     if (type === 'agent_died') {
       setPending(false);
+      // Nothing is left to create against. The frame the pending create was
+      // waiting for cannot come from an agent that has exited.
+      pendingCreate = null;
       setLoading(null);
       sessionId = null;
       setTurn(false);
@@ -1593,6 +2192,10 @@
         }
         if (!replaying) restorePendingPrompt(payload.code);
         logLine('error', '← error [close_in_progress] ' + payload.message);
+        // The other way a close ends. This session is going either way, so a
+        // create waiting on it runs on the same latch — otherwise the user
+        // pressed "close this and make a new one" and got only the close.
+        pickerRunPending();
         return;
       }
       if (payload.code === 'unknown_session' && sessionId &&
@@ -1606,6 +2209,20 @@
         loadTried['s:' + sessionId] = true;
         logLine('info', 'not live on this server — asking the agent to load it');
         if (send('load', {}, sessionId)) return;
+      }
+      if (pendingCreate) {
+        // A refused close — `turn_in_progress`, `not_subscribed`,
+        // `nothing_to_close`. The session the create was waiting behind is
+        // still open, so the create is abandoned rather than run anyway: it was
+        // asked for as "close this one and make another", and half of that is
+        // the half that spends a slot.
+        var wanted = pendingCreate;
+        pendingCreate = null;
+        addMessage('note', 'The session was not closed, so no new one was '
+          + 'created. Press New session again to create one without closing '
+          + 'this one.');
+        logLine('error', 'create for ' + (wanted.cwd || "the agent's own folder")
+          + ' abandoned — the close was refused');
       }
       var failedLoad = loadingSid !== null &&
                        (frame.sessionId || sessionId) === loadingSid;
@@ -1694,6 +2311,10 @@
       // otherwise leave those buttons disabled with nothing left to re-enable
       // them: the frame that would have done it died with the socket.
       setPending(false);
+      // And a create waiting on a close that will never land now. The frame it
+      // was latched to cannot arrive on a dead socket, so holding it would fire
+      // the create against whatever session the *next* connection is on.
+      pendingCreate = null;
       setTurn(false);
       setLoading(null);
       setState('closed', 'disconnected (' + ev.code + ')');
@@ -1712,23 +2333,29 @@
   viewToggle.addEventListener('click', function () {
     setView(shellEl.dataset.view === 'chat' ? 'rail' : 'chat');
   });
-  newBtn.addEventListener('click', function () {
-    send('new', { cwd: cwdInput.value.trim() }, null);
+  // Both create controls open the picker; neither creates anything itself. One
+  // creation path, so the pending guard, the cap guard, the `meta pending`
+  // frame and the `session` handler cannot drift between two entry points —
+  // the property the two buttons already shared, now including *where* the
+  // session is created.
+  newBtn.addEventListener('click', pickerOpen);
+  railNew.addEventListener('click', pickerOpen);
+  pickerCancel.addEventListener('click', pickerClose);
+  pickerNeutral.addEventListener('click', function () {
+    if (pickerNeutral.disabled) return;
+    // Empty cwd is the agent's own neutral directory — the documented meaning
+    // of a blank value, and the same thing the removed text box did when left
+    // alone. It is now something the user picks rather than something they get
+    // for not typing.
+    pickerCreate('');
   });
-  railNew.addEventListener('click', function () {
-    // The same frame the toolbar's button sends, read off the same cwd field.
-    // One creation path, so the pending guard, the `meta pending` frame and
-    // the `session` handler cannot drift between two entry points. The cwd
-    // field lives in the pane this button exists because a phone cannot see:
-    // blank there is the agent's own neutral cwd, which is both the documented
-    // meaning of an empty field and the only value a rail-first user could
-    // have supplied.
-    if (!send('new', { cwd: cwdInput.value.trim() }, null)) return;
-    // The session arrives in the conversation pane, so the press goes there —
-    // otherwise the phone presses create and stays looking at a list that will
-    // not show it for another minute. Above 768 px both panes are on screen
-    // and CSS ignores the attribute, exactly as the toggle's presses do.
-    setView('chat');
+  pickerSearch.addEventListener('input', function () {
+    // Client-side over the list already fetched, the same reasoning the rail's
+    // own filter carries: there is no search parameter on the route, and one
+    // request per keystroke against a route that stats every workspace would be
+    // an amplification lever rather than a feature.
+    pickerFilter = String(pickerSearch.value || '').trim().toLowerCase();
+    pickerRender();
   });
   stopBtn.addEventListener('click', function () {
     if (!sessionId || !turnActive) return;
@@ -1763,6 +2390,28 @@
     loadGroupPage(railGroupPage + 1);
   });
   railReload.addEventListener('click', function () { loadGroupPage(1); });
+  // Dismissal for the row menus, and both listeners are on the document because
+  // the gestures that should close a menu are exactly the ones that never reach
+  // it. Registered unconditionally: with ACP_ERROR set there are no rows and so
+  // no menus, and a listener over an empty rail costs nothing.
+  document.addEventListener('click', function () {
+    // The press that opened a menu is on its way here — it bubbles from the
+    // button that just handled it — so without this flag every menu would open
+    // and close in the same gesture. Cleared on the way past rather than
+    // stopped at the button, so nothing else loses sight of the press.
+    if (railMenuGuard) { railMenuGuard = false; return; }
+    if (railMenuOpen) railCloseMenus();
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (!ev || ev.key !== 'Escape') return;
+    // The picker first: it is the thing on top, and a single Escape should
+    // dismiss one layer rather than both.
+    if (!picker.hidden) { pickerClose(); return; }
+    // Focus does not move into the menu when it opens, so the button keeps it
+    // and Escape returns the keyboard user exactly where they were — which is
+    // the whole reason the menu is toggled in place rather than re-rendered.
+    if (railMenuOpen) railCloseMenus();
+  });
   reconnectBtn.addEventListener('click', connect);
   reloadBtn.addEventListener('click', function () { location.reload(); });
   sendBtn.addEventListener('click', sendPrompt);

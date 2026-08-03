@@ -687,16 +687,93 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-group-missing { flex-shrink: 0; font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; color: #fbbf24; border: 1px solid currentColor; border-radius: 10px; padding: 1px 6px; }
 .acp-rail-group-gone .acp-rail-row-title { color: var(--text-muted); }
 .acp-rail-group-more { align-self: flex-start; margin: 2px 0 0 4px; font-size: 11px; padding: 4px 10px; }
+/* The row and its actions menu are siblings, because the row is a <button> and
+   a <button> cannot contain one. `position: relative` is what the menu popup
+   below is anchored to, so it opens against its own row rather than against the
+   scrolling list. */
+.acp-rail-item { display: flex; align-items: center; gap: 2px; position: relative; }
 /* A row is a <button>, so it needs every one of the text/background/border
    resets below to stop looking like one. 40 px is a touch target, not a text
    line: the rail's whole purpose is being usable with a thumb. */
-.acp-rail-row { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 6px 8px; cursor: pointer; }
+.acp-rail-row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; min-height: 40px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 6px 8px; cursor: pointer; }
 .acp-rail-row:hover:not(:disabled) { background: var(--surface-hover); }
 .acp-rail-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .acp-rail-row-current { background: var(--surface-selected); border-color: var(--accent); }
 .acp-rail-row:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-rail-row-when { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* The row's actions menu. Present for a loopback viewer only — acp.html does
+   not build it at all when `local` is false — so nothing here needs a remote
+   variant. 32x40 keeps the row's touch height while taking as little of a
+   390 px line as a thumb can still hit. */
+.acp-rail-menu-wrap { flex-shrink: 0; position: relative; }
+.acp-rail-menu-btn { min-height: 40px; width: 32px; padding: 0; line-height: 1; background: transparent; border-color: transparent; color: var(--text-dim); }
+.acp-rail-menu-btn:hover { background: var(--surface-hover); color: var(--text); }
+.acp-rail-menu-btn[aria-expanded="true"] { background: var(--surface-hover); color: var(--text); border-color: var(--border); }
+/* Right-aligned and above the row below it. `z-index` is needed because the
+   rows after this one are later in the document and would otherwise paint over
+   an open menu; 5 is enough to clear siblings without competing with the
+   topbar. */
+.acp-rail-menu { position: absolute; top: calc(100% - 2px); right: 0; z-index: 5; min-width: 168px; display: flex; flex-direction: column; gap: 2px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); }
+.acp-rail-menu[hidden] { display: none; }
+.acp-rail-menu-item { width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+.acp-rail-menu-item:hover:not(:disabled) { background: var(--surface-hover); }
+.acp-rail-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Disabled is how a `held` or `locked` row says the server would refuse — the
+   same reading `.acp-rail-row:disabled` gives a locked row. The title attribute
+   set in acp.html carries the reason. */
+.acp-rail-menu-item:disabled { opacity: 0.45; cursor: default; }
+.acp-rail-menu-danger:not(:disabled) { color: #f87171; }
+.acp-rail-menu-danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.12); }
+
+/* The create picker. `position: fixed` over the whole viewport rather than
+   inside .acp-shell, because the shell is the thing being covered and both of
+   its panes have their own scrollers — an overlay inside one of them would
+   scroll away with it. Written mobile-first like everything else in this block:
+   the panel is the full screen at 390 px and a centred card once there is room
+   (the media query at the end of the file). */
+.acp-picker { position: fixed; inset: 0; z-index: 20; display: flex; align-items: stretch; justify-content: center; background: rgba(0, 0, 0, 0.55); }
+.acp-picker[hidden] { display: none; }
+.acp-picker-panel { display: flex; flex-direction: column; gap: 8px; width: 100%; min-height: 0; padding: 12px; background: var(--bg); }
+.acp-picker-head { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.acp-picker-title { font-size: 13px; font-weight: 600; }
+.acp-picker-head .acp-btn { margin-left: auto; flex-shrink: 0; }
+.acp-picker-note { flex-shrink: 0; min-height: 15px; font-size: 11px; line-height: 1.35; color: var(--text-muted); }
+/* The consequence of creating while a session is open, stated where the choice
+   is made. Unchecked by default — leaving a long turn running while starting
+   another session is a real use — so this is an offer, not a default. */
+.acp-picker-keep { display: flex; align-items: flex-start; gap: 8px; flex-shrink: 0; font-size: 11px; line-height: 1.4; color: var(--text-muted); padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.acp-picker-keep[hidden] { display: none; }
+.acp-picker-keep input { flex-shrink: 0; margin-top: 1px; }
+/* `flex: 0 0 auto`, and the full shorthand is load-bearing. This element also
+   carries `.acp-rail-search`, whose `flex: 1` sets grow to 1 — and the panel is
+   a column flex container, so the box grew *vertically* to fill it: measured at
+   390x844 it was ~330 px tall, a text input taller than the list beneath it.
+   `flex-shrink: 0` alone did not fix it, because the problem was grow. */
+.acp-picker-search { flex: 0 0 auto; }
+/* The only scroller in the panel, so the neutral option, the filter and the
+   checkbox stay reachable however many workspaces there are — 65 on the
+   machine this was built against. */
+.acp-picker-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.acp-picker-empty { font-size: 12px; color: var(--text-dim); padding: 6px 2px; }
+/* Two lines: what it is, and what it means. 48 px because this is the control
+   a thumb aims at, and it carries two lines of text rather than one. */
+.acp-picker-option { display: flex; flex-direction: column; align-items: stretch; gap: 2px; width: 100%; min-width: 0; min-height: 48px; text-align: left; padding: 8px 10px; flex-shrink: 0; }
+.acp-picker-option-name { display: flex; align-items: baseline; gap: 8px; font-size: 12px; font-weight: 600; }
+.acp-picker-option-count { margin-left: auto; flex-shrink: 0; font-size: 10px; font-weight: 400; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* One line, clipped. `nowrap` is what makes `text-overflow` do anything at all
+   — without it the path wrapped to two and three lines and every row in the
+   list was a different height. The full path is on the row's `title`, which is
+   the same answer the rail's group header gives for the same problem. */
+.acp-picker-option-hint { font-size: 10px; line-height: 1.35; color: var(--text-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The neutral option's hint is prose, not a path, so it is the one that wraps. */
+.acp-picker-neutral-hint { white-space: normal; }
+.acp-picker-option:hover:not(:disabled) .acp-picker-option-hint { color: var(--text-muted); }
+/* The neutral option is separated from the workspace list by a rule rather than
+   by spacing alone: it is a different kind of answer, not the first workspace. */
+.acp-picker-ws { border-color: transparent; }
+.acp-picker-ws:hover:not(:disabled) { border-color: var(--accent); }
+
 /* D17's three states. The dot carries the colour and an aria-label; nothing
    here is the only carrier of the meaning. */
 .acp-avail { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
@@ -718,5 +795,10 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-rail { flex: 0 0 288px; border-right: 1px solid var(--border); padding: 14px 12px 14px 16px; }
   .acp-page { padding: 14px 16px; }
   .acp-log { flex-basis: 120px; }
+  /* The picker stops being the whole screen once there is room for a card. The
+     height is capped rather than fitted so a machine with 65 workspaces and one
+     with 3 produce the same dialog, with the list scrolling inside it. */
+  .acp-picker { align-items: center; padding: 24px; }
+  .acp-picker-panel { max-width: 520px; max-height: min(560px, 100%); padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45); }
 }
 

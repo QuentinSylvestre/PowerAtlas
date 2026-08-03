@@ -13669,6 +13669,416 @@ class TestAcpListingEndpoint:
         assert acp_listing_store["lock_calls"] == []
 
 
+@pytest.fixture
+def acp_store_dir(tmp_path, monkeypatch):
+    """A real on-disk kiro-cli store, and a factory for sessions in it.
+
+    Real files rather than mocks, because what the delete path is being tested
+    on is filesystem behaviour: which paths a session actually owns, and whether
+    a failure part-way leaves the store readable. A mocked `Path` would let
+    every one of those pass without touching the property.
+
+    Returns a callable that writes one session's full set — `.json`, `.jsonl`,
+    `.history`, `.lock` and the `<id>/tasks/` subtree the live store carries —
+    and hands back the paths it wrote.
+    """
+    from power_atlas import acp as acp_mod
+    monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", tmp_path)
+
+    def _make(session_id, cwd="C:\\dev\\ws", *, lock=True, history=True):
+        written = []
+        meta = tmp_path / f"{session_id}.json"
+        meta.write_text(json.dumps({"session_id": session_id, "cwd": cwd,
+                                    "title": "a session"}), encoding="utf-8")
+        written.append(meta)
+        jsonl = tmp_path / f"{session_id}.jsonl"
+        jsonl.write_text('{"kind":"Prompt"}\n', encoding="utf-8")
+        written.append(jsonl)
+        if history:
+            hist = tmp_path / f"{session_id}.history"
+            hist.write_text("first prompt\n", encoding="utf-8")
+            written.append(hist)
+        if lock:
+            lk = tmp_path / f"{session_id}.lock"
+            lk.write_text(json.dumps({"pid": 4242,
+                                      "started_at": "2026-08-01T10:00:00Z"}),
+                          encoding="utf-8")
+            written.append(lk)
+        # ~500 of the real store's ids carry one of these, each holding a
+        # `tasks/` subdirectory — so the delete has a tree to remove, not just
+        # an empty directory.
+        tasks = tmp_path / session_id / "tasks"
+        tasks.mkdir(parents=True)
+        (tasks / "t1.json").write_text("{}", encoding="utf-8")
+        written.append(tmp_path / session_id)
+        return written
+
+    return _make
+
+
+class TestAcpDeleteEndpoint:
+    """Session deletion — the first thing PowerAtlas writes to kiro-cli's store.
+
+    Irreversible, loopback-only, and refused for any session something might
+    still be holding. Each test below pins one of those three.
+    """
+
+    _PATH = "/api/acp/sessions/delete"
+
+    def _post(self, client, ids):
+        return client.post(self._PATH, json={"session_ids": ids})
+
+    def test_it_removes_every_path_the_session_owns(self, client, acp_store_dir,
+                                                    monkeypatch):
+        """All five, not the three `data_kiro` reads.
+
+        A delete written from the loader's point of view would leave the
+        `.lock` and the `<id>/` tree behind: invisible to PowerAtlas, still on
+        disk, and — for the lock — still able to make the id read as `locked`.
+        """
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        paths = acp_store_dir("sess-1")
+        assert all(p.exists() for p in paths)
+
+        body = self._post(client, ["sess-1"]).json()
+
+        assert body == {"deleted": ["sess-1"], "failed": []}
+        assert [p for p in paths if p.exists()] == []
+
+    def test_a_held_session_is_refused_and_nothing_is_removed(self, client,
+                                                              acp_store_dir,
+                                                              monkeypatch):
+        """PowerAtlas's own agent has it open — Close is the remedy, and the
+        message has to say so, because Close and Delete are different actions
+        and only one of them is reversible."""
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        paths = acp_store_dir("sess-held")
+        acp_mod._supervisor.sessions["sess-held"] = {"cwd": "C:\\dev\\ws"}
+        try:
+            body = self._post(client, ["sess-held"]).json()
+        finally:
+            acp_mod._supervisor.sessions.pop("sess-held", None)
+
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "held"
+        assert "close" in body["failed"][0]["message"].lower()
+        assert all(p.exists() for p in paths)
+
+    def test_a_locked_session_is_refused_and_names_the_holder(self, client,
+                                                              acp_store_dir,
+                                                              monkeypatch):
+        """A foreign live kiro-cli. The pid is carried because it is the only
+        thing that tells the user *where* to go and close it."""
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: 21344)
+        paths = acp_store_dir("sess-locked")
+
+        body = self._post(client, ["sess-locked"]).json()
+
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "locked"
+        assert "21344" in body["failed"][0]["message"]
+        assert all(p.exists() for p in paths)
+
+    def test_an_unreadable_lock_does_not_grant_a_deletion(self, client,
+                                                          acp_store_dir,
+                                                          monkeypatch):
+        """`_lock_holder` raising is "I could not tell", and the route treats it
+        as no holder — the same fail-open `_acp_availability` takes, and for the
+        same reason: the hint may add a refusal, never grant one. What stops
+        that becoming data loss is the staging rename, not this check."""
+        from power_atlas import acp as acp_mod
+
+        def _boom(sid):
+            raise OSError("the lock could not be read")
+
+        monkeypatch.setattr(acp_mod, "_lock_holder", _boom)
+        acp_store_dir("sess-hintless")
+        body = self._post(client, ["sess-hintless"]).json()
+        assert body["deleted"] == ["sess-hintless"]
+
+    def test_an_id_that_could_form_a_path_is_refused_before_it_does(
+            self, client, acp_store_dir, monkeypatch, tmp_path):
+        """The id becomes a filename in a directory holding 5,958 other
+        conversations, so it is checked against the same rule the `load` path
+        applies. A traversal must be refused *and* leave the target alone."""
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        outsider = tmp_path.parent / "outside.json"
+        outsider.write_text("keep me", encoding="utf-8")
+
+        body = self._post(client, ["../outside", "a/b", "with.dot", ""]).json()
+
+        assert body["deleted"] == []
+        assert [f["code"] for f in body["failed"]] == ["bad_id"] * 4
+        assert outsider.exists()
+
+    def test_a_session_with_no_files_is_not_found_rather_than_deleted(
+            self, client, acp_store_dir, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        body = self._post(client, ["never-existed"]).json()
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "not_found"
+
+    def test_a_failure_part_way_through_leaves_the_session_whole(
+            self, client, acp_store_dir, monkeypatch):
+        """**The property the whole design exists for.**
+
+        A session is up to five paths. Unlinking them in turn has no way to
+        fail cleanly: on Windows an unlink is refused for a file another
+        process holds open (`winerror=32`, measured 2026-08-03), so a delete
+        racing a live holder would remove the `.json`, trip on the `.jsonl`,
+        and leave an entry nothing in this repo can parse.
+
+        So every path is *renamed* first — a refused rename changes nothing —
+        and only once all of them have moved is anything destroyed. Simulated
+        here by failing the third rename rather than by opening a real handle,
+        because a held-file test would assert Windows semantics on a POSIX
+        runner and pass vacuously.
+        """
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        paths = acp_store_dir("sess-racy")
+
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def _flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                err = OSError("in use")
+                err.winerror = 32
+                raise err
+            return real_replace(src, dst)
+
+        monkeypatch.setattr(os, "replace", _flaky)
+        body = self._post(client, ["sess-racy"]).json()
+
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "in_use"
+        # Every path back under its own name — not merely present under some
+        # name. A rollback that left `<id>.json.pa-deleting-ab12` on disk would
+        # satisfy "nothing was destroyed" while hiding the session from every
+        # reader, which is the same outcome as deleting it.
+        assert all(p.exists() for p in paths), (
+            "a refused delete did not restore the session it had staged")
+
+    def test_a_mixed_request_reports_each_id_separately(self, client,
+                                                        acp_store_dir,
+                                                        monkeypatch):
+        """The list form admits partial success, which is why the outcome is
+        per id and the status is 200 either way — a 4xx over a mixed result
+        would leave the caller unable to tell which half happened."""
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        kept = acp_store_dir("sess-keep")
+        acp_store_dir("sess-go")
+        acp_mod._supervisor.sessions["sess-keep"] = {"cwd": "C:\\dev\\ws"}
+        try:
+            res = self._post(client, ["sess-keep", "sess-go"])
+        finally:
+            acp_mod._supervisor.sessions.pop("sess-keep", None)
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["deleted"] == ["sess-go"]
+        assert [f["id"] for f in body["failed"]] == ["sess-keep"]
+        assert all(p.exists() for p in kept)
+
+    def test_a_successful_delete_expires_the_caches_that_would_restore_the_row(
+            self, client, acp_store_dir, monkeypatch):
+        """Without this the row comes back on the next Refresh.
+
+        `get_sessions` answers from `session_cache`, and the workspace counts
+        sit behind a 30 s TTL — so the store changing underneath them is not
+        something either notices in time for the request the user is about to
+        make.
+        """
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        acp_store_dir("sess-cached", cwd="C:\\dev\\cached")
+        forgotten = []
+        counts_cleared = []
+        monkeypatch.setattr(data_mod.session_cache, "forget",
+                            lambda cwd, provider="kiro-cli": forgotten.append((cwd, provider)))
+        monkeypatch.setattr(data_mod, "invalidate_workspace_counts",
+                            lambda: counts_cleared.append(True))
+
+        self._post(client, ["sess-cached"])
+
+        assert forgotten == [("C:\\dev\\cached", "kiro-cli")]
+        assert counts_cleared == [True]
+
+    def test_nothing_is_invalidated_when_nothing_was_deleted(self, client,
+                                                             acp_store_dir,
+                                                             monkeypatch):
+        """A refused request must not drop a workspace's parsed session list:
+        that is a full re-parse of the store's largest workspace (208 sessions)
+        bought for nothing."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: 21344)
+        acp_store_dir("sess-busy")
+        forgotten = []
+        monkeypatch.setattr(data_mod.session_cache, "forget",
+                            lambda cwd, provider="kiro-cli": forgotten.append(cwd))
+
+        self._post(client, ["sess-busy"])
+
+        assert forgotten == []
+
+    def test_the_route_is_not_on_the_remote_surface(self):
+        """**The whole authorization story, and it is an absence.**
+
+        `_REMOTE_ALLOWED_PATHS` is default-deny (D6), so leaving this path out
+        of it is what refuses a remote peer — no check in the route relies on
+        being remembered. This test is the tripwire for the one-line edit that
+        would make irreversible deletion reachable from a phone.
+        """
+        from power_atlas.web import _ACP_DELETE_PATH, _REMOTE_ALLOWED_PATHS
+        assert _ACP_DELETE_PATH not in _REMOTE_ALLOWED_PATHS
+        # And it is not reachable by prefix through the listing entry either:
+        # the two paths share one, and the matcher is exact for everything but
+        # the static mount.
+        from power_atlas.web import _remote_path_allowed
+        assert not _remote_path_allowed(_ACP_DELETE_PATH, "http")
+
+    @pytest.mark.parametrize("payload", [
+        {}, {"session_ids": []}, {"session_ids": "sess-1"},
+        {"session_ids": ["a"] * 201},
+    ])
+    def test_a_malformed_request_is_refused_without_touching_the_store(
+            self, client, acp_store_dir, payload):
+        res = client.post(self._PATH, json=payload)
+        assert res.status_code == 400
+
+
+class TestAcpWorkspacesEndpoint:
+    """The create picker's list. Paths and counts, no session content.
+
+    Split from the listing route rather than added to it because the two answer
+    different questions at very different prices: `_acp_listing` loads every
+    session of every group it returns to compute `total`, which for a picker
+    over 65 workspaces would be the most expensive request the app makes.
+    """
+
+    _PATH = "/api/acp/workspaces"
+
+    def test_it_carries_paths_and_counts_and_no_session_content(
+            self, client, acp_listing_store, tmp_path):
+        """Asserted as equality, so a field added later fails here rather than
+        reaching a phone — this route is on the remote surface."""
+        ws = tmp_path / "ProjectOne"
+        ws.mkdir()
+        acp_listing_store["add"](str(ws), [_acp_row("s1", title="a title"),
+                                           _acp_row("s2")])
+
+        body = client.get(self._PATH).json()
+
+        assert set(body) == {"workspaces", "missing", "capacity"}
+        assert body["workspaces"] == [
+            {"cwd": str(ws), "name": "ProjectOne", "sessions": 2}]
+        # The whole point of the split: no id, no title, no timestamp. The
+        # listing route's own docstring records that `title` can be raw prompt
+        # text, and this route is reachable from the same remote surface.
+        assert "s1" not in json.dumps(body)
+        assert "a title" not in json.dumps(body)
+
+    def test_a_workspace_whose_folder_is_gone_is_not_offered(
+            self, client, acp_listing_store, tmp_path):
+        """`_resolve_session_cwd` refuses every one of them with `BadCwd`, so
+        offering them would be offering guaranteed failures — 14 of the real
+        store's 65 workspaces are in this state. The count is reported because a
+        list that silently shows 51 of 65 reads as broken."""
+        live = tmp_path / "live"
+        live.mkdir()
+        acp_listing_store["add"](str(live), [_acp_row("s1")])
+        acp_listing_store["add"](str(tmp_path / "deleted"), [_acp_row("s2")])
+
+        body = client.get(self._PATH).json()
+
+        assert [w["cwd"] for w in body["workspaces"]] == [str(live)]
+        assert body["missing"] == 1
+
+    def test_a_hidden_workspace_is_excluded_like_it_is_from_the_listing(
+            self, client, acp_listing_store, tmp_path, monkeypatch):
+        """A workspace hidden from the dashboard has not asked to be a create
+        target either — the same exclusion `_acp_listing` applies."""
+        from power_atlas import web as web_mod
+        shown, hidden = tmp_path / "shown", tmp_path / "hidden"
+        shown.mkdir()
+        hidden.mkdir()
+        acp_listing_store["add"](str(shown), [_acp_row("s1")])
+        acp_listing_store["add"](str(hidden), [_acp_row("s2")])
+        monkeypatch.setattr(
+            web_mod, "_enabled", lambda config, provider: True)
+        import power_atlas.config as config_mod
+        real = config_mod.get_workspace_settings
+        monkeypatch.setattr(
+            config_mod, "get_workspace_settings",
+            lambda config, cwd: ({"tags": ["hidden"]} if cwd == str(hidden)
+                                 else real(config, cwd)))
+
+        body = client.get(self._PATH).json()
+
+        assert [w["cwd"] for w in body["workspaces"]] == [str(shown)]
+        # Hidden is not missing: the folder is there, the user chose not to see
+        # it. Conflating the two would report a phantom "folder no longer on
+        # this machine" for a directory that is fine.
+        assert body["missing"] == 0
+
+    def test_it_reports_the_same_capacity_pair_the_listing_does(
+            self, client, acp_listing_store, tmp_path):
+        """The picker refuses at the cap before spending anything, so it needs
+        the pair on the answer it already makes rather than a second request."""
+        from power_atlas import acp as acp_mod
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        acp_listing_store["add"](str(ws), [_acp_row("s1")])
+        acp_mod._supervisor.sessions["a"] = {"cwd": str(ws)}
+        try:
+            body = client.get(self._PATH).json()
+        finally:
+            acp_mod._supervisor.sessions.pop("a", None)
+        assert body["capacity"] == {"held": 1, "max": acp_mod.MAX_SESSIONS}
+
+    def test_it_is_on_the_remote_surface_and_deletion_is_not(self):
+        """The asymmetry, pinned.
+
+        Creating a session already works from a phone — `session/new` rides the
+        allowlisted `/ws/acp` — so a picker that could not list workspaces
+        remotely would remove a capability that exists today. Deletion does not
+        exist yet, so keeping it local costs nothing.
+        """
+        from power_atlas.web import (_ACP_WORKSPACES_PATH, _ACP_DELETE_PATH,
+                                     _REMOTE_ALLOWED_PATHS)
+        assert _REMOTE_ALLOWED_PATHS[_ACP_WORKSPACES_PATH] == "http"
+        assert _ACP_DELETE_PATH not in _REMOTE_ALLOWED_PATHS
+
+    def test_it_reads_the_store_only_once_per_request(self, client,
+                                                      acp_listing_store,
+                                                      tmp_path, monkeypatch):
+        """`get_sessions` is never called. That is the cost difference from the
+        listing route, and it is the reason this route exists at all: the
+        listing loads every session of every group it returns to compute
+        `total`, measured at 975 of 1,210 sessions for a single request."""
+        from power_atlas import data as data_mod
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        acp_listing_store["add"](str(ws), [_acp_row("s1")])
+        calls = []
+        monkeypatch.setattr(data_mod, "get_sessions",
+                            lambda cwd, provider="kiro-cli": calls.append(cwd) or [])
+
+        client.get(self._PATH)
+
+        assert calls == []
+
+
 class TestWorkspaceExistsDiscriminatesAbsenceFromSilence:
     """Phase 5b review. `_acp_cwd_exists`'s docstring promised that "a
     permission error or an unmounted network drive must not badge a live

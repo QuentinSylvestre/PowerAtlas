@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -628,6 +629,12 @@ _REMOTE_AUTH_PATH = "/remote-auth"
 # together further down.
 _ACP_LISTING_PATH = "/api/acp/sessions"
 
+# The create picker's workspace list, up here for exactly the same mechanical
+# reason as its neighbour above — `_REMOTE_ALLOWED_PATHS` names it, and that
+# dict is built at import time. Its rationale, and why it is on the remote
+# surface while deletion is not, stay with the route further down.
+_ACP_WORKSPACES_PATH = "/api/acp/workspaces"
+
 
 def set_remote_host(address: str) -> None:
     """Teach `_ALLOWED_HOSTS` the one non-loopback address we bind. Startup only.
@@ -1002,6 +1009,14 @@ _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     "/ws/acp": "websocket",
     _REMOTE_AUTH_PATH: "http",
     _ACP_LISTING_PATH: "http",
+    # The create picker's workspace list. Here because creating a session is
+    # already a remote capability — `session/new` rides the allowlisted
+    # `/ws/acp` — so a picker that could not list workspaces from a phone would
+    # remove something that works today. It carries workspace paths and session
+    # *counts* and no session content, i.e. a strict subset of what
+    # `_ACP_LISTING_PATH` above already discloses. Deletion is deliberately not
+    # here; see `_ACP_DELETE_PATH`.
+    _ACP_WORKSPACES_PATH: "http",
     _REMOTE_STATIC_MOUNT: "http",
 }
 
@@ -1823,6 +1838,353 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
         held, capacity)
+
+
+# --- The create flow's workspace list ------------------------------------
+#
+# **On the remote surface, unlike its sibling below**, and the asymmetry is not
+# an oversight. Creating a session already works from a phone — `session/new`
+# rides `/ws/acp`, which is allowlisted — so a picker that could not list
+# workspaces remotely would break a capability that exists today. Deletion is
+# the opposite: it does not exist yet, so keeping it local costs nothing.
+#
+# It discloses strictly less than `_ACP_LISTING_PATH` already does. That route's
+# own docstring records that an authorized peer which keeps paging reaches every
+# workspace path *and every session title* on the machine; this one carries the
+# paths and counts with no session content at all.
+#
+# Cheap on purpose. `/api/acp/sessions` costs a full `get_sessions` per group
+# because each group's `total` needs the whole list — measured at 975 of 1,210
+# sessions loaded for a single 50x50 request — so building a 65-workspace picker
+# out of four pages of it would be the most expensive request the app makes.
+# `discover_workspaces_with_counts` already carries the count, is cached for 30 s
+# and is the same call the dashboard makes, so this is a filter over a warm list.
+#
+# `_ACP_WORKSPACES_PATH` itself is defined next to `_REMOTE_AUTH_PATH` at the top
+# of this file, because the allowlist literal is evaluated before this point.
+
+
+def _acp_workspaces(capacity: dict) -> dict:
+    """Workspaces a session can be created in. Blocking; runs off the loop.
+
+    Excludes the same two sets `_acp_listing` excludes — `hidden`-tagged
+    workspaces and a disabled provider — plus a third this route needs and that
+    one does not: **workspaces whose directory is gone**. 14 of the real store's
+    65 are in that state, and `_resolve_session_cwd` refuses every one of them
+    with `BadCwd`, so offering them as create targets would be offering 14
+    guaranteed failures. The listing route keeps them because reading an old
+    conversation from a deleted tree is perfectly reasonable; creating a new one
+    there is not.
+
+    The count of what was dropped is reported rather than swallowed: a picker
+    that silently shows 51 of 65 workspaces reads as a broken list.
+    """
+    from .config import get_workspace_settings
+
+    config = load_config()
+    if not _enabled(config, _ACP_LISTING_PROVIDER):
+        return {"workspaces": [], "missing": 0, "capacity": capacity}
+    found = [
+        w for w in data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
+        if "hidden" not in get_workspace_settings(config, w[0])["tags"]
+    ]
+    # One budget for the whole sweep, the same helper and the same reason the
+    # listing route uses it: `os.stat` on a routable-but-dead UNC host measured
+    # 42.2 s, and this list is longer than one listing page.
+    flags = _acp_exists_flags([w[0] for w in found])
+    live = [w for w, ok in zip(found, flags) if ok]
+    return {
+        "workspaces": [{
+            "cwd": cwd,
+            "name": Path(cwd).name or cwd,
+            "sessions": count,
+        } for cwd, count, _updated, _prov in live],
+        "missing": len(found) - len(live),
+        "capacity": capacity,
+    }
+
+
+@app.get(_ACP_WORKSPACES_PATH)
+async def api_acp_workspaces(response: Response):
+    """Workspace paths, names and session counts, for the create picker.
+
+    No session content of any kind — no ids, no titles, no timestamps. That is
+    the whole difference from `_ACP_LISTING_PATH`, and it is why this one can be
+    on the remote surface with a smaller disclosure than the route already
+    there.
+
+    `capacity` rides along so the picker can refuse at the cap before spending
+    anything, the way the rail's rows already do — one request rather than two,
+    and the same pair the listing route reports.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    # Loop-side snapshot before the thread hop (D9), exactly as the listing
+    # route takes it, and `_reserved` counted for the same reason: a creation
+    # in flight already holds the slot this number is asked about.
+    held = frozenset(acp._supervisor.sessions) if acp is not None else frozenset()
+    capacity = {
+        "held": (len(held) + acp._supervisor._reserved) if acp is not None else 0,
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
+    return await asyncio.to_thread(_acp_workspaces, capacity)
+
+
+# --- The session browser's delete action ---------------------------------
+#
+# **The first thing in PowerAtlas that writes to kiro-cli's store.** Everything
+# else that touches `~/.kiro/sessions/cli` reads it: `data_kiro` parses and
+# caches, `acp._lock_holder` reads a bounded `.lock` prefix, and the listing
+# route above says "Read-only" in its first line. That is worth stating once,
+# here, because it is the property a reviewer would otherwise assume still held.
+#
+# **Loopback-only, and the enforcement is the absence below.** `_ACP_DELETE_PATH`
+# is deliberately NOT in `_REMOTE_ALLOWED_PATHS`, and that map is default-deny
+# (D6), so a remote peer is refused by the guard that already exists rather than
+# by a check written here that could be forgotten or inverted. Adding the path to
+# that map is the only edit that would make irreversible deletion reachable from
+# a phone — one line, in one place, which is where a decision like that belongs.
+# The page cooperates rather than relying on the 403: `/acp` renders the menu
+# only when `local` is true, so a remote viewer is never offered a control that
+# would fail. Being a POST, it also inherits `same_origin_guard`'s Origin/Referer
+# check (`:809`) for free.
+_ACP_DELETE_PATH = "/api/acp/sessions/delete"
+
+# Everything one session owns in the store — measured against the live store on
+# 2026-08-03, not inferred from the loader: 13,993 entries made of 5,958 `.json`,
+# 5,958 `.jsonl`, 708 `.history`, 861 `.lock` and ~500 `<id>/` directories (each
+# holding a `tasks/` subtree). `data_kiro.load_sessions` opens only the first
+# three, so a delete written from the loader's point of view would leave the
+# `.lock` and the directory behind: invisible to PowerAtlas, still on disk, and
+# — for the `.lock` — still able to make a *reused* id read as `locked`.
+_ACP_SESSION_SUFFIXES = (".json", ".jsonl", ".history", ".lock")
+
+# What a path is renamed to before anything is unlinked. Chosen so the staged
+# name cannot be picked up as a session again: `data_kiro._iter_meta_files`
+# selects on `entry.name.endswith(".json")`, which `<id>.json.pa-deleting-ab12`
+# does not satisfy.
+_ACP_DELETE_STAGING = ".pa-deleting"
+
+# ERROR_SHARING_VIOLATION. **Measured, not assumed** (Windows 11, Python 3.13,
+# 2026-08-03): with a second handle open on a file, `os.unlink` AND `os.replace`
+# both raise `winerror=32` / `errno=13`. The second half is what this whole
+# design rests on — see `_acp_delete_session`.
+_ACP_SHARING_VIOLATION = 32
+
+# A caller-supplied list is a loop bound, so it is capped. The UI sends exactly
+# one; the list form exists so that adding bulk deletion later is a change to
+# the page rather than to the protocol.
+_ACP_MAX_DELETE_IDS = 200
+
+
+def _acp_session_paths(session_id: str) -> list[Path]:
+    """Every path in the store belonging to one session, existing ones only.
+
+    `Path.exists()` rather than the `os.stat` dance `_acp_cwd_exists` argues
+    for, and the difference is the input: that function is handed a workspace
+    path the agent wrote, which can be an unreachable UNC host. This one only
+    ever joins a `_valid_session_id` onto `KIRO_SESSION_DIR`, which is under
+    `Path.home()` — local, always answerable, and nothing here is a remote mount.
+    """
+    base = acp.KIRO_SESSION_DIR
+    found = [base / f"{session_id}{suffix}" for suffix in _ACP_SESSION_SUFFIXES]
+    out = [path for path in found if path.exists()]
+    directory = base / session_id
+    if directory.is_dir():
+        out.append(directory)
+    return out
+
+
+def _acp_delete_session(session_id: str) -> tuple[str, str]:
+    """Remove one session from the store. Blocking; runs off the loop.
+
+    Returns ``("", "")`` on success, or ``(code, message)``.
+
+    **Rename first, unlink second, and that ordering is the correctness
+    argument rather than a style.** A session is up to five separate paths, and
+    the naive loop — unlink each in turn — has no way to fail cleanly: measured
+    above, Windows refuses to unlink a file another process holds open, so a
+    delete racing a live holder removes the `.json`, then trips on the `.jsonl`,
+    and leaves a store entry that nothing in this repo can parse. The rail would
+    show a session whose transcript is gone; `data_kiro.load_sessions` would
+    skip it silently; the bytes would stay forever.
+
+    `os.replace` is refused by the *same* sharing violation, and — this is the
+    part that makes it useful — a refused rename changes nothing at all. So
+    every path is staged to a name first, and only once all of them have moved
+    is anything destroyed. A holder anywhere in the set aborts the whole
+    operation, and the renames already made are put back.
+
+    **This is a second line of defence, not the first.** The route refuses a
+    session that is `held` or `locked` before reaching here. What this catches
+    is the gap those checks cannot close: `acp._lock_holder` is explicitly "a
+    hint and never the gate" (`acp.py:1175`) and the store carries 861 `.lock`
+    files whose pids died long ago, so a live holder with an unreadable lock
+    passes the hint. The rename is what stops that becoming a corrupt entry.
+
+    **The one degradation it accepts.** If a rename succeeds and the unlink that
+    follows fails, the session is gone as far as every reader is concerned — the
+    staged names match no loader pattern — but the bytes remain. That is logged
+    loudly rather than reported to the user, because from the caller's point of
+    view the delete did happen, and an error naming a file they cannot act on
+    would be worse than a log line an operator can grep for.
+    """
+    paths = _acp_session_paths(session_id)
+    if not paths:
+        return ("not_found",
+                "Nothing left to delete — the store has no files for this "
+                "session.")
+
+    # Distinguishes one delete's staging names from another's, so two deletions
+    # racing on ids that share a prefix cannot collide on a staged name.
+    token = secrets.token_hex(4)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for path in paths:
+            target = path.with_name(f"{path.name}{_ACP_DELETE_STAGING}-{token}")
+            os.replace(path, target)
+            staged.append((target, path))
+    except OSError as exc:
+        for target, original in reversed(staged):
+            try:
+                os.replace(target, original)
+            except OSError:
+                # The rollback itself failed, which leaves this session
+                # half-staged: readers skip it, and no later call will find it
+                # under its own name. Nothing here can fix that, so it is
+                # recorded with the exact paths an operator would need.
+                log.exception("ACP delete: could not restore %s to %s",
+                              target, original)
+        if getattr(exc, "winerror", None) == _ACP_SHARING_VIOLATION:
+            return ("in_use",
+                    "A process still has this session's files open. Close it "
+                    "there, then try again.")
+        log.warning("ACP delete: staging failed for session=%s: %s",
+                    session_id, exc)
+        return ("failed", f"Could not delete this session: {exc}")
+
+    leftover: list[str] = []
+    for target, _original in staged:
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        except OSError as exc:
+            leftover.append(f"{target} ({exc})")
+    if leftover:
+        log.warning(
+            "ACP delete: session=%s is gone from the store's readable names, "
+            "but %d staged path(s) could not be removed and are still on disk: "
+            "%s", session_id, len(leftover), "; ".join(leftover))
+    return ("", "")
+
+
+def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
+    """Delete each id, refusing the ones that are not safe. Blocking.
+
+    `held` is a snapshot taken on the loop and passed in, for the reason
+    `_acp_availability` gives at length: `_supervisor.sessions` is loop-owned
+    and unlocked, and iterating it from a worker thread is a torn read (D9).
+    """
+    deleted: list[str] = []
+    failed: list[dict] = []
+    touched: set[str] = set()
+
+    for session_id in session_ids:
+        if not acp._valid_session_id(session_id):
+            # Before anything joins it to a path. The same guard the `load`
+            # path applies, and the reason it exists: this string becomes a
+            # filename in a directory whose neighbours are 5,958 other
+            # conversations.
+            failed.append({"id": session_id, "code": "bad_id",
+                           "message": "Not a usable session id."})
+            continue
+        if session_id in held:
+            failed.append({
+                "id": session_id, "code": "held",
+                "message": "PowerAtlas has this session open. Open it in the "
+                           "conversation pane and press Close first."})
+            continue
+        try:
+            holder = acp._lock_holder(session_id)
+        except Exception:
+            # Same fail-open reading `_acp_availability` takes: the hint may
+            # add a refusal, never grant one — so a hint that could not be read
+            # does not refuse. The rename staging below is what covers the case
+            # where it was wrong.
+            holder = None
+        if holder is not None:
+            failed.append({
+                "id": session_id, "code": "locked",
+                "message": f"Another process (pid {holder}) is using this "
+                           "session. Close it there first."})
+            continue
+
+        # Read *before* the delete: it is the session's own metadata file that
+        # says which workspace it belongs to, and after the delete there is
+        # nothing left to ask.
+        cwd = acp._stored_session_cwd(session_id)
+        code, message = _acp_delete_session(session_id)
+        if code:
+            failed.append({"id": session_id, "code": code, "message": message})
+            continue
+        deleted.append(session_id)
+        if cwd:
+            touched.add(cwd)
+
+    if deleted:
+        # The store has changed under caches that key on it. `data_kiro`'s own
+        # index keys on the directory's mtime and self-invalidates, but
+        # `session_cache` holds the parsed list per workspace and
+        # `discover_workspaces_with_counts` holds the counts for 30 s — so
+        # without these two the deleted row comes back on the next Refresh and
+        # the workspace header keeps counting it.
+        for cwd in touched:
+            data.session_cache.forget(cwd, _ACP_LISTING_PROVIDER)
+        data.invalidate_workspace_counts()
+        log.info("ACP delete: removed %d session(s) across %d workspace(s)",
+                 len(deleted), len(touched))
+
+    return {"deleted": deleted, "failed": failed}
+
+
+@app.post(_ACP_DELETE_PATH)
+async def api_acp_delete_sessions(request: Request):
+    """Delete sessions from kiro-cli's store. Irreversible. Loopback-only.
+
+    Loopback-only by omission from `_REMOTE_ALLOWED_PATHS` — see the block
+    comment above this route, which is where that decision is recorded.
+
+    Answers `{"deleted": [...], "failed": [{"id", "code", "message"}]}` with a
+    200 whenever the request itself was well-formed, including when every id in
+    it was refused. Per-id outcomes rather than a status code because the list
+    form admits partial success, and a 4xx over a mixed result would leave the
+    caller unable to tell which half happened.
+    """
+    if acp is None:
+        return JSONResponse(
+            {"error": "The ACP module is not loaded, so its store is not "
+                      "reachable from here."}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
+    raw = body.get("session_ids") if isinstance(body, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return JSONResponse(
+            {"error": "'session_ids' must be a non-empty list."},
+            status_code=400)
+    if len(raw) > _ACP_MAX_DELETE_IDS:
+        return JSONResponse(
+            {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
+            status_code=400)
+    session_ids = [s for s in raw if isinstance(s, str)]
+    # **On the loop, before the thread hop** (D9), exactly as the listing route
+    # snapshots it. `_reserved` is deliberately not counted here: it bounds
+    # *creation*, and a session still being created holds no store files a
+    # delete could reach.
+    held = frozenset(acp._supervisor.sessions)
+    return await asyncio.to_thread(_acp_delete_many, session_ids, held)
 
 
 # --- The secret exchange -------------------------------------------------

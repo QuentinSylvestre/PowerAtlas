@@ -157,6 +157,26 @@ class SessionCache:
         with self._lock:
             return self._file_stats.get(key, {}).copy()
 
+    def forget(self, cwd: str, provider: str = "kiro-cli") -> None:
+        """Drop one workspace's entry so the next get_sessions re-reads it.
+
+        For a caller that has just changed the store on purpose. The polling
+        path does not need this — refresh_stale_entries() re-reads whatever the
+        recorded (mtime, size) no longer matches — but it only runs on its own
+        schedule, so a UI action that deletes a session and then re-lists would
+        be served the pre-deletion list from here and the row would come back.
+
+        Narrow on purpose: clear() drops every workspace of every provider, and
+        the store this exists for is 5,958 sessions across 65 workspaces, so
+        using it here would turn one deletion into a full re-parse.
+        """
+        key = (provider, _normalize_path(cwd))
+        with self._lock:
+            self._sessions.pop(key, None)
+            self._file_stats.pop(key, None)
+            self._loaded_keys.discard(key)
+            self._original_cwds.pop(key, None)
+
     def clear(self) -> None:
         with self._lock:
             self._sessions.clear()
@@ -166,6 +186,22 @@ class SessionCache:
 
 
 session_cache = SessionCache()
+
+
+def invalidate_workspace_counts() -> None:
+    """Expire the 30 s discover_workspaces_with_counts cache immediately.
+
+    Its key is per provider plus an "all" bucket, and a deletion changes the
+    count of exactly one workspace — but the cached value is the whole sorted
+    list, so there is nothing finer to invalidate than the entry. Dropping every
+    variant is correct rather than lazy: `provider=None` and `provider="kiro-cli"`
+    are separate entries holding the same now-stale count.
+
+    Without this, a deleted session keeps its workspace's "3 of 47" header
+    honest for up to _CACHE_TTL seconds after the row it counted has gone.
+    """
+    for key in [k for k in _cache if k.startswith("workspaces_with_counts:")]:
+        _cache.pop(key, None)
 
 
 # --- Legacy API (kiro-cli only, retained for external/test use) ---
