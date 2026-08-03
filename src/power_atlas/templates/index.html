@@ -1064,6 +1064,19 @@ function renderRestartKeys(settings) {
 // The two keys with a live control in the topbar. Without this the hotkey field
 // accepts a new value, saves it, and behaves as though nothing happened until
 // the next launch — which is the same lie the API side was fixed for.
+//
+// The badge reads "on relaunch", not "restart", because it is a **property of
+// the setting** and not a pending-change indicator. `restart_to_apply` is a
+// static frozenset (`_RESTART_TO_APPLY` in `web.py`), so these two keys are in
+// the list on every request and the badge is unconditional — no restart clears
+// it and none ever will. Labelled "restart" it read as unfinished business the
+// user could act on, which is exactly the "positively wrong field" the
+// `peek_hotkey` comment beside that frozenset warns about. The wording now
+// matches the title text, which was always phrased as a property.
+//
+// Making it conditional is a real feature, not a rename: `/api/settings`
+// returns only stored values (`config.X`) with no startup snapshot, so nothing
+// here can tell a changed-but-unapplied value from an applied one.
 function markRestartInputs(keys) {
   var owners = {peek_hotkey: 'peek-hotkey-group', port: 'port-group'};
   Object.keys(owners).forEach(function (key) {
@@ -1074,7 +1087,7 @@ function markRestartInputs(keys) {
     if (!badge) {
       badge = document.createElement('span');
       badge.className = 'restart-badge';
-      badge.textContent = 'restart';
+      badge.textContent = 'on relaunch';
       host.appendChild(badge);
     }
     badge.title = 'This value is read once at startup — it takes effect on the '

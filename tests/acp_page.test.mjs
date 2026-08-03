@@ -2770,7 +2770,7 @@ check("every key the server reports as restart-only gets a row and a badge", () 
   for (const sel of [".peek-hotkey-group", ".port-group"]) {
     const badge = p.badge(sel);
     assert(badge, `${sel} carries no restart badge`);
-    assertEqual(badge.textContent, "restart", `${sel}'s badge says nothing`);
+    assertEqual(badge.textContent, "on relaunch", `${sel}'s badge says nothing`);
     assert(/next launch/i.test(String(badge.title)),
            `${sel}'s badge does not say when the value takes effect: ${badge.title}`);
   }
