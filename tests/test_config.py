@@ -18,9 +18,21 @@ from power_atlas.config import (
 
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
-    """Redirect config to tmp dir."""
+    """Redirect config to tmp dir.
+
+    `REMOTE_SECRET_PATH` is listed explicitly and is not redundant with
+    `CONFIG_DIR`. It is computed **at import time** as `CONFIG_DIR /
+    "remote-secret"`, so rebinding `CONFIG_DIR` afterwards does not move it —
+    it keeps pointing at the real `%LOCALAPPDATA%\\power-atlas\\remote-secret`.
+    Latent when added: a 2026-08-03 census of all seven test modules found the
+    secret functions called only from `tests/test_web.py`, which redirects all
+    three paths. It stops being latent the first time a secret test is written
+    here, and the failure is writing a live credential over the user's own.
+    """
     monkeypatch.setattr("power_atlas.config.CONFIG_DIR", tmp_path)
     monkeypatch.setattr("power_atlas.config.CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr("power_atlas.config.REMOTE_SECRET_PATH",
+                        tmp_path / "remote-secret")
 
 
 def _write_toml(tmp_path, data):
