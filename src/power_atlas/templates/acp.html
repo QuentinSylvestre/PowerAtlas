@@ -161,15 +161,29 @@
   </div>
   <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
        aria-label="Conversation"></div>
-  <div class="acp-composer">
-    <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
-              placeholder="Prompt the agent — Enter sends, Shift+Enter for a new line"
-              aria-label="Prompt"></textarea>
-    <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
-    <!-- Only during a turn. A stop control that is present and inert for the
-         whole idle time is indistinguishable from one that has stopped
-         working, and a turn under -a can run tools for minutes. -->
-    <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
+  <div class="acp-composer" id="acpComposer">
+    <!-- Images staged for the next prompt, and the only place they are ever
+         shown as pictures. The transcript gets `[Image 1]` instead: the bytes
+         are sent to the agent and deliberately never enter a `chunk` frame,
+         because the replay buffer charges base64 at full weight and about
+         eight of them would evict a whole conversation.
+
+         `hidden` until something is staged, so the composer is exactly what it
+         was before for anyone who never pastes an image. Empty in the markup —
+         every chip inside is built with createElement and textContent, like
+         the rest of this page. -->
+    <div class="acp-tray" id="acpTray" hidden role="group"
+         aria-label="Images attached to the next prompt"></div>
+    <div class="acp-composer-row">
+      <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
+                placeholder="Prompt the agent — Enter sends, Shift+Enter for a new line, Ctrl+V to attach an image"
+                aria-label="Prompt"></textarea>
+      <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
+      <!-- Only during a turn. A stop control that is present and inert for the
+           whole idle time is indistinguishable from one that has stopped
+           working, and a turn under -a can run tools for minutes. -->
+      <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
+    </div>
   </div>
   <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
 </div>
@@ -292,6 +306,8 @@
   var reloadBtn = document.getElementById('acpReload');
   var transcriptEl = document.getElementById('acpTranscript');
   var promptInput = document.getElementById('acpPrompt');
+  var composerEl = document.getElementById('acpComposer');
+  var trayEl = document.getElementById('acpTray');
   var sendBtn = document.getElementById('acpSend');
   var stopBtn = document.getElementById('acpStop');
   var closeBtn = document.getElementById('acpClose');
@@ -342,6 +358,11 @@
   // The prompt handed to a `send` that has not yet been acknowledged by a
   // turn starting. Held so a refusal can put it back in the textarea.
   var pendingPrompt = null;
+  // The attachments that went with it, held for exactly the same reason and
+  // released at exactly the same moments. Staging an image costs a paste, a
+  // decode and a re-encode; dropping that on a refusal the user did not cause
+  // is the same loss as clearing the textarea, one step more expensive.
+  var pendingAttachments = [];
   // toolCallId -> the elements a later `tool_update` rewrites in place, so a
   // call that runs then completes is one row rather than three.
   var toolRows = Object.create(null);
@@ -656,6 +677,11 @@
     setTurn(false);
     setContext(null);
     setPending(false);
+    // Images were staged against the conversation this page has just let go
+    // of. Carrying them to whatever is opened next would put a screenshot in
+    // front of a different agent in a different directory.
+    clearAttachments();
+    releasePendingAttachments();
     sidEl.textContent = '';
     // The id leaves the URL with the session. Left in place, a reload would
     // re-adopt the session through `load` and spend the ~161 MB again --
@@ -693,6 +719,392 @@
     // anyone reading the top of it.
     return transcriptEl.scrollHeight - transcriptEl.scrollTop
              - transcriptEl.clientHeight < 60;
+  }
+
+  // The 1 px top and bottom border `.acp-prompt` carries. `scrollHeight`
+  // measures content plus padding and stops there, while `box-sizing:
+  // border-box` (style.css:1) makes `height` include the border as well — so
+  // writing `scrollHeight` straight into `height` leaves the box 2 px short of
+  // its own content and the textarea grows a scrollbar it does not need.
+  // Written as a literal rather than read back from the element: neither
+  // `getComputedStyle` nor `offsetHeight` exists in the DOM stand-in the page's
+  // checks run against, and a layout read here would be a call that throws in
+  // the harness while looking correct in a browser.
+  var PROMPT_BORDER_PX = 2;
+
+  // Grow the composer with what has been typed into it.
+  //
+  // The height is written **unclamped** and `max-height` in style.css does the
+  // clamping. That is deliberate: mirroring 180 here would put the ceiling in
+  // two places free to disagree, and a `height` above the max is simply not the
+  // used value. Past the cap the textarea scrolls, which is already its default
+  // overflow.
+  //
+  // `height = 'auto'` first, because `scrollHeight` on an element with an
+  // explicit height reports that height once the content has shrunk — without
+  // the reset the box would grow and never come back down.
+  //
+  // `stuckToBottom` is read *before* the write for the same reason `addMessage`
+  // reads it before appending: the composer takes its new height out of the
+  // transcript above it, so somebody reading the bottom of a conversation would
+  // otherwise be pushed off it by their own typing.
+  function autoGrowPrompt() {
+    var stick = stuckToBottom();
+    promptInput.style.height = 'auto';
+    promptInput.style.height =
+      (promptInput.scrollHeight + PROMPT_BORDER_PX) + 'px';
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  /* ---- image attachments ------------------------------------------------
+   *
+   * Ctrl+V needs no keybinding here, and that is the whole reason this is a
+   * browser feature rather than the `Alt+V` kiro-cli and Claude Code both ask
+   * for. A terminal emulator only ever hands its TUI the *text* flavour of the
+   * clipboard — the image flavour never crosses the PTY — so a terminal client
+   * has to shell out to a platform clipboard reader on a separate keystroke.
+   * A `paste` listener gets `clipboardData.files` with the image in it for
+   * free.
+   *
+   * Everything below is reached only from an event handler. Nothing in this
+   * block names a browser API at script scope, and that is deliberate rather
+   * than tidy: the page's checks run against a hand-built DOM stand-in with no
+   * `FileReader`, no `Image`, no `Blob` and no canvas, and an unguarded
+   * reference at the top level throws while the script is still evaluating —
+   * taking every check on the page down at once, not only the image ones.
+   */
+
+  // The staged images, in the order they were pasted, which is the order
+  // `[Image N]` numbers them in. Each entry is
+  // `{mimeType, data, bytes, url, name}` where `data` is bare base64 with no
+  // `data:` prefix and `url` is a `blob:` for the thumbnail.
+  var attachments = [];
+
+  // The budget, as the server states it. Both are replaced by the `meta`
+  // acknowledgement every socket receives before anything can be sent; the
+  // values here only cover the window before it lands. Deliberately not the
+  // authority — `acp.py` re-checks every one of these, because this socket is
+  // reachable by clients that are not this page.
+  var imageMaxCount = 4;
+  var imageMaxBytes = 176 * 1024;
+
+  // The encode ladder: longest edge, then quality. 1568 px is the point above
+  // which the model downscales anyway, so pixels past it cost budget and buy
+  // nothing. Each rung is tried in both formats before the next rung is, so
+  // quality is spent before resolution is.
+  var IMAGE_LADDER = [
+    { edge: 1568, quality: 0.85 },
+    { edge: 1568, quality: 0.60 },
+    { edge: 1024, quality: 0.60 }
+  ];
+  // WebP first because the thing most worth pasting here is a screenshot of a
+  // UI, and JPEG rings around glyphs at exactly the quality that makes it fit.
+  // Measured on a dense 1774x887 screenshot at 1568 px: PNG 1572 KB, JPEG q85
+  // 154 KB. PNG is not a candidate at all — it does not compress a screenshot.
+  var IMAGE_FORMATS = ['image/webp', 'image/jpeg'];
+
+  function imagesSupported() {
+    if (typeof FileReader === 'undefined') return false;
+    if (typeof Image === 'undefined') return false;
+    if (typeof URL === 'undefined' || !URL.createObjectURL) return false;
+    var probe = document.createElement('canvas');
+    return !!(probe && probe.getContext && probe.toBlob);
+  }
+
+  /** The image files on a clipboard or drag payload, in order. */
+  function imageFilesFrom(source) {
+    var out = [];
+    if (!source) return out;
+    var files = source.files;
+    if (files && files.length) {
+      for (var i = 0; i < files.length; i++) {
+        var f = files[i];
+        if (f && typeof f.type === 'string' && f.type.indexOf('image/') === 0) {
+          out.push(f);
+        }
+      }
+      return out;
+    }
+    // The older shape, still what some builds populate for a clipboard paste.
+    var items = source.items;
+    if (items && items.length) {
+      for (var j = 0; j < items.length; j++) {
+        var it = items[j];
+        if (it && it.kind === 'file' && typeof it.type === 'string' &&
+            it.type.indexOf('image/') === 0 && it.getAsFile) {
+          var got = it.getAsFile();
+          if (got) out.push(got);
+        }
+      }
+    }
+    return out;
+  }
+
+  /* Whether a drag carries files at all — the most a `dragover` is allowed to
+   * know. Only the metadata is exposed mid-drag, so this reads `types` and the
+   * `kind` of each item and never reaches for content. */
+  function dragHasFiles(source) {
+    if (!source) return false;
+    var types = source.types;
+    if (types && types.length) {
+      for (var i = 0; i < types.length; i++) {
+        if (types[i] === 'Files') return true;
+      }
+    }
+    var items = source.items;
+    if (items && items.length) {
+      for (var j = 0; j < items.length; j++) {
+        if (items[j] && items[j].kind === 'file') return true;
+      }
+    }
+    return false;
+  }
+
+  function imageBudgetLeft() {
+    var used = 0;
+    for (var i = 0; i < attachments.length; i++) used += attachments[i].bytes;
+    return imageMaxBytes - used;
+  }
+
+  function kb(bytes) { return Math.max(1, Math.round(bytes / 1024)) + ' KB'; }
+
+  // Said in the transcript rather than only in the log strip. The rule this
+  // follows is `send`'s: something the user spent effort on did not happen,
+  // and a line in a 120 px debugging strip is not where they will look for it.
+  function attachNote(message) {
+    addMessage('note', message);
+    logLine('error', message);
+  }
+
+  function loadImage(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        reject(new Error('it could not be decoded as an image'));
+      };
+      img.src = url;
+    });
+  }
+
+  function encodeOnce(img, rung, type) {
+    return new Promise(function (resolve) {
+      var w = img.naturalWidth || img.width || 0;
+      var h = img.naturalHeight || img.height || 0;
+      if (!w || !h) { resolve(null); return; }
+      var scale = Math.min(1, rung.edge / Math.max(w, h));
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      var ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(null); return; }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(function (blob) { resolve(blob || null); },
+                    type, rung.quality);
+    });
+  }
+
+  /* Walk the ladder until something fits, and keep the smallest seen so the
+   * refusal can say how close it got.
+   *
+   * The returned blob's own `type` is what gets sent as `mimeType`, and that
+   * is load-bearing rather than incidental: `toBlob` with a format the browser
+   * cannot encode falls back to PNG rather than failing, so `file.type` — or
+   * the format we asked for — would be a lie for exactly the browsers that
+   * need the fallback. A declared type that disagrees with the bytes is the
+   * one thing the agent handles worst: measured against kiro-cli 2.16.0, PNG
+   * bytes labelled `image/jpeg` came back `-32603 Internal error` quoting
+   * Bedrock, with nothing in the message naming an image at all.
+   */
+  function encodeToBudget(img, budget) {
+    var attempts = [];
+    for (var r = 0; r < IMAGE_LADDER.length; r++) {
+      for (var f = 0; f < IMAGE_FORMATS.length; f++) {
+        attempts.push({ rung: IMAGE_LADDER[r], type: IMAGE_FORMATS[f] });
+      }
+    }
+    var best = null;
+    function attempt(i) {
+      if (i >= attempts.length) return Promise.resolve(best);
+      return encodeOnce(img, attempts[i].rung, attempts[i].type)
+        .then(function (blob) {
+          if (!blob) return attempt(i + 1);
+          if (!best || blob.size < best.size) best = blob;
+          if (blob.size <= budget) return blob;
+          return attempt(i + 1);
+        });
+    }
+    return attempt(0);
+  }
+
+  function blobToBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        // `readAsDataURL` yields `data:<mime>;base64,<payload>`, and the wire
+        // carries the payload alone — the server re-attaches nothing and
+        // decodes exactly what arrives.
+        var s = String(reader.result || '');
+        var comma = s.indexOf(',');
+        if (comma < 0) { reject(new Error('the encoded image could not be read')); return; }
+        resolve(s.slice(comma + 1));
+      };
+      reader.onerror = function () {
+        reject(new Error('the encoded image could not be read'));
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function stageOne(file) {
+    var label = (file && file.name) ? file.name : 'the pasted image';
+    if (attachments.length >= imageMaxCount) {
+      attachNote('at most ' + imageMaxCount + ' images can go with one prompt — '
+                 + label + ' was not attached');
+      return Promise.resolve();
+    }
+    var budget = imageBudgetLeft();
+    if (budget <= 0) {
+      attachNote('the attached images already fill the ' + kb(imageMaxBytes)
+                 + ' a prompt allows — ' + label + ' was not attached');
+      return Promise.resolve();
+    }
+    return loadImage(file).then(function (img) {
+      return encodeToBudget(img, budget);
+    }).then(function (blob) {
+      if (!blob) {
+        attachNote('this browser could not encode ' + label + ' — nothing attached');
+        return;
+      }
+      if (blob.size > budget) {
+        attachNote(label + ' is still ' + kb(blob.size) + ' at the smallest '
+                   + 'this page can make it, and only ' + kb(budget)
+                   + ' is left in this prompt — not attached. Send what is '
+                   + 'staged first, or crop it.');
+        return;
+      }
+      return blobToBase64(blob).then(function (data) {
+        attachments.push({
+          mimeType: blob.type,
+          data: data,
+          bytes: blob.size,
+          url: URL.createObjectURL(blob),
+          name: label
+        });
+        renderTray();
+        logLine('info', 'attached ' + label + ' as ' + blob.type + ', ' + kb(blob.size));
+      });
+    });
+  }
+
+  /* Staged one at a time rather than in parallel: `[Image N]` numbers them in
+   * the order they land, and the budget check for the second has to see what
+   * the first actually cost. Two concurrent encodes would race on both. */
+  function stageFiles(files) {
+    if (!files.length) return;
+    if (!imagesSupported()) {
+      attachNote('this browser cannot attach images here — nothing was attached');
+      return;
+    }
+    var chain = Promise.resolve();
+    files.forEach(function (file) {
+      chain = chain.then(function () { return stageOne(file); });
+    });
+    chain.catch(function (err) {
+      attachNote('attaching an image failed: '
+                 + ((err && err.message) ? err.message : String(err)));
+    });
+  }
+
+  function revokeAttachment(item) {
+    // Without this every pasted image stays resident for the tab's lifetime:
+    // an object URL keeps its blob alive until it is revoked or the document
+    // goes away.
+    if (item && item.url && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+      URL.revokeObjectURL(item.url);
+    }
+  }
+
+  function clearAttachments() {
+    for (var i = 0; i < attachments.length; i++) revokeAttachment(attachments[i]);
+    attachments = [];
+    renderTray();
+  }
+
+  function releasePendingAttachments() {
+    for (var i = 0; i < pendingAttachments.length; i++) {
+      revokeAttachment(pendingAttachments[i]);
+    }
+    pendingAttachments = [];
+  }
+
+  function removeAttachment(index) {
+    var item = attachments[index];
+    if (!item) return;
+    revokeAttachment(item);
+    attachments.splice(index, 1);
+    renderTray();
+  }
+
+  function renderTray() {
+    trayEl.textContent = '';
+    if (!attachments.length) {
+      trayEl.hidden = true;
+      return;
+    }
+    trayEl.hidden = false;
+    for (var i = 0; i < attachments.length; i++) {
+      trayEl.appendChild(attachmentChip(attachments[i], i));
+    }
+  }
+
+  /* One staged image. Every class name here is a literal and every string
+   * reaching the DOM goes through `textContent`, exactly as everywhere else on
+   * this page. The one attribute sink is `img.src`, and what it receives is a
+   * `blob:` URL this page minted moments ago from bytes the user pasted —
+   * never a string off the wire. That is the distinction the CSP encodes too:
+   * `img-src 'self' blob:` admits this and still refuses the remote URL an
+   * agent could put in its markdown, which `MD_DROPPED.image` drops before it
+   * could reach an element at all. */
+  function attachmentChip(item, index) {
+    var chip = document.createElement('div');
+    chip.className = 'acp-attach';
+
+    var thumb = document.createElement('img');
+    thumb.className = 'acp-attach-thumb';
+    thumb.src = item.url;
+    // Decorative: the label beside it already names the image, and a screen
+    // reader reading both would say it twice.
+    thumb.setAttribute('alt', '');
+    chip.appendChild(thumb);
+
+    var label = document.createElement('span');
+    label.className = 'acp-attach-label';
+    // The same name the transcript and the agent will use for it.
+    label.textContent = 'Image ' + (index + 1);
+    chip.appendChild(label);
+
+    var size = document.createElement('span');
+    size.className = 'acp-attach-size';
+    size.textContent = kb(item.bytes);
+    chip.appendChild(size);
+
+    var drop = document.createElement('button');
+    drop.className = 'acp-attach-drop';
+    drop.type = 'button';
+    drop.textContent = '×';
+    drop.setAttribute('aria-label', 'Remove image ' + (index + 1));
+    // The index is captured from this render, and every mutation re-renders —
+    // so a chip's button can only ever address the position it is drawn at.
+    drop.addEventListener('click', function () { removeAttachment(index); });
+    chip.appendChild(drop);
+
+    return chip;
   }
 
   // `role` is a literal at every call site, and `appendChunk` narrows the one
@@ -2815,6 +3227,12 @@
     loadFailed = false;
     setLoading(null);
     clearTranscript();
+    // Staged against the session being navigated away from, exactly as in
+    // `releaseSession`. A reconnect deliberately does *not* do this: a dropped
+    // socket is not a change of intent, and on a phone over the remote
+    // interface it is not rare.
+    clearAttachments();
+    releasePendingAttachments();
     setContext(null);
     setTurn(false);
     sidEl.textContent = 'session ' + sid;
@@ -3089,7 +3507,10 @@
 
   function sendPrompt() {
     var text = promptInput.value;
-    if (!text.trim()) return;
+    // An image with no words is a whole prompt: paste a screenshot, press
+    // Enter. kiro-cli answers a prompt carrying no text block at all, and the
+    // server builds one from the `[Image N]` markers either way.
+    if (!text.trim() && !attachments.length) return;
     if (loadFailed) {
       // Send is disabled here but Enter is not, and this gate used to fall
       // through to the server, which answered "create a new one" — the one
@@ -3108,14 +3529,50 @@
       logLine('error', 'still answering the previous prompt — not sent');
       return;
     }
-    if (!send('prompt', { prompt: text }, sessionId)) return;
+    var payload = { prompt: text };
+    if (attachments.length) {
+      // Only what the wire needs. The thumbnail URL, the byte count and the
+      // file name stay on this page — the server rebuilds each block from the
+      // two fields it validates, so nothing else could travel even if it were
+      // put here.
+      payload.images = attachments.map(function (item) {
+        return { mimeType: item.mimeType, data: item.data };
+      });
+    }
+    if (!send('prompt', payload, sessionId)) return;
+    // Anything still held from an earlier send that never reached a turn.
+    releasePendingAttachments();
     pendingPrompt = text;
+    // Handed over rather than revoked: a refusal has to be able to give the
+    // images back along with the text, and re-staging them costs another
+    // paste, decode and re-encode.
+    pendingAttachments = attachments;
+    attachments = [];
+    renderTray();
     promptInput.value = '';
+    // Emptying the box does not fire `input`, so the height it grew to would
+    // survive the send and leave a tall empty composer.
+    autoGrowPrompt();
   }
 
   function restorePendingPrompt(why) {
     var text = pendingPrompt;
+    var staged = pendingAttachments;
     pendingPrompt = null;
+    pendingAttachments = [];
+    if (staged.length) {
+      // The tray is a different surface from the box, so these come back on
+      // their own terms: the only thing that can stop them is more images
+      // staged since, which is the same test the text below applies to itself.
+      if (attachments.length) {
+        for (var i = 0; i < staged.length; i++) revokeAttachment(staged[i]);
+        addMessage('note', 'the refused prompt’s images are not restored — '
+                           + 'others have been attached since');
+      } else {
+        attachments = staged;
+        renderTray();
+      }
+    }
     if (text === null) return;
     // Only if the box is still empty: the user may have started typing the
     // next thing while the refusal was in flight, and overwriting that would
@@ -3126,6 +3583,9 @@
       return;
     }
     promptInput.value = text;
+    // The mirror of the reset in `sendPrompt`: a refused multi-line prompt comes
+    // back to a box still sized for the empty string it was left as.
+    autoGrowPrompt();
     logLine('info', 'prompt restored to the box (' + why + ')');
   }
 
@@ -3134,8 +3594,20 @@
     var payload = (frame && frame.payload) || {};
     if (type === 'meta' && payload.connected) {
       setState('open', 'connected');
+      // The image budget comes off the wire rather than being written into
+      // this page, so the number the composer rations itself against is the
+      // one `acp.py` will actually enforce. A local copy free to drift would
+      // drift in the bad direction: a page believing the cap is higher than it
+      // is stages an image, then loses it to a refusal after the fact.
+      if (typeof payload.maxPromptImages === 'number') {
+        imageMaxCount = payload.maxPromptImages;
+      }
+      if (typeof payload.maxPromptImageBytes === 'number') {
+        imageMaxBytes = payload.maxPromptImageBytes;
+      }
       logLine('info', '← meta: server ack (max frame ' + payload.maxMessageBytes +
-                      ' bytes, max sockets ' + payload.maxConnections + ')');
+                      ' bytes, max sockets ' + payload.maxConnections +
+                      ', up to ' + imageMaxCount + ' images per prompt)');
       return;
     }
     if (type === 'meta' && payload.pending === 'new') {
@@ -3162,6 +3634,11 @@
     if (type === 'meta' && payload.turn === 'start') {
       agentBody = null;
       pendingPrompt = null;
+      // The turn really started, so the images that went with it are spent and
+      // their object URLs can go. Guarded on `replaying` where `pendingPrompt`
+      // is not: a replayed turn marker is history, and revoking on one would
+      // destroy images the user staged since and has not sent yet.
+      if (!replaying) releasePendingAttachments();
       // Live turn markers move the buttons; replayed ones only separate the
       // transcript's bubbles. Whether a turn is running *now* is what the
       // `session` frame says, because these markers are evictable.
@@ -3717,6 +4194,48 @@
       ev.preventDefault();
       sendPrompt();
     }
+  });
+  // `input` rather than `keydown`: it is the one event that fires for every way
+  // text arrives — typing, a paste, an undo, a drag-and-drop of selected text —
+  // and it fires *after* the value has changed, which is what `scrollHeight`
+  // has to see. On `keydown` the box still holds the previous value, so the
+  // height would trail the content by one keystroke.
+  promptInput.addEventListener('input', autoGrowPrompt);
+  // Ctrl+V, and nothing had to be bound for it — this is the ordinary paste,
+  // which in a browser carries the clipboard's image flavour alongside its
+  // text one.
+  //
+  // `preventDefault` only once images have actually been found. A paste with
+  // no image in it must fall through completely untouched: pasting a stack
+  // trace or a code block into this box is the common case, and swallowing it
+  // to check for pictures would break the feature people actually use.
+  promptInput.addEventListener('paste', function (ev) {
+    var files = imageFilesFrom(ev && ev.clipboardData);
+    if (!files.length) return;
+    if (ev.preventDefault) ev.preventDefault();
+    stageFiles(files);
+  });
+  // Drag-and-drop over the whole composer, tray included, so a second image
+  // can be dropped onto the tray the first one is sitting in.
+  //
+  // `dragover` has to preventDefault or the drop never fires — the browser
+  // navigates to the dropped file instead, which on this page means leaving a
+  // live session to look at a PNG.
+  composerEl.addEventListener('dragover', function (ev) {
+    // `dragHasFiles`, not `imageFilesFrom`: a browser deliberately withholds
+    // the file *contents* until the drop, so `dataTransfer.files` is empty
+    // here and `getAsFile()` returns null. Asking the question this way would
+    // answer "no files" for every drag, never preventDefault, and leave the
+    // drop below unreachable — the browser would navigate to the image
+    // instead, taking the page off a live session.
+    if (!dragHasFiles(ev && ev.dataTransfer)) return;
+    if (ev.preventDefault) ev.preventDefault();
+  });
+  composerEl.addEventListener('drop', function (ev) {
+    var files = imageFilesFrom(ev && ev.dataTransfer);
+    if (!files.length) return;
+    if (ev.preventDefault) ev.preventDefault();
+    stageFiles(files);
   });
 
   if (ACP_ERROR) {

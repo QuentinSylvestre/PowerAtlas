@@ -63,7 +63,8 @@ or by opening `/acp` directly.
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Drive kiro-cli sessions from the browser at `/acp`, with no terminal — create a session or resume an
-  exited one over ACP, stream the agent's output, cancel a turn, close the session. Creating asks which
+  exited one over ACP, stream the agent's output, cancel a turn, close the session. Paste a screenshot
+  straight into the prompt with Ctrl+V, or drag one onto it. Creating asks which
   workspace first; each row's `⋯` menu can permanently delete a session from the kiro-cli store, from
   this machine only. A workspace-grouped session browser lists what is resumable and greys out sessions
   another process currently holds. See *Agent sessions* below
@@ -200,6 +201,22 @@ refused for a session PowerAtlas has open (close it first) or one another proces
 not shown at all to a remote viewer and its endpoint is not on the remote path allowlist, so deletion
 is reachable only from the machine running PowerAtlas.
 
+**Images go in with Ctrl+V.** Paste a screenshot into the prompt box, or drag an image file onto it, and
+it is staged as a thumbnail above the box before anything is sent — each one labelled *Image 1*, *Image 2*
+and removable with the `×` beside it. An image on its own is a whole prompt: paste and press Enter without
+typing anything. Because a screenshot is far larger than the frame this page sends, each one is scaled to
+at most 1568 px on its long edge and re-encoded — WebP where the browser can, JPEG otherwise — until it
+fits the budget the server advertises, and refused with the reason if it still will not. Up to four images
+go with one prompt, within about 176 KB between them once decoded; both numbers come from the server, so
+they are the same ones it enforces.
+
+The conversation itself shows `[Image 1]` where the picture went, and so does the copy the agent reads —
+so *"compare image 1 with image 2"* names something it can see. The thumbnails live above the prompt box
+and only until the turn starts; the bytes go to the agent and are deliberately never written into the
+transcript, which is what keeps a reload from replaying megabytes and what stops a few screenshots
+evicting the conversation behind them. A reloaded transcript therefore shows `[Image 1]` rather than the
+picture. The prompt box also grows as you type, up to a limit, then scrolls.
+
 **A finished answer is redrawn as markdown.** While the agent is still streaming, its text shows as it
 arrives; once the answer is complete the bubble is rebuilt with headings, lists, emphasis, code blocks
 and pipe tables. A table is as wide as it wants to be until the window says otherwise: given the
@@ -215,8 +232,10 @@ which is what keeps the rule below true of code blocks too. Colour is never allo
 code: a language the bundle carries no grammar for renders plainly, as does a snippet past 20,000
 characters, and so does every block if the highlighter fails to load at all. The label is drawn by
 the stylesheet rather than added to the block, so copying a snippet gets the code and not the
-language name. Raw HTML and images are dropped rather than shown, and a link is clickable only when its URL
-is `http(s)`; anything else stays as plain text. The page builds every one of those elements itself and
+language name. Raw HTML and any image the *agent* writes into its markdown are dropped rather than shown
+— an image there is a URL the page would fetch on the agent's say-so, which is a different thing from a
+picture you attached yourself (see below) — and a link is clickable only when its URL is `http(s)`;
+anything else stays as plain text. The page builds every one of those elements itself and
 never parses markup, which is what stops an agent running with every tool pre-approved from putting
 something executable on a page you have open.
 

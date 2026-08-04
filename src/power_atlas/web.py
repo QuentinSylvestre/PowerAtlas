@@ -1324,10 +1324,31 @@ def _acp_csp(nonce: str, host: str) -> str:
     an origin nothing can connect to — the page's own socket still matches the
     real origin the browser loaded it from — so it costs a broken page for a
     caller who chose to break it, and grants nothing.
+
+    ``img-src`` is the one directive that had to be widened, and only to
+    ``blob:``. Without it ``default-src 'self'`` governs images, and ``'self'``
+    does not cover a ``blob:`` URL — so the thumbnails of the images a user has
+    staged for the next prompt would silently not render.
+
+    ``blob:`` rather than ``data:`` deliberately. A ``blob:`` URL is revocable,
+    which is what lets the page hand back the several hundred KB behind each
+    thumbnail the moment the turn it belongs to starts; a ``data:`` URI is a
+    string living in a DOM attribute for as long as the node does. It is also
+    the narrower grant: ``blob:`` names something this page minted, while
+    ``data:`` admits any bytes anything can spell.
+
+    What this does **not** re-admit is the case the page refuses on purpose. An
+    image in agent-authored markdown is dropped before it becomes an element at
+    all — ``MD_DROPPED.image`` in ``acp.html`` — because a remote URL in an
+    ``<img>`` is a request this page would be making on the agent's say-so.
+    That refusal is upstream of the policy and unaffected by it, so the two
+    layers stay independent: the CSP admits local bytes the user pasted, and
+    the renderer still refuses remote ones the agent named.
     """
     return "; ".join((
         "default-src 'self'",
         f"script-src 'nonce-{nonce}'",
+        "img-src 'self' blob:",
         f"connect-src 'self' ws://{host} wss://{host}",
         "object-src 'none'",
         "base-uri 'none'",

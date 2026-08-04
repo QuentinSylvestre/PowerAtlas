@@ -707,8 +707,40 @@ script { display: none; }
 .acp-msg-md .acp-md-left { text-align: left; }
 .acp-msg-md .acp-md-center { text-align: center; }
 .acp-msg-md .acp-md-right { text-align: right; }
-.acp-composer { display: flex; gap: 8px; align-items: stretch; flex-shrink: 0; }
-.acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: vertical; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
+/* A column now: the attachment tray stacks above the input row rather than
+   beside it. The row keeps the rules the composer itself used to carry, so the
+   textarea and the two buttons lay out exactly as before — an empty tray is
+   `hidden`, and `gap` on a flex container ignores a hidden child, so a page
+   nobody attaches anything on is pixel-identical to the one before this. */
+.acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.acp-composer-row { display: flex; gap: 8px; align-items: stretch; }
+/* Wraps rather than scrolls: at most four chips fit in a prompt and a wrapped
+   second line is cheaper to read than a horizontal scroller holding two. */
+.acp-tray { display: flex; flex-wrap: wrap; gap: 6px; }
+.acp-attach { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+/* Fixed box with `cover`, so a wide screenshot and a tall phone capture make
+   the same shape and the row cannot be pushed around by what was pasted. */
+.acp-attach-thumb { width: 40px; height: 32px; object-fit: cover; border-radius: 3px; background: var(--card-bg); display: block; }
+.acp-attach-label { font-size: 12px; color: var(--text); }
+.acp-attach-size { font-size: 11px; color: var(--text-dim); }
+/* 24px is below the 44px touch target the rest of the page keeps, and that is
+   deliberate: the cost of a mis-tap here is one re-paste, while a remove
+   control big enough to hit by accident sits directly under the thumb the user
+   is reaching for. */
+.acp-attach-drop { width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 15px; background: transparent; border: none; border-radius: var(--radius-sm); color: var(--text-dim); cursor: pointer; }
+.acp-attach-drop:hover { background: var(--card-bg); color: var(--text); }
+.acp-attach-drop:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* `resize: none` rather than the `vertical` this used to carry, because the
+   height now has one owner. `autoGrowPrompt` in `acp.html` writes `height` on
+   every input, which is the same property the drag handle writes — so a height
+   the user dragged survived exactly until their next keystroke. A control that
+   does not hold is worse than no control.
+
+   `max-height` is what clamps the growth, and it is deliberately the *only*
+   place the cap is written: the script sets an unclamped `height` and lets this
+   rule cut it off, so there is no second copy of 180 to drift. Past the cap the
+   textarea scrolls, which is the default `overflow` for the element. */
+.acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-send { padding: 6px 20px; }
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone

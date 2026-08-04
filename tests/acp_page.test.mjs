@@ -658,9 +658,51 @@ function loadPage(templatePath, opts = {}) {
   // script evaluation, so setting it afterwards would be too late.
   const stored = { ...(opts.stored || {}) };
 
+  /* ---- the image-attachment surface ------------------------------------
+   *
+   * `FileReader`, `Image`, `Blob`, `URL` and a canvas 2D context are browser
+   * furniture and none of it exists in a bare `vm` context. They are stubbed
+   * rather than skipped because the paste path cannot be driven at all
+   * otherwise — and `opts.images === false` is then a real case rather than an
+   * accident: a browser that genuinely lacks them, which the page has to
+   * refuse cleanly instead of throwing.
+   *
+   * The encoder is deterministic and swappable on purpose. What these checks
+   * are for is the ladder, the budget arithmetic, the numbering and *which
+   * mimeType comes out the other end* — none of which depend on real
+   * compression. Whether a browser agrees about the byte counts is a browser
+   * question and is verified in one.
+   */
+  class FakeBlob {
+    constructor(size, type) { this.size = size; this.type = type; }
+  }
+  const objectUrls = new Map();
+  const revokedUrls = [];
+  let objectUrlSeq = 0;
+  // Bytes-per-pixel by format, scaled by quality. The ordering is what matters
+  // and it matches the measurement the page's ladder was written against: WebP
+  // well under JPEG, PNG far above both.
+  const RATE = { "image/webp": 0.06, "image/jpeg": 0.11, "image/png": 0.9 };
+  const encodeBlob = opts.encode || ((type, quality, w, h) => {
+    // A browser asked for a format it cannot encode answers with PNG rather
+    // than failing, which is exactly why the page reads the *blob's* type
+    // instead of the one it requested. `opts.noWebp` is that browser.
+    const got = (type === "image/webp" && opts.noWebp) ? "image/png" : type;
+    return new FakeBlob(
+      Math.max(1, Math.round(w * h * (RATE[got] ?? 0.11) * quality)), got);
+  });
+
   const sandbox = {
     document: {
-      createElement: (tag) => new El(tag),
+      createElement: (tag) => {
+        const el = new El(tag);
+        if (String(tag).toLowerCase() === "canvas" && opts.images !== false) {
+          el.getContext = () => ({ drawImage() {} });
+          el.toBlob = (cb, type, quality) =>
+            cb(encodeBlob(type, quality, el.width, el.height));
+        }
+        return el;
+      },
       getElementById: (id) => byId.get(id) ?? null,
       addEventListener: (type, fn) => {
         if (!docListeners.has(type)) docListeners.set(type, []);
@@ -707,6 +749,43 @@ function loadPage(templatePath, opts = {}) {
     },
     console: { log() {}, warn() {}, error() {} },
   };
+  if (opts.images !== false) {
+    sandbox.Blob = FakeBlob;
+    sandbox.URL = {
+      createObjectURL(source) {
+        const url = `blob:fake-${++objectUrlSeq}`;
+        objectUrls.set(url, source);
+        return url;
+      },
+      // Recorded rather than ignored: an object URL that is never revoked
+      // keeps its blob alive for the tab's lifetime, and that leak is
+      // invisible unless something counts.
+      revokeObjectURL(url) { revokedUrls.push(url); },
+    };
+    sandbox.FileReader = class {
+      readAsDataURL(blob) {
+        // The page splits on the first comma and keeps the tail, so this
+        // payload is what a check reads back off the wire.
+        this.result = `data:${blob.type};base64,b64-${blob.type}-${blob.size}`;
+        if (this.onload) this.onload();
+      }
+    };
+    sandbox.Image = class {
+      constructor() {
+        this.naturalWidth = opts.imageWidth ?? 1774;
+        this.naturalHeight = opts.imageHeight ?? 887;
+      }
+      // Assigning `src` is what starts a decode, and the page assigns its
+      // handlers before it — so firing synchronously here models the ordering
+      // correctly without needing a timer.
+      set src(value) {
+        this._src = value;
+        if (opts.imageDecodeFails) { if (this.onerror) this.onerror(); }
+        else if (this.onload) this.onload();
+      }
+      get src() { return this._src; }
+    };
+  }
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   // Present by default, because the served page loads it. `prism: false` is the
@@ -739,6 +818,36 @@ function loadPage(templatePath, opts = {}) {
     },
     click(id) { page.el(id).dispatch("click"); },
     type(text) { page.el("acpPrompt").value = text; },
+    /* A clipboard file. The page reads `type` to decide whether it is an image
+     * and `name` only to name it in a refusal, so those two are the whole
+     * contract — a real `File` brings bytes the fake encoder never looks at. */
+    imageFile(type = "image/png", name = "screenshot.png") { return { type, name }; },
+    /** Paste files into the composer. Returns whether the page took the event
+     *  over, which is what decides if an ordinary text paste still works. */
+    paste(files) {
+      let prevented = false;
+      page.el("acpPrompt").dispatch("paste", {
+        clipboardData: { files },
+        preventDefault() { prevented = true; },
+      });
+      return prevented;
+    },
+    /** Drop files onto the composer, having dragged them over it first. */
+    drop(files) {
+      let allowed = false;
+      page.el("acpComposer").dispatch("dragover", {
+        dataTransfer: { types: ["Files"], files: [] },
+        preventDefault() { allowed = true; },
+      });
+      page.el("acpComposer").dispatch("drop", {
+        dataTransfer: { files },
+        preventDefault() {},
+      });
+      return allowed;
+    },
+    trayChips() { return page.all("acpTray", ".acp-attach"); },
+    /** Every object URL the page has revoked, in order. */
+    revoked() { return revokedUrls.slice(); },
     sentOf(type) { return page.socket().sent.filter((f) => f.type === type); },
     transcript() { return page.el("acpTranscript").textContent; },
     // Dynamic lookup. Everything the rail draws is created after render, so
@@ -844,8 +953,11 @@ async function railed(templatePath, opts = {}) {
 
 /** A page already past connect + a `session` frame, which is where the
  *  interesting behaviour starts. Returns the session id it settled on. */
-function connected(templatePath, { sid = "", turnActive = false, prism } = {}) {
-  const page = loadPage(templatePath, { sid, prism });
+// `rest` forwards anything else straight to `loadPage`, which is how the image
+// checks reach `encode`, `noWebp`, `imageWidth` and friends without every
+// caller having to know they exist.
+function connected(templatePath, { sid = "", turnActive = false, prism, ...rest } = {}) {
+  const page = loadPage(templatePath, { sid, prism, ...rest });
   page.open();
   const live = "sess-live-0001";
   page.deliver({
@@ -863,6 +975,12 @@ function connected(templatePath, { sid = "", turnActive = false, prism } = {}) {
 
 const checks = [];
 const check = (name, fn) => checks.push({ name, fn });
+
+/* Let the staging promise chain finish. Every stub above resolves
+ * synchronously, so one turn of the real macrotask queue is enough to drain
+ * every microtask behind a paste. Node's own `setTimeout`, not the sandbox's
+ * held one — different scopes, and this is the test process's clock. */
+const settleStaging = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 function assert(cond, message) {
   if (!cond) throw new Error(message);
@@ -956,6 +1074,275 @@ check("a refusal does not clobber what was typed since", (tpl) => {
               "the restore overwrote what the user had started typing");
   assert(page.transcript().includes("first question"),
          "the refused prompt was dropped without being shown anywhere");
+});
+
+// The composer's height. `scrollHeight` is an inert field on the stand-in — a
+// browser recomputes it from the content, this harness does not — so these set
+// it by hand to stand for "the content is now this tall". That is enough to
+// pin the arithmetic and the reset, which is where the defects are; what it
+// cannot see is whether a real browser agrees about the number, and that half
+// is browser-verified rather than asserted here.
+check("the composer grows with what is typed into it", (tpl) => {
+  const { page } = connected(tpl);
+  const box = page.el("acpPrompt");
+  page.type("one\ntwo\nthree");
+  box.scrollHeight = 90;
+  box.dispatch("input");
+  assertEqual(box.style.height, "92px",
+              "the composer did not grow to its content — 90 px of text plus " +
+              "the 2 px border box-sizing: border-box makes `height` carry");
+});
+
+check("the composer comes back down when the text is deleted", (tpl) => {
+  const { page } = connected(tpl);
+  const box = page.el("acpPrompt");
+  box.scrollHeight = 120;
+  box.dispatch("input");
+  assertEqual(box.style.height, "122px", "the composer did not grow first");
+  // A browser reports the *set* height from scrollHeight once an explicit one
+  // is in place, which is why the page resets to 'auto' before measuring. With
+  // that reset missing the box grows and never shrinks, and this is the check
+  // that would catch it.
+  box.scrollHeight = 30;
+  box.dispatch("input");
+  assertEqual(box.style.height, "32px",
+              "the composer stayed tall after its content shrank — the " +
+              "height: auto reset before the measurement is missing");
+});
+
+check("growing the composer keeps a reader pinned to the bottom", (tpl) => {
+  const { page } = connected(tpl);
+  const box = page.el("acpPrompt");
+  const pane = page.el("acpTranscript");
+  // Within 60 px of the bottom: stuck.
+  pane.scrollHeight = 500;
+  pane.scrollTop = 480;
+  pane.clientHeight = 0;
+  box.scrollHeight = 90;
+  box.dispatch("input");
+  assertEqual(pane.scrollTop, 500,
+              "the composer took its new height out of the transcript and " +
+              "pushed a reader at the bottom off the newest message");
+});
+
+check("growing the composer leaves a reader scrolled up where they were", (tpl) => {
+  const { page } = connected(tpl);
+  const box = page.el("acpPrompt");
+  const pane = page.el("acpTranscript");
+  // 500 px from the bottom: deliberately reading history, not stuck.
+  pane.scrollHeight = 500;
+  pane.scrollTop = 0;
+  pane.clientHeight = 0;
+  box.scrollHeight = 90;
+  box.dispatch("input");
+  assertEqual(pane.scrollTop, 0,
+              "typing yanked a reader who had scrolled up back to the bottom");
+});
+
+// ---- image attachments ----
+//
+// The encoder behind these is a deterministic stub, so what they pin is the
+// page's own arithmetic and bookkeeping — the ladder, the budget, the
+// numbering, which mimeType is reported and what gets revoked. Whether a real
+// canvas produces those byte counts is a browser question, verified in one.
+
+check("pasting an image stages it without touching the transcript", async (tpl) => {
+  const { page } = connected(tpl);
+  const took = page.paste([page.imageFile()]);
+  assert(took, "the page let the browser handle an image paste itself");
+  await settleStaging();
+  assertEqual(page.trayChips().length, 1, "the image was not staged");
+  assertEqual(page.el("acpTray").hidden, false, "the tray stayed hidden");
+  assert(page.el("acpTray").textContent.includes("Image 1"),
+         "the chip is not labelled with the name the transcript will use");
+  assertEqual(page.sentOf("prompt").length, 0,
+              "staging an image sent a prompt on its own");
+});
+
+check("a paste carrying no image is left entirely alone", (tpl) => {
+  const { page } = connected(tpl);
+  // Pasting a stack trace or a code block into the box is the common case;
+  // swallowing it to go looking for pictures would break the feature people
+  // actually use.
+  const took = page.paste([{ type: "text/plain", name: "notes.txt" }]);
+  assert(!took, "an ordinary text paste was intercepted");
+  assertEqual(page.el("acpTray").hidden, true, "a text paste opened the tray");
+});
+
+check("a staged image travels as bytes the transcript never carries", async (tpl) => {
+  const { page } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.type("what is wrong here?");
+  page.click("acpSend");
+  const sent = page.sentOf("prompt")[0];
+  assertEqual(sent.payload.prompt, "what is wrong here?",
+              "the text and the images should travel in separate fields");
+  assertEqual(sent.payload.images.length, 1, "the image never reached the wire");
+  assert(sent.payload.images[0].data.length > 0, "the image carried no data");
+  // Only the two fields the server validates. A thumbnail URL or a byte count
+  // sent here would be a field nothing on the other side reads.
+  assertEqual(Object.keys(sent.payload.images[0]).sort().join(","),
+              "data,mimeType", "the wire carried more than the server reads");
+  assertEqual(page.trayChips().length, 0, "the tray kept the images after sending");
+});
+
+check("an image with no words is a whole prompt", async (tpl) => {
+  const { page } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.click("acpSend");
+  const sent = page.sentOf("prompt")[0];
+  assert(sent, "paste-and-send with an empty box sent nothing at all");
+  assertEqual(sent.payload.prompt, "", "the empty box should travel as empty");
+  assertEqual(sent.payload.images.length, 1, "the image never reached the wire");
+});
+
+check("the type sent is the one the encoder produced, not the one asked for", async (tpl) => {
+  // A browser that cannot encode WebP answers `toBlob('image/webp')` with a
+  // PNG rather than failing. Forwarding the requested type would then be a
+  // lie, and a declared type that disagrees with the bytes is the one thing
+  // the agent handles worst — it comes back as an internal error naming no
+  // image at all.
+  const { page } = connected(tpl, { noWebp: true, imageWidth: 200, imageHeight: 100 });
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.click("acpSend");
+  assertEqual(page.sentOf("prompt")[0].payload.images[0].mimeType, "image/png",
+              "the page reported the format it requested rather than the one " +
+              "it got back");
+});
+
+check("the encoder walks down the ladder until something fits", async (tpl) => {
+  const { page } = connected(tpl, {
+    encode: (type, quality) => ({ size: quality > 0.7 ? 900000 : 5000, type }),
+  });
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  assertEqual(page.trayChips().length, 1,
+              "the first rung did not fit and the page gave up instead of " +
+              "trying a lower quality");
+  assert(page.el("acpTray").textContent.includes("5 KB"),
+         "the staged image is not the one the lower rung produced");
+});
+
+check("an image that cannot be made to fit is refused, not truncated", async (tpl) => {
+  const { page } = connected(tpl, { encode: (type) => ({ size: 900000, type }) });
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  assertEqual(page.trayChips().length, 0, "an oversized image was staged anyway");
+  assert(page.transcript().includes("not attached"),
+         "the refusal was not said anywhere the user will read it");
+});
+
+check("the count cap is the server's, not a number written into the page", async (tpl) => {
+  const { page } = connected(tpl);
+  page.deliver({
+    type: "meta",
+    payload: { connected: true, maxMessageBytes: 262144, maxConnections: 8,
+               maxPromptImages: 1, maxPromptImageBytes: 180224 },
+  });
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.paste([page.imageFile("image/png", "second.png")]);
+  await settleStaging();
+  assertEqual(page.trayChips().length, 1,
+              "the page ignored the cap the server advertised");
+  assert(page.transcript().includes("at most 1 images"),
+         "nothing said why the second image was dropped");
+});
+
+check("removing a staged image gives its object URL back", async (tpl) => {
+  const { page } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  const before = page.revoked().length;
+  page.trayChips()[0].querySelector(".acp-attach-drop").dispatch("click");
+  assertEqual(page.trayChips().length, 0, "the chip stayed after being removed");
+  assert(page.revoked().length > before,
+         "the object URL was never revoked — its blob stays alive for the " +
+         "lifetime of the tab");
+});
+
+check("opening another session drops images staged against the last one", async (tpl) => {
+  // Driven through the rail, because `selectSession` is the only thing that
+  // performs this clear and a `session` frame does not go near it.
+  const page = await railed(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  assertEqual(page.trayChips().length, 1, "nothing was staged to begin with");
+  const before = page.revoked().length;
+  page.railRows()[4].dispatch("click");
+  // A screenshot staged for one conversation must not arrive in front of a
+  // different agent running in a different directory.
+  assertEqual(page.trayChips().length, 0,
+              "images staged for the previous session survived the switch");
+  assert(page.revoked().length > before,
+         "the tray was emptied but the object URLs behind it were not revoked");
+});
+
+check("closing the session drops the images staged against it", async (tpl) => {
+  const { page, live } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  const before = page.revoked().length;
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, reason: "closed" },
+  });
+  assertEqual(page.trayChips().length, 0,
+              "the session went away but its staged images stayed behind");
+  assert(page.revoked().length > before, "the object URLs were never revoked");
+});
+
+check("a refused prompt gives the images back with the text", async (tpl) => {
+  const { page, live } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.type("look at this");
+  page.click("acpSend");
+  assertEqual(page.trayChips().length, 0, "the tray should empty on send");
+  page.deliver({
+    type: "error", sessionId: live,
+    payload: { code: "turn_in_progress", message: "still answering" },
+  });
+  assertEqual(page.el("acpPrompt").value, "look at this", "the text was lost");
+  assertEqual(page.trayChips().length, 1,
+              "the refusal cost the user their attachment, which is another " +
+              "paste, decode and re-encode to replace");
+});
+
+check("a started turn releases the images it consumed", async (tpl) => {
+  const { page, live } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.click("acpSend");
+  const before = page.revoked().length;
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  assert(page.revoked().length > before,
+         "the turn started but the sent images' object URLs were never " +
+         "revoked, so their blobs outlive the page's use for them");
+});
+
+check("dropping an image onto the composer stages it", async (tpl) => {
+  const { page } = connected(tpl);
+  const allowed = page.drop([page.imageFile()]);
+  assert(allowed, "dragover never called preventDefault, so a real browser " +
+                  "would navigate to the image instead of dropping it here");
+  await settleStaging();
+  assertEqual(page.trayChips().length, 1, "the dropped image was not staged");
+});
+
+check("a browser with no image APIs refuses cleanly instead of throwing", async (tpl) => {
+  // The whole page is evaluated in this sandbox, so if any of the image code
+  // reached for `FileReader` or a canvas at load rather than at the point of
+  // use, every other check here would fail too — not just this one.
+  const { page } = connected(tpl, { images: false });
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  assertEqual(page.trayChips().length, 0, "something was staged with no encoder");
+  assert(page.transcript().includes("cannot attach images"),
+         "the page failed silently rather than saying it could not attach");
 });
 
 check("a replayed turn marker does not move the buttons", (tpl) => {
@@ -4662,7 +5049,7 @@ async function hoverRow({ viewport, rowRect, naturalWidth, contentHeight }) {
   // loadTail holds the fetch behind a hover delay; fire it, then let the
   // promise chain that places the box run to completion.
   for (const fire of timers.splice(0)) fire();
-  await settle();
+  await settleStaging();
   return { sandbox, contentEl, slot, tooltip: slot.querySelector(".session-tail-tooltip") };
 }
 

@@ -53,6 +53,8 @@ deadlocks the child once ~64 KB accumulates in it.
 """
 
 import asyncio
+import base64
+import binascii
 import collections
 import contextlib
 import itertools
@@ -162,6 +164,50 @@ SERVER_TYPES = frozenset({
 # default with a megabyte — above this cap, so the typed refusal below stays
 # the one a client actually meets.
 MAX_MESSAGE_BYTES = 256 * 1024
+
+# Image attachments on one prompt: how many, and what they may weigh between
+# them once decoded.
+#
+# Both are **floors of defence, not the budget the page aims at**. `/ws/acp` is
+# reachable by a non-browser client holding the device cookie and the token, so
+# an `images` array is untrusted input rather than "whatever the page sent" —
+# every limit the browser rations itself against is re-checked here.
+#
+# The byte figure sits deliberately *below* what MAX_MESSAGE_BYTES physically
+# admits. Measured 2026-08-04: at most 196,485 raw image bytes survive base64
+# and JSON inside a 256 KiB `prompt` frame carrying a short prompt. Capping at
+# 176 KiB leaves ~21 KB of that frame for prose and — the reason it matters —
+# keeps this typed refusal *in front of* the frame check in `serve_socket`.
+# That one does not answer: it closes the socket with 1009, and
+# `restorePendingPrompt` on the page is not reachable from a transport close,
+# so a user who pasted one screenshot too many would lose the prompt and the
+# connection with nothing anywhere saying the image was why.
+#
+# Four rather than one so a pathological array cannot be decoded element by
+# element before the byte bound notices. Four *useful* images do not fit under
+# the byte cap and are not meant to: the bytes bind first, the count only
+# bounds the work done before they can.
+MAX_PROMPT_IMAGES = 4
+MAX_PROMPT_IMAGE_BYTES = 176 * 1024
+
+# The image types an attachment may declare. All three were driven against
+# kiro-cli 2.16.0 on 2026-08-04 and answered `stopReason: end_turn` with the
+# model demonstrably reading the picture.
+#
+# Two measured failure modes are why `_validate_images` exists at all rather
+# than forwarding what arrives:
+#
+# 1. A declared type that disagrees with the bytes is **fatal and unreadable**.
+#    PNG bytes labelled `image/jpeg` came back `-32603 Internal error` quoting
+#    Bedrock, with nothing in the message naming an image. Checking the
+#    signature here turns that into a refusal somebody can act on.
+# 2. A `data` field that is not valid base64 is **not an error at all**. The
+#    agent answered the prompt's text with `stopReason: end_turn` exactly as if
+#    no image had been attached — a confident answer about a picture nobody
+#    saw. Nothing downstream catches it, so the decode below is `validate=True`
+#    rather than Python's default, which silently discards stray characters and
+#    would reproduce the same silence one layer earlier.
+IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
 
 # A single-user UI in which **one socket drives many sessions**. The session
 # rail lists every session on the machine and switches between them in place,
@@ -650,6 +696,114 @@ def _content_text(content) -> str:
     if isinstance(content, list):
         return "".join(_content_text(item) for item in content)
     return ""
+
+
+def _content_image_count(content) -> int:
+    """How many image blocks a content payload carries.
+
+    The counterpart to ``_content_text``, and it exists for the case that
+    function cannot express: an image block has no ``text`` key, so a turn made
+    only of images extracts as ``""`` and reads as nothing happening.
+    """
+    if isinstance(content, dict):
+        return 1 if content.get("type") == "image" else 0
+    if isinstance(content, list):
+        return sum(_content_image_count(item) for item in content)
+    return 0
+
+
+def _with_image_markers(text: str, count: int) -> str:
+    """Name a prompt's attachments in the prose that stands for it.
+
+    ``[Image 1] [Image 2]`` is the convention kiro-cli and Claude Code both
+    print, for the reason a terminal has: it cannot draw pixels. This page can,
+    and still wants the markers, for two reasons a terminal never faces.
+
+    The first is that the marked-up text is what the *transcript* carries. The
+    image bytes are sent to the agent and deliberately never enter the `chunk`
+    frame — at `_frame_weight`'s reckoning base64 costs full freight, and eight
+    image-bearing chunks would evict a whole 2 MiB replay buffer and set
+    `truncated` for good. So the marker is what a second tab, and this tab
+    after a reload, have instead of the picture.
+
+    The second is that the same string is what goes to the *agent*, as its text
+    block. Without it the model has the images positionally and no labels to
+    bind them to, so a prompt saying "compare image 1 with image 2" names
+    nothing it can see. Numbering them costs a few bytes and makes that
+    phrasing work.
+    """
+    if count <= 0:
+        return text
+    markers = " ".join(f"[Image {n}]" for n in range(1, count + 1))
+    return f"{text}\n\n{markers}" if text.strip() else markers
+
+
+def _image_bytes_match(mime: str, blob: bytes) -> bool:
+    """Whether decoded bytes actually are the type the block declares.
+
+    A closed set rather than a magic-number library: three types are admitted
+    (IMAGE_MIME_TYPES) and anything else has already been refused before this
+    is reached. WebP is the one that needs two checks — ``RIFF`` opens the
+    container and the four bytes naming the payload sit past a length field.
+    """
+    if mime == "image/png":
+        return blob.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime == "image/jpeg":
+        return blob.startswith(b"\xff\xd8\xff")
+    if mime == "image/webp":
+        return blob[:4] == b"RIFF" and blob[8:12] == b"WEBP"
+    return False
+
+
+def _validate_images(raw) -> tuple[list[dict], str]:
+    """Narrow a client's ``images`` payload into content blocks, or refuse it.
+
+    Returns ``(blocks, "")`` when every attachment is admissible, or
+    ``([], reason)`` with prose naming which one failed and why. The index in
+    that prose is 1-based to match the ``[Image N]`` markers the user is
+    looking at.
+
+    Every check is ordered cheapest-first — shape, then count, then the
+    per-item decode — so a hostile array is refused before anything expensive
+    runs on it.
+    """
+    if raw is None:
+        return [], ""
+    if not isinstance(raw, list):
+        return [], "'images' must be a list."
+    if len(raw) > MAX_PROMPT_IMAGES:
+        return [], (f"At most {MAX_PROMPT_IMAGES} images may be attached to "
+                    f"one prompt; this one carried {len(raw)}.")
+    blocks: list[dict] = []
+    total = 0
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            return [], f"Image {index} is not an object."
+        mime = item.get("mimeType")
+        data = item.get("data")
+        if not isinstance(mime, str) or mime not in IMAGE_MIME_TYPES:
+            return [], (f"Image {index} declares an unsupported type. "
+                        f"Supported: {', '.join(sorted(IMAGE_MIME_TYPES))}.")
+        if not isinstance(data, str) or not data:
+            return [], f"Image {index} carries no base64 data."
+        try:
+            blob = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            return [], f"Image {index} is not valid base64."
+        if not _image_bytes_match(mime, blob):
+            return [], (f"Image {index} does not look like {mime} — the bytes "
+                        "and the declared type disagree. The agent answers a "
+                        "mismatch with an internal error that names no image, "
+                        "so it is refused here instead.")
+        total += len(blob)
+        if total > MAX_PROMPT_IMAGE_BYTES:
+            return [], (f"The attached images come to more than "
+                        f"{MAX_PROMPT_IMAGE_BYTES // 1024} KiB between them "
+                        "once decoded. Send fewer, or smaller ones.")
+        # Re-built rather than forwarded, so no other key an untrusted client
+        # put on the item travels to the agent.
+        blocks.append({"type": "image", "mimeType": mime, "data": data})
+    return blocks, ""
 
 
 def _as_text(value) -> str:
@@ -2161,7 +2315,27 @@ class _Supervisor:
             # across a driven turn. A build that started emitting one would render
             # the prompt twice, which is the thing to look for if that appears.
             role = "user" if kind == "user_message_chunk" else "agent"
-            text = _content_text(update.get("content"))
+            content = update.get("content")
+            text = _content_text(content)
+            if role == "user":
+                # An image-only turn replays as nothing at all: every block in
+                # it is an image, and `_content_text` yields "" for a block
+                # with no `text` key. That made `if text` false, which cost two
+                # things rather than one — the `chunk` frame, and the
+                # `_flush_bubble` below it. Losing the flush is the worse half:
+                # in a `session/load` replay it is the *only* thing separating
+                # one answer from the next, so the agent's reply either side of
+                # an image-only turn merged into a single bubble.
+                #
+                # Naming the images makes the turn non-empty, and names them
+                # exactly as the live path did when the prompt was sent, so a
+                # loaded conversation and a replayed one read the same.
+                #
+                # Deliberately not applied to the agent arm: nothing measured
+                # has an agent sending image blocks, and inventing a marker for
+                # one would put a label in the transcript that stands for
+                # nothing the reader can check.
+                text = _with_image_markers(text, _content_image_count(content))
             if text and isinstance(session_id, str):
                 if role == "user":
                     # A user chunk closes the agent bubble on the page —
@@ -2367,7 +2541,8 @@ class _Supervisor:
         if history is not None:
             history.append(frame)
 
-    async def prompt(self, session_id: str, text: str) -> dict:
+    async def prompt(self, session_id: str, text: str,
+                     images: list[dict] | None = None) -> dict:
         """Run one turn. Returns the agent's ``{"stopReason": …}``.
 
         The answer does not come back through here — it arrives as
@@ -2388,10 +2563,19 @@ class _Supervisor:
         # of agent chatter can push them.
         self.touch_used(session_id)
         try:
+            # The text block first and the images after it, which is the order
+            # they were pasted in and the order `[Image N]` numbers them in.
+            #
+            # `images` defaults to None rather than `[]` so a text-only turn
+            # builds the exact single-element array this sent before images
+            # existed — the wire shape is asserted verbatim by a test, and a
+            # bare `[]` extension would have changed nothing visible while
+            # leaving two ways to express the same prompt.
+            blocks: list[dict] = [{"type": "text", "text": text}]
+            blocks.extend(images or ())
             result = await self._request(
                 "session/prompt",
-                {"sessionId": session_id,
-                 "prompt": [{"type": "text", "text": text}]},
+                {"sessionId": session_id, "prompt": blocks},
                 timeout=_INACTIVITY,
             )
         finally:
@@ -2567,6 +2751,14 @@ async def serve_socket(ws: WebSocket) -> None:
         "connected": True,
         "maxMessageBytes": MAX_MESSAGE_BYTES,
         "maxConnections": MAX_CONNECTIONS,
+        # The image budget travels rather than being written into the page,
+        # because the page has to ration itself against the *same* number this
+        # module enforces. A copy in the template would be a second source free
+        # to drift, and the direction it would drift in is the bad one: a page
+        # believing the cap is higher than it is sends a prompt that is refused
+        # after the user has already spent the effort staging it.
+        "maxPromptImages": MAX_PROMPT_IMAGES,
+        "maxPromptImageBytes": MAX_PROMPT_IMAGE_BYTES,
     }))
     log.info("ACP socket %s open (%d/%d)", conn.cid,
              len(_registry.connections), MAX_CONNECTIONS)
@@ -3142,9 +3334,23 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         conn.send(error_frame("bad_envelope", "'prompt' needs a sessionId."))
         log.warning("ACP prompt refused: [bad_envelope] no sessionId")
         return
+    # A missing `prompt` is not a refusal on its own any more: an image-only
+    # turn is a real gesture — paste a screenshot, press Enter — and kiro-cli
+    # 2.16.0 answers a prompt array with no text block at all (measured
+    # 2026-08-04, `stopReason: end_turn`). What is still refused is a prompt
+    # carrying neither, and a `prompt` key of the wrong type.
     text = payload.get("prompt")
-    if not isinstance(text, str) or not text.strip():
-        refuse("bad_payload", "'prompt' must be a non-empty string.")
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        refuse("bad_payload", "'prompt' must be a string.")
+        return
+    images, why = _validate_images(payload.get("images"))
+    if why:
+        refuse("bad_payload", why)
+        return
+    if not text.strip() and not images:
+        refuse("bad_payload", "A prompt needs text, an image, or both.")
         return
     if session_id not in _supervisor.sessions:
         refuse("unknown_session",
@@ -3178,7 +3384,13 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
                "This session is still answering the previous prompt.")
         return
     _supervisor.inflight.add(session_id)
-    log.info("ACP turn start: session=%s (%d chars)", session_id, len(text))
+    log.info("ACP turn start: session=%s (%d chars, %d image(s))",
+             session_id, len(text), len(images))
+    # What stands for this prompt everywhere it is not the raw bytes: the
+    # transcript frame below, and the agent's own text block. One string for
+    # both, so the numbering a person reads and the numbering the model reads
+    # cannot drift apart.
+    spoken = _with_image_markers(text, len(images))
 
     # Before the user's own chunk, which is the first of the two frames that
     # close the previous bubble on the page. Live turns almost never have
@@ -3186,14 +3398,18 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     # answer arrived with no turn marker behind it, so this is where that
     # bubble finally renders.
     _flush_bubble(session_id)
-    _emit(session_id, envelope("chunk", {"role": "user", "text": text}, session_id))
+    # `spoken`, never the image bytes. The frame lands in the replay buffer,
+    # which charges every string it can reach at full UTF-8 weight — base64
+    # included — so putting the attachments here would spend a 2 MiB
+    # conversation on about eight of them.
+    _emit(session_id, envelope("chunk", {"role": "user", "text": spoken}, session_id))
     _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
     # Names the state a reload would find if this task never reaches its own
     # end: the turn boundary is what the page derives "still answering" from,
     # so it has to be emitted on the cancellation path too.
     stop_reason = "interrupted"
     try:
-        result = await _supervisor.prompt(session_id, text)
+        result = await _supervisor.prompt(session_id, spoken, images)
         stop_reason = result.get("stopReason") or "end_turn"
     except AcpError as exc:
         log.warning("ACP session/prompt refused: [%s] %s", exc.code, exc)

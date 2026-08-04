@@ -1,6 +1,7 @@
 """Tests for web module."""
 
 import asyncio
+import base64
 import datetime as dt
 import errno
 import json
@@ -2894,6 +2895,170 @@ class TestAcpPromptDispatch:
         assert sid not in acp_mod._supervisor.inflight
 
 
+class TestAcpPromptImages:
+    """Image attachments on a prompt.
+
+    The blobs below carry a real signature and filler after it, which is
+    exactly what the server checks — `_image_bytes_match` reads the first
+    bytes and does not decode the picture. Using a real PNG here would assert
+    something the production path never looks at.
+    """
+
+    PNG = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"pixels").decode()
+    JPEG = base64.b64encode(b"\xff\xd8\xff" + b"pixels").decode()
+    WEBP = base64.b64encode(b"RIFF\x00\x00\x00\x00WEBP" + b"pixels").decode()
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _run(self, acp_mod, sid, payload):
+        """Drive one turn against a stubbed transport, returning what the
+        agent was asked and what the subscribers saw."""
+        calls = []
+
+        async def fake_request(self, method, params,
+                               timeout=acp_mod.REQUEST_TIMEOUT_SECONDS):
+            calls.append((method, params, timeout))
+            return {"stopReason": "end_turn"}
+
+        conn = self._conn(acp_mod, sid)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, payload))
+        return calls, _queued(conn)
+
+    def test_an_image_only_prompt_reaches_the_agent(self, acp_session):
+        acp_mod, sid = acp_session
+        calls, frames = self._run(acp_mod, sid, {
+            "images": [{"mimeType": "image/png", "data": self.PNG}]})
+        assert calls[0][0] == "session/prompt"
+        assert calls[0][1]["prompt"] == [
+            {"type": "text", "text": "[Image 1]"},
+            {"type": "image", "mimeType": "image/png", "data": self.PNG},
+        ]
+        chunk = next(f for f in frames if f["type"] == "chunk")
+        assert chunk["payload"] == {"role": "user", "text": "[Image 1]"}
+
+    def test_text_and_images_are_numbered_in_paste_order(self, acp_session):
+        acp_mod, sid = acp_session
+        calls, frames = self._run(acp_mod, sid, {
+            "prompt": "what changed?",
+            "images": [{"mimeType": "image/png", "data": self.PNG},
+                       {"mimeType": "image/webp", "data": self.WEBP}]})
+        blocks = calls[0][1]["prompt"]
+        # The agent reads the same numbering the user does, so a prompt saying
+        # "compare image 1 with image 2" names something it can see.
+        assert blocks[0] == {"type": "text",
+                             "text": "what changed?\n\n[Image 1] [Image 2]"}
+        assert [b["mimeType"] for b in blocks[1:]] == ["image/png", "image/webp"]
+
+    def test_the_transcript_frame_never_carries_the_bytes(self, acp_session):
+        """Base64 in a `chunk` would be charged at full weight by the replay
+        buffer, and about eight of them evict a whole 2 MiB conversation."""
+        acp_mod, sid = acp_session
+        self._run(acp_mod, sid, {
+            "prompt": "look", "images": [
+                {"mimeType": "image/jpeg", "data": self.JPEG}]})
+        recorded = json.dumps(acp_mod._supervisor.history[sid].events())
+        assert self.JPEG not in recorded
+        assert "[Image 1]" in recorded
+
+    @pytest.mark.parametrize("images, fragment", [
+        ("not-a-list", "must be a list"),
+        ([{"mimeType": "image/png", "data": PNG}] * 5, "At most"),
+        (["not-an-object"], "not an object"),
+        ([{"mimeType": "image/tiff", "data": PNG}], "unsupported type"),
+        ([{"mimeType": "image/png"}], "no base64 data"),
+        ([{"mimeType": "image/png", "data": "!!!not-base64!!!"}],
+         "not valid base64"),
+        ([{"mimeType": "image/jpeg", "data": PNG}], "declared type disagree"),
+    ])
+    def test_bad_images_are_refused_with_a_typed_frame(self, acp_session,
+                                                       images, fragment):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        asyncio.run(acp_mod._handle_prompt(
+            conn, sid, {"prompt": "hi", "images": images}))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == "bad_payload"
+        assert fragment in frames[0]["payload"]["message"]
+        # Refused before anything was emitted, so a rejected prompt leaves no
+        # half-turn in the transcript a reload would replay.
+        assert acp_mod._supervisor.history[sid].events() == []
+
+    def test_the_byte_cap_counts_decoded_bytes_across_every_image(self, acp_session):
+        acp_mod, sid = acp_session
+        half = acp_mod.MAX_PROMPT_IMAGE_BYTES // 2 + 64
+        blob = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * half).decode()
+        conn = self._conn(acp_mod, sid)
+        asyncio.run(acp_mod._handle_prompt(conn, sid, {
+            "prompt": "hi",
+            "images": [{"mimeType": "image/png", "data": blob},
+                       {"mimeType": "image/png", "data": blob}]}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_payload"
+        assert "between them" in frames[0]["payload"]["message"]
+
+    def test_the_socket_advertises_the_budget_it_will_enforce(self, acp_session):
+        """The page rations itself against these. A copy written into the
+        template would be a second source free to drift, and it would drift in
+        the direction that costs the user work: a page believing the cap is
+        higher stages an image, then loses it to a refusal after the fact."""
+        acp_mod, _sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        conn.send(acp_mod.envelope("meta", {
+            "connected": True,
+            "maxMessageBytes": acp_mod.MAX_MESSAGE_BYTES,
+            "maxConnections": acp_mod.MAX_CONNECTIONS,
+            "maxPromptImages": acp_mod.MAX_PROMPT_IMAGES,
+            "maxPromptImageBytes": acp_mod.MAX_PROMPT_IMAGE_BYTES,
+        }))
+        # The real ack is built in `serve_socket`, which needs a live socket;
+        # what this pins is that both fields are on the frame the page reads,
+        # and the source text below is what pins that it is the same builder.
+        import inspect
+        source = inspect.getsource(acp_mod.serve_socket)
+        assert '"maxPromptImages": MAX_PROMPT_IMAGES' in source
+        assert '"maxPromptImageBytes": MAX_PROMPT_IMAGE_BYTES' in source
+        assert _queued(conn)[0]["payload"]["maxPromptImages"] == \
+            acp_mod.MAX_PROMPT_IMAGES
+
+    def test_the_server_cap_sits_below_what_the_frame_admits(self):
+        """The typed refusal has to be reachable. Above this the frame check in
+        `serve_socket` wins instead, and that one closes the socket with 1009
+        rather than answering — losing the prompt with it."""
+        from power_atlas import acp as acp_mod
+        assert acp_mod.MAX_PROMPT_IMAGE_BYTES < acp_mod.MAX_MESSAGE_BYTES
+
+    def test_a_replayed_image_only_turn_still_separates_the_bubbles(self,
+                                                                    acp_session):
+        """`session/load` replays an image turn as its text alone, and an
+        image-only turn therefore has no text at all — measured against
+        kiro-cli 2.16.0 on 2026-08-04, which returned no non-text block in a
+        replay. Before the markers that made the arm emit nothing *and* skip
+        the flush, merging the answers either side into one bubble."""
+        acp_mod, sid = acp_session
+        sup = acp_mod._supervisor
+        acp_mod._bubble_append(sid, "the answer before the image")
+        sup._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "user_message_chunk",
+                "content": [{"type": "image", "mimeType": "image/png",
+                             "data": "irrelevant"}]}},
+        })
+        kinds = [f["type"] for f in sup.history[sid].events()]
+        # `rendered` is the flush: the bubble that was open got closed before
+        # the user's own turn was written after it.
+        assert kinds == ["rendered", "chunk"]
+        chunk = sup.history[sid].events()[-1]
+        assert chunk["payload"] == {"role": "user", "text": "[Image 1]"}
+
+
 class TestAcpMarkdownRendering:
     """The agent writes markdown; the transcript used to show it as source.
 
@@ -3499,6 +3664,17 @@ class TestAcpContentSecurityPolicy:
         for directive in ("default-src 'self'", "object-src 'none'",
                           "base-uri 'none'", "frame-ancestors 'none'"):
             assert directive in policy, "%r missing from %s" % (directive, policy)
+
+    def test_thumbnails_are_admitted_and_only_as_blobs(self, raw_client):
+        """`default-src 'self'` governs images without this, and `'self'` does
+        not cover a `blob:` — so the attachment tray would render nothing.
+
+        `data:` stays out. It is the wider grant of the two and the
+        non-revocable one, and the page has no use for it: every thumbnail is
+        an object URL it minted and hands back when the turn starts."""
+        policy = self._policy(raw_client.get("/acp"))
+        assert "img-src 'self' blob:" in policy, policy
+        assert "img-src" in policy and "data:" not in policy, policy
 
     def test_the_header_nonce_is_the_one_on_the_page(self, raw_client):
         """A mismatched nonce is a blank page, and it passes every assertion
