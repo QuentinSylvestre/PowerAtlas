@@ -21,6 +21,41 @@
 
 ---
 
+## Where to start — ranked 2026-08-04
+
+> A ranking by payoff per unit of effort, not a plan. **It is a snapshot and it decays**: it was
+> written when 21 items were live, and every shipped or closed item shifts it. Re-rank rather than
+> trusting a stale order — the reasoning for each item lives in the item itself, and this table only
+> records the comparison between them.
+>
+> **What would invalidate it**: anything under Tier 3 shipping (it gates six items); a re-measurement
+> that moves the dispatch-agent figure; or the auto-mode accuracy work returning a bad result, which
+> would push every unattended item from "blocked" to "abandoned".
+
+| # | Item | Tier | Why here |
+|---|---|---|---|
+| 1 | *Replace the pid-recycling skew window with `procStart`* | hours | Turns an admittedly approximate guard into an exact check; the sidecar pipeline already carries the neighbouring fields |
+| 2 | *Revisit the `None` → `"working"` fallback* | hours | Small, self-contained, last survivor of the transcript-tail fix |
+| 3 | *Sub-agent pipeline visibility* — disk increment only | days | 4,737 stages under 451 fan-outs, every parent resolves; needs no ACP, no hooks, no new dependency. **Tree, not two levels** — 5 parents are themselves stages |
+| 4 | *A PowerAtlas dispatch agent* | days | Now sized: 27,223 tokens/session, and MCP turned out to cost zero context so the change is `resources` alone. One open question left |
+| 5 | *Tool output in the transcript* | days | The rendering surface it waited for now has highlighted code blocks and tables |
+| 6 | *Bulk session deletion* — workspace form only | days | Protocol ready; re-scope for the rail's second grouping first |
+| 7 | *Secret-aware handling for custom-launcher env vars* — shape (a) | week | Ambient exposure is closed; this is the durable answer, not the urgent one |
+| 8 | *Launched sessions inherit PowerAtlas's own environment* | week | Real user-visible bug, three launch paths disagreeing |
+| 9 | *Real session titles* | week | 15.3% untitled / 22.1% raw prompt, and the steering meant to fix it lands ~1 in 11 |
+| 10 | *Unify the `/search` and `partials_workspaces` render pipelines* | week | Has already shipped one 500; static analysis will not catch the repeat |
+| 11 | *Tell the operator a turn ended* | week | Cheap version fails when the phone sleeps the tab; the real one reopens the declined-TLS decision |
+| 12 | *An auto-mode for `/acp` permissions* | **keystone** | Gates all six `## Automation & Workflows` items. Latency settled; **accuracy entirely unmeasured**, and that is the real gate |
+
+**Parked, deliberately**: v3 session support · `[P2b]` invisible stores · usage stats · plan-progress
+overlay · creating a session in a workspace that has none · both `[SECURITY]` items (each carries its
+own reopen condition).
+
+*Practical note, true on 2026-08-04*: items 5 and 6 both touch `acp.html`; items 1 and 3 touch
+`presence.py` and `data_kiro.py`/`web.py` respectively. Relevant only if two streams run at once.
+
+---
+
 ## Automation & Workflows
 
 > Every item here needed one capability PowerAtlas did not have: sending a prompt to an agent
@@ -97,6 +132,12 @@
   - *Same disease as the interpreter split, on a different resource*: `interpreter.py`'s module docstring already diagnoses it — "four entry points independently choose an interpreter … and each inherits whichever environment invoked it. Left alone they drift apart." That module made the interpreter a property of the source tree instead of the invoking context. The environment has the identical shape and no equivalent fix.
   - *Shapes worth considering, none chosen*: (a) deny-list — strip `CLAUDECODE`, the `CLAUDE_CODE_*` session markers, the kiro equivalents and `POWER_ATLAS_VENV_REEXEC` before spawning; small, but a list that needs maintaining as agents add variables; (b) construct the child environment explicitly rather than inheriting it, which is the durable answer and also the one that makes the three launch paths agree; (c) accept it and document the workaround — restart PowerAtlas from a shell that is not inside an agent session, or from its autostart shortcut. Note that `launch_custom` deliberately merges `os.environ` at `launcher.py:403` for user-supplied launcher env vars, so (b) must keep that path's intended inheritance while fixing its default.
   - *Unverified — the one gap*: PowerAtlas's own environment block was never read directly. A PEB reader written for the purpose returned 0 variables, so its "no marker present" results are meaningless and are not relied on here; the conclusion that the tray process carries the marker is deduction from the observed banner plus the proven forwarding. Cheapest confirmation, if this is ever picked up: print `$env:CLAUDE_CODE_CHILD_SESSION` in a session launched from the UI. Also unmeasured: whether Terminal's forwarding behaviour is version-stable, and what the non-`wt` terminals in `_LINUX_TERMINALS` do.
+
+- **Replace the pid-recycling skew window with `procStart`** — `presence.py` decides whether a sidecar's pid is genuinely its own process by comparing the sidecar's `startedAt` against psutil's `create_time` inside a **tolerance window**: `_SIDECAR_SKEW_S` 120 s forward (claude-code only) and `_SIDECAR_BACKWARD_SKEW_S` 5 s backward. The file's own comment calls that guard set "deliberately good enough, not airtight". *Scoped 2026-08-04.*
+  - **`procStart` makes it exact instead of approximate.** Observed in the claude-code sidecar for the first time on 2026-08-04 (the field was in the binary's reader but in no file until then): a Windows creation FILETIME as a string, e.g. `134303452332239908`. It converts to within **1.757 s** of the same record's `startedAt` — and, critically, it is read off the **same clock psutil's `create_time` derives from**, so the comparison becomes an identity check rather than a window. That retires the whole class of failure the two constants exist to bound, including the clock-step-backward residual that plan `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION` D10 accepted as Low risk.
+  - *Cheap now, and cheaper than it looks*: `_Sidecar` became a `NamedTuple` on 2026-08-04 and already carries `kind` and `entrypoint` alongside the existing fields, so this is one more field plus a comparison — no new plumbing.
+  - **claude-code only, and the asymmetry must be preserved.** kiro-cli's lock carries `{pid, started_at}` and nothing equivalent, so the skew window stays in force for that provider. Any implementation that removes the constants outright rather than short-circuiting past them when `procStart` is present will silently drop kiro-cli's only recycling guard.
+  - *Unverified*: whether `procStart` appears on every claude-code sidecar or only some. It was absent from every file observed before 2026-08-04 and present on all three seen since, which is too small a sample to build a hard dependency on — treat it as an optimisation with the window as fallback, not a replacement.
 
 - **Unify the `/search` and `partials_workspaces` render pipelines** — `search` and `partials_workspaces` (`web.py`) implement substantially the same filter-and-render pipeline in parallel. Unify them behind one shared helper — but diff the two functions first: they are not faithful copies, and a helper generalised from either one alone will silently change the other route's behaviour. *Scoped 2026-07-25.*
   - **The duplication has already shipped a defect, which is what moves this off the tidiness pile.** `51fc500` dropped the `latest_updated` parameter from `_workspace_status` and updated the `partials_workspaces` copy of the call; the `search` copy kept passing it, so `/search` with a status filter raised a 500 until the `260725_KIRO_CLI_ACP_CLIENT_PROTOTYPE` work fixed it. Nothing structural stops the next signature change repeating that.
