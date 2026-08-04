@@ -3510,8 +3510,33 @@ class TestAcpContentSecurityPolicy:
         # And the shared <head> tag, which would otherwise log a violation on a
         # page whose console has to stay readable.
         assert ('<script nonce="%s" src="/static/htmx.min.js">' % nonce) in resp.text
+        # The vendored highlighter. An external script rides the same nonce as
+        # an inline one, which is why adding it needed no widening of
+        # `script-src` — and why it is blanked just as silently without one.
+        assert ('<script nonce="%s" src="/static/prism.js">' % nonce) in resp.text
         tags = re.findall(r"<script\b[^>]*>", resp.text)
-        assert len(tags) == 2, "a script tag was added without a nonce: %s" % tags
+        assert len(tags) == 3, "a script tag was added without a nonce: %s" % tags
+        # Every tag, not only the three named above. The count makes adding a
+        # script a deliberate act; this makes a nonce-less one a failing test
+        # rather than a feature that quietly does nothing in the browser.
+        for tag in tags:
+            assert ('nonce="%s"' % nonce) in tag, "a script tag has no nonce: %s" % tag
+
+    def test_the_highlighter_is_served_and_is_inert_on_load(self, raw_client):
+        """The page names /static/prism.js; a 404 there is a silent downgrade.
+
+        ``manual`` is the property that makes vendoring it safe at all: Prism's
+        core reads it while building itself, and without it, loading Prism hooks
+        ``DOMContentLoaded`` and rewrites every ``<pre>`` on the page through
+        ``innerHTML`` — the one sink /acp does not have. The page calls
+        ``Prism.tokenize()`` and never hands Prism a DOM node.
+        """
+        resp = raw_client.get("/static/prism.js")
+        assert resp.status_code == 200
+        assert "window.Prism = { manual: true };" in resp.text
+        # Ahead of prism-core, or core reads it too late to matter.
+        assert resp.text.index("window.Prism = { manual: true };") < \
+            resp.text.index("/* --- prism-core --- */")
 
     def test_the_nonce_is_regenerated_per_response(self, raw_client):
         first = self._nonce(self._policy(raw_client.get("/acp")))

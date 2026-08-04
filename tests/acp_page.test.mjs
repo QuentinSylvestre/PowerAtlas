@@ -43,6 +43,47 @@ import vm from "node:vm";
 const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATE = path.join(
   HERE, "..", "src", "power_atlas", "templates", "acp.html");
+// The vendored highlighter the page loads, always the committed one even when
+// the template under test is a copy: what the colouring checks measure is this
+// repo's bundle against this repo's grammars.
+const PRISM_BUNDLE = path.join(
+  HERE, "..", "src", "power_atlas", "static", "prism.js");
+
+// Prism as the page sees it, built once and shared by every check.
+//
+// Run in a context of its own rather than in the page's, and handed over as an
+// object. Prism's core sniffs for a document on the way up — `currentScript`,
+// and a DOMContentLoaded hook it skips only because the bundle sets `manual` —
+// and the DOM stand-in below is not a document: it is the handful of methods
+// this page calls and nothing else. Nothing wanted from Prism here touches the
+// DOM. `tokenize()` takes a string and returns data, which is the entire reason
+// the page uses it instead of `highlightElement()`.
+//
+// Sharing one instance across checks is safe for the same reason: `tokenize`
+// reads the grammars and never writes them, so there is no state for one check
+// to leave behind for the next.
+let PRISM = null;
+function prismGlobal() {
+  if (PRISM) return PRISM;
+  const box = {};
+  box.window = box;
+  box.self = box;
+  box.globalThis = box;
+  vm.createContext(box);
+  vm.runInContext(fs.readFileSync(PRISM_BUNDLE, "utf8"), box,
+                  { filename: "prism.js" });
+  if (!box.Prism || typeof box.Prism.tokenize !== "function") {
+    throw new Error("static/prism.js did not define a usable Prism.tokenize");
+  }
+  // The bundle's whole safety property, pinned where it is cheap to pin: with
+  // `manual` false, loading Prism rewrites every <pre> on the page through
+  // innerHTML, which is the one sink /acp does not have.
+  if (box.Prism.manual !== true) {
+    throw new Error("static/prism.js does not set Prism.manual; it would " +
+                    "rewrite the page's code blocks through innerHTML on load");
+  }
+  return (PRISM = box.Prism);
+}
 
 // ---------------------------------------------------------------- template --
 
@@ -479,18 +520,38 @@ function loadPage(templatePath, opts = {}) {
 
   // `acp.html`'s own content block only — `{% extends %}` is stripped by
   // `render()`, so `base.html`'s `<script src="/static/htmx.min.js">` is not in
-  // this string and is not being counted. The served `/acp` therefore has two
-  // script elements, not one; the policy still holds because base.html applies
-  // the same nonce conditionally, and what is measured here is that this
-  // template contributes exactly one inline script and no external one.
+  // this string and is not being counted. The served `/acp` therefore has three
+  // script elements, not two; the policy still holds because base.html applies
+  // the same nonce conditionally, and `test_web.py` counts the served page.
+  //
+  // What is measured here is this template's own contribution: exactly one
+  // inline script — the one every check below drives — and every external one
+  // nonced and served from this repo's own /static. An external tag that
+  // arrived without a nonce would be blanked by the policy at runtime and
+  // silently do nothing, which is a failure no assertion about behaviour can
+  // see, because the behaviour is simply absent.
   const scripts = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
-  if (scripts.length !== 1) {
+  const inline = scripts.filter((s) => !/\bsrc=/.test(s[1]));
+  if (inline.length !== 1) {
     throw new Error(
       `expected exactly one inline <script> in acp.html's content block, ` +
-      `found ${scripts.length}`);
+      `found ${inline.length}`);
   }
-  const scriptAttrs = scripts[0][1];
-  const scriptBody = scripts[0][2];
+  for (const external of scripts.filter((s) => /\bsrc=/.test(s[1]))) {
+    const src = /\bsrc="([^"]*)"/.exec(external[1]);
+    if (!/\bnonce="/.test(external[1])) {
+      throw new Error(
+        `acp.html loads ${src ? src[1] : "a script"} without a nonce; the ` +
+        `page's Content-Security-Policy would blank it`);
+    }
+    if (!src || !src[1].startsWith("/static/")) {
+      throw new Error(
+        `acp.html loads ${src ? src[1] : "a script"} from outside /static; ` +
+        `this page's scripts are vendored, not fetched from a third party`);
+    }
+  }
+  const scriptAttrs = inline[0][1];
+  const scriptBody = inline[0][2];
   const markup = html.replace(/<script[\s\S]*?<\/script>/g, "");
 
   // Every element the static markup gives an id, with its real tag name and its
@@ -648,6 +709,12 @@ function loadPage(templatePath, opts = {}) {
   };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
+  // Present by default, because the served page loads it. `prism: false` is the
+  // page as a reader with a failed or blocked /static/prism.js gets it, which
+  // is a case with its own check — the highlighting is an upgrade to blocks
+  // that already render, and a check that only ever ran with Prism loaded could
+  // not tell that from a hard dependency on it.
+  if (opts.prism !== false) sandbox.Prism = prismGlobal();
   vm.createContext(sandbox);
   vm.runInContext(scriptBody, sandbox, { filename: `${templatePath}#inline-script` });
 
@@ -777,8 +844,8 @@ async function railed(templatePath, opts = {}) {
 
 /** A page already past connect + a `session` frame, which is where the
  *  interesting behaviour starts. Returns the session id it settled on. */
-function connected(templatePath, { sid = "", turnActive = false } = {}) {
-  const page = loadPage(templatePath, { sid });
+function connected(templatePath, { sid = "", turnActive = false, prism } = {}) {
+  const page = loadPage(templatePath, { sid, prism });
   page.open();
   const live = "sess-live-0001";
   page.deliver({
@@ -1050,6 +1117,46 @@ const MD_TABLE_PROTO_ALIGN = [{ type: "table", children: [
       { type: "table_cell", attrs: { align: "constructor", head: false },
         children: [{ type: "text", raw: "CELL" }] }] }] }] }];
 
+// Every shape a fenced block's info string arrives in, as one bubble: a
+// language the display table names, one it does not, CommonMark's "everything
+// after the fence" form (` ```js {highlight} `, whose language is the first
+// word alone), a bare fence, and an indented block. The last two carry no
+// `attrs` at all — mistune has nothing to put there — which is why the label
+// is an upgrade for the blocks that declare a language rather than a thing
+// every block gets.
+const MD_CODE_LANGS = [
+  { type: "block_code", raw: "x = 1\n", style: "fenced", marker: "```",
+    attrs: { info: "py" } },
+  { type: "block_code", raw: "const a = 1;\n", style: "fenced", marker: "```",
+    attrs: { info: "js {highlight}" } },
+  { type: "block_code", raw: "fn main() {}\n", style: "fenced", marker: "```",
+    attrs: { info: "zig" } },
+  { type: "block_code", raw: "bare\n", style: "fenced", marker: "```" },
+  { type: "block_code", raw: "indented\n", style: "indent" },
+];
+
+// Info strings that must not reach the label as themselves. `constructor` is
+// the prototype probe and the interesting one: eleven lowercase letters, so it
+// passes the shape check and reaches the display table — the same probe
+// `MD_TABLE_PROTO_ALIGN` runs against `MD_ALIGN`. The other two are the shapes
+// the check refuses outright, one for its characters and one for its length.
+//
+// The length case is a single long token deliberately. Only the first word of
+// an info string is read, so a *long* info string is never what the cap
+// catches — ` ```an info string this long ` labels the block `an`, and the
+// shape check cannot tell that from `zig`. That is the cost of bounding a
+// shape rather than a set, and it buys a label for every language nobody
+// thought to list. The label is small, lowercase and above the block, so the
+// worst case reads as an odd word rather than as damage.
+const MD_CODE_HOSTILE = [
+  { type: "block_code", raw: "A\n", style: "fenced", marker: "```",
+    attrs: { info: "constructor" } },
+  { type: "block_code", raw: "B\n", style: "fenced", marker: "```",
+    attrs: { info: "<script>alert(1)</script>" } },
+  { type: "block_code", raw: "C\n", style: "fenced", marker: "```",
+    attrs: { info: "supercalifragilisticexpialidocious" } },
+];
+
 // Every element name the page is allowed to build from a token tree. Anything
 // else in the bubble is a tag name that came off the wire.
 const MD_TAGS = new Set([
@@ -1103,6 +1210,211 @@ check("a finished bubble is rebuilt as markup, not left as source", (tpl) => {
   // it left on, every rendered block is double-spaced.
   assert(body.className.split(/\s+/).includes("acp-msg-md"),
          `the rendered bubble is not marked for the markdown rules: ${body.className}`);
+});
+
+check("a fenced block is labelled with its language, and only if it has one", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", MD_CODE_LANGS);
+  const body = bubble(page);
+  const labels = body.querySelectorAll(".acp-md-code")
+                     .map((n) => n.getAttribute("data-lang"));
+  // `py` and `js` through the display table, `zig` through as itself — the
+  // table names the aliases worth expanding and the shape check is what admits
+  // the rest, so a language nobody listed still gets labelled. The two blocks
+  // that declared nothing are absent from this list entirely.
+  assertEqual(labels.join("|"), "Python|JavaScript|zig",
+              "the labels are not the languages the fences declared");
+  // Five blocks in, five blocks out. The two with no language are still a
+  // <pre>, they are simply not wrapped — a label that cost a block its
+  // rendering would be a worse trade than no label at all.
+  assertEqual(body.querySelectorAll("pre").length, 5, "a code block was lost");
+  for (const raw of ["x = 1", "const a = 1;", "fn main() {}", "bare", "indented"]) {
+    assert(body.textContent.includes(raw), `the block holding \`${raw}\` lost its code`);
+  }
+  // The label is drawn by the stylesheet out of `data-lang`, so it is not part
+  // of the bubble's text and cannot come along with a copied snippet.
+  assert(!/Python|JavaScript/.test(body.textContent),
+         `the language label reached the bubble's text: ${body.textContent}`);
+});
+
+check("an info string reaches the label as a language or not at all", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", MD_CODE_HOSTILE);
+  const body = bubble(page);
+  const labels = body.querySelectorAll(".acp-md-code")
+                     .map((n) => n.getAttribute("data-lang"));
+  // One label out of three, and it is the word the agent wrote. On an object
+  // literal `MD_LANG_NAME['constructor']` answers the Object constructor and
+  // the corner of the block reads "function Object() { [native code] }"; the
+  // other two never get that far, one refused for its characters and one for
+  // its length.
+  assertEqual(labels.join("|"), "constructor",
+              "an info string reached the label as something other than a language");
+  // Every block still shows its code, which is the trade here: a refused info
+  // string costs the label and never the snippet.
+  assertEqual(body.querySelectorAll("pre").length, 3, "a code block was lost");
+  for (const raw of ["A", "B", "C"]) {
+    assert(body.textContent.includes(raw), `the block holding \`${raw}\` lost its code`);
+  }
+  assert(!body.textContent.includes("alert(1)"),
+         `an info string's payload was rendered as text: ${body.textContent}`);
+});
+
+// ---------------------------------------------------- syntax highlighting --
+//
+// The page walks `Prism.tokenize()` — data — with createElement and
+// textContent, rather than calling `Prism.highlightElement()`, which builds an
+// HTML string and assigns it to `innerHTML`. That choice is the reason /acp
+// still has no sink that parses markup, and the harness arms it: `new El().
+// innerHTML = …` throws, so a future switch to the convenient Prism API fails
+// here rather than shipping.
+//
+// Every check below therefore asserts two things at once — that the colouring
+// happened, and that the code came through the walk unaltered. The second is
+// the one that matters: a highlighter that drops a character has corrupted a
+// snippet the reader is about to run.
+
+/** The code a block ended up showing, and the token classes it was given. */
+function codeBlock(page, index = 0) {
+  const pres = bubble(page).querySelectorAll("pre");
+  const pre = pres[index];
+  assert(pre, `the bubble has no code block at index ${index}`);
+  const classes = pre.descendants()
+                     .map((n) => String(n.className))
+                     .filter(Boolean)
+                     .join(" ")
+                     .split(/\s+/)
+                     .filter(Boolean);
+  return { text: pre.textContent, classes: new Set(classes) };
+}
+
+const PY_SNIPPET = 'def greet(name):\n    return f"hi {name}"  # note\n';
+
+check("a block in a language Prism knows is coloured, character for character", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", [
+    { type: "block_code", raw: PY_SNIPPET, style: "fenced", marker: "```",
+      attrs: { info: "python" } },
+  ]);
+  const { text, classes } = codeBlock(page);
+  // Not a subset check and not a "contains" check. Every character the agent
+  // wrote, in order, including the trailing newline: a token walk that dropped
+  // whitespace between tokens would still pass any assertion phrased as
+  // `includes`, and would hand the reader code that does not run.
+  assertEqual(text, PY_SNIPPET, "the highlighted block is not the code it was given");
+  for (const want of ["acp-tok-keyword", "acp-tok-string", "acp-tok-comment",
+                      "acp-tok-function", "acp-tok-punctuation"]) {
+    assert(classes.has(want),
+           `nothing in the block was marked ${want}; it got ${[...classes].join(",")}`);
+  }
+});
+
+check("the page renders every block plainly when Prism did not load", (tpl) => {
+  // /static/prism.js blocked, cached stale, or 404 after a bad deploy. The
+  // colouring is an upgrade to a block that already rendered, so its absence
+  // costs the colour and nothing else — the same trade the server makes when
+  // mistune is missing and the bubble keeps its plain text.
+  const { page, live } = connected(tpl, { prism: false });
+  answered(page, live, "plain", [
+    { type: "block_code", raw: PY_SNIPPET, style: "fenced", marker: "```",
+      attrs: { info: "python" } },
+  ]);
+  const { text, classes } = codeBlock(page);
+  assertEqual(text, PY_SNIPPET, "the block lost its code with no highlighter");
+  assertEqual(classes.size, 0,
+              `something was marked as a token with no Prism: ${[...classes].join(",")}`);
+  // The label does not depend on Prism — it is read off the fence, not off a
+  // grammar — so it survives a highlighter that never loaded.
+  const wrap = bubble(page).querySelector(".acp-md-code");
+  assert(wrap, "the block lost its wrapper with no highlighter");
+  assertEqual(wrap.getAttribute("data-lang"), "Python",
+              "the label is gated on the highlighter loading");
+});
+
+check("a language with no grammar keeps its label and its text", (tpl) => {
+  // `zig` passes the shape check and gets a label, and Prism has no grammar for
+  // it because the bundle does not carry one. The two are independent: the
+  // label comes off the fence, the colour off the grammar.
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", [
+    { type: "block_code", raw: "pub fn main() !void {}\n", style: "fenced",
+      marker: "```", attrs: { info: "zig" } },
+  ]);
+  const { text, classes } = codeBlock(page);
+  assertEqual(text, "pub fn main() !void {}\n", "the block lost its code");
+  assertEqual(classes.size, 0,
+              `an unknown language was coloured anyway: ${[...classes].join(",")}`);
+  assertEqual(bubble(page).querySelector(".acp-md-code").getAttribute("data-lang"), "zig",
+              "an unknown language lost its label");
+});
+
+check("an info string off Object.prototype is not a grammar", (tpl) => {
+  // `Prism.languages` is an object literal — the one map this renderer reads
+  // that the page does not own — so `constructor` answers it with a function.
+  // Without the `hasOwnProperty` guard that function reaches `tokenize()` as a
+  // grammar. The same probe as the `MD_ALIGN` and `MD_TAG` checks above, on the
+  // one lookup that could not be closed by building the map differently.
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", [
+    { type: "block_code", raw: "payload\n", style: "fenced", marker: "```",
+      attrs: { info: "constructor" } },
+    { type: "block_code", raw: "second\n", style: "fenced", marker: "```",
+      attrs: { info: "__proto__" } },
+  ]);
+  for (const [i, raw] of [[0, "payload\n"], [1, "second\n"]]) {
+    const { text, classes } = codeBlock(page, i);
+    assertEqual(text, raw, "a block whose language came off the prototype lost its code");
+    assertEqual(classes.size, 0,
+                `a prototype value was used as a grammar: ${[...classes].join(",")}`);
+  }
+});
+
+check("a snippet past the size cap is rendered rather than tokenised", (tpl) => {
+  // Prism's grammars are regular expressions run on the main thread, over text
+  // an agent wrote, in the tab holding this page's socket. A bubble may carry
+  // 128 KiB of it (MAX_BUBBLE_CHARS in acp.py), so past the cap the block
+  // renders uncoloured — a slow tab is recoverable and a hung one is not.
+  const { page, live } = connected(tpl);
+  const huge = "x = 1\n".repeat(4000);   // 24,000 chars, over the 20,000 cap
+  answered(page, live, "plain", [
+    { type: "block_code", raw: huge, style: "fenced", marker: "```",
+      attrs: { info: "python" } },
+  ]);
+  const { text, classes } = codeBlock(page);
+  assertEqual(text, huge, "the oversized block lost its code");
+  assertEqual(classes.size, 0,
+              `a block over the cap was tokenised anyway: ${[...classes].join(",")}`);
+  // And the block under the cap still is, so the check above is measuring the
+  // cap rather than a highlighter that stopped working.
+  answered(page, live, "plain", [
+    { type: "block_code", raw: "x = 1\n", style: "fenced", marker: "```",
+      attrs: { info: "python" } },
+  ]);
+  assert(codeBlock(page).classes.size > 0,
+         "nothing is being highlighted at all, so the cap check proves nothing");
+});
+
+check("an alias the bundle does not carry still finds its grammar", (tpl) => {
+  // Prism answers to `js`, `py` and `md` itself; `ps1`, `rs`, `golang` and
+  // `cxx` it does not, and `MD_LANG_GRAMMAR` is what maps those on. A missing
+  // entry is invisible — the block renders, uncoloured, looking like a language
+  // nobody supports — so each one is pinned.
+  const { page, live } = connected(tpl);
+  const cases = [
+    ["ps1", "Get-ChildItem -Recurse\n"],
+    ["rs", "fn main() { let x = 1; }\n"],
+    ["golang", "func main() { x := 1 }\n"],
+    ["cxx", "int main() { return 0; }\n"],
+    ["jsonc", "{\"a\": 1}\n"],
+    ["patch", "--- a/x\n+++ b/x\n"],
+  ];
+  answered(page, live, "plain", cases.map(([info, raw]) => (
+    { type: "block_code", raw, style: "fenced", marker: "```", attrs: { info } })));
+  cases.forEach(([info, raw], i) => {
+    const { text, classes } = codeBlock(page, i);
+    assertEqual(text, raw, `the ${info} block lost its code`);
+    assert(classes.size > 0, `${info} found no grammar and rendered uncoloured`);
+  });
 });
 
 check("a rendered bubble closes, so the next answer starts its own", (tpl) => {

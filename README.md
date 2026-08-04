@@ -206,7 +206,16 @@ and pipe tables. A table is as wide as it wants to be until the window says othe
 room it renders full width with every row on one line, and it starts wrapping only when the pane is
 narrower than that. When it does wrap, every column gives up width in proportion rather than one column
 absorbing all of it. (The dashboard's session tooltip keeps its own tables on one line and scrolls
-instead — it holds names and counts, where this holds prose.) Raw HTML and images are dropped rather than shown, and a link is clickable only when its URL
+instead — it holds names and counts, where this holds prose.) A code block that names its language is
+syntax-highlighted and carries that name as a small label above it. Both come from the fence the
+agent wrote, so a block opened without a language — or indented rather than fenced — has neither.
+The highlighter is Prism, vendored under `static/` rather than fetched from a CDN so that code
+blocks still colour with no network, and used through its tokeniser rather than its HTML renderer,
+which is what keeps the rule below true of code blocks too. Colour is never allowed to cost the
+code: a language the bundle carries no grammar for renders plainly, as does a snippet past 20,000
+characters, and so does every block if the highlighter fails to load at all. The label is drawn by
+the stylesheet rather than added to the block, so copying a snippet gets the code and not the
+language name. Raw HTML and images are dropped rather than shown, and a link is clickable only when its URL
 is `http(s)`; anything else stays as plain text. The page builds every one of those elements itself and
 never parses markup, which is what stops an agent running with every tool pre-approved from putting
 something executable on a page you have open.

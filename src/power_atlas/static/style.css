@@ -613,6 +613,47 @@ script { display: none; }
 .acp-msg-md code { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0 4px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; }
 .acp-msg-md pre { margin: 6px 0 8px; }
 .acp-msg-md pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+/* A fenced block that named a language, which only some do — an indented block
+   and a bare fence carry nothing to label, and those still render as a bare
+   <pre>. The wrapper exists to give the label a box outside the <pre>: the
+   <pre> is the scroll container, so a label drawn inside it scrolls off the top
+   of any block that reaches the 220px cap. It sits in normal flow above the
+   block rather than pinned over its top-right corner — pinned, the code would
+   need padding clear of it on every line, and this bubble is a narrow column
+   with no width to give. The text comes from `data-lang` rather than from an
+   appended element so it stays out of `textContent`, and so out of a snippet
+   the reader selects and copies. Sized like `.acp-tool-kind`, which is the same
+   kind of chip. */
+.acp-msg-md .acp-md-code { margin: 6px 0 8px; }
+.acp-msg-md .acp-md-code > pre { margin: 0; }
+.acp-msg-md .acp-md-code::before { content: attr(data-lang); display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
+/* Syntax colours for a highlighted block. The page walks Prism's `tokenize()`
+   output itself and names each span `acp-tok-<type>`, so these are the only
+   rules involved — no Prism theme is vendored, and the palette is the one the
+   rest of PowerAtlas uses rather than a third party's idea of dark. A token
+   type with no rule here inherits the block's colour, which is why an
+   unrecognised grammar degrades to plain text instead of to something unread-
+   able. `--text-muted` stays the base, so an uncoloured block is unchanged. */
+.acp-msg-md .acp-tok-comment, .acp-msg-md .acp-tok-prolog,
+.acp-msg-md .acp-tok-doctype, .acp-msg-md .acp-tok-cdata { color: var(--text-dim); font-style: italic; }
+.acp-msg-md .acp-tok-punctuation, .acp-msg-md .acp-tok-operator { color: #a5b0c8; }
+.acp-msg-md .acp-tok-keyword, .acp-msg-md .acp-tok-atrule,
+.acp-msg-md .acp-tok-rule, .acp-msg-md .acp-tok-important { color: #c084fc; }
+.acp-msg-md .acp-tok-string, .acp-msg-md .acp-tok-char,
+.acp-msg-md .acp-tok-attr-value, .acp-msg-md .acp-tok-regex,
+.acp-msg-md .acp-tok-inserted { color: #4ade80; }
+.acp-msg-md .acp-tok-number, .acp-msg-md .acp-tok-boolean,
+.acp-msg-md .acp-tok-constant, .acp-msg-md .acp-tok-symbol { color: #fbbf24; }
+.acp-msg-md .acp-tok-function, .acp-msg-md .acp-tok-method,
+.acp-msg-md .acp-tok-title { color: #8ba4ff; }
+.acp-msg-md .acp-tok-class-name, .acp-msg-md .acp-tok-builtin,
+.acp-msg-md .acp-tok-tag, .acp-msg-md .acp-tok-selector { color: #7dd3fc; }
+.acp-msg-md .acp-tok-variable, .acp-msg-md .acp-tok-property,
+.acp-msg-md .acp-tok-attr-name, .acp-msg-md .acp-tok-parameter { color: #e9d5ff; }
+.acp-msg-md .acp-tok-deleted { color: #f87171; }
+.acp-msg-md .acp-tok-namespace { opacity: 0.7; }
+.acp-msg-md .acp-tok-bold { font-weight: 600; }
+.acp-msg-md .acp-tok-italic { font-style: italic; }
 .acp-msg-md a { color: var(--accent); }
 /* Agent tables are wide — four prose columns is ordinary — and this bubble is
    a narrow column inside a panel. `display: block` is what makes a table
