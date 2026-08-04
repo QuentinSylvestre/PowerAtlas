@@ -552,8 +552,30 @@ script { display: none; }
 .acp-msg { display: flex; gap: 10px; align-items: flex-start; }
 .acp-msg-role { flex-shrink: 0; width: 42px; text-align: right; font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); padding-top: 4px; }
 .acp-msg-body { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+/* The user's own turns get a full-bleed band rather than a coloured label. In
+   a single column where agent prose, tool calls and notes all stack, the thing
+   being scanned for is "where did I last say something", and a 42 px gutter
+   label is not findable at a glance — the band is what marks the boundary
+   between one turn and the next.
+
+   `margin: 0 -14px` cancels `.acp-transcript`'s horizontal padding exactly, so
+   the highlight reaches both edges of the card instead of stopping short and
+   reading as a quoted block. It lands on the padding edge and not one pixel
+   further, which is what keeps it free: the scrollable overflow area is the
+   union of the box's *padding* box with its descendants' boxes, and the
+   transcript's `overflow-y: auto` computes `overflow-x` to `auto` as well — so
+   a wider band would buy a horizontal scrollbar. The -14px is tied to that
+   padding and to nothing else; the two move together.
+
+   The 2 px border plus 12 px of padding restores the 14 px the body would
+   otherwise have had, so the text column does not step sideways between a user
+   turn and the agent's reply under it. */
+.acp-msg-user { background: var(--accent-dim); border-left: 2px solid var(--accent); margin: 0 -14px; padding: 6px 14px 6px 12px; }
 .acp-msg-user .acp-msg-role { color: var(--accent); }
-.acp-msg-user .acp-msg-body { color: var(--text-muted); }
+/* Full `--text` rather than the muted grey this used to carry: the band now
+   does the separating, and dimming the one line the user wrote made the thing
+   they are looking for the faintest thing in the pane. */
+.acp-msg-user .acp-msg-body { color: var(--text); }
 .acp-msg-note .acp-msg-body { color: #fbbf24; font-size: 12px; font-style: italic; }
 .acp-msg-error .acp-msg-role { color: #f87171; }
 .acp-msg-error .acp-msg-body { color: #f87171; font-size: 12px; }
