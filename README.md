@@ -200,6 +200,17 @@ refused for a session PowerAtlas has open (close it first) or one another proces
 not shown at all to a remote viewer and its endpoint is not on the remote path allowlist, so deletion
 is reachable only from the machine running PowerAtlas.
 
+**A finished answer is redrawn as markdown.** While the agent is still streaming, its text shows as it
+arrives; once the answer is complete the bubble is rebuilt with headings, lists, emphasis, code blocks
+and pipe tables. A table is as wide as it wants to be until the window says otherwise: given the
+room it renders full width with every row on one line, and it starts wrapping only when the pane is
+narrower than that. When it does wrap, every column gives up width in proportion rather than one column
+absorbing all of it. (The dashboard's session tooltip keeps its own tables on one line and scrolls
+instead — it holds names and counts, where this holds prose.) Raw HTML and images are dropped rather than shown, and a link is clickable only when its URL
+is `http(s)`; anything else stays as plain text. The page builds every one of those elements itself and
+never parses markup, which is what stops an agent running with every tool pre-approved from putting
+something executable on a page you have open.
+
 Three things are worth knowing before leaving a long task running:
 
 - **A turn is bounded by silence, not by duration.** A turn that keeps streaming runs as long as it

@@ -1028,11 +1028,34 @@ const MD_LINKS = [{"type":"paragraph","children":[{"type":"link","children":[{"t
 // Two lines of one paragraph.
 const MD_SOFTBREAK = [{"type":"paragraph","children":[{"type":"text","raw":"line one"},{"type":"softbreak"},{"type":"text","raw":"line two"}]}];
 
+// `| Integration | Topic pattern | Rows |` with `|---|:---:|---:|` under it and
+// one body row, whose middle cell is `contains \`aruba\`` — a codespan inside a
+// cell, because agent tables are full of them and a cell filled by `textContent`
+// instead of by the walker would lose it.
+const MD_TABLE = [{"type":"table","children":[{"type":"table_head","children":[{"type":"table_cell","attrs":{"align":null,"head":true},"children":[{"type":"text","raw":"Integration"}]},{"type":"table_cell","attrs":{"align":"center","head":true},"children":[{"type":"text","raw":"Topic pattern"}]},{"type":"table_cell","attrs":{"align":"right","head":true},"children":[{"type":"text","raw":"Rows"}]}]},{"type":"table_body","children":[{"type":"table_row","children":[{"type":"table_cell","attrs":{"align":null,"head":false},"children":[{"type":"text","raw":"Classic Aruba"}]},{"type":"table_cell","attrs":{"align":"center","head":false},"children":[{"type":"text","raw":"contains "},{"type":"codespan","raw":"aruba"}]},{"type":"table_cell","attrs":{"align":"right","head":false},"children":[{"type":"text","raw":"12"}]}]}]}]}];
+
+// The same table with `[bad](javascript:alert(1))` in one cell and
+// `![x](http://evil.example/x.png)` in the next. A cell is a container like any
+// other and the refusals have to hold inside one too — a table arm that filled
+// cells by any route but the walker would reinstate every sink at once.
+const MD_TABLE_HOSTILE = [{"type":"table","children":[{"type":"table_head","children":[{"type":"table_cell","attrs":{"align":null,"head":true},"children":[{"type":"text","raw":"Cell"}]},{"type":"table_cell","attrs":{"align":null,"head":true},"children":[{"type":"text","raw":"Payload"}]}]},{"type":"table_body","children":[{"type":"table_row","children":[{"type":"table_cell","attrs":{"align":null,"head":false},"children":[{"type":"link","children":[{"type":"text","raw":"bad"}],"attrs":{"url":"javascript:alert(1)"}}]},{"type":"table_cell","attrs":{"align":null,"head":false},"children":[{"type":"image","children":[{"type":"text","raw":"x"}],"attrs":{"url":"http://evil.example/x.png"}}]}]}]}]}];
+
+// One body cell whose `align` is `constructor`. Hand-built, like the other
+// prototype fixture: mistune emits one of three alignments and never this — but
+// mistune is not the wire, and `align` is the one table field that reaches a
+// map lookup.
+const MD_TABLE_PROTO_ALIGN = [{ type: "table", children: [
+  { type: "table_body", children: [
+    { type: "table_row", children: [
+      { type: "table_cell", attrs: { align: "constructor", head: false },
+        children: [{ type: "text", raw: "CELL" }] }] }] }] }];
+
 // Every element name the page is allowed to build from a token tree. Anything
 // else in the bubble is a tag name that came off the wire.
 const MD_TAGS = new Set([
   "DIV", "SPAN", "P", "H1", "H2", "H3", "H4", "H5", "H6",
   "UL", "OL", "LI", "PRE", "CODE", "STRONG", "EM", "BR", "A",
+  "TABLE", "THEAD", "TBODY", "TR", "TH", "TD",
 ]);
 
 /** Stream `text` into a fresh agent bubble and then render `tokens` into it,
@@ -1173,6 +1196,189 @@ check("a link is an element only for http(s), and its text otherwise", (tpl) => 
   // wrote, it just is not a thing that can be clicked.
   assert(body.textContent.includes("bad") && body.textContent.includes("rel"),
          `the refused links lost their text: ${body.textContent}`);
+});
+
+check("a pipe table is rebuilt as a table, not flattened onto one line", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live,
+           "| Integration | Topic pattern | Rows |\n|---|:---:|---:|\n" +
+           "| Classic Aruba | contains `aruba` | 12 |\n", MD_TABLE);
+  const body = bubble(page);
+  const tags = tagsIn(body);
+  for (const want of ["TABLE", "THEAD", "TBODY", "TR", "TH", "TD"]) {
+    assert(tags.includes(want),
+           `the rendered table has no <${want}>; it built ${tags.join(",")}`);
+  }
+  // The CSS that makes a wide table scroll instead of stretching the panel is
+  // keyed on this class. Without it the table renders and then overflows the
+  // conversation, which is a different bug wearing this one's clothes.
+  assert(String(body.className).split(/\s+/).includes("acp-msg-md"),
+         `the rendered bubble is not marked as markdown: ${body.className}`);
+  // mistune hangs the head's cells straight off `table_head`, with no row
+  // token between them. The page builds that row itself; stop doing so and the
+  // browser hoists the cells into an implicit one — a row the page never made,
+  // cannot style and cannot count.
+  const heads = body.descendants().filter((n) => n.tagName === "THEAD");
+  assertEqual(heads.length, 1, "the table has no single <thead>");
+  assertEqual(heads[0].childNodes.map((n) => n.tagName).join(","), "TR",
+              "the head's cells were not wrapped in a row of the page's own");
+  assertEqual(heads[0].childNodes[0].childNodes.length, 3,
+              "the header row did not get all three cells");
+  // `head` on the token is the only thing choosing between <th> and <td>, and
+  // reversing it would look almost right while turning every column heading
+  // into a data cell.
+  const cellsOf = (root) => root.descendants()
+    .filter((n) => n.tagName === "TH" || n.tagName === "TD");
+  for (const cell of cellsOf(heads[0])) {
+    assertEqual(cell.tagName, "TH", "a head cell was built as a data cell");
+  }
+  const tbodies = body.descendants().filter((n) => n.tagName === "TBODY");
+  assertEqual(tbodies.length, 1, "the table has no single <tbody>");
+  for (const cell of cellsOf(tbodies[0])) {
+    assertEqual(cell.tagName, "TD", "a body cell was built as a header cell");
+  }
+  // A cell is filled by the walker and not by `textContent`, so the codespan
+  // inside one is still an element. A table arm that took the shortcut would
+  // pass every check above and quietly flatten every `like this` in a cell.
+  assert(cellsOf(tbodies[0]).some((c) => tagsIn(c).includes("CODE")),
+         "the codespan inside a cell was flattened into plain text");
+  assert(body.textContent.includes("Classic Aruba") &&
+         body.textContent.includes("aruba"),
+         `the table lost its cell text: ${body.textContent}`);
+});
+
+check("a column's alignment is a class from a closed set, never a style", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live,
+           "| Integration | Topic pattern | Rows |\n|---|:---:|---:|\n" +
+           "| Classic Aruba | contains `aruba` | 12 |\n", MD_TABLE);
+  const body = bubble(page);
+  const classesOf = (tag) => body.descendants()
+    .filter((n) => n.tagName === tag)
+    .map((n) => String(n.className || "")).join("|");
+  // `|---|:---:|---:|` — default, centre, right — on both the head and the row
+  // under it, because mistune puts the alignment on every cell in the column
+  // and a page that read it only off the head would align nothing below it.
+  assertEqual(classesOf("TH"), "|acp-md-center|acp-md-right",
+              "the delimiter row's alignment did not reach the header cells");
+  assertEqual(classesOf("TD"), "|acp-md-center|acp-md-right",
+              "the delimiter row's alignment did not reach the body cells");
+  // `align` is a wire string like every other field here. Reaching it into
+  // `style.textAlign` would put an agent-authored value straight into a CSS
+  // property; the closed map is what keeps it out, and the way to see that the
+  // map is still doing the work is that nothing in the table has a style at all.
+  const table = body.descendants().find((n) => n.tagName === "TABLE");
+  assert(table, "the table was never built");
+  for (const node of [table].concat(table.descendants())) {
+    assertEqual(Object.keys(node.style).length, 0,
+                `a table node carries an inline style: ${JSON.stringify(node.style)}`);
+  }
+});
+
+check("the markdown refusals hold inside a table cell too", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live,
+           "| Cell | Payload |\n|---|---|\n" +
+           "| [bad](javascript:alert(1)) | ![x](http://evil.example/x.png) |\n",
+           MD_TABLE_HOSTILE);
+  const body = bubble(page);
+  assertEqual(body.descendants().filter((n) => n.tagName === "A").length, 0,
+              "a javascript: URL became a link because it was inside a cell");
+  for (const tag of tagsIn(body)) {
+    assert(MD_TAGS.has(tag),
+           `a table cell built a tag outside the allowlist: ${tag}`);
+  }
+  for (const node of body.descendants()) {
+    assertEqual(node.getAttribute("href"), null,
+                "an href reached a node inside a table");
+    assertEqual(node.getAttribute("src"), null,
+                "a src reached a node inside a table");
+  }
+  // Refused as a link, kept as text — the same bargain the prose case strikes.
+  // The image keeps nothing, which is also the prose case: it is dropped, not
+  // escaped, so there is no alt text to find here.
+  assert(body.textContent.includes("bad"),
+         `the refused link lost its text inside the cell: ${body.textContent}`);
+});
+
+check("a transcript table is bounded by the pane and by nothing else", () => {
+  // Three declarations decide how one of these tables gives up width, and none
+  // of them reads as load-bearing:
+  //   - no `max-width` on a cell. A fixed cap is chosen without knowing the
+  //     pane, so it is wrong twice: it wraps a table that had room to spare
+  //     and fails to save one that had none. Measured at 42ch, it bound on a
+  //     900px pane where the table already fit.
+  //   - no `white-space`. `nowrap` makes min-content the whole line, and the
+  //     table then cannot shrink at all.
+  //   - `overflow-wrap: anywhere`. Auto table layout hands every column its
+  //     min-content width before sharing out anything, so one unbreakable
+  //     token holds its column at full width while the prose beside it pays
+  //     the whole shortfall. Measured on a 4-column table in a 444px pane:
+  //     `break-word` kept one column at 100% and cut another to 14% (spread
+  //     0.86); `anywhere` gave 0.56/0.54/0.45/0.40 (spread 0.17).
+  // Every rule naming the cell, not the last one: `.acp-msg-md td` is set
+  // twice — once for the box and once for its colour — and reading either
+  // alone describes a cell that does not exist. Declarations are collected in
+  // source order and the last value of each property is the effective one,
+  // which is the cascade this file can model without a CSS engine (no @media
+  // here, and all three selectors are the same specificity).
+  const css = fs.readFileSync(STYLESHEET, "utf8");
+  const declarations = [];
+  for (const m of css.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const selectors = m[1].split(",").map((s) => s.trim().replace(/\s+/g, " "));
+    if (!selectors.includes(".acp-msg-md td")) continue;
+    for (const decl of m[2].split(";")) {
+      const at = decl.indexOf(":");
+      if (at < 0) continue;
+      declarations.push([decl.slice(0, at).trim(),
+                         decl.slice(at + 1).trim()]);
+    }
+  }
+  assert(declarations.length > 0,
+         "no rule sets `.acp-msg-md td` any more; the transcript's table cells " +
+         "are unstyled and this check has lost its subject");
+  const effective = (prop) => {
+    const hits = declarations.filter(([name]) => name === prop);
+    return hits.length ? hits[hits.length - 1][1] : null;
+  };
+  assertEqual(effective("max-width"), null,
+              "a `max-width` is back on the transcript's table cells. That " +
+              "caps a column without knowing how wide the pane is, so it " +
+              "wraps tables that had room and does not save the ones that " +
+              "had none — the pane is the only thing allowed to bound these");
+  assertEqual(effective("white-space"), null,
+              "a `white-space` is on the cells. If it is `nowrap` the table " +
+              "cannot shrink at all: nowrap makes min-content the whole line, " +
+              "and no column is ever narrower than its min-content");
+  assertEqual(effective("overflow-wrap"), "anywhere",
+              "the cells no longer drop their min-content floor, so auto " +
+              "table layout gives each column its longest word before " +
+              "sharing anything out — one unbreakable token then keeps its " +
+              "column at full width and the prose column absorbs every pixel " +
+              "of the shortfall instead of the columns shrinking together");
+  // Keeps the decision above local. `.acp-msg-body` sets `word-break:
+  // break-word`, which inherits in and would decide the cells' breaking for
+  // them from a rule 50 lines away that is about streamed prose.
+  assertEqual(effective("word-break"), "normal",
+              "the cells do not reset `word-break`, so how a table breaks is " +
+              "set by `.acp-msg-body`'s rule for streamed prose rather than here");
+});
+
+check("an alignment off Object.prototype cannot name a class", (tpl) => {
+  // `MD_ALIGN` is `Object.create(null)` for the same reason every other map in
+  // the renderer is: on an object literal `MD_ALIGN['constructor']` answers the
+  // Object constructor, and a truthy answer is assigned straight to className.
+  const { page, live } = connected(tpl);
+  answered(page, live, "plain", MD_TABLE_PROTO_ALIGN);
+  const body = bubble(page);
+  const cells = body.descendants().filter((n) => n.tagName === "TD");
+  assertEqual(cells.length, 1, "the row did not build its one cell");
+  assertEqual(String(cells[0].className || ""), "",
+              "a value off Object.prototype reached a cell's class");
+  // And the cell still shows what the agent wrote: a hostile attribute costs
+  // the alignment, never the content.
+  assert(body.textContent.includes("CELL"),
+         `the cell lost its text: ${body.textContent}`);
 });
 
 check("a token type off Object.prototype cannot name an element", (tpl) => {

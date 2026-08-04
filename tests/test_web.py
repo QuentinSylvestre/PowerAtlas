@@ -3026,6 +3026,36 @@ class TestAcpMarkdownRendering:
         # Nothing of the first bubble is in the second one.
         assert "ls -la" not in json.dumps(second)
 
+    def test_a_pipe_table_reaches_the_page_as_table_tokens(self, acp_session):
+        """Pipe tables are GFM and not CommonMark, and mistune ships only the
+        latter — so ``create_markdown`` without the ``table`` plugin emits no
+        table token at all. The rows come back as a paragraph of literal pipes,
+        which the page's fall-through arm then flattens onto one line, and that
+        is what an agent's comparison table looked like on ``/acp``. ``web.py``
+        reached the same conclusion for the dashboard tooltip.
+
+        Asserting the *token types* is the half that fails when the plugin is
+        dropped. The cell text survives either way, which is exactly why this
+        was invisible to every check that looked for content.
+        """
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        frames = self._turn(acp_mod, sid, conn, [self._says(
+            "| Integration | Rows |\n|---|---:|\n| Classic Aruba | 12 |\n")])
+        rendered = next(f for f in frames if f["type"] == "rendered")
+        tokens = rendered["payload"]["tokens"]
+        table = next((t for t in tokens if t["type"] == "table"), None)
+        assert table is not None, tokens
+        assert {t["type"] for t in table["children"]} == {"table_head",
+                                                          "table_body"}, table
+        # The `---:` delimiter's alignment rides along on the cell. The client
+        # turns it into a class, and it cannot do that from a token that never
+        # carried one.
+        head = next(t for t in table["children"] if t["type"] == "table_head")
+        assert [c["attrs"]["align"] for c in head["children"]] == [None, "right"]
+        # The failure mode, stated positively: no row survived as prose.
+        assert not any(t["type"] == "paragraph" for t in tokens), tokens
+
     def test_a_tool_update_does_not_split_a_bubble(self, acp_session):
         """The mirror of the check above, and the reason it is ``tool_call``
         alone. ``addToolCall`` returns early for an id it already drew, leaving

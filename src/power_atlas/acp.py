@@ -131,8 +131,16 @@ try:
     # dependency declared in pyproject.toml but absent from the running
     # interpreter has broken this project before. Absent, `/acp` degrades to
     # exactly the plain-text transcript it had before this existed.
+    #
+    # `table` is a plugin because pipe tables are GFM and not CommonMark, and
+    # mistune ships only the latter by default. Without it the parser never
+    # sees a table at all: the rows come back as paragraphs of literal pipes,
+    # which the client's fall-through arm then flattens onto one line. `web.py`
+    # carries the same plugin for the dashboard tooltip and for the same
+    # reason. It adds token types and nothing else — no renderer, and so no
+    # HTML — so the no-HTML-parser property above is untouched by it.
     import mistune
-    _markdown = mistune.create_markdown(renderer=None)
+    _markdown = mistune.create_markdown(renderer=None, plugins=["table"])
 except Exception as _e:  # pragma: no cover - only when the dep is missing
     mistune = None
     _markdown = None

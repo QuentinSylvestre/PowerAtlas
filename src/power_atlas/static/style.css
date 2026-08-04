@@ -614,6 +614,58 @@ script { display: none; }
 .acp-msg-md pre { margin: 6px 0 8px; }
 .acp-msg-md pre code { background: none; border: 0; padding: 0; font-size: inherit; }
 .acp-msg-md a { color: var(--accent); }
+/* Agent tables are wide — four prose columns is ordinary — and this bubble is
+   a narrow column inside a panel. `display: block` is what makes a table
+   scrollable at all: CSS regenerates the anonymous table boxes inside, so the
+   columns still line up while the box itself becomes something with an
+   overflow to scroll. Still needed alongside the cell cap below, because four
+   capped columns can outrun the panel between them. */
+.acp-msg-md table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 6px 0 8px; font-size: 12px; }
+/* **Nothing here caps a column except the pane.** A cell carries no
+   `max-width` on purpose: a fixed cap decides how wide a table may be without
+   knowing how much room there is, and a measured one is still wrong twice —
+   it wrapped a table that had space to spare, and it did not save a table that
+   had none. `width: max-content` asks for the natural width, `max-width: 100%`
+   is the only thing that ever takes it away, and the two together mean the
+   table wraps when and only when the window makes it.
+
+   There is also deliberately no `white-space`: `nowrap` defines min-content as
+   the whole line, which would stop the table shrinking at all. A check in
+   `tests/acp_page.test.mjs` fails if either declaration comes back.
+
+   `overflow-wrap: anywhere` is what makes the shrinking *proportional*, and it
+   is the one line here whose reason is not obvious. Auto table layout gives
+   every column its min-content width first and shares out only what is left,
+   so a column holding one unbreakable token keeps its full width while the
+   prose beside it pays the entire shortfall. Measured on a real 4-column
+   table (natural 1013px) in a 444px pane, `break-word` kept `Proto type` at
+   100% of its width and cut `Key data extracted` to 14% — spread 0.86.
+   Dropping the floor with `anywhere` gave 0.56/0.54/0.45/0.40 — spread 0.17,
+   and 0.02 at a 924px pane where it barely bites.
+
+   What it costs is a token split mid-character once the pane is far below what
+   the table needs, which no rule can avoid: shrinking a column that holds an
+   unbreakable word *is* breaking that word. Above ~900px of pane nothing
+   breaks at all. `word-break: normal` keeps that decision here rather than
+   inheriting a different one from `.acp-msg-body`, and `min-width` stops a
+   column collapsing to a single character.
+
+   `.tail-md table` keeps `nowrap` and does not follow any of this. That is a
+   split rather than drift: the tooltip is a hover popup holding model names,
+   timings and counts — what its own comment says `nowrap` suits — while this
+   is a transcript somebody reads, and prose is what it holds. */
+.acp-msg-md th, .acp-msg-md td { border: 1px solid var(--border); padding: 3px 8px; text-align: left; min-width: 4ch; word-break: normal; overflow-wrap: anywhere; }
+.acp-msg-md th { background: var(--surface); color: var(--text); font-weight: 600; }
+.acp-msg-md td { color: var(--text-muted); }
+.acp-msg-md tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
+/* The `:---:` delimiter's alignment, arriving as a class rather than as an
+   inline style — the page puts no wire string into a CSS property. `left` is
+   already the cell default above, so this rule beats nothing; it exists so the
+   closed map in `acp.html` is total and an explicitly left-aligned column is
+   not the one case that silently finds no rule. */
+.acp-msg-md .acp-md-left { text-align: left; }
+.acp-msg-md .acp-md-center { text-align: center; }
+.acp-msg-md .acp-md-right { text-align: right; }
 .acp-composer { display: flex; gap: 8px; align-items: stretch; flex-shrink: 0; }
 .acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: vertical; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }

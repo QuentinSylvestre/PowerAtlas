@@ -837,6 +837,22 @@
   MD_TAG.codespan = 'code';
   MD_TAG.list_item = 'li';
   MD_TAG.linebreak = 'br';
+  // Three of the table plugin's five token types are a tag and nothing more.
+  // The other two carry something that needs deciding and have their own arms
+  // in `mdNode`: `table_head` holds its cells with no row token between them,
+  // and `table_cell` is the only token here with wire data in its attrs.
+  MD_TAG.table = 'table';
+  MD_TAG.table_body = 'tbody';
+  MD_TAG.table_row = 'tr';
+
+  // The `:---:` delimiter's alignment, as a class name from a closed map. A
+  // map and not `cell.style.textAlign = attrs.align` for the same reason
+  // `MD_HEADING` is keyed by string: `align` is a wire value like every other
+  // field on this page, and the set of alignments a table can have is three.
+  var MD_ALIGN = Object.create(null);
+  MD_ALIGN.left = 'acp-md-left';
+  MD_ALIGN.center = 'acp-md-center';
+  MD_ALIGN.right = 'acp-md-right';
 
   // Keyed by the heading level as a string, because `attrs.level` is a wire
   // value like any other and `'h' + level` would be a tag name built by
@@ -930,6 +946,32 @@
       return;
     }
 
+    if (type === 'table_head') {
+      // The plugin's shape is not uniform: `table_head` holds `table_cell`
+      // tokens directly, while `table_body` holds `table_row` tokens that hold
+      // theirs. Mapping this to <thead> alone would put <th> straight inside
+      // it, and the browser would hoist them into a row this page never built
+      // — so the row is built here, explicitly.
+      var thead = document.createElement('thead');
+      var headRow = document.createElement('tr');
+      mdAppend(headRow, token.children);
+      thead.appendChild(headRow);
+      parent.appendChild(thead);
+      return;
+    }
+
+    if (type === 'table_cell') {
+      var cellAttrs = token.attrs || {};
+      // Both tag names are literals, as every tag name on this page is; the
+      // wire only chooses between them.
+      var cell = document.createElement(cellAttrs.head ? 'th' : 'td');
+      var alignClass = MD_ALIGN[String(cellAttrs.align)];
+      if (alignClass) cell.className = alignClass;
+      mdFill(cell, token);
+      parent.appendChild(cell);
+      return;
+    }
+
     if (type === 'heading') {
       var level = token.attrs && token.attrs.level;
       var heading = document.createElement(MD_HEADING[String(level)] || 'p');
@@ -961,8 +1003,9 @@
       return;
     }
 
-    // Everything else — a blockquote, a table the parser left as prose, a
-    // token type a future mistune adds. Its text, with none of its structure,
+    // Everything else — a blockquote, a token type a future mistune adds, a
+    // table from a server whose mistune lacks the `table` plugin and which
+    // therefore never emitted one. Its text, with none of its structure,
     // and nothing at all when it has no text (`blank_line`,
     // `thematic_break`). Never an element named after it.
     var text = mdText(token);
