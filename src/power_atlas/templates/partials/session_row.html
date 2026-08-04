@@ -4,6 +4,13 @@
     <div class="session-title-row">
       {% if status == 'working' %}<span class="session-status status-working" title="Working — agent is executing" aria-label="Working"></span>{% elif status == 'waiting' %}{% set wd = waiting_detail|default(('', '')) %}<span class="session-status status-waiting{% if wd[0] %} waiting-{{ wd[0] }}{% endif %}"{% if wd[0] %} data-waiting="{{ wd[0] }}"{% endif %} title="Waiting — {{ wd[1] or 'needs your input' }}" aria-label="Waiting — {{ wd[1] or 'needs your input' }}"></span>{% elif status == 'errored' %}<span class="session-status status-errored" title="Errored — something went wrong" aria-label="Errored"></span>{% endif %}
       {% if session.session_id in pinned_sessions %}<span class="pinned-indicator" title="Pinned">📌</span>{% endif %}
+      {# Machine-driven session: `bg`/`daemon`/`daemon-worker`, or an SDK
+         entrypoint. Only ever set for a live session, because both fields come
+         from the per-process sidecar. Placed before the title rather than in
+         .session-actions so it reads as part of what the row *is*, and because
+         .session-actions is click-excluded for reasons recorded in that block
+         below. #}
+      {% if origin|default('') %}<span class="session-origin" title="Started by a program, not from a terminal — {{ origin }}" aria-label="Machine-driven session: {{ origin }}">{{ origin }}</span>{% endif %}
       <span class="session-title">{{ session.title or 'untitled' }}</span>
       <span class="session-time">{{ session.updated_at[5:16] | replace('T', ' ') if session.updated_at else '' }}</span>
     </div>

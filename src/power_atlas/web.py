@@ -261,6 +261,68 @@ def _map_reported_status(reported: str) -> str:
     return ""
 
 
+# Entrypoints that mean "started by a program, not by a person at a terminal".
+# Taken verbatim from Claude Code's own set (2.1.221 carries
+# `new Set(["sdk-cli","sdk-ts","sdk-py"])` and filters these out of `/resume`),
+# so PowerAtlas and the provider agree on what counts as machine-driven rather
+# than inventing a second definition that drifts.
+#
+# `cli` is the interactive terminal case. Deliberately NOT listed here:
+# `mcp`, `local-agent`, `remote*`, `claude-vscode`, `claude-code-github-action`
+# and `claude_in_slack` are all real entrypoint values this build knows, and
+# each is arguably machine-driven too — but none has been observed on this
+# machine, and Claude Code itself does not filter them. Add one when there is a
+# sidecar to check it against, not before.
+_SDK_ENTRYPOINTS = frozenset({"sdk-cli", "sdk-ts", "sdk-py"})
+
+# Session kinds that are not a person at a prompt. `interactive` and "" are the
+# ordinary cases and yield no badge.
+_MACHINE_KINDS = frozenset({"bg", "daemon", "daemon-worker"})
+
+
+def _session_origin(kind: str, entrypoint: str) -> str:
+    """A short badge label for a session no human is sitting in front of, or "".
+
+    **Both fields are consulted, and that is the whole point of this function.**
+    Measured 2026-08-04 on Claude Code 2.1.221: `kind` is read straight out of
+    the `CLAUDE_CODE_SESSION_KIND` environment variable, so it only reads
+    non-`interactive` when a caller deliberately sets it. A plain `claude -p` —
+    the shape every script, hook and CI job uses — reports `kind: interactive`
+    with `entrypoint: sdk-cli`. Keying on `kind` alone, which is what this was
+    originally scoped as, would therefore have missed the commonest
+    machine-driven session entirely while looking like it worked.
+
+    `kind` wins when both are informative, because it is the more specific
+    claim: a `daemon` started through the SDK is better described as a daemon
+    than as an SDK run.
+
+    Returns "" for an ordinary interactive session, for kiro-cli (whose lock
+    carries neither field), and for any value this build does not recognise —
+    the same defer-rather-than-guess contract `_map_reported_status` uses.
+    """
+    if kind in _MACHINE_KINDS:
+        return kind
+    if entrypoint in _SDK_ENTRYPOINTS:
+        return "sdk"
+    return ""
+
+
+def _row_origin(snapshot, session, provider: str) -> str:
+    """``_session_origin`` for one row, read off the snapshot.
+
+    Only ever non-empty for a **live** session: both fields come from the
+    per-process sidecar, which `presence` discards once the process is gone. A
+    historical row therefore carries no badge, which is the right scope — the
+    confusion this addresses is a background session showing the same live dot
+    as a real one, and a dead session shows no dot at all.
+    """
+    sid = getattr(session, "session_id", "")
+    if not sid:
+        return ""
+    return _session_origin(snapshot.session_kind(provider, sid),
+                           snapshot.session_entrypoint(provider, sid))
+
+
 def _session_status(snapshot, session, provider: str,
                     notifications_enabled: bool = False, *,
                     notify: bool = True) -> str:
@@ -3110,6 +3172,7 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
             workspace_name=Path(session.cwd).name if session.cwd else "",
             status=(_rs := row_status.get((session.session_id, prov_name), "closed")),
             waiting_detail=_waiting_detail(snap, session, prov_name, _rs),
+            origin=_row_origin(snap, session, prov_name),
         )
     if pinned_items and non_pinned:
         html += '<div class="pinned-separator" aria-hidden="true"></div>'
@@ -3134,6 +3197,7 @@ async def partials_all_sessions(request: Request, page: int = 1, provider: str =
                     workspace_name=Path(session.cwd).name if session.cwd else "",
                     status=(_rs := row_status.get((session.session_id, prov_name), "closed")),
                     waiting_detail=_waiting_detail(snap, session, prov_name, _rs),
+            origin=_row_origin(snap, session, prov_name),
                 )
 
     if not html:
@@ -4063,6 +4127,7 @@ async def partials_sessions(request: Request, cwd: str = "", provider: str = "al
             provider_color=_get_provider_color(prov_name, config),
             status=sess_status,
             waiting_detail=_waiting_detail(snap, session, prov_name, sess_status),
+            origin=_row_origin(snap, session, prov_name),
         )
     if not html:
         return HTMLResponse('<div class="new-session-inline">No matching sessions</div>')

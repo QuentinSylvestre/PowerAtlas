@@ -25,6 +25,7 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from .data import _normalize_path
 
@@ -257,14 +258,33 @@ def _epoch_from_iso(value: str) -> float | None:
     return dt.timestamp()
 
 
-def _sidecar_records() -> list[tuple[str, int, str, float, str, str, str]]:
-    """Collect (provider, pid, session_id, started_epoch, cwd, status, reason).
+class _Sidecar(NamedTuple):
+    """One provider sidecar, parsed but not yet validated for liveness.
 
-    ``cwd``, ``status`` and ``reason`` are best-effort and may be empty. No
-    liveness filtering happens here — the caller validates against the
-    process table.
+    A NamedTuple rather than a bare tuple because the field count outgrew what
+    a positional unpack can be read safely at: `kind` and `entrypoint` joined
+    an already-seven-wide row. Nothing outside this module consumes it, so the
+    change costs no caller.
     """
-    out: list[tuple[str, int, str, float, str, str, str]] = []
+    provider: str
+    pid: int
+    sid: str
+    started: float
+    cwd: str
+    status: str
+    reason: str
+    kind: str
+    entrypoint: str
+
+
+def _sidecar_records() -> list[_Sidecar]:
+    """Collect one ``_Sidecar`` per readable sidecar file.
+
+    Everything but ``provider``, ``pid``, ``sid`` and ``started`` is
+    best-effort and may be empty. No liveness filtering happens here — the
+    caller validates against the process table.
+    """
+    out: list[_Sidecar] = []
 
     for lock, st in _list_sidecars(_KIRO_LOCK_DIR, ".lock"):
         data = _load_json_cached(Path(lock), st)
@@ -276,7 +296,10 @@ def _sidecar_records() -> list[tuple[str, int, str, float, str, str, str]]:
             continue
         # cwd lives in the sibling metadata; only worth reading for a
         # candidate, which the caller has not filtered yet — defer it.
-        out.append(("kiro-cli", pid, Path(lock).stem, started, "", "", ""))
+        # kiro-cli's lock carries `{pid, started_at}` and nothing else, so it
+        # has no equivalent of claude-code's `kind`/`entrypoint`.
+        out.append(_Sidecar("kiro-cli", pid, Path(lock).stem, started,
+                            "", "", "", "", ""))
 
     for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json"):
         data = _load_json_cached(Path(meta), st)
@@ -291,10 +314,26 @@ def _sidecar_records() -> list[tuple[str, int, str, float, str, str, str]]:
         if not isinstance(started_ms, (int, float)) or isinstance(started_ms, bool):
             continue
         reason = data.get("waitingFor")
-        out.append(("claude-code", pid, sid, started_ms / 1000.0,
-                    cwd if isinstance(cwd, str) else "",
-                    str(data.get("status") or ""),
-                    reason if isinstance(reason, str) else ""))
+        # `kind` and `entrypoint` together say whether a human is sitting in
+        # front of this session, and **both are needed** — measured 2026-08-04
+        # on 2.1.221. `kind` comes straight from `CLAUDE_CODE_SESSION_KIND`, so
+        # it only ever reads non-`interactive` when a caller sets that variable:
+        # a plain `claude -p` — the shape every script and CI job uses — reports
+        # `kind: interactive` with `entrypoint: sdk-cli`. Keying on `kind` alone
+        # would therefore miss the commonest machine-driven session. Claude
+        # Code's own `/resume` filter agrees, keying on entrypoint against
+        # `{sdk-cli, sdk-ts, sdk-py}` and using `sessionKind` only for the
+        # daemon pair.
+        #
+        # Passed through raw and unmapped, exactly as `status` is: this module
+        # reports what the provider said, and `web._session_origin` decides what
+        # it means. An unrecognised value arrives intact rather than as "".
+        out.append(_Sidecar("claude-code", pid, sid, started_ms / 1000.0,
+                            cwd if isinstance(cwd, str) else "",
+                            str(data.get("status") or ""),
+                            reason if isinstance(reason, str) else "",
+                            str(data.get("kind") or ""),
+                            str(data.get("entrypoint") or "")))
 
     return out
 
@@ -316,7 +355,9 @@ class Snapshot:
     def __init__(self, live_sids: set[tuple[str, str]], live_cwds: set[tuple[str, str]],
                  sid_to_cwd: dict[tuple[str, str], str] | None = None,
                  sid_status: dict[tuple[str, str], str] | None = None,
-                 sid_reason: dict[tuple[str, str], str] | None = None):
+                 sid_reason: dict[tuple[str, str], str] | None = None,
+                 sid_kind: dict[tuple[str, str], str] | None = None,
+                 sid_entrypoint: dict[tuple[str, str], str] | None = None):
         # live_sids: {(provider, session_id)}
         # live_cwds: {(provider, normalized_cwd)}
         self._live_sids = live_sids
@@ -333,10 +374,38 @@ class Snapshot:
         self._sid_status = sid_status or {}
         # sid_reason: {(provider, session_id) -> why the session is waiting}
         self._sid_reason = sid_reason or {}
+        # sid_kind / sid_entrypoint: {(provider, session_id) -> raw provider
+        # value}. claude-code only; kiro-cli's lock carries neither. Both are
+        # **trailing and keyword-defaulted on purpose** — this class is
+        # constructed positionally in `tests/test_web.py` and by keyword in
+        # `tests/test_data.py`, so a parameter inserted anywhere but the end
+        # silently re-binds an existing argument at every positional site.
+        self._sid_kind = sid_kind or {}
+        self._sid_entrypoint = sid_entrypoint or {}
 
     def reported_status(self, provider: str, session_id: str) -> str:
         """Provider-reported live status, or "" when the provider offers none."""
         return self._sid_status.get((provider, session_id), "")
+
+    def session_kind(self, provider: str, session_id: str) -> str:
+        """Provider-reported session kind, or "" when the provider offers none.
+
+        claude-code only, and one of ``interactive``/``bg``/``daemon``/
+        ``daemon-worker`` when present. Read it alongside
+        ``session_entrypoint()`` rather than on its own — see the note in
+        ``_sidecar_records`` for why ``kind`` misses most machine-driven
+        sessions by itself.
+        """
+        return self._sid_kind.get((provider, session_id), "")
+
+    def session_entrypoint(self, provider: str, session_id: str) -> str:
+        """How the session was started, as the provider labels it.
+
+        ``cli`` for a terminal session; ``sdk-cli``/``sdk-ts``/``sdk-py`` for
+        an SDK or ``-p`` run; also ``mcp``, ``local-agent``, ``remote*``,
+        ``claude-vscode`` and others. "" when the provider offers none.
+        """
+        return self._sid_entrypoint.get((provider, session_id), "")
 
     def waiting_reason(self, provider: str, session_id: str) -> str:
         """Why a waiting session is blocked, as the provider describes it.
@@ -455,6 +524,8 @@ def _scan() -> Snapshot:
     sid_to_cwd: dict[tuple[str, str], str] = {}
     sid_status: dict[tuple[str, str], str] = {}
     sid_reason: dict[tuple[str, str], str] = {}
+    sid_kind: dict[tuple[str, str], str] = {}
+    sid_entrypoint: dict[tuple[str, str], str] = {}
     # pid -> (provider, create_time) for live provider processes only. A
     # sidecar is trusted only against one of these, which is both the cheap
     # guard and the strong one: a recycled pid almost always lands on some
@@ -517,7 +588,9 @@ def _scan() -> Snapshot:
     # publish show one snapshot for one session and a newer one for the next,
     # which is the inconsistency the immutable snapshot exists to prevent.
     acp_sids, acp_pid = _acp_live
-    for provider, pid, sid, started, cwd, status, reason in records:
+    for rec in records:
+        provider, pid, sid, started = rec.provider, rec.pid, rec.sid, rec.started
+        cwd, status, reason = rec.cwd, rec.status, rec.reason
         # Per-record isolation: one unparseable or oddly-typed sidecar must
         # not drop the remaining sessions, which would silently regress to
         # the pre-sidecar behaviour of matching nothing.
@@ -565,6 +638,10 @@ def _scan() -> Snapshot:
                 sid_status[key] = status
             if reason:
                 sid_reason[key] = reason
+            if rec.kind:
+                sid_kind[key] = rec.kind
+            if rec.entrypoint:
+                sid_entrypoint[key] = rec.entrypoint
             if not cwd and provider == "kiro-cli":
                 cwd = _kiro_session_cwd(sid)
             if cwd:
@@ -575,7 +652,8 @@ def _scan() -> Snapshot:
             log.exception("sidecar record rejected: provider=%s sid=%r", provider, sid)
             continue
 
-    return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason)
+    return Snapshot(live_sids, live_cwds, sid_to_cwd, sid_status, sid_reason,
+                    sid_kind, sid_entrypoint)
 
 
 def get_snapshot(force: bool = False) -> Snapshot:

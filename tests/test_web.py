@@ -752,6 +752,145 @@ def test_launcher_run(mock_load, mock_launch, client, tmp_path):
     mock_launch.assert_called_once()
 
 
+# --- Machine-driven session origin -----------------------------------------
+#
+# `kind` and `entrypoint` together say whether a person is sitting in front of
+# a session. Measured on Claude Code 2.1.221 (2026-08-04): `kind` alone is not
+# enough, because it is read straight from CLAUDE_CODE_SESSION_KIND and so
+# stays "interactive" for a plain `claude -p`. Both real observations are
+# pinned below so a future refactor cannot quietly regress to `kind` only.
+
+def test_session_origin_plain_sdk_run_is_badged():
+    """The observed `claude -p` sidecar: kind=interactive, entrypoint=sdk-cli.
+
+    This is the case keying on `kind` alone would miss, and it is the common
+    one — every script, hook and CI invocation looks like this.
+    """
+    from power_atlas.web import _session_origin
+    assert _session_origin("interactive", "sdk-cli") == "sdk"
+
+
+def test_session_origin_bg_kind_wins_over_entrypoint():
+    """The observed CLAUDE_CODE_SESSION_KIND=bg sidecar: kind=bg, entry=sdk-cli.
+
+    `kind` is the more specific claim, so it wins when both are informative.
+    """
+    from power_atlas.web import _session_origin
+    assert _session_origin("bg", "sdk-cli") == "bg"
+
+
+def test_session_origin_daemon_kinds():
+    from power_atlas.web import _session_origin
+    assert _session_origin("daemon", "cli") == "daemon"
+    assert _session_origin("daemon-worker", "cli") == "daemon-worker"
+
+
+def test_session_origin_ordinary_interactive_session_is_not_badged():
+    """The observed terminal sidecar: kind=interactive, entrypoint=cli."""
+    from power_atlas.web import _session_origin
+    assert _session_origin("interactive", "cli") == ""
+
+
+def test_session_origin_defers_on_unknown_and_absent():
+    """Unknown values yield no badge, matching _map_reported_status's contract.
+
+    "" for both is the kiro-cli case: its lock carries neither field.
+    """
+    from power_atlas.web import _session_origin
+    assert _session_origin("", "") == ""
+    assert _session_origin("some-future-kind", "some-future-entrypoint") == ""
+    assert _session_origin("", "mcp") == ""  # real value, deliberately unlisted
+
+
+def test_row_origin_reads_the_snapshot():
+    from types import SimpleNamespace
+    from power_atlas.presence import Snapshot
+    from power_atlas.web import _row_origin
+    snap = Snapshot(set(), set(), {}, {}, {},
+                    {("claude-code", "s1"): "bg"},
+                    {("claude-code", "s1"): "sdk-cli"})
+    assert _row_origin(snap, SimpleNamespace(session_id="s1"), "claude-code") == "bg"
+    # A session the snapshot knows nothing about — the historical-row case.
+    assert _row_origin(snap, SimpleNamespace(session_id="s2"), "claude-code") == ""
+
+
+def _render_session_row(**over):
+    """Render partials/session_row.html with the minimum viable context."""
+    from types import SimpleNamespace
+    from power_atlas.web import templates
+    ctx = dict(
+        request=None,
+        session=SimpleNamespace(session_id="s1", title="A session",
+                                updated_at="2026-08-04T12:00:00",
+                                first_prompt="", last_reply_tail="", cwd="C:\\p"),
+        cwd="C:\\p", stale=False, pinned_sessions=[], provider_name="claude-code",
+        provider_color="", show_workspace=False, workspace_name="",
+        status="working", waiting_detail=("", ""),
+    )
+    ctx.update(over)
+    return templates.get_template("partials/session_row.html").render(**ctx)
+
+
+def test_session_row_renders_the_origin_badge():
+    html = _render_session_row(origin="bg")
+    assert 'class="session-origin"' in html
+    assert ">bg<" in html
+    # The badge must not swallow the title beside it.
+    assert "A session" in html
+
+
+def test_session_row_omits_the_badge_for_interactive_sessions():
+    html = _render_session_row(origin="")
+    assert "session-origin" not in html
+    assert "A session" in html
+
+
+def test_session_row_survives_a_missing_origin_key():
+    """Every render site passes `origin`, but the template must not hard-depend.
+
+    Three call sites pass it today; a fourth added later that forgets would
+    otherwise raise at render time rather than simply omitting the badge.
+    """
+    from types import SimpleNamespace
+    from power_atlas.web import templates
+    html = templates.get_template("partials/session_row.html").render(
+        request=None,
+        session=SimpleNamespace(session_id="s1", title="A session",
+                                updated_at="", first_prompt="",
+                                last_reply_tail="", cwd=""),
+        cwd="", stale=True, pinned_sessions=[], provider_name="claude-code",
+        provider_color="", status="", waiting_detail=("", ""),
+    )
+    assert "session-origin" not in html
+    assert "A session" in html
+
+
+def test_origin_badge_class_is_styled():
+    """The badge is typographic, so an unstyled one renders as stray text.
+
+    style.css and the template are edited in different files by different
+    changes; this is the cheapest guard that they stayed in step.
+    """
+    from pathlib import Path
+    import power_atlas
+    css = (Path(power_atlas.__file__).parent / "static" / "style.css").read_text(
+        encoding="utf-8")
+    assert ".session-origin" in css
+
+
+def test_snapshot_origin_fields_are_trailing_and_optional():
+    """Older positional construction sites must keep working unchanged.
+
+    tests/test_web.py builds Snapshot positionally and tests/test_data.py by
+    keyword; a field inserted anywhere but the end silently rebinds an existing
+    argument at every positional site.
+    """
+    from power_atlas.presence import Snapshot
+    snap = Snapshot(set(), set(), {}, {"k": "v"}, {"r": "w"})
+    assert snap.session_kind("claude-code", "s1") == ""
+    assert snap.session_entrypoint("claude-code", "s1") == ""
+
+
 # --- Launcher env is not served in bulk ------------------------------------
 #
 # A custom launcher's `env` holds production credentials on the real machine.
