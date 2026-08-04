@@ -96,6 +96,22 @@
 
 ---
 
+## Rejected — `messagingSocketPath` as a path to driving live Claude Code sessions
+
+Carried on `ROADMAP.md` as a `[SPIKE]` from 2026-07-24, run and closed 2026-08-04 against Claude Code
+**2.1.221** (the spike was written against 2.1.219). It was the only candidate for injecting a prompt
+into a session already running in the user's terminal — the thing ACP cannot do, because
+`kiro-cli chat`'s own ACP grandchild holds the session lock.
+
+- **The field is never assigned anywhere in the binary, so no configuration can produce it.** `messagingSocketPath` occurs **4 times** in the 278 MB executable: once in a string table, twice inside the sidecar *reader* (`sock: typeof l.messagingSocketPath==="string" ? l.messagingSocketPath : ""`), and once in a producer that reads, in full, `let r; return {…, messagingSocketPath: r}` — declared and never assigned. `JSON.stringify` omits `undefined`, which is exactly why the key appears in no sidecar file. This is a stub awaiting a feature, not a gated capability.
+- **`remoteControlAtStartup` was the hypothesised gate and is ruled out empirically, not by inference.** It is `true` in both `.claude/settings.json` and `.claude.json`, with a live interactive session running, and the sidecar's key set is still `pid, sessionId, cwd, startedAt, procStart, version, peerProtocol, kind, entrypoint, name, nameSource, status, updatedAt, statusUpdatedAt, bridgeSessionId` — no `messagingSocketPath`, no `sock`.
+- **The reader is genuine, which is what made this look alive for a fortnight.** The 2026-07-24 finding was correct as far as it went: the reader does accept the field, and a `[uds-client]` that posts `{type:"user", message:{…}, priority:"next"}` does exist. The half nobody checked was whether anything ever *writes* it. Reading a consumer proves a format, never a capability — that is the transferable lesson, and it is the same shape as the NetBIOS finding above, where counting listening sockets proved reachability that the firewall denied.
+- *Cost of the closure*: about ten minutes, entirely from the machine's own state and one `mmap` scan of the binary. The spike had been sized as a cheap probe for eleven days.
+
+**Would reopen if**: a later build assigns the field. Cheapest re-check, and it is the whole test — dump the key set of any file in `~/.claude/sessions/*.json` and look for `messagingSocketPath` or `sock`; if absent, `grep -aoc messagingSocketPath` the executable and inspect whether the producer still reads `let r;` unassigned. Both are seconds. Note the version pin: this is a statement about 2.1.221, and Claude Code self-updates.
+
+---
+
 ## Accepted limitations — shipped code, deliberately not fixed
 
 Recorded so a future session recognises these as decisions rather than undiscovered bugs.
