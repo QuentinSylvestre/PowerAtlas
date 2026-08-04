@@ -1952,6 +1952,101 @@ check("choosing a grouping mode is remembered", async (tpl) => {
   assertEqual(last.mode, "recent", "switching mode did not refetch the new shape");
 });
 
+check("a group starts expanded and collapses from its header", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 2, sessions: 3 }) });
+  const toggle = page.railGroups()[0].querySelector(".acp-rail-group-toggle");
+  assertEqual(toggle.getAttribute("aria-expanded"), "true",
+              "a group nobody has touched did not start expanded");
+  toggle.dispatch("click");
+
+  const collapsed = page.railGroups()[0];
+  assertEqual(collapsed.querySelector(".acp-rail-group-toggle")
+                       .getAttribute("aria-expanded"), "false",
+              "the header did not report itself collapsed");
+  // Not built, rather than hidden with CSS. A row that is merely invisible is
+  // still a tab stop and still read out, so a collapsed workspace would go on
+  // costing a keyboard and a screen reader everything it appears to have saved.
+  assertEqual(collapsed.querySelectorAll(".acp-rail-row").length, 0,
+              "a collapsed group still drew its rows");
+  assertEqual(page.railGroups()[1].querySelectorAll(".acp-rail-row").length, 3,
+              "collapsing one group emptied another");
+
+  collapsed.querySelector(".acp-rail-group-toggle").dispatch("click");
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 3,
+              "the group did not come back when expanded again");
+});
+
+check("a day collapses by the same control as a workspace", async (tpl) => {
+  const page = await railed(tpl, {
+    store: dayStore(), stored: { pa_acp_group: "date" } });
+  const toggle = page.railGroups()[0].querySelector(".acp-rail-group-toggle");
+  toggle.dispatch("click");
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 0,
+              "a day heading is not the collapse control a workspace heading is");
+});
+
+check("a group's plus opens the picker already on that workspace", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 3, sessions: 2 }) });
+  const add = page.railGroups()[1].querySelector(".acp-rail-group-add");
+  assert(/ws-1/.test(add.getAttribute("aria-label")),
+         `the control does not name the workspace it creates in: ${add.getAttribute("aria-label")}`);
+  add.dispatch("click");
+  await page.settle();
+  assertEqual(page.el("acpPicker").hidden, false, "the picker did not open");
+  const offered = page.pickerNames();
+  assertEqual(offered.length, 1,
+              `the picker was not narrowed to the workspace pressed: ${offered.join(", ")}`);
+  assertEqual(offered[0], "ws-1", "the picker preselected the wrong workspace");
+});
+
+check("the rail's own create control still offers every workspace", async (tpl) => {
+  // The regression this guards is one line away at all times: `pickerOpen` now
+  // takes a workspace, so a listener bound straight to it is handed the click
+  // Event as that argument and filters the picker to a stringified event —
+  // which offers nothing, from the only labelled create control a phone has.
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 3, sessions: 2 }) });
+  page.click("acpRailNew");
+  await page.settle();
+  assertEqual(page.pickerNames().length, 3,
+              "the unfiltered create control opened a filtered picker");
+});
+
+check("the rail's chrome is gated on the device, not the window width", () => {
+  // CSS is the code here, for the reason the topbar check gives: this harness
+  // has no layout engine, so what can be pinned is the rule rather than the
+  // pixels. These three decide whether the redesign works for a reader who is
+  // not using a mouse, which is exactly the reader a desktop browser cannot
+  // show you.
+  const css = fs.readFileSync(STYLESHEET, "utf8")
+                .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
+  const after = (marker, span) => {
+    const at = css.indexOf(marker);
+    return at === -1 ? "" : css.slice(at, at + span);
+  };
+
+  assert(/\.acp-rail-group-head \{[^}]*position: sticky/.test(css),
+         "the group header does not stick, so scrolling a long workspace loses "
+         + "which group the rows on screen belong to");
+
+  const hover = after("@media (hover: hover)", 400);
+  assert(hover, "no (hover: hover) block — hiding the row menu unconditionally "
+       + "takes Delete away from every touch device, which is where the rail is "
+       + "the whole page");
+  assert(/\.acp-rail-menu-wrap \{ opacity: 0/.test(hover),
+         "the row menu is not hidden by that block at all");
+  assert(/:focus-within/.test(hover),
+         "the menu is revealed by pointing with no keyboard route to it, so "
+         + "Delete becomes unreachable without a mouse");
+  assert(/aria-expanded="true"/.test(hover),
+         "nothing keeps the menu visible while its own popup is open, and the "
+         + "pointer leaves the button the moment the popup is used");
+
+  const fine = after("@media (pointer: fine)", 260);
+  assert(fine && /\.acp-rail-row \{[^}]*min-height/.test(fine),
+         "the compact row height is not gated on the pointer, so it shrinks the "
+         + "40 px touch target the rail relies on");
+});
+
 check("a browser that refuses storage still renders the rail", async (tpl) => {
   // `localStorage` throws on read as well as on write when storage is
   // disabled, and the read happens while the page's script is still

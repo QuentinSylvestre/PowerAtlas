@@ -88,9 +88,27 @@
          than a rethink. Filled by railSettingsRender(); empty here for the
          same reason the rail is. -->
     <div class="acp-rail-settings-wrap">
+      <!-- Inline SVG rather than a glyph. A gear character renders at whatever
+           weight and baseline the user's emoji font decides, which is why it
+           sat low and heavy beside the text buttons; this draws in
+           `currentColor` at a size the rule below controls, so it matches the
+           other controls in both. Markup, not script — the no-innerHTML rule
+           governs what JS writes, and nothing here is built at runtime.
+           `aria-hidden` on the icon because the button's own label names it. -->
       <button class="acp-btn acp-rail-settings-btn" id="acpRailSettings"
               type="button" aria-haspopup="menu" aria-expanded="false"
-              aria-label="Session list settings">⚙</button>
+              aria-label="Session list settings">
+        <svg class="acp-rail-settings-icon" viewBox="0 0 16 16"
+             aria-hidden="true" focusable="false">
+          <path d="M2 4.5h4.2M10.8 4.5h3.2M2 11.5h3.2M9.8 11.5h4.2"
+                stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                fill="none"/>
+          <circle cx="8.5" cy="4.5" r="2" stroke="currentColor"
+                  stroke-width="1.5" fill="none"/>
+          <circle cx="7.5" cy="11.5" r="2" stroke="currentColor"
+                  stroke-width="1.5" fill="none"/>
+        </svg>
+      </button>
       <div class="acp-rail-menu acp-rail-settings" id="acpRailSettingsMenu"
            role="menu" aria-label="Session list settings" hidden></div>
     </div>
@@ -1257,6 +1275,16 @@
   var railFlatHasMore = false;
   /** Day keys the user pressed "Show N more" on. Reset when the list reloads. */
   var railRevealed = Object.create(null);
+  // Collapsed groups, keyed `g:<cwd>` or `d:<day>`. Absent means expanded,
+  // which makes expanded the default without anything having to say so, and
+  // makes a group the rail has never drawn before open rather than hidden.
+  //
+  // In memory only, deliberately. A collapse is a statement about the list in
+  // front of you now — "not this one, I am looking for something else" —
+  // and restoring it days later would hide a workspace for a reason its owner
+  // has long forgotten. The grouping mode persists because it is a preference;
+  // this is a gesture.
+  var railCollapsed = Object.create(null);
 
   // `localStorage` throws outright when storage is disabled or a browser is in
   // a mode that refuses it, and it throws on *read* as well as on write. A rail
@@ -2089,6 +2117,14 @@
                railLastRow(groups[i]);
         break;
       }
+    } else if (want.head) {
+      // Queried by class and matched on the dataset rather than with an
+      // attribute selector, which is the same restraint the rest of this file
+      // keeps: every selector here is a single class or tag.
+      var heads = railGroupsEl.querySelectorAll('.acp-rail-group-toggle');
+      for (i = 0; i < heads.length; i++) {
+        if (heads[i].dataset.head === want.head) { node = heads[i]; break; }
+      }
     } else if (want.day) {
       // The button that was pressed is gone — the press revealed the rest of
       // the day, which is what removes it — so focus goes to the last row of
@@ -2108,6 +2144,89 @@
     if (node && node.focus) node.focus();
   }
 
+  function railGroupAddNode(group) {
+    var label = group.name || group.cwd;
+    var add = document.createElement('button');
+    add.className = 'acp-btn acp-rail-group-add';
+    add.type = 'button';
+    // The glyph carries no accessible name, and a rail of ten workspaces would
+    // otherwise announce ten controls all called "+".
+    add.setAttribute('aria-label', 'New session in ' + label);
+    add.textContent = '+';
+    var atCap = railAtCapacity();
+    add.disabled = atCap || !!ACP_ERROR;
+    add.title = atCap
+      ? railCapacity.held + ' of ' + railCapacity.max
+        + ' sessions are already open, which is the limit'
+      : 'New session in ' + label;
+    add.addEventListener('click', function () {
+      // Opens the picker preselected rather than creating outright. Which
+      // directory is no longer the question — it is the group that was
+      // pressed — but the picker also carries the offer to close the open
+      // session, which is the only way a create succeeds at the cap. Skipping
+      // it would trade one guard away for a saved tap.
+      pickerOpen(group.cwd);
+    });
+    return add;
+  }
+
+  /**
+   * The header both shapes share.
+   *
+   * The toggle is a <button> and anything the caller hangs beside it is that
+   * button's *sibling*, not its child — the same constraint that makes a row's
+   * menu a sibling of the row: a <button> inside a <button> is closed by the
+   * parser at the inner start tag, so a nested `+` would land outside the
+   * header altogether.
+   */
+  function railHeadNode(key, label, countText, opts) {
+    var collapsed = !!railCollapsed[key];
+    var head = document.createElement('div');
+    head.className = 'acp-rail-group-head';
+
+    var toggle = document.createElement('button');
+    toggle.className = 'acp-rail-group-toggle';
+    toggle.type = 'button';
+    toggle.dataset.head = key;
+    toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+
+    var chevron = document.createElement('span');
+    chevron.className = 'acp-rail-group-chevron';
+    // Always drawn, never revealed on hover. The design this follows shows it
+    // on hover, and this rail is the whole page on a phone at 390 px where
+    // there is no hover to reveal it with — a control that only exists for a
+    // mouse is a control the phone does not have. `aria-hidden` because
+    // `aria-expanded` on the button already says this to a screen reader, and
+    // saying it twice is one more stop with no information at the end of it.
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = collapsed ? '›' : '⌄';
+    toggle.appendChild(chevron);
+
+    var name = document.createElement('span');
+    name.className = 'acp-rail-group-name';
+    name.textContent = label;
+    if (opts && opts.title) name.title = opts.title;
+    toggle.appendChild(name);
+    if (opts && opts.badge) toggle.appendChild(opts.badge);
+
+    var count = document.createElement('span');
+    count.className = 'acp-rail-group-count';
+    count.textContent = countText;
+    toggle.appendChild(count);
+
+    toggle.addEventListener('click', function () {
+      if (railCollapsed[key]) delete railCollapsed[key];
+      else railCollapsed[key] = true;
+      // Focus returns to the header, not into the list. Collapsing and
+      // expanding the same group repeatedly should leave the keyboard where it
+      // started rather than walking it down the rail.
+      railFocus = { head: key };
+      renderRail();
+    });
+    head.appendChild(toggle);
+    return head;
+  }
+
   function railGroupNode(group, sessions) {
     // `exists === false` and nothing looser. The field is a boolean the
     // endpoint always sends, so a missing or non-boolean value means an older
@@ -2119,15 +2238,7 @@
     wrap.className = 'acp-rail-group' + (gone ? ' acp-rail-group-gone' : '');
     wrap.dataset.cwd = group.cwd;
 
-    var head = document.createElement('div');
-    head.className = 'acp-rail-group-head';
-    var name = document.createElement('span');
-    name.className = 'acp-rail-group-name';
-    name.textContent = group.name || group.cwd;
-    // The folder name is what fits in the rail; the full path is the only thing
-    // that tells two workspaces with the same one apart.
-    name.title = group.cwd;
-    head.appendChild(name);
+    var badge = null;
     if (gone) {
       // 14 of the real store's 65 workspaces name a directory that is gone,
       // and one of them holds 208 sessions — so this is a normal reading of the
@@ -2137,25 +2248,31 @@
       // D17 fails open — a temporarily-unmounted network drive is not a dead
       // workspace, and a row the user cannot try is a dead end with no way to
       // find out why. What changes is that they are told first.
-      var goneTag = document.createElement('span');
-      goneTag.className = 'acp-rail-group-missing';
-      goneTag.textContent = 'folder missing';
-      goneTag.title = 'This directory no longer exists on this machine. Its '
-                    + 'sessions are still in the store, but opening one will '
-                    + 'usually fail.';
-      head.appendChild(goneTag);
+      badge = document.createElement('span');
+      badge.className = 'acp-rail-group-missing';
+      badge.textContent = 'folder missing';
+      badge.title = 'This directory no longer exists on this machine. Its '
+                  + 'sessions are still in the store, but opening one will '
+                  + 'usually fail.';
     }
-    var count = document.createElement('span');
-    count.className = 'acp-rail-group-count';
     // Under a filter the group draws only the rows that matched, so counting the
     // loaded set here would contradict what is directly beneath it — a header
     // reading "3 of 5" above a single row. `sessions` is the filtered list this
     // node is actually built from, which is the only count that can agree.
-    count.textContent = railFilter
-      ? sessions.length + ' matching'
-      : group.sessions.length + ' of ' + group.total;
-    head.appendChild(count);
+    var head = railHeadNode(
+      'g:' + group.cwd, group.name || group.cwd,
+      railFilter ? sessions.length + ' matching'
+                 : group.sessions.length + ' of ' + group.total,
+      // The folder name is what fits in the rail; the full path is the only
+      // thing that tells two workspaces with the same one apart.
+      { title: group.cwd, badge: badge });
+    head.appendChild(railGroupAddNode(group));
     wrap.appendChild(head);
+
+    // Collapsed draws the header and stops. The rows are not hidden with CSS
+    // but never built, so a collapsed workspace costs nothing to keep on screen
+    // and its rows are not in the tab order or the accessibility tree.
+    if (railCollapsed['g:' + group.cwd]) return wrap;
 
     for (var i = 0; i < sessions.length; i++) {
       wrap.appendChild(railRowNode(sessions[i]));
@@ -2223,21 +2340,16 @@
     wrap.className = 'acp-rail-group';
     wrap.dataset.day = bucket.key;
 
-    var head = document.createElement('div');
-    head.className = 'acp-rail-group-head';
-    var name = document.createElement('span');
-    name.className = 'acp-rail-group-name';
-    name.textContent = bucket.name;
-    head.appendChild(name);
-    var count = document.createElement('span');
-    count.className = 'acp-rail-group-count';
     // A bare count, with no "of" behind it. Project mode can say "3 of 47"
     // because the server hands it the workspace's total; nothing here knows a
     // day's total without reading the whole store, so this counts what is
     // loaded and claims nothing beyond it.
-    count.textContent = String(bucket.sessions.length);
-    head.appendChild(count);
-    wrap.appendChild(head);
+    //
+    // No `+` beside a day, unlike a workspace: a session is created somewhere,
+    // not somewhen, so there is nothing for the button to mean here.
+    wrap.appendChild(railHeadNode('d:' + bucket.key, bucket.name,
+                                  String(bucket.sessions.length), null));
+    if (railCollapsed['d:' + bucket.key]) return wrap;
 
     var all = bucket.sessions;
     var revealed = !!railRevealed['d:' + bucket.key];
@@ -2378,11 +2490,21 @@
   // being refused by a limit that was about to have room.
   var pendingCreate = null;
 
-  function pickerOpen() {
+  function pickerOpen(cwd) {
     if (ACP_ERROR) return;
     picker.hidden = false;
-    pickerFilter = '';
-    pickerSearch.value = '';
+    // Threaded through here rather than applied by the caller afterwards. This
+    // function clears the filter and then renders twice — once synchronously
+    // from whatever `pickerWorkspaces` already holds, again when the load
+    // answers — so a caller that set the filter after calling it would have its
+    // value wiped by the reset and then raced by the second render.
+    //
+    // The whole path and not the folder name: the filter matches on
+    // `name + cwd`, and two workspaces can share a basename, so a name alone
+    // could re-offer a choice the press had already made.
+    var preset = cwd ? String(cwd) : '';
+    pickerFilter = preset.toLowerCase();
+    pickerSearch.value = preset;
     pickerCloseCurrent.checked = false;
     pickerRenderKeepRow();
     pickerNote.textContent = 'loading workspaces…';
@@ -3013,8 +3135,12 @@
   // frame and the `session` handler cannot drift between two entry points —
   // the property the two buttons already shared, now including *where* the
   // session is created.
-  newBtn.addEventListener('click', pickerOpen);
-  railNew.addEventListener('click', pickerOpen);
+  // Wrapped rather than passed directly. `pickerOpen` now takes a workspace to
+  // preselect, and a listener bound straight to it would be handed the click
+  // Event as that argument — every press from these two buttons would open the
+  // picker filtered to the stringified event and offer nothing.
+  newBtn.addEventListener('click', function () { pickerOpen(); });
+  railNew.addEventListener('click', function () { pickerOpen(); });
   pickerCancel.addEventListener('click', pickerClose);
   pickerNeutral.addEventListener('click', function () {
     if (pickerNeutral.disabled) return;
