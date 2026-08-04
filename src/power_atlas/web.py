@@ -1475,6 +1475,26 @@ _ACP_SESSIONS_PER_GROUP = 3
 _ACP_MAX_GROUPS_PER_PAGE = 20
 _ACP_MAX_SESSIONS_PER_GROUP = 50
 
+# The flat axis, used when the rail groups by day instead of by workspace. It
+# has one page size because it has one axis: no group carries a `total`, so
+# none of the group-axis amplification above applies and a row costs exactly a
+# row.
+#
+# 30 matches the ~30 rows the grouped default puts on screen (10 x 3), which is
+# what bounds the per-row lock check. It is also what makes the day grouping
+# useful rather than degenerate: measured against this store, 30 rows reach
+# back to 2026-07-19, so a first page is roughly two weeks of day groups rather
+# than one enormous "Today".
+#
+# The ceiling is where the cost stops being free rather than where it starts to
+# hurt. `_acp_availability` has no wall-clock budget of its own and is strictly
+# O(rows) — measured at 0.12-0.21 ms a row, so 100 rows is 17.9 ms — while the
+# collect-and-sort behind it dominates at 140-340 ms warm. The bound exists
+# because this route is remotely reachable and a caller-supplied page size is
+# an amplification lever, not because 100 rows is expensive.
+_ACP_FLAT_PAGE_SIZE = 30
+_ACP_MAX_FLAT_PAGE_SIZE = 100
+
 # Bounds the payload, not the store: a kiro-cli title is free text and a first
 # prompt can be thousands of characters, and neither belongs in a rail row.
 _ACP_TITLE_MAX_CHARS = 120
@@ -1820,12 +1840,102 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     }
 
 
+def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
+    """Build the recency-ordered listing payload. Blocking; runs off the loop.
+
+    The listing's second shape: every session this ACP can resume, newest
+    first, across all workspaces instead of grouped inside one. It exists so
+    the rail can group rows by day, which no amount of the grouped payload can
+    be rearranged into — the ten most recently *touched workspaces* are not the
+    thirty most recently touched sessions, so a client re-bucketing what the
+    grouped route returns would file a session from an eleventh workspace
+    nowhere at all.
+
+    **Cutting the days is deliberately the client's job.** "Today" is a
+    question about the *reader's* clock, and this route answers a phone on the
+    NetBird interface that may be several timezones from this host.
+    `_time_bucket` (:181) answers it with `dt.astimezone()`, i.e. in the host's
+    zone — correct for the dashboard, which only ever renders locally, and
+    wrong here. So this returns instants and the browser decides which day
+    each one falls in.
+
+    Honours the same two exclusions the grouped listing does, for the same
+    reasons: a workspace tagged `hidden` has not asked to be visible from a
+    phone, and a disabled provider is not a listing this route may serve. Both
+    are pushed *into* `get_all_sessions_paginated` rather than applied to what
+    it returns — see that function's `exclude_cwds` documentation for why the
+    placement decides whether `page_size` and `has_more` mean anything.
+
+    Pinned to `_ACP_LISTING_PROVIDER`. `get_all_sessions_paginated` spans every
+    registered provider by default, and a row served here for another one would
+    be a session the browser cannot resume — the same constraint that makes the
+    grouped listing single-provider, arriving from the opposite direction.
+    """
+    from .config import get_workspace_settings
+
+    config = load_config()
+    if not _enabled(config, _ACP_LISTING_PROVIDER):
+        return {"sessions": [], "page": page, "has_more": False,
+                "capacity": capacity}
+
+    hidden = {
+        w[0] for w in data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
+        if "hidden" in get_workspace_settings(config, w[0])["tags"]
+    }
+    try:
+        rows, has_more = data.get_all_sessions_paginated(
+            page=page, page_size=size,
+            provider=_ACP_LISTING_PROVIDER,
+            enabled_providers={_ACP_LISTING_PROVIDER},
+            exclude_cwds=hidden)
+    except Exception:
+        log.exception("ACP flat listing: could not collect sessions")
+        rows, has_more = [], False
+
+    sessions = [s for s, _prov in rows]
+    # Same one-call-per-response discipline as the grouped path, over exactly
+    # the ids being returned.
+    availability = _acp_availability([s.session_id for s in sessions], held)
+    statuses = _acp_status_for_held(
+        [s for s in sessions if availability.get(s.session_id) == "held"])
+
+    # One stat per distinct workspace rather than one per row, which is a much
+    # bigger saving here than the grouped path ever needed: measured against
+    # this store, the 100 most recent sessions live in 5 workspaces. Ordered
+    # dedupe rather than a set, so the budget inside `_acp_exists_flags` is
+    # spent newest-workspace-first if it runs out.
+    order = list(dict.fromkeys(s.cwd for s in sessions))
+    flags = dict(zip(order, _acp_exists_flags(order)))
+
+    return {
+        "sessions": [{
+            "id": s.session_id,
+            "title": _acp_row_title(s),
+            "updated_at": s.updated_at,
+            "availability": availability.get(s.session_id, "available"),
+            "status": statuses.get(s.session_id, ""),
+            # The workspace behind the row. Grouped by day the rail draws no
+            # workspace header, so this is the only thing that can say which
+            # project a session belongs to and the only thing a missing-folder
+            # warning has left to hang off.
+            "cwd": s.cwd,
+            "name": Path(s.cwd).name or s.cwd,
+            "exists": flags.get(s.cwd, True),
+        } for s in sessions],
+        "page": page,
+        "has_more": has_more,
+        "capacity": capacity,
+    }
+
+
 @app.get(_ACP_LISTING_PATH)
 async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 1,
                            group_size: int = _ACP_GROUPS_PER_PAGE,
                            session_page: int = 1,
-                           session_size: int = _ACP_SESSIONS_PER_GROUP):
-    """Workspace-grouped sessions for the session browser. Read-only.
+                           session_size: int = _ACP_SESSIONS_PER_GROUP,
+                           mode: str = "", page: int = 1,
+                           size: int = _ACP_FLAT_PAGE_SIZE):
+    """Sessions for the session browser, grouped or flat. Read-only.
 
     Returns **only** the workspace path, display name and whether that
     directory still exists, and per session the id, title, updated timestamp,
@@ -1848,6 +1958,14 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     every session title on this machine**. The rail's default 10 workspaces by
     3 sessions is a page size, not a bound, and reading the numbers below as a
     bounded sample is the mistake this paragraph exists to prevent.
+
+    `mode=recent` does not widen that exposure — same route, same store, same
+    two exclusions — but it does make collecting it cheaper, and that is worth
+    stating rather than leaving to be discovered. It answers one flat
+    recency-ordered walk with `page`/`has_more`, so a peer enumerating the
+    store follows a single cursor to the end instead of crossing two nested
+    axes and reconciling them. Nothing becomes reachable that was not, and
+    reaching all of it takes less work.
 
     **`title` may be raw user prompt text.** `_acp_row_title` falls back to the
     first 120 characters of the session's first prompt whenever the store holds
@@ -1893,6 +2011,14 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
         "held": (len(held) + acp._supervisor._reserved) if acp is not None else 0,
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
+    # An exact match, not a truthiness test. `mode` is caller-supplied and the
+    # only value that means anything is this one; anything else — a typo, an
+    # older client, a probe — falls through to the grouped shape, which is the
+    # response every existing caller already expects.
+    if mode == "recent":
+        return await asyncio.to_thread(
+            _acp_flat_listing, max(1, page),
+            max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),

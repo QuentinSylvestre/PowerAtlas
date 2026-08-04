@@ -13794,6 +13794,126 @@ def acp_store_dir(tmp_path, monkeypatch):
     return _make
 
 
+class TestAcpFlatListing:
+    """`mode=recent` — the flat recency shape a day-grouped rail reads.
+
+    Seamed at `get_all_sessions_paginated` rather than at the store, because
+    what this mode adds is a *contract with* that function: which provider it
+    is pinned to, which workspaces it is told to skip, and that the skipping is
+    handed over rather than applied afterwards. Those are the three things that
+    would leak or truncate if they regressed, and none of them is observable
+    from the returned rows.
+    """
+
+    _PATH = "/api/acp/sessions"
+
+    @pytest.fixture
+    def collector(self, monkeypatch):
+        """Answers the collector call and records what the route asked for."""
+        from power_atlas import data as data_mod
+
+        asked = {}
+
+        def _paginated(page=1, page_size=20, provider=None,
+                       pinned_sessions=None, enabled_providers=None,
+                       exclude_cwds=None):
+            asked.update(page=page, page_size=page_size, provider=provider,
+                         enabled_providers=enabled_providers,
+                         exclude_cwds=exclude_cwds)
+            rows = [(data_mod.Session(
+                session_id=f"s{i}", title=f"title {i}", cwd=rf"C:\ws\w{i}",
+                created_at="", updated_at=f"2026-08-0{3 - i}T10:00:00.000000000Z",
+                first_prompt="", last_prompt="", last_reply_tail=""),
+                "kiro-cli") for i in range(3)]
+            return rows, True
+
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated", _paginated)
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts",
+                            lambda provider=None: [])
+        return asked
+
+    def test_mode_recent_answers_a_flat_list_and_not_groups(self, client, collector):
+        body = client.get(self._PATH, params={"mode": "recent"}).json()
+        assert "sessions" in body and "groups" not in body
+        assert [r["id"] for r in body["sessions"]] == ["s0", "s1", "s2"]
+        assert body["page"] == 1 and body["has_more"] is True
+        assert set(body["sessions"][0]) == {
+            "id", "title", "updated_at", "availability", "status", "cwd",
+            "name", "exists"}
+
+    def test_a_row_carries_the_workspace_it_came_from(self, client, collector):
+        """Grouped by day there is no workspace header, so the row is the only
+        place left that can say which project a session belongs to — and the
+        only thing a missing-folder warning can attach to."""
+        row = client.get(self._PATH, params={"mode": "recent"}).json()["sessions"][0]
+        assert row["cwd"] == r"C:\ws\w0" and row["name"] == "w0"
+
+    def test_an_unrecognised_mode_answers_the_grouped_shape(self, client,
+                                                            acp_listing_store):
+        """Exact match, not truthiness. An older client, a typo or a probe must
+        get the response every existing caller already expects rather than a
+        shape none of them can read."""
+        for mode in ("", "recent-ish", "RECENT", "1", "date"):
+            body = client.get(self._PATH, params={"mode": mode}).json()
+            assert "groups" in body, f"mode={mode!r} did not fall through"
+
+    def test_the_flat_page_size_is_clamped(self, client, collector):
+        """The route is remotely reachable, so a caller-supplied page size is an
+        amplification lever — availability is O(rows) with no budget of its own."""
+        client.get(self._PATH, params={"mode": "recent", "size": 5000})
+        assert collector["page_size"] == 100
+        client.get(self._PATH, params={"mode": "recent", "size": 0, "page": -4})
+        assert collector["page_size"] == 1 and collector["page"] == 1
+
+    def test_the_collector_is_pinned_to_the_acp_provider(self, client, collector):
+        """`get_all_sessions_paginated` spans every registered provider by
+        default. A row served here for another one would be a session the
+        browser cannot resume, which is the same reason the grouped listing
+        hardcodes the provider."""
+        client.get(self._PATH, params={"mode": "recent"})
+        assert collector["provider"] == "kiro-cli"
+        assert collector["enabled_providers"] == {"kiro-cli"}
+
+    def test_hidden_workspaces_are_handed_over_not_filtered_afterwards(
+            self, client, monkeypatch, collector):
+        """The exclusion has to reach the collector, because the collector is
+        what early-stops. Filtering its result instead would let hidden rows
+        decide where the read stopped: the page comes back short and `has_more`
+        stops describing what the caller is showing."""
+        from power_atlas import config as config_mod
+        from power_atlas import data as data_mod
+
+        monkeypatch.setattr(
+            data_mod, "discover_workspaces_with_counts",
+            lambda provider=None: [(r"C:\ws\secret", 3, "2026-08-03T10:00:00Z",
+                                    "kiro-cli"),
+                                   (r"C:\ws\open", 3, "2026-08-03T10:00:00Z",
+                                    "kiro-cli")])
+        monkeypatch.setattr(
+            config_mod, "get_workspace_settings",
+            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else []})
+
+        client.get(self._PATH, params={"mode": "recent"})
+        assert collector["exclude_cwds"] == {r"C:\ws\secret"}
+
+    def test_a_disabled_provider_serves_nothing(self, client, monkeypatch,
+                                                 collector):
+        from power_atlas import web as web_mod
+
+        monkeypatch.setattr(web_mod, "_enabled", lambda cfg, prov: False)
+        body = client.get(self._PATH, params={"mode": "recent"}).json()
+        assert body["sessions"] == [] and body["has_more"] is False
+        assert "page_size" not in collector, (
+            "a disabled provider still reached the collector")
+
+    def test_the_capacity_pair_rides_the_flat_shape_too(self, client, collector):
+        """The rail reads the cap off whichever listing it last fetched, so a
+        mode that dropped it would let the cap go stale for as long as the user
+        stayed in that mode."""
+        cap = client.get(self._PATH, params={"mode": "recent"}).json()["capacity"]
+        assert set(cap) == {"held", "max"}
+
+
 class TestAcpDeleteEndpoint:
     """Session deletion — the first thing PowerAtlas writes to kiro-cli's store.
 

@@ -386,6 +386,7 @@ def get_all_sessions_paginated(
     provider: str | None = None,
     pinned_sessions: list[str] | None = None,
     enabled_providers: set[str] | None = None,
+    exclude_cwds: set[str] | None = None,
 ) -> tuple[list[tuple[Session, str]], bool]:
     """Return sessions across all workspaces, interleaved by updated_at.
 
@@ -398,6 +399,17 @@ def get_all_sessions_paginated(
         provider: filter to specific provider, None = all
         pinned_sessions: session IDs to sort to top (always returned in full)
         enabled_providers: set of enabled provider names to include
+        exclude_cwds: workspace paths to leave out of the result entirely.
+            Normalized on entry, so callers may pass whatever form they hold.
+
+            Excluded **before collection**, not filtered out of the result, and
+            that placement is the whole point of the parameter. This function
+            early-stops once it has read enough sessions for the requested
+            page; a caller that instead drops rows afterwards has already let
+            those rows decide where the read stopped, so it returns a page
+            shorter than `page_size` and a `has_more` that no longer describes
+            the data the caller is actually showing. Excluding here also skips
+            the `get_sessions` disk read for a workspace nobody will see.
 
     Returns:
         ([(session, provider_name), ...], has_more)
@@ -407,6 +419,11 @@ def get_all_sessions_paginated(
     page_size = max(1, page_size)
     pinned_set = set(pinned_sessions) if pinned_sessions else set()
     target_count = page * page_size
+    # Both passes below key on the normalized form — pass 1 because
+    # `get_loaded_cwds` returns normalized paths, pass 2 because it normalizes
+    # each workspace before the cache check. Normalizing once here is what lets
+    # a caller pass raw config paths without every one of them having to know.
+    excluded = {_normalize_path(c) for c in exclude_cwds} if exclude_cwds else set()
 
     # Determine which providers to check
     if provider is not None:
@@ -436,6 +453,8 @@ def get_all_sessions_paginated(
     # workspaces into the cache at app startup.
     for prov_name in providers_to_check:
         for norm_cwd in session_cache.get_loaded_cwds(prov_name):
+            if norm_cwd in excluded:
+                continue
             cached = session_cache.get(norm_cwd, prov_name)
             if cached:
                 _collect(cached, prov_name)
@@ -451,6 +470,11 @@ def get_all_sessions_paginated(
         if ws_provider not in providers_to_check:
             continue
         norm_cwd = _normalize_path(cwd)
+        # Ahead of the cache check and the disk read both, so an excluded
+        # workspace costs nothing and — the part that matters — never counts
+        # toward the early stop below.
+        if norm_cwd in excluded:
+            continue
         if norm_cwd in loaded_cwds_by_provider[ws_provider]:
             continue  # already collected in Pass 1
 

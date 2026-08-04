@@ -285,7 +285,9 @@ alone carried an employer name, four client and project names, the directory lay
 machine, a colleague's first name and the subject line of an email. Session titles are the raw text of
 the first prompt whenever the store has no title of its own (267 of 1,210 sessions here, 22.1%) — that
 proportion is how often the fallback fires, not a bound on what is reachable, because the peer can page
-to all 1,210.
+to all 1,210. The same route also answers `mode=recent`, one flat newest-first walk used when the rail
+groups sessions by day; it reaches nothing the paged form does not, but it reaches it with a single
+cursor instead of two nested ones, so collecting the lot is less work than the paragraph above implies.
 
 This is stated rather than capped: the listing is what makes the phone usable, and truncating it would
 break the feature rather than fix the exposure. **The decision it asks of you is whether the machine's
