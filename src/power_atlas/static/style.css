@@ -747,6 +747,28 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-menu-item:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-menu-danger:not(:disabled) { color: #f87171; }
 .acp-rail-menu-danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.12); }
+/* The list's settings popup. Anchored to its own button rather than to the
+   scrolling list, so it opens against the control that summoned it. Reuses
+   `.acp-rail-menu` for the panel itself — same surface, same border, same
+   shadow — because it is the same kind of object as a row's menu and a second
+   set of values for one would drift the first time either moved. */
+.acp-rail-settings-wrap { position: relative; flex-shrink: 0; }
+.acp-rail-settings-btn { width: 32px; padding: 0; line-height: 1; }
+/* Right-aligned rather than left: the button sits at the end of the head row,
+   and a menu growing rightwards from it would leave the rail. */
+.acp-rail-settings { top: calc(100% + 4px); right: 0; min-width: 156px; }
+.acp-rail-menu-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); padding: 4px 10px 2px; }
+/* The label takes the room and the tick keeps its column, so the options read
+   as one list rather than as two ragged ones. */
+.acp-rail-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.acp-rail-setting-tick { flex-shrink: 0; width: 12px; text-align: right; color: var(--accent); }
+/* Grouped by day a row has no workspace header above it, so the missing-folder
+   warning becomes the row's own. Dimmed and not struck through or badged: the
+   row is deliberately title-only, and the session is still selectable — the
+   directory may be an unmounted network drive rather than a deleted tree, which
+   is why the listing fails this check open in the first place. The reason is on
+   the row's `title`. */
+.acp-rail-row-gone .acp-rail-row-title { color: var(--text-muted); font-style: italic; }
 
 /* The create picker. `position: fixed` over the whole viewport rather than
    inside .acp-shell, because the shell is the thing being covered and both of

@@ -331,6 +331,7 @@ function parseQuery(target) {
 // pass against a stub that honoured it and under-fill against the real route.
 const MAX_GROUP_SIZE = 20;    // web.py:_ACP_MAX_GROUPS_PER_PAGE
 const MAX_SESSION_SIZE = 50;  // web.py:_ACP_MAX_SESSIONS_PER_GROUP
+const MAX_FLAT_SIZE = 100;    // web.py:_ACP_MAX_FLAT_PAGE_SIZE
 
 function clampSize(raw, fallback, ceiling) {
   const n = Number(raw === undefined || raw === "" ? fallback : raw);
@@ -375,6 +376,38 @@ function serveDelete(init) {
     ids = JSON.parse((init && init.body) || "{}").session_ids || [];
   } catch { ids = []; }
   return { deleted: ids, failed: [] };
+}
+
+// The flat recency shape (`mode=recent`) the rail reads when it groups by day.
+// Mirrors the route rather than the rail: every session across every workspace,
+// `updated_at` descending, walked by a single cursor, each row carrying the
+// workspace it came from because grouped by day there is no header left to say
+// so. Sorting here rather than trusting the fixture order is deliberate — the
+// rail is required *not* to re-sort, so the stub has to be the thing that
+// establishes the order, or a rail that sorted anyway would pass.
+function serveFlat(store, params) {
+  const page = Math.max(1, Number(params.page || 1));
+  const size = clampSize(params.size, 30, MAX_FLAT_SIZE);
+  const rows = [];
+  for (const ws of store) {
+    for (const s of ws.sessions) {
+      rows.push({
+        ...s,
+        cwd: ws.cwd,
+        name: ws.name,
+        exists: ws.exists === undefined ? true : ws.exists,
+      });
+    }
+  }
+  rows.sort((a, b) => (
+    a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+  const start = (page - 1) * size;
+  return {
+    sessions: rows.slice(start, start + size),
+    page,
+    has_more: start + size < rows.length,
+    capacity: { held: 0, max: 8 },
+  };
 }
 
 function serveListing(store, params) {
@@ -520,7 +553,10 @@ function loadPage(templatePath, opts = {}) {
       ? override.body
       : (url === DELETE_URL ? serveDelete(init)
          : url.startsWith(WORKSPACES_URL) ? serveWorkspaces(store)
-         : url.startsWith(LISTING_URL) ? serveListing(store, params) : {});
+         : url.startsWith(LISTING_URL)
+           ? (params.mode === "recent" ? serveFlat(store, params)
+              : serveListing(store, params))
+         : {});
     return Promise.resolve({
       ok,
       status,
@@ -556,6 +592,10 @@ function loadPage(templatePath, opts = {}) {
   const timers = [];
   const docListeners = new Map();
   let visibility = opts.visibility ?? "visible";
+  // Seeded from `opts.stored`, which is how a check starts the page in a
+  // grouping mode instead of clicking its way there — the mode is read once at
+  // script evaluation, so setting it afterwards would be too late.
+  const stored = { ...(opts.stored || {}) };
 
   const sandbox = {
     document: {
@@ -588,6 +628,22 @@ function loadPage(templatePath, opts = {}) {
     // correctly. Absent from this sandbox until session deletion existed; a
     // page that reached for it before would have thrown at the call site.
     confirm: (text) => { confirms.push(text); return opts.confirm !== false; },
+    // Without a stand-in, every `localStorage` read raises a ReferenceError
+    // that the page's own try/catch swallows — so the grouping mode would pin
+    // silently to its default and every check about remembering it would pass
+    // against a page that remembered nothing. `opts.storageThrows` reproduces
+    // the browser refusing storage outright, which is the case that try/catch
+    // exists for and precisely the one an unconditional shim would hide.
+    localStorage: {
+      getItem(key) {
+        if (opts.storageThrows) throw new Error("storage is unavailable");
+        return key in stored ? stored[key] : null;
+      },
+      setItem(key, value) {
+        if (opts.storageThrows) throw new Error("storage is unavailable");
+        stored[key] = String(value);
+      },
+    },
     console: { log() {}, warn() {}, error() {} },
   };
   sandbox.window = sandbox;
@@ -628,6 +684,20 @@ function loadPage(templatePath, opts = {}) {
     railTitles() {
       return page.railRows().map(
         (row) => row.querySelector(".acp-rail-row-title").textContent);
+    },
+    /** What `localStorage` holds, so persistence is asserted at the store. */
+    stored,
+    /** The heading of each group, whichever shape the rail is drawing. */
+    railHeadings() {
+      return page.all("acpRailGroups", ".acp-rail-group-name")
+                 .map((n) => n.textContent);
+    },
+    settingsOptions() {
+      return page.all("acpRailSettingsMenu", ".acp-rail-setting");
+    },
+    openSettings() {
+      page.click("acpRailSettings");
+      return page.settingsOptions();
     },
     listingCalls() {
       // Excludes the delete route, which the prefix would otherwise swallow —
@@ -1755,6 +1825,144 @@ check("a rail timestamp is the reader's local time, not the store's UTC", async 
               "an absent updated_at drew a timestamp; new Date(null) is 1969-12-31");
   assertEqual(when[2], "not a timestamp",
               "a record the rail cannot read must be shown as it came, not as Invalid Date");
+});
+
+// ---- grouped by day -------------------------------------------------------
+//
+// Instants are built from the *local* clock and converted to the UTC string the
+// store would hold, rather than written as literals. A literal would encode the
+// author's offset: `2026-08-04T02:00:00Z` is the 3rd here and the 4th in
+// London, so a check pinned to it would assert this machine's timezone rather
+// than the behaviour. Building from local midnight outward states the property
+// instead, and holds wherever it runs.
+function isoAtLocal(daysAgo, hour) {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo,
+                  hour, 0).toISOString();
+}
+
+function dayStore() {
+  return [{
+    cwd: "C:\\work\\alpha", name: "alpha", exists: true,
+    sessions: [
+      // Late enough that its UTC date is the *next* day anywhere west of
+      // Greenwich — the row that separates local bucketing from UTC bucketing.
+      { id: "late", title: "late tonight", updated_at: isoAtLocal(0, 23),
+        availability: "available" },
+      { id: "early", title: "early today", updated_at: isoAtLocal(0, 1),
+        availability: "available" },
+      { id: "prev", title: "yesterday one", updated_at: isoAtLocal(1, 12),
+        availability: "available" },
+    ],
+  }];
+}
+
+check("grouped by day the rail asks for the flat listing", async (tpl) => {
+  const page = await railed(tpl, {
+    store: dayStore(), stored: { pa_acp_group: "date" } });
+  const asked = page.listingCalls().map((c) => c.params);
+  assert(asked.length > 0, "the rail made no listing request at all");
+  assertEqual(asked[0].mode, "recent",
+              "grouped by day the rail still asked for workspace groups");
+  assertEqual(asked[0].size, "30", "the flat page size is not the agreed 30");
+  assert(!("group_page" in asked[0]),
+         "the flat request carried the group axis it does not have");
+});
+
+check("a day heading follows the reader's clock, not the stored UTC", async (tpl) => {
+  const page = await railed(tpl, {
+    store: dayStore(), stored: { pa_acp_group: "date" } });
+  const headings = page.railHeadings();
+  assertEqual(headings[0], "Today", `first heading was ${headings[0]}`);
+  assertEqual(headings[1], "Yesterday", `second heading was ${headings[1]}`);
+  // The load-bearing one. `late` is 23:00 local, so its stored UTC date is the
+  // following day for every reader west of Greenwich. Bucketed on the raw
+  // string it lands in a group of its own, ahead of Today; bucketed on the
+  // reader's clock it sits beside the 01:00 row it shares a day with.
+  assertEqual(headings.length, 2,
+              `bucketed by UTC, not local: headings were ${headings.join(", ")}`);
+  const groups = page.railGroups();
+  assertEqual(groups[0].querySelectorAll(".acp-rail-row").length, 2,
+              "the 23:00 row did not join the day it belongs to locally");
+});
+
+check("a day row carries no timestamp column, but still says where it is from",
+      async (tpl) => {
+  const page = await railed(tpl, {
+    store: dayStore(), stored: { pa_acp_group: "date" } });
+  assertEqual(page.all("acpRailGroups", ".acp-rail-row-when").length, 0,
+              "the date-grouped row kept the timestamp its heading already carries");
+  const row = page.railRows()[0];
+  assert(/alpha/.test(row.title),
+         `the row does not name the workspace it came from: ${row.title}`);
+});
+
+check("a day shows three rows and offers exactly the rest", async (tpl) => {
+  const store = dayStore();
+  for (let i = 0; i < 4; i++) {
+    store[0].sessions.push({
+      id: `extra-${i}`, title: `extra ${i}`, updated_at: isoAtLocal(0, 12),
+      availability: "available" });
+  }
+  const page = await railed(tpl, {
+    store, stored: { pa_acp_group: "date" } });
+  const first = page.railGroups()[0];
+  assertEqual(first.querySelectorAll(".acp-rail-row").length, 3,
+              "the day drew more than the three rows a group shows");
+  const more = first.querySelector(".acp-rail-group-more");
+  // Six sessions fall on today, three are drawn: the promise is exact because
+  // these rows are already loaded, unlike the grouped mode's button which
+  // promises what the next request will bring.
+  assertEqual(more.textContent, "Show 3 more",
+              `the button misstates what it will reveal: ${more.textContent}`);
+  more.dispatch("click");
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 6,
+              "revealing the day did not draw the rows it promised");
+});
+
+check("a session whose folder is gone is marked on the row itself", async (tpl) => {
+  const store = dayStore();
+  store[0].exists = false;
+  const page = await railed(tpl, {
+    store, stored: { pa_acp_group: "date" } });
+  const row = page.railRows()[0];
+  assert(/acp-rail-row-gone/.test(row.className),
+         "the row from a missing directory is drawn like any other");
+  assert(/folder missing/i.test(row.title),
+         `the row does not say why it is marked: ${row.title}`);
+  assert(!row.disabled,
+         "a missing folder made the row unselectable; an unmounted drive is "
+         + "not a deleted workspace, which is why the listing fails this open");
+});
+
+check("choosing a grouping mode is remembered", async (tpl) => {
+  const page = await railed(tpl, { store: dayStore() });
+  // Default with nothing stored is the shape that shipped, so a rail nobody
+  // has configured is the rail they already had.
+  assertEqual(page.listingCalls()[0].params.mode, undefined,
+              "an unconfigured rail did not start in workspace grouping");
+  const options = page.openSettings();
+  assertEqual(options.length, 2, "the settings popup did not offer both modes");
+  const byDate = options.filter((o) => o.dataset.mode === "date")[0];
+  byDate.dispatch("click");
+  await page.settle();
+  assertEqual(page.stored.pa_acp_group, "date",
+              "the chosen mode was not written to storage");
+  const last = page.listingCalls().pop().params;
+  assertEqual(last.mode, "recent", "switching mode did not refetch the new shape");
+});
+
+check("a browser that refuses storage still renders the rail", async (tpl) => {
+  // `localStorage` throws on read as well as on write when storage is
+  // disabled, and the read happens while the page's script is still
+  // evaluating — so an unguarded one takes the whole rail down, not just its
+  // memory of a preference.
+  const page = await railed(tpl, {
+    store: dayStore(), storageThrows: true });
+  assert(page.railRows().length > 0,
+         "storage that refuses left the rail with no rows at all");
+  assertEqual(page.listingCalls()[0].params.mode, undefined,
+              "a rail that cannot read its preference did not fall back to the default");
 });
 
 check("a listing that fails says so instead of leaving the rail blank", async (tpl) => {

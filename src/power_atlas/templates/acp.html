@@ -76,6 +76,24 @@
            placeholder="Filter the sessions below"
            aria-label="Filter the sessions listed below">
     <button class="acp-btn" id="acpRailReload" type="button">Refresh</button>
+    <!-- The list's own settings, anchored to their button rather than opened as
+         an overlay. It follows the row `⋯` menu's shape and not the create
+         picker's: this changes how the list beneath is arranged, so it belongs
+         over that list, and it is dismissed by pressing anywhere else rather
+         than by a Cancel button.
+
+         One live row today. The others in the reference design — status,
+         environment, sort — are deliberately out of scope, and the menu is
+         built as a list of headed sections so adding one is a section rather
+         than a rethink. Filled by railSettingsRender(); empty here for the
+         same reason the rail is. -->
+    <div class="acp-rail-settings-wrap">
+      <button class="acp-btn acp-rail-settings-btn" id="acpRailSettings"
+              type="button" aria-haspopup="menu" aria-expanded="false"
+              aria-label="Session list settings">⚙</button>
+      <div class="acp-rail-menu acp-rail-settings" id="acpRailSettingsMenu"
+           role="menu" aria-label="Session list settings" hidden></div>
+    </div>
   </div>
   <div class="acp-rail-status" id="acpRailStatus" role="status" aria-live="polite"></div>
   <div class="acp-rail-groups" id="acpRailGroups"></div>
@@ -239,6 +257,8 @@
   var railSearch = document.getElementById('acpRailSearch');
   var railNew = document.getElementById('acpRailNew');
   var railReload = document.getElementById('acpRailReload');
+  var railSettingsBtn = document.getElementById('acpRailSettings');
+  var railSettingsMenu = document.getElementById('acpRailSettingsMenu');
   var railStatus = document.getElementById('acpRailStatus');
   var railGroupsEl = document.getElementById('acpRailGroups');
   var railMore = document.getElementById('acpRailMore');
@@ -1003,9 +1023,22 @@
   function railSummary() {
     // Both loaders end here, so the status never keeps a "loading…" line that
     // the answer has already made false.
-    var text = railGroups.length
-      ? railGroups.length + ' of ' + railGroupTotal + ' workspaces'
-      : 'no sessions found';
+    // Each mode counts the thing it actually pages. "N of M workspaces" is
+    // meaningless where the axis is time, and grouped by day there is no total
+    // to count against — nothing knows how many sessions the store holds
+    // without reading all of it — so this says how many are loaded and stops
+    // there.
+    var text;
+    if (railMode === 'date') {
+      text = railFlat.length
+        ? railFlat.length + ' session' + (railFlat.length === 1 ? '' : 's')
+          + ' loaded' + (railFlatHasMore ? ', more available' : '')
+        : 'no sessions found';
+    } else {
+      text = railGroups.length
+        ? railGroups.length + ' of ' + railGroupTotal + ' workspaces'
+        : 'no sessions found';
+    }
     // The session cap, stated before it is hit rather than after. The rail can
     // reach it in eight taps and used to show neither the count nor a way to
     // free a slot, so the ninth tap was the first mention of a limit — and it
@@ -1138,6 +1171,111 @@
     });
   }
 
+  function loadFlatPage(page) {
+    // Same single-in-flight guard the grouped loader takes, and for the same
+    // reason: two overlapping pages would append into `railFlat` in whatever
+    // order they answered, which for a list whose whole meaning is its order is
+    // not a cosmetic problem.
+    if (railBusy) return;
+    railBusy = true;
+    railStatus.textContent = page > 1
+      ? 'loading more sessions…' : 'loading sessions…';
+    railFetch({ mode: 'recent', page: page, size: RAIL_FLAT_SIZE })
+      .then(function (data) {
+        railBusy = false;
+        if (page === 1) {
+          railFlat = [];
+          // Reveals belong to the list that was on screen. Carried across a
+          // reload they would expand a day on behalf of rows that are no
+          // longer in it.
+          railRevealed = Object.create(null);
+        }
+        var rows = (data && data.sessions) || [];
+        // Deduped by id, for the reason the grouped merge is: a session whose
+        // turn ends between two requests moves to the front of the ordering,
+        // so the next page can legitimately re-offer a row already on screen.
+        var seen = Object.create(null);
+        var i;
+        for (i = 0; i < railFlat.length; i++) seen['s:' + railFlat[i].id] = true;
+        for (i = 0; i < rows.length; i++) {
+          if (seen['s:' + rows[i].id]) continue;
+          seen['s:' + rows[i].id] = true;
+          railFlat.push(rows[i]);
+        }
+        railFlatPage = page;
+        railFlatHasMore = !!(data && data.has_more);
+        railSetCapacity(data);
+        railSummary();
+        renderRail();
+      }).catch(function (err) {
+        railFailed('could not load the session list', err);
+      });
+  }
+
+  function railLoadFirstPage() {
+    if (railMode === 'date') loadFlatPage(1); else loadGroupPage(1);
+  }
+
+  function railSetMode(mode) {
+    var next = mode === 'date' ? 'date' : 'project';
+    if (next === railMode) return;
+    railMode = next;
+    railStore(RAIL_MODE_KEY, next);
+    // The store being left is emptied rather than kept warm for a switch back.
+    // A switch refetches either way, and two populated stores would leave
+    // `railIndex` holding two copies of one session with no rule saying which
+    // the poll should write to or the delete path should splice.
+    railGroups = [];
+    railGroupsByCwd = Object.create(null);
+    railGroupPage = 0;
+    railHasMore = false;
+    railFlat = [];
+    railFlatPage = 0;
+    railFlatHasMore = false;
+    railRevealed = Object.create(null);
+    // Drawn empty first so the rail visibly changes shape on the press rather
+    // than holding the old one until the request answers.
+    renderRail();
+    railLoadFirstPage();
+  }
+
+  // ---- grouping mode -------------------------------------------------------
+  //
+  // The rail draws one of two shapes. `project` is the original: workspace
+  // groups, server-paged on both axes. `date` is one flat recency list from
+  // `?mode=recent`, cut into local days here. They keep separate stores and
+  // switching empties the one being left, so exactly one is ever populated —
+  // two live stores would need `railIndex`, the delete path and the poll to
+  // agree on which copy of a session is authoritative, for no gain, since a
+  // switch refetches anyway.
+
+  var RAIL_MODE_KEY = 'pa_acp_group';
+  var RAIL_FLAT_SIZE = 30;
+  /** Sessions for `date`, newest first, exactly as the server ordered them. */
+  var railFlat = [];
+  var railFlatPage = 0;
+  var railFlatHasMore = false;
+  /** Day keys the user pressed "Show N more" on. Reset when the list reloads. */
+  var railRevealed = Object.create(null);
+
+  // `localStorage` throws outright when storage is disabled or a browser is in
+  // a mode that refuses it, and it throws on *read* as well as on write. A rail
+  // that cannot remember a preference is a much smaller problem than a rail
+  // that does not render, so both sides swallow it.
+  function railStored(key) {
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function railStore(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) { /* not fatal */ }
+  }
+
+  // Narrowed against a closed set on the way in, like every other value this
+  // page reads from somewhere it does not control. `localStorage` is writable
+  // by anything else served from this origin, and the mode reaches a class name
+  // and a `dataset` value.
+  var railMode = railStored(RAIL_MODE_KEY) === 'date' ? 'date' : 'project';
+
   // ---- addressing a session without knowing how the rail is grouped -------
   //
   // Two operations act on a *session* rather than on a workspace: the poll
@@ -1168,6 +1306,13 @@
           session: rows[j], group: group, list: rows, at: j
         };
       }
+    }
+    // The flat store, whose rows belong to no group. This is the whole of what
+    // the second grouping mode had to teach the poll and the delete path.
+    for (var k = 0; k < railFlat.length; k++) {
+      byId['s:' + railFlat[k].id] = {
+        session: railFlat[k], group: null, list: railFlat, at: k
+      };
     }
     return byId;
   }
@@ -1264,6 +1409,30 @@
     // narrower gap than the one measured and costs one request instead of one
     // per group.
     if (railBusy) return;
+    if (railMode === 'date') {
+      if (!railFlat.length) return;
+      railBusy = true;
+      // Re-reads the rows already on screen, capped at the server's own
+      // ceiling. A user who has pressed "Load more" past that keeps the state
+      // rows beyond it were fetched with until a reload — the same staleness
+      // the grouped path accepts past its group clamp, and for the same reason:
+      // one request beats one per page.
+      railFetch({ mode: 'recent', page: 1,
+                  size: Math.min(100, railFlat.length) })
+        .then(function (data) {
+          railBusy = false;
+          // Handed straight to the same write-back the grouped path uses.
+          // `railRefreshStates` reads only `sessions` now, so the flat payload
+          // needs no adapting and there is no second copy of the merge rules
+          // to drift.
+          if (railRefreshStates({ sessions: (data && data.sessions) || [] })) {
+            renderRail();
+          }
+        }).catch(function () {
+          railBusy = false;
+        });
+      return;
+    }
     if (!railGroups.length) return;
     railBusy = true;
     railFetch({
@@ -1393,6 +1562,22 @@
     return n < 10 ? '0' + n : String(n);
   }
 
+  /**
+   * The instant a stored timestamp names, or null if it does not name one.
+   *
+   * One reading shared by the row's printed time and the day it is filed
+   * under. Two readings could disagree — which is the entire failure this
+   * grouping has to avoid, a row printed with one date and grouped under
+   * another.
+   */
+  function railParse(value) {
+    var text = String(value || '');
+    if (!text) return null;
+    var at = new Date(text);
+    // `getTime() !== getTime()` is the NaN test, i.e. `Invalid Date`.
+    return at.getTime() === at.getTime() ? at : null;
+  }
+
   function railWhen(value) {
     // Every provider writes this field in UTC: kiro-cli a `Z` with a
     // nanosecond fraction (`2026-07-29T19:04:53.086294300Z`), claude-code a
@@ -1418,16 +1603,83 @@
     // `1969-12-31` — a wrong answer that looks like a right one — instead of as
     // nothing at all.
     if (!text) return '';
-    var at = new Date(text);
-    var ms = at.getTime();
-    // `ms !== ms` is the NaN test, i.e. `Invalid Date`. Returning the raw
-    // string preserves the property the sliced version had and stated in its
-    // own comment: a record the rail cannot read is shown as it came, so the
-    // defect reads as the store's rather than as the rail's.
-    if (ms !== ms) return text;
+    var at = railParse(text);
+    // Returning the raw string preserves the property the sliced version had
+    // and stated in its own comment: a record the rail cannot read is shown as
+    // it came, so the defect reads as the store's rather than as the rail's.
+    if (!at) return text;
     return at.getFullYear() + '-' + railPad2(at.getMonth() + 1) + '-' +
            railPad2(at.getDate()) + ' ' + railPad2(at.getHours()) + ':' +
            railPad2(at.getMinutes());
+  }
+
+  var RAIL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  /** The local calendar day an instant falls in, as a stable key. */
+  function railDayKey(at) {
+    return at.getFullYear() + '-' + railPad2(at.getMonth() + 1) + '-' +
+           railPad2(at.getDate());
+  }
+
+  function railDayLabel(at) {
+    var now = new Date();
+    // Both floored to local midnight before subtracting, so this counts
+    // calendar days and not elapsed hours. 23:50 and 00:10 are ten minutes
+    // apart and belong to different days; 00:10 and 23:50 on one day are
+    // nearly a day apart and belong to the same one. Rounding after the floor
+    // then absorbs the 23- and 25-hour days a daylight-saving change makes.
+    var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    var day = new Date(at.getFullYear(), at.getMonth(), at.getDate());
+    var days = Math.round((today - day) / 86400000);
+    if (days === 0) return 'Today';
+    if (days === 1) return 'Yesterday';
+    var label = RAIL_MONTHS[at.getMonth()] + ' ' + at.getDate();
+    // The year only when it is not the current one, which is what keeps the
+    // common case short enough to read at a glance.
+    if (at.getFullYear() !== now.getFullYear()) label += ', ' + at.getFullYear();
+    return label;
+  }
+
+  /**
+   * Cut a recency-ordered list into local days, in the order they appear.
+   *
+   * The order is the input's, never re-derived here: the server returns rows
+   * `updated_at` descending and its `has_more` describes that sequence, so
+   * sorting again on the client would be a second opinion about ordering that
+   * could quietly disagree with the cursor.
+   */
+  function railBuckets(sessions) {
+    var out = [];
+    var byKey = Object.create(null);
+    for (var i = 0; i < sessions.length; i++) {
+      var at = railParse(sessions[i].updated_at);
+      // A row whose timestamp cannot be read still has to be reachable, so it
+      // collects under its own heading rather than vanishing from a view
+      // organised by the one field it is missing.
+      var key = at ? railDayKey(at) : 'undated';
+      var bucket = byKey['d:' + key];
+      if (!bucket) {
+        bucket = {
+          key: key, name: at ? railDayLabel(at) : 'Undated', sessions: []
+        };
+        byKey['d:' + key] = bucket;
+        out.push(bucket);
+      }
+      bucket.sessions.push(sessions[i]);
+    }
+    return out;
+  }
+
+  function railMatchesFlat(session) {
+    if (!railFilter) return true;
+    // The same haystack the grouped filter builds, with the workspace fields
+    // read off the row instead of off its group — grouped by day there is no
+    // group to read them from, and "the sessions in nrf_tool" is a query the
+    // filter has to keep answering in both shapes.
+    var hay = ((session.title || '') + ' ' + (session.name || '') + ' ' +
+               (session.cwd || '')).toLowerCase();
+    return hay.indexOf(railFilter) !== -1;
   }
 
   function railMatches(group, session) {
@@ -1453,7 +1705,7 @@
     return String(session.title || '').trim() || 'untitled session';
   }
 
-  function railRowNode(session) {
+  function railRowNode(session, flat) {
     var state = railAvailability(session.availability);
     var locked = state === 'locked';
     // The row and its menu are siblings inside a wrapper, and that shape is
@@ -1522,10 +1774,32 @@
     title.textContent = titleText;
     row.appendChild(title);
 
-    var when = document.createElement('span');
-    when.className = 'acp-rail-row-when';
-    when.textContent = railWhen(session.updated_at);
-    row.appendChild(when);
+    if (flat) {
+      // Grouped by day, the heading already carries the date, so the row keeps
+      // only what the heading cannot say. The workspace and the exact time are
+      // moved into the title attribute rather than dropped: they are the two
+      // questions a list spanning every workspace raises, and the row has no
+      // width left to answer them in.
+      var note = (session.name || '') + ' · ' + railWhen(session.updated_at);
+      if (session.exists === false) {
+        // The missing-folder warning loses the group header it used to sit on,
+        // so it becomes the row's own. Dimmed rather than badged, because the
+        // row is deliberately title-only — and still selectable, for the same
+        // reason the group badge left it selectable: 14 of 65 real workspaces
+        // name a directory that is gone, and a temporarily unmounted network
+        // drive is not a deleted workspace.
+        row.className += ' acp-rail-row-gone';
+        note += ' — folder missing, so opening this will usually fail';
+      }
+      // Never over a locked row's own title. That one explains why the row
+      // cannot be pressed, which outranks saying where it came from.
+      if (!locked) row.title = note;
+    } else {
+      var when = document.createElement('span');
+      when.className = 'acp-rail-row-when';
+      when.textContent = railWhen(session.updated_at);
+      row.appendChild(when);
+    }
 
     row.addEventListener('click', function () {
       // A browser fires no click on a disabled button; this guard covers
@@ -1575,6 +1849,53 @@
       buttons[i].setAttribute('aria-expanded', 'false');
     }
     railMenuOpen = null;
+    // The settings popup closes on everything that closes a row menu — the
+    // press elsewhere, Escape, a row being opened — so it is shut here rather
+    // than wired into each of those separately. It lives outside
+    // `railGroupsEl`, so the two queries above cannot see it.
+    railSettingsMenu.hidden = true;
+    railSettingsBtn.setAttribute('aria-expanded', 'false');
+  }
+
+  function railSettingsRender() {
+    railSettingsMenu.textContent = '';
+    // A headed section rather than a row that opens a submenu. Same
+    // extensibility — status and sort would each arrive as another heading and
+    // its options — with no second level of open/closed state to keep, and one
+    // fewer press to reach the thing being changed.
+    var head = document.createElement('div');
+    head.className = 'acp-rail-menu-head';
+    head.textContent = 'Group by';
+    railSettingsMenu.appendChild(head);
+    var modes = [['date', 'Date'], ['project', 'Project']];
+    for (var i = 0; i < modes.length; i++) {
+      railSettingsMenu.appendChild(railSettingOption(modes[i][0], modes[i][1]));
+    }
+  }
+
+  function railSettingOption(mode, label) {
+    var item = document.createElement('button');
+    item.className = 'acp-rail-menu-item acp-rail-setting';
+    item.type = 'button';
+    // `menuitemradio` and not `menuitem`: these are one choice with two
+    // answers, and `aria-checked` is what tells a screen reader which is
+    // current. The tick beside it is decoration over the same fact.
+    item.setAttribute('role', 'menuitemradio');
+    item.setAttribute('aria-checked', railMode === mode ? 'true' : 'false');
+    item.dataset.mode = mode;
+    var name = document.createElement('span');
+    name.textContent = label;
+    item.appendChild(name);
+    var tick = document.createElement('span');
+    tick.className = 'acp-rail-setting-tick';
+    tick.setAttribute('aria-hidden', 'true');
+    tick.textContent = railMode === mode ? '✓' : '';
+    item.appendChild(tick);
+    item.addEventListener('click', function () {
+      railCloseMenus();
+      railSetMode(mode);
+    });
+    return item;
   }
 
   function railMenuNode(session, state) {
@@ -1768,6 +2089,16 @@
                railLastRow(groups[i]);
         break;
       }
+    } else if (want.day) {
+      // The button that was pressed is gone — the press revealed the rest of
+      // the day, which is what removes it — so focus goes to the last row of
+      // that day, where the button stood and where the newly-revealed rows end.
+      var days = railGroupsEl.querySelectorAll('.acp-rail-group');
+      for (i = 0; i < days.length; i++) {
+        if (days[i].dataset.day !== want.day) continue;
+        node = railLastRow(days[i]);
+        break;
+      }
     } else if (want.more) {
       // This button is outside the rebuilt container, so it keeps focus by
       // itself; the one case that needs restoring is the render that hides it,
@@ -1848,6 +2179,92 @@
     // Emptied by textContent rather than innerHTML: same effect, and it keeps
     // the no-innerHTML rule true of every line on this page without exception.
     railGroupsEl.textContent = '';
+    var shown = railMode === 'date' ? renderRailDate() : renderRailProject();
+    if (shown === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'acp-rail-empty';
+      empty.textContent = railFilter
+        ? 'nothing listed matches that — the filter narrows the sessions '
+          + 'already loaded, so load '
+          + (railMode === 'date' ? 'more sessions' : 'more workspaces')
+          + ' to widen it'
+        : 'no sessions to show';
+      railGroupsEl.appendChild(empty);
+    }
+    // One control, two cursors. Each mode has its own idea of what is left and
+    // its own word for what pressing this brings back.
+    if (railMode === 'date') {
+      railMore.hidden = !railFlatHasMore;
+      railMore.textContent = 'Load more sessions';
+    } else {
+      railMore.hidden = !railHasMore;
+      railMore.textContent = 'More workspaces';
+    }
+    railRestoreFocus();
+  }
+
+  function renderRailDate() {
+    var rows = [];
+    var i;
+    for (i = 0; i < railFlat.length; i++) {
+      if (railMatchesFlat(railFlat[i])) rows.push(railFlat[i]);
+    }
+    var buckets = railBuckets(rows);
+    var shown = 0;
+    for (i = 0; i < buckets.length; i++) {
+      railGroupsEl.appendChild(railBucketNode(buckets[i]));
+      shown += buckets[i].sessions.length;
+    }
+    return shown;
+  }
+
+  function railBucketNode(bucket) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-rail-group';
+    wrap.dataset.day = bucket.key;
+
+    var head = document.createElement('div');
+    head.className = 'acp-rail-group-head';
+    var name = document.createElement('span');
+    name.className = 'acp-rail-group-name';
+    name.textContent = bucket.name;
+    head.appendChild(name);
+    var count = document.createElement('span');
+    count.className = 'acp-rail-group-count';
+    // A bare count, with no "of" behind it. Project mode can say "3 of 47"
+    // because the server hands it the workspace's total; nothing here knows a
+    // day's total without reading the whole store, so this counts what is
+    // loaded and claims nothing beyond it.
+    count.textContent = String(bucket.sessions.length);
+    head.appendChild(count);
+    wrap.appendChild(head);
+
+    var all = bucket.sessions;
+    var revealed = !!railRevealed['d:' + bucket.key];
+    var limit = revealed ? all.length : Math.min(RAIL_SESSION_SIZE, all.length);
+    for (var i = 0; i < limit; i++) {
+      wrap.appendChild(railRowNode(all[i], true));
+    }
+    if (limit < all.length) {
+      var more = document.createElement('button');
+      more.className = 'acp-btn acp-rail-group-more';
+      more.type = 'button';
+      // The exact remainder, and exact is what it is: these rows are already
+      // here, so pressing reveals precisely this many. Project mode's button
+      // says the same words about a number that means something different —
+      // what the next request will fetch.
+      more.textContent = 'Show ' + (all.length - limit) + ' more';
+      more.addEventListener('click', function () {
+        railRevealed['d:' + bucket.key] = true;
+        railFocus = { day: bucket.key };
+        renderRail();
+      });
+      wrap.appendChild(more);
+    }
+    return wrap;
+  }
+
+  function renderRailProject() {
     var shown = 0;
     for (var i = 0; i < railGroups.length; i++) {
       var group = railGroups[i];
@@ -1869,17 +2286,7 @@
       railGroupsEl.appendChild(railGroupNode(group, sessions));
       shown += sessions.length;
     }
-    if (shown === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'acp-rail-empty';
-      empty.textContent = railFilter
-        ? 'nothing listed matches that — the filter narrows the sessions already '
-          + 'loaded, so load more workspaces to widen it'
-        : 'no sessions to show';
-      railGroupsEl.appendChild(empty);
-    }
-    railMore.hidden = !railHasMore;
-    railRestoreFocus();
+    return shown;
   }
 
   function selectSession(sid, availability) {
@@ -2655,9 +3062,21 @@
   });
   railMore.addEventListener('click', function () {
     railFocus = { more: true };
+    if (railMode === 'date') { loadFlatPage(railFlatPage + 1); return; }
     loadGroupPage(railGroupPage + 1);
   });
-  railReload.addEventListener('click', function () { loadGroupPage(1); });
+  railReload.addEventListener('click', function () { railLoadFirstPage(); });
+  railSettingsBtn.addEventListener('click', function () {
+    if (!railSettingsMenu.hidden) { railCloseMenus(); return; }
+    // The same guard a row menu's button sets. Without it this press carries on
+    // up to the document-level handler that closes open menus and shuts the one
+    // it has just opened, in a single gesture.
+    railMenuGuard = true;
+    railCloseMenus();
+    railSettingsRender();
+    railSettingsMenu.hidden = false;
+    railSettingsBtn.setAttribute('aria-expanded', 'true');
+  });
   // Dismissal for the row menus, and both listeners are on the document because
   // the gestures that should close a menu are exactly the ones that never reach
   // it. Registered unconditionally: with ACP_ERROR set there are no rows and so
@@ -2716,7 +3135,7 @@
       + 'module is not loaded';
   } else {
     connect();
-    loadGroupPage(1);
+    railLoadFirstPage();
     // Coming back to the tab refreshes at once, which is the moment a stale
     // dot would otherwise be believed — a phone returns to this page far more
     // often than it leaves it open for a full interval.
