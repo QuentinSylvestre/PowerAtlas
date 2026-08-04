@@ -1138,6 +1138,45 @@
     });
   }
 
+  // ---- addressing a session without knowing how the rail is grouped -------
+  //
+  // Two operations act on a *session* rather than on a workspace: the poll
+  // writing fresh state onto a row already drawn, and a deletion taking one
+  // away. Both were written against `railGroupsByCwd`, which is not a lookup a
+  // rail grouped by day can perform — a date bucket is derived at render time
+  // and owns no rows. These two functions are the seam: everything session-shaped
+  // goes through them, and adding a second container to `railIndex` is then the
+  // whole of what a new grouping mode has to teach the rest of the rail.
+  //
+  // Rebuilt per call rather than maintained alongside `railGroups`. It is one
+  // pass over the rows already on screen — 30 by default — and an index that
+  // drifts out of step with the array it describes puts a write on the wrong
+  // row, which is a worse failure than the pass it saves.
+
+  /** Every loaded session by id -> the row and the container holding it. */
+  function railIndex() {
+    var byId = Object.create(null);
+    for (var i = 0; i < railGroups.length; i++) {
+      var group = railGroups[i];
+      var rows = group.sessions || [];
+      for (var j = 0; j < rows.length; j++) {
+        // Prefixed for the same reason `railGroupsByCwd` prefixes: a session id
+        // off the wire reaching a bare object key can name `__proto__`.
+        // `Object.create(null)` already closes that, and the prefix keeps the
+        // two maps reading the same way.
+        byId['s:' + rows[j].id] = {
+          session: rows[j], group: group, list: rows, at: j
+        };
+      }
+    }
+    return byId;
+  }
+
+  /** One session by id, or null. `group` is null for a container without one. */
+  function railFindSession(sid) {
+    return railIndex()['s:' + sid] || null;
+  }
+
   function railRefreshStates(incoming) {
     // Availability, a held row's status, and the row's title. Timestamps and
     // the workspace's own fields stay out: they are not what goes stale in
@@ -1167,45 +1206,42 @@
     // availability would leave the working pulse running on a session that had
     // stopped — the same "asserted something false with no way to learn
     // otherwise" this poll exists to prevent.
-    var group = railGroupsByCwd['c:' + incoming.cwd];
-    if (!group) return false;
-    var fresh = Object.create(null);
+    // Keyed on the session id rather than on the workspace the response
+    // grouped it under. Session ids are unique across the store, so for a rail
+    // drawn as workspace groups the two are the same lookup — but only one of
+    // them survives a rail that also draws one flat recency list, where no row
+    // has a `cwd`-keyed container to be found through. The poll's job is
+    // identical in both shapes: write today's availability, status and title
+    // onto whichever row is already drawn for that id.
     var rows = incoming.sessions || [];
-    var i;
-    for (i = 0; i < rows.length; i++) {
-      fresh['s:' + rows[i].id] = {
-        availability: railAvailability(rows[i].availability),
-        status: railRowStatus(rows[i].status),
-        // The raw value and its rendered form, because the two halves need
-        // different ones. The write has to carry the raw title — `railMatches`
-        // filters on it — while the comparison has to be on the rendered text,
-        // or a row whose title is merely absent in a different way (`""` for
-        // `null`, a trailing space) reads as a change and rebuilds the whole
-        // rail on every tick for a difference nobody can see.
-        title: rows[i].title,
-        titleText: railTitleText(rows[i])
-      };
-    }
+    var byId = railIndex();
     var changed = false;
-    for (i = 0; i < group.sessions.length; i++) {
-      var next = fresh['s:' + group.sessions[i].id];
-      if (next === undefined) continue;
-      var row = group.sessions[i];
-      if (next.availability !== railAvailability(row.availability)) {
-        row.availability = next.availability;
+    for (var i = 0; i < rows.length; i++) {
+      var found = byId['s:' + rows[i].id];
+      if (found === undefined) continue;
+      var row = found.session;
+      var availability = railAvailability(rows[i].availability);
+      if (availability !== railAvailability(row.availability)) {
+        row.availability = availability;
         changed = true;
       }
       // Only where the dot is actually drawn. Every non-held row narrows to the
       // same `working` fallback, so writing it through would set `changed` on a
       // field nothing renders and rebuild the whole rail for a difference
       // nobody can see.
-      if (next.availability === 'held' &&
-          next.status !== railRowStatus(row.status)) {
-        row.status = next.status;
+      if (availability === 'held' &&
+          railRowStatus(rows[i].status) !== railRowStatus(row.status)) {
+        row.status = railRowStatus(rows[i].status);
         changed = true;
       }
-      if (next.titleText !== railTitleText(row)) {
-        row.title = next.title;
+      // The write carries the raw value and the comparison runs on the rendered
+      // one, because the two halves need different things: `railMatches`
+      // filters on the raw title, while a title that is merely absent in a
+      // different way (`""` for `null`, a trailing space) must not read as a
+      // change and rebuild the whole rail once a minute over a string that
+      // draws identically.
+      if (railTitleText(rows[i]) !== railTitleText(row)) {
+        row.title = rows[i].title;
         changed = true;
       }
     }
@@ -1417,7 +1453,7 @@
     return String(session.title || '').trim() || 'untitled session';
   }
 
-  function railRowNode(session, group) {
+  function railRowNode(session) {
     var state = railAvailability(session.availability);
     var locked = state === 'locked';
     // The row and its menu are siblings inside a wrapper, and that shape is
@@ -1506,7 +1542,7 @@
       selectSession(session.id, state);
     });
     item.appendChild(row);
-    if (ACP_LOCAL) item.appendChild(railMenuNode(session, group, state));
+    if (ACP_LOCAL) item.appendChild(railMenuNode(session, state));
     return item;
   }
 
@@ -1541,7 +1577,7 @@
     railMenuOpen = null;
   }
 
-  function railMenuNode(session, group, state) {
+  function railMenuNode(session, state) {
     var wrap = document.createElement('div');
     wrap.className = 'acp-rail-menu-wrap';
 
@@ -1589,7 +1625,7 @@
     del.addEventListener('click', function () {
       if (del.disabled) return;
       railCloseMenus();
-      railDeleteSession(session, group);
+      railDeleteSession(session);
     });
     menu.appendChild(del);
 
@@ -1609,7 +1645,7 @@
     return wrap;
   }
 
-  function railDeleteSession(session, group) {
+  function railDeleteSession(session) {
     if (railDeleting) return;
     var label = railTitleText(session);
     // `confirm` and not an in-page dialog, for the same reason the dashboard's
@@ -1656,7 +1692,7 @@
         logLine('error', 'delete refused for ' + session.id + ' — ' + why);
         return;
       }
-      railForgetSession(session.id, group);
+      railForgetSession(session.id);
       logLine('info', 'deleted ' + session.id + ' from the store');
       railStatus.textContent = 'deleted “' + label + '”';
     }).catch(function (err) {
@@ -1666,26 +1702,30 @@
   }
 
   /** Drop a deleted session from what the rail is drawing. */
-  function railForgetSession(sid, group) {
-    for (var i = 0; i < group.sessions.length; i++) {
-      if (group.sessions[i].id !== sid) continue;
-      group.sessions.splice(i, 1);
-      // The header reads "3 of 47" — the loaded count and the workspace's
-      // total — so both move, or it starts claiming a session that is gone.
-      // Floored at the loaded count rather than at zero: `total` comes from the
-      // server and a client-side decrement that ran twice must not drive it
-      // below what is on screen.
-      if (typeof group.total === 'number') {
-        group.total = Math.max(group.sessions.length, group.total - 1);
+  function railForgetSession(sid) {
+    // The container is resolved here rather than handed in. Which group holds a
+    // row is a question only a rail with groups can answer, and the caller
+    // should not have to know which shape it is drawing to delete from it.
+    var found = railFindSession(sid);
+    if (found) {
+      found.list.splice(found.at, 1);
+      var group = found.group;
+      // The workspace header reads "3 of 47" — the loaded count and the
+      // workspace's total — so both move, or it starts claiming a session that
+      // is gone. Floored at the loaded count rather than at zero: `total` comes
+      // from the server and a client-side decrement that ran twice must not
+      // drive it below what is on screen. A container with no group carries no
+      // such header and has nothing to correct.
+      if (group && typeof group.total === 'number') {
+        group.total = Math.max(found.list.length, group.total - 1);
       }
-      break;
-    }
-    if (group.sessions.length === 0 && group.has_more) {
-      // Every row this workspace had loaded is gone and the server says there
-      // are more. The offsets the next page would be read at now point past
-      // rows that moved down, so the next "More in …" starts again from the
-      // first page rather than resuming into a gap.
-      group.session_page = 0;
+      if (group && found.list.length === 0 && group.has_more) {
+        // Every row this workspace had loaded is gone and the server says there
+        // are more. The offsets the next page would be read at now point past
+        // rows that moved down, so the next "More in …" starts again from the
+        // first page rather than resuming into a gap.
+        group.session_page = 0;
+      }
     }
     if (sid === sessionId) {
       // Reachable despite the `held` refusal: a session this page holds a
@@ -1787,7 +1827,7 @@
     wrap.appendChild(head);
 
     for (var i = 0; i < sessions.length; i++) {
-      wrap.appendChild(railRowNode(sessions[i], group));
+      wrap.appendChild(railRowNode(sessions[i]));
     }
 
     if (group.has_more) {
