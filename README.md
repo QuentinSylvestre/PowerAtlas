@@ -51,8 +51,8 @@ rather than adding the venv's `Scripts`/`bin` directory itself — that director
 
 The app starts as a system tray icon. Click to open the dashboard UI. The kiro-cli agent surface lives
 at `/acp` — a workspace-grouped session browser beside a conversation pane, two panes on a desktop and a
-drill-down below 768 px. Reach it from the dashboard's *open in ACP* action on any kiro-cli session row,
-or by opening `/acp` directly.
+drill-down below 768 px. Reach it from the **ACP** button beside the dashboard's logo, from the *open in
+ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 
 ### Features
 
@@ -166,7 +166,11 @@ Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hot
 
 ## Agent sessions (`/acp`)
 
-Reached from the **Agents** button in the dashboard topbar, or by opening `/acp` directly.
+Reached from the **ACP** button beside the logo in the dashboard topbar, or by opening `/acp` directly.
+`/acp` carries the mirror of that button — **Main dashboard**, in the same corner — so the two surfaces
+switch between each other from the same place. The dashboard is loopback-only, so a phone reaching `/acp`
+over remote access sees the logo there but no dashboard button; the link would only ever have produced a
+403.
 
 `/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp` process holds every session PowerAtlas
 opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by

@@ -1780,7 +1780,7 @@ class TestSingleLabelHostRejected:
 
 
 class TestAcpBackLinkMatchesReachability:
-    """Phase 5b. The topbar's "back to PowerAtlas" link points at ``/``, which
+    """Phase 5b. The topbar's ``Main dashboard`` link points at ``/``, which
     is not on ``_REMOTE_ALLOWED_PATHS`` and never will be (SC-4) — so from a
     phone it was a control whose only possible outcome was a 403 page with no
     way back to the conversation.
@@ -1790,10 +1790,19 @@ class TestAcpBackLinkMatchesReachability:
     would hand exactly that peer the link it cannot follow. Nothing here is a
     security decision — the guard has already admitted or refused the request —
     so a wrong reading costs a link, not a boundary.
+
+    The logo is deliberately *not* on this branch. It is served from
+    ``/static``, which is on the allowlist, and naming the product is not
+    navigation — so it renders for both viewers, and that is what lets the link
+    be dropped without the remote page losing its identity.
     """
 
     def test_a_loopback_viewer_keeps_the_dashboard_link(self, raw_client):
-        assert '<a class="acp-back" href="/">' in raw_client.get("/acp").text
+        text = raw_client.get("/acp").text
+        link = re.search(r'<a\b[^>]*\bclass="[^"]*topbar-nav[^"]*"[^>]*>', text)
+        assert link, "the loopback viewer has no dashboard link in the topbar"
+        assert 'href="/"' in link.group(0), (
+            f"the dashboard link no longer points at `/`: {link.group(0)}")
 
     def test_a_remote_viewer_is_not_handed_a_link_they_cannot_follow(
             self, remote_enabled):
@@ -1802,10 +1811,25 @@ class TestAcpBackLinkMatchesReachability:
         text = body.decode()
         assert 'href="/"' not in text, (
             "the phone was handed a link to a loopback-only page")
-        assert "acp-back-local-only" in text, (
-            "the product name vanished entirely rather than rendering as text")
+        assert "topbar-nav" not in text, (
+            "the dashboard link is rendered remotely in some other form")
+        # What replaced the old plain-text arm: the logo is unconditional, so
+        # dropping the link above costs the page its navigation and not its
+        # name. Both renderings are asserted because CSS picks between them by
+        # width and only one of the two is on screen at a time.
+        assert "poweratlas-banner.png" in text and "acp-wordmark" in text, (
+            "the product name vanished entirely for the remote viewer")
         # The positive control for the whole reason this branch exists.
         assert _peer_http("/", [_cookie_header()])[0] == 403
+
+    def test_the_logo_is_reachable_by_the_viewer_it_is_rendered_for(
+            self, remote_enabled):
+        """The half the assertion above cannot make. Dropping the link is only
+        safe if what replaces it actually loads: the banner is an ``/static``
+        URL, and if that mount ever leaves ``_REMOTE_ALLOWED_PATHS`` the remote
+        page keeps its ``<img>`` and renders a broken one."""
+        assert _peer_http(
+            "/static/poweratlas-banner.png", [_cookie_header()])[0] == 200
 
 
 _ACP_PATH_FOR_BACKLINK = "/acp"
@@ -1846,6 +1870,23 @@ class TestTheDashboardLinksToTheAgentPage:
             "stray text beside two pill buttons")
         assert "aria-label=" in attrs, "the link is unlabelled for a screen reader"
         assert label.strip(), "the link renders no visible label at all"
+
+    def test_the_link_sits_with_the_logo_and_not_among_the_settings(self, client):
+        """Where it is *is* the feature. This link spent its first life in the
+        right-hand cluster, which is settings and state — launch profile, remote
+        access, autostart, last refresh — and a page link wearing the same pill
+        as four settings reads as a fifth one. `topbar-spacer` is the divider
+        between the two halves, so "before the spacer" is the machine-checkable
+        form of "in the top-left corner, beside the logo", and it does not pin
+        the label, the emoji or the order of the settings beside it."""
+        topbar = self._topbar(client)
+        link = topbar.find('href="/acp"')
+        spacer = topbar.find('class="topbar-spacer"')
+        banner = topbar.find('class="topbar-banner"')
+        assert -1 < banner < link < spacer, (
+            "the /acp link is not between the logo and the spacer; it is back "
+            f"among the settings cluster (banner={banner}, link={link}, "
+            f"spacer={spacer})")
 
     def test_the_link_points_at_a_route_that_answers(self, raw_client):
         """The half a substring check cannot make: the href has to name a live

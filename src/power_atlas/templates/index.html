@@ -2,6 +2,20 @@
 {% block content %}
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
+  <!-- An anchor, not a button with `location.href`: it is a plain navigation
+       to another page of this app, and the anchor is what makes middle-click,
+       Ctrl-click and "copy link" work. `/acp` carries the mirror of this
+       control — `Main dashboard`, wearing the same shape in the same place —
+       so the pair reads as one switch between the app's two surfaces.
+
+       Beside the logo rather than in the right-hand cluster, and that placement
+       is the point rather than a preference: the cluster is settings and state
+       (profile, remote access, autostart, last refresh), so a page link sitting
+       in it read as one more setting and was missed. The top-left corner is
+       where a reader looks to answer "where am I, and where else can I go". -->
+  <a class="topbar-profile-btn topbar-link topbar-nav" href="/acp"
+     title="Agent sessions: create and drive kiro-cli sessions over ACP, without a terminal"
+     aria-label="ACP agent sessions">🤖 ACP</a>
   <div class="topbar-spacer"></div>
   <div class="topbar-cluster">
     <button class="topbar-profile-btn" onclick="openProfileModal()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
@@ -10,12 +24,6 @@
     <button class="topbar-profile-btn" onclick="openRemoteModal()" title="Remote access: the URL and device secret a phone needs, and which settings need a restart" aria-label="Remote access">
       📡 Remote
     </button>
-    <!-- An anchor, not a button with `location.href`: it is a plain navigation
-         to another page of this app, and the anchor is what makes middle-click,
-         Ctrl-click and "copy link" work. `/acp` links back here the same way. -->
-    <a class="topbar-profile-btn topbar-link" href="/acp" title="Agent sessions: create and drive kiro-cli sessions over ACP, without a terminal" aria-label="Agent sessions">
-      🤖 Agents
-    </a>
     <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
       <span class="trust-dot"></span>Autostart
     </div>

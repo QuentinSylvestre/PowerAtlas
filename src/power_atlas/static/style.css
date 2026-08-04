@@ -49,9 +49,30 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .topbar-profile-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; color: var(--text-muted); padding: 6px 12px; font-size: 12px; cursor: pointer; transition: all 0.2s; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .topbar-profile-btn:hover { border-color: var(--accent); color: var(--text); }
 /* `.topbar-profile-btn` was written for <button>, whose UA styles already give
-   it a box and no underline. An <a> wearing the same class needs both back, or
-   the pill's padding does not lay out and the label renders underlined. */
+   it a box and no underline. An <a> wearing any of this file's button classes
+   — that one on `/`, `.acp-btn` on `/acp` — needs both back, or the pill's
+   padding does not lay out and the label renders underlined. */
 .topbar-link { display: inline-flex; align-items: center; text-decoration: none; }
+/* The cross-surface switch: `ACP` on `/`, `Main dashboard` on `/acp`. One
+   control in two places, so it is tinted apart from the pills it sits beside —
+   on `/` those are settings and state (profile, remote, autostart, refresh),
+   and a page link that looked identical to them was read as one more setting
+   and missed. The colour reinforces; the label is what carries the meaning, so
+   nothing is lost where the tint does not resolve. */
+.topbar-nav { color: var(--accent); flex-shrink: 0; }
+/* Both base classes set `color` on `:hover` — a two-class selector that would
+   otherwise win on specificity and drop the tint on the way to being clicked. */
+.topbar-nav:hover { color: var(--accent); }
+/* The `flex-shrink: 0` above is the dashboard's half, and it is load-bearing
+   there in a way it is not here. `/`'s topbar is a banner that does not shrink
+   and three clusters that sit at min-content, so the moment this link became a
+   direct child of that row it was the only item in it that *could* give — and
+   it gave everything: measured at 42 px of a 65 px pill at 1280 px and 26 px
+   at 1100 px, i.e. a robot emoji and the letter A. That row has always been
+   wider than a narrow window and has always clipped on the right when it did
+   not fit; what it must not do is silently eat the one control that was added
+   to make the agent surface findable. `/acp` overrides the factor for its own
+   row further down, where the order of sacrifice is stated in full. */
 .trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s; }
 .trust-toggle.active .trust-dot, .topbar-toggle.active .trust-dot { background: var(--success); }
 
@@ -497,8 +518,12 @@ script { display: none; }
 .ws-info-line { display: block; }
 
 /* ACP prototype page (/acp) */
-.acp-back { color: var(--text-muted); text-decoration: none; font-size: 13px; padding: 0 4px 0 16px; }
-.acp-back:hover { color: var(--accent); }
+/* The logo at phone width, where the banner is 376 px of a 390 px row. Plain
+   text and deliberately not a link: `.topbar-nav` beside it is the navigation,
+   and a logo that is *also* a control is the ambiguity this pair exists to
+   remove. The 16 px left inset is what the banner gets from the viewport edge
+   above the breakpoint, restated here because the wordmark has no bleed. */
+.acp-wordmark { color: var(--text-muted); font-size: 13px; font-weight: 600; letter-spacing: -0.2px; padding: 0 4px 0 16px; }
 .acp-title { font-size: 13px; font-weight: 600; letter-spacing: -0.2px; }
 .acp-status { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
 .acp-status[data-state="open"] { border-color: var(--success); color: var(--success); }
@@ -515,21 +540,92 @@ script { display: none; }
    What is set here is the *order of sacrifice*, which is the part a browser
    cannot guess — flex distributes a shortfall in proportion to base size, so
    left alone the widest item gives the most, which here is the cluster holding
-   the pill:
-     1. the back link's text, which ellipses. `flex-shrink: 999` is what puts
-        it first rather than in proportion — its target stays tappable at any
-        width and the label is a courtesy;
-     2. the context meter, whose track is a proportion and still reads at
-        24 px;
-     3. the status pill, which never shrinks at all. It is the only element on
+   the pill. The row now also carries a logo and a link to the dashboard, which
+   is why the order is stated for four items rather than three — and why it is
+   stated at all rather than measured: an explicit order makes an overflow
+   impossible by construction, instead of true at the widths someone thought to
+   check.
+     1. the context meter, which degrades better than anything else here: it
+        is a proportion, and a proportion still reads as one at the 24 px its
+        track is floored to. `flex-shrink: 999` on the cluster is what puts it
+        first rather than in proportion, and the cluster carries the factor
+        because the meter is inside it — a shrink factor on the meter alone
+        cannot be reached while the box holding it is still min-content;
+     2. the logo, whichever of the two renderings is on screen. Behind the
+        meter, and this is the part that was measured wrong first: with 999
+        here instead, the logo absorbed ~99.7% of any shortfall by weight and
+        was starved to 26 px of an 83 px name — "P…" — while the meter beside
+        it sat at its full 72 px. Giving first must not mean giving alone;
+     3. the `Main dashboard` link's label, which ellipses. Last of the three
+        because it names where it goes and half a destination is still one;
+     4. the status pill, which never shrinks at all. It is the only element on
         the page that says whether the socket is up, and a truncated one is
         worse than none: "conn" is indistinguishable from "connecting".
-   Every selector here is `.acp-*`; nothing in this block reaches the shared
-   topbar the dashboard also renders. */
-.acp-back { min-width: 0; flex-shrink: 999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+   Every selector here resolves on `/acp` only, and the one that had to be
+   *made* to is `.acp-btn.topbar-nav`. `.topbar-nav` alone is the cross-surface
+   link and the dashboard renders it too — and the dashboard's topbar is a
+   fixed ~1250 px row of settings clusters that genuinely does overflow a
+   narrow window, so a bare `.topbar-nav` shrink factor gave it the first thing
+   to collapse: measured at 26 px, an `ACP` pill showing its emoji and no word.
+   `.acp-btn` is this page's button shape and nothing on `/` wears it, so the
+   compound selector is what keeps an order of sacrifice written for this row
+   from being applied to a row it was never measured against. */
+.acp-wordmark, .acp-banner { min-width: 0; flex-shrink: 3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The banner is a replaced element: shrinking its box alone would stretch the
+   wordmark drawn inside it. `contain` makes the shortfall a scale rather than a
+   squeeze, and `left` keeps the logo on the edge it shares with `/`. */
+.acp-banner { object-fit: contain; object-position: left center; }
+.acp-btn.topbar-nav { min-width: 0; flex-shrink: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Decoration, and the last thing here that should cost the row anything — but
+   it has to be told that in the right units. Left to wrap it does not overflow
+   the row, it grows it: at 768 px "ACP prototype" broke across two lines and
+   the topbar itself got taller, which is the one direction a fixed 48 px bar
+   cannot give in. */
+.acp-title { min-width: 0; flex-shrink: 4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The meter's own clip. Its label is a flex item with a min-content of about
+   26 px, so once the cluster is at the floor below there is no room left for
+   it and it painted *outside* the meter, over the status pill beside it —
+   geometry every box-level measurement calls correct, because every box is
+   where it should be and only the ink is in the wrong place. */
+.acp-context { overflow: hidden; }
 .acp-context { min-width: 0; }
 .acp-context-track { min-width: 24px; }
 .acp-status { flex-shrink: 0; white-space: nowrap; }
+/* Step 1 of the order above, and it has to live on the cluster rather than on
+   the meter: the meter is the cluster's child, so the topbar can only reach it
+   by shrinking the cluster first. `min-width: 0` alone was measured to change
+   nothing at any width from 320 to 1600 — the cluster's min-content already
+   floors it at ~154 px, and what was missing was never the floor but the
+   *factor*.
+
+   The floor is a number, and it is one because the three keywords were each
+   measured and each does the wrong thing. `auto` and `min-content` both leave
+   the cluster unshrinkable — it sat at its 206 px base at every width from 320
+   to 1600, so step 1 never ran at all and the whole shortfall fell through to
+   the logo. (Both, because the meter's track is `width: 72px`; a definite
+   width is its own min-content contribution, and the `min-width: 24px` below
+   is a floor on the track, not a reduction of what it *asks* for.) `0` goes as
+   far wrong the other way: with nothing to stop it the cluster took the entire
+   136 px deficit at 360 px, down to 97 px — narrower than the 95 px status
+   pill inside it — and the pill was pushed bodily off the right of a viewport
+   that clips, which is the exact failure this block exists to prevent,
+   reintroduced by the rule meant to serve it.
+
+   130 px is what the cluster must keep for its contents to stay on screen:
+   the status pill's 95 px, the 8 px gap, and the meter's floored 24 px track.
+   It does not include the meter's numeric label, because below the breakpoint
+   there is no label — see `.acp-context-label`, which is dropped there rather
+   than clipped, and the 130 px and that rule have to stay in step.
+
+   Both halves are undone above 768 px, where this is the wrong order: up there
+   the banner is 376 px of a row with room to spare, so the logo is what should
+   give and the meter should not. Measured across 320..1600 on both arms after
+   all of it: nothing overflows, and the pill's right edge is inside the
+   viewport at every width.
+
+   Scoped to this page the way `body:has(> .acp-shell)` above is, because the
+   dashboard renders `.topbar-cluster` too and its row is not this one. */
+body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; }
 /* Wraps because the toolbar is four controls and a free-text cwd field, and at
    390 px they do not fit on one line; on a wide window nothing wraps and this
@@ -794,23 +890,59 @@ body:has(> .acp-shell) { height: 100dvh; }
    panes are on screen and a button that moves between them would move nothing. */
 .acp-viewtoggle { flex-shrink: 0; }
 /* Reclaimed for the toggle at 390 px, where the topbar is the tightest row on
-   the page. Keyed on **which arm the template rendered, not on viewport
-   width** — the previous rule named `.acp-back`, which both arms carry, and
-   the justification it gave ("`/` is loopback-only (SC-4), so on the device
-   this width is for it does not resolve at all") is a statement about the
-   *viewer*, which a media query cannot observe. A loopback viewer who merely
-   narrowed a desktop window below 768 px lost the only link back to the
-   dashboard, for a constraint that is the phone's.
+   the page.
 
-   `.acp-back-local-only` is the remote arm: a <span> of plain text whose only
-   job is to name the product, so dropping it costs nothing. The loopback arm
-   is an <a href="/"> and is navigation, so it stays at every width. The title
-   is decoration on either arm and stays droppable. */
-.acp-back-local-only, .acp-title { display: none; }
+   Both selectors here are things a *width* may legitimately decide, and that
+   distinction is the whole rule. This file made the opposite mistake once: a
+   rule keyed on 768 px hid `.acp-back`, which the template rendered for every
+   viewer, so a loopback reader who merely narrowed a desktop window lost the
+   only link back to the dashboard — a constraint that was the phone's, written
+   as a statement about window width. What may be width-keyed is what a wider
+   window would render *differently* rather than render *at all*:
+
+   - `.acp-banner` is the logo, and `.acp-wordmark` below is the same logo at a
+     width where 376 px of banner is most of the row. One or the other is on
+     screen at every width, so the page never stops naming its product.
+   - `.acp-title` is decoration and stays droppable.
+
+   What must never appear here is `.topbar-nav`. Whether the dashboard link
+   exists is `local`'s decision, taken in the template, and a viewer's
+   reachability is not something a media query can observe. */
+.acp-banner, .acp-title { display: none; }
+/* Below the breakpoint this row cannot hold a logo *and* a link, and that is
+   arithmetic rather than taste. Measured at 390 px with the link present: the
+   bar's min-content was 404 px against a viewport `overflow: hidden` will not
+   scroll, and the 14 px came off the status pill — the one item here that must
+   never be truncated. The costs that cannot move are the drill-down toggle and
+   the status cluster; what is left over is about 26 px, which is one control's
+   worth and not two.
+
+   So below 768 px the link *is* the logo — the arrangement this row carried
+   before the pair was added, and one that was measured to fit. The wordmark is
+   not dropped, it is subsumed: `:has()` keys on whether the link was rendered
+   at all, so the viewer who has no link keeps it. That viewer is the remote
+   one, and this width is really theirs — their row has three items, has always
+   fit, and would lose the product's name for a shortfall it does not have.
+
+   Where `:has()` is unsupported the rule drops and both render, which is the
+   14 px clip and not a blank topbar. */
+.topbar:has(.topbar-nav) .acp-wordmark { display: none; }
+/* The meter's number, dropped here rather than left to be clipped. Once the
+   cluster is at the floor above there is not room for both the bar and the
+   figure, and a figure that loses its tail is not a smaller reading — it is a
+   wrong one: "64%" clipped to its first glyph renders as "6", which is a
+   plausible percentage and a lie. The bar keeps the meaning it carried anyway;
+   the number was the precision. Restored above the breakpoint, where the row
+   is not the one that is short. */
+.acp-context-label { display: none; }
+/* `.topbar` has no left padding — the banner is meant to bleed to the edge, on
+   `/` and here — so whatever leads the row supplies its own inset. That was the
+   wordmark's `padding-left`; with the wordmark subsumed above, the link leads
+   and inherits the job, or it sits flush against the side of the screen. */
+.topbar:has(.topbar-nav) .acp-btn.topbar-nav { margin-left: 16px; }
 /* Below the breakpoint the rail and the conversation are one pane at a time,
    so there is no boundary between them to drag. */
 .acp-rail-resize { display: none; }
-.acp-back-local-only { color: var(--text-dim); }
 
 .acp-rail { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
 /* Three controls on a 390 px line: create, filter, refresh. `wrap` is the
@@ -852,7 +984,15 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-group-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: inherit; font-family: inherit; font-size: 12px; text-align: left; padding: 3px 4px; cursor: pointer; }
 .acp-rail-group-toggle:hover { background: var(--surface-hover); }
 .acp-rail-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* Drawn, not typed. The glyph this replaces (U+2304) measured perfectly centred
+/* Trails the label rather than leading it, so a heading starts at the rail's
+   own left edge and the session rows below — a dot column and 8 px of padding
+   in — are the indented ones. It is not pushed right either: it sits in the
+   text's flow immediately after the name, because an arrow parked by the count
+   reads as a second control rather than as this label's own disclosure. The
+   name shrinks and the arrow does not, so on a narrow rail the two stay
+   together against the ellipsis.
+
+   Drawn, not typed. The glyph this replaces (U+2304) measured perfectly centred
    by the box model and visibly low against its label anyway: a character sits
    where its font's metrics put it inside the em box, and those differ per font,
    so no amount of `align-items` fixes it. Two borders rotated 45 degrees have no
@@ -968,8 +1108,9 @@ body:has(> .acp-shell) { height: 100dvh; }
    hover to reveal anything with — keeps the button it has always had.
 
    That query keys on the *input device*, not on viewport width. This file made
-   the opposite mistake once (see `.acp-back-local-only`, where a rule about who
-   the viewer was got written as a rule about how wide their window was), and a
+   the opposite mistake once (see the `.acp-banner, .acp-title` block, which
+   carries the account: a rule about who the viewer was got written as a rule
+   about how wide their window was, and hid the dashboard link), and a
    loopback viewer on a tablet is exactly the reader that mistake would strand
    here — the menu is loopback-only, so a width-keyed rule would look correct
    on every device that never sees it. */
@@ -1060,10 +1201,26 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-shell[data-view="rail"] > .acp-page { display: flex; }
   .acp-shell[data-view="chat"] > .acp-rail { display: flex; }
   .acp-viewtoggle { display: none; }
-  /* Both arms are back above the breakpoint, including the remote one: there
-     is room for it, and naming the product is the only thing it was ever for. */
-  .acp-back-local-only { display: inline; }
+  /* The logo swaps to the full banner, which is the same one `/` carries at
+     the same height in the same corner — the point of the pair. The wordmark
+     is the narrow-width stand-in for exactly this, so the two are never on
+     screen together. */
+  .acp-banner { display: block; }
+  .acp-wordmark { display: none; }
   .acp-title { display: inline; }
+  /* The banner leads again, so it is the banner that bleeds to the edge and
+     the link goes back to being an ordinary item in the row. Same selector as
+     the rule it undoes, so the reset cannot be lost to specificity. */
+  .topbar:has(.topbar-nav) .acp-btn.topbar-nav { margin-left: 0; }
+  /* The order of sacrifice inverts here, and both halves of the inversion are
+     the same statement: up here the row's biggest item is a 376 px logo and
+     the meter is 80 px of reading, so the logo gives and the meter does not.
+     Below the breakpoint it is the other way round — the logo is a word and
+     the row cannot hold everything — which is what the rules being undone say.
+     Left in force, they crushed the cluster to its 130 px floor at 768 px and
+     clipped the meter's label while the banner sat at its full width. */
+  body:has(> .acp-shell) .topbar-cluster { flex-shrink: 1; min-width: auto; }
+  .acp-context-label { display: inline; }
   /* The 288 px is now the fallback rather than the value. `--acp-rail-w` is set
      on `.acp-shell` by the drag handle and restored from localStorage at load;
      if neither ever runs — storage refused, script failed — the rail is exactly

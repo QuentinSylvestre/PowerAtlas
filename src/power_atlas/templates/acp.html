@@ -1,17 +1,34 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="topbar">
+  {# The logo, in the same corner and the same order as on `/`, so the two
+     surfaces read as one app rather than two.
+
+     Unconditional, unlike the link below it: `/static` *is* on
+     `_REMOTE_ALLOWED_PATHS` (web.py, `_REMOTE_STATIC_MOUNT`), and naming the
+     product is not navigation, so nothing here depends on `local`. That is
+     what lets the link be dropped for a remote viewer without the page losing
+     its identity — the job the old plain-text arm existed to do.
+
+     Two renderings of one logo, and CSS shows exactly one: the banner is
+     1920x240, i.e. 376 px at this bar's height, which is most of a 390 px row.
+     Above 768 px it is the banner; below, the wordmark. #}
+  <img src="/static/poweratlas-banner.png" class="topbar-banner acp-banner" alt="PowerAtlas">
+  <span class="acp-wordmark">PowerAtlas</span>
   {# `/` is loopback-only and always will be (SC-4: the dashboard, the launchers
      and the settings never cross the remote boundary), so from a phone this
      link was a control whose only possible outcome was a 403 page with no way
      back. `local` comes from `scope["client"]`, not the Host header (D26).
-     Rendered as plain text remotely rather than dropped entirely, so the page
-     still names the product it belongs to. #}
+
+     Labelled with its destination rather than drawn as a bare arrow: this and
+     the dashboard's `ACP` pill are the only two controls that move between the
+     app's surfaces, and an arrow says a direction without naming where it
+     goes. Absent — not disabled — for the viewer who cannot follow it, which
+     is the same rule the rail's row menu applies. #}
   {% if local %}
-  <a class="acp-back" href="/">&#8592; PowerAtlas</a>
-  {% else %}
-  <span class="acp-back acp-back-local-only"
-        title="The PowerAtlas dashboard is reachable from the machine running it only">PowerAtlas</span>
+  <a class="acp-btn topbar-link topbar-nav" href="/"
+     title="Back to the PowerAtlas dashboard: sessions, launchers and settings"
+     aria-label="Main dashboard">&#8592; Main dashboard</a>
   {% endif %}
   <!-- Below 768 px the rail and the conversation are one pane at a time
        (drill-down), and this is the only way between them; at 768 px and above
@@ -3001,6 +3018,17 @@
     toggle.dataset.head = key;
     toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 
+    // The label leads the header. Behind the chevron it started 16 px in — past
+    // where the session rows beneath it begin — so the heading read as one more
+    // indented thing in a list of indented things. Starting it at the rail's own
+    // left edge is what tells the two levels apart, and the arrow that used to
+    // hold that column now trails the text it opens.
+    var name = document.createElement('span');
+    name.className = 'acp-rail-group-name';
+    name.textContent = label;
+    if (opts && opts.title) name.title = opts.title;
+    toggle.appendChild(name);
+
     var chevron = document.createElement('span');
     chevron.className = 'acp-rail-group-chevron';
     // Always drawn, never revealed on hover. The design this follows shows it
@@ -3018,11 +3046,8 @@
     // rotated 45 degrees has no metrics to disagree with.
     toggle.appendChild(chevron);
 
-    var name = document.createElement('span');
-    name.className = 'acp-rail-group-name';
-    name.textContent = label;
-    if (opts && opts.title) name.title = opts.title;
-    toggle.appendChild(name);
+    // After the chevron, so the arrow stays against the name it belongs to. A
+    // badge between them would read as the thing being expanded.
     if (opts && opts.badge) toggle.appendChild(opts.badge);
 
     var count = document.createElement('span');

@@ -2931,6 +2931,15 @@ check("a group starts expanded and collapses from its header", async (tpl) => {
   const toggle = page.railGroups()[0].querySelector(".acp-rail-group-toggle");
   assertEqual(toggle.getAttribute("aria-expanded"), "true",
               "a group nobody has touched did not start expanded");
+  // The label leads and the arrow trails it. Source order is what draws this:
+  // the header is a flex row and only the count is pushed right, so the two
+  // read in the order they are built. Led by the chevron the heading starts
+  // 16 px in — further than the rows beneath it — and a workspace reads as one
+  // more indented line rather than as the thing those rows hang off.
+  const order = toggle.childNodes.map((n) => n.className);
+  assert(order.indexOf("acp-rail-group-name")
+         < order.indexOf("acp-rail-group-chevron"),
+         `the collapse arrow does not follow the group name: ${order.join(", ")}`);
   toggle.dispatch("click");
 
   const collapsed = page.railGroups()[0];
@@ -3191,24 +3200,38 @@ check("only the two known views ever reach the shell attribute", async (tpl) => 
               "the shell took a view value other than the two the CSS knows");
 });
 
-check("the back link is a link on loopback and inert from a remote peer", (tpl) => {
+check("the dashboard link is rendered for the viewer who can follow it", (tpl) => {
   // `/` is not on `_REMOTE_ALLOWED_PATHS` and never will be (SC-4), so from a
   // phone the old `<a href="/">` was a control whose only outcome was a 403
   // with no way back.
   const local = loadPage(tpl, { local: true });
-  const localBack = local.markup.match(/<a\b[^>]*class="acp-back"[^>]*>/);
-  assert(localBack, "the dashboard link is gone for a loopback viewer too");
-  assert(/href="\/"/.test(localBack[0]),
-         `the loopback link no longer reaches the dashboard: ${localBack[0]}`);
+  const localNav = local.markup.match(/<a\b[^>]*class="[^"]*topbar-nav[^"]*"[^>]*>/);
+  assert(localNav, "the dashboard link is gone for a loopback viewer too");
+  assert(/href="\/"/.test(localNav[0]),
+         `the loopback link no longer reaches the dashboard: ${localNav[0]}`);
+  assert(/aria-label=/.test(localNav[0]),
+         "the link is unlabelled for a screen reader");
 
   const remote = loadPage(tpl, { local: false });
-  assertEqual(remote.markup.match(/<a\b[^>]*class="acp-back"/g), null,
+  assertEqual(remote.markup.match(/topbar-nav/g), null,
               "a remote viewer is still handed a link to a loopback-only page");
-  assert(/class="acp-back acp-back-local-only"/.test(remote.markup),
-         "the remote page dropped the product name entirely rather than " +
-         "rendering it as text");
   assert(!/href="\/"/.test(remote.markup),
          "something else on the remote page still points at the dashboard");
+
+  // The logo is what makes dropping the link above affordable, so it is the
+  // other half of this check rather than a separate one: it is served from
+  // `/static` — which *is* on the allowlist — and naming the product is not
+  // navigation, so it is unconditional. Both renderings are asserted on both
+  // arms; the stylesheet, not the template, decides which is on screen.
+  for (const [who, page] of [["loopback", local], ["remote", remote]]) {
+    assert(/class="[^"]*acp-banner[^"]*"/.test(page.markup),
+           `the ${who} page has no banner logo, so above 768 px it opens with ` +
+           "an unnamed topbar");
+    assert(/class="acp-wordmark"/.test(page.markup),
+           `the ${who} page has no wordmark, so below 768 px — where the ` +
+           "banner is 376 px of a 390 px row and is hidden — nothing names " +
+           "the product");
+  }
 });
 
 check("a workspace whose directory is gone is marked in the rail", async (tpl) => {
@@ -4899,18 +4922,86 @@ check("the status pill is the one thing in the topbar that cannot be squeezed", 
          "the pill may wrap, so a longer state ('reconnecting') breaks the topbar's " +
          "line box instead of staying one pill");
   // Something has to absorb the shortfall, or an unshrinkable pill just moves
-  // the overflow rather than removing it. The back link is the designated one.
-  const back = body(".acp-back");
-  assert(/min-width:\s*0/.test(back) && /text-overflow:\s*ellipsis/.test(back),
-         "nothing in the topbar is allowed to give way, so pinning the pill only " +
-         "moves the 44 px overflow onto whichever item is last in the line box");
-  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(back),
-         "the back link shrinks only in proportion to its width, so the cluster " +
-         "holding the pill — the widest item — gives up the most, which is the " +
-         "opposite of the intended order");
+  // the overflow rather than removing it. Step 1 is the cluster, and it needs
+  // BOTH halves: the factor, or it never gives and the deficit falls through
+  // to the logo (measured: 206 px at every width from 320 to 1600); and the
+  // floor, or it gives everything and the pill it contains is pushed off the
+  // right of a viewport that clips (measured: 97 px at 360 px, against a 95 px
+  // pill). Neither half is meaningful alone, so neither is optional.
+  const cluster = body("body:has(> .acp-shell) .topbar-cluster");
+  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(cluster),
+         "the status cluster has no shrink factor, so the meter inside it — " +
+         "the one item here that degrades gracefully — never gives way, and " +
+         "the shortfall is taken out of the logo instead");
+  assert(/min-width:\s*\d+px/.test(cluster),
+         "the status cluster has no floor, so it shrinks past its own status " +
+         "pill and pushes it off the right of a viewport that clips. `auto` " +
+         "and `min-content` do not count and are why this asks for a length: " +
+         "the meter's track is `width: 72px`, and a definite width is its own " +
+         "min-content contribution");
+
+  // Step 2, and it has two renderings — the row is only safe if *whichever* of
+  // them the width selects can give, so both are checked.
+  for (const sel of [".acp-wordmark", ".acp-banner"]) {
+    const logo = body(sel);
+    assert(/min-width:\s*0/.test(logo) && /text-overflow:\s*ellipsis/.test(logo),
+           `${sel} is not allowed to give way, so pinning the pill only moves ` +
+           "the 44 px overflow onto whichever item is last in the line box");
+    assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(logo),
+           `${sel} does not yield at all, so the deficit lands on an item ` +
+           "further down the order than the logo");
+    assert(!/flex-shrink:\s*99\d/.test(logo),
+           `${sel} takes a shrink factor so large it absorbs the whole ` +
+           "shortfall by weight — measured at 26 px of an 83 px product name " +
+           "while the meter beside it sat at its full width. Giving first " +
+           "must not mean giving alone");
+  }
+  // The banner is a replaced element. Shrinking its box without this stretches
+  // the wordmark drawn inside it, which is a distorted logo rather than the
+  // graceful give the shrink factor above was set for.
+  assert(/object-fit:\s*contain/.test(body(".acp-banner")),
+         "the banner's shortfall is taken as a squeeze rather than a scale");
+  // Step 3. Added with the `Main dashboard` link, which is ~126 px this row
+  // did not have to find before. The selector is compound on purpose: the
+  // dashboard renders `.topbar-nav` too, and a bare-class rule collapsed its
+  // `ACP` pill to 26 px — emoji, no word — in the dashboard's own topbar.
+  const nav = body(".acp-btn.topbar-nav");
+  assert(nav, "the dashboard link's shrink rule is gone, or no longer scoped " +
+              "to this page's button shape");
+  assert(/min-width:\s*0/.test(nav) && /text-overflow:\s*ellipsis/.test(nav),
+         "the dashboard link cannot give way, so once the cluster has reached " +
+         "its floor there is nothing left to take a 320 px window's deficit");
+  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(nav),
+         "the dashboard link never yields, which puts it ahead of the status " +
+         "pill in the order of sacrifice rather than behind the logo");
   assert(/min-width:\s*\d+px/.test(body(".acp-context-track")),
          "the context meter's track has no floor, so it collapses to nothing " +
-         "before the back link has finished giving way");
+         "before the logo has finished giving way");
+});
+
+check("the cross-surface link keeps its label in the dashboard's own topbar", () => {
+  // The stylesheet is shared, and this half of the pair lives on `/` — a row
+  // with a `flex-shrink: 0` banner and three clusters pinned at min-content,
+  // which makes any direct child of it the only thing in the row that can give
+  // way. This link became such a child, and took the whole deficit: measured
+  // at 42 px of a 65 px pill at 1280 px, and 26 px at 1100 px — a robot emoji
+  // and the letter "A". The row has always been wider than a narrow window and
+  // has always clipped on the right when it did not fit; what it must not do
+  // is quietly consume the one control added to make `/acp` findable.
+  const css = fs.readFileSync(STYLESHEET, "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [...css.matchAll(/([^{}]*)\{([^{}]*)\}/g)];
+  const bodyOf = (selector) => rules
+    .filter((m) => m[1].split(",").some((s) => s.trim().replace(/\s+/g, " ") === selector))
+    .map((m) => m[2]).join(";");
+  assert(/flex-shrink:\s*0/.test(bodyOf(".topbar-nav")),
+         "`.topbar-nav` has no shrink floor, so on `/` the ACP pill is the " +
+         "only item in the topbar that can give and is truncated to its emoji " +
+         "before any cluster beside it yields a pixel");
+  // The override that keeps `/acp`'s own row working must still outrank it, or
+  // fixing the dashboard freezes the link on the page that has no room for it.
+  assert(/flex-shrink:\s*(?!0\b)[1-9]/.test(bodyOf(".acp-btn.topbar-nav")),
+         "`/acp`'s override is gone, so the link cannot give way on the one " +
+         "row where the order of sacrifice needs it to");
 });
 
 check("the dashboard link is hidden from the remote viewer, not from a narrow window", () => {
@@ -4925,17 +5016,33 @@ check("the dashboard link is hidden from the remote viewer, not from a narrow wi
     if (!/display\s*:\s*none/.test(m[2])) continue;
     for (const sel of m[1].split(",")) hidden.push(sel.trim().replace(/\s+/g, " "));
   }
-  assert(!hidden.includes(".acp-back"),
-         "`.acp-back` is hidden outright, and *both* arms of the template carry " +
-         "that class — so a loopback viewer who merely narrowed a desktop window " +
-         "below 768 px loses the only link back to the dashboard. The width is " +
-         "not the viewer; `local` is, and the template already computes it");
+  assert(!hidden.includes(".topbar-nav"),
+         "`.topbar-nav` is hidden by a rule in the sheet, and the template " +
+         "renders it for every viewer it renders it for at all — so a loopback " +
+         "viewer who merely narrowed a desktop window below 768 px loses the " +
+         "only link back to the dashboard. The width is not the viewer; " +
+         "`local` is, and the template already computes it");
   // The positive control. Without it this check also passes against a sheet
-  // that hides nothing at all — a different regression, in which the remote
-  // arm's plain-text span keeps the space the 390 px topbar reclaimed from it.
-  assert(hidden.includes(".acp-back-local-only"),
-         "nothing hides the remote arm at narrow widths, so the tightest row on " +
-         "the page keeps a control that resolves to nothing for that viewer");
+  // that hides nothing at all — a different regression, in which the 390 px
+  // topbar keeps 376 px of banner and the row it was measured for is gone.
+  assert(hidden.includes(".acp-banner"),
+         "nothing hides the banner at narrow widths, so the tightest row on " +
+         "the page opens with a logo nearly as wide as the viewport");
+  // The other half of the swap. The two are alternates, not an element and an
+  // optional extra: if the wordmark is never hidden, both are on screen above
+  // the breakpoint and the page names itself twice.
+  assert(hidden.includes(".acp-wordmark"),
+         "the wordmark is not hidden anywhere, so above 768 px it renders " +
+         "beside the banner that replaced it");
+  // Also width-keyed, and for the same reason the other two are: it is what a
+  // wider row renders differently, not something a viewer is denied. Dropped
+  // rather than clipped because a clipped figure is not a coarser reading but
+  // a wrong one — "64%" cut to its first glyph is "6", which is a plausible
+  // percentage. The cluster's floor is sized for a row without it.
+  assert(hidden.includes(".acp-context-label"),
+         "the context meter's number is not dropped at narrow widths, so it " +
+         "is clipped there instead and reports a percentage that is not the " +
+         "one the agent sent");
 });
 
 // ----------------------------------------- the session tooltip's placement --
