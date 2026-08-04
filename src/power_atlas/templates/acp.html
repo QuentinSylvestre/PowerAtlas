@@ -1349,15 +1349,49 @@
     return RAIL_STATUS[value] || 'working';
   }
 
+  // `getMonth()` and its siblings return unpadded numbers, and the timestamp
+  // column is aligned by `font-variant-numeric: tabular-nums`
+  // (`.acp-rail-row-when`, style.css) — a one-digit month would break exactly
+  // the alignment that property is bought for.
+  function railPad2(n) {
+    return n < 10 ? '0' + n : String(n);
+  }
+
   function railWhen(value) {
-    // The store's timestamps are ISO strings. Anything else is shown as it came
-    // rather than parsed into an `Invalid Date`, which would read as a defect in
-    // the rail rather than in the record.
+    // Every provider writes this field in UTC: kiro-cli a `Z` with a
+    // nanosecond fraction (`2026-07-29T19:04:53.086294300Z`), claude-code a
+    // `+00:00` off `datetime.isoformat()`, kiro-ide a whole-second `Z`. The
+    // version this replaces sliced the digits out of the string
+    // (`text.slice(0, 10) + ' ' + text.slice(11, 16)`) and drew them as though
+    // they were local, so the rail was wrong by the machine's whole UTC offset:
+    // measured here, `2026-08-03T12:00:00Z` renders as 07:00 local, and every
+    // session after 19:00 local was filed under tomorrow's date.
+    //
+    // That was cosmetic while the rail only ever showed a timestamp. It stops
+    // being cosmetic once rows are grouped by day, because the group a row
+    // lands in and the time printed on it would disagree.
+    //
+    // `new Date` reads all three shapes — including the 9-digit fraction that
+    // 5,343 of the store's 5,958 records carry, which is past what the ISO
+    // grammar requires an engine to accept — so the fix costs one Date
+    // construction per row, against 30 rows a page.
     var text = String(value || '');
-    if (text.length >= 16 && text.charAt(10) === 'T') {
-      return text.slice(0, 10) + ' ' + text.slice(11, 16);
-    }
-    return text;
+    // Covers a missing `updated_at` (`data_kiro.py` falls back to `''`) and
+    // with it `null`, which matters more than it looks: `new Date(null)` is the
+    // epoch, so an absent timestamp would otherwise draw as a confident
+    // `1969-12-31` — a wrong answer that looks like a right one — instead of as
+    // nothing at all.
+    if (!text) return '';
+    var at = new Date(text);
+    var ms = at.getTime();
+    // `ms !== ms` is the NaN test, i.e. `Invalid Date`. Returning the raw
+    // string preserves the property the sliced version had and stated in its
+    // own comment: a record the rail cannot read is shown as it came, so the
+    // defect reads as the store's rather than as the rail's.
+    if (ms !== ms) return text;
+    return at.getFullYear() + '-' + railPad2(at.getMonth() + 1) + '-' +
+           railPad2(at.getDate()) + ' ' + railPad2(at.getHours()) + ':' +
+           railPad2(at.getMinutes());
   }
 
   function railMatches(group, session) {

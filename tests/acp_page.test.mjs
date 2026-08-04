@@ -290,7 +290,15 @@ function fakeStore({ workspaces = 12, sessions = 5 } = {}) {
       rows.push({
         id: `sess-w${w}-s${s}`,
         title: `workspace ${w} session ${s}`,
-        updated_at: `2026-07-${String(10 + (s % 20)).padStart(2, "0")}T09:${String(s).padStart(2, "0")}:00`,
+        // Shaped like the real store, suffix and all. A bare
+        // `2026-07-10T09:00:00` is not a value this endpoint can return —
+        // kiro-cli writes `Z` with a nine-digit fraction — and the difference
+        // is not cosmetic: JavaScript reads an offset-less date-time as *local*
+        // and a `Z` one as UTC, so a fixture without the suffix would have
+        // verified the rail against an instant five hours from the one the
+        // store actually holds, and against the wrong day either side of
+        // midnight.
+        updated_at: `2026-07-${String(10 + (s % 20)).padStart(2, "0")}T09:${String(s).padStart(2, "0")}:00.086294300Z`,
         availability: "available",
       });
     }
@@ -1718,6 +1726,37 @@ check("a session with no title renders a placeholder, not a blank row", async (t
               "positive control: a real title must not be replaced");
 });
 
+check("a rail timestamp is the reader's local time, not the store's UTC", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 3 });
+  // The three readings the fix has to survive: a real record, an absent one,
+  // and one the rail cannot parse.
+  store[0].sessions[0].updated_at = "2026-08-03T12:00:00.086294300Z";
+  store[0].sessions[1].updated_at = "";
+  store[0].sessions[2].updated_at = "not a timestamp";
+  const page = await railed(tpl, { store });
+  const when = page.all("acpRailGroups", ".acp-rail-row-when")
+                   .map((n) => n.textContent);
+
+  // Derived from the same instant rather than hardcoded, so the check states
+  // the property and holds wherever it is run. Pinning the literal
+  // "2026-08-03 07:00" would encode this author's UTC-5 machine and fail for
+  // everyone else — which is the same class of mistake as the bug being fixed,
+  // one timezone assumed to be the only one.
+  const at = new Date("2026-08-03T12:00:00.086294300Z");
+  const p2 = (n) => (n < 10 ? "0" + n : String(n));
+  const want = `${at.getFullYear()}-${p2(at.getMonth() + 1)}-${p2(at.getDate())}`
+             + ` ${p2(at.getHours())}:${p2(at.getMinutes())}`;
+  assertEqual(when[0], want,
+              "the rail drew the store's UTC digits instead of the reader's local time");
+
+  // Not "renders something harmless" — `new Date(null)` is the epoch, so the
+  // failure this guards is a confident `1969-12-31` that reads as a real date.
+  assertEqual(when[1], "",
+              "an absent updated_at drew a timestamp; new Date(null) is 1969-12-31");
+  assertEqual(when[2], "not a timestamp",
+              "a record the rail cannot read must be shown as it came, not as Invalid Date");
+});
+
 check("a listing that fails says so instead of leaving the rail blank", async (tpl) => {
   const page = await railed(tpl, {
     answer: (url) => (url.startsWith("/api/acp/sessions")
@@ -2551,7 +2590,7 @@ check("a created session reaches the rail without a Refresh", async (tpl) => {
   // there — availability, status, title — and adds none.
   store[0].sessions.unshift({
     id: "sess-brand-new", title: "brand new", availability: "held",
-    updated_at: "2026-08-03T12:00:00",
+    updated_at: "2026-08-03T12:00:00.086294300Z",
   });
   page.deliver({ type: "session", sessionId: "sess-brand-new", payload: {
     sessionId: "sess-brand-new", cwd: "C:\\work\\ws-0", created: true } });
