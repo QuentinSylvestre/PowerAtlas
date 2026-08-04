@@ -118,6 +118,20 @@
   <button class="acp-btn acp-rail-more" id="acpRailMore" type="button" hidden>More workspaces</button>
 </aside>
 
+<!-- The rail's width, as a control rather than a constant. Present above 768 px
+     only: below it the rail and the conversation are one pane at a time, so
+     there is nothing to divide and a handle would be a control that resizes the
+     viewport against itself.
+
+     `role="separator"` with `tabindex="0"` and the three `aria-value*`
+     attributes is the whole accessible splitter contract — it is what makes the
+     current width announceable and what makes arrow keys a real alternative to
+     dragging, for a reader who cannot drag a 7 px target at all. -->
+<div class="acp-rail-resize" id="acpRailResize" role="separator"
+     aria-orientation="vertical" aria-label="Session list width"
+     tabindex="0" aria-valuenow="288" aria-valuemin="220"
+     aria-valuemax="560"></div>
+
 <div class="acp-page">
   <div class="acp-toolbar">
     <!-- Opens the picker rather than creating anything. Every session created
@@ -275,6 +289,7 @@
   var railSearch = document.getElementById('acpRailSearch');
   var railNew = document.getElementById('acpRailNew');
   var railReload = document.getElementById('acpRailReload');
+  var acpRailEl = document.getElementById('acpRail');
   var railSettingsBtn = document.getElementById('acpRailSettings');
   var railSettingsMenu = document.getElementById('acpRailSettingsMenu');
   var railStatus = document.getElementById('acpRailStatus');
@@ -3219,6 +3234,122 @@
     if (railMode === 'date') { loadFlatPage(railFlatPage + 1); return; }
     loadGroupPage(railGroupPage + 1);
   });
+  // ---- the rail's width ----------------------------------------------------
+  //
+  // Everything below reaches for a DOM API this page does not otherwise use —
+  // `setProperty`, `getBoundingClientRect`, pointer capture, `document.body`,
+  // `window` — and every one of them is guarded. That is not defensiveness for
+  // its own sake: the page's checks run against a hand-built DOM stand-in with
+  // no layout engine and no `window`, so an unguarded call here throws while
+  // the script is still evaluating and takes the entire rail down with it,
+  // including the parts that have nothing to do with dragging.
+
+  var RAIL_WIDTH_KEY = 'pa_acp_rail_w';
+  var RAIL_W_MIN = 220;
+  var RAIL_W_MAX = 560;
+  var RAIL_W_DEFAULT = 288;
+  var railResize = document.getElementById('acpRailResize');
+
+  function railWidthCeiling() {
+    // Derived at every use rather than stored beside the width. A width is
+    // saved on whatever monitor was attached at the time, and reopening a
+    // 560 px rail on a 900 px window would leave the conversation 340 px —
+    // the failure lands precisely when a stored value is restored, which is
+    // why the clamp has to run on read and on resize, not only on drag.
+    var w = (typeof window !== 'undefined' && window.innerWidth) || 0;
+    if (!w) return RAIL_W_MAX;
+    return Math.max(RAIL_W_MIN, Math.min(RAIL_W_MAX, Math.floor(w / 2)));
+  }
+
+  function railSetWidth(px, persist) {
+    var w = Math.round(Number(px));
+    // `w !== w` is the NaN test: a mangled or hand-edited stored value must
+    // leave the rail at whatever width it already had rather than at `NaNpx`,
+    // which resolves to no width at all.
+    if (w !== w) return;
+    w = Math.max(RAIL_W_MIN, Math.min(railWidthCeiling(), w));
+    var style = shellEl && shellEl.style;
+    if (style && style.setProperty) style.setProperty('--acp-rail-w', w + 'px');
+    railResize.setAttribute('aria-valuenow', String(w));
+    railResize.setAttribute('aria-valuemax', String(railWidthCeiling()));
+    if (persist) railStore(RAIL_WIDTH_KEY, String(w));
+  }
+
+  function railWidthNow() {
+    return Number(railResize.getAttribute('aria-valuenow')) || RAIL_W_DEFAULT;
+  }
+
+  var railDragFrom = 0;
+  var railDragWidth = 0;
+  var railDragging = false;
+
+  function railDragClass(on) {
+    var body = document.body;
+    if (!body) return;
+    var base = String(body.className || '').replace(/\s*acp-resizing/g, '');
+    body.className = on ? (base + ' acp-resizing') : base;
+  }
+
+  railResize.addEventListener('pointerdown', function (ev) {
+    railDragging = true;
+    railDragFrom = ev.clientX || 0;
+    var box = acpRailEl && acpRailEl.getBoundingClientRect
+      ? acpRailEl.getBoundingClientRect() : null;
+    railDragWidth = box ? box.width : railWidthNow();
+    // Capture, so the drag keeps tracking once the pointer outruns a seven
+    // pixel handle — which it does on every drag that is not slow.
+    if (railResize.setPointerCapture && ev.pointerId !== undefined) {
+      railResize.setPointerCapture(ev.pointerId);
+    }
+    railDragClass(true);
+    if (ev.preventDefault) ev.preventDefault();
+  });
+
+  railResize.addEventListener('pointermove', function (ev) {
+    if (!railDragging) return;
+    railSetWidth(railDragWidth + ((ev.clientX || 0) - railDragFrom), false);
+  });
+
+  function railDragEnd(ev) {
+    if (!railDragging) return;
+    railDragging = false;
+    if (railResize.releasePointerCapture && ev && ev.pointerId !== undefined) {
+      try { railResize.releasePointerCapture(ev.pointerId); } catch (e) { /* gone */ }
+    }
+    railDragClass(false);
+    // Written once, at the end. Persisting on every `pointermove` would put a
+    // synchronous storage write on a 60 Hz event for a value that is only
+    // meaningful when the user stops moving.
+    railStore(RAIL_WIDTH_KEY, String(railWidthNow()));
+  }
+  railResize.addEventListener('pointerup', railDragEnd);
+  railResize.addEventListener('pointercancel', railDragEnd);
+
+  railResize.addEventListener('keydown', function (ev) {
+    // The whole reason the handle is focusable. A seven pixel target is not
+    // reachable by everyone, and a width that can only be set by dragging is a
+    // setting some readers simply do not have.
+    var step = ev.shiftKey ? 64 : 16;
+    var key = ev.key;
+    if (key === 'ArrowLeft') railSetWidth(railWidthNow() - step, true);
+    else if (key === 'ArrowRight') railSetWidth(railWidthNow() + step, true);
+    else if (key === 'Home') railSetWidth(RAIL_W_MIN, true);
+    else if (key === 'End') railSetWidth(railWidthCeiling(), true);
+    else return;
+    // Arrows would otherwise scroll the pane behind the handle at the same
+    // time as resizing it.
+    if (ev.preventDefault) ev.preventDefault();
+  });
+
+  // Restored through the same clamp a drag goes through, which is the point:
+  // the stored number is whatever was true on another monitor.
+  railSetWidth(Number(railStored(RAIL_WIDTH_KEY)) || RAIL_W_DEFAULT, false);
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('resize', function () {
+      railSetWidth(railWidthNow(), false);
+    });
+  }
+
   railReload.addEventListener('click', function () { railLoadFirstPage(); });
   railSettingsBtn.addEventListener('click', function () {
     if (!railSettingsMenu.hidden) { railCloseMenus(); return; }

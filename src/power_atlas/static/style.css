@@ -675,6 +675,9 @@ body:has(> .acp-shell) { height: 100dvh; }
    is an <a href="/"> and is navigation, so it stays at every width. The title
    is decoration on either arm and stays droppable. */
 .acp-back-local-only, .acp-title { display: none; }
+/* Below the breakpoint the rail and the conversation are one pane at a time,
+   so there is no boundary between them to drag. */
+.acp-rail-resize { display: none; }
 .acp-back-local-only { color: var(--text-dim); }
 
 .acp-rail { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; }
@@ -909,7 +912,21 @@ body:has(> .acp-shell) { height: 100dvh; }
      is room for it, and naming the product is the only thing it was ever for. */
   .acp-back-local-only { display: inline; }
   .acp-title { display: inline; }
-  .acp-rail { flex: 0 0 288px; border-right: 1px solid var(--border); padding: 14px 12px 14px 16px; }
+  /* The 288 px is now the fallback rather than the value. `--acp-rail-w` is set
+     on `.acp-shell` by the drag handle and restored from localStorage at load;
+     if neither ever runs — storage refused, script failed — the rail is exactly
+     the width it always was. */
+  .acp-rail { flex: 0 0 var(--acp-rail-w, 288px); border-right: 1px solid var(--border); padding: 14px 12px 14px 16px; }
+  /* Straddles the 1 px border with negative margins, so the grab area is seven
+     pixels wide while the rail's edge stays exactly where it was drawn. */
+  .acp-rail-resize { display: block; flex: 0 0 7px; margin: 0 -3px 0 -4px; position: relative; z-index: 2; cursor: col-resize; background: transparent; }
+  .acp-rail-resize:hover, .acp-rail-resize:focus-visible { background: var(--accent); opacity: 0.5; }
+  .acp-rail-resize:focus-visible { outline: none; }
+  /* While dragging, the pointer is outside the handle more often than in it, so
+     the cursor and the selection guard go on the document rather than on the
+     element under it — without this, a drag across the transcript selects the
+     conversation it is dragging over. */
+  body.acp-resizing { cursor: col-resize; user-select: none; }
   .acp-page { padding: 14px 16px; }
   .acp-log { flex-basis: 120px; }
   /* The picker stops being the whole screen once there is room for a card. The

@@ -2054,6 +2054,40 @@ check("the rail's chrome is gated on the device, not the window width", () => {
          + "40 px touch target the rail relies on");
 });
 
+check("the width handle is a splitter a keyboard can reach", async (tpl) => {
+  // What this harness can hold is the contract, not the drag: there is no
+  // layout engine, no pointer capture and no `window` here. The dragging itself
+  // was measured in a browser — 288 to 445 and persisted, floored at 220, two
+  // arrow presses moving 32 px, and a stored 9999 reopening at 450 on a 900 px
+  // window. What is pinned here is the part that silently rots: a splitter that
+  // loses `tabindex` or its value attributes still drags perfectly and becomes
+  // unreachable for anyone who cannot.
+  // Read from the template rather than through `page.el`. `byId` builds its
+  // stubs by regexing the markup for ids alone, so every element it hands back
+  // reports `null` for every attribute — asserting through it would pass
+  // against a handle with no role and no tabindex at all.
+  const src = fs.readFileSync(tpl, "utf8");
+  const handle = src.match(/<div[^>]*id="acpRailResize"[^>]*>/);
+  assert(handle, "the rail has no width handle in the markup at all");
+  for (const attr of ['role="separator"', 'tabindex="0"',
+                      'aria-orientation="vertical"', "aria-valuenow",
+                      "aria-valuemin", "aria-valuemax"]) {
+    assert(handle[0].includes(attr),
+           `the splitter is missing ${attr}, so it drags for a mouse and for `
+           + `nothing else: ${handle[0]}`);
+  }
+
+  const css = fs.readFileSync(STYLESHEET, "utf8")
+                .replace(/\/\*[\s\S]*?\*\//g, "").replace(/\s+/g, " ");
+  assert(/\.acp-rail \{[^}]*flex: 0 0 var\(--acp-rail-w, 288px\)/.test(css),
+         "the rail's width is not driven by the custom property, so the handle "
+         + "moves a number nothing reads — and the 288px fallback is what keeps "
+         + "the rail its old width when storage or the script is unavailable");
+  assert(/\.acp-rail-resize \{ display: none/.test(css),
+         "the handle is not hidden below the breakpoint, where the rail and the "
+         + "conversation are one pane at a time and there is no edge to drag");
+});
+
 check("a browser that refuses storage still renders the rail", async (tpl) => {
   // `localStorage` throws on read as well as on write when storage is
   // disabled, and the read happens while the page's script is still
