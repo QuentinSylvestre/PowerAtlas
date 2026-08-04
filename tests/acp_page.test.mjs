@@ -2220,6 +2220,47 @@ check("the poll moves the open-session counter with the dots", async (tpl) => {
          page.el("acpRailStatus").textContent);
 });
 
+check("the poll picks up a session renamed outside the page", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  const page = await railed(tpl, { store });
+  assertEqual(page.railTitles()[0], "workspace 0 session 0",
+              "the fixture's title never reached its row");
+
+  // Renamed in the agent, which is the only place renaming happens: nothing on
+  // this page did it and no frame announces it. `railRefreshStates` copied
+  // availability and status alone, and no other automatic path writes a title
+  // — so the row kept its old label not for a tick but for as long as the tab
+  // stayed open, until someone happened to press Refresh.
+  store[0].sessions[0].title = "renamed in the agent";
+  page.tick();
+  await page.settle();
+  assertEqual(page.railTitles()[0], "renamed in the agent",
+              "the rail still shows the old title, so a rename is visible only " +
+              "to whoever thinks to press Refresh");
+});
+
+check("the poll leaves a rail whose titles only look different alone", async (tpl) => {
+  // The other half of the same change. `changed` is what gates `renderRail`,
+  // and a diff computed against the raw field rather than the rendered fallback
+  // would set it on every tick for a pair of values that draw the same string —
+  // rebuilding the rail, and dropping focus, once a minute for no news. `null`
+  // is what the listing sends for a session carrying no title at all; `""` is
+  // what a later fetch of the same row may carry instead.
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].title = null;
+  const page = await railed(tpl, { store });
+  assertEqual(page.railTitles()[0], "untitled session",
+              "the empty-title fallback never rendered");
+
+  const row = page.railRows()[0];
+  store[0].sessions[0].title = "";
+  page.tick();
+  await page.settle();
+  assert(page.railRows()[0] === row,
+         "the poll rebuilt the rail over a title that renders identically " +
+         "either way — every node recreated, and focus dropped with them");
+});
+
 check("closing a session refreshes the rail instead of waiting out the tick", async (tpl) => {
   const store = fakeStore({ workspaces: 1, sessions: 1 });
   store[0].sessions[0].availability = "held";
@@ -2506,7 +2547,8 @@ check("a created session reaches the rail without a Refresh", async (tpl) => {
   assertEqual(page.railTitles().length, 2, "the fixture did not load as expected");
   // The agent has created it, so the store now has it. This is the state the
   // rail could not see: `renderRail` draws from `railGroups`, which only the
-  // paging loaders extend, and the 60 s poll updates availability alone.
+  // paging loaders extend, and the 60 s poll updates fields on rows already
+  // there — availability, status, title — and adds none.
   store[0].sessions.unshift({
     id: "sess-brand-new", title: "brand new", availability: "held",
     updated_at: "2026-08-03T12:00:00",

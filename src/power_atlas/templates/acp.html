@@ -1139,12 +1139,27 @@
   }
 
   function railRefreshStates(incoming) {
-    // Availability and a held row's status, and nothing else on the row.
-    // Titles, timestamps and the workspace's own fields are not what goes stale
-    // in seconds, and rewriting them would let a background poll rename or
-    // reorder a row under a thumb already travelling towards it. Returns
-    // whether anything moved, so a tick that finds the world unchanged does not
-    // rebuild the rail and does not throw away focus for nothing.
+    // Availability, a held row's status, and the row's title. Timestamps and
+    // the workspace's own fields stay out: they are not what goes stale in
+    // seconds, and rewriting them would let a background poll reorder a row
+    // under a thumb already travelling towards it. Returns whether anything
+    // moved, so a tick that finds the world unchanged does not rebuild the rail
+    // and does not throw away focus for nothing.
+    //
+    // `title` was on that excluded list, and the exclusion was wrong rather
+    // than conservative: no other automatic path writes one. `loadGroupPage(1)`
+    // builds rows and Refresh presses it, so a session renamed in the agent
+    // kept its old label here until someone pressed that button or reloaded —
+    // indefinitely, not for a tick. The reorder argument never covered titles
+    // anyway: a rename changes a row's label, not its identity or its place in
+    // the list, so a thumb already travelling towards a row still lands on the
+    // session it was aimed at, and `renderRail` ends in `railRestoreFocus`, so
+    // the rebuild does not cost a keyboard user their place either.
+    //
+    // One visible consequence, and it is the right one: `railMatches` filters
+    // on the title, so a row renamed out of an active filter leaves the list on
+    // the next tick. A filter that went on matching text the row no longer
+    // carries is the worse of the two.
     //
     // `status` earns its place on that list by being the other half of one
     // indicator: a held session that finishes its turn moves working ->
@@ -1160,7 +1175,15 @@
     for (i = 0; i < rows.length; i++) {
       fresh['s:' + rows[i].id] = {
         availability: railAvailability(rows[i].availability),
-        status: railRowStatus(rows[i].status)
+        status: railRowStatus(rows[i].status),
+        // The raw value and its rendered form, because the two halves need
+        // different ones. The write has to carry the raw title — `railMatches`
+        // filters on it — while the comparison has to be on the rendered text,
+        // or a row whose title is merely absent in a different way (`""` for
+        // `null`, a trailing space) reads as a change and rebuilds the whole
+        // rail on every tick for a difference nobody can see.
+        title: rows[i].title,
+        titleText: railTitleText(rows[i])
       };
     }
     var changed = false;
@@ -1179,6 +1202,10 @@
       if (next.availability === 'held' &&
           next.status !== railRowStatus(row.status)) {
         row.status = next.status;
+        changed = true;
+      }
+      if (next.titleText !== railTitleText(row)) {
+        row.title = next.title;
         changed = true;
       }
     }
@@ -1342,6 +1369,20 @@
     return hay.indexOf(railFilter) !== -1;
   }
 
+  // What a row's title reads as once drawn. Hoisted because four call sites now
+  // have to agree on it — the row, the row's menu label, the delete confirm, and
+  // `railRefreshStates`'s diff — and the diff is the one that makes disagreement
+  // expensive rather than merely untidy: a fallback it computed differently from
+  // the renderer would rebuild the rail once a minute over a string that renders
+  // identically both ways.
+  //
+  // 185 of the real store's 1,210 sessions carry neither a title nor a first
+  // prompt to fall back to, so a blank one is a normal reading and not an edge
+  // case; a row with nothing in it is unclickable in practice.
+  function railTitleText(session) {
+    return String(session.title || '').trim() || 'untitled session';
+  }
+
   function railRowNode(session, group) {
     var state = railAvailability(session.availability);
     var locked = state === 'locked';
@@ -1365,10 +1406,7 @@
     // an error the user cannot act on.
     row.disabled = locked;
 
-    // 185 of the real store's 1,210 sessions carry neither a title nor a first
-    // prompt to fall back to, so a blank one is a normal reading and not an
-    // edge case; a row with nothing in it is unclickable in practice.
-    var titleText = String(session.title || '').trim() || 'untitled session';
+    var titleText = railTitleText(session);
 
     // **A dot means this ACP is driving the session, and nothing else does.**
     // Its presence is the marker; its colour is then free to mean what the
@@ -1479,7 +1517,7 @@
     // The glyph carries no accessible name, so the label is the whole of it for
     // a screen reader — and it names the session, because a rail of forty rows
     // otherwise announces forty controls called "more".
-    var label = String(session.title || '').trim() || 'untitled session';
+    var label = railTitleText(session);
     button.setAttribute('aria-label', 'Actions for ' + label);
     button.setAttribute('aria-haspopup', 'menu');
     button.setAttribute('aria-expanded', 'false');
@@ -1539,7 +1577,7 @@
 
   function railDeleteSession(session, group) {
     if (railDeleting) return;
-    var label = String(session.title || '').trim() || 'untitled session';
+    var label = railTitleText(session);
     // `confirm` and not an in-page dialog, for the same reason the dashboard's
     // destructive actions use it (index.html's secret rotation and batch
     // launch): it is the one control on the web platform that cannot be
