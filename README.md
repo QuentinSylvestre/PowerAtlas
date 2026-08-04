@@ -173,6 +173,15 @@ default, each axis paging independently — and marks every visible row *availab
 or *locked* by another process. Selecting a row resumes that session and replays its history; sessions
 whose workspace directory no longer exists are marked so, since they cannot be resumed usefully.
 
+**The rail groups by workspace or by day.** The sliders button beside *Refresh* switches between them and
+remembers the choice. Grouped by day the rail shows every session across every workspace, newest first,
+cut into *Today*, *Yesterday* and dated groups — by **your** clock, not the machine's, so the grouping is
+right on a phone in another timezone. Either way each group shows three sessions and offers the rest, and
+any group can be collapsed by its heading. Timestamps show only what distinguishes them — a clock for
+today, a day for this year — with the full value on hover. On a desktop the rail's right edge drags to
+resize it, between 220 px and half the window, and that width is remembered too; arrow keys move it when
+the handle has focus.
+
 **Creating a session asks where first.** *New session* — in the rail and in the conversation toolbar —
 opens a picker offering the agent's own scratch folder, for general local work that lights up no
 workspace in the dashboard, or any workspace that already has kiro-cli sessions, with a filter box.
