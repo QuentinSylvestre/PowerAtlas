@@ -2242,7 +2242,12 @@
     // `aria-expanded` on the button already says this to a screen reader, and
     // saying it twice is one more stop with no information at the end of it.
     chevron.setAttribute('aria-hidden', 'true');
-    chevron.textContent = collapsed ? '›' : '⌄';
+    // Deliberately empty: the arrow is drawn by CSS off the toggle's own
+    // `aria-expanded`, so nothing here has to say which way it points. The
+    // glyph this replaces (U+2304) was measured sitting low against its label —
+    // the boxes were centred to the pixel, the ink was not, because a character
+    // is positioned by its font's metrics and those vary by font. A border
+    // rotated 45 degrees has no metrics to disagree with.
     toggle.appendChild(chevron);
 
     var name = document.createElement('span');

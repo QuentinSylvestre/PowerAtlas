@@ -720,7 +720,17 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-group-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: inherit; font-family: inherit; font-size: 12px; text-align: left; padding: 3px 4px; cursor: pointer; }
 .acp-rail-group-toggle:hover { background: var(--surface-hover); }
 .acp-rail-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.acp-rail-group-chevron { flex-shrink: 0; width: 10px; font-size: 10px; line-height: 1; color: var(--text-dim); }
+/* Drawn, not typed. The glyph this replaces (U+2304) measured perfectly centred
+   by the box model and visibly low against its label anyway: a character sits
+   where its font's metrics put it inside the em box, and those differ per font,
+   so no amount of `align-items` fixes it. Two borders rotated 45 degrees have no
+   metrics to disagree with, and the direction comes off the toggle's own
+   `aria-expanded` — so the arrow cannot say one thing while the button reports
+   another, which a JS-written glyph could. */
+.acp-rail-group-chevron { flex-shrink: 0; position: relative; width: 10px; height: 10px; }
+.acp-rail-group-chevron::before { content: ""; position: absolute; left: 2px; top: 2px; width: 5px; height: 5px; border-right: 1.5px solid var(--text-dim); border-bottom: 1.5px solid var(--text-dim); transform: rotate(45deg); transform-origin: center; }
+.acp-rail-group-toggle[aria-expanded="false"] .acp-rail-group-chevron::before { transform: rotate(-45deg); }
+.acp-rail-group-toggle:hover .acp-rail-group-chevron::before { border-color: var(--text); }
 /* Creates in this workspace. Quiet until pointed at, because it repeats once
    per group and ten insistent plus signs would compete with the titles. */
 .acp-rail-group-add { flex-shrink: 0; width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 14px; background: transparent; border-color: transparent; color: var(--text-dim); }
@@ -782,7 +792,17 @@ body:has(> .acp-shell) { height: 100dvh; }
    `.acp-rail-menu` for the panel itself — same surface, same border, same
    shadow — because it is the same kind of object as a row's menu and a second
    set of values for one would drift the first time either moved. */
-.acp-rail-settings-wrap { position: relative; flex-shrink: 0; }
+/* Anchored to the head, not to the button. The wrap carried `position:
+   relative` and the popup hung `right: 0` off it, which is correct only while
+   the button is the rightmost thing in the rail — and it stopped being that the
+   moment the head row learned to wrap, putting the button on line two at the
+   left. Measured: the popup's left edge landed at -32 px, off the viewport,
+   clipped by `overflow: hidden` on the body.
+   `.acp-rail-head` is full width whatever the row does, so a popup pinned to
+   its right edge stays inside the rail in both layouts, and `top: 100%` puts it
+   under the whole header rather than under one wrapped line of it. */
+.acp-rail-head { position: relative; }
+.acp-rail-settings-wrap { flex-shrink: 0; }
 /* Square, and sized to sit level with the text buttons beside it rather than
    to whatever an emoji font would have decided. The icon is centred by the
    flexbox instead of by a line-height guess, which is what kept the old glyph
@@ -793,7 +813,7 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-settings-icon { width: 15px; height: 15px; display: block; }
 /* Right-aligned rather than left: the button sits at the end of the head row,
    and a menu growing rightwards from it would leave the rail. */
-.acp-rail-settings { top: calc(100% + 4px); right: 0; min-width: 156px; }
+.acp-rail-settings { top: calc(100% - 2px); right: 0; min-width: 156px; }
 .acp-rail-menu-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); padding: 4px 10px 2px; }
 /* The label takes the room and the tick keeps its column, so the options read
    as one list rather than as two ragged ones. */
