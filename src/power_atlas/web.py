@@ -1279,6 +1279,42 @@ def _ws_origin_ok(ws: WebSocket) -> bool:
     return ws.headers.get("origin", "").lower() == expected.lower()
 
 
+def _launchers_without_env(launchers) -> list[dict]:
+    """Launcher entries with ``env`` removed, for anything that leaves this process.
+
+    A custom launcher's ``env`` is the one field in the config that routinely
+    holds production credentials — the live file carries `AUTH_TOKEN_PRODUCTION`
+    and `AUTH_TOKEN_STAGING` — and it used to travel on **three** paths that
+    nothing authenticates: `GET /api/launchers`, the `custom_launchers` key of
+    `GET /api/settings`, and the `|tojson` bootstrap that puts the whole list in
+    the page source of `/`. None of the three needs it: the tile partial never
+    renders `env`, and the only consumer is the edit modal, which now asks for
+    one launcher's env explicitly (`/api/launcher/env`).
+
+    **What this is and is not.** It removes the credentials from payloads that
+    are fetched routinely, cached by the browser, visible in `view-source:`, and
+    readable by any local process issuing a single GET with a loopback `Host`.
+    It does **not** authenticate anything — `same_origin_guard` never did, and a
+    local process that deliberately forges an `Origin` header can still reach
+    the POST below. The exposure goes from ambient to deliberate, which is worth
+    having and is not the same as fixed. The durable answer remains
+    reference-by-name indirection into the OS credential store, recorded as
+    shape (a) on `plans/ROADMAP.md`.
+
+    Shallow copies, and only the one key dropped: these dicts are the live
+    config objects, so mutating them here would strip `env` from the process's
+    own state and the next `save_config` would write the credentials out of the
+    file entirely.
+    """
+    out = []
+    for entry in launchers or ():
+        if isinstance(entry, dict):
+            out.append({k: v for k, v in entry.items() if k != "env"})
+        else:
+            out.append(entry)
+    return out
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     config = load_config()
@@ -1288,7 +1324,8 @@ async def index(request: Request):
         "active_launch_profile": profile,
         "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "autostart": autostart.is_enabled(),
-        "launchers": config.custom_launchers,
+        # Stripped: this one lands in the page source via `|tojson`.
+        "launchers": _launchers_without_env(config.custom_launchers),
         "peek_hotkey": config.peek_hotkey,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
@@ -3303,7 +3340,7 @@ async def api_settings():
         "port": config.port,
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
-        "custom_launchers": config.custom_launchers,
+        "custom_launchers": _launchers_without_env(config.custom_launchers),
         "autostart": autostart_enabled,
         "acp_max_sessions": config.acp_max_sessions,
         "acp_idle_ttl_seconds": config.acp_idle_ttl_seconds,
@@ -4180,7 +4217,39 @@ async def partials_launchers(request: Request):
 @app.get("/api/launchers")
 async def api_launchers():
     config = load_config()
-    return config.custom_launchers
+    return _launchers_without_env(config.custom_launchers)
+
+
+@app.post("/api/launcher/env")
+async def api_launcher_env(request: Request):
+    """One launcher's environment variables, for the edit modal only.
+
+    **POST for a read, deliberately.** `same_origin_guard`'s Origin/Referer
+    check is POST-only, and its docstring justifies that scope with "every other
+    GET here only reads" — meaning reads of things it is content to hand a
+    cross-origin page. Credentials are not that, so this route opts into the
+    stricter half rather than widening the guard. `/api/workspace-settings-bulk`
+    is the existing precedent for POST-to-read in this file.
+
+    Not on `_REMOTE_ALLOWED_PATHS`, which is default-deny, so a NetBird peer is
+    refused before routing ever happens — no code here depends on that, it is
+    stated so the omission reads as intentional.
+
+    Answers 404 for an unknown id rather than an empty env, because the caller
+    has to tell "no variables set" apart from "this launcher is gone": the
+    modal writes whatever it renders straight back on save, so the two must not
+    look alike.
+    """
+    body = await request.json()
+    lid = body.get("id")
+    if not isinstance(lid, str) or not lid:
+        return JSONResponse({"error": "A launcher id is required"}, status_code=400)
+    config = load_config()
+    entry = next((e for e in config.custom_launchers if e.get("id") == lid), None)
+    if entry is None:
+        return JSONResponse({"error": "No such launcher"}, status_code=404)
+    env = entry.get("env")
+    return {"env": env if isinstance(env, dict) else {}}
 
 
 @app.post("/api/launcher/create", response_class=HTMLResponse)
@@ -4275,12 +4344,31 @@ async def launcher_run(request: Request):
     body = await request.json()
     config = load_config()
     use_terminal = body.get("terminal", True)
+    # `env` is resolved from the stored launcher when the caller names one,
+    # rather than taken from the request body. Two reasons, and the first is
+    # load-bearing: the page no longer *has* it — `_launchers_without_env`
+    # strips `env` from every launcher payload this app serves, so the old
+    # `env: l.env` the tile sent would now arrive as `undefined` and every
+    # custom launcher would start without its variables. The second is that a
+    # launcher's credentials should not make a round trip through the browser
+    # to reach the process that already holds them. `/api/launcher/run-batch`
+    # has always resolved its entry this way; this brings the two into line.
+    #
+    # The body value stays as the fallback for a call that names no id, which
+    # is the shape the ad-hoc "run this command" path and `test_launcher_run`
+    # both use.
+    env = body.get("env")
+    lid = body.get("id")
+    if isinstance(lid, str) and lid:
+        stored = next((e for e in config.custom_launchers if e.get("id") == lid), None)
+        if stored is not None:
+            env = stored.get("env")
     result = launcher.launch_custom(
         name=body.get("name", ""),
         command=body.get("command", ""),
         custom_args=body.get("custom_args", ""),
         cwd=body.get("cwd", ""),
-        env=body.get("env"),
+        env=env,
         launch_profile=get_active_launch_profile(config),
         use_terminal=use_terminal,
     )

@@ -752,6 +752,134 @@ def test_launcher_run(mock_load, mock_launch, client, tmp_path):
     mock_launch.assert_called_once()
 
 
+# --- Launcher env is not served in bulk ------------------------------------
+#
+# A custom launcher's `env` holds production credentials on the real machine.
+# It used to travel on three unauthenticated paths; these pin that it travels
+# on none of them, and that the one route which does serve it is POST (so
+# `same_origin_guard`'s Origin check applies) and per-launcher.
+
+_LAUNCHER_WITH_SECRET = {
+    "id": "prod-1", "name": "Prod", "command": "app.exe",
+    "env": {"AUTH_TOKEN_PRODUCTION": "s3cret-value"},
+}
+
+
+@patch("power_atlas.web.load_config")
+def test_api_launchers_omits_env(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    resp = client.get("/api/launchers")
+    assert resp.status_code == 200
+    assert "s3cret-value" not in resp.text
+    assert "env" not in resp.json()[0]
+    # The rest of the entry still arrives — this strips one key, not the row.
+    assert resp.json()[0]["name"] == "Prod"
+
+
+@patch("power_atlas.web.load_config")
+def test_api_settings_omits_launcher_env(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    resp = client.get("/api/settings")
+    assert resp.status_code == 200
+    assert "s3cret-value" not in resp.text
+    assert "env" not in resp.json()["custom_launchers"][0]
+
+
+@patch("power_atlas.web.load_config")
+def test_index_bootstrap_omits_launcher_env(mock_load, client):
+    """The `|tojson` payload lands in page source, so this is the view-source case."""
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "s3cret-value" not in resp.text
+
+
+@patch("power_atlas.web.load_config")
+def test_launchers_without_env_does_not_mutate_config(mock_load, client):
+    """The stripped dicts must be copies of the live config, never the config.
+
+    `custom_launchers` entries are the process's own state. Popping `env` in
+    place would empty it here and the next `save_config` would write the
+    credentials out of the file entirely — turning a disclosure fix into data
+    loss.
+    """
+    from power_atlas.config import Config
+    cfg = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    mock_load.return_value = cfg
+    client.get("/api/launchers")
+    client.get("/api/settings")
+    client.get("/")
+    assert cfg.custom_launchers[0]["env"] == {"AUTH_TOKEN_PRODUCTION": "s3cret-value"}
+
+
+@patch("power_atlas.web.load_config")
+def test_launcher_env_route_returns_one_launchers_env(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    resp = client.post("/api/launcher/env", json={"id": "prod-1"})
+    assert resp.status_code == 200
+    assert resp.json() == {"env": {"AUTH_TOKEN_PRODUCTION": "s3cret-value"}}
+
+
+@patch("power_atlas.web.load_config")
+def test_launcher_env_route_404s_unknown_id(mock_load, client):
+    """404, not an empty env.
+
+    The modal writes back whatever it renders, so "this launcher is gone" and
+    "this launcher has no variables" must not look the same on the wire — an
+    empty answer to a stale id would let a save wipe a real launcher.
+    """
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    resp = client.post("/api/launcher/env", json={"id": "nope"})
+    assert resp.status_code == 404
+
+
+@patch("power_atlas.web.load_config")
+def test_launcher_env_route_rejects_missing_id(mock_load, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    assert client.post("/api/launcher/env", json={}).status_code == 400
+    assert client.post("/api/launcher/env", json={"id": ""}).status_code == 400
+
+
+@patch("power_atlas.web.launcher.launch_custom")
+@patch("power_atlas.web.load_config")
+def test_launcher_run_resolves_env_from_stored_launcher(mock_load, mock_launch, client):
+    """Running by id uses the stored env, ignoring whatever the body claims.
+
+    The page no longer holds `env`, so without this the launcher would start
+    with none — the regression this whole change would otherwise have shipped.
+    """
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config(custom_launchers=[dict(_LAUNCHER_WITH_SECRET)])
+    mock_launch.return_value = LaunchResult(True, None, "C:\\tmp")
+    resp = client.post("/api/launcher/run", json={
+        "id": "prod-1", "command": "app.exe", "env": {"SPOOFED": "from-the-body"},
+    })
+    assert resp.status_code == 200
+    assert mock_launch.call_args.kwargs["env"] == {"AUTH_TOKEN_PRODUCTION": "s3cret-value"}
+
+
+@patch("power_atlas.web.launcher.launch_custom")
+@patch("power_atlas.web.load_config")
+def test_launcher_run_without_id_still_takes_body_env(mock_load, mock_launch, client):
+    """The ad-hoc path (no stored launcher) keeps its existing contract."""
+    from power_atlas.config import Config
+    from power_atlas.launcher import LaunchResult
+    mock_load.return_value = Config()
+    mock_launch.return_value = LaunchResult(True, None, "C:\\tmp")
+    resp = client.post("/api/launcher/run", json={
+        "command": "npm", "env": {"NODE_ENV": "development"},
+    })
+    assert resp.status_code == 200
+    assert mock_launch.call_args.kwargs["env"] == {"NODE_ENV": "development"}
+
+
 @patch("power_atlas.web.icons.has_icon", return_value=False)
 @patch("power_atlas.web.load_config")
 def test_launcher_icon_fallback_terminal(mock_load, mock_has, client):
