@@ -3971,6 +3971,294 @@ check("the dashboard link is hidden from the remote viewer, not from a narrow wi
          "the page keeps a control that resolves to nothing for that viewer");
 });
 
+// ----------------------------------------- the session tooltip's placement --
+//
+// `index.html` places the session hover tooltip from JS, and nothing checked
+// where it landed. The vertical axis had flipped between above and below since
+// it was written; the horizontal axis had no constraint at all. `left` was set
+// to the hovered row's own left edge, and the box — up to the stylesheet's cap
+// wide — simply ran off the right of the window whenever the window was
+// narrower than that cap plus the row's offset. A screenshot of an ~833px
+// window is what found it, and neither pytest nor a substring check could have:
+// every literal involved was still in the file, correctly spelled.
+//
+// Only the tooltip's own region runs, on the same terms as the panel above.
+
+const TOOLTIP_NAMES = [
+  "TOOLTIP_MARGIN", "TOOLTIP_GAP", "_resetTooltipSlot", "loadTail", "hideTail",
+];
+
+function tooltipSource() {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+  const from = src.indexOf("var TOOLTIP_MARGIN=");
+  if (from < 0) throw new Error("index.html no longer defines TOOLTIP_MARGIN");
+  const to = src.indexOf("</script>", from);
+  if (to < 0) throw new Error("the tooltip's <script> element is unterminated");
+  const region = src.slice(from, to);
+  for (const name of TOOLTIP_NAMES) {
+    if (!region.includes(name)) {
+      throw new Error(
+        `the extracted region does not contain ${name}; the tooltip code has ` +
+        "moved and this harness is measuring less of it than it claims to");
+    }
+  }
+  return region;
+}
+
+// The stylesheet's own cap, read rather than repeated here. Keeping a box that
+// wide inside a window narrower than it is the entire job of the code below, so
+// a harness holding its own copy of the number could go on passing after the
+// sheet changed and the arithmetic stopped matching what a browser lays out.
+function cssTooltipMaxWidth() {
+  const css = fs.readFileSync(STYLESHEET, "utf8");
+  const rule = css.match(/\.session-tail-tooltip\s*\{([^}]*)\}/);
+  if (!rule) throw new Error("style.css no longer has a .session-tail-tooltip rule");
+  const cap = rule[1].match(/max-width:\s*(\d+)px/);
+  if (!cap) throw new Error(".session-tail-tooltip no longer caps its max-width");
+  return Number(cap[1]);
+}
+
+const CSS_TOOLTIP_MAX_WIDTH = cssTooltipMaxWidth();
+
+// The floor the placement owes every window edge. Asserted as a floor rather
+// than read out of the source: what was asked for is a margin of at least this,
+// and a check that parsed `TOOLTIP_MARGIN` back out would agree with the page
+// about any value it happened to hold, including zero.
+const GUTTER = 4;
+
+function px(v) {
+  const n = /^(-?\d+(?:\.\d+)?)px$/.exec(String(v ?? ""));
+  return n ? Number(n[1]) : null;
+}
+
+// The slot is filled by assigning the server's rendered partial to `innerHTML`
+// — the opposite of the acp rail's createElement rule, so `El`, which arms that
+// sink to throw, cannot stand in here and this section brings its own box. It
+// models the three things the placement reads back out of layout and nothing
+// else: offsetWidth, scrollHeight and getBoundingClientRect.
+class Box {
+  constructor(className) {
+    this.className = className;
+    this.style = {};
+    this.dataset = {};
+    this.childNodes = [];
+    this.parentNode = null;
+    this._natural = 0;   // width the content wants, before any cap applies
+    this._content = 0;   // height the content wants, before any cap applies
+  }
+  append(child) { child.parentNode = this; this.childNodes.push(child); return child; }
+  querySelector(sel) {
+    const want = String(sel).replace(/^\./, "");
+    for (const child of this.childNodes) {
+      if (String(child.className).split(/\s+/).includes(want)) return child;
+      const deep = child.querySelector(sel);
+      if (deep) return deep;
+    }
+    return null;
+  }
+  closest(sel) {
+    const want = String(sel).replace(/^\./, "");
+    for (let node = this; node; node = node.parentNode) {
+      if (String(node.className).split(/\s+/).includes(want)) return node;
+    }
+    return null;
+  }
+  // A browser reports 0 for both metrics on a `display:none` element. That is
+  // not a detail — it is the trap the placement has to step around, because the
+  // slot starts hidden and the old code measured it there and got zero. Model
+  // it and a placement that measures too early fails the width checks below.
+  get _hidden() {
+    for (let node = this; node; node = node.parentNode) {
+      if (node.style.display === "none") return true;
+    }
+    return false;
+  }
+  // Shrink-to-fit under a max-width: the natural width, capped by the
+  // stylesheet and then by whatever inline max-width the placement set.
+  // Deliberately not a layout engine — it does not grow the height back when
+  // the width shrinks, so no check here may assert on a reflowed height.
+  get offsetWidth() {
+    if (this._hidden) return 0;
+    const caps = [this._natural, CSS_TOOLTIP_MAX_WIDTH];
+    const inline = px(this.style.maxWidth);
+    if (inline !== null) caps.push(inline);
+    return Math.min(...caps);
+  }
+  get scrollHeight() { return this._hidden ? 0 : this._content; }
+  set innerHTML(html) {
+    this.childNodes = [];
+    if (!String(html).includes("session-tail-tooltip")) return;
+    const tip = new Box("session-tail-tooltip");
+    tip._natural = this._partialWidth;
+    tip._content = this._partialHeight;
+    this.append(tip);
+  }
+}
+
+// Node's own scheduler, kept out of the sandbox so a check can let the page's
+// fetch chain settle after firing the page's own deferred timer.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+async function hoverRow({ viewport, rowRect, naturalWidth, contentHeight }) {
+  const row = new Box("session-row");
+  row.dataset.sid = "3f9c";
+  row.dataset.provider = "claude-code";
+  row.dataset.cwd = "C:\\ws";
+  const contentEl = row.append(new Box("session-content"));
+  const slot = contentEl.append(new Box("session-tooltip-slot"));
+  // `.session-tooltip-slot { display: none }` in the stylesheet: the slot the
+  // page hands to the placement is a hidden one, every time.
+  slot.style.display = "none";
+  slot._partialWidth = naturalWidth;
+  slot._partialHeight = contentHeight;
+  contentEl.getBoundingClientRect = () => ({
+    left: rowRect.left,
+    right: rowRect.left + rowRect.width,
+    top: rowRect.top,
+    bottom: rowRect.top + rowRect.height,
+    width: rowRect.width,
+    height: rowRect.height,
+  });
+
+  const timers = [];
+  const sandbox = {
+    document: { documentElement: { clientWidth: viewport.width } },
+    innerWidth: viewport.width,
+    innerHeight: viewport.height,
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    clearTimeout: () => {},
+    encodeURIComponent,
+    fetch: () => Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve('<div class="session-tail-tooltip">tail</div>'),
+    }),
+    console: { log() {}, warn() {}, error() {} },
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(tooltipSource(), sandbox, { filename: "index.html#session-tooltip" });
+
+  sandbox.loadTail(contentEl);
+  // loadTail holds the fetch behind a hover delay; fire it, then let the
+  // promise chain that places the box run to completion.
+  for (const fire of timers.splice(0)) fire();
+  await settle();
+  return { sandbox, contentEl, slot, tooltip: slot.querySelector(".session-tail-tooltip") };
+}
+
+check("a tooltip too wide for the space to its right slides left, not off-screen", async () => {
+  // The reported window, near enough: the row starts 90px in and the stylesheet
+  // would give the tooltip 800, which lands its right edge past 833.
+  const view = 833;
+  const { slot, tooltip } = await hoverRow({
+    viewport: { width: view, height: 557 },
+    rowRect: { left: 90, width: 700, top: 78, height: 82 },
+    naturalWidth: 900,
+    contentHeight: 300,
+  });
+  const left = px(slot.style.left);
+  assert(left !== null, "the tooltip was never placed");
+  assert(left >= GUTTER,
+         `the tooltip's left edge sits ${left}px from the window, under the ` +
+         `${GUTTER}px floor`);
+  const gap = view - (left + tooltip.offsetWidth);
+  assert(gap >= GUTTER,
+         `the tooltip's right edge sits ${gap}px from the window edge, under ` +
+         `the ${GUTTER}px floor — this is the reported overflow`);
+  // Shifted, not shrunk. A placement that met the floor by narrowing the box
+  // would pass the assertion above while throwing away width the window had.
+  assertEqual(tooltip.offsetWidth, CSS_TOOLTIP_MAX_WIDTH,
+              "the tooltip gave up width the window could have given it");
+});
+
+check("a window narrower than the tooltip's own cap keeps both side gutters", async () => {
+  const view = 400;
+  const { slot, tooltip } = await hoverRow({
+    viewport: { width: view, height: 700 },
+    rowRect: { left: 90, width: 260, top: 60, height: 40 },
+    naturalWidth: 900,
+    contentHeight: 300,
+  });
+  const left = px(slot.style.left);
+  assertEqual(left, GUTTER,
+              "the tooltip did not fall back to the left gutter on a window " +
+              "too narrow to hold it at the row's own offset");
+  assertEqual(view - (left + tooltip.offsetWidth), GUTTER,
+              "the right gutter is not the one the left edge got");
+});
+
+check("a tooltip with room to spare stays aligned to the row it belongs to", async () => {
+  const { slot, tooltip } = await hoverRow({
+    viewport: { width: 1600, height: 900 },
+    rowRect: { left: 90, width: 1200, top: 120, height: 60 },
+    naturalWidth: 900,
+    contentHeight: 300,
+  });
+  assertEqual(px(slot.style.left), 90,
+              "the tooltip drifted off its row's left edge on a window with " +
+              "room for it there");
+  assertEqual(tooltip.style.maxWidth, "",
+              "an inline max-width was set on a window wide enough for the " +
+              "stylesheet's cap, which would beat that cap and let the " +
+              "tooltip sprawl wider than the sheet allows");
+});
+
+check("a tooltip opening below its row keeps the gutter above the window's floor", async () => {
+  const view = 600;
+  const { slot, tooltip } = await hoverRow({
+    viewport: { width: 1200, height: view },
+    rowRect: { left: 40, width: 900, top: 80, height: 60 },
+    naturalWidth: 700,
+    contentHeight: 2000,   // taller than any space on offer
+  });
+  assertEqual(slot.style.transform, "none",
+              "the tooltip flipped above a row with far more room below it");
+  const bottom = px(slot.style.top) +
+                 Math.min(tooltip.scrollHeight, px(tooltip.style.maxHeight));
+  assert(view - bottom >= GUTTER,
+         `the tooltip's bottom edge sits ${view - bottom}px from the window ` +
+         `edge, under the ${GUTTER}px floor`);
+});
+
+check("a tooltip opening above its row keeps the gutter below the window's top", async () => {
+  const { slot, tooltip } = await hoverRow({
+    viewport: { width: 1200, height: 600 },
+    rowRect: { left: 40, width: 900, top: 480, height: 60 },
+    naturalWidth: 700,
+    contentHeight: 2000,
+  });
+  assertEqual(slot.style.transform, "translateY(-100%)",
+              "the tooltip opened downward into the smaller of the two spaces");
+  // translateY(-100%) puts the box's own height above the `top` it was given.
+  const top = px(slot.style.top) -
+              Math.min(tooltip.scrollHeight, px(tooltip.style.maxHeight));
+  assert(top >= GUTTER,
+         `the tooltip's top edge sits ${top}px from the window edge, under ` +
+         `the ${GUTTER}px floor`);
+});
+
+check("hiding a capped tooltip gives back the cap the narrow window imposed", async () => {
+  const { sandbox, contentEl, slot, tooltip } = await hoverRow({
+    viewport: { width: 400, height: 700 },
+    rowRect: { left: 90, width: 260, top: 60, height: 40 },
+    naturalWidth: 900,
+    contentHeight: 300,
+  });
+  assertEqual(slot.style.visibility, "",
+              "the tooltip was placed and then left invisible — it is hidden " +
+              "only for the moment it is measured");
+  assert(px(tooltip.style.maxWidth) !== null,
+         "the narrow window put no cap on the tooltip at all");
+  sandbox.hideTail(contentEl);
+  assertEqual(slot.style.display, "none", "hiding left the tooltip on screen");
+  assertEqual(slot.style.left, "", "hiding left the placement's own offset behind");
+  assertEqual(tooltip.style.maxWidth, "",
+              "hiding kept the narrow window's cap, so the next hover after " +
+              "the window is widened opens a tooltip still squeezed to it");
+});
+
 // -------------------------------------------------------------------- main --
 
 const template = process.argv[2]
