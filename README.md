@@ -179,9 +179,11 @@ remembers the choice. Grouped by day the rail shows every session across every w
 cut into *Today*, *Yesterday* and dated groups — by **your** clock, not the machine's, so the grouping is
 right on a phone in another timezone. Either way each group shows three sessions and offers the rest, and
 any group can be collapsed by its heading. Timestamps show only what distinguishes them — a clock for
-today, a day for this year — with the full value on hover. On a desktop the rail's right edge drags to
-resize it, between 220 px and half the window, and that width is remembered too; arrow keys move it when
-the handle has focus.
+today, a day for this year. Hovering a row states all three of its facts at once, in either grouping
+mode: `[{workspace}]: {session title} - {date & time}`, so the project a row came from, a title too long
+for the rail's width and the full timestamp are one hover away. On a desktop the rail's right edge drags
+to resize it, between 220 px and half the window, and that width is remembered too; arrow keys move it
+when the handle has focus.
 
 **Creating a session asks where first.** *New session* — in the rail and in the conversation toolbar —
 opens a picker offering the agent's own scratch folder, for general local work that lights up no

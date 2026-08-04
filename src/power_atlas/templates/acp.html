@@ -2502,7 +2502,42 @@
     return String(session.title || '').trim() || 'untitled session';
   }
 
-  function railRowNode(session, flat) {
+  /**
+   * What a row says on hover: `[{workspace}]: {session title} - {date & time}`.
+   *
+   * One form for both grouping modes, because the three facts a row is built
+   * from are the same in both and only their *visible* half differs — grouped
+   * by workspace the header carries the project and the row carries a short
+   * clock; grouped by day the heading carries the date and the row carries
+   * neither. Either way the hover is the only place all three are stated
+   * together, and stating them the same way in both means a user who switches
+   * modes is not also switching tooltip grammars.
+   *
+   * The workspace is a parameter rather than a field read off the session,
+   * because it does not arrive the same way in the two shapes: the flat listing
+   * puts `name` on every row, the grouped one puts it on the group meta and
+   * leaves the rows without it. Passing it in is what lets one function serve
+   * both; reading `session.name` alone would silently drop the workspace from
+   * every grouped row.
+   *
+   * A part that is missing is dropped along with its separator rather than
+   * drawn empty. A session whose `updated_at` the rail cannot read would
+   * otherwise hover with a trailing ` - `, and one whose workspace is unknown
+   * with a bare `[]: ` — both of which read as a formatting defect rather than
+   * as a field the store did not have.
+   */
+  function railRowHoverText(session, workspace) {
+    // Unparseable timestamps come back from `railWhen` as they arrived, which
+    // is deliberate there and equally right here: a record the rail cannot read
+    // is shown as the store's defect, not hidden as the rail's.
+    var when = railWhen(session.updated_at);
+    var where = String(workspace || session.name || '').trim();
+    return (where ? '[' + where + ']: ' : '')
+         + railTitleText(session)
+         + (when ? ' - ' + when : '');
+  }
+
+  function railRowNode(session, flat, workspace) {
     var state = railAvailability(session.availability);
     var locked = state === 'locked';
     // The row and its menu are siblings inside a wrapper, and that shape is
@@ -2571,13 +2606,17 @@
     title.textContent = titleText;
     row.appendChild(title);
 
+    // Both modes hover the same three facts; only the *visible* half of the row
+    // differs below. Built before the branch so the two cannot drift apart
+    // again — they carried two different grammars until this was hoisted.
+    var note = railRowHoverText(session, workspace);
+
     if (flat) {
       // Grouped by day, the heading already carries the date, so the row keeps
       // only what the heading cannot say. The workspace and the exact time are
-      // moved into the title attribute rather than dropped: they are the two
-      // questions a list spanning every workspace raises, and the row has no
-      // width left to answer them in.
-      var note = (session.name || '') + ' · ' + railWhen(session.updated_at);
+      // in the hover text rather than dropped: they are the two questions a
+      // list spanning every workspace raises, and the row has no width left to
+      // answer them in.
       if (session.exists === false) {
         // The missing-folder warning loses the group header it used to sit on,
         // so it becomes the row's own. Dimmed rather than badged, because the
@@ -2588,19 +2627,18 @@
         row.className += ' acp-rail-row-gone';
         note += ' — folder missing, so opening this will usually fail';
       }
-      // Never over a locked row's own title. That one explains why the row
-      // cannot be pressed, which outranks saying where it came from.
-      if (!locked) row.title = note;
     } else {
       var when = document.createElement('span');
       when.className = 'acp-rail-row-when';
       when.textContent = railWhenShort(session.updated_at);
       row.appendChild(when);
-      // Full precision one hover away, so shortening the visible form loses
-      // nothing. Never over a locked row's own title, which explains why the
-      // row cannot be pressed and outranks saying when it last moved.
-      if (!locked) row.title = railWhen(session.updated_at);
     }
+
+    // Never over a locked row's own title. That one explains why the row cannot
+    // be pressed, which outranks both saying where it came from and saying when
+    // it last moved. Full precision one hover away is also what lets the
+    // visible timestamp above be shortened without losing anything.
+    if (!locked) row.title = note;
 
     row.addEventListener('click', function () {
       // A browser fires no click on a disabled button; this guard covers
@@ -3052,8 +3090,13 @@
     // and its rows are not in the tab order or the accessibility tree.
     if (railCollapsed['g:' + group.cwd]) return wrap;
 
+    // The workspace is handed down rather than read off the row: the grouped
+    // listing carries `name` on this meta and not on its sessions, so the rows
+    // have no other way to say which project they came from. Falls back to the
+    // path for the same reason the header does — a workspace whose folder name
+    // is empty still has to be nameable.
     for (var i = 0; i < sessions.length; i++) {
-      wrap.appendChild(railRowNode(sessions[i]));
+      wrap.appendChild(railRowNode(sessions[i], false, group.name || group.cwd));
     }
 
     if (group.has_more) {

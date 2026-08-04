@@ -2726,8 +2726,14 @@ check("a rail timestamp is the reader's local time, not the store's UTC", async 
   // day this year, a year before that. Pinning the visible text would make this
   // check start failing on its own the day after it was written, which is a
   // test that reports the calendar rather than the code.
-  assertEqual(page.railRows()[0].title, want,
-              "the rail drew the store's UTC digits instead of the reader's local time");
+  //
+  // The trailing segment only: the hover reads `[{workspace}]: {session title}
+  // - {date & time}`, and the two facts before the timestamp are the next
+  // check's subject. Splitting the two keeps this one reporting the timezone
+  // question it was written for rather than failing on a renamed fixture.
+  assert(String(page.railRows()[0].title).endsWith(" - " + want),
+         "the rail drew the store's UTC digits instead of the reader's local "
+         + `time: ${page.railRows()[0].title}`);
   assert(when[0] && when[0].length < want.length,
          `the row still spends the full ${want.length} characters on a timestamp: ${when[0]}`);
 
@@ -2737,6 +2743,57 @@ check("a rail timestamp is the reader's local time, not the store's UTC", async 
               "an absent updated_at drew a timestamp; new Date(null) is 1969-12-31");
   assertEqual(when[2], "not a timestamp",
               "a record the rail cannot read must be shown as it came, not as Invalid Date");
+});
+
+// The hover is the only place a rail row states all three of its facts at once:
+// grouped by workspace the visible row shows a title and a short clock and the
+// project is in a header that scrolls away; grouped by day it shows a title
+// alone. Both are drawn by `railRowNode`, which had two separate `title`
+// assignments in two different grammars — so the same session hovered as
+// `2026-07-10 09:00` in one mode and `alpha · 2026-07-10 09:00` in the other,
+// and neither named the session. Asserted in both modes from one fixture,
+// because one form for both is the property, not an implementation detail.
+check("a row hovers its workspace, title and time, identically in both modes",
+      async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].name = "alpha";
+  store[0].sessions[0].updated_at = "2026-07-10T09:00:00.086294300Z";
+  store[0].sessions[0].title = "the one session";
+
+  // Derived from the instant rather than written out, for the reason the check
+  // above states: a literal would pin this author's UTC offset.
+  const at = new Date("2026-07-10T09:00:00.086294300Z");
+  const p2 = (n) => (n < 10 ? "0" + n : String(n));
+  const want = "[alpha]: the one session - "
+             + `${at.getFullYear()}-${p2(at.getMonth() + 1)}-${p2(at.getDate())}`
+             + ` ${p2(at.getHours())}:${p2(at.getMinutes())}`;
+
+  const grouped = await railed(tpl, { store });
+  assertEqual(grouped.railRows()[0].title, want,
+              "the workspace-grouped row does not hover "
+              + "`[{workspace}]: {session title} - {date & time}`");
+
+  // The load-bearing half. The grouped listing carries the workspace name on
+  // the group meta and not on its rows, so this is the mode where the name has
+  // to be handed down into the row; the flat listing puts it on the row itself
+  // and would pass on its own.
+  const byDay = await railed(tpl, { store, stored: { pa_acp_group: "date" } });
+  assertEqual(byDay.railRows()[0].title, want,
+              "the two grouping modes hover the same session differently");
+});
+
+check("a hover drops a field the store did not have, not just its value",
+      async (tpl) => {
+  // A session with no readable timestamp would otherwise hover with a trailing
+  // ` - ` and nothing after it, which reads as a formatting defect rather than
+  // as a field the store is missing.
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].name = "alpha";
+  store[0].sessions[0].updated_at = "";
+  store[0].sessions[0].title = "the one session";
+  const page = await railed(tpl, { store });
+  assertEqual(page.railRows()[0].title, "[alpha]: the one session",
+              "an unset timestamp left its separator behind");
 });
 
 // ---- grouped by day -------------------------------------------------------
@@ -2807,6 +2864,11 @@ check("a day row carries no timestamp column, but still says where it is from",
   const row = page.railRows()[0];
   assert(/alpha/.test(row.title),
          `the row does not name the workspace it came from: ${row.title}`);
+  // And the session it is, which the visible row does say — but the hover is
+  // what a truncated title is read from, so dropping it there would make the
+  // long-title case the one with no answer.
+  assert(/late tonight/.test(row.title),
+         `the row's hover does not name the session: ${row.title}`);
 });
 
 check("a day shows three rows and offers exactly the rest", async (tpl) => {
