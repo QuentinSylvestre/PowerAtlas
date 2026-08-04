@@ -4,9 +4,12 @@
 > `ROADMAP.md` so that file stays forward-looking. **Nothing here is a to-do.** Each entry records what
 > was tried, what killed it, and the condition that would justify reopening it.
 >
-> Versions matter. Every measurement below is against Claude Code `2.1.219` and kiro-cli
-> `2.14.0`/`2.14.1`, both self-updating binaries — a verdict is only as current as the version it was
-> measured on. Claims are marked *verified* (observed on this machine, with logs) or *unverified*
+> Versions matter, and this file no longer has one pin. The 2026-07-24/25 entries are against Claude
+> Code `2.1.219` and kiro-cli `2.14.0`/`2.14.1`; the entries added on 2026-08-04 are against Claude
+> Code `2.1.221` and kiro-cli `2.16.0`. **Both binaries self-update without asking** — kiro-cli moved
+> twice mid-project and one measured behaviour regressed across a bump — so a verdict is only as
+> current as the version it was measured on, and **every entry states its own**. Do not read a version
+> off this header. Claims are marked *verified* (observed on this machine, with logs) or *unverified*
 > (inferred from shipped code or docs, not executed).
 >
 > Raw wire logs, captured payloads and benchmark scripts live outside the repo at
@@ -93,6 +96,38 @@
 - **Two further design collisions**, recorded so they are not rediscovered: row click already means multi-select for batch launch (`session_row.html:1` → `handleItemClick` in `index.html`), so "click a row to focus" conflicts with existing behaviour; and the live dot does not imply a resolvable pid, because `_session_status`'s cwd+recency fallback gate (`web.py`) lights a row live with no session-id match at all.
 
 **Would reopen if**: sessions stop sharing a terminal window — either because the user's habit changes to one window per session, or because `launcher.py` starts forcing a new window per launch. Cheapest signal, re-runnable in seconds: enumerate visible windows, map each live provider process up its ancestry, and check whether distinct sessions resolve to distinct `hwnd`s. If they do, window-level focus becomes exact and the feature is worth ~a day. Tab-level targeting would additionally need a session→tab-index mapping (UI Automation over Terminal's tab elements, or `wt -w <id> focus-tab -t <n>`), which does not exist for terminal-started sessions and is the reason option C was not pursued.
+
+---
+
+## Closed — driving a session already live in someone's terminal, on any provider
+
+Two roadmap items were retired into this one on 2026-08-04 — *Visualize/interact with opened
+sessions from PowerAtlas* and *Local network access to mimic claude code remote control*. Both had
+one open half left, and it was the same half in each: taking over a session another process already
+owns. That half is now closed on every known path, for **both** providers.
+
+- **kiro-cli — closed since 2026-07-24**, and unchanged: `kiro-cli chat` is itself an ACP wrapper whose grandchild holds `~\.kiro\sessions\cli\<sid>.lock`, and a second `session/load` is hard-refused. Detail in *Partly closed — remote control for kiro-cli* above.
+- **Claude Code — closed 2026-08-04**, and this is the part that is new. `messagingSocketPath` was the only independent lead and it is a stub; see the section below.
+- **What shipped instead, and where it is documented**: PowerAtlas drives sessions *it hosts* over ACP, plus exited sessions it resumes, reachable from a phone over NetBird behind a device secret. That is product, so it lives in `README.md` § *Agent sessions* and § *Remote access* rather than on the roadmap.
+- *One live consequence, deliberately kept visible on the roadmap rather than filed here*: the device cookie is the sole authorization layer, because no NetBird policy restricts this host. See the `[SECURITY — accepted, 2026-08-03]` item in `plans/ROADMAP.md`.
+
+**Would reopen if**: a provider ships a supported way in — a documented multi-client attach for
+kiro-cli, or Claude Code assigning `messagingSocketPath`. Both re-checks are seconds and are
+described in their own sections.
+
+---
+
+## Declined — a trash tier for session deletion
+
+Considered and declined 2026-08-03 while single-session delete was built; moved off `ROADMAP.md`
+2026-08-04 because a decided question is not pending work.
+
+- **Why deleting straight out is defensible today.** `_acp_delete_session` (`web.py`) stages a rename before it unlinks anything, so a live holder aborts the whole operation with nothing changed. The failure mode is "refused", never "half gone". What that does not protect against is the user meaning a *different row* — which is the case a trash tier would cover, and the reason this is declined rather than rejected.
+- *If it comes back, the cost is the lifecycle, not the move*: renaming into a `.trash/` directory is trivial and is nearly what the staging step already does. Retention is the part nobody maintains — and it needs checking that kiro-cli's own scanner does not pick the folder back up, which is **unverified**: `data_kiro._iter_meta_files` uses `os.scandir` on the flat directory and would not recurse, but kiro-cli's own reader has not been read.
+
+**Would reopen if**: bulk deletion ships. One mistaken click costing 200 sessions is a different
+proposition from one costing a single row, and the roadmap's bulk-deletion item is the trigger — not
+this entry on its own.
 
 ---
 
