@@ -1644,6 +1644,30 @@
   var RAIL_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+  /**
+   * The row's own version of a timestamp: only the part that distinguishes it.
+   *
+   * `2026-08-03 19:07` is sixteen characters, and measured in the rail at its
+   * 288 px default it took 110 px of the ~225 px a row has — nearly half the
+   * width, spent on a year and a month that are the same for almost every row
+   * on screen, while the titles beside it were being cut at eight words. Today
+   * needs only a clock; this year needs only a day; older needs a year, short.
+   * The full value stays one hover away on the row's `title`.
+   */
+  function railWhenShort(value) {
+    var at = railParse(value);
+    if (!at) return String(value || '');
+    var now = new Date();
+    if (at.getFullYear() === now.getFullYear()) {
+      if (at.getMonth() === now.getMonth() && at.getDate() === now.getDate()) {
+        return railPad2(at.getHours()) + ':' + railPad2(at.getMinutes());
+      }
+      return RAIL_MONTHS[at.getMonth()] + ' ' + at.getDate();
+    }
+    return RAIL_MONTHS[at.getMonth()] + ' ' + at.getDate() + ' '
+         + String(at.getFullYear()).slice(2);
+  }
+
   /** The local calendar day an instant falls in, as a stable key. */
   function railDayKey(at) {
     return at.getFullYear() + '-' + railPad2(at.getMonth() + 1) + '-' +
@@ -1825,8 +1849,12 @@
     } else {
       var when = document.createElement('span');
       when.className = 'acp-rail-row-when';
-      when.textContent = railWhen(session.updated_at);
+      when.textContent = railWhenShort(session.updated_at);
       row.appendChild(when);
+      // Full precision one hover away, so shortening the visible form loses
+      // nothing. Never over a locked row's own title, which explains why the
+      // row cannot be pressed and outranks saying when it last moved.
+      if (!locked) row.title = railWhen(session.updated_at);
     }
 
     row.addEventListener('click', function () {

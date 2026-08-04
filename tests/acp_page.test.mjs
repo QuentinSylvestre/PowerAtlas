@@ -1816,8 +1816,15 @@ check("a rail timestamp is the reader's local time, not the store's UTC", async 
   const p2 = (n) => (n < 10 ? "0" + n : String(n));
   const want = `${at.getFullYear()}-${p2(at.getMonth() + 1)}-${p2(at.getDate())}`
              + ` ${p2(at.getHours())}:${p2(at.getMinutes())}`;
-  assertEqual(when[0], want,
+  // Asserted on the row's `title`, because the visible column carries a short
+  // form whose shape depends on how long ago the instant was — a clock today, a
+  // day this year, a year before that. Pinning the visible text would make this
+  // check start failing on its own the day after it was written, which is a
+  // test that reports the calendar rather than the code.
+  assertEqual(page.railRows()[0].title, want,
               "the rail drew the store's UTC digits instead of the reader's local time");
+  assert(when[0] && when[0].length < want.length,
+         `the row still spends the full ${want.length} characters on a timestamp: ${when[0]}`);
 
   // Not "renders something harmless" — `new Date(null)` is the epoch, so the
   // failure this guards is a confident `1969-12-31` that reads as a real date.

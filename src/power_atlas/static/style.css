@@ -688,7 +688,14 @@ body:has(> .acp-shell) { height: 100dvh; }
    labelled way to create a session on a phone. It keeps its label at every
    width; the filter box beside it is the elastic one. */
 .acp-rail-new { flex-shrink: 0; }
-.acp-rail-search { flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 7px 10px; }
+/* `min-width` is what makes `flex-wrap` on the head row mean anything. With
+   `min-width: 0` the box squeezed instead of wrapping: measured at the rail's
+   288 px default it rendered **45 px wide**, showing "Filte" of its own
+   placeholder, because create + Refresh + settings had already taken 214 of the
+   264 available. 140 px is wider than the leftovers, so the box drops to its own
+   line at the default width and rejoins the row once the rail is dragged past
+   about 430 px — which is the adaptive behaviour the wrap was chosen for. */
+.acp-rail-search { flex: 1; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 7px 10px; }
 .acp-rail-search:focus { outline: none; border-color: var(--accent); }
 .acp-rail-search:disabled { opacity: 0.45; cursor: default; }
 /* Reserves its line whether or not it has text, so the rows below do not jump
@@ -722,7 +729,13 @@ body:has(> .acp-shell) { height: 100dvh; }
    and the row is still selectable, so this is a warning and not a refusal. */
 .acp-rail-group-missing { flex-shrink: 0; font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; color: #fbbf24; border: 1px solid currentColor; border-radius: 10px; padding: 1px 6px; }
 .acp-rail-group-gone .acp-rail-row-title { color: var(--text-muted); }
-.acp-rail-group-more { align-self: flex-start; margin: 2px 0 0 4px; font-size: 11px; padding: 4px 10px; }
+/* A quiet line of text, not a button. It sits once per group and repeats down
+   the rail, and drawn with the surface and border `.acp-btn` gives it, seven of
+   them competed with the session titles they exist to reveal. Indented to the
+   rows' text column so it reads as the end of the list rather than as a control
+   floating beside it. */
+.acp-rail-group-more { align-self: flex-start; margin: 0 0 2px 0; font-size: 11px; padding: 3px 8px 3px 26px; background: transparent; border-color: transparent; color: var(--text-muted); }
+.acp-rail-group-more:hover:not(:disabled) { background: transparent; border-color: transparent; color: var(--accent); text-decoration: underline; }
 /* The row and its actions menu are siblings, because the row is a <button> and
    a <button> cannot contain one. `position: relative` is what the menu popup
    below is anchored to, so it opens against its own row rather than against the
@@ -771,7 +784,7 @@ body:has(> .acp-shell) { height: 100dvh; }
    to whatever an emoji font would have decided. The icon is centred by the
    flexbox instead of by a line-height guess, which is what kept the old glyph
    sitting low. */
-.acp-rail-settings-btn { width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
+.acp-rail-settings-btn { width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
 .acp-rail-settings-btn:hover { color: var(--accent); }
 .acp-rail-settings-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
 .acp-rail-settings-icon { width: 15px; height: 15px; display: block; }
