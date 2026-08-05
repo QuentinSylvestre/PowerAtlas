@@ -112,6 +112,19 @@
 **Source**: claude-code session 6ab328ed-b9e7-41e2-8e66-2efe2a1a3afa (2026-07-28), line 87; fixed in commit 09cbbe1 | **Verified**: 2026-07-28
 **Evidence-quote**: "The real design smell is that `_workspace_status` aggregates *raw signals* rather than *resolved session statuses*. If it aggregated `_session_status` outputs, precedence would be decided once, per session"
 
+### A new context variable added to a shared Jinja partial must be added at EVERY route that renders it
+
+**Why**: `partials/workspace_card.html` is rendered from four call sites in `web.py` (verified 2026-08-05: lines 3015, 3048, 3300, 3329). A session added `hover_launchers` to the `partials_workspaces` route only; the `search` route's two render calls omitted it, so `{% for hl in hover_launchers %}` iterated an undefined and silently produced zero hover buttons. 862 pytest checks passed and the change was committed and pushed (`dde7de5`); the user found the defect as the opening turn of the next session (fixed in `e4fced3`). Jinja's default undefined is falsy-iterable, so neither the template nor the suite can see the omission — only a call-site census can.
+**How to apply**: When adding a variable to a template's render context, grep for every `get_template("<that template>").render(` call site before running tests, and add the variable at each. Do not rely on the pytest suite or `tests/acp_page.test.mjs` to catch a missing context key — a green suite is compatible with the bug.
+**Source**: kiro-cli sessions 848ea02d (introduced, `dde7de5`) and ff0b8d69 (reported and fixed, `e4fced3`), 2026-07-29/31 | **Verified**: 2026-08-05 (sweep, cross-validated — all four call sites confirmed in current `web.py`)
+**Evidence-quote**: "When searching for workspaces, quick provider actions do not show on hover, why?"
+
+### `launcher.py` passes no `env=`, so launched sessions inherit the parent's `CLAUDE_CODE_*` markers
+
+**Why**: Measured on the live tray process 2026-08-03: the PowerAtlas process carries `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID` and `CLAUDE_PID`, inherited from whichever Claude Code session started it. `launcher.py:191-192` calls `subprocess.Popen(cmd, **kwargs)` with no `env=` (verified 2026-08-05: no `env=` on any Popen in the file), so every session launched from the quick-access button receives that whole block — which is why a launched Claude reports transcript saving off. It leaks more than a nested flag: `CLAUDE_CODE_SESSION_ID` hands the child a *specific other session's* identity.
+**How to apply**: When debugging launched-session identity or transcript-persistence problems, check `launcher.py`'s `Popen` call for an `env=` argument first — as of 2026-08-05 there is none. A fix must scrub the `CLAUDE_CODE_*` / `CLAUDECODE` / `CLAUDE_PID` keys from the child environment rather than relying on the child to ignore them. Before trusting a recollection that something was fixed, run `git log -- <the file the fix would touch>`: commit `a4f8c72` (2026-07-28) is a `docs(roadmap)` commit touching only `plans/ROADMAP.md` — it recorded the problem without implementing anything, which reads like a fix in `git log`.
+**Source**: session 361b50c5 (2026-08-03), PEB measurement of the live tray process | **Verified**: 2026-08-05 (sweep, cross-validated — code and commit both re-checked)
+
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
