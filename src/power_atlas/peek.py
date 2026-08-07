@@ -191,7 +191,9 @@ class PeekWindow:
             else:
                 win.show()
                 win.toggle_fullscreen()
-            win.evaluate_js("if(typeof doRefresh==='function') doRefresh()")
+            # Navigate back to the dashboard root so that any /acp navigation
+            # from a previous show is cleared before refreshing content.
+            win.evaluate_js("if(location.pathname!=='/'){location.href='/';}else if(typeof doRefresh==='function'){doRefresh()}")
 
     def _hide(self) -> None:
         win = self._window  # local capture for thread safety
