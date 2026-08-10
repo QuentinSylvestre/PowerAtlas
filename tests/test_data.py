@@ -1833,6 +1833,28 @@ class TestParseSessionFileHeadScan:
         assert first_prompt == "survived"
 
 
+class TestParseSessionFileTailScan:
+    """A rename must be found even when it precedes the session's last real turn."""
+
+    def test_rename_past_head_scan_before_last_turn_still_wins(self, claude_project):
+        # The rename sits past the head scan's 500-line cap, and a real user/
+        # assistant turn follows it — the exact shape that let the reverse
+        # tail scan break on that turn before ever reaching the rename.
+        p = _claude_session(claude_project, "g", [
+            b'{"type":"custom-title","customTitle":"original-name"}',
+            b'{"type":"ai-title","aiTitle":"Auto"}',
+            b'{"type":"user","message":{"content":"first prompt"}}',
+            *[b'{"type":"assistant","message":{"content":"filler"}}'] * 510,
+            b'{"type":"custom-title","customTitle":"renamed-name"}',
+            b'{"type":"user","message":{"content":"say hi"}}',
+            b'{"type":"assistant","message":{"content":"hi there"}}',
+        ])
+        title, _fp, last_prompt, last_reply, _ts = data_claude._parse_session_file(p)
+        assert title == "renamed-name"
+        assert last_prompt == "say hi"
+        assert last_reply == "hi there"
+
+
 class TestParseCache:
     """load_sessions must re-parse only files whose (mtime, size) changed."""
 

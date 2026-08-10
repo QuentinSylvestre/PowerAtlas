@@ -388,6 +388,27 @@ def _parse_session_file(jsonl_path: Path, st: os.stat_result | None = None) -> t
 
     # Parse tail for last user/assistant messages and custom-title
     tail_lines = tail_text.splitlines()
+
+    # custom-title has no natural stopping point tied to real message content —
+    # a rename can land chronologically before the session's last real turn,
+    # which the message-scan loop below would hit first and break on. Scanning
+    # for it in its own pass (cheap: a substring pre-filter before the JSON
+    # parse, same trick the head-scan's "title" filter above uses) finds the
+    # true most-recent rename over the whole tail regardless of where that
+    # break fires, instead of silently reverting to the head-scanned name.
+    for line in reversed(tail_lines):
+        if "custom-title" not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if obj.get("type") == "custom-title":
+            ct = obj.get("customTitle", "")
+            if ct:
+                custom_title = ct
+            break
+
     for line in reversed(tail_lines):
         if last_prompt and last_reply_tail:
             break
@@ -398,11 +419,7 @@ def _parse_session_file(jsonl_path: Path, st: os.stat_result | None = None) -> t
 
         obj_type = obj.get("type", "")
 
-        # custom-title can appear anywhere — last one wins (most recent rename)
         if obj_type == "custom-title":
-            ct = obj.get("customTitle", "")
-            if ct:
-                custom_title = ct
             continue
 
         if obj_type == "assistant" and not last_reply_tail:
