@@ -807,14 +807,34 @@ function loadPage(templatePath, opts = {}) {
       if (sockets.length === 0) throw new Error("the page opened no socket");
       return sockets[sockets.length - 1];
     },
+    /** The Nth socket the page has opened, 0-indexed — the sub-agent panel
+     *  opens a second, independent WebSocket (`subWs`) the first time a pill
+     *  is pressed, and checks on it need to address the main socket (index 0)
+     *  and the sub-agent one (index 1) separately rather than always getting
+     *  whichever opened last. */
+    socketAt(i) {
+      if (!sockets[i]) throw new Error(`the page has not opened socket #${i}`);
+      return sockets[i];
+    },
     open() {
       const s = page.socket();
       s.readyState = FakeWs.OPEN;
       if (!s.onopen) throw new Error("the page set no onopen handler");
       s.onopen();
     },
+    /** Like `open()`, for a socket other than the last one opened. */
+    openAt(i) {
+      const s = page.socketAt(i);
+      s.readyState = FakeWs.OPEN;
+      if (!s.onopen) throw new Error("the page set no onopen handler");
+      s.onopen();
+    },
     deliver(frame) {
       page.socket().onmessage({ data: JSON.stringify(frame) });
+    },
+    /** Like `deliver()`, targeted at a socket other than the last one opened. */
+    deliverTo(i, frame) {
+      page.socketAt(i).onmessage({ data: JSON.stringify(frame) });
     },
     click(id) { page.el(id).dispatch("click"); },
     type(text) { page.el("acpPrompt").value = text; },
@@ -5475,6 +5495,188 @@ check("hiding a capped tooltip gives back the cap the narrow window imposed", as
   assertEqual(tooltip.style.maxWidth, "",
               "hiding kept the narrow window's cap, so the next hover after " +
               "the window is widened opens a tooltip still squeezed to it");
+});
+
+// ---------------------------------------------- the agent bar + debug log --
+
+function subagentsFrame(live, subagents) {
+  return { type: "subagents", sessionId: live, payload: { subagents } };
+}
+
+check("the agent bar is hidden until the session has a crew", (tpl) => {
+  const { page } = connected(tpl);
+  assertEqual(page.el("acpAgentBar").hidden, true,
+              "a session with no crew should show no agent bar at all");
+});
+
+check("a subagents frame renders Main plus one pill per sub-agent", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "read", done: false, error: "" },
+    { sessionId: "sub-2", role: "reviewer", task: "", status: "done",
+      action: "", done: true, error: "" },
+  ]));
+  assertEqual(page.el("acpAgentBar").hidden, false,
+              "a crew arrived but the bar stayed hidden");
+  const pills = page.all("acpAgentBar", ".acp-agentbar-pill");
+  assertEqual(pills.length, 3, "expected Main plus two sub-agents");
+  assertEqual(pills[0].querySelector(".acp-agentbar-name").textContent, "Main");
+  assertEqual(pills[0].getAttribute("aria-selected"), "true",
+              "Main should be the active pill before any sub-agent is opened");
+  assertEqual(pills[1].querySelector(".acp-agentbar-name").textContent, "explorer");
+  assertEqual(pills[1].querySelector(".acp-agentbar-sub").textContent, "read",
+              "the running sub-agent's pill should show its current action");
+  assertEqual(pills[2].querySelector(".acp-agentbar-sub").textContent, "done",
+              "the finished sub-agent's pill should say done, not its last (empty) action");
+});
+
+check("tapping a sub-agent pill opens a second, read-only socket for it", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "look around",
+      status: "working", action: "", done: false, error: "" },
+  ]));
+  page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+  assertEqual(page.el("acpTranscript").hidden, true,
+              "the main transcript should hide while a sub-agent is open");
+  assertEqual(page.el("acpComposer").hidden, true,
+              "the composer should hide — a sub-agent's conversation is read-only");
+  assertEqual(page.el("acpSubPanel").hidden, false);
+  page.openAt(1);
+  const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
+  assertEqual(subs.length, 1, "expected exactly one subscribe on the sub-agent socket");
+  assertEqual(subs[0].sessionId, "sub-1");
+});
+
+check("the sub-agent panel renders its own chunk and tool_call frames", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "" },
+  ]));
+  page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+  page.openAt(1);
+  page.deliverTo(1, { type: "session", sessionId: "sub-1",
+    payload: { sessionId: "sub-1", readOnly: true, parentSessionId: live } });
+  page.deliverTo(1, { type: "history", sessionId: "sub-1", payload: { events: [] } });
+  page.deliverTo(1, { type: "chunk", sessionId: "sub-1",
+    payload: { role: "agent", text: "looking around" } });
+  page.deliverTo(1, { type: "tool_call", sessionId: "sub-1",
+    payload: { toolCallId: "tc-1", title: "read", kind: "", status: "" } });
+  const body = page.el("acpSubTranscript").textContent;
+  assert(body.includes("looking around"), "the sub-agent's chunk text was not rendered");
+  assert(body.includes("read"), "the sub-agent's tool call was not rendered");
+});
+
+check("tapping Main returns to the main transcript without dropping the sub socket",
+  (tpl) => {
+    const { page, live } = connected(tpl);
+    page.deliver(subagentsFrame(live, [
+      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+        action: "", done: false, error: "" },
+    ]));
+    page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+    page.openAt(1);
+    page.all("acpAgentBar", ".acp-agentbar-pill")[0].dispatch("click");
+    assertEqual(page.el("acpTranscript").hidden, false);
+    assertEqual(page.el("acpComposer").hidden, false);
+    assertEqual(page.el("acpSubPanel").hidden, true);
+    assertEqual(page.socketAt(1).readyState, 1,
+                "the sub-agent socket should stay connected — MAX_CONNECTIONS " +
+                "(acp.py) budgets for exactly this shape, and reopening on every " +
+                "pill tap would pay a fresh handshake for a few seconds of switching");
+  });
+
+check("the back button in the sub-agent panel does the same as tapping Main", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "" },
+  ]));
+  page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+  page.openAt(1);
+  page.click("acpSubBack");
+  assertEqual(page.el("acpSubPanel").hidden, true);
+  assertEqual(page.el("acpTranscript").hidden, false);
+});
+
+check("reopening a sub-agent reuses the existing socket rather than a third one",
+  (tpl) => {
+    const { page, live } = connected(tpl);
+    page.deliver(subagentsFrame(live, [
+      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+        action: "", done: false, error: "" },
+    ]));
+    page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+    page.openAt(1);
+    page.click("acpSubBack");
+    page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+    let thirdOpened = true;
+    try { page.socketAt(2); } catch (e) { thirdOpened = false; }
+    assert(!thirdOpened, "a third socket was opened instead of reusing the " +
+                         "existing sub-agent one");
+    const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
+    assertEqual(subs.length, 2, "expected a second subscribe sent on the reused socket");
+  });
+
+check("a live subagents update refreshes the bar while a panel is open", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "reading", done: false, error: "" },
+  ]));
+  page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+  page.openAt(1);
+  // On the MAIN socket (index 0) — `page.deliver()` alone would now target the
+  // sub-agent socket, since it always addresses whichever opened last.
+  page.deliverTo(0, subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "done",
+      action: "", done: true, error: "" },
+  ]));
+  assertEqual(page.el("acpSubPanel").hidden, false,
+              "the panel should stay open across a crew update");
+  assertEqual(page.el("acpSubStatus").textContent, "done");
+});
+
+check("a new session frame clears the crew and closes any open sub-agent panel",
+  (tpl) => {
+    const { page, live } = connected(tpl);
+    page.deliver(subagentsFrame(live, [
+      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+        action: "", done: false, error: "" },
+    ]));
+    page.all("acpAgentBar", ".acp-agentbar-pill")[1].dispatch("click");
+    page.openAt(1);
+    page.deliverTo(0, {
+      type: "session", sessionId: "sess-other-0002",
+      payload: { sessionId: "sess-other-0002", cwd: "C:\\work\\other",
+                 created: false, turnActive: false, contextPercent: null },
+    });
+    assertEqual(page.el("acpAgentBar").hidden, true,
+                "the previous session's crew should not carry over");
+    assertEqual(page.el("acpSubPanel").hidden, true,
+                "the sub-agent panel should close on a session switch");
+    assertEqual(page.el("acpTranscript").hidden, false);
+    assertEqual(page.el("acpComposer").hidden, false);
+  });
+
+check("the debug log starts collapsed and a tap opens it, remembered for next time",
+  (tpl) => {
+    const { page } = connected(tpl);
+    assertEqual(page.el("acpLog").hidden, true, "the debug log should start collapsed");
+    assertEqual(page.el("acpLogToggle").getAttribute("aria-expanded"), "false");
+    page.click("acpLogToggle");
+    assertEqual(page.el("acpLog").hidden, false, "tapping the toggle should open the log");
+    assertEqual(page.el("acpLogToggle").getAttribute("aria-expanded"), "true");
+    assertEqual(page.stored["pa_acp_debug_log"], "open",
+                "the open state should be persisted for the next load");
+  });
+
+check("a stored open preference reopens the debug log on load", (tpl) => {
+  const { page } = connected(tpl, { stored: { pa_acp_debug_log: "open" } });
+  assertEqual(page.el("acpLog").hidden, false,
+              "a previously-opened debug log should not reopen closed");
 });
 
 // -------------------------------------------------------------------- main --

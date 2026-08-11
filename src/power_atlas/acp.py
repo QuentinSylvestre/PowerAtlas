@@ -40,7 +40,13 @@ Server to client: ``session`` (id and metadata after ``new``/``subscribe``),
 ``chunk``, ``rendered``, ``tool_call``, ``tool_update``, ``meta``, ``error``,
 ``agent_died``, ``session_closed``, ``history_truncated``, ``history`` (the
 whole replay, coalesced into one frame), ``thought`` (an ``agent_thought_chunk``
-notification's text, if the agent ever sends one — see ``_on_notification``).
+notification's text, if the agent ever sends one — see ``_on_notification``),
+``subagents`` (the current sub-agent crew for a session that has dispatched a
+fan-out — see ``_Supervisor._on_subagent_list``). A sub-agent's own session id
+is subscribable exactly like a real one — same ``subscribe``/``session``/
+``history``/``chunk``/``tool_call`` frames — except its ``session`` frame
+carries ``readOnly: true`` and ``prompt``/``cancel``/``close`` against it are
+refused: see ``_Supervisor.subagent_sessions``.
 ``envelope`` refuses any type not in ``SERVER_TYPES``.
 
 Session identity survives a reload because the page carries ``?sid=…`` and
@@ -154,6 +160,7 @@ CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history", "thought",
+    "subagents",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -348,6 +355,68 @@ CONTEXT_PERCENT_KEY = "contextUsagePercentage"
 # naming ``-32601`` on the page rather than as a close that quietly does
 # nothing: ``close_session`` drops no local state until the agent has answered.
 CLOSE_METHOD = "_kiro.dev/session/terminate"
+
+# The kiro-private notification carrying the current sub-agent crew for
+# whichever session is running a fan-out — see ``_Supervisor._on_subagent_list``.
+# Like ``METADATA_METHOD``, matched on the method name rather than on
+# ``update.sessionUpdate``: it carries no ``update`` key at all, only
+# ``subagents`` (and, per its own docstring, no ``sessionId`` either).
+SUBAGENT_LIST_METHOD = "_kiro.dev/subagent/list_update"
+
+# The kiro-private notification carrying a *sub-agent's own* session/update —
+# a method distinct from plain ``session/update`` (see ``_stamp_activity``'s
+# P0-3 note) and, unlike it, tagged with the sub-agent's ``sessionId`` rather
+# than the parent's. Its ``update.sessionUpdate`` vocabulary is narrower than
+# the top-level one: ``tool_call_chunk`` (not ``tool_call``/``tool_call_update``)
+# carrying only ``toolCallId``/``title``, and the same ``agent_message_chunk``
+# string the top-level channel uses.
+SUBAGENT_ACTIVITY_METHOD = "_kiro.dev/session/update"
+
+# ``status.type`` values a sub-agent list entry may carry that mean "still
+# running" — everything else (``done``, ``completed``, ``failed``, ``error``,
+# an unrecognised future value, ...) is treated as terminal. ``""`` is in here
+# rather than treated as terminal: an entry can be seen before kiro-cli has
+# assigned it a status at all.
+#
+# **Inferred, not measured against a live kiro-cli** — PowerAtlas has never
+# captured a real ``_kiro.dev/subagent/list_update`` payload (only kiro-cli's
+# own docs and a JSON-RPC probe could confirm the exact vocabulary). This whole
+# block — the field names below and the two methods above — is corroborated
+# instead against kirodotdev/kirocrew's ACP client (``acp/client.py``,
+# ``acp/_dispatch.py``, ``dashboard/chat_runner.py:_native_subagent_sync``), an
+# independent, tested implementation against the same kiro-cli ACP surface.
+# That is real evidence, not a guess, but it is second-hand: correct it against
+# this app's own traffic the first time a real payload is captured, the same
+# as ``agent_thought_chunk`` above it in this file.
+_SUBAGENT_ACTIVE_STATUSES = frozenset(
+    {"working", "running", "pending", "queued", "in_progress", ""})
+
+# Field names a sub-agent list entry may use for its session id, its display
+# role, and the task it was given — kirocrew reads ``role`` with an
+# ``agentName`` fallback, and ``initialQuery`` with a ``sessionName`` fallback,
+# for exactly the reason named there: kiro-cli has sent both across builds.
+_SUBAGENT_ROLE_KEYS = ("role", "agentName")
+_SUBAGENT_TASK_KEYS = ("initialQuery", "sessionName")
+
+# What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
+# targeting a sub-agent's own session id with. One string rather than one
+# per call site, so the three refusals cannot read differently for the same
+# reason.
+_READ_ONLY_SUBAGENT_MESSAGE = (
+    "This is a sub-agent's own conversation — it can only be watched, not "
+    "prompted. Switch back to the main session to send it a message.")
+
+# How many sub-agents (across every crew) one parent session may accumulate
+# before the oldest **finished** ones are evicted to make room. Exempt from
+# MAX_SESSIONS by design (Q&A, 2026-08-11) — a crew is bounded by how many
+# stages one fan-out actually runs, not by the cap that gates real sessions —
+# but "exempt" must not mean "unbounded": a session that runs many fan-outs
+# over a long life must not grow this without limit. A currently-running entry
+# is never evicted; eviction only ever removes a `done` one, so a bound this
+# high is never reached by one fan-out in practice (ten stages is the largest
+# measured, `memory/MEMORY.md`) and only bites a session with an unusually long
+# history of them.
+MAX_SUBAGENTS_PER_SESSION = 64
 
 # How long a server-initiated close waits for the outbound queue to reach the
 # wire before giving up on it. Bounded because the peer this is waiting on may
@@ -1540,6 +1609,48 @@ class _Supervisor:
         # spans two awaits and the cap has to hold across them.
         self._reserved = 0
 
+        # ── Sub-agent crews (SUBAGENT_LIST_METHOD) ──
+        #
+        # Deliberately three dicts parallel to `sessions`/`history`, not entries
+        # merged into them: a sub-agent session must never count against
+        # `at_capacity()` (Q&A, 2026-08-11 — "exempt them", so a ten-stage
+        # fan-out cannot crowd out room for a real session the user asked for)
+        # and must never be prompt/close/cancel-able (roadmap's own note: "the
+        # correct interaction model is to watch it, not to prompt it"). Folding
+        # them into `sessions` would need every one of `at_capacity`,
+        # `new_session`'s reservation math, `_handle_prompt`, `_handle_close`
+        # and `_handle_cancel` to carry a read-only branch instead of the two or
+        # three call sites that actually need one — see `_handle_subscribe`.
+        #
+        # `crews`: parent session id -> ordered `{child sid: entry}`, insertion
+        # order preserved (a plain dict, Python 3.7+) so the bar and the inline
+        # transcript card both list sub-agents in the order kiro-cli first
+        # reported them. An entry is never removed while its parent session is
+        # open — Q&A: "stay, marked done" — only ever updated in place or
+        # (past MAX_SUBAGENTS_PER_SESSION, and only among the already-`done`)
+        # evicted oldest-first. See `_on_subagent_list`.
+        self.crews: dict[str, dict[str, dict]] = {}
+        # `subagent_sessions`: child sid -> `{"parent": parent sid}`. Minimal on
+        # purpose — this is the membership test `_handle_subscribe`,
+        # `_handle_prompt`, `_handle_close` and `_handle_cancel` all consult,
+        # and the one place a child's parent is looked up for cleanup. No
+        # `cwd`/`created`/`last_used` the way `_new_session_record` carries for
+        # a real session: nothing here reads them, because nothing sweeps a
+        # sub-agent on its own clock — it is torn down only with its parent
+        # (`close_session`) or the whole agent (`_detach`).
+        self.subagent_sessions: dict[str, dict] = {}
+        # `subagent_history`: child sid -> its own `_History`, exactly like
+        # `history` for a real session, and read by the exact same `record`/
+        # `_handle_subscribe` — a sub-agent's transcript is the same replay
+        # machinery a real session's is, just never counted or swept the same
+        # way. Created in `_on_subagent_list` the moment a child sid is first
+        # seen, so a `tool_call_chunk`/`agent_message_chunk` arriving after it
+        # (the expected order — kiro-cli announces a sub-agent before it talks)
+        # is recorded rather than silently dropped the way an unregistered
+        # session's frames already are (see the module docstring's isolation
+        # note and `_stamp_activity`'s P0-4).
+        self.subagent_history: dict[str, _History] = {}
+
     # -- lifecycle ---------------------------------------------------------
 
     def alive(self) -> bool:
@@ -1809,6 +1920,12 @@ class _Supervisor:
         self.history.clear()
         self.inflight.clear()
         self.closing.clear()
+        # Every crew belonged to a session that no longer exists on this agent
+        # either — the agent that held the sub-agents' own processes is the one
+        # that just died.
+        self.crews.clear()
+        self.subagent_sessions.clear()
+        self.subagent_history.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -2292,6 +2409,130 @@ class _Supervisor:
             return
         meta["last_used"] = time.monotonic()
 
+    def _on_subagent_list(self, params: dict) -> None:
+        """Handle one ``_kiro.dev/subagent/list_update`` notification.
+
+        Carries no ``sessionId`` of its own (measured — see
+        ``SUBAGENT_LIST_METHOD``'s docstring and ``_stamp_activity``'s P0-4),
+        so the crew it describes has to be attributed some other way. A
+        fan-out can only originate from a running turn, so with **exactly
+        one** session mid-``session/prompt`` the attribution is unambiguous;
+        with zero or more than one, there is no honest answer and this file's
+        rule is to say nothing rather than guess (the same rule
+        ``METADATA_METHOD``'s neighbouring comment states for a different
+        notification) — the crew silently does not appear rather than
+        appearing on the wrong session's bar. Two (or more) sessions each
+        running their own fan-out at once is the one case this cannot cover;
+        it is left as a known gap rather than a guess.
+        """
+        subs = params.get("subagents")
+        if not isinstance(subs, list):
+            return
+        inflight = self.inflight
+        if len(inflight) != 1:
+            log.debug("ACP subagent_list: %d session(s) in flight, cannot "
+                      "attribute %d entries; dropped", len(inflight), len(subs))
+            return
+        parent_id = next(iter(inflight))
+        crew = self.crews.setdefault(parent_id, {})
+        changed = False
+        for entry in subs:
+            if not isinstance(entry, dict):
+                continue
+            child_id = _as_text(entry.get("sessionId"))
+            if not child_id:
+                continue
+            existing = crew.get(child_id)
+            if existing is not None and existing["done"]:
+                # Terminal is sticky (Q&A, 2026-08-11: "stay, marked done") —
+                # a crew entry that finished must never un-finish because a
+                # stale or reordered notification repeats an earlier status.
+                continue
+            role = _first_text(entry, _SUBAGENT_ROLE_KEYS)
+            task = _first_text(entry, _SUBAGENT_TASK_KEYS)
+            if not role and not task and existing is None:
+                # kiro-cli sometimes announces a slot before it has anything
+                # to say about it — corroborated by kirocrew's own
+                # `_native_subagent_sync`, which skips exactly this case
+                # rather than showing a card with nothing on it. Wait for a
+                # later update to name it.
+                continue
+            status = entry.get("status")
+            stype = str(status.get("type") or "").lower() if isinstance(status, dict) else ""
+            smsg = str(status.get("message") or "") if isinstance(status, dict) else ""
+            done = bool(stype) and stype not in _SUBAGENT_ACTIVE_STATUSES
+            error = (smsg[:MAX_ERROR_DETAIL_CHARS]
+                     if done and stype in ("failed", "error") and smsg
+                     else (existing["error"] if existing else ""))
+            updated = {
+                "role": role or (existing["role"] if existing else ""),
+                "task": task or (existing["task"] if existing else ""),
+                "status": stype or (existing["status"] if existing else ""),
+                "action": existing["action"] if existing else "",
+                "done": done,
+                "error": error,
+                "order": existing["order"] if existing else len(crew),
+            }
+            if updated != existing:
+                changed = True
+            crew[child_id] = updated
+            if child_id not in self.subagent_sessions:
+                self.subagent_sessions[child_id] = {"parent": parent_id}
+                self.subagent_history[child_id] = _History()
+                changed = True
+        if not changed:
+            return
+        self._evict_finished_subagents(parent_id)
+        _emit_subagents_frame(parent_id)
+
+    def _note_subagent_action(self, child_id: str, title: str) -> None:
+        """Record a sub-agent's latest tool title as its crew card's action.
+
+        The only source this file has for "what is this sub-agent doing right
+        now" — ``SUBAGENT_ACTIVITY_METHOD``'s ``tool_call_chunk`` carries a
+        title and nothing more structured. Silent no-op for an id
+        ``_on_subagent_list`` never registered, or whose entry already
+        finished: the crew card is frozen the instant it is marked done, the
+        same rule ``_on_subagent_list`` applies to the fields it owns.
+        """
+        if not title:
+            return
+        meta = self.subagent_sessions.get(child_id)
+        if meta is None:
+            return
+        entry = self.crews.get(meta["parent"], {}).get(child_id)
+        if entry is None or entry["done"] or entry["action"] == title:
+            return
+        entry["action"] = title
+        _emit_subagents_frame(meta["parent"])
+
+    def _evict_finished_subagents(self, parent_id: str) -> None:
+        """Keep one session's remembered crew under MAX_SUBAGENTS_PER_SESSION.
+
+        Evicts the OLDEST *finished* entries first (by arrival order) and
+        never a still-running one — sub-agent sessions are exempt from
+        MAX_SESSIONS by design (Q&A, 2026-08-11), but exempt must not mean
+        unbounded. One fan-out's own stage count sits far under this; only a
+        session that has run through many fan-outs over a long life reaches
+        it, and even then only its finished stages are ever reclaimed.
+        """
+        crew = self.crews.get(parent_id)
+        if crew is None or len(crew) <= MAX_SUBAGENTS_PER_SESSION:
+            return
+        finished = sorted(
+            (cid for cid, e in crew.items() if e["done"]),
+            key=lambda cid: crew[cid]["order"])
+        overflow = len(crew) - MAX_SUBAGENTS_PER_SESSION
+        for child_id in finished[:overflow]:
+            crew.pop(child_id, None)
+            self.subagent_sessions.pop(child_id, None)
+            self.subagent_history.pop(child_id, None)
+            _bubbles.pop(child_id, None)
+            frame = _session_closed_frame(child_id)
+            for target in tuple(_registry.subscribers.get(child_id, ())):
+                target.send(frame)
+                _registry.detach(target)
+
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
         params = msg.get("params") or {}
@@ -2305,6 +2546,9 @@ class _Supervisor:
             if percent is not None and isinstance(session_id, str):
                 _note_context(session_id, percent)
             return
+        if method == SUBAGENT_LIST_METHOD:
+            self._on_subagent_list(params)
+            return
         if kind in ("agent_message_chunk", "user_message_chunk"):
             # `user_message_chunk` is what makes a loaded conversation a
             # conversation: `session/load` replays both halves of it, and
@@ -2317,7 +2561,15 @@ class _Supervisor:
             # the prompt twice, which is the thing to look for if that appears.
             role = "user" if kind == "user_message_chunk" else "agent"
             content = update.get("content")
-            text = _content_text(content)
+            # The nested shape first, a flat `text` field as fallback rather
+            # than the other way round: an *empty* nested `content.text` must
+            # not shadow a populated flat one. Never observed on the main
+            # channel — every chunk measured there carries the nested object —
+            # but SUBAGENT_ACTIVITY_METHOD's `agent_message_chunk` is
+            # corroborated (kirocrew's own dual-shape handling, with the same
+            # ordering and the same reasoning) as sometimes carrying the flat
+            # form instead. One `or` covers both without a second branch.
+            text = _content_text(content) or _as_text(update.get("text"))
             if role == "user":
                 # An image-only turn replays as nothing at all: every block in
                 # it is an image, and `_content_text` yields "" for a block
@@ -2377,6 +2629,29 @@ class _Supervisor:
                 _emit(session_id, envelope(
                     "tool_call" if kind == "tool_call" else "tool_update",
                     payload, session_id))
+            return
+        if kind == "tool_call_chunk":
+            # A sub-agent's own tool call, on SUBAGENT_ACTIVITY_METHOD rather
+            # than plain `session/update` (see that constant's docstring) —
+            # `session_id` here is the CHILD's, not the parent's. Narrower
+            # payload than the top-level `tool_call` shape: only `toolCallId`/
+            # `title` observed, no `kind`/`status`/`rawInput` — but
+            # `_tool_payload` already defaults every absent field to `""`, so
+            # reusing it unmodified is safe rather than approximate.
+            #
+            # Gated on `subagent_sessions` membership (unlike the
+            # `agent_message_chunk` arm below, which needs no such gate — its
+            # dispatch already no-ops for an unregistered id via `record`/
+            # `broadcast`): only this arm also mutates crew state
+            # (`_note_subagent_action`), and mutating a crew entry for an id
+            # `_on_subagent_list` never registered would create one
+            # `_evict_finished_subagents` and `close_session` do not know how
+            # to find again.
+            if isinstance(session_id, str) and session_id in self.subagent_sessions:
+                payload = _tool_payload(update)
+                _flush_bubble(session_id)
+                _emit(session_id, envelope("tool_call", payload, session_id))
+                self._note_subagent_action(session_id, payload["title"])
             return
         if kind == "agent_thought_chunk":
             # Never observed: the 2026-08-03 latency benchmark measured zero
@@ -2554,8 +2829,16 @@ class _Supervisor:
         return {"sessionId": session_id, "cwd": cwd}
 
     def record(self, session_id: str, frame: dict) -> None:
-        """Append a frame to a session's replay buffer, if it still has one."""
+        """Append a frame to a session's replay buffer, if it still has one.
+
+        Checks ``subagent_history`` as well as ``history`` — the two are
+        disjoint (a session id is never in both), so this is one extra dict
+        lookup on the common path rather than a second call site to keep in
+        sync with the first.
+        """
         history = self.history.get(session_id)
+        if history is None:
+            history = self.subagent_history.get(session_id)
         if history is not None:
             history.append(frame)
 
@@ -2639,6 +2922,20 @@ class _Supervisor:
         self.history.pop(session_id, None)
         self.inflight.discard(session_id)
         _bubbles.pop(session_id, None)
+        # This session's crew, if it ever dispatched a fan-out. A sub-agent's
+        # own history/bubble go with it — nothing else can ever name a child
+        # sid once its parent's row is what would have shown a "click to open"
+        # affordance for it — and any socket still viewing one is told and
+        # detached, the same notice and the same pattern `_handle_close` and
+        # `_sweep_once` use for a real session's own subscribers.
+        for child_id in self.crews.pop(session_id, ()):
+            self.subagent_sessions.pop(child_id, None)
+            self.subagent_history.pop(child_id, None)
+            _bubbles.pop(child_id, None)
+            frame = _session_closed_frame(child_id)
+            for target in tuple(_registry.subscribers.get(child_id, ())):
+                target.send(frame)
+                _registry.detach(target)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
 
 
@@ -2656,6 +2953,55 @@ def _emit(session_id: str, frame: dict) -> None:
     """
     _supervisor.record(session_id, frame)
     _registry.broadcast(session_id, frame)
+
+
+def _first_text(entry: dict, keys: tuple) -> str:
+    """The first non-empty string among ``entry``'s candidate key names.
+
+    Sub-agent list entries use more than one name for the same fact across
+    kiro-cli builds — ``role``/``agentName``, ``initialQuery``/``sessionName``
+    — corroborated against kirodotdev/kirocrew's ``_native_subagent_sync``,
+    which reads both for the same reason.
+    """
+    for key in keys:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _subagents_payload(crew: dict) -> list:
+    """A crew dict as the ``subagents`` frame's wire list, arrival-ordered."""
+    return [
+        {
+            "sessionId": child_id,
+            "role": entry["role"],
+            "task": entry["task"],
+            "status": entry["status"],
+            "action": entry["action"],
+            "done": entry["done"],
+            "error": entry["error"],
+        }
+        for child_id, entry in sorted(crew.items(), key=lambda kv: kv[1]["order"])
+    ]
+
+
+def _emit_subagents_frame(parent_id: str) -> None:
+    """Push the current crew snapshot to a session's subscribers.
+
+    Deliberately **not** recorded into the replay buffer via ``_emit`` —
+    like ``turnActive``/``contextPercent`` on the ``session`` frame, this is
+    current derived state rather than a transcript event. ``_handle_subscribe``
+    rebuilds it fresh from ``crews`` on every attach instead, which is both
+    cheaper than replaying every incremental update that produced it and more
+    current — the last one is always the whole truth, so only the last one is
+    worth keeping.
+    """
+    crew = _supervisor.crews.get(parent_id)
+    if not crew:
+        return
+    _registry.broadcast(parent_id, envelope(
+        "subagents", {"subagents": _subagents_payload(crew)}, parent_id))
 
 
 # session id -> the agent prose accumulated for the **bubble** currently open on
@@ -2900,6 +3246,13 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
             "bad_envelope", "'subscribe' needs a sessionId."))
         log.warning("ACP subscribe refused: [bad_envelope] no sessionId")
         return
+    sub_meta = _supervisor.subagent_sessions.get(session_id)
+    if sub_meta is not None:
+        # A sub-agent's own session id, not a real one — `_registry.loading`
+        # never carries one of these (nothing ever `session/load`s a
+        # sub-agent), so that check does not apply here.
+        _handle_subagent_subscribe(conn, session_id, sub_meta)
+        return
     if session_id in _registry.loading:
         _defer_until_loaded(conn, session_id)
         return
@@ -2977,6 +3330,73 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
              session_id, len(history),
              ", truncated" if history.truncated else "",
              ", turn in flight" if session_id in _supervisor.inflight else "")
+    crew = _supervisor.crews.get(session_id)
+    if crew:
+        # A fresh snapshot, not a replay: `subagents` frames are deliberately
+        # not recorded into `history` (see `_emit_subagents_frame`), so a
+        # reload's only source for "which sub-agents does this session have"
+        # is rebuilding it here, the same way `turnActive`/`contextPercent`
+        # are rebuilt onto the `session` frame above rather than replayed.
+        conn.send(envelope(
+            "subagents", {"subagents": _subagents_payload(crew)}, session_id))
+
+
+def _handle_subagent_subscribe(conn: _Connection, session_id: str,
+                                sub_meta: dict) -> None:
+    """Attach this socket to a sub-agent's own session, read-only.
+
+    Mirrors ``_handle_subscribe`` against ``subagent_history`` instead of
+    ``history``, with the same replay-throttle floor. The ``session`` frame
+    carries ``readOnly: true`` and ``parentSessionId`` so the page hides its
+    composer and offers a way back, rather than a prompt box the server would
+    refuse anyway — see ``_handle_prompt``/``_handle_close``/``_handle_cancel``.
+
+    No ``closing``/reservation checks: a sub-agent session is never itself
+    closed, loaded or reserved — only its parent is, and closing the parent
+    tears every child down with it (``close_session``), sending this same
+    socket a ``session_closed`` at that point exactly as a real session's
+    subscriber gets. A subscribe that lands in the brief window before that
+    cleanup runs is not a lie — it is correct for the moment it is answered.
+    """
+    now = time.monotonic()
+    since = None if conn.replayed_at is None else now - conn.replayed_at
+    if since is not None and since < SUBSCRIBE_MIN_INTERVAL_SECONDS:
+        conn.send(error_frame(
+            "subscribe_throttled",
+            "This socket was replayed less than "
+            f"{SUBSCRIBE_MIN_INTERVAL_SECONDS:.0f}s ago; the replay was not "
+            "rebuilt. Reload the page if the transcript looks wrong.",
+            session_id))
+        log.warning("ACP subscribe throttled: socket=%s session=%s, %.3fs "
+                    "since the last replay", conn.cid, session_id, since)
+        return
+    conn.replayed_at = now
+    _registry.attach(conn, session_id)
+    parent_id = sub_meta["parent"]
+    entry = _supervisor.crews.get(parent_id, {}).get(session_id, {})
+    conn.send(envelope("session", {
+        "sessionId": session_id,
+        "cwd": "",
+        "created": False,
+        "readOnly": True,
+        "parentSessionId": parent_id,
+        "role": entry.get("role", ""),
+        "task": entry.get("task", ""),
+        "turnActive": not entry.get("done", False),
+        "contextPercent": None,
+    }, session_id))
+    history = _supervisor.subagent_history.get(session_id)
+    if history is None:
+        return
+    if history.truncated:
+        conn.send(envelope("history_truncated", {
+            "message": "Earlier events fell out of the replay buffer; what "
+                       "follows is the tail of the conversation.",
+        }, session_id))
+    conn.send(envelope("history", {"events": history.events()}, session_id))
+    log.info("ACP subscribe (sub-agent): session=%s parent=%s, %d event(s) "
+             "replayed%s", session_id, parent_id, len(history),
+             ", truncated" if history.truncated else "")
 
 
 def _in_use_message(pid: int) -> str:
@@ -3154,6 +3574,16 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
             f"{MAX_SESSION_ID_CHARS} characters of letters, digits, "
             "underscores and hyphens, and nothing else."))
         log.warning("ACP load refused: [bad_session_id] %.200r", session_id)
+        return
+    if session_id in _supervisor.subagent_sessions:
+        # Already held here read-only — the buffer is the better answer for
+        # the same reason the `sessions` branch below redirects to
+        # `_handle_subscribe`: a second agent-side `session/load` would
+        # duplicate a conversation this process already has, and (unlike that
+        # branch) would also spend a real, cap-counted session slot on a
+        # sub-agent this surface is never meant to drive interactively.
+        _handle_subagent_subscribe(
+            conn, session_id, _supervisor.subagent_sessions[session_id])
         return
     if session_id in _registry.loading:
         # A concurrent load owns this session. Waiting for its buffer is the
@@ -3370,6 +3800,14 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     if not text.strip() and not images:
         refuse("bad_payload", "A prompt needs text, an image, or both.")
         return
+    if session_id in _supervisor.subagent_sessions:
+        # Checked ahead of the generic `unknown_session` below, which is true
+        # of a sub-agent id too (it is never in `sessions`) but says the wrong
+        # thing — this is a real, live conversation, just not one this surface
+        # may drive. Roadmap's own note: "the correct interaction model is to
+        # watch it, not to prompt it alongside the parent."
+        refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)
+        return
     if session_id not in _supervisor.sessions:
         refuse("unknown_session",
                "This server has no such live session. It may belong to an "
@@ -3468,6 +3906,12 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
         conn.send(error_frame("bad_envelope", "'cancel' needs a sessionId."))
         log.warning("ACP cancel refused: [bad_envelope] no sessionId")
         return
+    if session_id in _supervisor.subagent_sessions:
+        conn.send(error_frame(
+            "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP cancel refused: [read_only_session] session=%s",
+                    session_id)
+        return
     if conn.session_id != session_id:
         # The same requirement `prompt` carries, for the same reason: the turn
         # this ends belongs to the session's watchers, and a socket that is not
@@ -3523,6 +3967,9 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
     if not session_id:
         conn.send(error_frame("bad_envelope", "'close' needs a sessionId."))
         log.warning("ACP close refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor.subagent_sessions:
+        refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)
         return
     if session_id in _registry.loading:
         # `_Registry.loading` bars attachment for the whole of a `session/load`,

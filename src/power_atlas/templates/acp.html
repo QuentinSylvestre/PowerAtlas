@@ -187,6 +187,21 @@
   </div>
   <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
        aria-label="Conversation"></div>
+  <!-- A sub-agent's own conversation, shown in place of the transcript+composer
+       while one is selected on the agent bar below. Read-only by design (the
+       roadmap's own note on this feature: "the correct interaction model is
+       to watch it, not to prompt it alongside the parent") — no composer here
+       at all, only a way back. Built with createElement + textContent like
+       every other pane on this page; empty in the markup. -->
+  <div class="acp-subpanel" id="acpSubPanel" hidden>
+    <div class="acp-subpanel-head">
+      <button class="acp-btn" id="acpSubBack" type="button">‹ Back to main</button>
+      <span class="acp-subpanel-role" id="acpSubRole"></span>
+      <span class="acp-subpanel-status" id="acpSubStatus"></span>
+    </div>
+    <div class="acp-transcript acp-subpanel-transcript" id="acpSubTranscript"
+         role="log" aria-live="polite" aria-label="Sub-agent conversation"></div>
+  </div>
   <div class="acp-composer" id="acpComposer">
     <!-- Images staged for the next prompt, and the only place they are ever
          shown as pictures. The transcript gets `[Image 1]` instead: the bytes
@@ -211,7 +226,21 @@
       <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
     </div>
   </div>
-  <div class="acp-log" id="acpLog" role="log" aria-live="polite" aria-label="ACP transport log"></div>
+  <!-- The agent bar: Main plus one pill per sub-agent in the session's current
+       crew, Claude-Code-style — the one currently viewed is highlighted, and
+       tapping any pill switches between it and Main. Hidden whenever the
+       session has no crew at all, which is every session that has never run a
+       fan-out. Built with createElement + textContent; empty in the markup. -->
+  <div class="acp-agentbar" id="acpAgentBar" hidden role="tablist"
+       aria-label="Agents"></div>
+  <!-- Collapsed by default and remembered per browser: the transport log is a
+       debugging aid, not something most sessions of this page ever need open,
+       and the vertical space it costs while closed is worth more to the
+       transcript and (Q&A, 2026-08-11) the sub-agent bar below it. -->
+  <button class="acp-btn acp-log-toggle" id="acpLogToggle" type="button"
+          aria-expanded="false" aria-controls="acpLog">Debug log</button>
+  <div class="acp-log" id="acpLog" role="log" aria-live="polite"
+       aria-label="ACP transport log" hidden></div>
 </div>
 
 </div><!-- /.acp-shell -->
@@ -317,6 +346,7 @@
 
   var statusEl = document.getElementById('acpStatus');
   var logEl = document.getElementById('acpLog');
+  var logToggle = document.getElementById('acpLogToggle');
   var sidEl = document.getElementById('acpSid');
   var newBtn = document.getElementById('acpNew');
   var picker = document.getElementById('acpPicker');
@@ -331,6 +361,12 @@
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
   var transcriptEl = document.getElementById('acpTranscript');
+  var subPanelEl = document.getElementById('acpSubPanel');
+  var subBackBtn = document.getElementById('acpSubBack');
+  var subRoleEl = document.getElementById('acpSubRole');
+  var subStatusEl = document.getElementById('acpSubStatus');
+  var subTranscriptEl = document.getElementById('acpSubTranscript');
+  var agentBarEl = document.getElementById('acpAgentBar');
   var promptInput = document.getElementById('acpPrompt');
   var composerEl = document.getElementById('acpComposer');
   var trayEl = document.getElementById('acpTray');
@@ -409,6 +445,39 @@
   // toolCallId -> the elements a later `tool_update` rewrites in place, so a
   // call that runs then completes is one row rather than three.
   var toolRows = Object.create(null);
+  // ---- sub-agents (the agent bar + the read-only sub-agent panel) ---------
+  //
+  // The current session's crew, as last sent on a `subagents` frame — an
+  // array of `{sessionId, role, task, status, action, done, error}`, arrival-
+  // ordered by the server. `[]` for every session that has never run a
+  // fan-out, which is why `renderAgentBar` hides the bar on an empty array
+  // rather than the bar existing and being empty.
+  var crew = [];
+  // The sub-agent currently shown in `subPanelEl`, or null while looking at
+  // the main transcript. Distinct from `sessionId`: the *page* never stops
+  // holding the parent session while a sub-agent is open — only what is drawn
+  // changes — which is what lets a fan-out keep streaming into the main
+  // transcript behind the panel exactly as Claude Code's own agent bar does.
+  var subViewSid = null;
+  // A second, independent WebSocket, opened the first time a sub-agent pill is
+  // pressed and left connected afterwards (switching pills re-subscribes it
+  // rather than reopening it). Kept apart from `ws` on purpose: `_registry`
+  // (acp.py) attaches one *socket* to one *session* at a time, so watching a
+  // sub-agent on the primary socket would detach it from the parent and stop
+  // the main transcript mid-fan-out — the one thing this feature must not do.
+  var subWs = null;
+  // The `handle()`-replaying flag's counterpart, scoped to `subWs`'s own
+  // `history` replay rather than the main socket's.
+  var subReplaying = false;
+  // The sub-agent bubble text is appended to, mirroring `agentBody` but for
+  // `subTranscriptEl`. No markdown rendering in this panel — a sub-agent's
+  // own `rendered` frame, on the rare turn that gets one, is left unhandled
+  // rather than given a second copy of `renderMarkdown`'s DOM-walking code
+  // for a read-only, transcript-only view (roadmap's own framing of this
+  // feature); the plain chunks it summarises are already on screen.
+  var subAgentBody = null;
+  // `toolRows`'s counterpart for the sub-agent panel.
+  var subToolRows = Object.create(null);
   // Session ids a `load` has already been tried for on this socket. Reset per
   // connection, because the reason a load is worth retrying is a server that
   // restarted. Without it the one refusal that matters — "active in another
@@ -581,6 +650,26 @@
     logEl.appendChild(row);
     logEl.scrollTop = logEl.scrollHeight;
   }
+
+  // Remembered per browser (`railStored`/`railStore` — generic localStorage
+  // wrappers despite the name, defined below and hoisted like every other
+  // `function` declaration in this closure) so a preference set once survives
+  // a reload rather than reopening closed by default every time.
+  var DEBUG_LOG_KEY = 'pa_acp_debug_log';
+
+  function setLogOpen(open) {
+    logEl.hidden = !open;
+    logToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    logToggle.textContent = open ? 'Debug log ▾' : 'Debug log ▸';
+    if (open) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  setLogOpen(railStored(DEBUG_LOG_KEY) === 'open');
+  logToggle.addEventListener('click', function () {
+    var open = logEl.hidden;
+    setLogOpen(open);
+    railStore(DEBUG_LOG_KEY, open ? 'open' : 'closed');
+  });
 
   function wsUrl() {
     // Derived from location.host, never a hardcoded port: config.py defaults
@@ -759,6 +848,12 @@
     hideThinking();
     setContext(null);
     setPending(false);
+    // The crew belonged to the session just released — `close_session`
+    // (acp.py) has already torn down every one of its sub-agent records
+    // server-side, so a bar or panel still showing them would be offering
+    // pills that `subscribe` would now answer `unknown_session`.
+    setCrew([]);
+    closeSubagentView();
     // Images were staged against the conversation this page has just let go
     // of. Carrying them to whatever is opened next would put a screenshot in
     // front of a different agent in a different directory.
@@ -1896,6 +1991,238 @@
     // remove a second time, and `showThinking` would otherwise believe one
     // still stands.
     thinkingRow = null;
+    // A new session (or a reload of this one) has no crew of its own yet —
+    // whatever the previous session's fan-out looked like does not carry over,
+    // and a sub-agent panel left open would be showing a conversation that no
+    // longer has anything to do with what is on screen behind it.
+    setCrew([]);
+    closeSubagentView();
+  }
+
+  // ---- the agent bar -------------------------------------------------------
+  //
+  // Claude-Code-style: Main plus one pill per sub-agent the current session's
+  // crew carries, the one being viewed highlighted, tapping any pill switches
+  // between it and Main. Q&A, 2026-08-11 — a finished sub-agent stays listed
+  // and clickable rather than disappearing, so the bar (and, once every
+  // sub-agent is done, the transcript card it is built from) is how a
+  // finished fan-out is reviewed after the fact.
+
+  function setCrew(next) {
+    crew = Array.isArray(next) ? next : [];
+    renderAgentBar();
+    // The panel currently open may name a sub-agent this update no longer
+    // carries the same entry for — refresh its header from the latest
+    // `role`/`task`/`status` rather than leaving it showing the snapshot from
+    // whenever it was opened.
+    if (subViewSid) renderSubHead();
+  }
+
+  function crewEntry(sid) {
+    for (var i = 0; i < crew.length; i++) {
+      if (crew[i].sessionId === sid) return crew[i];
+    }
+    return null;
+  }
+
+  function renderAgentBar() {
+    agentBarEl.textContent = '';
+    if (!crew.length) {
+      agentBarEl.hidden = true;
+      return;
+    }
+    agentBarEl.hidden = false;
+    agentBarEl.appendChild(agentPill('Main', !subViewSid, function () {
+      closeSubagentView();
+    }));
+    for (var i = 0; i < crew.length; i++) {
+      (function (entry) {
+        var label = entry.role || entry.task || 'sub-agent';
+        agentBarEl.appendChild(agentPill(label, entry.sessionId === subViewSid,
+          function () { openSubagent(entry.sessionId); },
+          entry.done ? (entry.error ? 'errored' : 'done') : (entry.action || 'working…')));
+      })(crew[i]);
+    }
+  }
+
+  function agentPill(label, active, onClick, sublabel) {
+    var pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'acp-agentbar-pill' + (active ? ' acp-agentbar-pill-active' : '');
+    pill.setAttribute('role', 'tab');
+    pill.setAttribute('aria-selected', active ? 'true' : 'false');
+    var name = document.createElement('span');
+    name.className = 'acp-agentbar-name';
+    name.textContent = label;
+    pill.appendChild(name);
+    if (sublabel) {
+      var sub = document.createElement('span');
+      sub.className = 'acp-agentbar-sub';
+      sub.textContent = sublabel;
+      pill.appendChild(sub);
+    }
+    pill.addEventListener('click', onClick);
+    return pill;
+  }
+
+  // ---- the sub-agent panel -------------------------------------------------
+
+  function renderSubHead() {
+    var entry = crewEntry(subViewSid);
+    subRoleEl.textContent = (entry && (entry.role || entry.task)) || subViewSid;
+    subStatusEl.textContent = entry
+      ? (entry.done ? (entry.error ? 'errored: ' + entry.error : 'done')
+                    : (entry.action || 'working…'))
+      : '';
+  }
+
+  function openSubagent(sid) {
+    if (!sid) return;
+    subViewSid = sid;
+    subPanelEl.hidden = false;
+    transcriptEl.hidden = true;
+    composerEl.hidden = true;
+    subTranscriptEl.textContent = '';
+    subAgentBody = null;
+    subToolRows = Object.create(null);
+    renderSubHead();
+    renderAgentBar();
+    connectSubWs(sid);
+  }
+
+  function closeSubagentView() {
+    var wasOpen = !!subViewSid;
+    subViewSid = null;
+    subPanelEl.hidden = true;
+    transcriptEl.hidden = false;
+    composerEl.hidden = false;
+    if (wasOpen) renderAgentBar();
+    // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
+    // budgets for a handful of sockets per viewer for exactly this shape — "a
+    // second one while comparing two conversations" is that module's own
+    // phrase for it — and reopening it on every pill tap would pay a fresh
+    // handshake for what is often a few seconds of switching back and forth.
+  }
+
+  subBackBtn.addEventListener('click', closeSubagentView);
+
+  function connectSubWs(sid) {
+    if (subWs && subWs.readyState === WebSocket.OPEN) {
+      subWs.send(JSON.stringify({ type: 'subscribe', sessionId: sid, payload: {} }));
+      return;
+    }
+    if (subWs) { try { subWs.close(); } catch (e) {} }
+    subWs = new WebSocket(wsUrl());
+    subWs.onopen = function () {
+      subWs.send(JSON.stringify({ type: 'subscribe', sessionId: sid, payload: {} }));
+    };
+    subWs.onmessage = function (event) {
+      var frame;
+      try { frame = JSON.parse(event.data); } catch (e) { return; }
+      handleSub(frame);
+    };
+    // No reconnect loop, unlike the primary `ws` — this socket exists only
+    // while a sub-agent panel is open, and the pill that opens it is always
+    // one tap away from trying again.
+  }
+
+  function subAppendChunk(text) {
+    if (!subAgentBody) {
+      var row = document.createElement('div');
+      row.className = 'acp-msg acp-msg-agent';
+      var who = document.createElement('span');
+      who.className = 'acp-msg-role';
+      who.textContent = 'agent';
+      subAgentBody = document.createElement('div');
+      subAgentBody.className = 'acp-msg-body';
+      row.appendChild(who);
+      row.appendChild(subAgentBody);
+      subTranscriptEl.appendChild(row);
+    }
+    subAgentBody.textContent += text;
+    subTranscriptEl.scrollTop = subTranscriptEl.scrollHeight;
+  }
+
+  function subAddToolCall(payload) {
+    var id = payload.toolCallId;
+    var known = id ? subToolRows['t:' + id] : null;
+    if (known) {
+      known.textContent = payload.title || payload.kind || 'tool call';
+      return;
+    }
+    subAgentBody = null;
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-tool';
+    var who = document.createElement('span');
+    who.className = 'acp-msg-role';
+    who.textContent = 'tool';
+    var body = document.createElement('div');
+    body.className = 'acp-msg-body';
+    body.textContent = payload.title || payload.kind || 'tool call';
+    row.appendChild(who);
+    row.appendChild(body);
+    subTranscriptEl.appendChild(row);
+    if (id) subToolRows['t:' + id] = body;
+    subTranscriptEl.scrollTop = subTranscriptEl.scrollHeight;
+  }
+
+  function subAddNote(text) {
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-note';
+    var body = document.createElement('div');
+    body.className = 'acp-msg-body';
+    body.textContent = text;
+    row.appendChild(body);
+    subTranscriptEl.appendChild(row);
+    subTranscriptEl.scrollTop = subTranscriptEl.scrollHeight;
+  }
+
+  // A small, deliberately separate handler from the main `handle()` — see
+  // `subWs`'s comment for why sharing a socket is not an option, and this
+  // mirrors that: reusing `handle()` here would mean threading a second
+  // "which transcript/session am I" context through every branch of a
+  // function that was written assuming there is only ever one. Only the
+  // frame types a sub-agent's own session actually emits are handled; the
+  // main channel's markdown/thinking/context/rail machinery does not apply to
+  // a read-only secondary view.
+  function handleSub(frame) {
+    var type = frame && frame.type;
+    var payload = (frame && frame.payload) || {};
+    if (type === 'session') {
+      subTranscriptEl.textContent = '';
+      subAgentBody = null;
+      subToolRows = Object.create(null);
+      return;
+    }
+    if (type === 'history') {
+      var events = payload.events || [];
+      subReplaying = true;
+      try {
+        for (var i = 0; i < events.length; i++) handleSub(events[i]);
+      } finally {
+        subReplaying = false;
+      }
+      return;
+    }
+    if (type === 'history_truncated') {
+      subAddNote(payload.message || 'earlier events were dropped');
+      return;
+    }
+    if (type === 'chunk') {
+      if (payload.text) subAppendChunk(payload.text);
+      return;
+    }
+    if (type === 'tool_call' || type === 'tool_update') {
+      subAddToolCall(payload);
+      return;
+    }
+    if (type === 'session_closed' || type === 'error') {
+      subAddNote(payload.message || 'this sub-agent session ended');
+      return;
+    }
+    // `thought`/`rendered`/`meta`/`subagents` — not rendered in this panel;
+    // see the module-level comment on `subAgentBody` for why `rendered` in
+    // particular is skipped rather than given a second markdown path.
   }
 
   function railUrl(params) {
@@ -3971,6 +4298,14 @@
       }
       return;
     }
+    if (type === 'subagents') {
+      // Not part of `history` (acp.py's `_emit_subagents_frame` deliberately
+      // keeps it out of the replay buffer) — it arrives live, and once more
+      // right after every `subscribe`/`session` reply that has a crew to
+      // report, which is this page's only source for it after a reload.
+      setCrew(payload.subagents || []);
+      return;
+    }
     if (type === 'session_closed') {
       releaseSession();
       // The transcript stays: the user pressed Close on a conversation they
@@ -4000,6 +4335,11 @@
       sidWorkspace = '';
       sidRevealed = false;
       renderSidLabel();
+      // Every sub-agent process went with the agent, the same as every
+      // session did — the crew and any open panel are naming processes that
+      // no longer exist.
+      setCrew([]);
+      closeSubagentView();
       addMessage('error', 'the agent exited (code ' + payload.exitCode + ') — ' +
                           payload.message);
       restorePendingPrompt('the agent exited');

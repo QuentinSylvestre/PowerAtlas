@@ -2559,6 +2559,12 @@ def acp_session():
         acp_mod._registry.connections.clear()
         acp_mod._registry.subscribers.clear()
         acp_mod._registry.loading.clear()
+        # A crew a test attributed to this session, and everything it
+        # registered — same module-singleton leak risk as `sessions`/`history`
+        # above, just for the sub-agent dicts they gained alongside them.
+        acp_mod._supervisor.crews.pop(sid, None)
+        acp_mod._supervisor.subagent_sessions.clear()
+        acp_mod._supervisor.subagent_history.clear()
 
 
 class TestAcpServerTypeGuard:
@@ -4301,6 +4307,9 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.inflight.clear()
         acp_mod._supervisor.closing.clear()
         acp_mod._supervisor._reserved = 0
+        acp_mod._supervisor.crews.clear()
+        acp_mod._supervisor.subagent_sessions.clear()
+        acp_mod._supervisor.subagent_history.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
         acp_mod._registry.connections.clear()
@@ -5537,7 +5546,12 @@ class TestAcpLoadPageRecovery:
         """A load that succeeds on a retry must not leave the page refusing to
         send to a session it is now subscribed to."""
         src = self._page()
-        session_branch = src.split("if (type === 'session') {", 1)[1]
+        # Scoped to the main `handle(frame)` function specifically: `handleSub`
+        # (the read-only sub-agent panel's own, much smaller dispatcher) has its
+        # own `if (type === 'session') {` earlier in the file, and a plain
+        # first-match split would find that one instead.
+        handler = src.split("function handle(frame) {", 1)[1]
+        session_branch = handler.split("if (type === 'session') {", 1)[1]
         assert "loadFailed = false;" in session_branch.split("return;", 1)[0]
 
     def test_the_send_button_is_disabled_by_the_flag(self):
@@ -10356,6 +10370,357 @@ class TestAcpActivityStamp:
         assert seen["used"] == 0.0
         # And the turn ending is use again, whatever the agent did in between.
         assert meta["last_used"] > 0.0
+
+
+# --- ACP sub-agent visibility: crew parsing, activity, read-only access ----
+#
+# Wire shapes corroborated against kirodotdev/kirocrew's tested ACP client
+# rather than measured against a live kiro-cli — see acp.py's
+# SUBAGENT_LIST_METHOD/SUBAGENT_ACTIVITY_METHOD docstrings for what that means
+# and does not mean. These tests pin the parsing/attribution/exemption rules
+# this file's own code chose given that shape, not the shape itself.
+
+
+class TestAcpSubagentListAttribution:
+    """`_kiro.dev/subagent/list_update` carries no sessionId of its own, so
+    the crew it describes has to be attributed to whichever session is
+    running the fan-out — and only when that is unambiguous."""
+
+    def test_a_crew_is_attributed_to_the_sole_inflight_session(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        crew = acp_mod._supervisor.crews[sid]
+        assert crew["sub-1"]["role"] == "explorer"
+        assert crew["sub-1"]["done"] is False
+        assert acp_mod._supervisor.subagent_sessions["sub-1"] == {"parent": sid}
+        assert "sub-1" in acp_mod._supervisor.subagent_history
+
+    def test_zero_inflight_sessions_drops_the_update(self, acp_store):
+        acp_mod, _ = acp_store
+        _live_session(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        assert acp_mod._supervisor.crews == {}
+        assert "sub-1" not in acp_mod._supervisor.subagent_sessions
+
+    def test_two_inflight_sessions_is_ambiguous_and_drops_the_update(
+            self, acp_store):
+        """Never guess which of two running turns a crew belongs to — the
+        same rule METADATA_METHOD's neighbouring comment states for a
+        different notification."""
+        acp_mod, _ = acp_store
+        sid_a = _live_session(acp_mod, sid="crew-a")
+        sid_b = _live_session(acp_mod, sid="crew-b")
+        acp_mod._supervisor.inflight.add(sid_a)
+        acp_mod._supervisor.inflight.add(sid_b)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        assert acp_mod._supervisor.crews == {}
+
+
+class TestAcpSubagentListParsing:
+    """Field-level parsing of one ``subagents`` entry."""
+
+    def _seed(self, acp_mod):
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        return sid
+
+    def test_a_finished_entry_never_reopens(self, acp_store):
+        """Q&A, 2026-08-11: "stay, marked done" — a stale or reordered update
+        repeating an earlier status must not un-finish a card."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "done"}},
+        ]})
+        assert acp_mod._supervisor.crews[sid]["sub-1"]["done"] is True
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        assert acp_mod._supervisor.crews[sid]["sub-1"]["done"] is True
+
+    def test_a_failed_entry_captures_its_error_message(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "failed", "message": "network unreachable"}},
+        ]})
+        entry = acp_mod._supervisor.crews[sid]["sub-1"]
+        assert entry["done"] is True
+        assert entry["error"] == "network unreachable"
+
+    def test_an_empty_slot_is_skipped_until_named(self, acp_store):
+        """kiro-cli sometimes announces a slot before it has anything to say
+        about it — corroborated by kirocrew's own `_native_subagent_sync`,
+        which skips exactly this case rather than showing an empty card."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "status": {"type": "pending"}},
+        ]})
+        assert acp_mod._supervisor.crews.get(sid, {}) == {}
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        assert "sub-1" in acp_mod._supervisor.crews[sid]
+
+    def test_role_and_task_fall_back_to_the_alternate_field_names(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "agentName": "reviewer",
+             "sessionName": "review the PR", "status": {"type": "working"}},
+        ]})
+        entry = acp_mod._supervisor.crews[sid]["sub-1"]
+        assert entry["role"] == "reviewer"
+        assert entry["task"] == "review the PR"
+
+    def test_a_non_list_subagents_field_is_ignored_rather_than_raising(
+            self, acp_store):
+        acp_mod, _ = acp_store
+        self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": "nope"})
+        assert acp_mod._supervisor.crews == {}
+
+
+class TestAcpSubagentActivity:
+    """`_kiro.dev/session/update` — SUBAGENT_ACTIVITY_METHOD — a sub-agent's
+    own tool calls and text, tagged with its own sessionId."""
+
+    def test_tool_call_chunk_updates_the_crew_cards_action(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        _queued(conn)
+        _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
+            "sessionId": "sub-1",
+            "update": {"sessionUpdate": "tool_call_chunk",
+                       "toolCallId": "tc-1", "title": "read"},
+        })
+        assert acp_mod._supervisor.crews[sid]["sub-1"]["action"] == "read"
+        frames = _queued(conn)
+        subagents = [f for f in frames if f["type"] == "subagents"]
+        assert subagents[-1]["payload"]["subagents"][0]["action"] == "read"
+
+    def test_tool_call_chunk_for_an_unregistered_child_is_a_noop(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
+            "sessionId": "unregistered-sub",
+            "update": {"sessionUpdate": "tool_call_chunk",
+                       "toolCallId": "tc-1", "title": "read"},
+        })
+        assert acp_mod._supervisor.crews == {}
+
+    def test_agent_message_chunk_for_a_registered_child_is_recorded(
+            self, acp_store):
+        """No dedicated branch for the routing itself — the existing
+        agent_message_chunk dispatch already keys purely off `sessionId`, so
+        registering the child's history buffer is most of the fix. The flat
+        `text` field here (rather than nested `content.text`) is the one bit
+        that needed a real code change: SUBAGENT_ACTIVITY_METHOD is
+        corroborated as sometimes using the older flat shape even where the
+        main channel never has — see the fallback beside `_content_text`."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
+            "sessionId": "sub-1",
+            "update": {"sessionUpdate": "agent_message_chunk",
+                       "text": "hello from sub"},
+        })
+        events = acp_mod._supervisor.subagent_history["sub-1"].events()
+        assert any(e["type"] == "chunk" and e["payload"]["text"] == "hello from sub"
+                   for e in events)
+
+
+class TestAcpSubagentsFrameDelivery:
+
+    def test_a_subagents_frame_is_broadcast_but_not_recorded_into_history(
+            self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        frames = _queued(conn)
+        assert frames and frames[-1]["type"] == "subagents"
+        assert frames[-1]["payload"]["subagents"][0]["sessionId"] == "sub-1"
+        assert all(e["type"] != "subagents"
+                   for e in acp_mod._supervisor.history[sid].events())
+
+    def test_subscribing_after_the_fact_gets_a_crew_snapshot(self, acp_store):
+        """A reload's only source for the bar — see `_emit_subagents_frame`'s
+        docstring for why it is deliberately not in the replay buffer."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["session", "history", "subagents"]
+
+
+class TestAcpSubagentReadOnlyAccess:
+    """A sub-agent's own session id is subscribable like a real one, and
+    refused everywhere a real one would be driven."""
+
+    def _seed_crew(self, acp_mod):
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "initialQuery": "look around", "status": {"type": "working"}},
+        ]})
+        return sid
+
+    def test_subscribing_to_a_registered_child_serves_a_readonly_session(
+            self, acp_store):
+        acp_mod, _ = acp_store
+        sid = self._seed_crew(acp_mod)
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, "sub-1")
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["session", "history"]
+        payload = frames[0]["payload"]
+        assert payload["readOnly"] is True
+        assert payload["parentSessionId"] == sid
+        assert payload["role"] == "explorer"
+        assert payload["task"] == "look around"
+        assert conn.session_id == "sub-1"
+
+    def test_a_prompt_against_a_subagent_session_is_refused_read_only(
+            self, acp_store):
+        acp_mod, _ = acp_store
+        self._seed_crew(acp_mod)
+        conn = _acp_conn(acp_mod)
+        asyncio.run(acp_mod._handle_prompt(conn, "sub-1", {"prompt": "hi"}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "read_only_session"
+
+    def test_a_close_against_a_subagent_session_is_refused_read_only(
+            self, acp_store):
+        acp_mod, _ = acp_store
+        self._seed_crew(acp_mod)
+        conn = _acp_conn(acp_mod)
+        asyncio.run(acp_mod._handle_close(conn, "sub-1"))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "read_only_session"
+
+    def test_a_cancel_against_a_subagent_session_is_refused_read_only(
+            self, acp_store):
+        acp_mod, _ = acp_store
+        self._seed_crew(acp_mod)
+        conn = _acp_conn(acp_mod)
+        asyncio.run(acp_mod._handle_cancel(conn, "sub-1"))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "read_only_session"
+
+    def test_subagent_sessions_are_exempt_from_the_session_cap(self, acp_store):
+        """Q&A, 2026-08-11: "exempt them" — a fan-out must not crowd out room
+        for a real session the user asked for."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        with patch.object(acp_mod, "MAX_SESSIONS", 1):
+            assert acp_mod._supervisor.at_capacity() is True
+            _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+                {"sessionId": "sub-1", "role": "a", "status": {"type": "working"}},
+                {"sessionId": "sub-2", "role": "b", "status": {"type": "working"}},
+            ]})
+            # Still exactly as at capacity as before — two more live sessions
+            # would trip it further, two sub-agents must not.
+            assert acp_mod._supervisor.at_capacity() is True
+            assert len(acp_mod._supervisor.sessions) == 1
+
+
+class TestAcpSubagentCleanup:
+
+    def test_closing_the_parent_tears_down_its_crew(self, acp_session):
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
+        ]})
+        acp_mod._supervisor.inflight.discard(sid)
+        watcher = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(watcher, "sub-1")
+        _queued(watcher)
+        parent_conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(parent_conn, sid)
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod, lambda: acp_mod._handle_close(parent_conn, sid))
+        assert sid not in acp_mod._supervisor.crews
+        assert "sub-1" not in acp_mod._supervisor.subagent_sessions
+        assert "sub-1" not in acp_mod._supervisor.subagent_history
+        frames = _queued(watcher)
+        assert frames[0]["type"] == "session_closed"
+
+
+class TestAcpSubagentEviction:
+
+    def test_the_oldest_finished_entries_are_evicted_over_the_cap(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2):
+            _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+                {"sessionId": "sub-1", "role": "a", "status": {"type": "done"}},
+            ]})
+            _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+                {"sessionId": "sub-2", "role": "b", "status": {"type": "done"}},
+            ]})
+            _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+                {"sessionId": "sub-3", "role": "c", "status": {"type": "working"}},
+            ]})
+        crew = acp_mod._supervisor.crews[sid]
+        assert set(crew) == {"sub-2", "sub-3"}
+        assert "sub-1" not in acp_mod._supervisor.subagent_sessions
+        assert "sub-1" not in acp_mod._supervisor.subagent_history
+
+    def test_a_still_running_entry_is_never_evicted(self, acp_store):
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 1):
+            _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+                {"sessionId": "sub-1", "role": "a", "status": {"type": "working"}},
+            ]})
+            _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+                {"sessionId": "sub-2", "role": "b", "status": {"type": "working"}},
+            ]})
+        crew = acp_mod._supervisor.crews[sid]
+        # Both survive: neither is `done`, and eviction only ever removes a
+        # finished entry — a bound this small is simply exceeded rather than
+        # violated by dropping a sub-agent that is still running.
+        assert set(crew) == {"sub-1", "sub-2"}
 
 
 class TestAcpInactivityCeiling:

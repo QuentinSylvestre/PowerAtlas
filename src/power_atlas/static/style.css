@@ -659,6 +659,14 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 /* Transcript is the primary pane; the transport log below it is a fixed strip,
    because once chunks stream the conversation is what the page is for. */
 .acp-transcript { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.65; display: flex; flex-direction: column; gap: 10px; }
+/* `[hidden]` alone loses to the class rule above: both are one selector of
+   specificity, `[hidden]` is the browser's UA stylesheet and an author rule
+   beats it regardless of source order, and `display: flex` above is
+   unconditional. acp.html toggles `.hidden` on this element, `.acp-composer`
+   and `.acp-subpanel` to swap between the main transcript and a sub-agent's
+   read-only one — the same trap `.acp-rail-menu[hidden]`/`.acp-picker[hidden]`
+   already exist to close for their own elements. */
+.acp-transcript[hidden], .acp-composer[hidden], .acp-subpanel[hidden] { display: none; }
 .acp-msg { display: flex; gap: 10px; align-items: flex-start; }
 .acp-msg-role { flex-shrink: 0; width: 42px; text-align: right; font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); padding-top: 4px; }
 .acp-msg-body { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }
@@ -829,6 +837,32 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    textarea and the two buttons lay out exactly as before — an empty tray is
    `hidden`, and `gap` on a flex container ignores a hidden child, so a page
    nobody attaches anything on is pixel-identical to the one before this. */
+/* The sub-agent panel takes `.acp-transcript`'s flex slot while one is open
+   (acp.html toggles `hidden` on each, never both visible at once), so it needs
+   the same `flex: 1` to fill the space the transcript vacated. The transcript
+   element itself is reused via a shared `.acp-transcript` class on
+   `#acpSubTranscript` rather than duplicated here — same scroll box, same
+   `.acp-msg` rows, a read-only view built from the same parts. */
+.acp-subpanel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.acp-subpanel-head { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.acp-subpanel-role { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-subpanel-status { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+
+/* The agent bar: Main plus one pill per sub-agent, Claude-Code-style. A row
+   of small pills rather than the toolbar's full-size buttons — there can be
+   several, and each one is a switch, not a command. Wraps rather than
+   scrolling: a fan-out wide enough to need more than one line is rare, and a
+   wrapped second line stays fully readable where a horizontal scroller would
+   hide pills off-screen with no affordance saying more exist. */
+.acp-agentbar { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
+.acp-agentbar-pill { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 4px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-family: inherit; max-width: 160px; }
+.acp-agentbar-pill:hover { border-color: var(--accent); color: var(--text); }
+.acp-agentbar-pill:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.acp-agentbar-pill-active { background: var(--accent-dim); border-color: var(--accent); color: var(--text); }
+.acp-agentbar-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.acp-agentbar-sub { font-size: 10px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.acp-agentbar-pill-active .acp-agentbar-sub { color: var(--accent); }
+
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; }
 /* Wraps rather than scrolls: at most four chips fit in a prompt and a wrapped
@@ -866,9 +900,15 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-send { padding: 6px 20px; }
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone
-   is a sixth of the screen taken from the conversation. Widened back at the
-   breakpoint. */
+   is a sixth of the screen taken from the conversation — so it starts
+   collapsed (`hidden` in the markup; acp.html toggles it and remembers the
+   choice) and this sizing only applies once a reader opens it. Widened back
+   at the breakpoint. */
 .acp-log { flex: 0 0 88px; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 10px 12px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.7; }
+/* A small utility toggle, not a primary action — `.acp-btn` supplies the
+   button chrome, this only trims it down and mutes it so it reads as
+   secondary to New session / Close session beside it. */
+.acp-log-toggle { align-self: flex-start; padding: 2px 10px; font-size: 11px; color: var(--text-muted); }
 .acp-log-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
 .acp-log-time { color: var(--text-dim); flex-shrink: 0; }
 .acp-log-body { flex: 1; }
