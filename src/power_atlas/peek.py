@@ -3,6 +3,8 @@
 import logging
 import sys
 import threading
+import time
+import webbrowser
 
 log = logging.getLogger("power_atlas.peek")
 
@@ -21,6 +23,9 @@ def is_available() -> bool:
     return _AVAILABLE
 
 
+_DOUBLE_TAP_INTERVAL = 0.5  # seconds between two hotkey triggers to open the browser
+
+
 class PeekWindow:
     """Manages the pywebview overlay window and pynput hotkey listener."""
 
@@ -37,6 +42,7 @@ class PeekWindow:
         self._triggered = False  # True after full combo pressed
         self._webview_ready = threading.Event()
         self._webview_ok = False  # Set True only when webview is confirmed ready
+        self._last_trigger_time: float = 0.0  # monotonic time of the previous trigger
 
     def start(self, on_main_thread: bool = False) -> None:
         """Start the peek window and hotkey listener.
@@ -145,6 +151,9 @@ class PeekWindow:
                 # and clean up pressed state
                 if self._trigger_keys.issubset(self._pressed_keys):
                     self._pressed_keys.discard(name)
+                    # Reset triggered so the next z key-down fires _show again,
+                    # enabling double-tap detection while Ctrl+Shift stays held.
+                    self._triggered = False
                     self._listener.suppress_event()
 
     @staticmethod
@@ -171,6 +180,16 @@ class PeekWindow:
         return _SPECIAL.get(vk)
 
     def _show(self) -> None:
+        now = time.monotonic()
+        if now - self._last_trigger_time < _DOUBLE_TAP_INTERVAL:
+            # Double-tap: open the web UI in the default browser instead
+            log.debug("Peek double-tap — opening browser")
+            self._last_trigger_time = 0.0  # reset so a third tap is not a double-tap
+            if self._visible:
+                self._hide()
+            webbrowser.open(self._server_url)
+            return
+        self._last_trigger_time = now
         win = self._window  # local capture for thread safety
         if win and not self._visible and self._webview_ok:
             self._visible = True
@@ -219,7 +238,7 @@ class PeekWindow:
         if normalized:
             self._pressed_keys.add(normalized)
         # Escape key fallback: always dismiss if visible
-        if self._triggered and normalized == "esc":
+        if (self._triggered or self._visible) and normalized == "esc":
             self._triggered = False
             self._pressed_keys.clear()
             self._hide()
@@ -233,7 +252,7 @@ class PeekWindow:
         normalized = self._normalize_key(key)
         if normalized:
             self._pressed_keys.discard(normalized)
-        if self._triggered:
+        if self._triggered or self._visible:
             # Hide when either modifier is released
             modifiers = {k for k in self._trigger_keys if k in ("ctrl", "shift", "alt")}
             if not modifiers.issubset(self._pressed_keys):
