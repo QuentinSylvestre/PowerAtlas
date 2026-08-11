@@ -1,5 +1,57 @@
 # PowerAtlas — Roadmap
 
+## Table of Contents
+
+### Priority ranking
+- [Ranking table](#where-to-start--ranked-2026-08-04) — 12 items ranked by payoff/effort, with tier and one-line rationale each
+
+### Automation & Workflows
+- **Dispatch no-interactive tasks** — fire a kiro-cli task without a terminal; `--no-interactive` leaves no session trail so ACP is the right path, but unattended safety is still unsettled
+- **Open session with a prompt or skill** — prompt delivery and skill loading are proven; passing skill arguments (`$ARGUMENTS`) is not yet verified
+- **Template prompts** — save reusable per-workspace prompts; blocked on the same `$ARGUMENTS` question as above
+- **Scheduled tasks** — cron-like recurring kiro-cli launches; mechanism is measured and process cost is known, but the auto-permissions gate must come first
+- **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions
+- **Skills support spike** — understand how argument passing works in both kiro-cli and Claude Code, unblocking three items above
+- **Plan-file shortcuts** — detect `plans/*.md` files and offer one-click `/qdev` buttons; same `$ARGUMENTS` blocker
+
+### Workspace Intelligence
+- **Session status extensions** — "stale /qdev never completed" heuristics, sound notifications, and detecting fresh terminal sessions (base already shipped)
+- **Plan progress overlay** — show phase completion (e.g. "Phase 3/5") on workspace cards by reading plan files
+- **Sub-agent pipeline visibility** — show fan-out stages that are today invisible; disk data (completed) needs no ACP, live data uses the existing ACP client
+- **Sub-agent status and conversation** — let the user see live sub-agent status and drill into each sub-agent's conversation from `/acp`
+- **kiro-cli usage stats** — dashboard showing session counts, durations, and tool-usage patterns over time
+
+### Platform
+- **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
+- **Launched sessions inherit PowerAtlas's environment** — sessions inherit `CLAUDE_CODE_CHILD_SESSION` and other markers from the tray process; three launch paths disagree
+- **Replace pid-recycling skew window with `procStart`** — make the sidecar identity check exact instead of approximate; Claude Code only, one-liner once confirmed
+- **Unify `/search` and `partials_workspaces` pipelines** — two copies of the same filter/render code; the duplication already shipped one 500 error
+- **kiro-cli v3 session support** — scan the `sess_*/` store; currently 23 dormant historical sessions are invisible, store is not actively growing
+- **Parked items** — v3 support · invisible sqlite sessions · usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
+
+### Session Control & Integration
+- **Bulk session deletion** — single-row delete shipped; workspace-level "delete all N" is the useful shape for the store-size problem
+- **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
+- **Tell the operator a turn ended** — push notification when a long task finishes; cheapest version uses the existing WebSocket but fails when the phone sleeps the tab
+- **Real session titles** — 15% untitled, 22% raw first-prompt text; fixing this narrows a remote-access data-exposure residual at the same time
+- **Display workspace name in the `/acp` pane** — pane header shows only the session title; add the short folder name so context is always visible
+- **Avoid viewport zoom on mobile** — three interactions trigger zoom/layout-shift on iOS: textarea focus, picker open, session resume
+- **"Thinking" activity indicator** — show a spinner while the model thinks between tool calls; needs a probe to confirm what the wire frame actually carries
+- **Tool output in the transcript** — show truncated, rendered tool results (today only the command is shown, not what it returned)
+- **Tool display improvements** — richer tool-call rows: status badges, type icons, structured argument display, expandable detail
+- **Auto-mode for `/acp` permissions** — drop `-a` and decide each request automatically; latency is measured and fine, accuracy against adversarial inputs is the open question
+- **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured)
+- **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
+- **[P2b] Session stores PowerAtlas cannot see** — 23 v3 sessions and 11 classic sqlite sessions are invisible; v3 store is dormant, sqlite sessions have no files on disk
+
+### Misc
+- **[SECURITY] Loopback API token** — any local process can create sessions and run shell commands via `/api/*`; proposed fix is a startup-generated secret injected into the page
+- **[SECURITY — accepted] No NetBird access policy** — all 17 account peers can reach the remote bind; accepted because the account is shared; reopen conditions documented
+- **[SECURITY — closed] NetBIOS on the NetBird address** — original finding was wrong; TCP 139 is bound but all inbound rules are disabled; no action needed
+- **Claude Code sidecar fields inventory** — full table of every field PowerAtlas reads (or could read) from `~/.claude/sessions/<pid>.json`
+
+---
+
 > Non-executed ideas and future features, organized by theme. Shipped items are removed rather than
 > struck through — `git log -- plans/ROADMAP.md` carries their history.
 >
