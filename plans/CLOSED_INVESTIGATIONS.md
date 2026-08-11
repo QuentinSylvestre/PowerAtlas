@@ -131,6 +131,26 @@ this entry on its own.
 
 ---
 
+## Closed — NetBIOS reachability on the NetBird address
+
+**Verdict: closed 2026-08-03. The original finding was wrong, and the corrected one does not warrant
+action.** Recorded 2026-08-01 as "TCP 139 reachable by all 17 peers", inferred from a socket census
+rather than measured. Moved off `ROADMAP.md` 2026-08-11 because a decided, no-action question is not
+pending work — see the `messagingSocketPath` entry below, which already referenced this one as "above"
+in anticipation of the move.
+
+- **Re-measured 2026-08-03**: 139 and UDP 137/138 are all bound to `100.78.142.124`, but **all 19 inbound File and Printer Sharing rules are disabled** — including both `NB-Session-In` rules, the only ones that admit TCP 139 — so 139 is bound and unreachable, and SMB on 445 with it.
+- **What is actually exposed**: UDP 137/138, admitted by two enabled `Network Discovery` rules scoped to the **Private** profile, which is how `wt0` is classified. That is NetBIOS name and datagram service — hostname disclosure to the 17 peers accepted as trusted (see the NetBird access-policy item, `plans/ROADMAP.md`), and no file access.
+- **Why no action**: the one-line fix (`Set-NetConnectionProfile -InterfaceIndex 2 -NetworkCategory Public`) was proposed and withdrawn on measurement. Private is what permits local discovery between the user's own devices, NetBird may reset the classification when the tunnel re-establishes, and the downside outweighs a hostname. Also measured: `wt0` already carries `NetbiosOptions = 2` and the sockets bound regardless — NetBT binds at interface-up, so the setting needs an adapter re-bind to take effect.
+- **The reusable part**: a listening socket is not a reachable service. The first reading counted listeners; the second read the firewall.
+
+**Would reopen if**: the File and Printer Sharing rules are re-enabled (a Windows update, a profile
+change, or a future decision), or NetBird stops running on the Private-profile classification this
+rests on. Cheapest re-check: `Get-NetFirewallRule -DisplayGroup "File and Printer Sharing" | Where
+Direction -eq Inbound | Select DisplayName, Enabled`.
+
+---
+
 ## Rejected — `messagingSocketPath` as a path to driving live Claude Code sessions
 
 Carried on `ROADMAP.md` as a `[SPIKE]` from 2026-07-24, run and closed 2026-08-04 against Claude Code

@@ -41,7 +41,6 @@
 ### Misc
 - **[SECURITY] Loopback API token** — any local process can create sessions and run shell commands via `/api/*`; proposed fix is a startup-generated secret injected into the page
 - **[SECURITY — accepted] No NetBird access policy** — all 17 account peers can reach the remote bind; accepted because the account is shared; reopen conditions documented
-- **[SECURITY — closed] NetBIOS on the NetBird address** — original finding was wrong; TCP 139 is bound but all inbound rules are disabled; no action needed
 - **Claude Code sidecar fields inventory** — full table of every field PowerAtlas reads (or could read) from `~/.claude/sessions/<pid>.json`
 
 ---
@@ -91,7 +90,7 @@
 | 9 | *An auto-mode for `/acp` permissions* | **keystone** | Gates all six `## Automation & Workflows` items. Latency settled; **accuracy entirely unmeasured**, and that is the real gate |
 
 **Parked, deliberately**: v3 session support · `[P2b]` invisible stores · usage stats · plan-progress
-overlay · creating a session in a workspace that has none · both `[SECURITY]` items (each carries its
+overlay · creating a session in a workspace that has none · the accepted `[SECURITY]` item (carries its
 own reopen condition).
 
 ---
@@ -266,10 +265,6 @@ own reopen condition).
 - **[SECURITY — accepted, 2026-08-03] No NetBird access policy restricts this host, and that is now a decision rather than an oversight.** Measured 2026-07-31: `netbird status -d` enumerates **all 17** account peers in this host's network map, including machines belonging to other people (`akita`, `paros-g`, `nuc-chicago`, `ec2amaz-tv495hp`, `macbook-air-de-polestar`, …), so the stock `Default` (All → All) policy is still enabled.
   - *Closed as accepted at `/qclose`*: the NetBird account is shared for other purposes and cannot be restricted to this host's devices, and the peers on it are trusted. The device cookie stands as the sole authorization layer (D33) rather than the two independent layers D3 designed. It held against 60+ executed attacks and an adversarial reviewer's verdict was "not exploitable without the secret" — the boundary is not broken. What is true is that a single credential carries the whole model, and what sits behind it is `kiro-cli acp -a`.
   - *Reopen if*: the account stops being shared, or a peer on it stops being trusted. The close is then ~5 minutes — app.netbird.io → Access Control → Policies; group the laptop, `iphone-quentin` (`100.78.26.204`) and `ipad-quentin` (`100.78.66.16`); scope a policy to it; disable `Default`; verify the peer count collapses. **Nothing in the implementation depends on the policy's absence**, so it re-establishes the second layer with no code change.
-- **[SECURITY — closed, 2026-08-03] NetBIOS on the NetBird address: the original finding was wrong, and the corrected one does not warrant action.** Recorded 2026-08-01 as "TCP 139 reachable by all 17 peers", inferred from a socket census rather than measured. Re-measured 2026-08-03: 139 and UDP 137/138 are all bound to `100.78.142.124`, but **all 19 inbound File and Printer Sharing rules are disabled** — including both `NB-Session-In` rules, the only ones that admit TCP 139 — so 139 is bound and unreachable, and SMB on 445 with it.
-  - *What is actually exposed*: UDP 137/138, admitted by two enabled `Network Discovery` rules scoped to the **Private** profile, which is how `wt0` is classified. That is NetBIOS name and datagram service — hostname disclosure to the 17 peers accepted as trusted above, and no file access.
-  - *Why no action*: the one-line fix (`Set-NetConnectionProfile -InterfaceIndex 2 -NetworkCategory Public`) was proposed and withdrawn on measurement. Private is what permits local discovery between the user's own devices, NetBird may reset the classification when the tunnel re-establishes, and the downside outweighs a hostname. Also measured: `wt0` already carries `NetbiosOptions = 2` and the sockets bound regardless — NetBT binds at interface-up, so the setting needs an adapter re-bind to take effect.
-  - *The reusable part*: a listening socket is not a reachable service. The first reading counted listeners; the second read the firewall.
 
 - **Claude Code session-sidecar fields — full inventory and verdict**
   - Every field the binary's reader accepts from `~\.claude\sessions\<pid>.json`. PowerAtlas consumes four today (`pid`, `sessionId`, `cwd`, `startedAt`) plus `status`/`waitingFor`. Recorded so this does not need re-deriving.
