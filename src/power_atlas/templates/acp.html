@@ -174,7 +174,16 @@
          reclaims unattended sessions on its own; this is the control for
          releasing one now. plans/ROADMAP.md carries the cost model. -->
     <button class="acp-btn acp-danger" id="acpClose" type="button" hidden>Close session</button>
-    <span class="acp-sid" id="acpSid"></span>
+    <!-- Names the workspace by default — resuming from the recency-grouped
+         rail (`acp-rail-flat`) drops the session out of any workspace-headed
+         container, so this is the only place left that says which project
+         context the agent is running in. Tap swaps to the session id, which
+         is the more useful fact when two open sessions share a workspace. A
+         `<button>` rather than a `<span>` because that swap has to be
+         reachable without a hover a phone does not have. -->
+    <button type="button" class="acp-sid" id="acpSid"
+            aria-label="Workspace and session id — tap to switch between them"
+            aria-pressed="false"></button>
   </div>
   <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
        aria-label="Conversation"></div>
@@ -364,6 +373,15 @@
   // never will. Reset by connect(), because a socket that dropped took its
   // subscription with it and the new one holds nothing until it is answered.
   var subscribed = false;
+  // The open session's workspace, short form (`repo`, not `C:\work\repo`) —
+  // read off the `session` frame's `cwd`, which is the only place this page
+  // ever learns it. "" until that frame lands, which is why `renderSidLabel`
+  // falls back to the raw id rather than drawing an empty header.
+  var sidWorkspace = '';
+  // Whether the header is showing the session id instead of the workspace
+  // name. Reset to false on every session change: the id was one tap away
+  // for whichever conversation asked for it, not a standing preference.
+  var sidRevealed = false;
   // True while a `history` frame is being fed back through handle(). The
   // frames in it are real and render normally; what would be wrong is
   // narrating a replay into the transport log as if it were live traffic.
@@ -372,6 +390,14 @@
   // replayed turn marker — the buffer evicts those; the `session` frame
   // carries the authoritative value.
   var turnActive = false;
+  // The transcript row showing "thinking…" while a live turn is silent, or
+  // null when nothing is shown. `{row, body}` rather than just the row: the
+  // one live thing to arrive that touches it (`thought`) rewrites `body`'s
+  // text, and looking that up through `row` on every frame would be the same
+  // query repeated for no reason. `clearTranscript` resets this to null
+  // alongside `agentBody`, since emptying `transcriptEl` detaches `row`
+  // without this page finding out on its own.
+  var thinkingRow = null;
   // The prompt handed to a `send` that has not yet been acknowledged by a
   // turn starting. Held so a refusal can put it back in the textarea.
   var pendingPrompt = null;
@@ -507,7 +533,7 @@
   // That is the same population the `locked` row's `disabled` exists for.
   var railFocus = null;
 
-  if (sessionId) sidEl.textContent = 'session ' + sessionId;
+  renderSidLabel();
 
   // ---- the drill-down ---------------------------------------------------
   // Below 768 px the rail and the conversation are one pane at a time; at and
@@ -629,6 +655,44 @@
     railNew.title = why;
   }
 
+  /** The last non-empty path segment, `Path(cwd).name`'s client-side mirror.
+   *  Both separators are handled: the server sends whatever the OS the agent
+   *  runs on writes into `cwd`, `\` on Windows, and this page runs on
+   *  whichever OS the browser happens to be. */
+  function shortName(cwdPath) {
+    var trimmed = String(cwdPath || '').replace(/[\\/]+$/, '');
+    var cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+    var name = cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
+    return name || trimmed;
+  }
+
+  /** Redraw the toolbar's session label from the current `sidWorkspace` /
+   *  `sidRevealed` / `sessionId` state. One function for every writer so the
+   *  three cannot drift out of sync — see the click handler below and every
+   *  place that sets `sidWorkspace`. */
+  function renderSidLabel() {
+    if (!sessionId) {
+      sidEl.textContent = '';
+      sidEl.title = '';
+      return;
+    }
+    // Falls back to the id when the workspace is not known yet — right after
+    // `selectSession` and before the `session` frame answers — rather than
+    // drawing a blank header for that gap.
+    var showId = sidRevealed || !sidWorkspace;
+    sidEl.textContent = showId ? 'session ' + sessionId : sidWorkspace;
+    sidEl.setAttribute('aria-pressed', showId ? 'true' : 'false');
+    sidEl.title = sidWorkspace
+      ? (showId ? 'tap to show the workspace' : 'tap to show the session id')
+      : '';
+  }
+
+  sidEl.addEventListener('click', function () {
+    if (!sessionId) return;
+    sidRevealed = !sidRevealed;
+    renderSidLabel();
+  });
+
   function setLoading(sid) {
     loadingSid = sid || null;
     // Only the label moves. The socket really is open either way, and calling
@@ -692,6 +756,7 @@
     // one verified to fail when its clear is removed.
     sessionId = null;
     setTurn(false);
+    hideThinking();
     setContext(null);
     setPending(false);
     // Images were staged against the conversation this page has just let go
@@ -699,7 +764,9 @@
     // front of a different agent in a different directory.
     clearAttachments();
     releasePendingAttachments();
-    sidEl.textContent = '';
+    sidWorkspace = '';
+    sidRevealed = false;
+    renderSidLabel();
     // The id leaves the URL with the session. Left in place, a reload would
     // re-adopt the session through `load` and spend the ~161 MB again --
     // silently undoing the one thing the user pressed the button for.
@@ -1145,6 +1212,61 @@
     transcriptEl.appendChild(row);
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     return body;
+  }
+
+  /** Show the "thinking…" row, or do nothing if it is already showing.
+   *
+   *  Built like `addMessage` rather than through it: this row is not a
+   *  message, it is process chrome that gets torn back out the moment
+   *  something real arrives, and `addMessage` has no way to hand back the
+   *  row `hideThinking` needs to remove — only the body inside it.
+   *
+   *  Called once, from `setTurn(true)`'s live arm (`meta turn:start`) — a
+   *  turn is silent for certain in the instant it begins and there has been
+   *  nothing to say yet. It does not reappear between a tool call and the
+   *  agent's next words: nothing on the wire marks that gap as *renewed*
+   *  silence rather than an answer still being composed, and guessing with a
+   *  timer would show "thinking" over a bubble already mid-stream as often as
+   *  over a genuinely quiet turn. */
+  function showThinking() {
+    if (thinkingRow) return;
+    var stick = stuckToBottom();
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-thinking';
+    var who = document.createElement('span');
+    who.className = 'acp-msg-role';
+    var body = document.createElement('div');
+    body.className = 'acp-msg-body';
+    body.textContent = 'thinking…';
+    row.appendChild(who);
+    row.appendChild(body);
+    transcriptEl.appendChild(row);
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    thinkingRow = { row: row, body: body };
+  }
+
+  /** Remove the "thinking…" row, or do nothing if none is showing. Called on
+   *  every frame that means the turn stopped being silent — a message chunk,
+   *  a tool call, the turn ending — so the row never survives past the thing
+   *  it was standing in for. */
+  function hideThinking() {
+    if (!thinkingRow) return;
+    thinkingRow.row.remove();
+    thinkingRow = null;
+  }
+
+  /** Render `agent_thought_chunk` content in place of the placeholder text,
+   *  if the agent ever sends one. Unobserved in 1,200 measured runs across
+   *  every Claude and Qwen model and thinking configuration tried
+   *  (plans/ROADMAP.md) — this exists so a build that does send it is used
+   *  rather than silently dropped, not because it is known to fire. Never
+   *  called while replaying: a `thought` frame surviving in the ring buffer
+   *  from a turn long over has nothing live left to indicate. */
+  function appendThought(text) {
+    if (!text) return;
+    showThinking();
+    if (thinkingRow.body.textContent === 'thinking…') thinkingRow.body.textContent = '';
+    thinkingRow.body.textContent += text;
   }
 
   function addToolCall(payload) {
@@ -1770,6 +1892,10 @@
     transcriptEl.textContent = '';
     agentBody = null;
     toolRows = Object.create(null);
+    // The row emptying just detached, if one was showing — nothing left to
+    // remove a second time, and `showThinking` would otherwise believe one
+    // still stands.
+    thinkingRow = null;
   }
 
   function railUrl(params) {
@@ -3303,7 +3429,13 @@
     releasePendingAttachments();
     setContext(null);
     setTurn(false);
-    sidEl.textContent = 'session ' + sid;
+    // The workspace is not known yet — only the `session` frame this
+    // `subscribe` is about to provoke carries `cwd` — so this shows the raw
+    // id as a placeholder until that answers, the same gap `renderSidLabel`
+    // documents for a page opened straight at `?sid=`.
+    sidWorkspace = '';
+    sidRevealed = false;
+    renderSidLabel();
     history.replaceState(null, '',
       location.pathname + '?sid=' + encodeURIComponent(sid));
     // `subscribe` first. The server answers `unknown_session` for a session it
@@ -3711,11 +3843,16 @@
       // transcript's bubbles. Whether a turn is running *now* is what the
       // `session` frame says, because these markers are evictable.
       if (!replaying) setTurn(true);
+      // The turn is silent for certain right now — nothing has streamed yet —
+      // so this is the one point `showThinking` is called from directly
+      // rather than left to a frame that means content arrived.
+      if (!replaying) showThinking();
       return;
     }
     if (type === 'meta' && payload.turn === 'end') {
       agentBody = null;
       if (!replaying) setTurn(false);
+      if (!replaying) hideThinking();
       if (payload.stopReason && payload.stopReason !== 'end_turn') {
         // Written into the transcript, not only the log strip, because the
         // log is not replayed: a turn that failed would otherwise come back
@@ -3735,7 +3872,14 @@
       return;
     }
     if (type === 'chunk') {
+      hideThinking();
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+      return;
+    }
+    if (type === 'thought') {
+      // Never shown from a replay: the turn it belonged to is long over, so
+      // there is nothing live left for a "thinking" row to indicate.
+      if (!replaying) appendThought(payload.text || '');
       return;
     }
     if (type === 'rendered') {
@@ -3749,6 +3893,7 @@
       return;
     }
     if (type === 'tool_call' || type === 'tool_update') {
+      hideThinking();
       addToolCall(payload);
       logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
                     ' [' + (payload.status || '') + ']');
@@ -3791,7 +3936,14 @@
       // `null` for a session that has not run a turn yet, which hides the
       // meter rather than drawing an empty one.
       setContext(payload.contextPercent);
-      sidEl.textContent = 'session ' + payload.sessionId;
+      // The one place this page ever learns the workspace: `cwd` arrives on
+      // every `session` frame, created or resubscribed alike. Reset the
+      // reveal on every frame, not only a fresh selection — a reconnect that
+      // re-subscribes into the same session should not carry over whatever
+      // the user had tapped open before the drop.
+      sidWorkspace = shortName(payload.cwd || '');
+      sidRevealed = false;
+      renderSidLabel();
       logLine('in', '← session ' + payload.sessionId +
                     (payload.created ? ' (created' : ' (resubscribed') +
                     ', cwd ' + payload.cwd + ')');
@@ -3842,9 +3994,12 @@
       setLoading(null);
       sessionId = null;
       setTurn(false);
+      hideThinking();
       setContext(null);
       setState('closed', 'agent gone');
-      sidEl.textContent = '';
+      sidWorkspace = '';
+      sidRevealed = false;
+      renderSidLabel();
       addMessage('error', 'the agent exited (code ' + payload.exitCode + ') — ' +
                           payload.message);
       restorePendingPrompt('the agent exited');

@@ -39,8 +39,9 @@ that exists in the agent's own store but not in this process), ``prompt``,
 Server to client: ``session`` (id and metadata after ``new``/``subscribe``),
 ``chunk``, ``rendered``, ``tool_call``, ``tool_update``, ``meta``, ``error``,
 ``agent_died``, ``session_closed``, ``history_truncated``, ``history`` (the
-whole replay, coalesced into one frame). ``envelope`` refuses any type not in
-``SERVER_TYPES``.
+whole replay, coalesced into one frame), ``thought`` (an ``agent_thought_chunk``
+notification's text, if the agent ever sends one — see ``_on_notification``).
+``envelope`` refuses any type not in ``SERVER_TYPES``.
 
 Session identity survives a reload because the page carries ``?sid=…`` and
 re-sends ``subscribe`` on connect.
@@ -152,7 +153,7 @@ except Exception as _e:  # pragma: no cover - only when the dep is missing
 CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close"})
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
-    "agent_died", "session_closed", "history_truncated", "history",
+    "agent_died", "session_closed", "history_truncated", "history", "thought",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -2376,6 +2377,23 @@ class _Supervisor:
                 _emit(session_id, envelope(
                     "tool_call" if kind == "tool_call" else "tool_update",
                     payload, session_id))
+            return
+        if kind == "agent_thought_chunk":
+            # Never observed: the 2026-08-03 latency benchmark measured zero
+            # of these across 1,200 runs on every Claude and Qwen model with
+            # every thinking configuration tried (plans/ROADMAP.md). Handled
+            # anyway rather than left to the debug fall-through below, on the
+            # chance it is model- or config-gated rather than universally
+            # absent — the client's "Thinking…" indicator (`acp.html`) already
+            # covers the silence this would otherwise fill, so a build that
+            # never sends it costs this branch nothing.
+            text = _content_text(update.get("content"))
+            if text and isinstance(session_id, str):
+                # Ends the open bubble for the same reason a tool call does:
+                # this is not a continuation of the agent's prose, and mixing
+                # it into `agentBody` would parse two documents as one.
+                _flush_bubble(session_id)
+                _emit(session_id, envelope("thought", {"text": text}, session_id))
             return
         if log.isEnabledFor(logging.DEBUG):
             # Params and not only the method name. This module talks to an

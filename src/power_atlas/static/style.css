@@ -638,7 +638,14 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    button's hover suppressed and a caret cursor back. */
 .acp-input { flex: 1; min-width: 140px; cursor: text; }
 .acp-input:hover { border-color: var(--border); color: var(--text); }
-.acp-sid { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; }
+/* A <button> now, not a <span> — it toggles between the workspace name and the
+   session id, and that has to be reachable without the hover a phone does not
+   have. Reset to plain text otherwise: this is a label first and a control
+   second, and `.acp-btn`'s border/background would announce a whole new
+   toolbar control where there is only a tap target on existing text. */
+.acp-sid { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; background: none; border: none; padding: 0; cursor: pointer; }
+.acp-sid:empty { cursor: default; }
+.acp-sid:hover, .acp-sid:focus-visible { color: var(--text-muted); }
 /* Stop and Close both end something the user cannot get back in place, so they
    read as destructive rather than as two more grey buttons in the row. */
 .acp-danger:hover { border-color: #f87171; color: #f87171; }
@@ -682,6 +689,13 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-msg-note .acp-msg-body { color: #fbbf24; font-size: 12px; font-style: italic; }
 .acp-msg-error .acp-msg-role { color: #f87171; }
 .acp-msg-error .acp-msg-body { color: #f87171; font-size: 12px; }
+/* Process chrome, not a message — dimmer than a note and pulsing rather than
+   coloured, so a turn's own answer (once it starts streaming) reads as the
+   thing that changed rather than one more tinted row among several. The same
+   pulse the rail's own working dot uses, so "something is happening" carries
+   one animation across the page rather than two. */
+.acp-msg-thinking .acp-msg-body { color: var(--text-dim); font-size: 12px; font-style: italic; animation: status-pulse 2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .acp-msg-thinking .acp-msg-body { animation: none; } }
 /* Tool calls must not read as agent prose: under -a they are the only record
    of what actually executed, so they get their own rail, colour and mono
    command block rather than blending into the answer around them. */
@@ -843,7 +857,12 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    place the cap is written: the script sets an unclamped `height` and lets this
    rule cut it off, so there is no second copy of 180 to drift. Past the cap the
    textarea scrolls, which is the default `overflow` for the element. */
-.acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
+/* 16px, not the 13px this reads above 768px (see the override there). Below
+   16px iOS Safari treats a focused input as a "zoom to read this" signal and
+   scales the whole viewport in — measured on this exact element, since it is
+   focused by every prompt sent. The desktop-sized override undoes it above
+   the breakpoint where no such browser is in play. */
+.acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-send { padding: 6px 20px; }
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone
@@ -962,7 +981,11 @@ body:has(> .acp-shell) { height: 100dvh; }
    264 available. 140 px is wider than the leftovers, so the box drops to its own
    line at the default width and rejoins the row once the rail is dragged past
    about 430 px — which is the adaptive behaviour the wrap was chosen for. */
-.acp-rail-search { flex: 1; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 12px; padding: 7px 10px; }
+/* 16px below 768px for the same reason `.acp-prompt` is: this input is
+   auto-focused the moment the create picker opens (`.acp-picker-search`
+   shares this class and this rule), so a picker press was the second place
+   iOS Safari zoomed the viewport in, not only the composer. */
+.acp-rail-search { flex: 1; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 16px; padding: 7px 10px; }
 .acp-rail-search:focus { outline: none; border-color: var(--accent); }
 .acp-rail-search:disabled { opacity: 0.45; cursor: default; }
 /* Reserves its line whether or not it has text, so the rows below do not jump
@@ -1243,5 +1266,11 @@ body:has(> .acp-shell) { height: 100dvh; }
      with 3 produce the same dialog, with the list scrolling inside it. */
   .acp-picker { align-items: center; padding: 24px; }
   .acp-picker-panel { max-width: 520px; max-height: min(560px, 100%); padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45); }
+  /* The 16px base rule below this breakpoint exists for iOS Safari's
+     zoom-on-focus, a phone behaviour no desktop browser has. Restored to the
+     denser sizes these two carried before that fix, now that the reason for
+     the larger one no longer applies. */
+  .acp-prompt { font-size: 13px; }
+  .acp-rail-search { font-size: 12px; }
 }
 

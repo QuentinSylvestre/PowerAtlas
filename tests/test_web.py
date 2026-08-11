@@ -2921,6 +2921,42 @@ class TestAcpNotificationFanout:
         })
         assert _queued(conn) == []
 
+    def test_agent_thought_chunk_reaches_subscribers_as_a_thought_frame(self, acp_session):
+        """Never observed on the wire (plans/ROADMAP.md: zero across 1,200
+        measured runs), handled anyway on the chance a build does send it —
+        see the branch's own comment in `_on_notification`."""
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "considering the diff"}}},
+        })
+
+        assert _queued(conn) == [{
+            "type": "thought", "sessionId": sid,
+            "payload": {"text": "considering the diff"}}]
+        assert acp_mod._supervisor.history[sid].events()[0][
+            "payload"]["text"] == "considering the diff"
+
+    def test_agent_thought_chunk_with_no_text_emits_nothing(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": ""}}},
+        })
+        assert _queued(conn) == []
+
 
 class TestAcpToolCallVisibility:
     """Under ``-a`` there is no permission gate, and the accepted justification

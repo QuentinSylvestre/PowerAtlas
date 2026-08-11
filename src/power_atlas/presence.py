@@ -123,6 +123,49 @@ _SIDECAR_SKEW_S = 120.0
 # guard set is deliberately good enough, not airtight.
 _SIDECAR_BACKWARD_SKEW_S = 5.0
 
+# claude-code's sidecar carries `procStart`, a Windows creation FILETIME
+# (100ns intervals since 1601-01-01) as a decimal string — the *same* value
+# psutil's `create_time()` is itself derived from on Windows, rather than a
+# second, independently-stamped wall-clock reading like `startedAt`. Where the
+# two skew constants above bound how far `startedAt` may drift from
+# `create_time` because they are different clocks, `procStart` needs no bound
+# at all in principle — it should equal `create_time` outright. The tolerance
+# here exists only for float/FILETIME rounding on the way through, not for
+# clock disagreement, and is deliberately far tighter than `_SIDECAR_SKEW_S`.
+#
+# Observed 2026-08-04, three sidecars: converts to within 1.757s of the same
+# record's `startedAt`. That figure bounds `procStart` against the *other*
+# field on the same sidecar, not against `create_time` — the comparison this
+# module actually makes — so 2.0s is a deliberately generous ceiling on an
+# unmeasured quantity, not a pinned one.
+#
+# claude-code only, and it stays that way structurally rather than by a name
+# check here: kiro-cli's lock carries `{pid, started_at}` and nothing else, so
+# `_Sidecar.proc_start` is `None` on every kiro-cli record and this path never
+# runs for it. See `_sidecar_records()`.
+_PROC_START_TOLERANCE_S = 2.0
+
+# Windows FILETIME epoch (1601-01-01T00:00:00Z) expressed in 100ns intervals
+# before the Unix epoch (1970-01-01T00:00:00Z).
+_FILETIME_UNIX_DELTA = 116_444_736_000_000_000
+
+
+def _filetime_to_epoch(value) -> float | None:
+    """Convert a Windows FILETIME (100ns ticks since 1601-01-01) to POSIX time.
+
+    Returns None for anything that is not a positive integer-valued string —
+    `procStart` is read from JSON the agent wrote, not validated input, and a
+    field this module has seen on only three files is exactly the one to
+    fail closed on rather than raise out of a scan.
+    """
+    try:
+        ticks = int(value)
+    except (TypeError, ValueError):
+        return None
+    if ticks <= 0:
+        return None
+    return (ticks - _FILETIME_UNIX_DELTA) / 10_000_000.0
+
 # What PowerAtlas's own ACP agent currently holds: `(live session ids, agent
 # pid)`, or `(frozenset(), None)` when nothing has published — which is the
 # state for a plain `presence` import, every test that does not opt in, and any
@@ -275,6 +318,12 @@ class _Sidecar(NamedTuple):
     reason: str
     kind: str
     entrypoint: str
+    # POSIX time from claude-code's `procStart`, or None — absent for every
+    # kiro-cli record and for a claude-code one that predates the field or
+    # fails to parse. Defaulted, unlike every field above it, so the
+    # kiro-cli construction site below (predating this field) needs no
+    # change; the claude-code site passes it explicitly.
+    proc_start: float | None = None
 
 
 def _sidecar_records() -> list[_Sidecar]:
@@ -333,7 +382,8 @@ def _sidecar_records() -> list[_Sidecar]:
                             str(data.get("status") or ""),
                             reason if isinstance(reason, str) else "",
                             str(data.get("kind") or ""),
-                            str(data.get("entrypoint") or "")))
+                            str(data.get("entrypoint") or ""),
+                            _filetime_to_epoch(data.get("procStart"))))
 
     return out
 
@@ -598,22 +648,39 @@ def _scan() -> Snapshot:
             live = provider_pids.get(pid)
             if live is None or live[0] != provider:
                 continue
-            # A sidecar is always written after its process spawns, so only a
-            # forward offset is physically meaningful. The backward bound is
-            # what rejects a recycled pid — that writer necessarily ran before
-            # the live process existed — and it applies to both providers.
-            delta = started - live[1]
-            if delta < -_SIDECAR_BACKWARD_SKEW_S:
-                continue
-            # The forward ceiling applies to every provider except kiro-cli,
-            # whose locks may be arbitrarily newer than their process because
-            # PowerAtlas's ACP agent serves sessions for the app's whole
-            # lifetime. Exempting by name rather than naming the providers that
-            # keep the ceiling is deliberate: a provider added later inherits
-            # the conservative bound until someone makes kiro-cli's case for
-            # it. See _SIDECAR_SKEW_S.
-            if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
-                continue
+            if rec.proc_start is not None:
+                # `procStart` and psutil's `create_time` are readings of the
+                # *same* FILETIME, not two independently-stamped clocks — so
+                # this is an identity check, not a tolerance window. A match
+                # settles liveness on its own; a mismatch means this pid was
+                # recycled onto a different process, full stop, and does not
+                # fall through to the looser `started_at` checks below. See
+                # `_PROC_START_TOLERANCE_S`.
+                if abs(rec.proc_start - live[1]) > _PROC_START_TOLERANCE_S:
+                    continue
+            else:
+                # No `procStart` on this sidecar — every kiro-cli record,
+                # and a claude-code one from before the field existed or that
+                # failed to parse. Fall back to the skew window this branch
+                # replaces for everything else.
+                #
+                # A sidecar is always written after its process spawns, so
+                # only a forward offset is physically meaningful. The backward
+                # bound is what rejects a recycled pid — that writer
+                # necessarily ran before the live process existed — and it
+                # applies to both providers.
+                delta = started - live[1]
+                if delta < -_SIDECAR_BACKWARD_SKEW_S:
+                    continue
+                # The forward ceiling applies to every provider except
+                # kiro-cli, whose locks may be arbitrarily newer than their
+                # process because PowerAtlas's ACP agent serves sessions for
+                # the app's whole lifetime. Exempting by name rather than
+                # naming the providers that keep the ceiling is deliberate: a
+                # provider added later inherits the conservative bound until
+                # someone makes kiro-cli's case for it. See _SIDECAR_SKEW_S.
+                if provider != "kiro-cli" and delta > _SIDECAR_SKEW_S:
+                    continue
             # D32, closed. A lock naming *our own* ACP agent for a session that
             # agent no longer holds is an orphan it left behind — a failed
             # `session/load`, or a close whose terminate raised. Dropping the

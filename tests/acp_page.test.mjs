@@ -1045,6 +1045,70 @@ check("a session created with no ?sid= is still resubscribed on reconnect", (tpl
   assertEqual(subs[0].sessionId, live, "the reconnect subscribed to the wrong session");
 });
 
+check("the header names the workspace by default, not the session id", (tpl) => {
+  const { page } = connected(tpl);
+  // `connected()`'s fixture cwd is `C:\work\repo` — the short form is what a
+  // rail row scrolled out of view still leaves the pane able to say.
+  assertEqual(page.el("acpSid").textContent, "repo",
+              "opening a session should name its workspace by default — the raw id " +
+              "is a tap away for whichever conversation actually needs it, not the " +
+              "thing shown by default");
+  assertEqual(page.el("acpSid").getAttribute("aria-pressed"), "false",
+              "the header started in the id-hidden state without saying so to a " +
+              "screen reader");
+});
+
+check("tapping the header reveals the session id, and tapping again hides it", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.click("acpSid");
+  assertEqual(page.el("acpSid").textContent, "session " + live,
+              "tapping the workspace name did not reveal the session id");
+  assertEqual(page.el("acpSid").getAttribute("aria-pressed"), "true",
+              "the toggle did not announce its new state");
+  page.click("acpSid");
+  assertEqual(page.el("acpSid").textContent, "repo",
+              "a second tap did not put the workspace name back");
+  assertEqual(page.el("acpSid").getAttribute("aria-pressed"), "false",
+              "the toggle did not announce reverting");
+});
+
+check("a session with no workspace known yet shows the raw id, not a blank header", async (tpl) => {
+  const page = await railed(tpl);
+  page.railRows()[4].dispatch("click");
+  assert(page.el("acpSid").textContent.includes("sess-w1-s1"),
+         "before the session frame answers there is nothing to show but the id — " +
+         "a blank header here would read as broken rather than as still loading");
+});
+
+check("a reconnect's session frame shows the workspace again, not the id it was left on", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.click("acpSid");
+  assertEqual(page.el("acpSid").textContent, "session " + live,
+              "fixture is wrong: the tap never revealed the id, so a reconnect " +
+              "resetting it proves nothing");
+  page.click("acpReconnect");
+  page.open();
+  page.deliver({
+    type: "session", sessionId: live,
+    payload: { sessionId: live, cwd: "C:\\work\\repo", created: false, turnActive: false },
+  });
+  assertEqual(page.el("acpSid").textContent, "repo",
+              "the reconnect kept the id revealed from before the socket dropped, " +
+              "instead of starting the new subscription the way every other one does");
+});
+
+check("a workspace path with a trailing separator still names the folder alone", (tpl) => {
+  const page = loadPage(tpl, {});
+  page.open();
+  page.deliver({
+    type: "session", sessionId: "sess-trail",
+    payload: { sessionId: "sess-trail", cwd: "C:\\work\\repo\\",
+               created: true, turnActive: false },
+  });
+  assertEqual(page.el("acpSid").textContent, "repo",
+              "a trailing separator on cwd leaked into the displayed workspace name");
+});
+
 check("a refused send puts the typed prompt back in the box", (tpl) => {
   const { page, live } = connected(tpl);
   const typed = "summarise the repository layout";
@@ -1366,6 +1430,86 @@ check("a live turn marker does move the buttons", (tpl) => {
   page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
   assertEqual(page.el("acpSend").disabled, true,
               "positive control: a live turn must disable Send");
+});
+
+check("a live turn shows a thinking indicator the instant it starts", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  assert(page.transcript().includes("thinking"),
+         "a turn that started with nothing streamed yet gave no sign of being alive " +
+         "— exactly the stalled appearance this indicator exists to prevent");
+});
+
+check("a replayed turn start does not show a thinking indicator", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "meta", sessionId: live, payload: { turn: "start" } },
+      { type: "chunk", sessionId: live, payload: { role: "agent", text: "an old answer" } },
+      { type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } },
+    ] },
+  });
+  assert(!page.transcript().includes("thinking"),
+         "replaying a finished turn's start marker showed a live indicator for a " +
+         "turn that has been over since before this page loaded");
+});
+
+check("the first chunk clears the thinking indicator", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  assert(page.transcript().includes("thinking"), "fixture: the indicator never showed");
+  page.deliver({ type: "chunk", sessionId: live, payload: { role: "agent", text: "an answer" } });
+  assert(!page.transcript().includes("thinking"),
+         "the placeholder survived the first real content, sitting above the answer " +
+         "it was standing in for");
+});
+
+check("a tool call clears the thinking indicator", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "t-think", title: "shell", kind: "execute",
+               status: "pending", command: "git status" },
+  });
+  assert(!page.transcript().includes("thinking"),
+         "a tool call did not clear the placeholder, so it now sits above a tool the " +
+         "model has already started running");
+});
+
+check("the turn ending clears a thinking indicator that never got an answer", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "meta", sessionId: live,
+                 payload: { turn: "end", stopReason: "end_turn" } });
+  assert(!page.transcript().includes("thinking"),
+         "a turn that ended without ever streaming anything left the placeholder on " +
+         "screen with nothing left coming to remove it");
+});
+
+check("agent_thought_chunk content replaces the placeholder text", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "thought", sessionId: live,
+                 payload: { text: "considering the diff" } });
+  assert(page.transcript().includes("considering the diff"),
+         "a thought frame's own text did not reach the transcript — unobserved on " +
+         "the wire so far, but a build that does send it should not be dropped");
+  assert(!page.transcript().includes("thinking…"),
+         "the generic placeholder survived alongside real thought content");
+});
+
+check("a session closing removes its stuck thinking indicator", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "This session was closed." },
+  });
+  assert(!page.transcript().includes("thinking"),
+         "the session closing left a thinking indicator for a session that no " +
+         "longer exists");
 });
 
 check("the session frame is authoritative for turn state", (tpl) => {

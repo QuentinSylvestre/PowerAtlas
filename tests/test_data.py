@@ -1974,11 +1974,24 @@ def _write_kiro_lock(dirpath, sid, pid, started_iso, cwd=None):
             json.dumps({"session_id": sid, "cwd": cwd}), encoding="utf-8")
 
 
-def _write_claude_session(dirpath, pid, sid, started_ms, cwd, status="idle"):
-    (dirpath / f"{pid}.json").write_text(json.dumps({
+def _write_claude_session(dirpath, pid, sid, started_ms, cwd, status="idle",
+                          proc_start=None):
+    body = {
         "pid": pid, "sessionId": sid, "cwd": cwd,
         "startedAt": started_ms, "status": status, "kind": "interactive",
-    }), encoding="utf-8")
+    }
+    if proc_start is not None:
+        body["procStart"] = proc_start
+    (dirpath / f"{pid}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+_FILETIME_UNIX_DELTA = 116_444_736_000_000_000
+
+
+def _filetime(epoch_seconds):
+    """Windows FILETIME string for a POSIX time — the test-side inverse of
+    ``presence._filetime_to_epoch``."""
+    return str(int(round(epoch_seconds * 10_000_000)) + _FILETIME_UNIX_DELTA)
 
 
 def test_presence_rejects_electron_helper_processes(tmp_path):
@@ -2217,6 +2230,99 @@ def test_presence_claude_sidecar_outside_window_is_not_live(tmp_path):
         claude_dir=tmp_path,
     )
     assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is False
+
+
+def test_presence_proc_start_accepts_outside_the_started_at_window(tmp_path):
+    """`procStart` is an identity check, not a wider window on the same test.
+
+    `startedAt` puts this 300s outside the 120s forward ceiling — the exact
+    fixture `test_presence_claude_sidecar_outside_window_is_not_live` uses to
+    prove the ceiling rejects it. Here the sidecar also carries `procStart`
+    naming the *same* creation time psutil reports, and that settles liveness
+    on its own: the two clocks are readings of one FILETIME, so agreement
+    between them is not something a wall-clock skew window gets a vote on.
+    """
+    started_ms = 1784920809496
+    create_time = started_ms / 1000.0 - 300.0
+    _write_claude_session(tmp_path, 700, "sess-c", started_ms, "C:/work/pa",
+                          proc_start=_filetime(create_time))
+    snap = _scan_with(
+        [_FakeProc("claude.exe", ["C:/u/.local/bin/claude.exe"],
+                   pid=700, create_time=create_time)],
+        claude_dir=tmp_path,
+    )
+    assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is True
+
+
+def test_presence_proc_start_rejects_mismatch_inside_the_started_at_window(tmp_path):
+    """The exact check can reject what the softer window would have admitted.
+
+    `startedAt` is 1.2s ahead of `create_time` — comfortably inside both skew
+    constants, the shape every other sidecar test in this file uses as its
+    positive control. But `procStart` names a creation time 50s away from what
+    psutil reports for this pid, so the two clocks disagree about whose
+    process this is. A mismatched `procStart` must reject outright rather than
+    falling back to the `started_at` check that would have passed it —
+    otherwise "exact" is only ever a looser accept, never a stricter refusal.
+    """
+    started = _epoch("2026-07-24T10:00:01Z")
+    _write_claude_session(tmp_path, 700, "sess-c", int(started * 1000),
+                          "C:/work/pa", proc_start=_filetime(started - 50.0))
+    snap = _scan_with(
+        [_FakeProc("claude.exe", ["C:/u/.local/bin/claude.exe"],
+                   pid=700, create_time=started - 1.2)],
+        claude_dir=tmp_path,
+    )
+    assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is False
+
+
+def test_presence_proc_start_absent_falls_back_to_the_skew_window(tmp_path):
+    """No `procStart` on the sidecar — every kiro-cli record, and a
+    claude-code one from before the field existed — must fall back to the
+    `started_at` window exactly as before this field was read at all.
+    """
+    started_ms = 1784920809496
+    _write_claude_session(tmp_path, 700, "sess-c", started_ms, "C:/work/pa")
+    snap = _scan_with(
+        [_FakeProc("claude.exe", ["C:/u/.local/bin/claude.exe"],
+                   pid=700, create_time=started_ms / 1000.0 - 1.5)],
+        claude_dir=tmp_path,
+    )
+    assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is True
+
+
+def test_presence_proc_start_unparseable_falls_back_to_the_skew_window(tmp_path):
+    """A `procStart` that fails to parse must fail open to the window, not
+    reject the session outright — it is best-effort, read off JSON the agent
+    wrote and not validated input."""
+    started_ms = 1784920809496
+    _write_claude_session(tmp_path, 700, "sess-c", started_ms, "C:/work/pa",
+                          proc_start="not-a-filetime")
+    snap = _scan_with(
+        [_FakeProc("claude.exe", ["C:/u/.local/bin/claude.exe"],
+                   pid=700, create_time=started_ms / 1000.0 - 1.5)],
+        claude_dir=tmp_path,
+    )
+    assert snap.is_live("claude-code", "C:/work/pa", "sess-c") is True
+
+
+def test_filetime_to_epoch_conversion():
+    from power_atlas.presence import _filetime_to_epoch
+    # 134303452332239908 was observed on a real claude-code sidecar
+    # (plans/ROADMAP.md, 2026-08-04) and converts to within 1.757s of that
+    # record's `startedAt`, not to it exactly — the two are independent
+    # readings and are not expected to agree to sub-second precision. This
+    # pins the conversion's magnitude and epoch alignment, not that figure.
+    got = _filetime_to_epoch("134303452332239908")
+    assert got is not None
+    from datetime import datetime, timezone
+    year = datetime.fromtimestamp(got, tz=timezone.utc).year
+    assert 2020 <= year <= 2030, f"conversion landed outside a plausible range: {got}"
+    assert _filetime_to_epoch(None) is None
+    assert _filetime_to_epoch("") is None
+    assert _filetime_to_epoch("not-a-number") is None
+    assert _filetime_to_epoch(0) is None
+    assert _filetime_to_epoch(-5) is None
 
 
 def test_presence_kiro_lock_rewritten_in_place_is_reparsed(tmp_path):
