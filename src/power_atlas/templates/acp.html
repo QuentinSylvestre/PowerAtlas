@@ -184,6 +184,17 @@
     <button type="button" class="acp-sid" id="acpSid"
             aria-label="Workspace and session id — tap to switch between them"
             aria-pressed="false"></button>
+    <!-- In the toolbar rather than its own row below the composer: a debugging
+         aid most sessions of this page never open should not cost a whole
+         strip of vertical space of its own, especially once the agent bar
+         below can also be on screen. The chevron is CSS-drawn from
+         `aria-expanded` — the same technique the rail's own group chevron
+         uses (`.acp-rail-group-chevron`) — rather than a `▸`/`▾` character,
+         so this page draws one expand/collapse language throughout instead
+         of two. -->
+    <button class="acp-btn acp-log-toggle" id="acpLogToggle" type="button"
+            aria-expanded="false" aria-controls="acpLog">Debug log<span
+            class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
   </div>
   <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
        aria-label="Conversation"></div>
@@ -234,11 +245,9 @@
   <div class="acp-agentbar" id="acpAgentBar" hidden role="tablist"
        aria-label="Agents"></div>
   <!-- Collapsed by default and remembered per browser: the transport log is a
-       debugging aid, not something most sessions of this page ever need open,
-       and the vertical space it costs while closed is worth more to the
-       transcript and (Q&A, 2026-08-11) the sub-agent bar below it. -->
-  <button class="acp-btn acp-log-toggle" id="acpLogToggle" type="button"
-          aria-expanded="false" aria-controls="acpLog">Debug log</button>
+       debugging aid, not something most sessions of this page ever need open.
+       Its toggle lives in the toolbar above, next to the workspace pill —
+       see the comment there for why. -->
   <div class="acp-log" id="acpLog" role="log" aria-live="polite"
        aria-label="ACP transport log" hidden></div>
 </div>
@@ -659,8 +668,11 @@
 
   function setLogOpen(open) {
     logEl.hidden = !open;
+    // The label text is static in the markup; only the attribute moves, and
+    // the CSS-drawn chevron beside it (`.acp-log-toggle-chevron`) reads that
+    // same attribute to rotate itself — one source of truth for which way it
+    // points, the way the rail's own group chevron already works.
     logToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    logToggle.textContent = open ? 'Debug log ▾' : 'Debug log ▸';
     if (open) logEl.scrollTop = logEl.scrollHeight;
   }
 
@@ -2025,6 +2037,18 @@
     return null;
   }
 
+  // One of 'working' / 'done' / 'error', the state the agent bar's dot and
+  // the panel header's status text both key off — a single source so the two
+  // surfaces cannot read differently for the same crew entry. `null`/missing
+  // reads as 'working': a slot the bar already has a pill for but the crew
+  // has no entry for yet (the panel opened a beat before the first
+  // `subagents` frame naming it) is a sub-agent that has not finished, not
+  // one that has.
+  function subagentState(entry) {
+    if (!entry || !entry.done) return 'working';
+    return entry.error ? 'error' : 'done';
+  }
+
   function renderAgentBar() {
     agentBarEl.textContent = '';
     if (!crew.length) {
@@ -2038,26 +2062,42 @@
     for (var i = 0; i < crew.length; i++) {
       (function (entry) {
         var label = entry.role || entry.task || 'sub-agent';
+        var state = subagentState(entry);
+        var sublabel = state === 'error' ? 'errored'
+          : state === 'done' ? 'done' : (entry.action || 'working…');
         agentBarEl.appendChild(agentPill(label, entry.sessionId === subViewSid,
-          function () { openSubagent(entry.sessionId); },
-          entry.done ? (entry.error ? 'errored' : 'done') : (entry.action || 'working…')));
+          function () { openSubagent(entry.sessionId); }, sublabel, state));
       })(crew[i]);
     }
   }
 
-  function agentPill(label, active, onClick, sublabel) {
+  function agentPill(label, active, onClick, sublabel, state) {
     var pill = document.createElement('button');
     pill.type = 'button';
     pill.className = 'acp-agentbar-pill' + (active ? ' acp-agentbar-pill-active' : '');
     pill.setAttribute('role', 'tab');
     pill.setAttribute('aria-selected', active ? 'true' : 'false');
+    var head = document.createElement('span');
+    head.className = 'acp-agentbar-head';
+    if (state) {
+      // The dashboard's own live-status dot language
+      // (`.session-status`/`.ws-status`) — working pulses green, errored is a
+      // steady red. `done` is new here rather than borrowed: neither of those
+      // has a "finished" state to reuse, because for a session that concept
+      // does not exist the way it does for a sub-agent stage.
+      var dot = document.createElement('span');
+      dot.className = 'acp-agentbar-dot status-' + state;
+      dot.setAttribute('aria-hidden', 'true');
+      head.appendChild(dot);
+    }
     var name = document.createElement('span');
     name.className = 'acp-agentbar-name';
     name.textContent = label;
-    pill.appendChild(name);
+    head.appendChild(name);
+    pill.appendChild(head);
     if (sublabel) {
       var sub = document.createElement('span');
-      sub.className = 'acp-agentbar-sub';
+      sub.className = 'acp-agentbar-sub' + (state ? ' acp-agentbar-sub-' + state : '');
       sub.textContent = sublabel;
       pill.appendChild(sub);
     }
@@ -2070,10 +2110,15 @@
   function renderSubHead() {
     var entry = crewEntry(subViewSid);
     subRoleEl.textContent = (entry && (entry.role || entry.task)) || subViewSid;
-    subStatusEl.textContent = entry
-      ? (entry.done ? (entry.error ? 'errored: ' + entry.error : 'done')
-                    : (entry.action || 'working…'))
-      : '';
+    if (!entry) {
+      subStatusEl.className = 'acp-subpanel-status';
+      subStatusEl.textContent = '';
+      return;
+    }
+    var state = subagentState(entry);
+    subStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
+    subStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
+      : state === 'done' ? 'done' : (entry.action || 'working…');
   }
 
   function openSubagent(sid) {
