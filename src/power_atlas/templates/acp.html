@@ -184,6 +184,22 @@
     <button type="button" class="acp-sid" id="acpSid"
             aria-label="Workspace and session id — tap to switch between them"
             aria-pressed="false"></button>
+    <!-- Copies whatever the sid label currently shows (session id or workspace
+         name). Hidden when there is no active session (same guard as the sid
+         label itself). The icon is a minimal two-overlapping-squares clipboard
+         drawn in pure CSS via box-shadow rather than an SVG or a character,
+         so it does not depend on a font or an asset. -->
+    <button type="button" class="acp-copy-btn" id="acpCopy" hidden
+            aria-label="Copy to clipboard" title="Copy to clipboard">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+           aria-hidden="true" focusable="false"
+           xmlns="http://www.w3.org/2000/svg">
+        <rect x="4" y="0" width="8" height="8" rx="1.5"
+              fill="none" stroke="currentColor" stroke-width="1.2"/>
+        <rect x="0" y="4" width="8" height="8" rx="1.5"
+              fill="var(--bg, #18181b)" stroke="currentColor" stroke-width="1.2"/>
+      </svg>
+    </button>
     <!-- In the toolbar rather than its own row below the composer: a debugging
          aid most sessions of this page never open should not cost a whole
          strip of vertical space of its own, especially once the agent bar
@@ -357,6 +373,7 @@
   var logEl = document.getElementById('acpLog');
   var logToggle = document.getElementById('acpLogToggle');
   var sidEl = document.getElementById('acpSid');
+  var copyBtn = document.getElementById('acpCopy');
   var newBtn = document.getElementById('acpNew');
   var picker = document.getElementById('acpPicker');
   var pickerCancel = document.getElementById('acpPickerCancel');
@@ -775,6 +792,7 @@
     if (!sessionId) {
       sidEl.textContent = '';
       sidEl.title = '';
+      copyBtn.hidden = true;
       return;
     }
     // Falls back to the id when the workspace is not known yet — right after
@@ -786,12 +804,49 @@
     sidEl.title = sidWorkspace
       ? (showId ? 'tap to show the workspace' : 'tap to show the session id')
       : '';
+    copyBtn.hidden = false;
+    // Update tooltip to reflect what will be copied.
+    copyBtn.title = showId ? 'Copy session id' : 'Copy workspace name';
+    copyBtn.setAttribute('aria-label', showId ? 'Copy session id' : 'Copy workspace name');
   }
 
   sidEl.addEventListener('click', function () {
     if (!sessionId) return;
     sidRevealed = !sidRevealed;
     renderSidLabel();
+  });
+
+  // Copies the value currently shown in the sid label (session id or workspace
+  // name). Uses the Clipboard API where available and falls back to a transient
+  // textarea execCommand for older/restricted contexts (e.g. non-HTTPS).
+  var _copyOkTimer = null;
+  copyBtn.addEventListener('click', function () {
+    if (!sessionId) return;
+    var showId = sidRevealed || !sidWorkspace;
+    // Copy the raw value — the session id without the "session " display prefix,
+    // or the full workspace path (not the short display name) for easy paste.
+    var value = showId ? sessionId : (sidWorkspace || sessionId);
+    function markOk() {
+      copyBtn.classList.add('acp-copy-btn--ok');
+      copyBtn.title = 'Copied!';
+      clearTimeout(_copyOkTimer);
+      _copyOkTimer = setTimeout(function () {
+        copyBtn.classList.remove('acp-copy-btn--ok');
+        renderSidLabel(); // restore correct title
+      }, 1200);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(markOk, function () {});
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = value;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); markOk(); } catch (e) {}
+      document.body.removeChild(ta);
+    }
   });
 
   function setLoading(sid) {

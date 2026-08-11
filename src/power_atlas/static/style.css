@@ -646,6 +646,13 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-sid { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; background: none; border: none; padding: 0; cursor: pointer; }
 .acp-sid:empty { cursor: default; }
 .acp-sid:hover, .acp-sid:focus-visible { color: var(--text-muted); }
+/* Copy-to-clipboard button beside the sid label. Icon-only, sized to sit flush
+   with the monospace label beside it. Hidden when no session is active.
+   `.acp-copy-btn--ok` swaps the icon to a checkmark for one second after a
+   successful copy so the user gets a transient confirmation without a toast. */
+.acp-copy-btn { background: none; border: none; padding: 2px; margin-left: 2px; cursor: pointer; color: var(--text-dim); opacity: 0.6; display: inline-flex; align-items: center; vertical-align: middle; border-radius: 3px; transition: color 0.15s, opacity 0.15s; }
+.acp-copy-btn:hover, .acp-copy-btn:focus-visible { opacity: 1; color: var(--text-muted); }
+.acp-copy-btn--ok { color: var(--success) !important; opacity: 1 !important; }
 /* Stop and Close both end something the user cannot get back in place, so they
    read as destructive rather than as two more grey buttons in the row. */
 .acp-danger:hover { border-color: #f87171; color: #f87171; }
