@@ -131,6 +131,21 @@ this entry on its own.
 
 ---
 
+## Declined — linking completed sub-agent fan-outs from the rail (the "disk increment")
+
+**Verdict: declined 2026-08-11, YAGNI.** Moved off `ROADMAP.md` the same day the item's other half —
+live sub-agent visibility inside an open `/acp` session — shipped, once that shipped half turned out
+to be the case that actually mattered.
+
+- **What this would have been.** Sub-agent stages persist as ordinary kiro-cli sessions carrying `parent_session_id`, deliberately filtered out of the main session list by the four `parent_session_id` guards in `data_kiro.py`. Nothing ACP-side was needed — the data is already on disk — only a rail/dashboard affordance linking a parent row to its children: a collapsible tree, or an expandable section, so a *finished* fan-out from *before this session shipped*, or one that ran in a terminal session `/acp` never hosted, could still be reviewed after the fact.
+- **Why it is not worth building.** The live increment already covers the case that motivated the item: watching a fan-out and reviewing what each sub-agent did, from the same `/acp` session that ran it — a finished sub-agent stays listed and clickable on the agent bar for as long as that session stays open, with no time limit tied to the browser tab. What is left uncovered is narrower than the original item implied: only a fan-out that ran *before this shipped*, or *outside* `/acp` entirely (a terminal-hosted `kiro-cli chat -a` session dispatching its own `use_subagent` calls). Nobody has asked to review one of those, and building a rail affordance for a case with zero observed demand is exactly the shape this file exists to decline.
+
+**Would reopen if**: a user asks to review a historical or terminal-hosted fan-out from the rail — a
+concrete request, not a hypothetical one. The data does not go anywhere in the meantime: it is ordinary
+kiro-cli session state, unaffected by this decision either way.
+
+---
+
 ## Closed — NetBIOS reachability on the NetBird address
 
 **Verdict: closed 2026-08-03. The original finding was wrong, and the corrected one does not warrant
