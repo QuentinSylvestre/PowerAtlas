@@ -3017,6 +3017,24 @@ class TestAcpToolCallVisibility:
         assert frames[0]["payload"]["status"] == "completed"
         assert frames[0]["payload"]["toolCallId"] == "t1"
 
+    def test_a_content_only_update_is_not_forwarded(self, acp_session):
+        """Measured 2026-08-11 against a real kiro-cli 2.16.2 subprocess:
+        every toolCallId gets exactly one intermediate `tool_call_update`
+        shaped like this — only `content`, none of title/kind/status/
+        rawInput — before the terminal one with `status: "completed"`
+        arrives. `_tool_payload` does not read `content` at all, so
+        forwarding this one would send an all-blank `tool_update` that could
+        flash an already-populated row empty right before the real state
+        lands a moment later."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "content": [{"type": "content",
+                         "content": {"type": "text", "text": "24\n"}}]})
+        assert _queued(conn) == []
+        assert acp_mod._supervisor.history[sid].events() == []
+
     def test_the_command_is_logged_as_well_as_forwarded(self, acp_session, caplog):
         """The log line is the trace that outlives the tab. The test it
         replaces asserted only that forwarding did *not* happen, while its
@@ -10374,11 +10392,15 @@ class TestAcpActivityStamp:
 
 # --- ACP sub-agent visibility: crew parsing, activity, read-only access ----
 #
-# Wire shapes corroborated against kirodotdev/kirocrew's tested ACP client
-# rather than measured against a live kiro-cli — see acp.py's
-# SUBAGENT_LIST_METHOD/SUBAGENT_ACTIVITY_METHOD docstrings for what that means
-# and does not mean. These tests pin the parsing/attribution/exemption rules
-# this file's own code chose given that shape, not the shape itself.
+# Wire shapes measured 2026-08-11 against a real kiro-cli 2.16.2 subprocess,
+# spawned and driven directly outside PowerAtlas — see acp.py's
+# SUBAGENT_LIST_METHOD/SUBAGENT_ACTIVITY_METHOD/_SUBAGENT_ACTIVE_STATUSES
+# comments for the captured vocabulary and what it corrected. Some entry-level
+# details (an initially-nameless slot, a second sub-agent registering after
+# the first) remain corroborated only against kirodotdev/kirocrew's tested ACP
+# client rather than measured here — flagged per-test below where that is the
+# case. These tests pin the parsing/attribution/exemption rules this file's
+# own code chose given that shape, not the shape itself.
 
 
 class TestAcpSubagentListAttribution:
@@ -10463,7 +10485,10 @@ class TestAcpSubagentListParsing:
     def test_an_empty_slot_is_skipped_until_named(self, acp_store):
         """kiro-cli sometimes announces a slot before it has anything to say
         about it — corroborated by kirocrew's own `_native_subagent_sync`,
-        which skips exactly this case rather than showing an empty card."""
+        which skips exactly this case rather than showing an empty card. Not
+        directly observed in the 2026-08-11 capture: every entry in both
+        captured runs had `role`/`task` populated from its first appearance,
+        so this remains kirocrew-only evidence."""
         acp_mod, _ = acp_store
         sid = self._seed(acp_mod)
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
@@ -10485,6 +10510,22 @@ class TestAcpSubagentListParsing:
         entry = acp_mod._supervisor.crews[sid]["sub-1"]
         assert entry["role"] == "reviewer"
         assert entry["task"] == "review the PR"
+
+    def test_an_oversized_task_is_clipped(self, acp_store):
+        """Measured 2026-08-11: `initialQuery` — the fallback `task` almost
+        always resolves to, since it was populated on every entry in both
+        captured runs — is the sub-agent's full task prompt, not a short
+        label, and rode the `subagents` wire frame on every broadcast with no
+        bound at all until MAX_SUBAGENT_TASK_CHARS."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        long_query = "x" * (acp_mod.MAX_SUBAGENT_TASK_CHARS * 2)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "initialQuery": long_query, "status": {"type": "working"}},
+        ]})
+        entry = acp_mod._supervisor.crews[sid]["sub-1"]
+        assert entry["task"] == long_query[:acp_mod.MAX_SUBAGENT_TASK_CHARS]
 
     def test_a_non_list_subagents_field_is_ignored_rather_than_raising(
             self, acp_store):
@@ -10534,10 +10575,15 @@ class TestAcpSubagentActivity:
         """No dedicated branch for the routing itself — the existing
         agent_message_chunk dispatch already keys purely off `sessionId`, so
         registering the child's history buffer is most of the fix. The flat
-        `text` field here (rather than nested `content.text`) is the one bit
-        that needed a real code change: SUBAGENT_ACTIVITY_METHOD is
-        corroborated as sometimes using the older flat shape even where the
-        main channel never has — see the fallback beside `_content_text`."""
+        `text` field here (rather than nested `content.text`) exercises
+        `_content_text`'s fallback branch, kept as defensive coverage — not a
+        shape kiro-cli was captured sending. Measured 2026-08-11 against a
+        real kiro-cli 2.16.2 subprocess: SUBAGENT_ACTIVITY_METHOD never
+        carried `agent_message_chunk` at all in either captured run (only
+        `tool_call_chunk`), and every `agent_message_chunk` seen on any
+        channel used the nested `content.text` shape. This combination — flat
+        text, on this method — is untested against real traffic on both
+        axes."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         acp_mod._supervisor.inflight.add(sid)

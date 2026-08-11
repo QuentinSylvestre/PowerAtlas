@@ -360,34 +360,53 @@ CLOSE_METHOD = "_kiro.dev/session/terminate"
 # whichever session is running a fan-out — see ``_Supervisor._on_subagent_list``.
 # Like ``METADATA_METHOD``, matched on the method name rather than on
 # ``update.sessionUpdate``: it carries no ``update`` key at all, only
-# ``subagents`` (and, per its own docstring, no ``sessionId`` either).
+# ``subagents`` (and, per its own docstring, no ``sessionId`` either) plus a
+# sibling ``pendingStages`` list this file does not read — measured
+# 2026-08-11, always ``[]`` across two captured fan-outs and left unhandled
+# rather than guessed at.
 SUBAGENT_LIST_METHOD = "_kiro.dev/subagent/list_update"
 
-# The kiro-private notification carrying a *sub-agent's own* session/update —
-# a method distinct from plain ``session/update`` (see ``_stamp_activity``'s
-# P0-3 note) and, unlike it, tagged with the sub-agent's ``sessionId`` rather
-# than the parent's. Its ``update.sessionUpdate`` vocabulary is narrower than
-# the top-level one: ``tool_call_chunk`` (not ``tool_call``/``tool_call_update``)
-# carrying only ``toolCallId``/``title``, and the same ``agent_message_chunk``
-# string the top-level channel uses.
+# The kiro-private notification carrying a *pre-announcement* tool-call chunk
+# — a method distinct from plain ``session/update`` (see ``_stamp_activity``'s
+# P0-3 note). **Not sub-agent-exclusive**: measured 2026-08-11 against a real
+# kiro-cli 2.16.2 subprocess, spawned and driven directly (outside
+# PowerAtlas) through a 3-stage ``subagent`` fan-out — it also fires for the
+# *parent* session's own tool calls, including one that ran before any
+# sub-agent existed. What makes ``_on_notification`` handle that correctly is
+# the ``subagent_sessions`` membership gate at the ``tool_call_chunk`` branch,
+# not this method name; the constant itself is never compared against
+# ``method`` anywhere — dispatch there is entirely ``update.sessionUpdate``-
+# gated.
+#
+# Every frame captured on this method carried ``sessionUpdate: tool_call_chunk``
+# with ``toolCallId``/``title`` and also ``kind`` (a third field beyond the two
+# named below — harmless, since ``_tool_payload`` already defaults absent
+# fields). It never once carried ``agent_message_chunk``: every
+# ``agent_message_chunk`` observed, for the parent and for every child, arrived
+# on plain ``session/update`` instead, keyed by whichever ``sessionId`` was
+# speaking.
 SUBAGENT_ACTIVITY_METHOD = "_kiro.dev/session/update"
 
 # ``status.type`` values a sub-agent list entry may carry that mean "still
-# running" — everything else (``done``, ``completed``, ``failed``, ``error``,
-# an unrecognised future value, ...) is treated as terminal. ``""`` is in here
-# rather than treated as terminal: an entry can be seen before kiro-cli has
-# assigned it a status at all.
+# running" — everything else is treated as terminal. ``""`` is in here rather
+# than treated as terminal: an entry can be seen before kiro-cli has assigned
+# it a status at all.
 #
-# **Inferred, not measured against a live kiro-cli** — PowerAtlas has never
-# captured a real ``_kiro.dev/subagent/list_update`` payload (only kiro-cli's
-# own docs and a JSON-RPC probe could confirm the exact vocabulary). This whole
-# block — the field names below and the two methods above — is corroborated
-# instead against kirodotdev/kirocrew's ACP client (``acp/client.py``,
-# ``acp/_dispatch.py``, ``dashboard/chat_runner.py:_native_subagent_sync``), an
-# independent, tested implementation against the same kiro-cli ACP surface.
-# That is real evidence, not a guess, but it is second-hand: correct it against
-# this app's own traffic the first time a real payload is captured, the same
-# as ``agent_thought_chunk`` above it in this file.
+# **Measured 2026-08-11 against kiro-cli 2.16.2** — a real subprocess, spawned
+# and driven directly outside PowerAtlas — across two runs: a 3-stage fan-out
+# where every stage succeeded, and a 2-stage fan-out where one stage's own
+# shell command was made to fail deliberately. Only two ``status.type`` values
+# were ever observed: ``working`` while active, and **``terminated``** for
+# every terminal entry — including the stage whose command failed.
+# ``done``/``completed``/``failed``/``error`` were never seen even once. The
+# exclusion design below still classifies ``terminated`` correctly (it is
+# simply absent from this active set), but see the ``error =`` line in
+# ``_on_subagent_list`` for what "no observed ``failed``/``error`` value"
+# means for surfacing *why* a stage failed. This was previously corroborated
+# only against kirodotdev/kirocrew's ACP client (``acp/client.py``,
+# ``acp/_dispatch.py``, ``dashboard/chat_runner.py:_native_subagent_sync``) —
+# real but second-hand evidence; the terminal vocabulary above is now this
+# app's own.
 _SUBAGENT_ACTIVE_STATUSES = frozenset(
     {"working", "running", "pending", "queued", "in_progress", ""})
 
@@ -395,8 +414,31 @@ _SUBAGENT_ACTIVE_STATUSES = frozenset(
 # role, and the task it was given — kirocrew reads ``role`` with an
 # ``agentName`` fallback, and ``initialQuery`` with a ``sessionName`` fallback,
 # for exactly the reason named there: kiro-cli has sent both across builds.
+#
+# Measured 2026-08-11 against kiro-cli 2.16.2: every entry in both captured
+# runs carried all four keys at once. ``role`` and ``agentName`` were always
+# identical — the underlying agent name (e.g. ``"kiro_default"``), not a
+# per-stage label — so the fallback never actually triggers on this build.
+# ``initialQuery`` was always non-empty too, so it always won over the short
+# ``sessionName`` label (e.g. ``"count_src"``) a UI would probably rather show.
+# Left in kirocrew's order rather than reversed — that would be an unverified
+# UX call, not a wire-shape correction — but see ``MAX_SUBAGENT_TASK_CHARS``
+# just below for why the untruncated ``initialQuery`` winning matters
+# regardless of which key is shown.
 _SUBAGENT_ROLE_KEYS = ("role", "agentName")
 _SUBAGENT_TASK_KEYS = ("initialQuery", "sessionName")
+
+# How much of a crew entry's ``task`` (see ``_SUBAGENT_TASK_KEYS`` above) rides
+# the ``subagents`` wire frame. Unlike every other agent-authored string this
+# file renders — ``MAX_TOOL_INPUT_CHARS``, ``MAX_ERROR_DETAIL_CHARS``,
+# ``MAX_BUBBLE_CHARS`` — ``task`` had no bound at all until this one: measured
+# 2026-08-11, ``initialQuery`` (the fallback that always wins, per the note
+# above) is the sub-agent's full task prompt, not a short label, and
+# ``_subagents_payload`` forwarded it verbatim on every broadcast. Sized the
+# same as ``MAX_TOOL_INPUT_CHARS``: far above the few hundred characters
+# measured on trivial tasks, generous enough for a real one, and still
+# bounded.
+MAX_SUBAGENT_TASK_CHARS = 4000
 
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
 # targeting a sub-agent's own session id with. One string rather than one
@@ -2449,7 +2491,7 @@ class _Supervisor:
                 # stale or reordered notification repeats an earlier status.
                 continue
             role = _first_text(entry, _SUBAGENT_ROLE_KEYS)
-            task = _first_text(entry, _SUBAGENT_TASK_KEYS)
+            task = _first_text(entry, _SUBAGENT_TASK_KEYS)[:MAX_SUBAGENT_TASK_CHARS]
             if not role and not task and existing is None:
                 # kiro-cli sometimes announces a slot before it has anything
                 # to say about it — corroborated by kirocrew's own
@@ -2461,6 +2503,14 @@ class _Supervisor:
             stype = str(status.get("type") or "").lower() if isinstance(status, dict) else ""
             smsg = str(status.get("message") or "") if isinstance(status, dict) else ""
             done = bool(stype) and stype not in _SUBAGENT_ACTIVE_STATUSES
+            # `stype in ("failed", "error")` is unreachable against every
+            # vocabulary measured 2026-08-11 against kiro-cli 2.16.2: every
+            # terminal entry captured — including a stage whose own command
+            # genuinely failed — reported `stype == "terminated"` with no
+            # `message` at all. Kept rather than removed: a future kiro-cli
+            # build, or a failure mode this app has not exercised (the
+            # sub-agent's own session crashing, rather than a tool call
+            # erroring inside an otherwise-normal turn), may still use it.
             error = (smsg[:MAX_ERROR_DETAIL_CHARS]
                      if done and stype in ("failed", "error") and smsg
                      else (existing["error"] if existing else ""))
@@ -2563,12 +2613,16 @@ class _Supervisor:
             content = update.get("content")
             # The nested shape first, a flat `text` field as fallback rather
             # than the other way round: an *empty* nested `content.text` must
-            # not shadow a populated flat one. Never observed on the main
-            # channel — every chunk measured there carries the nested object —
-            # but SUBAGENT_ACTIVITY_METHOD's `agent_message_chunk` is
-            # corroborated (kirocrew's own dual-shape handling, with the same
-            # ordering and the same reasoning) as sometimes carrying the flat
-            # form instead. One `or` covers both without a second branch.
+            # not shadow a populated flat one. Never observed on either
+            # channel — measured 2026-08-11 against kiro-cli 2.16.2, every
+            # `agent_message_chunk` captured (parent and child alike) carried
+            # the nested object, and none arrived on SUBAGENT_ACTIVITY_METHOD
+            # at all (see that constant's comment: it only ever carried
+            # `tool_call_chunk` there). The flat fallback was corroborated
+            # only against kirocrew's dual-shape handling, never confirmed
+            # against this app's own traffic; kept as defensive coverage for
+            # a shape that may still exist on a build or channel not yet
+            # captured. One `or` covers both without a second branch.
             text = _content_text(content) or _as_text(update.get("text"))
             if role == "user":
                 # An image-only turn replays as nothing at all: every block in
@@ -2620,6 +2674,20 @@ class _Supervisor:
                     # bubble alone, so flushing on one would split a bubble the
                     # page never split.
                     _flush_bubble(session_id)
+                elif not (payload["title"] or payload["kind"] or
+                          payload["status"] or payload["command"]):
+                    # `tool_call_update` can arrive in two shapes for the same
+                    # `toolCallId`: measured 2026-08-11 against a real kiro-cli
+                    # 2.16.2 subprocess, every call got an optional
+                    # intermediate update carrying only `content` (the tool's
+                    # streamed output) — a shape `_tool_payload` does not read
+                    # at all — followed by a terminal one with
+                    # `status`/`rawOutput`. Forwarding the intermediate one
+                    # would emit a `tool_update` with every field blank, which
+                    # could flash an already-populated row empty a moment
+                    # before the real state lands. Skipped rather than sent:
+                    # nothing informative would have reached the page anyway.
+                    return
                 # Rendered, not only logged. `-a` removes the permission gate
                 # and the justification for removing it was a human watching
                 # the run; a tool call that reaches nothing but a log file the
