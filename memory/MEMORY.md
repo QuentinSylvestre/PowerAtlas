@@ -210,6 +210,17 @@
 **How to apply**: Verify in `.venv-PowerAtlas` — it is the interpreter the app runs on, so a green suite is now evidence about the running app. Never `pip install -e .` into a global interpreter. Detection is by `sys.prefix`, not `sys.executable`: on Windows the venv's `python.exe` is a redirector whose image path is the base install, so an executable comparison reports a false negative (WMI `ExecutablePath` shows the same trap). Two silent-fallback edges: `project_venv_dir()` returns None when a checkout holds two off-convention `.venv*` directories, and a venv missing the package makes every entry point fail invisibly under `pythonw`. The `power-atlas` command is a shim at `~/.local/bin/power-atlas.cmd`, not a pip console script — the venv's `Scripts` is deliberately kept off PATH because it also carries pip/pytest/ruff.
 **Source**: Session 7d812251 (2026-07-28) — verified by launching from the global interpreter and confirming the surviving process mapped only venv site-packages | **Verified**: 2026-07-28
 
+### `_session/steer` is available on kiro-cli 2.16.x, accepts raw text, echoes via AgentExecutionSteeringInjected
+
+**Why**: O1/O2 from the ACP UI Feature Batch exploration were open items about whether `_session/steer` existed on the installed build and whether KiroCrew's `<user_message>` wrapping was required. Both verified by live probe (2026-08-12, kiro-cli 2.16.x).
+**How to apply**:
+- `_session/steer` is available and works. Call it as a JSON-RPC request (it returns `{"result": {"queued": true}}`), NOT as a notification — unlike `session/cancel`. Send raw text in the `message` field; no `<user_message>` wrapping needed (that is KiroCrew's own convention, not a protocol requirement).
+- `agentCapabilities` from `initialize` does NOT include a `supports_steer` flag. No runtime check is possible from capability negotiation. Since `acp.py` spawns kiro-cli itself, assume steer is always available.
+- The injection echo arrives as `_kiro.dev/session/update` with `sessionUpdate: "AgentExecutionSteeringInjected"` carrying `messageId` and `content`.
+- Model may refuse a steer instruction it judges unhelpful — this is model behavior, not a protocol failure.
+**Source**: session 2026-08-12 — live probe, `acp_steer_probe3.py`, kiro-cli 2.16.x | **Verified**: 2026-08-12
+**Stale-when**: kiro-cli minor version changes past 2.16.x
+
 ## Declined
 
 <!-- Declination records: the user's Skip of an agent-initiated memory proposal. A live row here suppresses re-proposal of that subject for 60 days (window owned by shared/skills/qdream/memory-rules.md § Memory File Format → Declined records). NOT a fourth type and rows are NOT entries (no Type/Usage/Outcome; excluded from the Size advisory and the prune order). Sessions append rows only; the /qdream sweep prunes expired rows and rows whose subject is now a live entry. This heading is guarded by verify-citations — never remove it, even with zero rows. Row format: - "<proposed heading>" — declined <YYYY-MM-DD> (<reason, if given>) -->
