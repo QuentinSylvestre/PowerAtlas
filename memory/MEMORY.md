@@ -29,6 +29,12 @@
 **How to apply**: After any innerHTML assignment in JS (refreshCards, manual fetches, etc.), always call `htmx.process(el)` on the container. The htmx-mini's internal swap handler already does this, but manual JS bypasses it.
 **Source**: `plans/done/260701-1817_MULTI_PROVIDER_TABS_AND_LAUNCH.md` — tabs unresponsive bug, fixed in de1f68a | **Verified**: 2026-07-01
 
+### `_kiro.dev/commands/options` kills kiro-cli when called with `command: ""`
+
+**Why**: Sending `_kiro.dev/commands/options` with an empty `command` field causes kiro-cli to exit with code 0, no stderr. Observed when the `/` command palette sent it as a debounced WS request during command-name filtering. The method is designed for argument completion *after* a command is selected — tui.js always passes a non-empty command name. Sending `command: ""` is not a supported call.
+**How to apply**: Never send `_kiro.dev/commands/options` with `command: ""`. For command-name filtering (the dropdown while the user types `/prefix`), use client-side filtering of the `commands/available` catalogue only. Only call `_kiro.dev/commands/options` after the user has selected a specific command, passing that command's name.
+**Source**: Live observation 2026-08-12, confirmed from tui.js `getCommandOptions` call sites (always pass `e.name`, never `""`); fixed in commit `a245bce` | **Verified**: 2026-08-12
+
 
 ### Playwright MCP server drops connections under sustained use - retry without re-diagnosis
 
