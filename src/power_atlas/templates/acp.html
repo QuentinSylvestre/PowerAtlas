@@ -3654,6 +3654,16 @@
         node = railLastRow(days[i]);
         break;
       }
+    } else if (want.status) {
+      // Same pattern as want.day: the Show-N-more button is gone once it
+      // reveals the rest of the bucket, so focus goes to the last row of that
+      // status group, where the button stood and the newly-revealed rows end.
+      var statuses = railGroupsEl.querySelectorAll('.acp-rail-group');
+      for (i = 0; i < statuses.length; i++) {
+        if (statuses[i].dataset.head !== 's:' + want.status) continue;
+        node = railLastRow(statuses[i]);
+        break;
+      }
     } else if (want.more) {
       // This button is outside the rebuilt container, so it keeps focus by
       // itself; the one case that needs restoring is the render that hides it,
@@ -3887,6 +3897,7 @@
       if (!sessions || !sessions.length) continue;
       var wrap = document.createElement('div');
       wrap.className = 'acp-rail-group';
+      wrap.dataset.head = 's:' + key;
       // railHeadNode(key, label, countText, opts) — null opts omits the + create button
       wrap.appendChild(railHeadNode('s:' + key, STATUS_BUCKET_LABEL[key],
                                     String(sessions.length), null));

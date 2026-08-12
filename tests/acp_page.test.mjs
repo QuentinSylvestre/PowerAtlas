@@ -6052,6 +6052,60 @@ check("status mode with no sessions renders the empty-state node and no bucket g
            "the empty-state node should appear when status mode has no sessions");
   });
 
+check("clicking Show-N-more in a status bucket restores focus to the last revealed row",
+  async (tpl) => {
+    // Build a store with more than RAIL_SESSION_SIZE (3) available sessions so
+    // the Available bucket renders a Show-N-more button.
+    const bigStore = [{
+      cwd: "C:\\work\\focus", name: "focus", exists: true,
+      sessions: [
+        { id: "s-av-1", title: "av 1", updated_at: "2026-08-01T10:00:00.000000000Z",
+          availability: "available", status: "" },
+        { id: "s-av-2", title: "av 2", updated_at: "2026-08-01T09:00:00.000000000Z",
+          availability: "available", status: "" },
+        { id: "s-av-3", title: "av 3", updated_at: "2026-08-01T08:00:00.000000000Z",
+          availability: "available", status: "" },
+        { id: "s-av-4", title: "av 4", updated_at: "2026-08-01T07:00:00.000000000Z",
+          availability: "available", status: "" },
+        { id: "s-av-5", title: "av 5", updated_at: "2026-08-01T06:00:00.000000000Z",
+          availability: "available", status: "" },
+      ],
+    }];
+    const page = await railed(tpl, {
+      store: bigStore, stored: { pa_acp_group: "status" } });
+
+    // Find the Available bucket's Show-N-more button — should be present because
+    // 5 sessions > RAIL_SESSION_SIZE (3).
+    const availableGroup = page.railGroups().filter((g) => {
+      const name = g.querySelector(".acp-rail-group-name");
+      return name && name.textContent === "Available";
+    })[0];
+    assert(availableGroup !== undefined, "Available group not rendered");
+    const moreBtn = availableGroup.querySelector(".acp-rail-group-more");
+    assert(moreBtn !== null && moreBtn !== undefined,
+           "Show-N-more button absent from Available bucket — need > 3 sessions to trigger it");
+
+    moreBtn.focus();
+    moreBtn.dispatch("click");
+    await page.settle();
+
+    // After the click the button is gone (all rows revealed), so focus must
+    // have been restored to the last row in the expanded bucket.
+    // Re-query the group: renderRail() rebuilds the DOM, so pre-click references are stale.
+    const expandedGroup = page.railGroups().filter((g) => {
+      const name = g.querySelector(".acp-rail-group-name");
+      return name && name.textContent === "Available";
+    })[0];
+    const now = page.focused();
+    assert(now, "clicking Show-N-more in status bucket dropped focus to document body — " +
+                "railRestoreFocus() has no want.status branch");
+    const rows = expandedGroup.querySelectorAll(".acp-rail-row");
+    assert(rows.length > 0, "Available bucket has no rows after expand");
+    const lastRow = rows[rows.length - 1];
+    assertEqual(now.dataset.sid, lastRow.dataset.sid,
+                "focus did not land on the last revealed row of the Available bucket");
+  });
+
 
 // -------------------------------------------------------------------- main --
 
