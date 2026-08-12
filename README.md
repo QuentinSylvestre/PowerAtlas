@@ -63,7 +63,8 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
 - Resume sessions with one click (opens terminal with `--resume-id`)
 - Drive kiro-cli sessions from the browser at `/acp`, with no terminal — create a session or resume an
-  exited one over ACP, stream the agent's output, cancel a turn, close the session. Paste a screenshot
+  exited one over ACP, stream the agent's output, cancel a turn, close the session, queue a prompt for
+  after the current turn, or steer the agent mid-turn. Paste a screenshot
   straight into the prompt with Ctrl+V, or drag one onto it. Creating asks which
   workspace first; each row's `⋯` menu can permanently delete a session from the kiro-cli store, from
   this machine only. A workspace-grouped session browser lists what is resumable and greys out sessions
@@ -222,6 +223,14 @@ and only until the turn starts; the bytes go to the agent and are deliberately n
 transcript, which is what keeps a reload from replaying megabytes and what stops a few screenshots
 evicting the conversation behind them. A reloaded transcript therefore shows `[Image 1]` rather than the
 picture. The prompt box also grows as you type, up to a limit, then scrolls.
+
+**Queue and Steer let you act during a running turn.** When a turn is active and the prompt box has
+text, the Stop button is replaced by two stacked half-height buttons. **Queue** stores the text and
+clears the box — showing a cancellable inline note — then sends it as a normal prompt the moment the
+turn ends. **Steer** injects the text mid-turn via `_session/steer`, which kiro-cli processes without
+interrupting the turn in progress; a brief confirmation appears when the injection is accepted. Both
+discard safely if something unexpected happens: Queue restores the text if the connection drops or the
+session changes, and Steer restores it if the server returns an error.
 
 **A finished answer is redrawn as markdown.** While the agent is still streaming, its text shows as it
 arrives; once the answer is complete the bubble is rebuilt with headings, lists, emphasis, code blocks

@@ -5574,7 +5574,7 @@ class TestAcpLoadPageRecovery:
 
     def test_the_send_button_is_disabled_by_the_flag(self):
         src = self._page()
-        assert "sendBtn.disabled = active || !sessionId || loadFailed;" in src
+        assert "sendBtn.disabled = turnActive || !sessionId || loadFailed" in src
 
 
 class TestAcpLoadStatesItsCeiling:

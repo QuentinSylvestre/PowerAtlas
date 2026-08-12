@@ -1316,7 +1316,11 @@ check("an image with no words is a whole prompt", async (tpl) => {
   page.click("acpSend");
   const sent = page.sentOf("prompt")[0];
   assert(sent, "paste-and-send with an empty box sent nothing at all");
-  assertEqual(sent.payload.prompt, "", "the empty box should travel as empty");
+  // After Phase 2, pasting an image inserts [Image 1] at the cursor, so the
+  // prompt text is "[Image 1]" rather than "". Both the text marker and the
+  // attached image travel together.
+  assertEqual(sent.payload.prompt, "[Image 1]",
+    "paste inserts [Image 1] marker — the prompt text should carry it");
   assertEqual(sent.payload.images.length, 1, "the image never reached the wire");
 });
 
@@ -6557,6 +6561,219 @@ check("P3: anonymous tool calls (no toolCallId) form a group", async (tpl) => {
   const transcript = page.el("acpTranscript");
   assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 1,
     "two anonymous tool calls should produce exactly one .acp-tool-group");
+});
+
+// ---- Phase 2: Queue/Steer controls and image inline -----------------------
+
+check("image inline: [Image N] marker inserted at cursor position", async (tpl) => {
+  const { page } = connected(tpl);
+  page.el("acpPrompt").value = "hello world";
+  // Set cursor at position 5 ("hello" | " world")
+  page.el("acpPrompt").selectionStart = 5;
+  page.el("acpPrompt").selectionEnd = 5;
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  const val = page.el("acpPrompt").value;
+  assert(val.includes("[Image 1]"),
+    "textarea should contain [Image 1] after paste — got: " + val);
+  const pos = val.indexOf("[Image 1]");
+  assertEqual(pos, 5, "[Image 1] should appear at cursor position 5 — got: " + pos);
+});
+
+check("image inline: second paste inserts [Image 2]", async (tpl) => {
+  const { page } = connected(tpl);
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.el("acpPrompt").selectionStart = page.el("acpPrompt").value.length;
+  page.el("acpPrompt").selectionEnd = page.el("acpPrompt").value.length;
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  const val = page.el("acpPrompt").value;
+  assert(val.includes("[Image 1]"), "should contain [Image 1] — got: " + val);
+  assert(val.includes("[Image 2]"), "should contain [Image 2] — got: " + val);
+});
+
+check("queue button hidden when turn active but textarea empty", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  // Textarea is empty — Stop shows, Queue+Steer hidden
+  assert(page.el("acpStop").hidden === false,
+    "Stop should be visible during turn with empty textarea");
+  assert(page.el("acpQueueSteer").hidden === true,
+    "Queue+Steer wrapper should be hidden with empty textarea during turn");
+});
+
+check("queue+steer buttons visible when turn active and textarea has text", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("some text");
+  page.el("acpPrompt").dispatch("input");
+  assert(page.el("acpStop").hidden === true,
+    "Stop should be hidden when textarea has text during turn");
+  assert(page.el("acpQueueSteer").hidden === false,
+    "Queue+Steer wrapper should be visible when textarea has text during turn");
+});
+
+check("queue button stores text and clears textarea", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("hello agent");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  assertEqual(page.el("acpPrompt").value, "",
+    "textarea should be cleared after Queue");
+  // Queue note should contain cancel button in transcript
+  const cancelBtn = page.one("acpTranscript", ".acp-inline-cancel");
+  assert(cancelBtn !== null,
+    "queue note should contain a cancel button in transcript");
+});
+
+check("queue cancel link restores text to textarea", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("queued text");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  assertEqual(page.el("acpPrompt").value, "", "fixture: textarea cleared after queue");
+  // Find the cancel button inside the transcript note
+  const cancelBtn = page.one("acpTranscript", ".acp-inline-cancel");
+  assert(cancelBtn !== null, "cancel button should be present in queue note");
+  cancelBtn.dispatch("click");
+  assertEqual(page.el("acpPrompt").value, "queued text",
+    "cancel should restore text to textarea");
+});
+
+check("queued prompt auto-sends on meta turn:end when WS open and textarea empty", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("queued message");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  // Turn ends
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+  const prompts = page.socket().sent.filter((f) => f.type === "prompt");
+  assert(prompts.length >= 1,
+    "at least one prompt should be sent — auto-send should have fired");
+  const last = prompts[prompts.length - 1];
+  assert(last && last.payload && last.payload.prompt === "queued message",
+    "auto-sent prompt payload.prompt should match queued text, got: " +
+    JSON.stringify(last && last.payload));
+});
+
+check("queued prompt discarded when session changed", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("to discard");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  // Simulate session change: release current session
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { message: "closed" },
+  });
+  // Deliver a new session
+  const live2 = "sess-new-0002";
+  page.deliver({
+    type: "session", sessionId: live2,
+    payload: { sessionId: live2, cwd: "C:\\work\\repo2", created: true, turnActive: false },
+  });
+  // The turn end on the old session shouldn't fire auto-send against new session
+  const prompts = page.socket().sent.filter((f) => f.type === "prompt" && f.sessionId === live2);
+  assertEqual(prompts.length, 0,
+    "auto-send should not fire against the new session after session change");
+});
+
+check("steer sends steer frame and clears/disables textarea", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("inject this");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  const steers = page.socket().sent.filter((f) => f.type === "steer");
+  assertEqual(steers.length, 1, "exactly one steer frame should be sent");
+  assertEqual(steers[0].payload && steers[0].payload.message, "inject this",
+    "steer payload.message should match typed text");
+  assertEqual(page.el("acpPrompt").value, "",
+    "textarea should be cleared after steer");
+  assert(page.el("acpPrompt").disabled === true,
+    "textarea should be disabled while awaiting steer_ack");
+});
+
+check("steer_ack re-enables controls and shows note", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("steer text");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  page.deliver({ type: "steer_ack", sessionId: live, payload: { queued: true } });
+  assert(page.el("acpPrompt").disabled === false,
+    "textarea should be re-enabled after steer_ack");
+  assert(page.el("acpSteer").disabled === false,
+    "steer button should be re-enabled after steer_ack");
+  assert(page.el("acpTranscript").textContent.includes("Steer sent"),
+    "transcript should contain 'Steer sent' note");
+});
+
+check("steer_ack queued:false shows error note", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("bad steer");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  page.deliver({ type: "steer_ack", sessionId: live, payload: { queued: false } });
+  assert(page.el("acpTranscript").textContent.includes("not accepted"),
+    "transcript should contain rejection note when queued:false");
+});
+
+check("error frame during steer restores textarea text", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("important steer");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  assert(page.el("acpPrompt").disabled === true, "fixture: textarea disabled after steer click");
+  page.deliver({
+    type: "error", sessionId: live,
+    payload: { code: "agent_error", message: "steer failed" },
+  });
+  assertEqual(page.el("acpPrompt").value, "important steer",
+    "error frame should restore steer text to textarea");
+  assert(page.el("acpPrompt").disabled === false,
+    "textarea should be re-enabled after error frame");
+});
+
+check("queuedPrompt and _steerPending cleared on releaseSession", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  // Queue a prompt
+  page.type("queue me");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  // Release session
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { message: "closed" },
+  });
+  // Turn end on closed session should not fire auto-send
+  const prevCount = page.socket().sent.filter((f) => f.type === "prompt").length;
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+  const newCount = page.socket().sent.filter((f) => f.type === "prompt").length;
+  assertEqual(newCount, prevCount,
+    "no new prompt should be sent after releaseSession clears queuedPrompt");
+});
+
+check("removeAttachment renumbers [Image N] markers in textarea", async (tpl) => {
+  const { page } = connected(tpl);
+  // Paste two images
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  const val = page.el("acpPrompt").value;
+  assert(val.includes("[Image 1]"), "fixture: [Image 1] present — got: " + val);
+  assert(val.includes("[Image 2]"), "fixture: [Image 2] present — got: " + val);
+  // Remove first attachment (index 0)
+  const chips = page.trayChips();
+  assert(chips.length >= 1, "fixture: at least one chip");
+  // Find and click the × on the first chip
+  const removeBtn = chips[0].querySelector("button");
+  assert(removeBtn !== null, "fixture: remove button on first chip");
+  removeBtn.dispatch("click");
+  const after = page.el("acpPrompt").value;
+  assert(!after.includes("[Image 2]"),
+    "[Image 2] should have been renumbered to [Image 1] — got: " + after);
+  const count1 = (after.match(/\[Image 1\]/g) || []).length;
+  assert(count1 >= 1,
+    "after removing first attachment, [Image 1] should appear for the remaining one — got: " + after);
 });
 
 // -------------------------------------------------------------------- main --

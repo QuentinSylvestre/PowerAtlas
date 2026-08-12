@@ -251,6 +251,17 @@
            whole idle time is indistinguishable from one that has stopped
            working, and a turn under -a can run tools for minutes. -->
       <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
+      <!-- Queue and Steer: visible during a turn only when the textarea has
+           text. They replace Stop in that state — two half-height buttons
+           that together match Stop's height so the composer row stays stable.
+           Queue holds the text until the turn ends then sends it normally.
+           Steer injects the text mid-turn via _session/steer. -->
+      <div class="acp-queue-steer" id="acpQueueSteer" hidden>
+        <button class="acp-btn acp-queue" id="acpQueue" type="button"
+                aria-label="Queue this prompt — it will send when the agent finishes">Queue</button>
+        <button class="acp-btn acp-steer" id="acpSteer" type="button"
+                aria-label="Inject this text into the current agent turn">Steer</button>
+      </div>
     </div>
   </div>
   <!-- The agent bar: Main plus one pill per sub-agent in the session's current
@@ -398,6 +409,9 @@
   var trayEl = document.getElementById('acpTray');
   var sendBtn = document.getElementById('acpSend');
   var stopBtn = document.getElementById('acpStop');
+  var queueSteerEl = document.getElementById('acpQueueSteer');
+  var queueBtn = document.getElementById('acpQueue');
+  var steerBtn = document.getElementById('acpSteer');
   var closeBtn = document.getElementById('acpClose');
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
@@ -452,6 +466,12 @@
   // replayed turn marker — the buffer evicts those; the `session` frame
   // carries the authoritative value.
   var turnActive = false;
+  // Text queued for auto-send when the current turn ends (Queue button).
+  // Cleared by releaseSession() to prevent firing against a new session.
+  var queuedPrompt = null;
+  var queuedPromptSession = null;  // sessionId at queue time, for identity guard
+  // Text held in-flight for a steer request — restored to textarea on error.
+  var _steerPending = null;
   // The transcript row showing "thinking…" while a live turn is silent, or
   // null when nothing is shown. `{row, body}` rather than just the row: the
   // one live thing to arrive that touches it (`thought`) rewrites `body`'s
@@ -888,14 +908,28 @@
     }
   }
 
+  // Governs the three mutually-exclusive composer controls: Send (idle),
+  // Stop (turn active + textarea empty), Queue+Steer (turn active + textarea
+  // has text). Called by setTurn() and by the promptInput input handler so
+  // the correct pair is shown as the user types or clears the textarea.
+  function refreshComposerControls() {
+    var hasText = promptInput.value.trim().length > 0;
+    // Send: visible when not in a turn; also disabled when no session or no WS
+    sendBtn.hidden = turnActive;
+    sendBtn.disabled = turnActive || !sessionId || loadFailed || !ws || ws.readyState !== WebSocket.OPEN;
+    // Stop: visible during turn only when textarea is empty
+    stopBtn.hidden = !turnActive || hasText;
+    stopBtn.disabled = !turnActive;
+    // Queue+Steer wrapper: visible during turn only when textarea has text
+    queueSteerEl.hidden = !turnActive || !hasText;
+  }
+
   function setTurn(active) {
     turnActive = active;
-    sendBtn.disabled = active || !sessionId || loadFailed;
     sendBtn.textContent = active ? 'Working…' : 'Send';
-    sendBtn.hidden = active;
-    stopBtn.hidden = !active;
     stopBtn.disabled = false;
     stopBtn.textContent = 'Stop';
+    refreshComposerControls();
     // Closing under a live turn is refused by the server — the outstanding
     // session/prompt would sit on a session the agent no longer has for the
     // whole of its ten-minute ceiling — so the button says so by being off.
@@ -944,6 +978,11 @@
     hideThinking();
     setContext(null);
     setPending(false);
+    // Clear queue/steer state so neither fires against whatever session is
+    // opened next on this page.
+    queuedPrompt = null;
+    queuedPromptSession = null;
+    _steerPending = null;
     // The crew belonged to the session just released — `close_session`
     // (acp.py) has already torn down every one of its sub-agent records
     // server-side, so a bar or panel still showing them would be offering
@@ -1281,6 +1320,19 @@
           name: label
         });
         renderTray();
+        // Insert an [Image N] marker at the cursor so the user can see
+        // where the attachment sits in the prompt text.
+        var marker = '[Image ' + attachments.length + ']';
+        var start = promptInput.selectionStart != null
+          ? promptInput.selectionStart : promptInput.value.length;
+        var end = promptInput.selectionEnd != null
+          ? promptInput.selectionEnd : start;
+        promptInput.value = promptInput.value.slice(0, start)
+          + marker + promptInput.value.slice(end);
+        promptInput.selectionStart = promptInput.selectionEnd = start + marker.length;
+        promptInput.focus();
+        autoGrowPrompt();
+        refreshComposerControls();
         logLine('info', 'attached ' + label + ' as ' + blob.type + ', ' + kb(blob.size));
       });
     });
@@ -1332,6 +1384,17 @@
     if (!item) return;
     revokeAttachment(item);
     attachments.splice(index, 1);
+    // Renumber [Image N] markers in the textarea. The removed attachment was
+    // at position (index+1) in 1-based numbering; every marker with a higher
+    // N shifts down by one. Use a global regex for each to catch duplicates.
+    var renum = promptInput.value;
+    for (var i = index + 1; i <= attachments.length + 1; i++) {
+      renum = renum.replace(
+        new RegExp('\\[Image ' + (i + 1) + '\\]', 'g'),
+        '[Image ' + i + ']'
+      );
+    }
+    promptInput.value = renum;
     renderTray();
   }
 
@@ -4559,6 +4622,12 @@
       // Group consecutive tool calls accumulated during this turn into
       // collapsible containers. flushToolGroups() sets toolGroup = null.
       flushToolGroups();
+      // Snapshot queued prompt BEFORE setTurn(false), so the decision
+      // guards can read the pre-release turn/session state correctly.
+      var _toSend = queuedPrompt;
+      var _queueSession = queuedPromptSession;
+      queuedPrompt = null;
+      queuedPromptSession = null;
       if (!replaying) setTurn(false);
       if (!replaying) hideThinking();
       if (payload.stopReason && payload.stopReason !== 'end_turn') {
@@ -4569,6 +4638,27 @@
         addMessage('note', 'turn ended: ' + payload.stopReason);
       }
       logLine('info', '← turn end (' + payload.stopReason + ')');
+      // Auto-send the queued prompt if one was stored at queue time.
+      if (!replaying && _toSend) {
+        if (_queueSession && _queueSession !== sessionId) {
+          // Session changed between queue and turn-end — discard silently
+          // rather than sending to a different conversation.
+          addMessage('note', 'Queued prompt discarded — session changed.');
+        } else if (!ws || ws.readyState !== WebSocket.OPEN) {
+          // Connection dropped — restore text so the user can retry.
+          promptInput.value = _toSend;
+          autoGrowPrompt();
+          refreshComposerControls();
+          addMessage('note', 'Could not send queued prompt — connection lost.');
+        } else if (promptInput.value.trim()) {
+          // User typed something after queuing — do not clobber their text.
+          addMessage('note', 'Queued prompt discarded — you typed a new prompt.');
+        } else {
+          promptInput.value = _toSend;
+          autoGrowPrompt();
+          sendPrompt();
+        }
+      }
       return;
     }
     if (type === 'meta' && payload.contextPercent !== undefined) {
@@ -4679,6 +4769,20 @@
       }
       return;
     }
+    if (type === 'steer_ack') {
+      // The server confirmed the steer was received. Re-enable controls and
+      // clear the held text. queued===false means kiro-cli declined to inject.
+      promptInput.disabled = false;
+      steerBtn.disabled = false;
+      _steerPending = null;
+      refreshComposerControls();
+      if (payload && payload.queued === false) {
+        addMessage('error', 'Steer was not accepted by the agent.');
+      } else {
+        addMessage('note', 'Steer sent.');
+      }
+      return;
+    }
     if (type === 'subagents') {
       // Not part of `history` (acp.py's `_emit_subagents_frame` deliberately
       // keeps it out of the replay buffer) — it arrives live, and once more
@@ -4739,6 +4843,16 @@
       // Re-asserting the turn state the page already holds costs nothing and
       // repaints both buttons from it.
       setTurn(turnActive);
+      // If a steer was in-flight when this error arrived, restore the textarea
+      // text so the user can try again or edit it.
+      if (_steerPending) {
+        promptInput.value = _steerPending;
+        promptInput.disabled = false;
+        steerBtn.disabled = false;
+        _steerPending = null;
+        autoGrowPrompt();
+        refreshComposerControls();
+      }
       if (payload.code === 'close_in_progress' && sessionId &&
           frame.sessionId === sessionId) {
         // The session named here is being released, so the page must stop
@@ -4955,6 +5069,52 @@
     stopBtn.disabled = true;
     stopBtn.textContent = 'Stopping…';
   });
+  queueBtn.addEventListener('click', function () {
+    var text = promptInput.value.trim();
+    if (!text || !turnActive) return;
+    queuedPrompt = text;
+    queuedPromptSession = sessionId;
+    promptInput.value = '';
+    autoGrowPrompt();
+    refreshComposerControls();
+    // Show a cancellable inline note so the user can recover the text if
+    // they change their mind before the turn ends.
+    var queueNoteEl = addMessage('note', '');
+    var preview = text.length > 30 ? text.slice(0, 30) + '\u2026' : text;
+    var noteSpan = document.createElement('span');
+    noteSpan.textContent = 'Queued: ' + preview + ' \u2014 ';
+    queueNoteEl.appendChild(noteSpan);
+    var cancelLink = document.createElement('button');
+    cancelLink.className = 'acp-inline-cancel';
+    cancelLink.type = 'button';
+    cancelLink.textContent = 'Cancel';
+    cancelLink.addEventListener('click', function () {
+      if (!queuedPrompt) return;
+      promptInput.value = queuedPrompt;
+      queuedPrompt = null;
+      queuedPromptSession = null;
+      autoGrowPrompt();
+      refreshComposerControls();
+      queueNoteEl.textContent = 'Queued prompt cancelled.';
+      cancelLink.remove();
+    });
+    queueNoteEl.appendChild(cancelLink);
+  });
+  steerBtn.addEventListener('click', function () {
+    var text = promptInput.value.trim();
+    if (!text || !turnActive || !sessionId) return;
+    _steerPending = text;
+    // Disable the textarea and steer button while awaiting steer_ack.
+    // The textarea is cleared only after the ack — text is preserved in
+    // _steerPending for restoration on error.
+    promptInput.disabled = true;
+    steerBtn.disabled = true;
+    promptInput.value = '';
+    autoGrowPrompt();
+    refreshComposerControls();
+    send('steer', {message: text}, sessionId);
+    // Do NOT show "Steer sent." here — wait for steer_ack from the server.
+  });
   closeBtn.addEventListener('click', function () {
     if (!sessionId) return;
     if (!send('close', {}, sessionId)) return;
@@ -5151,7 +5311,12 @@
   // and it fires *after* the value has changed, which is what `scrollHeight`
   // has to see. On `keydown` the box still holds the previous value, so the
   // height would trail the content by one keystroke.
-  promptInput.addEventListener('input', autoGrowPrompt);
+  promptInput.addEventListener('input', function() {
+    autoGrowPrompt();
+    // Show Queue+Steer when the user types during a turn; show Stop when they
+    // clear the textarea. Runs on every keystroke, which is cheap.
+    refreshComposerControls();
+  });
   // Ctrl+V, and nothing had to be bound for it — this is the ordinary paste,
   // which in a browser carries the clipboard's image flavour alongside its
   // text one.
