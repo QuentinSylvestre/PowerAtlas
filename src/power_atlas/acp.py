@@ -156,11 +156,15 @@ except Exception as _e:  # pragma: no cover - only when the dep is missing
     log.warning("mistune unavailable — /acp renders the agent's markdown as "
                 "plain text: %s", _e)
 
-CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close", "steer"})
+CLIENT_TYPES = frozenset({
+    "subscribe", "new", "load", "prompt", "cancel", "close", "steer",
+    "commands_options", "commands_execute",
+})
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history", "thought",
     "subagents", "steer_ack",
+    "commands", "compaction", "commands_options_result", "commands_execute_result",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -172,6 +176,10 @@ SERVER_TYPES = frozenset({
 # default with a megabyte — above this cap, so the typed refusal below stays
 # the one a client actually meets.
 MAX_MESSAGE_BYTES = 256 * 1024
+
+# Slash command names are short (5–30 chars); 256 is a generous cap that
+# prevents protocol abuse without restricting legitimate autocomplete use.
+MAX_COMMAND_PARTIAL_CHARS = 256
 
 # Image attachments on one prompt: how many, and what they may weigh between
 # them once decoded.
@@ -2842,6 +2850,43 @@ class _Supervisor:
                 _flush_bubble(session_id)
                 _emit(session_id, envelope("thought", {"text": text}, session_id))
             return
+        if method == "_kiro.dev/commands/available":
+            commands = [
+                {"name": _as_text(c.get("name")), "description": _as_text(c.get("description"))}
+                for c in (params.get("commands") or [])
+                if isinstance(c, dict) and _as_text(c.get("name"))
+            ]
+            # Attribute to the single inflight session; drop if 0 or 2+
+            inflight = self.inflight
+            if len(inflight) == 1:
+                sid = next(iter(inflight))
+                meta = self.sessions.get(sid)
+                if meta is not None:
+                    meta["commands"] = commands
+                    _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
+            else:
+                log.debug("ACP commands_available: %d session(s) inflight, cannot "
+                          "attribute; dropped", len(inflight))
+            return
+        if method == "_kiro.dev/compaction/status":
+            status = params.get("status") or {}
+            stype = _as_text(status.get("type")) if isinstance(status, dict) else _as_text(status)
+            error = _as_text(status.get("error")) if isinstance(status, dict) else ""
+            summary = _as_text(params.get("summary"))
+            inflight = self.inflight
+            if len(inflight) == 1:
+                sid = next(iter(inflight))
+                if stype == "completed":
+                    # Reset context meter
+                    _note_context(sid, None)
+                _registry.broadcast(sid, envelope(
+                    "compaction", {"status": stype, "error": error, "summary": summary}, sid))
+            else:
+                log.debug("ACP compaction_status: %d session(s) inflight, cannot "
+                          "attribute; dropped (status=%r)", len(inflight), stype)
+            return
+        if method == "_kiro.dev/clear/status":
+            return  # silent consume; TUI logs debug only, nothing to display
         if log.isEnabledFor(logging.DEBUG):
             # Params and not only the method name. This module talks to an
             # undocumented protocol: `_kiro.dev/*` is not in the ACP spec at
@@ -3087,6 +3132,22 @@ class _Supervisor:
             {"sessionId": session_id, "message": text},
         ) or {}
 
+    async def commands_options(self, session_id: str, partial: str) -> list:
+        """Fetch autocomplete suggestions for a partial slash command."""
+        result = await self._request(
+            "_kiro.dev/commands/options",
+            {"sessionId": session_id, "command": "", "partial": partial},
+        )
+        return list((result or {}).get("options") or [])
+
+    async def commands_execute(self, session_id: str, name: str) -> dict:
+        """Execute a slash command via the TuiCommand object form."""
+        result = await self._request(
+            "_kiro.dev/commands/execute",
+            {"sessionId": session_id, "command": {"command": name, "args": {}}},
+        )
+        return result or {}
+
     async def close_session(self, session_id: str) -> None:
         """Release one session on the agent, and everything it holds here.
 
@@ -3263,7 +3324,7 @@ def _flush_bubble(session_id: str) -> None:
     _emit(session_id, envelope("rendered", {"tokens": tokens}, session_id))
 
 
-def _note_context(session_id: str, percent: float) -> None:
+def _note_context(session_id: str, percent: float | None) -> None:
     """Record and fan out how full a session's context window is.
 
     Broadcast rather than ``_emit``: this is a *level*, not an event, and the
@@ -3408,6 +3469,12 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
     if type_ == "steer":
         _spawn_task(_handle_steer(conn, session_id, payload))
         return
+    if type_ == "commands_options":
+        _spawn_task(_handle_commands_options(conn, session_id, payload))
+        return
+    if type_ == "commands_execute":
+        _spawn_task(_handle_commands_execute(conn, session_id, payload))
+        return
     if type_ == "close":
         _spawn_task(_handle_close(conn, session_id))
         return
@@ -3539,6 +3606,9 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         # are rebuilt onto the `session` frame above rather than replayed.
         conn.send(envelope(
             "subagents", {"subagents": _subagents_payload(crew)}, session_id))
+    commands = meta.get("commands")
+    if commands is not None:
+        conn.send(envelope("commands", {"commands": commands}, session_id))
 
 
 def _handle_subagent_subscribe(conn: _Connection, session_id: str,
@@ -4202,6 +4272,125 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
         log.exception("ACP _handle_steer: unexpected error")
         conn.send(error_frame(
             "internal_error", "Steer failed unexpectedly.", session_id))
+
+
+async def _handle_commands_options(conn: _Connection, session_id: str | None,
+                                    payload: dict) -> None:
+    """Return autocomplete suggestions for a partial slash command.
+
+    Forwards the partial string to ``_kiro.dev/commands/options`` and returns
+    the server's ``options`` list as a ``commands_options_result`` frame.
+    """
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'commands_options' needs a sessionId."))
+        log.warning("ACP commands_options refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor.subagent_sessions:
+        conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP commands_options refused: [read_only_session] session=%s", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame("not_subscribed",
+            "Subscribe to this session first.", session_id))
+        log.warning("ACP commands_options refused: [not_subscribed] session=%s", session_id)
+        return
+    if _supervisor.sessions.get(session_id) is None:
+        conn.send(error_frame("unknown_session", "No such live session.", session_id))
+        log.warning("ACP commands_options refused: [unknown_session] session=%s", session_id)
+        return
+    partial = str(payload.get("partial") or "")[:MAX_COMMAND_PARTIAL_CHARS]
+    try:
+        options = await _supervisor.commands_options(session_id, partial)
+    except AcpError as exc:
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        log.warning("ACP commands_options error: session=%s: %s", session_id, exc)
+        return
+    except Exception:
+        log.exception("ACP commands_options: unexpected error for session=%s", session_id)
+        conn.send(error_frame("internal_error",
+            "An unexpected error occurred processing commands_options.", session_id))
+        return
+    conn.send(envelope("commands_options_result", {"options": options}, session_id))
+
+
+async def _handle_commands_execute(conn: _Connection, session_id: str | None,
+                                    payload: dict) -> None:
+    """Execute a slash command via the kiro TuiCommand object form.
+
+    Validates guards (subscribed, no concurrent turn, session exists, name
+    within length and catalogue), then forwards to
+    ``_supervisor.commands_execute`` and returns a lightweight ack frame.
+    Command output arrives as ordinary ``chunk`` frames via ``_on_notification``
+    — the ack frame carries only ``{name, status:"accepted"}``.
+    """
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'commands_execute' needs a sessionId."))
+        log.warning("ACP commands_execute refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor.subagent_sessions:
+        conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP commands_execute refused: [read_only_session] session=%s", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame("not_subscribed",
+            "Subscribe to this session first.", session_id))
+        log.warning("ACP commands_execute refused: [not_subscribed] session=%s", session_id)
+        return
+    meta = _supervisor.sessions.get(session_id)
+    if meta is None:
+        conn.send(error_frame("unknown_session", "No such live session.", session_id))
+        log.warning("ACP commands_execute refused: [unknown_session] session=%s", session_id)
+        return
+    if session_id in _supervisor.closing:
+        conn.send(error_frame("close_in_progress",
+            "Session is being released; try again after it closes.", session_id))
+        log.warning("ACP commands_execute refused: [close_in_progress] session=%s", session_id)
+        return
+    if session_id in _supervisor.inflight:
+        conn.send(error_frame("turn_in_progress",
+            "A turn is already running; wait for it to finish before sending a command.",
+            session_id))
+        log.warning("ACP commands_execute refused: [turn_in_progress] session=%s", session_id)
+        return
+    name = str(payload.get("name") or "").strip().lstrip("/")
+    if not name:
+        conn.send(error_frame("bad_envelope",
+            "'commands_execute' needs a non-empty name.", session_id))
+        log.warning("ACP commands_execute refused: [bad_envelope] empty name session=%s",
+                    session_id)
+        return
+    if len(name) > MAX_COMMAND_PARTIAL_CHARS:
+        conn.send(error_frame("bad_payload", "Command name too long.", session_id))
+        log.warning("ACP commands_execute refused: [bad_payload] name too long session=%s",
+                    session_id)
+        return
+    # Validate name against the received catalogue when available.
+    # Allow-and-proceed when catalogue not yet received (race before first
+    # commands/available notification).
+    valid_names = {c["name"] for c in meta.get("commands") or [] if isinstance(c, dict)}
+    if valid_names and name not in valid_names:
+        conn.send(error_frame("bad_payload", f"Unknown command '{name}'.", session_id))
+        log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
+                    "session=%s", name, session_id)
+        return
+    _supervisor.touch_used(session_id)
+    log.info("ACP commands_execute: session=%s name=%r", session_id, name)
+    _supervisor.inflight.add(session_id)
+    try:
+        result = await _supervisor.commands_execute(session_id, name)
+    except AcpError as exc:
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        log.warning("ACP commands_execute error: session=%s: %s", session_id, exc)
+        return
+    except Exception:
+        log.exception("ACP commands_execute: unexpected error session=%s", session_id)
+        conn.send(error_frame("internal_error",
+            "An unexpected error occurred executing the command.", session_id))
+        return
+    finally:
+        _supervisor.inflight.discard(session_id)
+    conn.send(envelope("commands_execute_result",
+        {"name": name, "status": "accepted"}, session_id))
 
 
 def _mark_crew_done(crew: dict, now: float) -> bool:

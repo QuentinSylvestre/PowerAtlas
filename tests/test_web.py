@@ -16098,3 +16098,659 @@ class TestAcpStoppedAt:
 
         assert "stoppedAt" in by_id["sub-pay-02"]
         assert by_id["sub-pay-02"]["stoppedAt"] is None
+
+
+class TestAcpCommandsAvailable:
+    """``_kiro.dev/commands/available`` notification handler.
+
+    Attributed to the single inflight session when exactly one is in-flight;
+    stored in ``sessions[sid]["commands"]`` and broadcast as a ``commands``
+    frame.  Dropped (debug-logged) when 0 or 2+ sessions are inflight.
+    """
+
+    def _attached(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _notify(self, acp_mod, commands_list):
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/commands/available",
+            "params": {"commands": commands_list},
+        })
+
+    def test_single_inflight_stores_commands_and_broadcasts(self, acp_session):
+        """With exactly 1 inflight session the catalogue is stored and a
+        ``commands`` frame is broadcast to subscribers."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)  # drain session frame
+        try:
+            self._notify(acp_mod, [
+                {"name": "tools", "description": "List tools"},
+                {"name": "stats", "description": "Show stats"},
+            ])
+            stored = acp_mod._supervisor.sessions[sid].get("commands")
+            assert stored == [
+                {"name": "tools", "description": "List tools"},
+                {"name": "stats", "description": "Show stats"},
+            ]
+            frames = _queued(conn)
+            assert len(frames) == 1
+            assert frames[0]["type"] == "commands"
+            assert frames[0]["sessionId"] == sid
+            assert frames[0]["payload"]["commands"] == stored
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_zero_inflight_drops_notification(self, acp_session):
+        """No sessions inflight: notification is dropped silently (no broadcast,
+        no modification to sessions)."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)  # drain
+        # inflight is empty by default in the acp_session fixture
+        self._notify(acp_mod, [{"name": "tools", "description": "x"}])
+        assert "commands" not in acp_mod._supervisor.sessions[sid]
+        assert _queued(conn) == []
+
+    def test_two_inflight_drops_notification(self, acp_session):
+        """Two sessions inflight: cannot attribute; dropped."""
+        acp_mod, sid = acp_session
+        other_sid = "sess-other-cmds"
+        acp_mod._supervisor.sessions[other_sid] = {
+            "cwd": r"C:\other", "created": 0.0, "models": {}, "modes": {}}
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.inflight.add(other_sid)
+        _queued(conn)
+        try:
+            self._notify(acp_mod, [{"name": "tools", "description": "x"}])
+            assert "commands" not in acp_mod._supervisor.sessions[sid]
+            assert _queued(conn) == []
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+            acp_mod._supervisor.inflight.discard(other_sid)
+            acp_mod._supervisor.sessions.pop(other_sid, None)
+
+    def test_commands_with_empty_names_are_filtered_out(self, acp_session):
+        """Entries with an empty or missing ``name`` field are excluded from the
+        stored catalogue."""
+        acp_mod, sid = acp_session
+        self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        try:
+            self._notify(acp_mod, [
+                {"name": "tools", "description": "ok"},
+                {"name": "", "description": "empty name"},
+                {"name": None, "description": "null name"},
+                {"description": "missing name key"},
+                "not a dict",
+            ])
+            stored = acp_mod._supervisor.sessions[sid].get("commands")
+            assert stored == [{"name": "tools", "description": "ok"}]
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_meta_not_updated_when_session_missing(self, acp_session):
+        """If ``sessions.get(sid)`` returns None (session evicted between
+        inflight add and notification), nothing is updated and no crash."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.inflight.add(sid)
+        # Remove the session from the sessions dict to simulate eviction
+        del acp_mod._supervisor.sessions[sid]
+        try:
+            # Should not raise
+            self._notify(acp_mod, [{"name": "tools", "description": "x"}])
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+            # Restore so the fixture teardown doesn't fail
+            acp_mod._supervisor.sessions[sid] = {
+                "cwd": r"C:\scratch", "created": 0.0, "models": {}, "modes": {}}
+
+
+class TestAcpCompactionStatus:
+    """``_kiro.dev/compaction/status`` notification handler.
+
+    Broadcasts a ``compaction`` frame to subscribers.  On ``completed`` also
+    calls ``_note_context(sid, None)`` which broadcasts a ``meta`` frame with
+    ``contextPercent: null`` (the dual-frame effect).
+    """
+
+    def _attached(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _notify(self, acp_mod, status_type, error=None, summary=None):
+        status = {"type": status_type}
+        if error is not None:
+            status["error"] = error
+        params = {"status": status}
+        if summary is not None:
+            params["summary"] = summary
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/compaction/status",
+            "params": params,
+        })
+
+    def test_started_broadcasts_compaction_frame(self, acp_session):
+        """``started`` status broadcasts a ``compaction`` frame; no
+        ``_note_context`` call (contextPercent not changed)."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)  # drain
+        try:
+            self._notify(acp_mod, "started", summary="Compacting…")
+            frames = _queued(conn)
+            assert len(frames) == 1
+            assert frames[0]["type"] == "compaction"
+            assert frames[0]["payload"]["status"] == "started"
+            assert frames[0]["payload"]["error"] == ""
+            # No meta frame — _note_context not called
+            assert not any(f["type"] == "meta" for f in frames)
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_completed_broadcasts_compaction_and_resets_context(self, acp_session):
+        """``completed`` status broadcasts a ``compaction`` frame AND a ``meta``
+        frame with ``contextPercent: null`` (via ``_note_context(sid, None)``)."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        # Prime contextPercent so the reset is visible
+        acp_mod._supervisor.sessions[sid]["contextPercent"] = 90.0
+        _queued(conn)  # drain
+        try:
+            self._notify(acp_mod, "completed", summary="Done")
+            frames = _queued(conn)
+            # Expect at least 2 frames: compaction + meta
+            types = [f["type"] for f in frames]
+            assert "compaction" in types
+            assert "meta" in types
+            comp = next(f for f in frames if f["type"] == "compaction")
+            assert comp["payload"]["status"] == "completed"
+            meta = next(f for f in frames if f["type"] == "meta")
+            assert meta["payload"]["contextPercent"] is None
+            # contextPercent stored as None
+            assert acp_mod._supervisor.sessions[sid]["contextPercent"] is None
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_failed_broadcasts_with_error_field(self, acp_session):
+        """``failed`` status broadcasts a ``compaction`` frame with the error
+        field populated."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        try:
+            self._notify(acp_mod, "failed", error="out of memory")
+            frames = _queued(conn)
+            comp = next((f for f in frames if f["type"] == "compaction"), None)
+            assert comp is not None
+            assert comp["payload"]["status"] == "failed"
+            assert comp["payload"]["error"] == "out of memory"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_zero_inflight_drops_notification(self, acp_session):
+        """No sessions inflight: dropped silently (no broadcast)."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        # inflight empty by default
+        self._notify(acp_mod, "started")
+        assert _queued(conn) == []
+
+
+class TestAcpClearStatus:
+    """``_kiro.dev/clear/status`` is silently consumed — no broadcast, no error."""
+
+    def _attached(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def test_clear_status_produces_no_frame(self, acp_session):
+        """The notification is consumed silently; no frame reaches subscribers."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)  # drain
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": "_kiro.dev/clear/status",
+                "params": {},
+            })
+            assert _queued(conn) == []
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+
+class TestAcpCommandsOptionsHandler:
+    """``commands_options`` client frame handler.
+
+    Guards: sessionId required, not a subagent session, socket must be
+    subscribed to the session, session must exist.  On success returns a
+    ``commands_options_result`` frame with the ``options`` list.
+    """
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _unattached_conn(self, acp_mod):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        return conn
+
+    def test_successful_call_returns_options_result(self, acp_session):
+        """A valid call forwards the partial to ``commands_options`` and returns
+        a ``commands_options_result`` frame."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def fake_options(self_ignored, session_id, partial):
+            return [{"name": "tools"}, {"name": "stats"}]
+
+        with patch.object(acp_mod._Supervisor, "commands_options", fake_options):
+            asyncio.run(acp_mod._handle_commands_options(
+                conn, sid, {"partial": "to"}))
+
+        frames = _queued(conn)
+        assert len(frames) == 1
+        assert frames[0]["type"] == "commands_options_result"
+        assert frames[0]["sessionId"] == sid
+        assert frames[0]["payload"]["options"] == [{"name": "tools"}, {"name": "stats"}]
+
+    def test_no_session_id_returns_bad_envelope(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._unattached_conn(acp_mod)
+        _queued(conn)
+        asyncio.run(acp_mod._handle_commands_options(conn, None, {}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_envelope"
+        acp_mod._registry.connections.discard(conn)
+
+    def test_subagent_session_returns_read_only(self, acp_session):
+        acp_mod, sid = acp_session
+        child_id = "sub-co-01"
+        acp_mod._supervisor.subagent_sessions[child_id] = {"parent": sid}
+        conn = self._unattached_conn(acp_mod)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_options(conn, child_id, {}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "read_only_session"
+        finally:
+            acp_mod._supervisor.subagent_sessions.pop(child_id, None)
+            acp_mod._registry.connections.discard(conn)
+
+    def test_not_subscribed_returns_not_subscribed(self, acp_session):
+        """Socket not attached to the session returns ``not_subscribed``."""
+        acp_mod, sid = acp_session
+        conn = self._unattached_conn(acp_mod)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_options(conn, sid, {}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "not_subscribed"
+        finally:
+            acp_mod._registry.connections.discard(conn)
+
+    def test_unknown_session_returns_unknown_session(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        unknown = "not-live-co"
+        # Set session_id directly so the subscription guard passes
+        conn.session_id = unknown
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_options(conn, unknown, {}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "unknown_session"
+        finally:
+            conn.session_id = None
+            acp_mod._registry.connections.discard(conn)
+
+    def test_partial_is_truncated_to_max_chars(self, acp_session):
+        """A partial longer than ``MAX_COMMAND_PARTIAL_CHARS`` is truncated."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        captured = []
+
+        async def fake_options(self_ignored, session_id, partial):
+            captured.append(partial)
+            return []
+
+        oversized = "x" * (acp_mod.MAX_COMMAND_PARTIAL_CHARS + 100)
+        with patch.object(acp_mod._Supervisor, "commands_options", fake_options):
+            asyncio.run(acp_mod._handle_commands_options(
+                conn, sid, {"partial": oversized}))
+
+        assert len(captured) == 1
+        assert len(captured[0]) == acp_mod.MAX_COMMAND_PARTIAL_CHARS
+
+    def test_acp_error_returns_error_frame(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def raise_acp(self_ignored, session_id, partial):
+            raise acp_mod.AcpError("nope", "agent_rejected")
+
+        with patch.object(acp_mod._Supervisor, "commands_options", raise_acp):
+            asyncio.run(acp_mod._handle_commands_options(conn, sid, {}))
+
+        frames = _queued(conn)
+        assert frames[0]["type"] == "error"
+        assert frames[0]["payload"]["code"] == "agent_rejected"
+
+    def test_unexpected_exception_returns_internal_error(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def raise_unexpected(self_ignored, session_id, partial):
+            raise RuntimeError("boom")
+
+        with patch.object(acp_mod._Supervisor, "commands_options", raise_unexpected):
+            asyncio.run(acp_mod._handle_commands_options(conn, sid, {}))
+
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "internal_error"
+
+
+class TestAcpCommandsExecuteHandler:
+    """``commands_execute`` client frame handler.
+
+    Guards: sessionId required, not subagent session, subscribed, session
+    exists, not in closing, no turn inflight, non-empty name, name within
+    length, catalogue validation.  On success sends a
+    ``commands_execute_result`` ack frame and adds/removes session from
+    inflight around the awaited request.
+    """
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _unattached_conn(self, acp_mod):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        return conn
+
+    def test_successful_execution_returns_ack(self, acp_session):
+        """A valid ``commands_execute`` call returns a
+        ``commands_execute_result {name, status:"accepted"}`` frame."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def fake_execute(self_ignored, session_id, name):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+
+        frames = _queued(conn)
+        assert len(frames) == 1
+        assert frames[0]["type"] == "commands_execute_result"
+        assert frames[0]["sessionId"] == sid
+        assert frames[0]["payload"]["name"] == "tools"
+        assert frames[0]["payload"]["status"] == "accepted"
+
+    def test_no_session_id_returns_bad_envelope(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._unattached_conn(acp_mod)
+        _queued(conn)
+        asyncio.run(acp_mod._handle_commands_execute(conn, None, {"name": "tools"}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_envelope"
+        acp_mod._registry.connections.discard(conn)
+
+    def test_subagent_session_returns_read_only(self, acp_session):
+        acp_mod, sid = acp_session
+        child_id = "sub-ce-01"
+        acp_mod._supervisor.subagent_sessions[child_id] = {"parent": sid}
+        conn = self._unattached_conn(acp_mod)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, child_id, {"name": "tools"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "read_only_session"
+        finally:
+            acp_mod._supervisor.subagent_sessions.pop(child_id, None)
+            acp_mod._registry.connections.discard(conn)
+
+    def test_not_subscribed_returns_not_subscribed(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._unattached_conn(acp_mod)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "not_subscribed"
+        finally:
+            acp_mod._registry.connections.discard(conn)
+
+    def test_unknown_session_returns_unknown_session(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        unknown = "not-live-ce"
+        # Set session_id directly so the subscription guard passes
+        conn.session_id = unknown
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, unknown, {"name": "tools"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "unknown_session"
+        finally:
+            conn.session_id = None
+            acp_mod._registry.connections.discard(conn)
+
+    def test_close_in_progress_returns_close_in_progress(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.closing.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "close_in_progress"
+        finally:
+            acp_mod._supervisor.closing.discard(sid)
+
+    def test_turn_in_progress_returns_turn_in_progress(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "turn_in_progress"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_empty_name_returns_bad_envelope(self, acp_session):
+        """An empty name (after strip/lstrip) returns ``bad_envelope``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        asyncio.run(acp_mod._handle_commands_execute(conn, sid, {"name": "  "}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_envelope"
+
+    def test_slash_only_name_returns_bad_envelope(self, acp_session):
+        """Name ``/`` strips and lstrips to empty, returns ``bad_envelope``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        asyncio.run(acp_mod._handle_commands_execute(conn, sid, {"name": "/"}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_envelope"
+
+    def test_name_too_long_returns_bad_payload(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        long_name = "x" * (acp_mod.MAX_COMMAND_PARTIAL_CHARS + 1)
+        asyncio.run(acp_mod._handle_commands_execute(conn, sid, {"name": long_name}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_payload"
+
+    def test_unknown_command_returns_bad_payload(self, acp_session):
+        """When catalogue is populated and name is not in it, returns
+        ``bad_payload``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.sessions[sid]["commands"] = [
+            {"name": "tools", "description": "x"},
+        ]
+        _queued(conn)
+        asyncio.run(acp_mod._handle_commands_execute(
+            conn, sid, {"name": "unknown_cmd"}))
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "bad_payload"
+
+    def test_empty_catalogue_skips_validation(self, acp_session):
+        """When no ``commands`` key in meta, catalogue validation is skipped
+        and the execution proceeds normally."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        # No "commands" key in sessions[sid] — validation skipped
+        _queued(conn)
+
+        async def fake_execute(self_ignored, session_id, name):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "anything"}))
+
+        frames = _queued(conn)
+        assert frames[0]["type"] == "commands_execute_result"
+
+    def test_inflight_cleared_on_exception(self, acp_session):
+        """Even when ``commands_execute`` raises, inflight is discarded in the
+        ``finally`` block so subsequent turns are not blocked."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def raise_unexpected(self_ignored, session_id, name):
+            raise RuntimeError("crash")
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", raise_unexpected):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+
+        # inflight must be empty after the error
+        assert sid not in acp_mod._supervisor.inflight
+
+    def test_acp_error_returns_error_frame(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def raise_acp(self_ignored, session_id, name):
+            raise acp_mod.AcpError("nope", "agent_rejected")
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", raise_acp):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+
+        frames = _queued(conn)
+        assert frames[0]["type"] == "error"
+        assert frames[0]["payload"]["code"] == "agent_rejected"
+        assert sid not in acp_mod._supervisor.inflight
+
+    def test_unexpected_exception_returns_internal_error(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def raise_unexpected(self_ignored, session_id, name):
+            raise RuntimeError("boom")
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", raise_unexpected):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "tools"}))
+
+        frames = _queued(conn)
+        assert frames[0]["payload"]["code"] == "internal_error"
+        assert sid not in acp_mod._supervisor.inflight
+
+    def test_leading_slash_stripped_from_name(self, acp_session):
+        """A name like ``/tools`` is normalized to ``tools``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        captured = []
+
+        async def fake_execute(self_ignored, session_id, name):
+            captured.append(name)
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "/tools"}))
+
+        assert captured == ["tools"]
+
+
+class TestHandleSubscribeCommandsReplay:
+    """On subscribe, if ``meta["commands"]`` is set a ``commands`` frame is
+    replayed to the connecting socket (same pattern as the ``subagents`` crew
+    frame).  When ``commands`` is absent, no extra frame is sent.
+    """
+
+    def test_subscribe_with_commands_sends_commands_frame(self, acp_session):
+        """A session whose meta has a ``commands`` list replays it on subscribe."""
+        acp_mod, sid = acp_session
+        commands = [{"name": "tools", "description": "List tools"}]
+        acp_mod._supervisor.sessions[sid]["commands"] = commands
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+
+        frames = _queued(conn)
+        commands_frames = [f for f in frames if f["type"] == "commands"]
+        assert len(commands_frames) == 1
+        assert commands_frames[0]["payload"]["commands"] == commands
+        assert commands_frames[0]["sessionId"] == sid
+
+    def test_subscribe_without_commands_sends_no_commands_frame(self, acp_session):
+        """A session with no ``commands`` key in meta sends no ``commands`` frame
+        on subscribe."""
+        acp_mod, sid = acp_session
+        # No "commands" key — default acp_session meta
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._handle_subscribe(conn, sid)
+
+        frames = _queued(conn)
+        assert not any(f["type"] == "commands" for f in frames)
