@@ -2525,7 +2525,9 @@ class _Supervisor:
                 "startedAt": existing["startedAt"] if existing else time.time(),
                 # Preserve an already-set stoppedAt (e.g. from a cancel cascade
                 # that ran before this list update arrived); only stamp now when
-                # transitioning to done for the first time.
+                # transitioning to done for the first time.  This is the same
+                # rule as ``_mark_crew_done``, applied per-entry here because
+                # this function builds the full entry dict from a wire message.
                 "stoppedAt": (
                     existing["stoppedAt"]
                     if (existing and existing.get("stoppedAt"))
@@ -4030,7 +4032,7 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
             session_id))
         log.warning("ACP steer refused: [%s] session=%s", "no_turn_in_progress", session_id)
         return
-    raw = payload.get("prompt")
+    raw = payload.get("message")
     if not isinstance(raw, (str, type(None))):
         conn.send(error_frame("bad_payload", "Steer message must be a string.", session_id))
         log.warning("ACP steer refused: [%s] session=%s", "bad_payload", session_id)
@@ -4051,6 +4053,27 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
         log.exception("ACP _handle_steer: unexpected error")
         conn.send(error_frame(
             "internal_error", "Steer failed unexpectedly.", session_id))
+
+
+def _mark_crew_done(crew: dict, now: float) -> bool:
+    """Mark every non-done crew entry done and stamp ``stoppedAt``.
+
+    Used by the cancel cascade in ``_handle_cancel`` to finalize the whole
+    crew locally when kiro-cli stops emitting terminal subagent status after a
+    parent cancel.  See ``_on_subagent_list`` for the per-entry stamping rule
+    this mirrors: set ``stoppedAt`` to *now* only when transitioning to
+    ``done=True`` for the first time and it was not already set.
+
+    Returns ``True`` if any entry was changed, ``False`` otherwise.
+    """
+    changed = False
+    for entry in crew.values():
+        if not entry["done"]:
+            entry["done"] = True
+            if not entry.get("stoppedAt"):
+                entry["stoppedAt"] = now
+            changed = True
+    return changed
 
 
 async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
@@ -4116,18 +4139,8 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
     # crew entry done locally and broadcast so the page clears its crew bar.
     crew = _supervisor.crews.get(session_id)
     if crew:
-        changed = False
         now = time.time()
-        for entry in crew.values():
-            if not entry["done"]:
-                entry["done"] = True
-                # Preserve a more-precise kiro timestamp when already set
-                # (e.g. from a list_update that arrived before the cancel
-                # command was processed).
-                if not entry.get("stoppedAt"):
-                    entry["stoppedAt"] = now
-                changed = True
-        if changed:
+        if _mark_crew_done(crew, now):
             try:
                 _emit_subagents_frame(session_id)
             except Exception:

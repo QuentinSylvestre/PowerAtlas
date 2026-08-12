@@ -15494,7 +15494,7 @@ class TestAcpSteer:
 
         with patch.object(acp_mod._Supervisor, "steer", fake_steer):
             asyncio.run(acp_mod._handle_steer(
-                conn, sid, {"prompt": "focus on the login bug"}))
+                conn, sid, {"message": "focus on the login bug"}))
 
         assert captured == [(sid, "focus on the login bug")]
         outbound = _queued(conn)
@@ -15519,7 +15519,7 @@ class TestAcpSteer:
         acp_mod._registry.connections.add(conn)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, child_id, {"prompt": "x"}))
+            asyncio.run(acp_mod._handle_steer(conn, child_id, {"message": "x"}))
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "read_only_session"
         finally:
@@ -15533,7 +15533,7 @@ class TestAcpSteer:
         conn = self._conn(acp_mod, sid)
         # inflight is empty (default for acp_session fixture)
         _queued(conn)
-        asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "hurry up"}))
+        asyncio.run(acp_mod._handle_steer(conn, sid, {"message": "hurry up"}))
         outbound = _queued(conn)
         assert outbound[0]["payload"]["code"] == "no_turn_in_progress"
 
@@ -15562,7 +15562,7 @@ class TestAcpSteer:
         acp_mod._registry.connections.add(conn)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, unknown_sid, {"prompt": "x"}))
+            asyncio.run(acp_mod._handle_steer(conn, unknown_sid, {"message": "x"}))
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "unknown_session"
         finally:
@@ -15578,7 +15578,7 @@ class TestAcpSteer:
         acp_mod._registry.connections.add(conn)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "x"}))
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": "x"}))
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "not_subscribed"
         finally:
@@ -15594,7 +15594,7 @@ class TestAcpSteer:
         acp_mod._supervisor.closing.add(sid)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "x"}))
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": "x"}))
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "close_in_progress"
         finally:
@@ -15608,7 +15608,7 @@ class TestAcpSteer:
         acp_mod._supervisor.inflight.add(sid)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": ""}))
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": ""}))
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "bad_payload"
         finally:
@@ -15621,21 +15621,21 @@ class TestAcpSteer:
         acp_mod._supervisor.inflight.add(sid)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "  "}))
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": "  "}))
             outbound = _queued(conn)
             assert outbound[0]["payload"]["code"] == "bad_payload"
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
     def test_steer_refused_for_non_string_payload(self, acp_session):
-        """``steer`` with a non-string ``prompt`` value (e.g. an int) returns an
+        """``steer`` with a non-string ``message`` value (e.g. an int) returns an
         error frame rather than raising AttributeError."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor.inflight.add(sid)
         _queued(conn)
         try:
-            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": 123}))
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": 123}))
             outbound = _queued(conn)
             assert outbound, "Expected an error frame, got nothing"
             assert outbound[0]["type"] == "error"
