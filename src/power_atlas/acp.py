@@ -4040,6 +4040,25 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
                "This session is still answering the previous prompt.")
         return
     _supervisor.inflight.add(session_id)
+    # A new prompt means the previous turn's crew is stale — evict every
+    # finished entry so the next fan-out starts from a clean slate instead of
+    # stacking on top of earlier fan-outs' cards.  Running entries (shouldn't
+    # exist at turn start, but guard defensively) are left alone.
+    _stale_crew = _supervisor.crews.get(session_id)
+    if _stale_crew:
+        for _stale_id in [cid for cid, e in _stale_crew.items() if e["done"]]:
+            _stale_crew.pop(_stale_id, None)
+            _supervisor.subagent_sessions.pop(_stale_id, None)
+            _supervisor.subagent_history.pop(_stale_id, None)
+            _bubbles.pop(_stale_id, None)
+        if not _stale_crew:
+            _supervisor.crews.pop(session_id, None)
+            # Nothing left — tell attached sockets to clear the old panel.
+            _registry.broadcast(session_id, envelope(
+                "subagents", {"subagents": []}, session_id))
+        else:
+            # Some entries still running; emit the trimmed snapshot.
+            _emit_subagents_frame(session_id)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
     # What stands for this prompt everywhere it is not the raw bytes: the
@@ -4087,6 +4106,22 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         for _tcid in [k for k, v in _supervisor.crew_spawn_anchors.items()
                       if v == session_id]:
             _supervisor.crew_spawn_anchors.pop(_tcid, None)
+        # Force-mark any sub-agents that are still not-done.  kiro-cli
+        # occasionally sends a final list_update with an empty status.type,
+        # which leaves done=False on the entry.  The turn has ended, so every
+        # sub-agent that ran inside it is finished regardless of what the last
+        # wire update said.
+        _finishing_crew = _supervisor.crews.get(session_id)
+        if _finishing_crew:
+            _crew_changed = False
+            for _entry in _finishing_crew.values():
+                if not _entry["done"]:
+                    _entry["done"] = True
+                    if _entry.get("stoppedAt") is None:
+                        _entry["stoppedAt"] = time.time()
+                    _crew_changed = True
+            if _crew_changed:
+                _emit_subagents_frame(session_id)
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         # In the `finally` and above the end marker, so the markdown of a turn
         # that was cancelled or that errored is still rendered — `stop_reason`
