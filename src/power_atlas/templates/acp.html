@@ -395,6 +395,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+#acpCmdDropdown li.acp-cmd-placeholder {
+  color: var(--text-dim, #8b95b0);
+  font-size: 12px;
+  font-style: italic;
+  cursor: default;
+}
+#acpCmdDropdown li.acp-cmd-placeholder:hover {
+  background: none;
+}
 /* ---- compaction / system message --------------------------------------- */
 .acp-system-msg {
   padding: 4px 14px;
@@ -1652,9 +1661,21 @@
     }
     ul.textContent = '';
     if (!items.length) {
-      cmdDropdownEl.hidden = true;
+      // Show the dropdown open but with a placeholder rather than hiding
+      // silently — the user needs to know they are in slash-command mode.
+      // Commands arrive via the 'commands' frame after the first turn starts;
+      // on a freshly resumed session they may not be loaded yet.
+      var placeholder = document.createElement('li');
+      placeholder.className = 'acp-cmd-placeholder';
+      placeholder.setAttribute('role', 'option');
+      placeholder.setAttribute('aria-disabled', 'true');
+      placeholder.textContent = sessionCommands.length === 0
+        ? 'No commands loaded — start a turn to load the catalogue'
+        : 'No matching commands';
+      ul.appendChild(placeholder);
+      cmdDropdownEl.hidden = false;
       _cmdSelectedIndex = -1;
-      promptInput.setAttribute('aria-expanded', 'false');
+      promptInput.setAttribute('aria-expanded', 'true');
       return;
     }
     for (var i = 0; i < items.length; i++) {

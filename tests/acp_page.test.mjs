@@ -1,4 +1,4 @@
-// Behavioural coverage for the browser-side code this repo has no other way to
+﻿// Behavioural coverage for the browser-side code this repo has no other way to
 // test: src/power_atlas/templates/acp.html, the remote-access panel in
 // templates/index.html, and the two rules in static/style.css that decide what
 // the /acp topbar shows whom.
@@ -7603,15 +7603,17 @@ check("commandsFrameOnSessionChangeResetsSessionCommands", (tpl) => {
     payload: { sessionId: newSid, cwd: "C:\\tmp", created: true,
                turnActive: false, contextPercent: null },
   });
-  // Now '/' should show an empty dropdown (no commands).
+  // Now '/' should show the placeholder row — old session's commands must not appear.
   page.el("acpPrompt").value = "";
   page.el("acpPrompt").dispatch("keydown", {
     key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
   const drop = page.el("acpCmdDropdown");
-  assert(drop.hidden,
-    "dropdown should be hidden after a new session frame resets sessionCommands; " +
-    "stale commands from the old session must not appear");
+  // Dropdown shows but with placeholder only — no selectable items from the old session.
+  // No .acp-cmd-name spans means no selectable commands (only placeholder).
+  const cmdNames = drop.querySelectorAll(".acp-cmd-name");
+  assert(cmdNames.length === 0,
+    "no selectable commands - old session catalogue was cleared");
 });
 
 // compactionStartedAddsSystemMessage
