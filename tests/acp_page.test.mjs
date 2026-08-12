@@ -5676,8 +5676,8 @@ check("tapping a crew entry opens a second, read-only socket for it", (tpl) => {
       status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
   ]));
   page.all("acpTranscript", ".acp-crew-entry")[0].dispatch("click");
-  assertEqual(page.el("acpTranscript").hidden, true,
-              "the main transcript should hide while a sub-agent is open");
+  assertEqual(page.el("acpTranscriptWrap").hidden, true,
+              "the transcript wrapper should hide while a sub-agent is open");
   assertEqual(page.el("acpComposer").hidden, true,
               "the composer should hide — a sub-agent's conversation is read-only");
   assertEqual(page.el("acpSubPanel").hidden, false);
@@ -5685,6 +5685,26 @@ check("tapping a crew entry opens a second, read-only socket for it", (tpl) => {
   const subs = page.socketAt(1).sent.filter((f) => f.type === "subscribe");
   assertEqual(subs.length, 1, "expected exactly one subscribe on the sub-agent socket");
   assertEqual(subs[0].sessionId, "sub-1");
+});
+
+check("the transcript wrapper is hidden (not just the inner transcript) when a sub-agent is open", (tpl) => {
+  // Regression: the cycle-1 fix introduced .acp-transcript-wrap. openSubagent()
+  // used to hide #acpTranscript but not the wrapper, so the wrapper still claimed
+  // flex space while the subpanel was open.
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  page.all("acpTranscript", ".acp-crew-entry")[0].dispatch("click");
+  assertEqual(page.el("acpTranscriptWrap").hidden, true,
+              "the transcript wrapper still claims flex space while the subpanel " +
+              "is open — openSubagent must hide the wrapper, not just the inner transcript");
+  assertEqual(page.el("acpTranscript").hidden, false,
+              "the inner transcript should not be hidden directly (the wrapper hides it)");
+  page.click("acpSubBack");
+  assertEqual(page.el("acpTranscriptWrap").hidden, false,
+              "the transcript wrapper must be restored when closing the sub-agent view");
 });
 
 check("the sub-agent panel renders its own chunk and tool_call frames", (tpl) => {
@@ -5717,7 +5737,7 @@ check("the back button in the sub-agent panel returns to the main transcript", (
   page.openAt(1);
   page.click("acpSubBack");
   assertEqual(page.el("acpSubPanel").hidden, true);
-  assertEqual(page.el("acpTranscript").hidden, false);
+  assertEqual(page.el("acpTranscriptWrap").hidden, false);
 });
 
 check("reopening a sub-agent reuses the existing socket rather than a third one",
@@ -5777,7 +5797,7 @@ check("a new session frame clears the crew panel and closes any open sub-agent p
                 "the previous session's crew panel should not carry over");
     assertEqual(page.el("acpSubPanel").hidden, true,
                 "the sub-agent panel should close on a session switch");
-    assertEqual(page.el("acpTranscript").hidden, false);
+    assertEqual(page.el("acpTranscriptWrap").hidden, false);
     assertEqual(page.el("acpComposer").hidden, false);
   });
 

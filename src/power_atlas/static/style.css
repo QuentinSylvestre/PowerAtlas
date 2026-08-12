@@ -712,11 +712,12 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 /* `[hidden]` alone loses to the class rule above: both are one selector of
    specificity, `[hidden]` is the browser's UA stylesheet and an author rule
    beats it regardless of source order, and `display: flex` above is
-   unconditional. acp.html toggles `.hidden` on this element, `.acp-composer`
-   and `.acp-subpanel` to swap between the main transcript and a sub-agent's
-   read-only one — the same trap `.acp-rail-menu[hidden]`/`.acp-picker[hidden]`
-   already exist to close for their own elements. */
-.acp-transcript[hidden], .acp-composer[hidden], .acp-subpanel[hidden] { display: none; }
+   unconditional. acp.html toggles `hidden` on `.acp-transcript-wrap` (and
+   `.acp-transcript` itself where needed), `.acp-composer` and `.acp-subpanel`
+   to swap between the main transcript and a sub-agent's read-only one — the
+   same trap `.acp-rail-menu[hidden]`/`.acp-picker[hidden]` already exist to
+   close for their own elements. */
+.acp-transcript[hidden], .acp-transcript-wrap[hidden], .acp-composer[hidden], .acp-subpanel[hidden] { display: none; }
 .acp-msg { display: flex; gap: 10px; align-items: flex-start; }
 .acp-msg-role { flex-shrink: 0; width: 42px; text-align: right; font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); padding-top: 4px; }
 .acp-msg-body { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--text); }

@@ -212,7 +212,7 @@
             aria-expanded="false" aria-controls="acpLog">Debug log<span
             class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
   </div>
-  <div class="acp-transcript-wrap">
+  <div class="acp-transcript-wrap" id="acpTranscriptWrap">
     <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
          aria-label="Conversation"></div>
     <div class="acp-prompt-nav" id="acpPromptNav" hidden>
@@ -399,6 +399,7 @@
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
   var transcriptEl = document.getElementById('acpTranscript');
+  var transcriptWrapEl = document.getElementById('acpTranscriptWrap');
   var subPanelEl = document.getElementById('acpSubPanel');
   var subBackBtn = document.getElementById('acpSubBack');
   var subRoleEl = document.getElementById('acpSubRole');
@@ -2370,7 +2371,7 @@
     // so textContent = '' above does not remove it. Just hide it and clear the
     // userMsgEls tracking array.
     userMsgEls = [];
-    promptNavEl.hidden = userMsgEls.length < 2;
+    promptNavEl.hidden = true;
     agentBody = null;
     toolRows = Object.create(null);
     toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
@@ -2533,7 +2534,7 @@
     if (!sid) return;
     subViewSid = sid;
     subPanelEl.hidden = false;
-    transcriptEl.hidden = true;
+    transcriptWrapEl.hidden = true;
     composerEl.hidden = true;
     subTranscriptEl.textContent = '';
     subAgentBody = null;
@@ -2546,7 +2547,7 @@
     var wasOpen = !!subViewSid;
     subViewSid = null;
     subPanelEl.hidden = true;
-    transcriptEl.hidden = false;
+    transcriptWrapEl.hidden = false;
     composerEl.hidden = false;
     // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
     // budgets for a handful of sockets per viewer for exactly this shape — "a
