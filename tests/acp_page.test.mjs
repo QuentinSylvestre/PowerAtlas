@@ -3645,10 +3645,9 @@ check("a group's count agrees with the rows drawn beneath it", async (tpl) => {
 });
 
 check("a re-render puts keyboard focus back where the user left it", async (tpl) => {
-  // Use 15 sessions so the workspace show-more exists (RAIL_SESSION_SIZE=10).
-  const page = await railed(tpl, { store: fakeStore({ workspaces: 12, sessions: 15 }) });
+  const page = await railed(tpl);
 
-  // A workspace's own show-more: ten sessions become fifteen, which is all of
+  // A workspace's own show-more: three sessions become five, which is all of
   // them, so the button the user pressed does not exist after the rebuild.
   const more = page.railGroups()[0].querySelector(".acp-rail-group-more");
   more.focus();
@@ -3658,15 +3657,13 @@ check("a re-render puts keyboard focus back where the user left it", async (tpl)
   assert(now, "the rebuild dropped focus to the document body, throwing a keyboard " +
               "or screen-reader user out of the rail mid-task — the same population " +
               "the locked row's `disabled` exists for");
-  // After reveal, focus lands on the last row of ws-0 (a sess-w0-s* row).
-  assert(now.dataset && now.dataset.sid && now.dataset.sid.startsWith("sess-w0-"),
-         "focus did not land on a ws-0 row after the press revealed the rest");
+  assertEqual(now.dataset.sid, "sess-w0-s4",
+              "focus did not land on the rows the press revealed");
 
   // Row selection, which re-renders to move the `current` class.
-  // ws-0 now has 15 rows, ws-1 starts at index 15. rows[16] is ws-1 session 1.
-  const sid = page.railRows()[16].dataset.sid;
-  page.railRows()[16].focus();
-  page.railRows()[16].dispatch("click");
+  const sid = page.railRows()[7].dataset.sid;
+  page.railRows()[7].focus();
+  page.railRows()[7].dispatch("click");
   now = page.focused();
   assert(now, "selecting a row dropped focus to the document body");
   assertEqual(now.dataset.sid, sid, "focus moved somewhere other than the row selected");
