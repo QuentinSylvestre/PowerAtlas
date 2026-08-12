@@ -368,15 +368,10 @@
   // only pays off if this page says why it is dead instead of looking merely
   // disconnected.
   var ACP_ERROR = {{ acp_error | tojson }};
-  // Whether this page is being viewed from the machine running it. Same value
-  // the topbar's dashboard link branches on, and it comes from
-  // `scope["client"]` rather than the Host header (D26), so a remote peer
-  // cannot claim it.
-  //
-  // Note: session deletion used to be loopback-only and was gated on ACP_LOCAL.
-  // It is now gated on ACP_CAN_DELETE (below), which is true for loopback
-  // viewers unconditionally and for remote desktop browsers (non-mobile UA).
-  // Remote mobile browsers get ACP_CAN_DELETE=false and never see the menu.
+  // Whether this page is being viewed from the machine running it. Used by
+  // the Jinja if-local block above (the dashboard back-link). Not used
+  // in JavaScript — the JS gate for the \u22ef menu is ACP_CAN_DELETE below,
+  // which is derived from both the peer address and the User-Agent.
 
   // True when the viewer may use the \u22ef rail-row menu (delete). Loopback
   // viewers always get true. Remote viewers get true for desktop UAs, false for

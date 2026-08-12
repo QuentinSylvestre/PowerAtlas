@@ -324,9 +324,8 @@ exposing a listener on a port that changes every restart.
 **What is reachable remotely**, and nothing else: `/acp`, its WebSocket `/ws/acp`, the read-only session
 listing `GET /api/acp/sessions`, the workspace list `GET /api/acp/workspaces` that the create picker
 reads (paths and session counts, no session content — a strict subset of what the listing already
-discloses), `/static/*`, and the `/remote-auth` exchange page. **Session deletion is deliberately not on
-that list**: `POST /api/acp/sessions/delete` is refused from the remote address, and `/acp` does not
-render the row menu for a remote viewer. The path allowlist is
+discloses), `POST /api/acp/sessions/delete` (authenticated desktop browsers only — the row menu is not
+rendered for mobile UA), `/static/*`, and the `/remote-auth` exchange page. The path allowlist is
 default-deny, so any route added later is loopback-only until deliberately listed. The dashboard `/`,
 `/api/launchers` (which carries custom-launcher environment variables in cleartext) and `/api/settings`
 are refused from the remote address with a 403 before routing.

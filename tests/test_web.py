@@ -15435,6 +15435,31 @@ class TestMobileUaDetection:
         assert resp.status_code == 200
         assert b"ACP_CAN_DELETE = true" in resp.content
 
+    def test_can_delete_false_for_mobile_ua_via_helper(self):
+        """Remote peer + mobile UA → _is_mobile_ua returns True so can_delete is False."""
+        from power_atlas.web import _is_mobile_ua, _is_remote_peer
+        # Simulate the can_delete expression for a remote mobile peer:
+        # local = not _is_remote_peer("100.78.142.124") = False
+        # can_delete = False or not _is_mobile_ua("...iPhone...") = False or False = False
+        local = not _is_remote_peer("100.78.142.124")
+        assert local is False
+        assert _is_mobile_ua("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)") is True
+        can_delete = local or not _is_mobile_ua(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)"
+        )
+        assert can_delete is False
+
+    def test_can_delete_true_for_desktop_ua_via_helper(self):
+        """Remote peer + desktop UA → _is_mobile_ua returns False so can_delete is True."""
+        from power_atlas.web import _is_mobile_ua, _is_remote_peer
+        local = not _is_remote_peer("100.78.142.124")
+        assert local is False
+        assert _is_mobile_ua("Mozilla/5.0 (Windows NT 10.0; Win64; x64)") is False
+        can_delete = local or not _is_mobile_ua(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        )
+        assert can_delete is True
+
 
 class TestAcpWorkspacesEndpoint:
     """The create picker's list. Paths and counts, no session content.

@@ -6407,10 +6407,10 @@ check("P3: group header format: name xCount · status xCount", async (tpl) => {
   const toggle = transcript.querySelector(".acp-tool-group-toggle");
   assert(toggle !== null, "group toggle should exist");
   const text = toggle.textContent;
-  // Expected: "execute ×2, read · completed ×3"
-  assert(!text.includes("tool calls"),
-    "header should not contain 'tool calls' — got: " + text);
-  assert(!text.includes("shell"),
+  // Expected: "Tool calls: execute ×2, read · completed ×3"
+  assert(text.toLowerCase().startsWith("tool calls:"),
+    "header should start with 'Tool calls:' prefix — got: " + text);
+  assert(!text.toLowerCase().includes("shell"),
     "header should not contain title 'shell' (kind is used instead) — got: " + text);
   assert(text.includes("execute"),
     "header should contain kind 'execute' — got: " + text);
