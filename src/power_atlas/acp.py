@@ -1709,8 +1709,11 @@ class _Supervisor:
         # `crew_spawn_anchors`: toolCallId -> session_id. Records which session
         # emitted a `subagent` tool call that has not yet been consumed by
         # `_on_subagent_list`. Keyed by toolCallId so multiple concurrent spawns
-        # from the same session each get an independent entry. At steady state this
-        # holds O(1) entries per session (one outstanding spawn at a time).
+        # from the same session each get an independent entry. At steady state
+        # (one outstanding spawn at a time) this holds O(1) entries per session;
+        # in pathological cases (N fan-outs dispatched before any list_update
+        # arrives) it holds O(N) entries per turn, bounded by turn-end cleanup
+        # in `_handle_prompt`'s `finally` block.
         # Populated in `_on_notification` when a `subagent` tool_call fires;
         # consumed (oldest entry) in `_on_subagent_list` when anchor attribution
         # is used; cleaned up on turn end (`_handle_prompt` finally), terminal
@@ -2513,10 +2516,10 @@ class _Supervisor:
                 # possible if the session dispatched rapid successive fan-outs;
                 # consuming the oldest matches the list_update that just arrived
                 # while leaving later anchors for their respective list_updates.
-                for _tcid, _sid in self.crew_spawn_anchors.items():
-                    if _sid == parent_id:
-                        self.crew_spawn_anchors.pop(_tcid, None)
-                        break
+                # Use list-snapshot to avoid mutating the dict during iteration.
+                for _tcid in [k for k, v in self.crew_spawn_anchors.items()
+                              if v == parent_id][:1]:
+                    self.crew_spawn_anchors.pop(_tcid, None)
                 log.debug("ACP subagent_list: attributed to %s via spawner anchor"
                           " (%d in-flight sessions)", parent_id, len(inflight))
             else:
@@ -2756,6 +2759,17 @@ class _Supervisor:
                         self.crew_spawn_anchors[payload["toolCallId"]] = session_id
                         log.debug("ACP tool_call: spawner anchor recorded"
                                   " session=%s id=%s", session_id, payload["toolCallId"])
+                    elif (
+                        _spawner_tool_name is not None
+                        and _spawner_tool_name != "subagent"
+                        and session_id in self.inflight
+                    ):
+                        # `_meta.kiro.toolName` is present but not "subagent" —
+                        # kiro-cli may have renamed the spawner tool. Debug-only
+                        # signal to aid diagnosis if the crew panel stops appearing.
+                        log.debug("ACP tool_call: unrecognised _meta.kiro.toolName=%r"
+                                  " on inflight session=%s — spawner anchor not recorded",
+                                  _spawner_tool_name, session_id)
                 elif not (payload["title"] or payload["kind"] or
                           payload["status"] or payload["command"]):
                     # `tool_call_update` can arrive in two shapes for the same
