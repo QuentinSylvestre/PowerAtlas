@@ -6371,7 +6371,7 @@ check("P3: group is collapsed by default; toggle has aria-expanded=false", async
   }
 });
 
-check("P3: group header format: N tool calls (name xCount) · status xCount", async (tpl) => {
+check("P3: group header format: name xCount · status xCount", async (tpl) => {
   const { page, live } = connected(tpl);
   await deliverTurn(page, live, [
     { toolCallId: "g3a", title: "shell",     kind: "execute", status: "completed", command: "a" },
@@ -6382,9 +6382,9 @@ check("P3: group header format: N tool calls (name xCount) · status xCount", as
   const toggle = transcript.querySelector(".acp-tool-group-toggle");
   assert(toggle !== null, "group toggle should exist");
   const text = toggle.textContent;
-  // Expected: "3 tool calls (shell ×2, read_file ×1) · completed ×3"
-  assert(text.includes("3 tool calls"),
-    "header should start with count — got: " + text);
+  // Expected: "shell ×2, read_file · completed ×3"
+  assert(!text.includes("tool calls"),
+    "header should not contain 'tool calls' — got: " + text);
   assert(text.includes("shell"),
     "header should contain 'shell' — got: " + text);
   assert(text.includes("\xd72"),

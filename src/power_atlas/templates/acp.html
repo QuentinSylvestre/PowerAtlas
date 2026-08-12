@@ -1770,8 +1770,7 @@
       var stTally = stOrder.map(function (st) {
         return stCounts[st] > 1 ? st + ' \xd7' + stCounts[st] : st;
       }).join(', ');
-      var headerText = rows.length + ' tool calls (' + nameTally + ')' +
-                       (stTally ? ' \xb7 ' + stTally : '');
+      var headerText = nameTally + (stTally ? ' \xb7 ' + stTally : '');
 
       // Build group container.
       var group = document.createElement('div');
