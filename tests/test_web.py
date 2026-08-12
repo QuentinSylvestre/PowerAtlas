@@ -10520,15 +10520,41 @@ class TestAcpSubagentListAttribution:
             "tc-1": sid_a, "tc-2": sid_b,
         }
 
+    def test_on_notification_tool_call_records_spawner_anchor(self, acp_store):
+        """The anchor-recording path in _on_notification is exercised: a
+        tool_call notification with _meta.kiro.toolName == "subagent" on an
+        in-flight session populates crew_spawn_anchors.
+        """
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
+            "sessionId": sid,
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tc-spawn",
+                "title": "Spawning agent crew",
+                "kind": "other",
+                "status": "",
+                "command": "",
+                "_meta": {"kiro": {"toolName": "subagent"}},
+            },
+        })
+        assert acp_mod._supervisor.crew_spawn_anchors["tc-spawn"] == sid
+
     def test_stale_spawner_entry_cleaned_on_terminal_tool_call_update(self, acp_store):
         """A terminal tool_call_update removes the matching spawner anchor via
-        the notification path (not direct dict manipulation)."""
+        the notification path (not direct dict manipulation).  Sends a
+        tool_call_update notification with a terminal status and asserts the
+        anchor keyed by the same toolCallId is evicted.
+        """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         acp_mod._supervisor.crew_spawn_anchors["tc-stale"] = sid
         # Build a synthetic tool_call_update notification with terminal status.
-        # SUBAGENT_ACTIVITY_METHOD is `_kiro.dev/session/update`, which is the
-        # same method _on_notification handles for parent tool_call_update frames.
+        # The method routed through _on_notification; tool_call_update anchor
+        # cleanup does not filter on method — any method that reaches
+        # _on_notification works.
         _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
             "sessionId": sid,
             "update": {
@@ -10542,9 +10568,12 @@ class TestAcpSubagentListAttribution:
         })
         assert acp_mod._supervisor.crew_spawn_anchors == {}
 
-    def test_turn_end_clears_spawner_entries(self, acp_store):
-        """Anchors for a session are removed when the session leaves inflight
-        (simulated via direct inflight discard + cleanup)."""
+    def test_turn_end_clears_spawner_entries_logic(self, acp_store):
+        """Anchors for a session are removed when the session leaves inflight.
+        Tests the cleanup logic directly;
+        test_turn_end_clears_spawner_entries_via_production_code below tests
+        the production path.
+        """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         acp_mod._supervisor.inflight.add(sid)
@@ -10555,6 +10584,27 @@ class TestAcpSubagentListAttribution:
         for _tcid in [k for k, v in acp_mod._supervisor.crew_spawn_anchors.items()
                       if v == sid]:
             acp_mod._supervisor.crew_spawn_anchors.pop(_tcid, None)
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
+
+    def test_turn_end_clears_spawner_entries_via_production_code(self, acp_store):
+        """Anchors are cleared by _handle_prompt's finally block when the turn
+        ends, driving the real production code path.
+        """
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        # Seed an anchor before calling _handle_prompt
+        acp_mod._supervisor.crew_spawn_anchors["tc-prod"] = sid
+
+        async def fake_request(self, method, params, timeout=None):
+            return {"stopReason": "end_turn"}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hello"}))
+
+        # The finally block in _handle_prompt must have cleared the anchor
         assert acp_mod._supervisor.crew_spawn_anchors == {}
 
 
@@ -10893,6 +10943,33 @@ class TestAcpSubagentCleanup:
         assert "sub-1" not in acp_mod._supervisor.subagent_history
         frames = _queued(watcher)
         assert frames[0]["type"] == "session_closed"
+
+    def test_close_session_clears_spawner_anchor(self, acp_session):
+        """Anchors keyed to a session are removed when close_session is called,
+        so stale anchors don't accumulate after a session closes.
+        """
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.crew_spawn_anchors["tc-close"] = sid
+
+        async def answered(self_, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", answered), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._supervisor.close_session(sid))
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
+
+    def test_detach_clears_spawner_anchors(self, acp_session):
+        """_detach clears crew_spawn_anchors along with all other per-session
+        state (sessions, history, crews, etc.).
+        """
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.crew_spawn_anchors["tc-detach"] = sid
+        try:
+            acp_mod._supervisor._detach("test detach")
+        except Exception:
+            pass  # _detach may fail pending futures; that's fine
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
 
 
 class TestAcpSubagentEviction:

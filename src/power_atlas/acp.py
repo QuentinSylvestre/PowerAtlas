@@ -413,10 +413,10 @@ _SUBAGENT_ACTIVE_STATUSES = frozenset(
 # Terminal statuses for a `tool_call_update` frame. Used to evict stale
 # `crew_spawn_anchors` entries when a spawner tool call completes without
 # producing a list_update (e.g. cancelled or failed before the fan-out
-# actually dispatched). Includes "terminated" alongside the standard trio
-# because kiro-cli 2.16.2 uses "terminated" as the sole terminal
-# `status.type` for sub-agent entries, and a spawner tool_call_update may
-# follow the same vocabulary.
+# actually dispatched). "completed", "failed", and "cancelled" are the
+# standard observed trio; "terminated" is included by analogy with kiro-cli
+# 2.16.2's sub-agent status vocabulary (sole terminal `status.type` for
+# sub-agent entries) — not yet observed on `tool_call_update` status fields.
 _TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled", "terminated"})
 
 # Field names a sub-agent list entry may use for its session id, its display
@@ -2480,16 +2480,14 @@ class _Supervisor:
 
         Carries no ``sessionId`` of its own (measured — see
         ``SUBAGENT_LIST_METHOD``'s docstring and ``_stamp_activity``'s P0-4),
-        so the crew it describes has to be attributed some other way. A
-        fan-out can only originate from a running turn, so with **exactly
-        one** session mid-``session/prompt`` the attribution is unambiguous;
-        with zero or more than one, there is no honest answer and this file's
-        rule is to say nothing rather than guess (the same rule
-        ``METADATA_METHOD``'s neighbouring comment states for a different
-        notification) — the crew silently does not appear rather than
-        appearing on the wrong session's bar. Two (or more) sessions each
-        running their own fan-out at once is the one case this cannot cover;
-        it is left as a known gap rather than a guess.
+        so the crew it describes has to be attributed some other way. With
+        **exactly one** session mid-``session/prompt`` the attribution is
+        unambiguous. With zero in-flight the notification is dropped. With
+        more than one in-flight, the spawner-anchor fallback is tried: if
+        exactly one in-flight session has an outstanding ``crew_spawn_anchors``
+        entry, the crew is attributed to it (consuming the oldest anchor);
+        if zero or two or more sessions have anchors the attribution is
+        genuinely ambiguous and the notification is dropped rather than guessed.
         """
         subs = params.get("subagents")
         if not isinstance(subs, list):
@@ -2498,7 +2496,7 @@ class _Supervisor:
         if len(inflight) == 1:
             parent_id = next(iter(inflight))
         else:
-            # No single in-flight session — try the spawner anchor as a fallback.
+            # Zero or 2+ in-flight sessions — try the spawner anchor as a fallback.
             # `inflight ⊆ sessions` always holds; a session that closed has had
             # its anchors removed by `close_session`, so no stale entries point
             # to non-inflight sessions unless a concurrent close raced this path.
@@ -2746,26 +2744,13 @@ class _Supervisor:
                     # membership: a session not currently mid-turn cannot be the
                     # fan-out parent, and its anchor would never be consumed.
                     _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
-                    _spawner_tool_name = (
-                        _kiro_meta.get("toolName") if isinstance(_kiro_meta, dict)
-                        else None
-                    )
+                    _spawner_tool_name = _kiro_meta.get("toolName")
                     if (
                         _spawner_tool_name == "subagent"
                         and session_id in self.inflight
                         and payload["toolCallId"]
                     ):
                         self.crew_spawn_anchors[payload["toolCallId"]] = session_id
-                    elif (
-                        session_id in self.inflight
-                        and not _spawner_tool_name
-                        and payload["toolCallId"]
-                    ):
-                        log.debug(
-                            "ACP tool_call: no _meta.kiro.toolName on session=%s"
-                            " id=%s — spawner anchor not recorded",
-                            session_id, payload["toolCallId"],
-                        )
                 elif not (payload["title"] or payload["kind"] or
                           payload["status"] or payload["command"]):
                     # `tool_call_update` can arrive in two shapes for the same
