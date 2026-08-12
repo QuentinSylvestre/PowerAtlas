@@ -582,19 +582,43 @@ function flushToolGroups() {
 - Test: `toolGroup` is null after `clearTranscript()`.
 
 **Exit criteria**:
-- [ ] `El` harness class extended with `removeChild`, `insertBefore`, `nextSibling` before Phase 3 tests run.
-- [ ] Turn with >=2 consecutive tool calls: one `.acp-tool-group` at `meta turn:end`; individual rows inside group body.
-- [ ] Group collapsed by default; toggle expands/collapses.
-- [ ] Group toggle `aria-label` toggles between "Expand tool call group" and "Collapse tool call group".
-- [ ] Group header format correct: `"N tool calls (name xCount) · status xCount"` with `TOOL_STATUS_LABEL`-narrowed values; unknown wire status values omitted.
-- [ ] Single tool call in a turn: no group; row unchanged.
-- [ ] Turn producing two disjoint groups (e.g. A+B, prose, C+D): two groups rendered; clicking A+B toggle expands only A+B, not C+D (validates IIFE closure fix).
-- [ ] Non-adjacent calls (prose between): separate groups or individuals per sub-run size.
-- [ ] `toolRows` references valid after reparenting; `tool_update` status mutations work.
-- [ ] `toolGroup` reset in `clearTranscript()` and at `meta turn:start`.
-- [ ] Scroll preserved: `stuckToBottom()` captured once before runs loop; restored after all groups inserted.
-- [ ] `tests/acp_page.test.mjs` updated; suite green.
-- [ ] `plans/ROADMAP.md` lines 34 and 202 updated — delivered tool-display candidates marked (see §8).
+- [x] `El` harness class extended with `removeChild`, `insertBefore`, `nextSibling` before Phase 3 tests run.
+- [x] Turn with >=2 consecutive tool calls: one `.acp-tool-group` at `meta turn:end`; individual rows inside group body.
+- [x] Group collapsed by default; toggle expands/collapses.
+- [x] Group toggle `aria-label` toggles between "Expand tool call group" and "Collapse tool call group".
+- [x] Group header format correct: `"N tool calls (name xCount) · status xCount"` with `TOOL_STATUS_LABEL`-narrowed values; unknown wire status values omitted.
+- [x] Single tool call in a turn: no group; row unchanged.
+- [x] Turn producing two disjoint groups (e.g. A+B, prose, C+D): two groups rendered; clicking A+B toggle expands only A+B, not C+D (validates IIFE closure fix).
+- [x] Non-adjacent calls (prose between): separate groups or individuals per sub-run size.
+- [x] `toolRows` references valid after reparenting; `tool_update` status mutations work.
+- [x] `toolGroup` reset in `clearTranscript()` and at `meta turn:start`.
+- [x] Scroll preserved: `stuckToBottom()` captured once before runs loop; restored after all groups inserted.
+- [x] `tests/acp_page.test.mjs` updated; suite green.
+- [x] `plans/ROADMAP.md` lines 34 and 202 updated — delivered tool-display candidates marked (see §8).
+
+**Implementation (2026-08-11, code: 412df0f + 2dc0163)**
+Phase 3 adds turn-end grouping of consecutive tool calls. `flushToolGroups()` splits the accumulated `toolGroup` into consecutive sub-runs by DOM adjacency (`nextSibling` check), captures scroll state once before the loop, and for each sub-run of >=2 rows builds a collapsible `.acp-tool-group` container. The group header shows `N tool calls (name ×count) · status ×count` using `TOOL_STATUS_LABEL` for status narrowing (unknown values silently omitted). An IIFE per loop iteration captures `groupToggle`/`groupBody` bindings to prevent the var-in-loop closure bug (all toggles controlling the last group). `toolGroup` is reset in `clearTranscript()`, `meta turn:start`, and at the end of `flushToolGroups()`. The `El` harness was extended with `removeChild`, `insertBefore`, and `nextSibling`. 11 new tests added including the IIFE closure isolation test (A+B, prose, C+D → two groups; each toggle controls only its own body). Post-review auto-fixes: aria-controls linking toggle to body, parent-node guard on removeChild, replay test rewritten to use actual `{type:"history"}` frames, TOOL_STATUS_LABEL narrowing test, sequential-turns test, comment improvements. ROADMAP.md updated for both Phase 2 and Phase 3 deliveries. Final test count: 236 pass / 0 fail.
+
+### 2026-08-12 — Implementation Review (after Phase 3, personas: Senior engineer, Maintainability reviewer, Reliability engineer, End-user advocate)
+
+Implementation health: Green (after 1 auto-fix cycle).
+12 findings total (0 High, 5 Medium, 7 Low). All Medium auto-fixed except UX-3 (user-accepted).
+QA verification: PASS (browser — groups rendered, header format correct, expand/collapse works, Phase 2 toggles present inside expanded groups, 0 JS errors).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| M2 | Medium | Replay-safety test used live `deliverTurn()` path, not actual `{type:"history"}` replay path. | Fixed — test rewritten with real history frame |
+| M3 | Medium | No test for `TOOL_STATUS_LABEL` narrowing of unknown status values. | Fixed — test added asserting `in_progress` omitted from header |
+| R2 | Medium | `removeChild` in `flushToolGroups()` had no parent-node guard. | Fixed — `if (rows[k].parentNode === transcriptEl)` guard added |
+| UX-1 | Medium | `aria-controls` missing — no programmatic link between group toggle and group body. | Fixed — unique id assigned to groupBody, `aria-controls` set on toggle |
+| UX-2 | Medium | textContent vs aria-label split undocumented (future maintainer confusion). | Fixed — inline comment added explaining intentional split |
+| UX-3 | Medium | Failed status pills hidden in collapsed group — `failed` indicator only in 11px dim tally text. | User: accepted — tally text is sufficient; visual indicator deferred to future |
+| M1 | Low | `insertBefore` variable shadowed DOM method of same name. | Fixed — renamed to `insertionRef` |
+| SE-F1 | Low | No test for sequential turns keeping accumulators separate. | Fixed — test added asserting 2 groups from 2 sequential turns |
+| SE-F2 | Low | `TOOL_STATUS_LABEL.update` misleadingly labelled as if a real wire status. | Fixed — comment clarifying synthetic/fallback nature |
+| SE-F3 | Low | Name tally uses raw payload.title without closed-set narrowing (intentional). | Fixed — inline comment noting intentional pass-through |
+| SE-F4 | Low | `insertionRef` comment misleading about DOM position logic. | Fixed — comment updated to explain last.nextSibling logic |
+| UX-4 | Low | Static snapshot comment missing at tally-build site. | Fixed — snapshot comment added |
 
 
 ---
