@@ -1,7 +1,7 @@
 """FastAPI application serving the PowerAtlas UI over two surfaces.
 
 The htmx-driven pages and partials are ordinary request/response routes. The
-ACP prototype adds a second surface — the ``/ws/acp`` WebSocket — which is
+Agent orchestrator adds a second surface — the ``/ws/acp`` WebSocket — which is
 neither htmx nor request/response, and which ``same_origin_guard`` below
 structurally cannot see. Its equivalent protections live in ``_ws_origin_ok``.
 """
@@ -54,7 +54,7 @@ except Exception as exc:  # pragma: no cover - prototype degradation path
     acp = None
     _ACP_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
     logging.getLogger("power_atlas.web").exception(
-        "ACP prototype failed to import: /acp is disabled, the rest of the UI is "
+        "Agent orchestrator failed to import: /acp is disabled, the rest of the UI is "
         "unaffected")
 
 try:
@@ -1490,7 +1490,7 @@ def _acp_csp(nonce: str, host: str) -> str:
 
 @app.get(_ACP_PATH, response_class=HTMLResponse)
 async def acp_page(request: Request, sid: str = ""):
-    """The ACP prototype page. ``sid`` names the session to re-subscribe to.
+    """The Agent orchestrator page. ``sid`` names the session to re-subscribe to.
 
     This page is the ACP token's only delivery vehicle, so it repeats the
     ``_ALLOWED_HOSTS`` check that ``same_origin_guard`` now runs for every
@@ -1589,7 +1589,7 @@ async def ws_acp(ws: WebSocket) -> None:
         # The guarded import failed. Close after accept so the reason survives:
         # a pre-accept close becomes a bare 403 handshake rejection.
         await ws.accept()
-        await ws.close(code=1011, reason="ACP prototype unavailable")
+        await ws.close(code=1011, reason="Agent orchestrator unavailable")
         return
     await ws.accept()
     await acp.serve_socket(ws)

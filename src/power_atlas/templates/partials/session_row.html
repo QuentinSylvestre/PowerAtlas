@@ -29,7 +29,7 @@
        terminal-window-focus feature. kiro-cli only — /acp speaks ACP to
        kiro-cli and no other provider has a loadable session there. #}
     {% if provider_name|default('') in ('', 'kiro-cli') %}
-    <button class="row-btn acp-open-btn" onclick="openInAcp(this)" aria-label="Open in the ACP prototype" title="Open in the ACP prototype">💬</button>
+    <button class="row-btn acp-open-btn" onclick="openInAcp(this)" aria-label="Open in Agent orchestrator" title="Open in Agent orchestrator">💬</button>
     {% endif %}
     {% if not stale %}
     <button class="row-btn primary terminal-btn" onclick="resumeSession(this)" aria-label="{% if provider_name == 'kiro-ide' %}Open in Kiro IDE{% else %}Resume{% endif %}" title="{% if provider_name == 'kiro-ide' %}Open workspace in Kiro IDE{% else %}Resume session{% endif %}">

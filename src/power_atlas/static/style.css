@@ -53,8 +53,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    — that one on `/`, `.acp-btn` on `/acp` — needs both back, or the pill's
    padding does not lay out and the label renders underlined. */
 .topbar-link { display: inline-flex; align-items: center; text-decoration: none; }
-/* The cross-surface switch: `ACP` on `/`, `Main dashboard` on `/acp`. One
-   control in two places, so it is tinted apart from the pills it sits beside —
+/* The cross-surface switch: `ACP` on `/`. One
+   control, so it is tinted apart from the pills it sits beside —
    on `/` those are settings and state (profile, remote, autostart, refresh),
    and a page link that looked identical to them was read as one more setting
    and missed. The colour reinforces; the label is what carries the meaning, so
@@ -523,7 +523,7 @@ script { display: none; }
 .ws-tags-info { font-size: 11px; color: var(--text-muted); padding: 4px 0 6px; line-height: 1.5; }
 .ws-info-line { display: block; }
 
-/* ACP prototype page (/acp) */
+/* Agent orchestrator page (/acp) */
 /* The logo at phone width, where the banner is 376 px of a 390 px row. Plain
    text and deliberately not a link: `.topbar-nav` beside it is the navigation,
    and a logo that is *also* a control is the ambiguity this pair exists to
@@ -546,11 +546,8 @@ script { display: none; }
    What is set here is the *order of sacrifice*, which is the part a browser
    cannot guess — flex distributes a shortfall in proportion to base size, so
    left alone the widest item gives the most, which here is the cluster holding
-   the pill. The row now also carries a logo and a link to the dashboard, which
-   is why the order is stated for four items rather than three — and why it is
-   stated at all rather than measured: an explicit order makes an overflow
-   impossible by construction, instead of true at the widths someone thought to
-   check.
+   the pill. An explicit order makes an overflow impossible by construction,
+   instead of true at the widths someone thought to check.
      1. the context meter, which degrades better than anything else here: it
         is a proportion, and a proportion still reads as one at the 24 px its
         track is floored to. `flex-shrink: 999` on the cluster is what puts it
@@ -562,9 +559,7 @@ script { display: none; }
         here instead, the logo absorbed ~99.7% of any shortfall by weight and
         was starved to 26 px of an 83 px name — "P…" — while the meter beside
         it sat at its full 72 px. Giving first must not mean giving alone;
-     3. the `Main dashboard` link's label, which ellipses. Last of the three
-        because it names where it goes and half a destination is still one;
-     4. the status pill, which never shrinks at all. It is the only element on
+     3. the status pill, which never shrinks at all. It is the only element on
         the page that says whether the socket is up, and a truncated one is
         worse than none: "conn" is indistinguishable from "connecting".
    Every selector here resolves on `/acp` only, and the one that had to be
@@ -584,7 +579,7 @@ script { display: none; }
 .acp-btn.topbar-nav { min-width: 0; flex-shrink: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Decoration, and the last thing here that should cost the row anything — but
    it has to be told that in the right units. Left to wrap it does not overflow
-   the row, it grows it: at 768 px "ACP prototype" broke across two lines and
+   the row, it grows it: at 768 px "Agent orchestrator" broke across two lines and
    the topbar itself got taller, which is the one direction a fixed 48 px bar
    cannot give in. */
 .acp-title { min-width: 0; flex-shrink: 4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

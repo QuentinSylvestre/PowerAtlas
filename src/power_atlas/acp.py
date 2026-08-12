@@ -1,4 +1,4 @@
-"""Browser-facing half of the ACP prototype, and the agent process behind it.
+"""Browser-facing half of the Agent orchestrator, and the agent process behind it.
 
 This module owns everything that happens on a ``/ws/acp`` socket once
 ``web.py`` has accepted it — envelope parsing, the connection and session
