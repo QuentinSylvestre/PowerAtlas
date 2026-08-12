@@ -5283,9 +5283,16 @@
       return;
     }
     if (type === 'commands_execute_result') {
-      // Lightweight ack frame — the command's text output arrives as normal
-      // 'chunk' frames via agent_message_chunk notifications.  Ack-only.
+      // The command result is in payload.result (the JSON-RPC ack from kiro-cli).
+      // Commands return {success, message, data} — message carries human-readable
+      // output for most built-in commands. Render it as a system message.
       hideCommandDropdown();
+      var res = payload && payload.result;
+      if (res && res.message) {
+        addSystemMessage(res.message);
+      } else if (res && !res.success) {
+        addSystemMessage('Command failed.');
+      }
       return;
     }
     if (type === 'session_closed') {

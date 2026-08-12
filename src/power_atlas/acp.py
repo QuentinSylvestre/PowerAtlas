@@ -2859,7 +2859,8 @@ class _Supervisor:
             return
         if method == "_kiro.dev/commands/available":
             commands = [
-                {"name": _as_text(c.get("name")), "description": _as_text(c.get("description"))}
+                {"name": _as_text(c.get("name")).lstrip("/"),
+                 "description": _as_text(c.get("description"))}
                 for c in (params.get("commands") or [])[:MAX_COMMANDS_COUNT]
                 if isinstance(c, dict) and _as_text(c.get("name"))
             ]
@@ -4404,15 +4405,14 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
         return
     # Validate name against the received catalogue when available.
     # Allow-and-proceed when catalogue not yet received (race before first
-    # commands/available notification). Log a warning for unknown names but
-    # do not block — kiro-cli enforces its own command list and will reject
-    # names it doesn't know, while a mismatched catalogue (e.g. names stored
-    # with a leading "/" vs without) would otherwise permanently break dispatch.
+    # commands/available notification). Names are stored without leading slash;
+    # the client also strips it, so this comparison is always slash-free.
     valid_names = {c.get("name") for c in meta.get("commands") or [] if isinstance(c, dict) and c.get("name")}
     if valid_names and name not in valid_names:
-        log.warning("ACP commands_execute: name %r not in catalogue (%d entries, first=%r); "
-                    "forwarding anyway — kiro-cli will reject if truly unknown",
-                    name, len(valid_names), next(iter(valid_names)) if valid_names else None)
+        conn.send(error_frame("bad_payload", "Unknown command.", session_id))
+        log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
+                    "session=%s", name, session_id)
+        return
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
     # Hold inflight to block concurrent prompts while the command runs.
@@ -4436,7 +4436,7 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
     finally:
         _supervisor.inflight.discard(session_id)
     conn.send(envelope("commands_execute_result",
-        {"name": name, "status": "accepted"}, session_id))
+        {"name": name, "status": "accepted", "result": result or {}}, session_id))
 
 
 def _mark_crew_done(crew: dict, now: float) -> bool:
