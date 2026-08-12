@@ -6545,14 +6545,65 @@ check("P3: toolRows reference valid after grouping; tool_update status mutation 
 
 check("P3: replay safety — turn:end in history produces group", async (tpl) => {
   const { page, live } = connected(tpl);
-  await deliverTurn(page, live, [
-    { toolCallId: "g9a", title: "shell", kind: "execute", status: "completed", command: "a" },
-    { toolCallId: "g9b", title: "shell", kind: "execute", status: "completed", command: "b" },
-  ]);
+  // Build a history frame with two adjacent tool_call payloads and a turn:end,
+  // matching the format real replay frames use. This exercises the actual replay
+  // path (history frame → events loop → flushToolGroups at turn:end), not the
+  // live-event path deliverTurn() uses.
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "meta", sessionId: live, payload: { turn: "start" } },
+      { type: "tool_call", sessionId: live,
+        payload: { toolCallId: "rp1", title: "shell", kind: "execute",
+                   status: "completed", command: "git log" } },
+      { type: "tool_call", sessionId: live,
+        payload: { toolCallId: "rp2", title: "shell", kind: "execute",
+                   status: "completed", command: "git diff" } },
+      { type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } },
+    ] },
+  });
+  await page.settle();
   const transcript = page.el("acpTranscript");
   const groups = transcript.querySelectorAll(".acp-tool-group");
   assertEqual(groups.length, 1,
-    "replay of turn with tool_calls + turn:end should produce the group");
+    "history replay with two adjacent tool_calls + turn:end should produce exactly one .acp-tool-group");
+});
+
+check("P3: TOOL_STATUS_LABEL — unknown status is omitted from tally, no separator", async (tpl) => {
+  // `in_progress` is not in TOOL_STATUS_LABEL, so the status tally should be
+  // empty and the · separator should not appear in the toggle's text.
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "m3a", title: "shell", kind: "execute", status: "in_progress", command: "x" },
+    { toolCallId: "m3b", title: "shell", kind: "execute", status: "in_progress", command: "y" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 1, "two in_progress tool calls should still form a group");
+  const toggle = groups[0].querySelector(".acp-tool-group-toggle");
+  assert(toggle, "group has no toggle button");
+  assert(!toggle.textContent.includes("in_progress"),
+    "raw wire status 'in_progress' reached the toggle textContent — must be narrowed out");
+  assert(!toggle.textContent.includes('\xb7'),
+    "· separator appears even though the status tally is empty (all statuses unknown)");
+});
+
+check("P3: sequential turns each produce their own .acp-tool-group", async (tpl) => {
+  const { page, live } = connected(tpl);
+  // Turn 1 with 2 tool calls
+  await deliverTurn(page, live, [
+    { toolCallId: "sf1a", title: "shell", kind: "execute", status: "completed", command: "turn1-a" },
+    { toolCallId: "sf1b", title: "shell", kind: "execute", status: "completed", command: "turn1-b" },
+  ]);
+  // Turn 2 with 2 tool calls
+  await deliverTurn(page, live, [
+    { toolCallId: "sf1c", title: "shell", kind: "execute", status: "completed", command: "turn2-a" },
+    { toolCallId: "sf1d", title: "shell", kind: "execute", status: "completed", command: "turn2-b" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 2,
+    "two sequential turns with 2 tool calls each should produce exactly 2 .acp-tool-group elements");
 });
 
 check("P3: toolGroup is null after clearTranscript", async (tpl) => {
