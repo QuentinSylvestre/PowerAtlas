@@ -16200,6 +16200,7 @@ class TestAcpCommandsAvailable:
         acp_mod, sid = acp_session
         acp_mod._supervisor.inflight.add(sid)
         # Remove the session from the sessions dict to simulate eviction
+        orig = acp_mod._supervisor.sessions[sid].copy()
         del acp_mod._supervisor.sessions[sid]
         try:
             # Should not raise
@@ -16207,8 +16208,25 @@ class TestAcpCommandsAvailable:
         finally:
             acp_mod._supervisor.inflight.discard(sid)
             # Restore so the fixture teardown doesn't fail
-            acp_mod._supervisor.sessions[sid] = {
-                "cwd": r"C:\scratch", "created": 0.0, "models": {}, "modes": {}}
+            acp_mod._supervisor.sessions[sid] = orig
+
+    def test_oversized_list_is_truncated_to_max_commands_count(self, acp_session):
+        """A notification carrying 300 entries stores at most MAX_COMMANDS_COUNT
+        (200) entries.  The slice runs before the comprehension so at most 200
+        items are ever processed."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.inflight.add(sid)
+        try:
+            big_list = [{"name": "cmd%d" % i, "description": "x"} for i in range(300)]
+            self._notify(acp_mod, big_list)
+            stored = acp_mod._supervisor.sessions[sid].get("commands")
+            assert stored is not None
+            assert len(stored) == acp_mod.MAX_COMMANDS_COUNT
+            # The slice is taken from the front, so the first 200 names survive.
+            assert stored[0]["name"] == "cmd0"
+            assert stored[-1]["name"] == "cmd%d" % (acp_mod.MAX_COMMANDS_COUNT - 1)
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
 
 
 class TestAcpCompactionStatus:
@@ -16471,6 +16489,21 @@ class TestAcpCommandsOptionsHandler:
         frames = _queued(conn)
         assert frames[0]["payload"]["code"] == "internal_error"
 
+    def test_close_in_progress_returns_close_in_progress(self, acp_session):
+        """A session mid-close returns ``close_in_progress`` before the
+        autocomplete round-trip is attempted."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.closing.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_commands_options(
+                conn, sid, {"partial": "to"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "close_in_progress"
+        finally:
+            acp_mod._supervisor.closing.discard(sid)
+
 
 class TestAcpCommandsExecuteHandler:
     """``commands_execute`` client frame handler.
@@ -16718,6 +16751,75 @@ class TestAcpCommandsExecuteHandler:
                 conn, sid, {"name": "/tools"}))
 
         assert captured == ["tools"]
+
+    def test_prompt_refused_turn_in_progress_when_commands_execute_holds_inflight(
+            self, acp_session):
+        """When ``commands_execute`` holds the inflight lock for a session,
+        a concurrent ``_handle_prompt`` on the same session must return
+        ``turn_in_progress``.
+
+        This verifies that the inflight mutex is shared: ``commands_execute``
+        adds to ``inflight`` before awaiting its round-trip, and ``_handle_prompt``
+        checks ``inflight`` before starting its own turn.
+        """
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        # Simulate commands_execute holding the inflight lock.
+        acp_mod._supervisor.inflight.add(sid)
+        try:
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hello"}))
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "turn_in_progress"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_concurrent_execute_only_one_accepted(self, acp_session):
+        """Two simultaneous ``_handle_commands_execute`` calls on the same
+        session via ``asyncio.gather``: exactly one must return
+        ``commands_execute_result {status: "accepted"}`` and the other must
+        return a ``turn_in_progress`` error.
+
+        The inflight guard in ``_handle_commands_execute`` is set before the
+        first real suspension (``asyncio.to_thread``) in the production path, so
+        the first task to pass the guard wins the slot. To reproduce that
+        interleaving in the test, ``fake_execute`` yields once with
+        ``asyncio.sleep(0)`` so the event loop can run the second task's guards
+        while the first is suspended.
+        """
+        acp_mod, sid = acp_session
+        conn_a = self._conn(acp_mod, sid)
+        conn_b = self._conn(acp_mod, sid)
+        _queued(conn_a)
+        _queued(conn_b)
+
+        async def fake_execute(self_ignored, session_id, name):
+            await asyncio.sleep(0)  # yield so the event loop can run the other task
+            return {}
+
+        async def drive():
+            with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+                await asyncio.gather(
+                    acp_mod._handle_commands_execute(conn_a, sid, {"name": "tools"}),
+                    acp_mod._handle_commands_execute(conn_b, sid, {"name": "tools"}),
+                )
+
+        asyncio.run(drive())
+
+        frames_a = _queued(conn_a)
+        frames_b = _queued(conn_b)
+        accepted = [f for f in [frames_a[0], frames_b[0]]
+                    if f["type"] == "commands_execute_result"
+                    and f["payload"].get("status") == "accepted"]
+        refused = [f for f in [frames_a[0], frames_b[0]]
+                   if f["type"] == "error"
+                   and f["payload"].get("code") == "turn_in_progress"]
+        assert len(accepted) == 1, \
+            f"expected exactly 1 accepted, got {[f['type'] for f in [frames_a[0], frames_b[0]]]}"
+        assert len(refused) == 1, \
+            f"expected exactly 1 refused, got {[f['type'] for f in [frames_a[0], frames_b[0]]]}"
+        # Inflight must be empty once both tasks are done.
+        assert sid not in acp_mod._supervisor.inflight
 
 
 class TestHandleSubscribeCommandsReplay:

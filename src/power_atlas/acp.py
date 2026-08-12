@@ -181,6 +181,13 @@ MAX_MESSAGE_BYTES = 256 * 1024
 # prevents protocol abuse without restricting legitimate autocomplete use.
 MAX_COMMAND_PARTIAL_CHARS = 256
 
+# Maximum number of commands stored from a single ``_kiro.dev/commands/available``
+# notification. A kiro-cli build that emits a very long list (e.g. after MCP
+# server expansion) would otherwise grow ``sessions[sid]["commands"]`` without
+# bound, which is recorded in every replay buffer entry that follows it.
+# 200 is far above any catalogue observed in the wild and still bounded.
+MAX_COMMANDS_COUNT = 200
+
 # Image attachments on one prompt: how many, and what they may weigh between
 # them once decoded.
 #
@@ -2853,7 +2860,7 @@ class _Supervisor:
         if method == "_kiro.dev/commands/available":
             commands = [
                 {"name": _as_text(c.get("name")), "description": _as_text(c.get("description"))}
-                for c in (params.get("commands") or [])
+                for c in (params.get("commands") or [])[:MAX_COMMANDS_COUNT]
                 if isinstance(c, dict) and _as_text(c.get("name"))
             ]
             # Attribute to the single inflight session; drop if 0 or 2+
@@ -3133,7 +3140,12 @@ class _Supervisor:
         ) or {}
 
     async def commands_options(self, session_id: str, partial: str) -> list:
-        """Fetch autocomplete suggestions for a partial slash command."""
+        """Fetch autocomplete suggestions for a partial slash command.
+
+        ``session_id`` is expected to be a validated non-empty string; callers
+        in the handler guards verify it is non-falsy and that the session
+        exists before reaching this method.
+        """
         result = await self._request(
             "_kiro.dev/commands/options",
             {"sessionId": session_id, "command": "", "partial": partial},
@@ -3141,7 +3153,12 @@ class _Supervisor:
         return list((result or {}).get("options") or [])
 
     async def commands_execute(self, session_id: str, name: str) -> dict:
-        """Execute a slash command via the TuiCommand object form."""
+        """Execute a slash command via the TuiCommand object form.
+
+        ``session_id`` is expected to be a validated non-empty string; callers
+        in the handler guards verify it is non-falsy and that the session
+        exists before reaching this method.
+        """
         result = await self._request(
             "_kiro.dev/commands/execute",
             {"sessionId": session_id, "command": {"command": name, "args": {}}},
@@ -4298,6 +4315,11 @@ async def _handle_commands_options(conn: _Connection, session_id: str | None,
         conn.send(error_frame("unknown_session", "No such live session.", session_id))
         log.warning("ACP commands_options refused: [unknown_session] session=%s", session_id)
         return
+    if session_id in _supervisor.closing:
+        conn.send(error_frame("close_in_progress",
+            "Session is being released; try again after it closes.", session_id))
+        log.warning("ACP commands_options refused: [close_in_progress] session=%s", session_id)
+        return
     partial = str(payload.get("partial") or "")[:MAX_COMMAND_PARTIAL_CHARS]
     try:
         options = await _supervisor.commands_options(session_id, partial)
@@ -4367,9 +4389,9 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
     # Validate name against the received catalogue when available.
     # Allow-and-proceed when catalogue not yet received (race before first
     # commands/available notification).
-    valid_names = {c["name"] for c in meta.get("commands") or [] if isinstance(c, dict)}
+    valid_names = {c.get("name") for c in meta.get("commands") or [] if isinstance(c, dict) and c.get("name")}
     if valid_names and name not in valid_names:
-        conn.send(error_frame("bad_payload", f"Unknown command '{name}'.", session_id))
+        conn.send(error_frame("bad_payload", "Unknown command.", session_id))
         log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
                     "session=%s", name, session_id)
         return
