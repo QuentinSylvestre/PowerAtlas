@@ -4328,6 +4328,7 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.crews.clear()
         acp_mod._supervisor.subagent_sessions.clear()
         acp_mod._supervisor.subagent_history.clear()
+        acp_mod._supervisor.crew_spawn_anchors.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
         acp_mod._registry.connections.clear()
@@ -10442,11 +10443,119 @@ class TestAcpSubagentListAttribution:
         sid_b = _live_session(acp_mod, sid="crew-b")
         acp_mod._supervisor.inflight.add(sid_a)
         acp_mod._supervisor.inflight.add(sid_b)
+        # Neither session has a spawner anchor — anchor-absent drop path (SC-4)
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
             {"sessionId": "sub-1", "role": "explorer",
              "status": {"type": "working"}},
         ]})
         assert acp_mod._supervisor.crews == {}
+
+    def test_spawner_anchor_resolves_two_inflight_sessions(self, acp_store):
+        """When two sessions are in-flight but only one has a spawner anchor,
+        the crew is attributed to the anchor's session (SC-1 and SC-6)."""
+        acp_mod, _ = acp_store
+        sid_a = _live_session(acp_mod, sid="anchor-a")
+        sid_b = _live_session(acp_mod, sid="anchor-b")
+        acp_mod._supervisor.inflight.add(sid_a)
+        acp_mod._supervisor.inflight.add(sid_b)
+        # Only sid_a has a spawner anchor
+        acp_mod._supervisor.crew_spawn_anchors["tc-1"] = sid_a
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        # Crew attributed to sid_a (the anchor session)
+        assert "sub-1" in acp_mod._supervisor.crews.get(sid_a, {})
+        assert sid_b not in acp_mod._supervisor.crews
+        assert acp_mod._supervisor.subagent_sessions["sub-1"] == {"parent": sid_a}
+        assert "sub-1" in acp_mod._supervisor.subagent_history
+        # Anchor consumed
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
+
+    def test_spawner_anchor_consumed_after_use(self, acp_store):
+        """The spawner anchor is consumed on first use; a second list_update
+        with no remaining anchor falls back to the drop path."""
+        acp_mod, _ = acp_store
+        sid_a = _live_session(acp_mod, sid="consume-a")
+        sid_b = _live_session(acp_mod, sid="consume-b")
+        acp_mod._supervisor.inflight.add(sid_a)
+        acp_mod._supervisor.inflight.add(sid_b)
+        acp_mod._supervisor.crew_spawn_anchors["tc-1"] = sid_a
+        # First call: attribution succeeds, anchor consumed
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        assert "sub-1" in acp_mod._supervisor.crews.get(sid_a, {})
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
+        # Second call: no anchor, drops
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-2", "role": "researcher",
+             "status": {"type": "working"}},
+        ]})
+        # sub-2 must not appear anywhere (the drop path)
+        assert "sub-2" not in acp_mod._supervisor.subagent_sessions
+        assert "sub-2" not in acp_mod._supervisor.subagent_history
+
+    def test_two_inflight_sessions_both_with_spawner_anchors_is_ambiguous_and_drops(
+            self, acp_store):
+        """SC-4: two sessions both with anchors — genuinely ambiguous, drop
+        without consuming either anchor."""
+        acp_mod, _ = acp_store
+        sid_a = _live_session(acp_mod, sid="both-a")
+        sid_b = _live_session(acp_mod, sid="both-b")
+        acp_mod._supervisor.inflight.add(sid_a)
+        acp_mod._supervisor.inflight.add(sid_b)
+        acp_mod._supervisor.crew_spawn_anchors["tc-1"] = sid_a
+        acp_mod._supervisor.crew_spawn_anchors["tc-2"] = sid_b
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        # No crews populated
+        assert acp_mod._supervisor.crews == {}
+        # Neither anchor consumed
+        assert acp_mod._supervisor.crew_spawn_anchors == {
+            "tc-1": sid_a, "tc-2": sid_b,
+        }
+
+    def test_stale_spawner_entry_cleaned_on_terminal_tool_call_update(self, acp_store):
+        """A terminal tool_call_update removes the matching spawner anchor via
+        the notification path (not direct dict manipulation)."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.crew_spawn_anchors["tc-stale"] = sid
+        # Build a synthetic tool_call_update notification with terminal status.
+        # SUBAGENT_ACTIVITY_METHOD is `_kiro.dev/session/update`, which is the
+        # same method _on_notification handles for parent tool_call_update frames.
+        _notify(acp_mod, acp_mod.SUBAGENT_ACTIVITY_METHOD, {
+            "sessionId": sid,
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-stale",
+                "status": "completed",
+                "title": "some tool",
+                "kind": "execute",
+                "command": "echo hi",
+            },
+        })
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
+
+    def test_turn_end_clears_spawner_entries(self, acp_store):
+        """Anchors for a session are removed when the session leaves inflight
+        (simulated via direct inflight discard + cleanup)."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.crew_spawn_anchors["tc-turn"] = sid
+        acp_mod._supervisor.crew_spawn_anchors["tc-turn2"] = sid
+        # Simulate turn-end cleanup (what _handle_prompt finally does)
+        acp_mod._supervisor.inflight.discard(sid)
+        for _tcid in [k for k, v in acp_mod._supervisor.crew_spawn_anchors.items()
+                      if v == sid]:
+            acp_mod._supervisor.crew_spawn_anchors.pop(_tcid, None)
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
 
 
 class TestAcpSubagentListParsing:

@@ -410,6 +410,15 @@ SUBAGENT_ACTIVITY_METHOD = "_kiro.dev/session/update"
 _SUBAGENT_ACTIVE_STATUSES = frozenset(
     {"working", "running", "pending", "queued", "in_progress", ""})
 
+# Terminal statuses for a `tool_call_update` frame. Used to evict stale
+# `crew_spawn_anchors` entries when a spawner tool call completes without
+# producing a list_update (e.g. cancelled or failed before the fan-out
+# actually dispatched). Includes "terminated" alongside the standard trio
+# because kiro-cli 2.16.2 uses "terminated" as the sole terminal
+# `status.type` for sub-agent entries, and a spawner tool_call_update may
+# follow the same vocabulary.
+_TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled", "terminated"})
+
 # Field names a sub-agent list entry may use for its session id, its display
 # role, and the task it was given — kirocrew reads ``role`` with an
 # ``agentName`` fallback, and ``initialQuery`` with a ``sessionName`` fallback,
@@ -1696,6 +1705,16 @@ class _Supervisor:
         # session's frames already are (see the module docstring's isolation
         # note and `_stamp_activity`'s P0-4).
         self.subagent_history: dict[str, _History] = {}
+        # `crew_spawn_anchors`: toolCallId -> session_id. Records which session
+        # emitted a `subagent` tool call that has not yet been consumed by
+        # `_on_subagent_list`. Keyed by toolCallId so multiple concurrent spawns
+        # from the same session each get an independent entry. At steady state this
+        # holds O(1) entries per session (one outstanding spawn at a time).
+        # Populated in `_on_notification` when a `subagent` tool_call fires;
+        # consumed (oldest entry) in `_on_subagent_list` when anchor attribution
+        # is used; cleaned up on turn end (`_handle_prompt` finally), terminal
+        # `tool_call_update`, `close_session`, and `_detach`.
+        self.crew_spawn_anchors: dict[str, str] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1972,6 +1991,7 @@ class _Supervisor:
         self.crews.clear()
         self.subagent_sessions.clear()
         self.subagent_history.clear()
+        self.crew_spawn_anchors.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -2475,11 +2495,39 @@ class _Supervisor:
         if not isinstance(subs, list):
             return
         inflight = self.inflight
-        if len(inflight) != 1:
-            log.debug("ACP subagent_list: %d session(s) in flight, cannot "
-                      "attribute %d entries; dropped", len(inflight), len(subs))
-            return
-        parent_id = next(iter(inflight))
+        if len(inflight) == 1:
+            parent_id = next(iter(inflight))
+        else:
+            # No single in-flight session — try the spawner anchor as a fallback.
+            # `inflight ⊆ sessions` always holds; a session that closed has had
+            # its anchors removed by `close_session`, so no stale entries point
+            # to non-inflight sessions unless a concurrent close raced this path.
+            # Guard: only consider anchors for sessions currently in `inflight`.
+            candidates = {
+                sid for sid in self.crew_spawn_anchors.values()
+                if sid in inflight
+            }
+            if len(candidates) == 1:
+                parent_id = next(iter(candidates))
+                # Consume only the OLDEST anchor for this session (Python 3.7+
+                # dict insertion order is stable). Multiple pending anchors are
+                # possible if the session dispatched rapid successive fan-outs;
+                # consuming the oldest matches the list_update that just arrived
+                # while leaving later anchors for their respective list_updates.
+                for _tcid, _sid in self.crew_spawn_anchors.items():
+                    if _sid == parent_id:
+                        self.crew_spawn_anchors.pop(_tcid, None)
+                        break
+                log.debug("ACP subagent_list: attributed to %s via spawner anchor"
+                          " (%d in-flight sessions)", parent_id, len(inflight))
+            else:
+                # Zero candidates: no anchor for any in-flight session.
+                # 2+ candidates: two sessions both dispatched fan-outs — genuinely
+                # ambiguous (SC-4 acceptable gap). Drop in both cases.
+                log.debug("ACP subagent_list: %d session(s) in flight, %d anchor"
+                          " candidate(s) — cannot attribute %d entries; dropped",
+                          len(inflight), len(candidates), len(subs))
+                return
         crew = self.crews.setdefault(parent_id, {})
         changed = False
         for entry in subs:
@@ -2689,6 +2737,35 @@ class _Supervisor:
                     # bubble alone, so flushing on one would split a bubble the
                     # page never split.
                     _flush_bubble(session_id)
+                    # Record the spawner anchor for `_on_subagent_list`
+                    # attribution. `_meta` is a field inside `update` (same
+                    # level as `sessionUpdate`, `toolCallId`, etc.) — confirmed
+                    # by live capture 2026-08-12. Match on `_meta.kiro.toolName`
+                    # (stable identifier), not on `title` ("Spawning agent crew"
+                    # is human-readable and build-specific). Guard on `inflight`
+                    # membership: a session not currently mid-turn cannot be the
+                    # fan-out parent, and its anchor would never be consumed.
+                    _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
+                    _spawner_tool_name = (
+                        _kiro_meta.get("toolName") if isinstance(_kiro_meta, dict)
+                        else None
+                    )
+                    if (
+                        _spawner_tool_name == "subagent"
+                        and session_id in self.inflight
+                        and payload["toolCallId"]
+                    ):
+                        self.crew_spawn_anchors[payload["toolCallId"]] = session_id
+                    elif (
+                        session_id in self.inflight
+                        and not _spawner_tool_name
+                        and payload["toolCallId"]
+                    ):
+                        log.debug(
+                            "ACP tool_call: no _meta.kiro.toolName on session=%s"
+                            " id=%s — spawner anchor not recorded",
+                            session_id, payload["toolCallId"],
+                        )
                 elif not (payload["title"] or payload["kind"] or
                           payload["status"] or payload["command"]):
                     # `tool_call_update` can arrive in two shapes for the same
@@ -2703,6 +2780,14 @@ class _Supervisor:
                     # before the real state lands. Skipped rather than sent:
                     # nothing informative would have reached the page anyway.
                     return
+                # For tool_call_update terminal frames, clean up stale spawner
+                # anchors. Blank-intermediate updates have already returned
+                # above — only terminal (status non-empty) frames reach here.
+                # A spawner tool_call that was cancelled/failed before its
+                # list_update arrived would otherwise leave a stale anchor
+                # until turn end.
+                if kind == "tool_call_update" and payload.get("status") in _TERMINAL_TOOL_STATUSES:
+                    self.crew_spawn_anchors.pop(payload["toolCallId"], None)
                 # Rendered, not only logged. `-a` removes the permission gate
                 # and the justification for removing it was a human watching
                 # the run; a tool call that reaches nothing but a log file the
@@ -3021,6 +3106,12 @@ class _Supervisor:
         # could ever read or evict it.
         self.history.pop(session_id, None)
         self.inflight.discard(session_id)
+        # Remove pending spawner anchors for this session — a session that
+        # closes before its list_update arrives would otherwise leave stale
+        # entries until _detach or turn end.
+        for _tcid in [k for k, v in self.crew_spawn_anchors.items()
+                      if v == session_id]:
+            self.crew_spawn_anchors.pop(_tcid, None)
         _bubbles.pop(session_id, None)
         # This session's crew, if it ever dispatched a fan-out. A sub-agent's
         # own history/bubble go with it — nothing else can ever name a child
@@ -3984,6 +4075,14 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         stop_reason = "error"
     finally:
         _supervisor.inflight.discard(session_id)
+        # Remove any crew_spawn_anchors entries for this session on turn end.
+        # A turn that completes normally after a list_update was consumed will
+        # have no entries (already consumed); a turn that ends without a
+        # list_update (e.g. prompt cancelled before the fan-out executed)
+        # cleans up the stale anchor here.
+        for _tcid in [k for k, v in _supervisor.crew_spawn_anchors.items()
+                      if v == session_id]:
+            _supervisor.crew_spawn_anchors.pop(_tcid, None)
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         # In the `finally` and above the end marker, so the markdown of a turn
         # that was cancelled or that errored is still rendered — `stop_reason`
