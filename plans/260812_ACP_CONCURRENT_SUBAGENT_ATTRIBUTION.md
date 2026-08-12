@@ -1,7 +1,7 @@
 # ACP Concurrent Subagent Attribution
 
 > **Date**: 2026-08-12
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Improve `_Supervisor._on_subagent_list` to attribute fan-out crews when more than one session is in-flight simultaneously
 
 ---
@@ -286,24 +286,24 @@ The `acp_store` fixture clears all `_Supervisor` state in its `finally` block. *
    - Add a `crew_spawn_anchors` entry for a session; trigger `_handle_prompt`'s finally cleanup path (or call the cleanup logic directly if `_handle_prompt` cannot be driven cheaply in tests); assert entry is gone
 
 **Exit criteria**:
-- [ ] `crew_spawn_anchors` dict declared and type-annotated in `_Supervisor.__init__`
-- [ ] `_on_notification` tool_call branch populates `crew_spawn_anchors` when `_meta.kiro.toolName == "subagent"` and `session_id in self.inflight`
-- [ ] `_on_notification` tool_call branch emits debug log when `_meta.kiro.toolName` absent on an inflight session's `tool_call` frame
-- [ ] `_TERMINAL_TOOL_STATUSES` module-level frozenset defined (includes "terminated")
-- [ ] `_on_notification` tool_call_update branch removes stale anchor entries on terminal status (placed after blank-intermediate `return`, not before)
-- [ ] `_on_subagent_list` uses anchor fallback when `len(inflight) != 1`; single candidate → attribute, consume oldest anchor; zero or 2+ → drop
-- [ ] `_handle_prompt` finally block removes anchors for the completing session after `inflight.discard`
-- [ ] `_detach` clears `crew_spawn_anchors` (new addition — not present in current source)
-- [ ] `close_session` removes anchors for the closing session
-- [ ] `acp_store` fixture clears `crew_spawn_anchors` in its `finally` block
-- [ ] `test_two_inflight_sessions_is_ambiguous_and_drops_the_update` updated with pre-condition assert
-- [ ] `test_spawner_anchor_resolves_two_inflight_sessions` passes (including `subagent_sessions` and `subagent_history` assertions)
-- [ ] `test_spawner_anchor_consumed_after_use` passes (both halves asserted)
-- [ ] `test_two_inflight_sessions_both_with_spawner_anchors_is_ambiguous_and_drops` passes (SC-4 coverage)
-- [ ] `test_stale_spawner_entry_cleaned_on_terminal_tool_call_update` passes (exercises notification path, not direct dict)
-- [ ] `test_turn_end_clears_spawner_entries` passes
-- [ ] `pytest tests/test_web.py -k subagent` passes with no regressions
-- [ ] `pytest tests/test_web.py` passes (full suite)
+- [x] `crew_spawn_anchors` dict declared and type-annotated in `_Supervisor.__init__`
+- [x] `_on_notification` tool_call branch populates `crew_spawn_anchors` when `_meta.kiro.toolName == "subagent"` and `session_id in self.inflight`
+- [x] `_on_notification` tool_call branch emits debug log when `_meta.kiro.toolName` absent on an inflight session's `tool_call` frame
+- [x] `_TERMINAL_TOOL_STATUSES` module-level frozenset defined (includes "terminated")
+- [x] `_on_notification` tool_call_update branch removes stale anchor entries on terminal status (placed after blank-intermediate `return`, not before)
+- [x] `_on_subagent_list` uses anchor fallback when `len(inflight) != 1`; single candidate → attribute, consume oldest anchor; zero or 2+ → drop
+- [x] `_handle_prompt` finally block removes anchors for the completing session after `inflight.discard`
+- [x] `_detach` clears `crew_spawn_anchors` (new addition — not present in current source)
+- [x] `close_session` removes anchors for the closing session
+- [x] `acp_store` fixture clears `crew_spawn_anchors` in its `finally` block
+- [x] `test_two_inflight_sessions_is_ambiguous_and_drops_the_update` updated with pre-condition assert
+- [x] `test_spawner_anchor_resolves_two_inflight_sessions` passes (including `subagent_sessions` and `subagent_history` assertions)
+- [x] `test_spawner_anchor_consumed_after_use` passes (both halves asserted)
+- [x] `test_two_inflight_sessions_both_with_spawner_anchors_is_ambiguous_and_drops` passes (SC-4 coverage)
+- [x] `test_stale_spawner_entry_cleaned_on_terminal_tool_call_update` passes (exercises notification path, not direct dict)
+- [x] `test_turn_end_clears_spawner_entries` passes
+- [x] `pytest tests/test_web.py -k subagent` passes with no regressions
+- [x] `pytest tests/test_web.py` passes (full suite)
 
 ## Risk Assessment
 
@@ -335,7 +335,8 @@ The `acp_store` fixture clears all `_Supervisor` state in its `finally` block. *
 None. This change is internal to `_Supervisor` state. No user-visible behavior or documented API surface is altered.
 
 ## Implementation Divergences from Plan
-*Reserved — filled during implementation.*
+
+None. All changes implemented exactly as specified in the plan.
 
 ## Review Log
 
@@ -364,5 +365,38 @@ Running high-effort review (4 personas: Senior engineer, Architect, Reliability 
 | 15 | Low | Redundant `isinstance(session_id, str)` guard inside outer block that already ensures it. | Fixed — removed redundant check (1b). |
 
 Health: **Green** — all High findings resolved; all auto-fixable Medium/Low findings resolved.
+
+### 2026-08-12 — Implementation Review (after Phase 1, persona: Reliability engineer, Senior engineer, Maintainability reviewer, Architect)
+
+Implementation health: Green.
+4 personas, high effort. Cycle 1: 10 findings (5 Medium, 5 Low). Cycle 2: 6 findings (1 Medium, 5 Low). All resolved. 1244 tests pass.
+
+#### Implementation notes
+
+Implementation (2026-08-12, code: a4035ef)
+Phase 1 introduces a `crew_spawn_anchors: dict[str, str]` (toolCallId → session_id) dictionary to `_Supervisor.__init__`, and a module-level `_TERMINAL_TOOL_STATUSES` frozenset. When `_on_notification` processes a `tool_call` frame whose `_meta.kiro.toolName == "subagent"`, it records the originating session in `crew_spawn_anchors` keyed by `toolCallId` — giving `_on_subagent_list` a way to attribute a `_kiro.dev/subagent/list_update` to the correct parent even when multiple sessions are concurrently in-flight. The attribution block in `_on_subagent_list` was extended with an anchor fallback: when `len(inflight) != 1` and exactly one anchor candidate exists in `inflight`, attribution succeeds and only the oldest anchor for that session is consumed (leaving later anchors for subsequent fan-outs). The genuinely-ambiguous case (two sessions each with an anchor) continues to drop. Stale anchors are cleaned up in four places: on terminal `tool_call_update` frames (via the notification path), at turn end in `_handle_prompt`'s `finally` block, in `close_session`, and in `_detach`. Five new tests were added to `TestAcpSubagentListAttribution` covering SC-1, SC-4, SC-6, the anchor-consumed path, the terminal-cleanup notification path, and the turn-end cleanup; `test_two_inflight_sessions_is_ambiguous_and_drops_the_update` was updated with a pre-condition assert to document the anchor-absent drop path. All 1240 tests pass.
+
+Review cycle 1 auto-fixes (code: 7b23d69): Addressed `test_turn_end_clears_spawner_entries` production-path gap (added `test_turn_end_clears_spawner_entries_via_production_code`), added `test_on_notification_tool_call_records_spawner_anchor` (anchor-recording path untested), updated stale `_on_subagent_list` docstring, added `test_close_session_clears_spawner_anchor`, removed noisy `elif` debug log on non-spawner tool calls, fixed wrong test comment, removed dead `isinstance` guard, improved `_TERMINAL_TOOL_STATUSES` comment, added `test_detach_clears_spawner_anchors`, updated else-branch comment. 1244 tests pass.
+
+Post-review cycle 2 fixes (code: 416e4d8): Restored `isinstance(_kiro_meta, dict)` guard (incorrectly removed in cycle 1 — `or {}` only guards falsy values; a truthy non-dict `_meta.kiro` would cause `AttributeError`). Added `crew_spawn_anchors.clear()` to `acp_session` fixture teardown. Added debug log on anchor-recording success path. Improved logic-test docstring clarity. Replaced "not yet observed" phrasing with more stable language. Added inflight assertion to production-path test. 1244 tests pass.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `test_turn_end_clears_spawner_entries` duplicated production cleanup logic inline; production bugs would pass silently. | Fixed — renamed old test; added `test_turn_end_clears_spawner_entries_via_production_code` calling actual `_handle_prompt`. |
+| 2 | Medium | `_on_notification` anchor-recording path never exercised; all tests injected anchors directly into the dict. | Fixed — added `test_on_notification_tool_call_records_spawner_anchor` sending a real `tool_call` notification. |
+| 3 | Medium | `_on_subagent_list` docstring described the pre-anchor behavior, contradicting the implemented fallback logic. | Fixed — rewrote docstring to accurately describe all three attribution arms. |
+| 4 | Medium | `close_session` anchor-removal loop had no test coverage. | Fixed — added `test_close_session_clears_spawner_anchor`. |
+| 5 | Medium | `elif` debug log fired for every non-spawner inflight tool call (O(tool-calls-per-turn) false-anomaly DEBUG lines). | Fixed — removed `elif` block entirely. |
+| 6 | Medium | Removing `isinstance(_kiro_meta, dict)` introduced `AttributeError` regression on truthy non-dict `_meta.kiro` values. | Fixed — restored `isinstance` guard; `or {}` only protects falsy values. |
+| 7 | Low | Test comment falsely attributed `SUBAGENT_ACTIVITY_METHOD` as the parent tool_call_update method. | Fixed — updated docstring to accurate description. |
+| 8 | Low | `isinstance(_kiro_meta, dict)` appeared dead — `or {}` chain always yields a dict (this was incorrect; see finding 6). | Finding 6 retroactively corrects this: the guard was not dead; restored in follow-up commit. |
+| 9 | Low | `_TERMINAL_TOOL_STATUSES` "not yet observed" phrasing ages poorly. | Fixed — replaced with stable "kiro-cli 2.16.2 uses it only on sub-agent entries" language. |
+| 10 | Low | `_detach` `crew_spawn_anchors.clear()` had no test. | Fixed — added `test_detach_clears_spawner_anchors`. |
+| 11 | Low | `__init__` else-branch comment said "No single in-flight session" but else also covers zero-inflight. | Fixed — updated to "Zero or 2+ in-flight sessions". |
+| 12 | Low | `crew_spawn_anchors` recording subsystem produced zero debug output after `elif` removal. | Fixed — added `log.debug("ACP tool_call: spawner anchor recorded …")` on the positive recording path. |
+| 13 | Low | `acp_session` fixture teardown missing `crew_spawn_anchors.clear()`. | Fixed — added `acp_mod._supervisor.crew_spawn_anchors.clear()` to teardown. |
+| 14 | Low | `test_turn_end_clears_spawner_entries_logic` docstring misleadingly implied it tested production code. | Fixed — rewrote docstring to clarify it tests the algorithm in isolation. |
+| 15 | Low | `test_turn_end_clears_spawner_entries_via_production_code` lacked assertion that turn actually executed. | Fixed — added `assert sid not in acp_mod._supervisor.inflight`. |
+| 16 | Low | `_TERMINAL_TOOL_STATUSES` contained "terminated" with no wire evidence for tool_call_update status. | Fixed — added comment noting kiro-cli 2.16.2 uses it only on sub-agent entries. |
 
 ## Harness Improvement Opportunities
