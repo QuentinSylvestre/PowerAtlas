@@ -6,6 +6,13 @@
 > **Scope**: ACP slash command palette, session management notifications, groupby-date auto-poll fix
 > **Estimated effort**: 1–2 days
 
+## Completion Summary
+
+### Acknowledged at archival
+
+- **Accepted (live probe deferred)**: 3 Phase 1 exit criteria remain unticked (go/no-go live probes for `commands/execute` object form, output path, and `commands/options` response shape). All three are post-deployment manual gates. Phase 3 shipped based on design confirmation from tui.js and KiroCrew source analysis; KNOWLEDGE.md updated accordingly. Run the probes against a live kiro-cli session via PowerAtlas `/acp` to confirm and tick.
+- **Accepted (harness opportunity)**: Sub-agent auto-fix commit staged user's pre-staged working-tree files (web.py, acp.html, style.css, README.md, acp_page.test.mjs) because the auto-fix sub-agent brief did not specify `-- <file-list>` in the commit command. Cost: user's concurrent work committed under Phase 1 commit, blurring authorship. Suggested change: in auto-fix sub-agent briefs, always specify `git commit -m "..." -- <explicit-file-list>`.
+
 ---
 
 ## Intent
