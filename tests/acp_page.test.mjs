@@ -629,7 +629,7 @@ function loadPage(templatePath, opts = {}) {
   const confirms = [];
   const store = opts.store ?? fakeStore();
   const page = { html, markup, scriptAttrs, scriptBody, sockets, urls, fetches,
-                 confirms, store, reloaded: false };
+                 confirms, store, opts, reloaded: false };
 
   // A fetch with a body. The old stub answered `{ok: true}` and nothing else,
   // which is enough for the stale-token diagnosis (the only caller before the
@@ -7514,6 +7514,41 @@ check("railRefreshProjectModeUsesRefreshStates", async (tpl) => {
     "railRefresh in project mode made no listing call at all");
   assert(newCalls.every((c) => c.params.mode !== "recent"),
     "railRefresh in project mode issued a mode=recent fetch — the grouped path is broken");
+});
+
+// railRefreshDateModeFailureIsSilent: a background tick in date mode that hits a
+// server error must not overwrite the status line with an error message and must
+// leave the poll cycle unfrozen so the next tick can retry.
+check("railRefreshDateModeFailureIsSilent", async (tpl) => {
+  // Prime the rail in date mode with a healthy initial load.
+  const page = await railed(tpl, {
+    store: statusStore(),
+    stored: { pa_acp_group: "date" },
+  });
+  const statusBefore = page.el("acpRailStatus").textContent;
+  const beforeTick = page.listingCalls().length;
+
+  // Make the listing endpoint fail for the next tick.
+  page.opts.answer = (url) =>
+    url.startsWith(LISTING_URL) ? { reject: "server error" } : null;
+
+  page.tick();
+  await page.settle();
+
+  // The status line must not show an error message.
+  const statusAfter = page.el("acpRailStatus").textContent;
+  assert(!/could not load/i.test(statusAfter),
+    `background tick failure overwrote status with error: ${statusAfter}`);
+
+  // The poll cycle must not be frozen: a second tick should trigger another
+  // listing request (railBusy was cleared by the silent catch).
+  page.opts.answer = null;
+  const afterFirst = page.listingCalls().length;
+  page.tick();
+  await page.settle();
+  const afterSecond = page.listingCalls().length;
+  assert(afterSecond > afterFirst,
+    "second railRefresh made no listing call — poll cycle frozen after silent failure");
 });
 
 let failed = 0;

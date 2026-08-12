@@ -2860,15 +2860,17 @@
     });
   }
 
-  function loadFlatPage(page) {
+  function loadFlatPage(page, silent) {
     // Same single-in-flight guard the grouped loader takes, and for the same
     // reason: two overlapping pages would append into `railFlat` in whatever
     // order they answered, which for a list whose whole meaning is its order is
     // not a cosmetic problem.
     if (railBusy) return;
     railBusy = true;
-    railStatus.textContent = page > 1
-      ? 'loading more sessions…' : 'loading sessions…';
+    if (!silent) {
+      railStatus.textContent = page > 1
+        ? 'loading more sessions…' : 'loading sessions…';
+    }
     railFetch({ mode: 'recent', page: page, size: RAIL_FLAT_SIZE })
       .then(function (data) {
         railBusy = false;
@@ -2897,7 +2899,7 @@
         railSummary();
         renderRail();
       }).catch(function (err) {
-        railFailed('could not load the session list', err);
+        if (silent) { railBusy = false; } else { railFailed('could not load the session list', err); }
       });
   }
 
@@ -3161,8 +3163,11 @@
       // intentionally removed: loadFlatPage(1) is safe to call on an empty rail
       // (it resets railFlat=[] and fetches fresh), and railBusy already prevents
       // double-fetches while a request is in flight. A spurious tick before the
-      // first page loads is benign.
-      loadFlatPage(1);
+      // first page loads is benign (loadFlatPage handles an empty list correctly
+      // and railBusy is cleared by the silent catch so the next tick retries).
+      // Called with silent=true: background ticks are silent on error (same as
+      // the grouped-mode auto-poll) and do not flash "loading sessions\u2026".
+      loadFlatPage(1, true);
       return;
     }
     if (!railGroups.length) return;
