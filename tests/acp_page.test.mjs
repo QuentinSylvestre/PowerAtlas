@@ -7158,6 +7158,18 @@ check("dot absent for non held", async (tpl) => {
          `available session should have no visible dot, but got: ${dot ? dot.className : "none"}`);
 });
 
+// SC-4: unrecognized wire status falls back to status-thinking dot
+check("dot class thinking for unknown wire status", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "bogus_unknown_value";
+  const page = await railed(tpl, { store });
+  const dot = page.railRows()[0].querySelector(".session-status");
+  assert(dot, "held session with unknown status must have a dot");
+  assertEqual(String(dot.className), "session-status status-thinking",
+              `held session with unrecognized wire status should fall back to status-thinking, got: ${dot.className}`);
+});
+
 // SC-4: mark unread when non-open held session transitions working -> not working
 check("mark unread on turn end for other session", async (tpl) => {
   const store = fakeStore({ workspaces: 1, sessions: 2 });

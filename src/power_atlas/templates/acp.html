@@ -3058,8 +3058,8 @@
       var prevStatus = _prevSessionStatus[rows[i].id];
       _prevSessionStatus[rows[i].id] = rows[i].status;
       if (railAvailability(rows[i].availability) === 'held'
-          && rows[i].id !== sessionId
           && sessionId !== null
+          && rows[i].id !== sessionId
           && prevStatus === 'working' && rows[i].status !== 'working') {
         markUnread(rows[i].id);
         // Update the stored status to the raw wire value so railDotClass can
