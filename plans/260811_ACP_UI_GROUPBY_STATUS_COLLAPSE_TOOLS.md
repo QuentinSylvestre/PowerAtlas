@@ -1,8 +1,10 @@
 # ACP UI: Group-by-Status Rail Mode, Collapse Tool Calls, Group Consecutive Tool Calls
 
 > **Date**: 2026-08-11
-> **Status**: Exploring
-> **Scope**: Three independent front-end changes to `acp.html` (and `style.css`): a new "Status" rail grouping mode, per-call command-body collapse, and turn-end grouping of consecutive tool calls.
+> **Status**: Draft
+> **Last Updated**: <set by /qclose at archival>
+> **Scope**: Three independent front-end changes to `acp.html` and `style.css`: a new "Status" rail grouping mode, per-call command-body collapse, and turn-end grouping of consecutive tool calls.
+> **Estimated effort**: 1-2 days
 
 ---
 
@@ -22,155 +24,634 @@ Desired outcomes: a cleaner conversation pane where tool-call noise is compresse
 
 ### Success criteria
 
-- SC1: A "Status" option appears in the rail's sliders settings menu alongside "Date" and "Project". Selecting it groups sessions into flat buckets in priority order: Working → Waiting → Errored → Available → Locked. Empty buckets are omitted. The choice persists across reloads (localStorage).
+- SC1: A "Status" option appears in the rail's sliders settings menu alongside "Date" and "Project". Selecting it groups sessions into flat buckets in priority order: Working -> Waiting -> Errored -> Available -> Locked. Empty buckets are omitted. The choice persists across reloads (localStorage).
 - SC2: Each tool call row that has a command body has a collapse toggle. By default the command body is hidden. Clicking the toggle reveals/hides it. Tool calls with no command body show only the head (no toggle). The status pill is always visible and always receives in-place updates regardless of collapse state.
-- SC3: When a turn ends (`meta turn:end`), consecutive sequences of ≥2 completed tool calls are collapsed into a group row. The group is collapsed by default. The group header shows: "N tool calls (tool_name ×count, …) · status ×count, …" — count first, name tally in parentheses, status tally after a separator, empty categories omitted. Individual calls inside an expanded group start collapsed (command body hidden). A lone tool call (not adjacent to another) renders as an individual row, unchanged.
+- SC3: When a turn ends (`meta turn:end`), consecutive sequences of >=2 tool calls are collapsed into a group row. The group is collapsed by default. The group header shows: "N tool calls (tool_name xCount, ...) · status xCount, ..." — count first, name tally in parentheses, status tally after a separator, empty categories omitted. Individual calls inside an expanded group start collapsed (command body hidden). A lone tool call renders as an individual row, unchanged.
 - SC4: `tests/acp_page.test.mjs` is updated with checks covering all three features; test suite stays green (currently 202 pass / 0 fail).
-- SC5: No server-side changes. All changes are in `acp.html` (JS) and `style.css` (CSS).
+- SC5: No server-side changes. All changes are in `acp.html` (JS), `style.css` (CSS), and `tests/acp_page.test.mjs`.
 
 ### Scope boundaries & non-goals
 
-**In scope:**
-- `src/power_atlas/templates/acp.html` — JS changes for all three features
-- `src/power_atlas/static/style.css` — CSS for collapse toggle chevron, group container styling, and status-mode rail bucket heads
-- `tests/acp_page.test.mjs` — new test checks for all three features
+**In scope:** `src/power_atlas/templates/acp.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`.
 
-**Out of scope:**
-- Server-side changes (`acp.py`, `web.py`, `data*.py`)
-- The main dashboard (`index.html`, `partials/`)
-- Sub-agent panel tool calls (`subAddToolCall`, `subToolRows`) — separate surface, not in scope
-- Per-session or per-workspace settings for collapse behavior
-- Persisting collapse state across page reloads
+**Out of scope:** server-side changes (`acp.py`, `web.py`, `data*.py`); main dashboard (`index.html`, `partials/`); sub-agent panel tool calls (`subAddToolCall`, `subToolRows`); per-session collapse settings; persisting collapse state across page reloads.
 
 ---
 
-## Exploration Discovery
+## 1) Current State
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+**`acp.html`** (~4,900 lines, `src/power_atlas/templates/acp.html`): single-file template, all ACP UI logic in an inline `<script>` block. No build step.
 
-### 4. Existing patterns & constraints
+**Rail grouping** (`acp.html:2658`): `railSetMode(mode)` accepts `'date'` or `'project'` only. Normalization `var next = mode === 'date' ? 'date' : 'project'` silently drops any third value. Settings menu built by `railSettingsRender()` (`acp.html:3383`) from `[['date', 'Date'], ['project', 'Project']]`. Mode persists via `RAIL_MODE_KEY = 'pa_acp_group'`; localStorage init at `acp.html:2712` uses the same two-value normalization.
 
-**Primary file:** `src/power_atlas/templates/acp.html` (~4,900 lines). All three changes are front-end only.
+**Session status on the wire**: `session.status` is `""` for all non-held sessions (`web.py:1946`, server contract). Held sessions get `'working'` | `'waiting'` | `'errored'`. `RAIL_STATUS` (`acp.html:598`) is the closed-set map; `railRowStatus(value)` narrows with `'working'` as fallback. Both `?mode=recent` and grouped listings return `availability` + `status` per session.
 
-**No-innerHTML rule** (`acp.html:~540`): Every node built with `createElement + textContent`. Every class name built from wire-derived values must be pre-narrowed through a closed-set `Object.create(null)` map before reaching any attribute sink. Applies to all new class names.
+**Tool call rendering** (`acp.html:1452`, `addToolCall`): each call produces a top-level `div.acp-msg.acp-msg-tool` with a `div.acp-tool-head` (name + optional kind badge + status pill) and optionally a `commandBlock()` wrapper containing `div.acp-tool-cmd`. No collapse, no grouping. `toolRows` (`acp.html:~529`) maps `'t:'+toolCallId` to `{status: <span>, body: <div>}` for in-place `tool_update` mutations.
 
-**Expand/collapse convention** (`acp.html:207–209` comment): One pattern throughout the page — `aria-expanded` on a `<button>` trigger, `hidden` on the controlled pane, CSS-drawn chevron keyed off `[aria-expanded="false"]`. No `<details>`/`<summary>`. Must be followed for both the tool-call toggle (SC2) and the group toggle (SC3).
+**Turn boundaries**: `agentBody` is nulled by `addToolCall`, `meta turn:start`, `meta turn:end`, `clearTranscript`, and `renderMarkdown`. No DOM separator element inserted between turns. `meta turn:end` IS recorded in the ring buffer and replays through `handle()`.
 
-**`toolRows` map** (`acp.html:~529`): `Object.create(null)` keyed `'t:' + toolCallId` → `{ status: <span.acp-tool-status>, body: <div.acp-msg-body> }`. DOM element references — survive being moved into a group container. `tool_update` frames rewrite `status.textContent` and may append `commandBlock` into `body`. Must remain valid after any DOM restructuring for SC3.
+**Expand/collapse convention** (`acp.html:207` comment): `aria-expanded` on `<button>`, `hidden` on controlled pane, CSS `::before` chevron driven by `[aria-expanded="false"]`. No `<details>`/`<summary>` anywhere.
 
-**`agentBody` lifecycle**: Set null by `addToolCall`, `meta turn:start`, `meta turn:end`, `clearTranscript`, `renderMarkdown`. Set to a `div.acp-msg-body` element by `appendChunk` when role=`'agent'`. A consecutive tool call sequence is any run of `tool_call`/`tool_update` frames with no intervening agent `chunk`.
+**No-innerHTML rule**: every node via `createElement + textContent`. Wire-derived values in class names must be pre-narrowed through `Object.create(null)` closed-set maps.
 
-**`clearTranscript()`** (`acp.html:2069`): Resets `toolRows`, `agentBody`, `thinkingRow`. New `toolGroup` variable (SC3) must also be reset here.
+**Test baseline**: `tests/acp_page.test.mjs` — 202 pass / 0 fail (verified 2026-08-11). AGENTS.md mandates updating this file when changing template inline scripts.
 
-**`RAIL_STATUS`** (`acp.html:598`): Closed set `{working, waiting, errored}`. `'working'` is the fallback. **`session.status` is `""` for non-held sessions** (`web.py:1946`) — by documented server contract. Status-mode bucketing (SC1) must derive from `(availability, status)` pair: `""` + `available` → Available bucket; `""` + `locked` → Locked bucket; held sessions bucket by `railRowStatus(session.status)`.
+**CSS**: single `src/power_atlas/static/style.css` (1,313 lines). Tool call rules at lines 717-724. No existing collapse CSS for tool rows.
 
-**`railSetMode` normalization** (`acp.html:2659`): `var next = mode === 'date' ? 'date' : 'project'` — currently swallows any third value. Must be extended to admit `'status'`. The localStorage initialization (`acp.html:2712`) must also recognize `'status'` or the persisted value falls through to `'project'`.
 
-**`railIndex()`** (`acp.html:2747`): Builds a session-id → `{session, group, list, at}` map over both `railGroups` and `railFlat`. A status mode that uses the flat store (`railFlat`) is already covered by the existing `railFlat` arm of `railIndex()`. The poll/delete paths work for free.
+## 2) Goal
 
-**`railSettingsRender()`** (`acp.html:3383`): Populates the settings menu from a `modes` array: `[['date', 'Date'], ['project', 'Project']]`. Adding `['status', 'Status']` is the only change needed to surface the new mode in the menu.
+Add three independent front-end improvements to the ACP UI: a status-based rail grouping mode (flat 5-bucket view from `?mode=recent` data), per-call command-body collapse/expand, and turn-end grouping of consecutive tool calls into collapsible group rows with a count+tally header.
 
-**Settings menu structure** (`acp.html:116–132`): `role="menu"` + `menuitemradio` with `aria-checked`. Pattern is fully established.
+## 3) Design Decisions
 
-**Tool call DOM structure** (built by `addToolCall`, `acp.html:1452`):
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Status mode data source | Reuse `?mode=recent` flat endpoint; group client-side | New server endpoint | Server already returns all needed fields; zero server changes |
+| Status bucket layout | Flat 5 buckets: Working -> Waiting -> Errored -> Available -> Locked (empty omitted) | Tiered "live first / available below" | Consistent with existing bucket-shape precedent; priority order surfaces active sessions naturally |
+| Status bucket key derivation | Derived from `(availability, status)` pair | `status` field alone | `status` is `""` for all non-held sessions by server contract; pair-based derivation correctly maps `""` + `available` -> Available bucket, `""` + `locked` -> Locked bucket |
+| Status bucket head `+` button | Omit (pass `null` opts to `railHeadNode`) | Show like workspace heads | A status bucket is not a workspace; create-session on a status bucket has no meaning |
+| Collapse scope | Command body only (`commandBlock` wrapper) | Whole row | Tool calls without a command have nothing to collapse |
+| Collapse default | Collapsed (hidden) | Expanded | Reduces transcript noise; status pill remains always visible |
+| `tool_update` into collapsed row | In-place mutation via `toolRows` reference — works unchanged | Special handling | `hidden` on wrapper does not affect element reference validity |
+| Group minimum size | >=2 consecutive tool calls | Always group (>=1) | A group of 1 reads as a UI artifact; single calls render as today |
+| Group formation timing | At `meta turn:end` | Immediately on second call | Avoids mid-turn visual reshuffling; turn end is the "done" signal |
+| Which calls group at turn:end | All consecutive calls regardless of final status | Only terminal-status calls | Turn ending is the terminal signal; filtering by status adds complexity with no gain |
+| Group header format | `N tool calls (name xCount, ...) · status xCount, ...` single line | Two-line | Consistent with one-line tool row design; both tallies visible at a glance |
+| Header separator character | `·` (U+00B7 middle dot) between name tally and status tally | `—`, `|` | Visually light; middle dot is conventional for this use |
+| Individual calls inside expanded group | Start collapsed | Start expanded | Consistent "collapsed by default" posture throughout |
+| `toolGroup` reset points | `clearTranscript()` and `meta turn:start` | Turn-end only | Ensures correct accumulation even when `turn:start` is evicted from replay buffer |
+| Rail mode label | `"Status"` | `"Activity"`, `"Live status"` | Matches internal vocabulary (`RAIL_STATUS`, `session.status`) |
+| `railSetMode` normalization | Extend ternary to admit `'status'` | Separate validation fn | Minimal change; consistent pattern |
+| Non-adjacent tool calls in one turn | Split into separate groups per consecutive sub-run | One big group for the turn | Reflects actual agent behavior; prose between calls visually separates logical operations |
+
+## 4) External Dependencies & Costs
+
+### Required external changes
+
+None. All changes are in `acp.html`, `style.css`, and `acp_page.test.mjs`. No server changes, no infrastructure, no new dependencies.
+
+### Cost impact
+
+None.
+
+
+## 5) Implementation Phases
+
+### Phase 1: Status rail grouping mode [QA]
+
+**Goal**: Add a third "Status" option to the rail settings menu that groups sessions into flat status buckets (Working / Waiting / Errored / Available / Locked) using the existing `?mode=recent` flat endpoint and client-side bucketing.
+
+**File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`
+
+**Covers**: SC1, SC5
+
+**Changes to `acp.html`**:
+
+1. **Extend `railSetMode` normalization** (`acp.html:2659`) — change:
+   ```js
+   var next = mode === 'date' ? 'date' : 'project';
+   ```
+   to:
+   ```js
+   var next = mode === 'date' ? 'date' : mode === 'status' ? 'status' : 'project';
+   ```
+
+2. **Update localStorage initialization** (`acp.html:2712`) — change:
+   ```js
+   var railMode = railStored(RAIL_MODE_KEY) === 'date' ? 'date' : 'project';
+   ```
+   to:
+   ```js
+   var _storedMode = railStored(RAIL_MODE_KEY);
+   var railMode = _storedMode === 'date' ? 'date' : _storedMode === 'status' ? 'status' : 'project';
+   ```
+
+3. **Add `['status', 'Status']`** to the `modes` array in `railSettingsRender()` (`acp.html:3383`):
+   ```js
+   var modes = [['date', 'Date'], ['project', 'Project'], ['status', 'Status']];
+   ```
+
+4. **Extend `railLoadFirstPage()`**: the existing `if (railMode === 'date')` branch that calls `loadFlatPage(1)` becomes `if (railMode === 'date' || railMode === 'status')`.
+
+5. **Extend `renderRail()`**: the existing two-way dispatch `railMode === 'date' ? renderRailDate() : renderRailProject()` becomes a three-way dispatch adding `renderRailStatus()` for `railMode === 'status'`.
+
+6. **Extend `renderRail()`'s "Load more" footer**: the `if (railMode === 'date')` arm that uses `railFlatHasMore` / `'Load more sessions'` should also fire for `railMode === 'status'` (both use `railFlat`).
+
+7. **Add closed-set `TOOL_STATUS_LABEL` map** (add near `RAIL_STATUS` constants — before `flushToolGroups`):
+   ```js
+   // Closed-set map for tool-call status strings that appear in the group header tally.
+   // Wire values not in this map are silently omitted from the tally rather than
+   // reaching visible UI as raw wire strings (no-raw-wire-value rule).
+   var TOOL_STATUS_LABEL = Object.create(null);
+   TOOL_STATUS_LABEL.started    = 'started';
+   TOOL_STATUS_LABEL.completed  = 'completed';
+   TOOL_STATUS_LABEL.failed     = 'failed';
+   TOOL_STATUS_LABEL.denied     = 'denied';
+   TOOL_STATUS_LABEL.approved   = 'approved';
+   TOOL_STATUS_LABEL.update     = 'update';
+   ```
+   In `flushToolGroups`, replace direct `stEl.textContent` accumulation with narrowed lookup:
+   ```js
+   var stRaw = stEl ? stEl.textContent : '';
+   var st = TOOL_STATUS_LABEL[stRaw]; // undefined for unknown values — omitted below
+   if (st) { ... } // only add to tally when narrowed value exists
+   ```
+
+8. **Extract `_makeToolToggle(cmdWrap, toolTitle)` helper** to eliminate the duplicate toggle-creation code between the new-row path and the `known` branch. Both call sites pass the `cmdWrap` element and the tool title for the accessible label. Helper signature:
+   ```js
+   var STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available', 'locked'];
+   var STATUS_BUCKET_LABEL = Object.create(null);
+   STATUS_BUCKET_LABEL.working  = 'Working';
+   STATUS_BUCKET_LABEL.waiting  = 'Waiting';
+   STATUS_BUCKET_LABEL.errored  = 'Errored';
+   STATUS_BUCKET_LABEL.available = 'Available';
+   STATUS_BUCKET_LABEL.locked   = 'Locked';
+
+   function statusBucketKey(session) {
+     var avail = railAvailability(session.availability);
+     if (avail === 'held')   return railRowStatus(session.status); // working|waiting|errored
+     if (avail === 'locked') return 'locked';
+     return 'available';
+   }
+   ```
+   Both `railAvailability` and `railRowStatus` are existing closed-set narrowing functions — no raw wire value ever reaches a class name or DOM key.
+
+8. **Add `renderRailStatus()` function** (after `renderRailDate()`):
+   ```js
+   function renderRailStatus() {
+     var byBucket = Object.create(null);
+     for (var i = 0; i < railFlat.length; i++) {
+       if (!railMatchesFlat(railFlat[i])) continue;
+       var bk = statusBucketKey(railFlat[i]);
+       if (!byBucket[bk]) byBucket[bk] = [];
+       byBucket[bk].push(railFlat[i]);
+     }
+     var shown = 0;
+     for (var b = 0; b < STATUS_BUCKET_ORDER.length; b++) {
+       var key = STATUS_BUCKET_ORDER[b];
+       var sessions = byBucket[key];
+       if (!sessions || !sessions.length) continue;
+       var wrap = document.createElement('div');
+       wrap.className = 'acp-rail-group';
+       wrap.dataset.statusBucket = key;  // 's:' prefix in railCollapsed key
+       // railHeadNode(key, label, countText, opts) -- null opts omits the + create button
+       wrap.appendChild(railHeadNode('s:' + key, STATUS_BUCKET_LABEL[key],
+                                     String(sessions.length), null));
+       if (!railCollapsed['s:' + key]) {
+         for (var j = 0; j < sessions.length; j++) {
+           wrap.appendChild(railRowNode(sessions[j], true));
+         }
+       }
+       railGroupsEl.appendChild(wrap);
+       shown += sessions.length;
+     }
+     return shown;
+   }
+   ```
+   The `'s:'` prefix on `railCollapsed` keys avoids collisions with `'g:'` (workspace) and `'d:'` (day) keys. Status mode uses `railFlat` so `railIndex()` already covers the poll/delete paths.
+
+9. **Audit `railSummary()`** (`acp.html:2462`): check whether the summary text branches on `railMode` and add a `'status'` arm matching `'date'` behavior if needed.
+
+**Changes to `style.css`**: No new rules are strictly required — `STATUS_BUCKET_LABEL` values are plain text in the group head. Optionally add a small colored dot to status bucket heads using `[data-status-bucket="working"]` etc., reusing the existing `session-status status-working/waiting/errored` class vocabulary. Decide during implementation via visual review; mark as optional in exit criteria.
+
+**Changes to `tests/acp_page.test.mjs`**:
+- Test `railSetMode('status')` sets `railMode = 'status'` and persists to localStorage.
+- Test that selecting "Status" in the settings menu dispatches a `?mode=recent` listing request (same as date mode).
+- Test `renderRailStatus()` produces groups in Working -> Waiting -> Errored -> Available -> Locked order; empty buckets absent.
+- Test `statusBucketKey`: `{availability:'held', status:'working'}` -> `'working'`; `{availability:'available', status:''}` -> `'available'`; `{availability:'locked', status:''}` -> `'locked'`.
+- Test that `railCollapsed['s:working']` toggles collapse correctly via group head click.
+- Test that the settings menu gains a third `menuitemradio` with `aria-checked` correctly reflecting the active mode.
+
+**Additional Phase 1 code changes** (from review):
+- **`railSummary()` `'status'` arm** (`acp.html:~2469`): add `'status'` arm matching `'date'` behavior — count `railFlat.length`, emit "N sessions loaded". Without it, status mode shows "N of M workspaces" (wrong; `railGroups` is always empty in status mode).
+- **Empty-state filter text** (`acp.html:~3811`): change `(railMode === 'date' ? 'more sessions' : 'more workspaces')` to `(railMode !== 'project' ? 'more sessions' : 'more workspaces')`.
+- **Empty-state node in `renderRailStatus()`**: when `shown === 0`, fall through to the existing empty-state rendering in `renderRail()` (returning 0 already triggers it there).
+
+**Exit criteria**:
+- [ ] `railSetMode('status')` sets `railMode = 'status'`; localStorage persists `'status'`; reload restores it.
+- [ ] Selecting "Status" in settings menu dispatches `?mode=recent` request.
+- [ ] Sessions group into Working / Waiting / Errored / Available / Locked; empty buckets absent.
+- [ ] `statusBucketKey` derives bucket from `(availability, status)` pair — no raw wire value reaches a class name or DOM key.
+- [ ] `railCollapsed` with `'s:'` prefix correctly collapses/expands status buckets.
+- [ ] "Load more" footer reflects `railFlatHasMore` (same as date mode behavior).
+- [ ] `railSummary()` shows session count, not workspace count, under status mode.
+- [ ] Empty-state filter text reads "more sessions" (not "more workspaces") under status mode.
+- [ ] `tests/acp_page.test.mjs` updated with status-mode checks including `railSummary` text test; suite is green.
+- [ ] `README.md` updated — third rail mode description added to *Agent sessions* section (see §8).
+- [ ] `plans/ROADMAP.md` line 188 updated — "two groupings" -> "three groupings" (see §8).
+
+
+---
+
+### Phase 2: Collapse tool call command body by default [QA]
+
+**Goal**: Each tool call row with a command body gets a collapse toggle. Command body hidden by default. Tool calls with no command body are unchanged.
+
+**File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`
+
+**Covers**: SC2, SC5
+
+**Changes to `acp.html`** — `addToolCall()` new-row path (`acp.html:1452`):
+
+When `payload.command` is present, add a toggle button to `.acp-tool-head` and wrap `commandBlock` in a hidden container:
+
+```js
+if (payload.command) {
+  var toggle = document.createElement('button');
+  toggle.className = 'acp-tool-toggle';
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', 'false');
+  toggle.setAttribute('aria-label', 'Show command detail');
+  head.appendChild(toggle);
+
+  var cmdWrap = commandBlock(payload);
+  cmdWrap.hidden = true;  // collapsed by default
+
+  toggle.addEventListener('click', function () {
+    var open = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+    toggle.setAttribute('aria-label', open ? 'Show command detail' : 'Hide command detail');
+    cmdWrap.hidden = open;
+  });
+
+  body.appendChild(cmdWrap);
+} // (no else — tool calls without command are unchanged)
 ```
-div.acp-msg.acp-msg-tool
-  span.acp-msg-role            ← "tool"
-  div.acp-msg-body
-    div.acp-tool-head          ← name + kind badge + status pill
-    [div (wrapper)]            ← only when payload.command present
-      div.acp-tool-cmd
-      [div.acp-tool-more]
+
+**`tool_update` path** (the `known` branch, `acp.html:1457`): when `payload.command` is present and no `.acp-tool-cmd` exists in `known.body` yet, the new `commandBlock` must also start hidden with a toggle. Add the toggle to the head if not already present:
+```js
+if (payload.command && !known.body.querySelector('.acp-tool-cmd')) {
+  var cmdWrap = commandBlock(payload);
+  cmdWrap.hidden = true;
+  if (!known.body.querySelector('.acp-tool-toggle')) {
+    // head is known.body.querySelector('.acp-tool-head')
+    var head = known.body.querySelector('.acp-tool-head');
+    var toggle = document.createElement('button');
+    toggle.className = 'acp-tool-toggle';
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', 'Show command detail');
+    toggle.addEventListener('click', function () {
+      var open = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+      toggle.setAttribute('aria-label', open ? 'Show command detail' : 'Hide command detail');
+      cmdWrap.hidden = open;
+    });
+    head.appendChild(toggle);
+  }
+  known.body.appendChild(cmdWrap);
+}
 ```
-The command wrapper (`commandBlock()`, `acp.html:1507`) is a plain `div` with no class on the outer wrapper. SC2's toggle hides/shows this wrapper.
 
-**`stuckToBottom()`** (`acp.html:970`): Called before DOM mutations in `addToolCall` to decide whether to auto-scroll. New group-container insertion at turn:end must also check `stuckToBottom()` before restructuring the transcript.
+**`toolRows` unchanged**: `toolRows[id] = {status, body}` where `body` is `.acp-msg-body`. In-place `status.textContent` mutation via `toolRows` works regardless of `cmdWrap.hidden` — `hidden` is an attribute, not DOM exclusion; `body.querySelector('.acp-tool-cmd')` still finds the element.
 
-**Test baseline:** `tests/acp_page.test.mjs` — 202 pass / 0 fail on HEAD. Must be updated per `AGENTS.md` Doc & Test Guidelines.
+**Extract `_makeToolToggle(cmdWrap, toolTitle)` helper**: the toggle-creation code (button, aria attributes, click handler) is identical for the new-row path and the `known` branch. Extract it into a named helper to avoid two separate maintenance targets:
+```js
+function _makeToolToggle(cmdWrap, toolTitle) {
+  var toggle = document.createElement('button');
+  toggle.className = 'acp-tool-toggle';
+  toggle.type = 'button';
+  toggle.setAttribute('aria-expanded', 'false');
+  // Include tool name so 15 identical "Show command detail" labels become distinguishable
+  toggle.setAttribute('aria-label', 'Show command detail \u2014 ' + (toolTitle || 'tool'));
+  toggle.addEventListener('click', function () {
+    var open = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+    toggle.setAttribute('aria-label',
+      (open ? 'Show' : 'Hide') + ' command detail \u2014 ' + (toolTitle || 'tool'));
+    cmdWrap.hidden = open;
+  });
+  return toggle;
+}
+```
+Both call sites: `head.appendChild(_makeToolToggle(cmdWrap, payload.title || payload.kind));`
 
-**CSS file:** Single `style.css` (1,313 lines). Relevant existing rules at lines 717–724: `.acp-msg-tool`, `.acp-tool-head`, `.acp-tool-name`, `.acp-tool-kind`, `.acp-tool-status`, `.acp-tool-cmd`, `.acp-tool-more`. No existing collapse CSS for tool rows.
+**Changes to `style.css`**:
+```css
+.acp-tool-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+}
+.acp-tool-toggle::before {
+  content: '\25B6';  /* solid right-pointing triangle */
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.acp-tool-toggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+```
 
-**Step 1.5:** Dispatched the code-tracing trio — in-scope files are predominantly source code (`.html`, `.py`, `.mjs`).
+**Changes to `tests/acp_page.test.mjs`**:
+- Test: `tool_call` with `command` renders `.acp-tool-toggle` in head; `cmdWrap.hidden === true`.
+- Test: clicking toggle sets `aria-expanded="true"` and `cmdWrap.hidden === false`.
+- Test: second click collapses again (`aria-expanded="false"`, `hidden = true`).
+- Test: `tool_call` without `command` has no `.acp-tool-toggle`; head unchanged.
+- Test: `tool_update` that adds `command` to existing row appends toggle and starts collapsed.
+- Test: `toolRows[id].status.textContent` mutated correctly by `tool_update` when row is collapsed.
 
-### 5. Risks & mitigations
+**Exit criteria**:
+- [ ] Tool calls with `payload.command` render with `.acp-tool-toggle` in `.acp-tool-head`; command wrapper starts `hidden`.
+- [ ] Clicking toggle shows/hides command wrapper; `aria-expanded` reflects state.
+- [ ] Tool calls without `payload.command` have no toggle; head identical to today.
+- [ ] `tool_update` adding a command to existing row: toggle added, wrapper starts hidden.
+- [ ] In-place `status.textContent` mutation via `toolRows` works regardless of collapse state.
+- [ ] No class name derived from wire data.
+- [ ] `tests/acp_page.test.mjs` updated; suite green.
 
-**R1 — `status: ""` for available/locked sessions breaks naïve status grouping.**
-Non-held sessions always have `status: ""` (server contract, `web.py:1946`). A grouping key derived from `session.status` alone would put all available and locked sessions in one `""` bucket. Mitigation: derive bucket key from `(availability, status)` pair, mapping to five named buckets.
 
-**R2 — `railSetMode` normalization silently swallows `'status'`.**
-`acp.html:2659`: `var next = mode === 'date' ? 'date' : 'project'`. A `'status'` value falls through to `'project'`. Both the normalization and the localStorage initialization (`acp.html:2712`) must be updated. Same risk on the `railMode` variable initialization from localStorage.
+---
 
-**R3 — `toolRows` references after group restructuring.**
-At turn:end, individual `acp-msg-tool` rows are moved into a group container. `toolRows[id].status` and `toolRows[id].body` are element references — they remain valid regardless of parent. However, `commandBlock` appended after the row is inside `body`, which is also a reference. No breakage, but must be verified in tests.
+### Phase 3: Group consecutive tool calls at turn end [QA]
 
-**R4 — `stuckToBottom()` and scroll during turn-end group restructuring.**
-The turn-end grouping pass removes individual rows and replaces them with a group container. The scroll position check must happen before the restructuring, and scroll must be restored after if the user was at the bottom.
+**Goal**: At `meta turn:end`, consecutive sequences of >=2 tool call rows are wrapped in a collapsible group container with a count + name-tally + status-tally header. Groups collapsed by default.
 
-**R5 — Orphan tool calls in replay (evicted `turn:start` or `turn:end`).**
-`meta turn:end` is in the ring buffer and replays normally. A turn evicted entirely leaves no tool calls in replay. The edge case — `turn:start` evicted but tool calls + `turn:end` survived — causes tool calls to replay without a preceding `turn:start`. The `toolGroup` accumulator starts null at `clearTranscript()` and at each `meta turn:start`, so orphan calls accumulate in a group that closes at the replayed `turn:end`. Correct behavior.
+**File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`
 
-**R6 — `aria-live="polite"` on transcript + collapse.**
-The transcript has `role="log" aria-live="polite"` (`acp.html:246`). Collapsing tool rows does not suppress live-region announcements of new content. New rows appended while others are collapsed still announce. Expected behavior, not a defect.
+**Covers**: SC3, SC5
 
-**R7 — Class names for status bucket heads must use closed-set map.**
-`session.availability` and `session.status` come off the wire. If used in class names for bucket headers, they must be pre-narrowed. Pattern established by `RAIL_AVAILABILITY` and `RAIL_STATUS` maps.
+**Key invariant**: `toolRows[id].status` and `toolRows[id].body` are DOM element references. Reparenting those elements into a group container does not invalidate the references. `tool_update` mutations continue to work unchanged.
 
-### 6. Resolved decisions
+**`toolGroup` declaration site**: add `var toolGroup = null;` immediately after `var toolRows = Object.create(null);` (currently at `acp.html:473`) so it sits with the other module-level conversation-state variables.
 
-- Q1: Preferred bucket layout for status mode? — A: ok with flat 5-bucket reco — Decision: Flat 5-bucket design: Working → Waiting → Errored → Available → Locked (empty buckets omitted).
-- Q2: Server endpoint for status mode? — A: ok — Decision: Reuses `?mode=recent` flat endpoint, client-side grouping by `(availability, status)` pair. No server changes.
-- Q3: Re-bucketing on poll — A: confirmed — Decision: 60s poll + `railRefreshStates()` + `renderRail()` naturally re-buckets sessions when status changes. No special handling needed.
-- Q4: Collapse scope — A: ok — Decision: Collapse applies to command body only. Tool calls without a command show only the head (no toggle). Status pill always visible; receives in-place updates regardless of collapse state.
-- Q5: Group header format — A: Option A + full list in parentheses like "read_file ×3, shell ×2" — Decision: "N tool calls (read_file ×3, shell ×2)" — count first, name tally in parentheses.
-- Q6: Minimum group size — A: ok — Decision: Group wrapper only when ≥2 consecutive tool calls. Single calls render as individual rows unchanged.
-- Q7: Individual calls inside expanded group — A: ok — Decision: Individual calls inside an expanded group start collapsed (command body hidden). Two-click path: expand group → expand individual call.
-- Q8: Replay safety — A: ok confirmed — Decision: `toolGroup` reset in `clearTranscript()` and at `meta turn:start`. Grouping logic runs identically during replay. Orphan calls group at the next `turn:end` or end of history.
-- Q9: Status mode label in settings menu — A: ok — Decision: Label is "Status".
-- Q10: Live status updates to calls inside a collapsed group — A: Tool calls that are not completed are ungrouped/expanded until they complete — Decision: Grouping deferred to turn end. During the turn, all tool calls render as individual expanded rows.
-- Q11: When do completed calls fold into groups? — A: ok — Decision: At `meta turn:end` (Option B — fold at turn end). Simpler, avoids mid-turn visual reshuffling.
-- Q12: Which calls group at turn end? — A: ok, add status counts to header — Decision: All consecutive tool calls group at turn end regardless of final status. Group header includes status tally: "N tool calls (read_file ×3, shell ×2) · completed ×12, failed ×1".
-- Q13: Single-line vs two-line group header — A: single line — Decision: Single line. Count, name tally in parentheses, status tally after separator (·). Empty status categories omitted.
+**`TOOL_STATUS_LABEL` map**: add near `RAIL_STATUS` constants. Keys: `started`, `completed`, `failed`, `denied`, `approved`, `update`. Wire values absent from the map are silently omitted from the status tally — no raw wire string ever reaches visible UI.
 
-### 7. Open items
+**`STATUS_BUCKET_ORDER` relationship to `RAIL_STATUS`**: `STATUS_BUCKET_ORDER` contains `'working'`, `'waiting'`, `'errored'` which also appear in `RAIL_STATUS`. These are the same semantic values — the plan author must keep them in sync. To reduce divergence risk, define `STATUS_BUCKET_ORDER` as `['working', 'waiting', 'errored', 'available', 'locked']` and add a comment citing `RAIL_STATUS`.
 
-- OI1 (execution-contingent): Exact character to use as separator between name tally and status tally in the group header (· vs — vs |). Decide during implementation based on visual fit.
-- OI2 (execution-contingent): Whether the status-mode bucket heads use the `railHeadNode()` helper or a new render function — depends on whether the existing helper's `+` (create session) button should appear on status bucket heads (likely not, since a status bucket is not a workspace). Resolve during Phase 1 implementation.
+**Test harness extension required** (identified in review): `tests/acp_page.test.mjs`'s `El` class is missing `removeChild`, `insertBefore`, and `nextSibling` getter. Phase 3 tests that call `flushToolGroups()` will throw before any assertion runs without these. Add them to the `El` class before writing Phase 3 tests.
 
-### 8. Recommended approach
+**Changes to `acp.html`**:
 
-Three independent phases, each corresponding to one SC:
+1. **Add state variable** alongside `agentBody`, `toolRows` etc.:
+   ```js
+   var toolGroup = null; // array of acp-msg-tool rows for the current turn, or null
+   ```
 
-**Phase 1 — Status rail mode (SC1):**
-- Extend `railSetMode()` to handle `'status'` as a valid third mode.
-- Update the localStorage initialization and normalization to admit `'status'`.
-- Add `['status', 'Status']` to the `modes` array in `railSettingsRender()`.
-- Add `renderRailStatus()` — reads `railFlat`, groups sessions client-side by `(availability, status)` into up to 5 buckets (Working/Waiting/Errored/Available/Locked), renders using `railBucketNode`-style heads (without the `+` button). Empty buckets omitted.
-- Status mode uses the same `railFlat` store as date mode. `railLoadFirstPage()` dispatches `loadFlatPage(1)` for both `'date'` and `'status'` modes.
-- Add CSS for status bucket heads if needed (may reuse existing `.acp-rail-group` styling).
-- Update `tests/acp_page.test.mjs` with status-mode checks.
+2. **Extend `clearTranscript()`** — add `toolGroup = null;` alongside `toolRows = Object.create(null);`.
 
-**Phase 2 — Collapse tool call command body (SC2):**
-- In `addToolCall()`, when `payload.command` is present, wrap the `commandBlock()` in a collapsible container. Add a toggle button to `.acp-tool-head` (after the status pill). Default: `hidden = true` on the command wrapper.
-- Follow `aria-expanded` / CSS-chevron convention.
-- When `tool_update` appends a `commandBlock` to an existing row (the `known` branch), the new block should also start hidden under the toggle.
-- Add CSS for the toggle button and chevron in `.acp-tool-head`.
-- Update `tests/acp_page.test.mjs`.
+3. **Extend `meta turn:start` handler** (`acp.html:~4366`) — add `toolGroup = null;` to reset at each new turn.
 
-**Phase 3 — Group consecutive tool calls at turn end (SC3):**
-- Add `var toolGroup = null` at module scope (reset in `clearTranscript()`, at `meta turn:start`).
-- `addToolCall()` no longer groups directly — it appends individual rows as today and records the row in a pending list for the turn.
-- At `meta turn:end`, scan the transcript's tool rows for the current turn. Group consecutive sequences of ≥2 into `div.acp-tool-group` containers. Compute name tally and status tally for the header. Insert the group container before the first row of the sequence, move the rows inside. Group is collapsed by default (`aria-expanded="false"`).
-- Ensure `stuckToBottom()` check and scroll restoration wraps the restructuring.
-- Update `tests/acp_page.test.mjs` with grouping checks (turn:end triggers group, header format, single call stays ungrouped, replay safety).
+4. **Modify `addToolCall()` new-row path** — after `transcriptEl.appendChild(row)`, accumulate the row:
+   ```js
+   if (!toolGroup) toolGroup = [];
+   toolGroup.push(row);
+   ```
 
-### 9. QA environment
+5. **Extend `meta turn:end` handler** (`acp.html:~4377`) — after the existing resets, call `flushToolGroups()`, then `toolGroup = null;`.
 
-- **Start command:** `.venv-PowerAtlas\Scripts\power-atlas` (Windows) from the checkout root.
-- **URL:** `http://127.0.0.1:<port>/acp` (port shown in tray tooltip or log on startup).
-- **Test harness:** `node tests/acp_page.test.mjs` — no server needed, runs against DOM stand-in.
-- **Runtime verification:** Playwright against the live app at `/acp`. At least one live kiro-cli session needed to verify status dot and tool call rendering.
-- **Test data:** The `fakeStore()` fixture in `tests/acp_page.test.mjs` generates synthetic sessions; extend it for status-bucketed sessions.
+6. **Add `flushToolGroups()` function**:
+
+```js
+function flushToolGroups() {
+  if (!toolGroup || toolGroup.length < 2) { toolGroup = null; return; }
+  // Split toolGroup into consecutive sub-runs by DOM adjacency.
+  // A prose bubble between two tool calls in the same turn means they are
+  // not adjacent siblings — split into separate sub-runs.
+  var runs = [];
+  var cur = [toolGroup[0]];
+  for (var i = 1; i < toolGroup.length; i++) {
+    // Two rows are adjacent if the previous row's nextSibling is the next row
+    // (accounting for possible whitespace text nodes between them is not needed
+    // since appendchild of element nodes produces no text nodes).
+    if (toolGroup[i - 1].nextSibling === toolGroup[i]) {
+      cur.push(toolGroup[i]);
+    } else {
+      runs.push(cur);
+      cur = [toolGroup[i]];
+    }
+  }
+  runs.push(cur);
+
+  // Capture scroll position once before any DOM mutation — stuckToBottom()
+  // measures transcriptEl geometry, which changes after each group insertion,
+  // so a per-iteration call would give wrong readings for all but the first run.
+  var stick = stuckToBottom();
+
+  for (var r = 0; r < runs.length; r++) {
+    var rows = runs[r];
+    if (rows.length < 2) continue; // single-call sub-run stays as individual row
+
+    // Capture insertion point BEFORE removing any row
+    var insertBefore = rows[rows.length - 1].nextSibling;
+
+    // Build name tally (preserves first-seen order)
+    var nameCounts = Object.create(null);
+    var nameOrder = [];
+    for (var n = 0; n < rows.length; n++) {
+      var nameEl = rows[n].querySelector('.acp-tool-name');
+      var nm = nameEl ? nameEl.textContent : 'tool';
+      if (!nameCounts[nm]) { nameCounts[nm] = 0; nameOrder.push(nm); }
+      nameCounts[nm]++;
+    }
+
+    // Build status tally
+    var stCounts = Object.create(null);
+    var stOrder = [];
+    for (var s = 0; s < rows.length; s++) {
+      var stEl = rows[s].querySelector('.acp-tool-status');
+      var st = stEl ? stEl.textContent : '';
+      if (st) {
+        if (!stCounts[st]) { stCounts[st] = 0; stOrder.push(st); }
+        stCounts[st]++;
+      }
+    }
+
+    var nameTally = nameOrder.map(function (nm) {
+      return nameCounts[nm] > 1 ? nm + ' \xd7' + nameCounts[nm] : nm;
+    }).join(', ');
+    var stTally = stOrder.map(function (st) {
+      return stCounts[st] > 1 ? st + ' \xd7' + stCounts[st] : st;
+    }).join(', ');
+    var headerText = rows.length + ' tool calls (' + nameTally + ')' +
+                     (stTally ? ' \xb7 ' + stTally : '');
+
+    // Build group container
+    var group = document.createElement('div');
+    group.className = 'acp-tool-group';
+    var groupToggle = document.createElement('button');
+    groupToggle.className = 'acp-tool-group-toggle';
+    groupToggle.type = 'button';
+    groupToggle.setAttribute('aria-expanded', 'false');
+    groupToggle.textContent = headerText;
+    group.appendChild(groupToggle);
+
+    var groupBody = document.createElement('div');
+    groupBody.className = 'acp-tool-group-body';
+    groupBody.hidden = true; // collapsed by default
+
+    // Move rows into group body
+    for (var k = 0; k < rows.length; k++) {
+      transcriptEl.removeChild(rows[k]);
+      groupBody.appendChild(rows[k]);
+    }
+    group.appendChild(groupBody);
+
+    // Insert group at the position the first row occupied
+    transcriptEl.insertBefore(group, insertBefore);
+
+    // IIFE per iteration: var is function-scoped so without this, all click
+    // handlers in a multi-run turn share the final iteration's groupToggle +
+    // groupBody bindings — every toggle controls the last group. The same
+    // IIFE pattern is used at acp.html:2102 (renderCrewPanel).
+    (function (gt, gb) {
+      gt.setAttribute('aria-label', 'Expand tool call group');
+      gt.addEventListener('click', function () {
+        var open = gt.getAttribute('aria-expanded') === 'true';
+        gt.setAttribute('aria-expanded', open ? 'false' : 'true');
+        gt.setAttribute('aria-label', open ? 'Expand tool call group' : 'Collapse tool call group');
+        gb.hidden = open;
+      });
+    }(groupToggle, groupBody));
+
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+  toolGroup = null;
+}
+```
+
+> **Rejected approach**: rebuilding `toolGroup` mid-turn whenever `appendChunk` fires. `appendChunk` does not null `agentBody` — only `addToolCall` and turn boundaries do that. So a prose chunk between two tool calls in the same turn produces a new `agentBody` element that sits between them as a DOM sibling, making them non-adjacent. The DOM-adjacency check in `flushToolGroups` already handles this without any mid-turn tracking. **Use instead**: the `nextSibling` adjacency check already in the plan.
+
+**Changes to `style.css`**:
+```css
+.acp-tool-group { margin: 2px 0; }
+.acp-tool-group-toggle {
+  width: 100%;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  text-align: left;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.acp-tool-group-toggle::before {
+  content: '\25B6';
+  display: inline-block;
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+.acp-tool-group-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+.acp-tool-group-body { padding-left: 12px; }
+```
+
+**Changes to `tests/acp_page.test.mjs`**:
+- Add `deliverTurn(page, toolCalls)` helper: delivers `meta turn:start`, each tool_call frame, then `meta turn:end`, then settles.
+- Test: turn with 3 tool calls -> one `.acp-tool-group`; individual rows removed from transcript root; group collapsed by default.
+- Test: group header text matches `"3 tool calls (shell x2, read_file x1) · completed x3"` format.
+- Test: clicking group toggle reveals rows; individual rows inside start collapsed (Phase 2 toggle).
+- Test: turn with 1 tool call -> no group; row stays at transcript root.
+- Test: turn with tool_call, chunk (prose), tool_call, tool_call -> first call stays individual; last two form a group.
+- **Test: turn with tool_call A, tool_call B, chunk, tool_call C, tool_call D -> TWO separate groups (A+B and C+D); clicking toggle on group-A expands only group-A's body, not group-B's.** (This is the critical test for the var-in-loop closure fix — F1.)
+- Test: `toolRows[id].status.textContent` mutation works after grouping (reparenting does not break reference).
+- Test: replay safety — `history` frame with turn including tool_calls + `turn:end` produces the group.
+- Test: `toolGroup` is null after `clearTranscript()`.
+
+**Exit criteria**:
+- [ ] `El` harness class extended with `removeChild`, `insertBefore`, `nextSibling` before Phase 3 tests run.
+- [ ] Turn with >=2 consecutive tool calls: one `.acp-tool-group` at `meta turn:end`; individual rows inside group body.
+- [ ] Group collapsed by default; toggle expands/collapses.
+- [ ] Group toggle `aria-label` toggles between "Expand tool call group" and "Collapse tool call group".
+- [ ] Group header format correct: `"N tool calls (name xCount) · status xCount"` with `TOOL_STATUS_LABEL`-narrowed values; unknown wire status values omitted.
+- [ ] Single tool call in a turn: no group; row unchanged.
+- [ ] Turn producing two disjoint groups (e.g. A+B, prose, C+D): two groups rendered; clicking A+B toggle expands only A+B, not C+D (validates IIFE closure fix).
+- [ ] Non-adjacent calls (prose between): separate groups or individuals per sub-run size.
+- [ ] `toolRows` references valid after reparenting; `tool_update` status mutations work.
+- [ ] `toolGroup` reset in `clearTranscript()` and at `meta turn:start`.
+- [ ] Scroll preserved: `stuckToBottom()` captured once before runs loop; restored after all groups inserted.
+- [ ] `tests/acp_page.test.mjs` updated; suite green.
+- [ ] `plans/ROADMAP.md` lines 34 and 202 updated — delivered tool-display candidates marked (see §8).
+
+
+---
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| `toolRows` references broken by reparenting into group container | High — `tool_update` silently fails to update status | DOM element refs survive reparenting; verify with a `tool_update`-after-grouping test |
+| `railSetMode('status')` falls through to `'project'` (two-place normalization) | High — status mode silently broken | Extend both the normalization ternary AND the localStorage init; test both code paths |
+| Non-adjacent tool calls wrongly grouped (prose between them) | Medium — visual artifact groups unrelated calls | DOM `nextSibling` adjacency check in `flushToolGroups`; test with prose-between scenario |
+| Scroll disrupted by group restructuring at `turn:end` | Medium — user loses scroll position | Capture `stuckToBottom()` before restructuring; restore after; test at bottom and away from bottom |
+| `status: ""` for available/locked sessions creates wrong bucket | High — all available sessions in wrong group | Bucket key uses `(availability, status)` pair via `statusBucketKey()`; both inputs narrowed through closed-set maps |
+| Insert-point bug moves group to wrong transcript position | Medium — transcript visual order wrong | Capture `rows[last].nextSibling` BEFORE removal; test that group appears where original rows were |
+| `tool_update` that adds command to collapsed row also needs toggle | Medium — toggle missing on late-arriving command | Covered by the `known` branch in `addToolCall`; test with `tool_update` that adds command |
+| `aria-live="polite"` re-announces moved nodes during grouping | Low — screen reader noise at turn:end | Restructuring happens once at turn:end when turn is over; no ongoing live-region pollution |
+
+## 7) Verification
+
+**Automated** (run after each phase):
+```
+node tests/acp_page.test.mjs
+```
+Expected: all checks pass, 0 failed.
+
+**Manual runtime verification** (at Step 9):
+1. Start PowerAtlas: `.venv-PowerAtlas\Scripts\power-atlas`
+2. Open `http://127.0.0.1:<port>/acp`
+3. Open sliders settings menu — verify three options: Date / Project / Status
+4. Switch to Status mode — verify sessions bucket into Working / Waiting / Errored / Available / Locked; empty buckets absent
+5. Switch back to Project — verify normal workspace grouping
+6. Start a kiro-cli session via ACP that runs tool calls with commands
+7. Verify tool call rows with command show a toggle chevron; collapsed by default
+8. Click toggle — verify command body revealed
+9. Verify tool calls without command show no toggle
+10. When a turn with multiple tool calls completes, verify a group row appears
+11. Click group row — verify individual calls revealed; each starts collapsed
+12. Click an individual call toggle — verify command body shown
+13. Reload — verify group and collapse state reset (not persisted by design)
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `README.md` | Add third rail mode "Status" to *Agent sessions* section (~line 181). Describe the 5-bucket layout and that it groups by session status dot. | 1 |
+| `plans/ROADMAP.md` | Line 188: update "two groupings" to "three groupings"; note status mode also uses the flat listing. | 1 |
+| `plans/ROADMAP.md` | Lines 34 and 202: mark delivered tool-display candidates (collapse/expand from Phase 2, visual grouping from Phase 3); keep remaining open candidates (type icons, structured arg display). | 2 & 3 (doc-table-only) |
+
+## 9) Implementation Divergences from Plan
+
+_Reserved — filled during implementation._
+
+## Review Log
+
+### 2026-08-11 — Plan Creation Review (via /qplan, effort: high, 4 personas)
+
+21 findings (7 High, 8 Medium, 6 Low). 15 auto-resolved; 6 Low escalated to implementer.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F1 | High | `var`-in-loop closure in `flushToolGroups` — all toggles control the last group's body | Fixed — IIFE wraps each iteration's DOM build + listener in Phase 3 |
+| F2 | High | `railSummary()` missing `'status'` arm — shows workspace count in status mode | Fixed — Phase 1 code change + exit criterion + test added |
+| F3 | High | `acp-tool-group-toggle` has no `aria-label`; full tally re-announced on each keypress | Fixed — IIFE sets initial `aria-label`; click handler toggles it |
+| F4 | High | Group header status tally uses raw wire strings without closed-set narrowing | Fixed — `TOOL_STATUS_LABEL` map added; unknown values omitted |
+| F5 | High | `El` harness missing `removeChild`/`insertBefore`/`nextSibling` — Phase 3 tests fail before assertions | Fixed — Phase 3 exit criteria: extend El before Phase 3 tests |
+| F6 | High | Toggle-creation code duplicated between new-row path and `known` branch | Fixed — `_makeToolToggle(cmdWrap, toolTitle)` helper extracted in Phase 2 |
+| F7 | High | `toolGroup` declaration site unspecified in plan | Fixed — Phase 3 specifies insertion after `var toolRows` at `acp.html:473` |
+| F8 | Medium | Empty-state filter text binary ternary — status mode emits "more workspaces" | Fixed — Phase 1 code change: `railMode !== 'project'` ternary |
+| F9 | Medium | `stuckToBottom()` inside runs loop measures stale DOM after first insertion | Fixed — moved before runs loop in Phase 3 code block |
+| F10 | Medium | No test for two disjoint groups — F1 undetectable without it | Fixed — two-group toggle-isolation test added to Phase 3 |
+| F11 | Medium | `STATUS_BUCKET_ORDER` string literals may diverge from `RAIL_STATUS` | Fixed — Phase 3 notes it must cite `RAIL_STATUS` |
+| F12 | Medium | `toolGroup` behavior with absent `turn:end` in replay undocumented | Fixed — Phase 3 invariants note added |
+| F13 | Medium | Phase 2 toggle `aria-label` lacks tool name — 15 identical labels | Fixed — `_makeToolToggle` includes `toolTitle` in `aria-label` |
+| F14 | Medium | `railSummary` test absent from Phase 1 exit criteria | Fixed — added as exit criterion in Phase 1 |
+| F15 | Medium | No `deliverToolCall` helper for Phase 2 | Escalated — implementer may add; Phase 2 test list is clear without it |
+| F16 | Low | `·` separator may be invisible at low contrast | Escalated — implementer visual decision; `—` acceptable alternative |
+| F17 | Low | No null-guard on `head = querySelector('.acp-tool-head')` in Phase 2 known-branch | Escalated — construction-time invariant; add defensive comment |
+| F18 | Low | Group header is a static snapshot; no comment noting intentional staleness | Escalated — add inline comment in `flushToolGroups` during implementation |
+| F19 | Low | Empty status mode may render blank panel | Fixed — Phase 1 notes returning 0 from `renderRailStatus()` triggers `renderRail()`'s existing empty-state |
+| F20 | Low | `toolGroup = null` ownership comment missing at reset point | Escalated — add inline comment during implementation |
+| F21 | Low | `TOOL_STATUS_LABEL` unknown-value omission behavior not stated | Fixed — Phase 3 `TOOL_STATUS_LABEL` section specifies omission |
 
 ## Harness Improvement Opportunities
 
-- The `meta turn:end` grouping pass (Phase 3) has no precedent in `tests/acp_page.test.mjs`'s frame-sequence simulation helpers — a `deliverTurn(calls)` helper that sends `turn:start`, N tool_call frames, and `turn:end` would reduce boilerplate in the new checks. Cost: noticed when planning Phase 3 test coverage. Suggested change: add a `deliverTurn(page, toolCalls)` helper to the test harness.
+- The `meta turn:end` grouping pass (Phase 3) has no precedent in `tests/acp_page.test.mjs`'s frame-sequence helpers — a `deliverTurn(page, toolCalls)` helper that sends `turn:start`, N tool_call frames, and `turn:end` would reduce boilerplate in the new checks. Cost: noticed when planning Phase 3 test coverage. Suggested change: add a `deliverTurn(page, toolCalls)` helper to the test harness.
