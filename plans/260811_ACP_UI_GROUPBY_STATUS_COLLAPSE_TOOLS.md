@@ -1,7 +1,7 @@
 # ACP UI: Group-by-Status Rail Mode, Collapse Tool Calls, Group Consecutive Tool Calls
 
 > **Date**: 2026-08-11
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Three independent front-end changes to `acp.html` and `style.css`: a new "Status" rail grouping mode, per-call command-body collapse, and turn-end grouping of consecutive tool calls.
 > **Estimated effort**: 1-2 days
@@ -229,17 +229,20 @@ None.
 - **Empty-state node in `renderRailStatus()`**: when `shown === 0`, fall through to the existing empty-state rendering in `renderRail()` (returning 0 already triggers it there).
 
 **Exit criteria**:
-- [ ] `railSetMode('status')` sets `railMode = 'status'`; localStorage persists `'status'`; reload restores it.
-- [ ] Selecting "Status" in settings menu dispatches `?mode=recent` request.
-- [ ] Sessions group into Working / Waiting / Errored / Available / Locked; empty buckets absent.
-- [ ] `statusBucketKey` derives bucket from `(availability, status)` pair — no raw wire value reaches a class name or DOM key.
-- [ ] `railCollapsed` with `'s:'` prefix correctly collapses/expands status buckets.
-- [ ] "Load more" footer reflects `railFlatHasMore` (same as date mode behavior).
-- [ ] `railSummary()` shows session count, not workspace count, under status mode.
-- [ ] Empty-state filter text reads "more sessions" (not "more workspaces") under status mode.
-- [ ] `tests/acp_page.test.mjs` updated with status-mode checks including `railSummary` text test; suite is green.
-- [ ] `README.md` updated — third rail mode description added to *Agent sessions* section (see §8).
-- [ ] `plans/ROADMAP.md` line 188 updated — "two groupings" -> "three groupings" (see §8).
+- [x] `railSetMode('status')` sets `railMode = 'status'`; localStorage persists `'status'`; reload restores it.
+- [x] Selecting "Status" in settings menu dispatches `?mode=recent` request.
+- [x] Sessions group into Working / Waiting / Errored / Available / Locked; empty buckets absent.
+- [x] `statusBucketKey` derives bucket from `(availability, status)` pair — no raw wire value reaches a class name or DOM key.
+- [x] `railCollapsed` with `'s:'` prefix correctly collapses/expands status buckets.
+- [x] "Load more" footer reflects `railFlatHasMore` (same as date mode behavior).
+- [x] `railSummary()` shows session count, not workspace count, under status mode.
+- [x] Empty-state filter text reads "more sessions" (not "more workspaces") under status mode.
+- [x] `tests/acp_page.test.mjs` updated with status-mode checks including `railSummary` text test; suite is green.
+- [x] `README.md` updated — third rail mode description added to *Agent sessions* section (see §8).
+- [x] `plans/ROADMAP.md` line 188 updated — "two groupings" -> "three groupings" (see §8).
+
+**Implementation (2026-08-11, code: a3603ce + cce87a4 + 4b0a913)**
+Phase 1 adds a third "Status" grouping mode to the `/acp` rail. The `railSetMode` normalization ternary and localStorage initialization were extended to admit `'status'` alongside `'date'` and `'project'`. `railLoadFirstPage` and `renderRail`'s load-more footer were extended to treat `'status'` identically to `'date'` (both use the flat `?mode=recent` endpoint). The three-way dispatch in `renderRail` routes to a new `renderRailStatus()` function that buckets sessions by `(availability, status)` pair into five priority-ordered buckets (Working → Waiting → Errored → Available → Locked), using the existing `railAvailability`/`railRowStatus` closed-set narrowing functions; the `'s:'` key prefix in `railCollapsed` avoids collisions with workspace (`'g:'`) and day (`'d:'`) keys. `TOOL_STATUS_LABEL` and `STATUS_BUCKET_ORDER`/`STATUS_BUCKET_LABEL` constants were added near `RAIL_STATUS`, and `statusBucketKey()` was added alongside `railRowStatus`. `railSummary()` and the empty-state filter ternary were both updated for the status arm. Post-review auto-fixes added: `railMore` click handler and `railRefresh()` tick-poll both extended for status mode (two High bugs from review); `renderRailStatus()` now applies `RAIL_SESSION_SIZE` (3) cap with "Show N more" per bucket; `railRestoreFocus()` gained a `want.status` branch. 7 new tests in cycle 1 (209 total), 4 more in cycle 2 (213), 1 more for `railRestoreFocus` fix (214 total). Final test count: 214 pass / 0 fail.
 
 
 ---
@@ -623,6 +626,30 @@ Expected: all checks pass, 0 failed.
 _Reserved — filled during implementation._
 
 ## Review Log
+
+### 2026-08-11 — Implementation Review (after Phase 1, personas: Senior engineer, End-user advocate, Architect, Maintainability reviewer)
+
+Implementation health: Green (after 2 auto-fix cycles + 1 regression fix).
+15 findings total (2 High, 6 Medium, 7 Low). All High and Medium auto-fixed.
+QA verification: PASS (browser — Status mode renders correctly, 3-bucket cap works, load-more works, localStorage persists, 0 JS errors).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F1 | High | `railMore` click handler used `railMode === 'date'` only; status mode called `loadGroupPage` instead of `loadFlatPage`. | Fixed — extended to `railMode === 'date' \|\| railMode === 'status'` |
+| F2 | High | `railRefresh()` tick-poll used `railMode === 'date'` only; status dots wouldn't update in status mode. | Fixed — same condition extension in `railRefresh()` |
+| F3 | Medium | No test for Load-more click in status mode dispatching flat endpoint. | Fixed — test added |
+| F4 | Medium | No test for tick-poll in status mode dispatching `?mode=recent`. | Fixed — test added |
+| F5 | Medium | `renderRailStatus()` had no session count cap — contradicted README "three sessions" claim. | Fixed — `RAIL_SESSION_SIZE` cap + "Show N more" per bucket |
+| F6 | Medium | `statusBucketKey` test missing `held+waiting` and `held+errored` sub-cases. | Fixed — assertions added |
+| F7 | Medium | No empty-case test for status mode. | Fixed — test added |
+| N1 | Medium | `railFocus = { status: k }` in Show-N-more handler had no matching branch in `railRestoreFocus()`. | Fixed — `want.status` branch added; test added |
+| F8 | Low | README "Either way" / "either grouping mode" applied to 3 modes. | Fixed — updated wording |
+| F9 | Low | Stale inline comments (two-mode references, key list, railFlat JSDoc). | Fixed — updated |
+| F10 | Low | `TOOL_STATUS_LABEL` had no forward-reference comment. | Fixed — comment added |
+| F11 | Low | `aria-controls` missing on bucket head toggles (pre-existing omission). | Escalated — pre-existing gap in all modes; follow-up scope |
+| F12 | Low | Keyboard focus drops to `<body>` on mode switch (pre-existing in date mode). | Escalated — pre-existing; follow-up scope |
+| F13 | Low | Ternary chain duplicated in two call sites. | Escalated — readable at 3 values; extract if 4th mode added |
+| F14 | Low | Bucket ordering test missing Errored-relative assertions. | Fixed — `Waiting < Errored` and `Errored < Available` added |
 
 ### 2026-08-11 — Plan Creation Review (via /qplan, effort: high, 4 personas)
 
