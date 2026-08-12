@@ -1,8 +1,8 @@
 # Kiro Extensions Support + Date-Sort Fix
 
 > **Date**: 2026-08-12
-> **Status**: Draft
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: In Progress
+> **Last Updated**: 2026-08-12
 > **Scope**: ACP slash command palette, session management notifications, groupby-date auto-poll fix
 > **Estimated effort**: 1–2 days
 
@@ -426,19 +426,22 @@ None. No new infrastructure, APIs, or recurring costs.
 **Also update `_note_context` type annotation** to `def _note_context(session_id: str, percent: float | None) -> None:` — the function already handles `None` correctly (stores it; client hides meter), but the annotation must match usage.
 
 **Exit criteria**:
-- [ ] `SERVER_TYPES` frozenset literal rewritten to contain `"commands"`, `"compaction"`, `"commands_options_result"`, `"commands_execute_result"`
-- [ ] `CLIENT_TYPES` frozenset literal rewritten to contain `"commands_options"`, `"commands_execute"`
-- [ ] `MAX_COMMAND_PARTIAL_CHARS = 256` constant added
-- [ ] `_on_notification` has branches for `_kiro.dev/commands/available`, `_kiro.dev/compaction/status` (with debug log on drop), `_kiro.dev/clear/status`
-- [ ] `_note_context` type annotation updated to `float | None`
-- [ ] `_handle_subscribe` replays `commands` frame when `meta["commands"]` is set
-- [ ] `_handle_commands_options` and `_handle_commands_execute` are in `_dispatch`
-- [ ] Both handlers have: `not_subscribed` guard, `read_only_session` error code, `log.warning` on every refusal, `except Exception` fallback
-- [ ] `_handle_commands_execute` has: `inflight.add` before await, `finally: inflight.discard`, catalogue validation, name length cap, `log.info` on success dispatch
+- [x] `SERVER_TYPES` frozenset literal rewritten to contain `"commands"`, `"compaction"`, `"commands_options_result"`, `"commands_execute_result"`
+- [x] `CLIENT_TYPES` frozenset literal rewritten to contain `"commands_options"`, `"commands_execute"`
+- [x] `MAX_COMMAND_PARTIAL_CHARS = 256` constant added
+- [x] `_on_notification` has branches for `_kiro.dev/commands/available`, `_kiro.dev/compaction/status` (with debug log on drop), `_kiro.dev/clear/status`
+- [x] `_note_context` type annotation updated to `float | None`
+- [x] `_handle_subscribe` replays `commands` frame when `meta["commands"]` is set
+- [x] `_handle_commands_options` and `_handle_commands_execute` are in `_dispatch`
+- [x] Both handlers have: `not_subscribed` guard, `read_only_session` error code, `log.warning` on every refusal, `except Exception` fallback
+- [x] `_handle_commands_execute` has: `inflight.add` before await, `finally: inflight.discard`, catalogue validation, name length cap, `log.info` on success dispatch
 - [ ] **Live probe — `commands/execute` object form**: spawn `kiro-cli acp -a`, create a session, send `{"jsonrpc":"2.0","id":1,"method":"_kiro.dev/commands/execute","params":{"sessionId":"...","command":{"command":"tools","args":{}}}}` and confirm the process stays alive (does NOT exit with code 0). This is a **go/no-go gate for Phase 3** — if the process exits, the `commands_execute` path is shelved and SC-1 re-scoped to catalogue-only.
 - [ ] **Live probe — `commands/execute` output path**: confirm whether output arrives as `agent_message_chunk` chunks (same as `session/prompt`) or only in the `_request` result dict. Document the finding in `docs/KNOWLEDGE.md`. If chunks arrive, the `commands_execute_result` ack-only design is confirmed correct; if no chunks and result carries text, update `commands_execute_result` payload to include `text`.
 - [ ] **Live probe — `commands/options` response shape**: confirm `options` element shape (assumed `{name, description?}`). Update `docs/KNOWLEDGE.md` if different.
-- [ ] All new test classes pass; no regressions in full `test_web.py` suite
+- [x] All new test classes pass; no regressions in full `test_web.py` suite
+
+**Implementation (2026-08-12, code: 410abcb / 9f40e7c / b74f724)**
+Added four new `SERVER_TYPES` entries (`commands`, `compaction`, `commands_options_result`, `commands_execute_result`) and two new `CLIENT_TYPES` entries (`commands_options`, `commands_execute`), plus a `MAX_COMMAND_PARTIAL_CHARS = 256` constant and `MAX_COMMANDS_COUNT = 200` constant. In `_on_notification`, added three new method branches: `_kiro.dev/commands/available` (attributes catalogue to single inflight session, stores in `sessions[sid]["commands"]` with 200-entry cap, broadcasts `commands` frame), `_kiro.dev/compaction/status` (broadcasts `compaction` frame, resets context meter via `_note_context(sid, None)` on `completed`), and `_kiro.dev/clear/status` (silent consume). Added commands catalogue replay in `_handle_subscribe` after the crew replay block, and two new `_Supervisor` methods (`commands_options`, `commands_execute`), two new top-level handler functions (`_handle_commands_options`, `_handle_commands_execute`) with full guard suites matching canonical `_handle_steer` order, and two new `_dispatch` arms. Updated `_note_context` type annotation to `float | None`. Auto-fixes: `closing` guard added to `_handle_commands_options`, error message sanitized (static "Unknown command." instead of f-string), guard order corrected to match canonical steer pattern, `c.get("name")` in valid_names comprehension.
 
 ---
 
@@ -711,8 +714,32 @@ Running high-effort review (4 personas: Architect, Senior engineer, Reliability 
 | 23 | Low | `sessionCommands` reset not in exit criteria. | Fixed — exit criterion added to Phase 3 |
 | 24 | Low | `dropdownEnterWithClosedSocketIsNoop` test missing. | Fixed — test added to Phase 3 test list |
 
+### 2026-08-12 -- Implementation Review (after Phase 1, persona: Security auditor, Reliability engineer)
+
+Implementation health: Yellow.
+2 escalated Mediums pending user decision; all other findings auto-fixed.
+12 findings total (0 High, 7 Medium, 5 Low). 9 auto-fixed across 2 cycles; 2 escalated.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| R1 | Medium | `commands_execute` holds `inflight` but emits no `meta {turn:"start"}` frame; client Send button stays enabled during blocking call. | Escalated — recommend emitting turn-start/end markers around commands_execute |
+| R2 | Medium | `commands_execute` uses 90 s wall-clock timeout (`REQUEST_TIMEOUT_SECONDS`) rather than the inactivity sentinel; long commands are cut off abruptly at 90 s. | Escalated — recommend switching to `_INACTIVITY` sentinel (same as `session/prompt`) |
+| R3 | Medium | `_handle_commands_options` was missing `closing` guard, unlike parallel handler. | Fixed — closing guard added matching canonical steer order |
+| S1 | Medium | Unbounded commands list stored in `meta["commands"]`; a compromised kiro-cli could inflate per-session memory. | Fixed — `MAX_COMMANDS_COUNT = 200` constant and slice added |
+| S2 | Medium | Error frame echoed user-supplied `name` in f-string (`f"Unknown command '{name}'."`), potential XSS vector via Phase 3 innerHTML. | Fixed — static "Unknown command." message |
+| R4/S4 | Low | `c["name"]` in `valid_names` set comprehension (KeyError risk on malformed catalogue entry). | Fixed — changed to `c.get("name")` with None exclusion guard |
+| R5 | Low | No test verifying `_handle_prompt` blocked when `commands_execute` holds `inflight`. | Fixed — test added |
+| R6 | Low | Test fixture cleanup not in try/finally; potential state leak on failure. | Fixed — try/finally with copy restore |
+| S3 | Low | Guard order inconsistency: `not_subscribed` before `unknown_session` in both new handlers, reversed from `_handle_steer`. | Fixed — guard order corrected in both handlers |
+| S5 | Low | Supervisor methods had no documentation that `session_id` is pre-validated. | Fixed — docstrings updated |
+| S6 | Low | No concurrent `commands_execute` test. | Fixed — asyncio.gather concurrent test added |
+| C2-L1 | Low | `not_subscribed` / `unknown_session` still inverted after cycle-1 fixes. | Fixed — orchestrator-direct swap in cycle 2 |
+| C2-L2 | Low | Test `test_unknown_command_returns_bad_payload` didn't assert the static message text. | Fixed — assertion added |
+
+*Reviewers: Security auditor findings prefixed S; Reliability engineer prefixed R. R4 and S4 merged (same finding). C2-* are cycle-2 findings.*
+
 ## Harness Improvement Opportunities
-<Reserved — appended during /qexplore, /qplan and /qdev when harness friction is felt.
+- Sub-agent auto-fix commit staged user's pre-staged working-tree files (web.py, acp.html, style.css, README.md, acp_page.test.mjs) because the pathspec-scoped commit was missing `-- <paths>`. Cost: user's concurrent work committed under Phase 1 commit, blurring authorship. Suggested change: in auto-fix sub-agent briefs, always specify `git commit -m "..." -- <explicit-file-list>` to prevent index bleed from concurrent working-tree files.
 Format: - <observation> — cost: <what the friction actually cost> — suggested change: <one-line>
 Leave the heading even if empty: /qclose Pass 2 and /qdream GAT-PLANS both read it, and an
 absent heading is indistinguishable from a frictionless run.>
