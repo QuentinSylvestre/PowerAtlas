@@ -6771,12 +6771,15 @@ check("steer_ack re-enables controls and shows note", (tpl) => {
 
 check("steer_ack queued:false shows error note", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
-  page.type("bad steer");
+  const originalText = "bad steer";
+  page.type(originalText);
   page.el("acpPrompt").dispatch("input");
   page.click("acpSteer");
   page.deliver({ type: "steer_ack", sessionId: live, payload: { queued: false } });
   assert(page.el("acpTranscript").textContent.includes("not accepted"),
     "transcript should contain rejection note when queued:false");
+  assertEqual(page.el("acpPrompt").value, originalText,
+    "steer_ack queued:false should restore the textarea text");
 });
 
 check("error frame during steer restores textarea text", (tpl) => {
@@ -6835,8 +6838,69 @@ check("removeAttachment renumbers [Image N] markers in textarea", async (tpl) =>
   assert(!after.includes("[Image 2]"),
     "[Image 2] should have been renumbered to [Image 1] — got: " + after);
   const count1 = (after.match(/\[Image 1\]/g) || []).length;
-  assert(count1 >= 1,
-    "after removing first attachment, [Image 1] should appear for the remaining one — got: " + after);
+  assert(count1 === 1,
+    "after removing first attachment, [Image 1] should appear exactly once for the remaining one — got: " + after);
+});
+
+// Fix 7: steer textarea re-enabled on WS close during pending steer
+check("steer textarea re-enabled on ws close during pending steer", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("steer text");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  assert(page.el("acpPrompt").disabled === true,
+    "fixture: textarea should be disabled after clicking Steer");
+  // Simulate WS close mid-steer
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.el("acpPrompt").disabled, false,
+    "textarea should be re-enabled when WS closes during a pending steer");
+  assertEqual(page.el("acpSteer").disabled, false,
+    "steer button should be re-enabled when WS closes during a pending steer");
+  // Textarea text should be restored from _steerPending
+  assertEqual(page.el("acpPrompt").value, "steer text",
+    "textarea text should be restored from _steerPending on WS close");
+});
+
+// Fix 7b: steer controls re-enabled on session_closed (releaseSession) while steer pending
+check("steer controls re-enabled on session release during pending steer", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("steer before close");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  assert(page.el("acpPrompt").disabled === true,
+    "fixture: textarea disabled after steer click");
+  // Release session via session_closed
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { message: "closed" },
+  });
+  assertEqual(page.el("acpPrompt").disabled, false,
+    "textarea should be re-enabled after session release with steer pending");
+});
+
+// Fix 13: session-change guard — queue with sessionId=A, change to B, turn:end with A, no prompt sent
+check("queued prompt not sent when sessionId changed before turn end", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("queue this");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  // Verify the prompt was queued (sent no prompt yet)
+  const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
+  // Change sessionId to a different session (without closing), by delivering
+  // a new session frame directly
+  const live2 = "sess-other-0099";
+  page.deliver({
+    type: "session", sessionId: live2,
+    payload: { sessionId: live2, cwd: "C:\\work\\other", created: false, turnActive: false },
+  });
+  // Now fire turn:end with the ORIGINAL session id — the guard _queueSession !== sessionId
+  // should prevent sending to the new session
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+  const promptsAfter = page.socket().sent.filter((f) => f.type === "prompt").length;
+  assertEqual(promptsAfter, promptsBefore,
+    "queued prompt should not be sent when sessionId changed between queue and turn:end");
+  assert(page.transcript().includes("session changed") || page.transcript().includes("discarded"),
+    "nothing said the queued prompt was discarded due to session change");
 });
 
 // -------------------------------------------------------------------- main --

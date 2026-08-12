@@ -661,11 +661,12 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    text in the textarea. `.acp-queue-steer` is the wrapper that hides as a unit
    so the composer row height stays stable when the pair swaps with Stop. */
 .acp-queue-steer { display: flex; flex-direction: column; gap: 0; }
-.acp-queue, .acp-steer { padding: 0 12px; height: calc(2.5rem / 2 - 0.5px); line-height: 1; font-size: 11px; display: flex; align-items: center; justify-content: center; }
+.acp-queue, .acp-steer { padding: 0 12px; height: calc(var(--send-btn-height, 2.5rem) / 2); line-height: 1; font-size: 11px; display: flex; align-items: center; justify-content: center; }
 /* Inline cancel link in a queue note — styled as a de-emphasised inline
    button so it reads as secondary to the note text around it. */
 .acp-inline-cancel { background: none; border: none; padding: 0; color: var(--accent); font-size: inherit; cursor: pointer; text-decoration: underline; }
 .acp-inline-cancel:hover { color: var(--text); }
+.acp-inline-cancel:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; }
 /* The context meter. A bar and a number, because the number alone reads as
    noise until you know what a full window looks like. */
 .acp-context { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
