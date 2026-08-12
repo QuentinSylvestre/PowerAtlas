@@ -261,6 +261,38 @@ class El {
     this.parentNode = null;
     if (ACTIVE === this) ACTIVE = null;
   }
+  // Required by flushToolGroups() (Phase 3) which moves tool-call rows into
+  // group containers via transcriptEl.removeChild(row). Returns the removed child.
+  removeChild(child) {
+    const i = this.childNodes.indexOf(child);
+    if (i >= 0) this.childNodes.splice(i, 1);
+    child.parentNode = null;
+    return child;
+  }
+  // Required by flushToolGroups() which inserts group containers at their
+  // original position via transcriptEl.insertBefore(group, insertBefore).
+  // If ref is null, appends (matches real DOM behaviour).
+  insertBefore(node, ref) {
+    if (node.parentNode) node.parentNode.removeChild(node);
+    node.parentNode = this;
+    if (ref === null) {
+      this.childNodes.push(node);
+    } else {
+      const i = this.childNodes.indexOf(ref);
+      if (i >= 0) this.childNodes.splice(i, 0, node);
+      else this.childNodes.push(node);
+    }
+    return node;
+  }
+  // Required by flushToolGroups() adjacency check:
+  //   toolGroup[i-1].nextSibling === toolGroup[i]
+  // A null parent or out-of-bounds index returns null (matches real DOM).
+  get nextSibling() {
+    if (!this.parentNode) return null;
+    const kids = this.parentNode.childNodes;
+    const i = kids.indexOf(this);
+    return (i >= 0 && i + 1 < kids.length) ? kids[i + 1] : null;
+  }
   // The remote panel's Copy button selects the field first and unconditionally,
   // because that is its fallback when the clipboard API is unavailable — which
   // it is over plain http off localhost, i.e. on the remote surface the panel
@@ -6299,6 +6331,274 @@ check("exactly one toggle is created when command is updated multiple times", (t
   assertEqual(toggles.length, 1,
               "multiple tool_updates providing a command should produce exactly " +
               "ONE .acp-tool-toggle in the row's head — got " + toggles.length);
+});
+
+// ---- Phase 3: Group consecutive tool calls at turn end -------------------
+//
+// deliverTurn sends turn:start, each tool_call payload, then turn:end, then
+// settles. This mirrors the live frame sequence the agent produces.
+async function deliverTurn(page, live, toolCallPayloads) {
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  for (const payload of toolCallPayloads) {
+    page.deliver({ type: "tool_call", sessionId: live, payload });
+  }
+  page.deliver({ type: "meta", sessionId: live,
+                 payload: { turn: "end", stopReason: "end_turn" } });
+  await page.settle();
+}
+
+check("P3: turn with 3 tool calls produces one .acp-tool-group; rows removed from root", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g1a", title: "shell",     kind: "execute", status: "completed", command: "ls" },
+    { toolCallId: "g1b", title: "shell",     kind: "execute", status: "completed", command: "pwd" },
+    { toolCallId: "g1c", title: "read_file", kind: "read",    status: "completed", command: "cat f" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 1, "expected exactly 1 .acp-tool-group");
+  const rootToolRows = transcript.childNodes.filter(
+    (n) => n.className && String(n.className).includes("acp-msg-tool"));
+  assertEqual(rootToolRows.length, 0,
+    "individual acp-msg-tool rows should not be at transcript root after grouping");
+});
+
+check("P3: group is collapsed by default; toggle has aria-expanded=false", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g2a", title: "shell", kind: "execute", status: "completed", command: "a" },
+    { toolCallId: "g2b", title: "shell", kind: "execute", status: "completed", command: "b" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-group-toggle");
+  assert(toggle !== null, "group toggle should exist");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false",
+    "group should be collapsed by default");
+  const body = transcript.querySelector(".acp-tool-group-body");
+  assert(body !== null, "group body should exist");
+  assert(body.hidden === true, "group body should be hidden by default");
+});
+
+check("P3: group header format: N tool calls (name xCount) · status xCount", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g3a", title: "shell",     kind: "execute", status: "completed", command: "a" },
+    { toolCallId: "g3b", title: "shell",     kind: "execute", status: "completed", command: "b" },
+    { toolCallId: "g3c", title: "read_file", kind: "read",    status: "completed", command: "c" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-group-toggle");
+  assert(toggle !== null, "group toggle should exist");
+  const text = toggle.textContent;
+  // Expected: "3 tool calls (shell ×2, read_file ×1) · completed ×3"
+  assert(text.includes("3 tool calls"),
+    "header should start with count — got: " + text);
+  assert(text.includes("shell"),
+    "header should contain 'shell' — got: " + text);
+  assert(text.includes("\xd72"),
+    "header should use \xd7 (multiplication sign) for counts — got: " + text);
+  assert(text.includes("read_file"),
+    "header should contain 'read_file' — got: " + text);
+  assert(text.includes("\xb7"),
+    "header should contain \xb7 (middle dot) separator — got: " + text);
+  assert(text.includes("completed"),
+    "header should include narrowed status — got: " + text);
+});
+
+check("P3: clicking group toggle reveals rows; individual rows start collapsed", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g4a", title: "shell", kind: "execute", status: "completed", command: "ls" },
+    { toolCallId: "g4b", title: "shell", kind: "execute", status: "completed", command: "pwd" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-group-toggle");
+  assert(toggle !== null, "group toggle should exist");
+  const body = transcript.querySelector(".acp-tool-group-body");
+  toggle.dispatch("click");
+  assertEqual(toggle.getAttribute("aria-expanded"), "true",
+    "after click group should be expanded");
+  assert(body.hidden === false, "group body should be visible after click");
+  // Individual rows inside should start collapsed (Phase 2 toggle hidden)
+  const innerRows = body.querySelectorAll(".acp-msg-tool");
+  assert(innerRows.length >= 2, "group body should contain the individual rows");
+  for (const row of innerRows) {
+    const cmdWrap = row.querySelector(".acp-tool-cmd")
+      ? row.querySelector(".acp-tool-cmd").parentNode : null;
+    if (cmdWrap) {
+      assert(cmdWrap.hidden === true,
+        "individual rows inside group should start collapsed (command body hidden)");
+    }
+  }
+});
+
+check("P3: turn with 1 tool call: no group; row stays at transcript root", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g5a", title: "shell", kind: "execute", status: "completed", command: "ls" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 0, "single call should not produce a group");
+  const rootToolRows = transcript.childNodes.filter(
+    (n) => n.className && String(n.className).includes("acp-msg-tool"));
+  assertEqual(rootToolRows.length, 1, "single call should remain at transcript root");
+});
+
+check("P3: tool_call + prose + tool_call+tool_call: first stays individual; last two form group", async (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  // First tool call
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "g6a", title: "shell", kind: "execute",
+               status: "completed", command: "first" } });
+  // Prose between (creates agentBody, breaking DOM adjacency)
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "agent", text: "then I did something" } });
+  // Two more adjacent tool calls
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "g6b", title: "shell", kind: "execute",
+               status: "completed", command: "second" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "g6c", title: "shell", kind: "execute",
+               status: "completed", command: "third" } });
+  page.deliver({ type: "meta", sessionId: live,
+    payload: { turn: "end", stopReason: "end_turn" } });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 1, "only the adjacent pair should form a group");
+  const rootToolRows = transcript.childNodes.filter(
+    (n) => n.className && String(n.className).includes("acp-msg-tool"));
+  assertEqual(rootToolRows.length, 1,
+    "the first call (non-adjacent) should remain at root");
+});
+
+check("P3: IIFE closure — two groups A+B and C+D; clicking A+B expands only A+B", async (tpl) => {
+  // Critical: validates the var-in-loop IIFE closure fix.
+  // Without the IIFE all toggles would control the last group's body.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "gAa", title: "shell", kind: "execute",
+               status: "completed", command: "A" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "gAb", title: "shell", kind: "execute",
+               status: "completed", command: "B" } });
+  // Prose breaks adjacency
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "agent", text: "in between" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "gCa", title: "shell", kind: "execute",
+               status: "completed", command: "C" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "gCb", title: "shell", kind: "execute",
+               status: "completed", command: "D" } });
+  page.deliver({ type: "meta", sessionId: live,
+    payload: { turn: "end", stopReason: "end_turn" } });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 2, "expected two groups (A+B and C+D)");
+  const [groupAB, groupCD] = groups;
+  const toggleAB = groupAB.querySelector(".acp-tool-group-toggle");
+  const bodyAB   = groupAB.querySelector(".acp-tool-group-body");
+  const toggleCD = groupCD.querySelector(".acp-tool-group-toggle");
+  const bodyCD   = groupCD.querySelector(".acp-tool-group-body");
+  assertEqual(toggleAB.getAttribute("aria-expanded"), "false", "A+B starts collapsed");
+  assertEqual(toggleCD.getAttribute("aria-expanded"), "false", "C+D starts collapsed");
+  toggleAB.dispatch("click");
+  assertEqual(toggleAB.getAttribute("aria-expanded"), "true",
+    "A+B should expand after clicking its toggle");
+  assert(bodyAB.hidden === false, "A+B body should be visible");
+  // IIFE validation: C+D must NOT have changed
+  assertEqual(toggleCD.getAttribute("aria-expanded"), "false",
+    "C+D must remain collapsed — IIFE closure fix");
+  assert(bodyCD.hidden === true, "C+D body must remain hidden — IIFE closure fix");
+});
+
+check("P3: toolRows reference valid after grouping; tool_update status mutation works", async (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "g8a", title: "shell", kind: "execute",
+               status: "started", command: "ls" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "g8b", title: "shell", kind: "execute",
+               status: "started", command: "pwd" } });
+  page.deliver({ type: "meta", sessionId: live,
+    payload: { turn: "end", stopReason: "end_turn" } });
+  await page.settle();
+  // Deliver tool_update after grouping
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "g8a", title: "shell", kind: "execute", status: "completed" } });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  const group = transcript.querySelector(".acp-tool-group");
+  assert(group !== null, "group should exist");
+  const body = group.querySelector(".acp-tool-group-body");
+  const statusSpans = body.querySelectorAll(".acp-tool-status");
+  const statuses = Array.from(statusSpans).map((s) => s.textContent);
+  assert(statuses.includes("completed"),
+    "tool_update should reach the status element even after reparenting — statuses: " + statuses.join(", "));
+});
+
+check("P3: replay safety — turn:end in history produces group", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g9a", title: "shell", kind: "execute", status: "completed", command: "a" },
+    { toolCallId: "g9b", title: "shell", kind: "execute", status: "completed", command: "b" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const groups = transcript.querySelectorAll(".acp-tool-group");
+  assertEqual(groups.length, 1,
+    "replay of turn with tool_calls + turn:end should produce the group");
+});
+
+check("P3: toolGroup is null after clearTranscript", async (tpl) => {
+  const { page, live } = connected(tpl);
+  // Start a turn with tool calls, then switch session (which calls clearTranscript)
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "g10a", title: "shell", kind: "execute",
+               status: "started", command: "ls" } });
+  // Switch session (triggers clearTranscript)
+  const newSid = "sess-post-clear";
+  page.deliver({ type: "session", sessionId: newSid,
+    payload: { sessionId: newSid, cwd: "C:\\other", created: true,
+               turnActive: false, contextPercent: null } });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 0,
+    "no groups should exist after clearTranscript");
+  // New single-call turn should not form a group (old toolGroup cleared)
+  await deliverTurn(page, newSid, [
+    { toolCallId: "g10b", title: "shell", kind: "execute", status: "completed", command: "new" },
+  ]);
+  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 0,
+    "single call after clear should not form a group (toolGroup was properly reset)");
+});
+
+check("P3: group toggle aria-label toggles between Expand and Collapse", async (tpl) => {
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "g11a", title: "shell", kind: "execute", status: "completed", command: "a" },
+    { toolCallId: "g11b", title: "shell", kind: "execute", status: "completed", command: "b" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-group-toggle");
+  assert(toggle !== null, "group toggle should exist");
+  const initial = toggle.getAttribute("aria-label");
+  assert(initial !== null && initial.toLowerCase().includes("expand"),
+    "initial aria-label should say 'Expand' — got: " + initial);
+  toggle.dispatch("click");
+  const expanded = toggle.getAttribute("aria-label");
+  assert(expanded.toLowerCase().includes("collapse"),
+    "aria-label after expand should say 'Collapse' — got: " + expanded);
+  toggle.dispatch("click");
+  const collapsed = toggle.getAttribute("aria-label");
+  assert(collapsed.toLowerCase().includes("expand"),
+    "aria-label after re-collapse should say 'Expand' — got: " + collapsed);
 });
 
 // -------------------------------------------------------------------- main --

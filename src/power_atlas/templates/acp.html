@@ -471,6 +471,10 @@
   // toolCallId -> the elements a later `tool_update` rewrites in place, so a
   // call that runs then completes is one row rather than three.
   var toolRows = Object.create(null);
+  // Accumulates acp-msg-tool rows added during the current turn; flushed into
+  // collapsible group containers at meta turn:end by flushToolGroups().
+  // Null between turns (reset at turn:start and after each flush).
+  var toolGroup = null; // accumulates tool-call rows during a turn; flushed at turn:end
   // ---- sub-agents (the agent bar + the read-only sub-agent panel) ---------
   //
   // The current session's crew, as last sent on a `subagents` frame — an
@@ -1558,6 +1562,10 @@
     row.appendChild(body);
     transcriptEl.appendChild(row);
     if (id) toolRows['t:' + id] = { status: status, body: body };
+    // Accumulate this row for turn-end grouping. The flush at meta turn:end
+    // will wrap consecutive sub-runs of >=2 rows into collapsible group containers.
+    if (!toolGroup) toolGroup = [];
+    toolGroup.push(row);
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
 
@@ -1577,6 +1585,123 @@
       wrap.appendChild(more);
     }
     return wrap;
+  }
+
+  // Wraps consecutive sub-runs of >=2 tool-call rows into collapsible group
+  // containers. Called at meta turn:end. Sets toolGroup = null when done.
+  //
+  // Key invariants:
+  //   - toolRows[id].status and toolRows[id].body are DOM refs; reparenting
+  //     them into the group body does not invalidate those refs.
+  //   - The group header is a static snapshot of the turn's tools — it is
+  //     intentionally not updated by later tool_update mutations.
+  //   - toolGroup is reset in clearTranscript() and meta turn:start, so this
+  //     function always operates on a single turn's accumulation.
+  function flushToolGroups() {
+    if (!toolGroup || toolGroup.length < 2) { toolGroup = null; return; }
+
+    // Split toolGroup into consecutive sub-runs by DOM adjacency.
+    // A prose bubble between two tool calls in the same turn makes them
+    // non-adjacent siblings — they belong in separate groups (or none).
+    var runs = [];
+    var cur = [toolGroup[0]];
+    for (var i = 1; i < toolGroup.length; i++) {
+      if (toolGroup[i - 1].nextSibling === toolGroup[i]) {
+        cur.push(toolGroup[i]);
+      } else {
+        runs.push(cur);
+        cur = [toolGroup[i]];
+      }
+    }
+    runs.push(cur);
+
+    // Capture scroll position ONCE before any DOM mutation. stuckToBottom()
+    // measures transcriptEl geometry, which changes after each insertion,
+    // so a per-iteration call would give stale readings for all but the first.
+    var stick = stuckToBottom();
+
+    for (var r = 0; r < runs.length; r++) {
+      var rows = runs[r];
+      if (rows.length < 2) continue; // single-call sub-run stays as individual row
+
+      // Capture insertion point BEFORE removing any row — once rows are moved
+      // out, the last row has no nextSibling in the transcript.
+      var insertBefore = rows[rows.length - 1].nextSibling;
+
+      // Build name tally (preserves first-seen order).
+      var nameCounts = Object.create(null);
+      var nameOrder = [];
+      for (var n = 0; n < rows.length; n++) {
+        var nameEl = rows[n].querySelector('.acp-tool-name');
+        var nm = nameEl ? nameEl.textContent : 'tool';
+        if (!nameCounts[nm]) { nameCounts[nm] = 0; nameOrder.push(nm); }
+        nameCounts[nm]++;
+      }
+
+      // Build status tally using TOOL_STATUS_LABEL narrowing.
+      // Unknown wire status values are silently omitted (no-raw-wire-value rule).
+      var stCounts = Object.create(null);
+      var stOrder = [];
+      for (var s = 0; s < rows.length; s++) {
+        var stEl = rows[s].querySelector('.acp-tool-status');
+        var stRaw = stEl ? stEl.textContent : '';
+        var st = TOOL_STATUS_LABEL[stRaw]; // undefined for unknown values
+        if (st) {
+          if (!stCounts[st]) { stCounts[st] = 0; stOrder.push(st); }
+          stCounts[st]++;
+        }
+      }
+
+      var nameTally = nameOrder.map(function (nm) {
+        return nameCounts[nm] > 1 ? nm + ' \xd7' + nameCounts[nm] : nm;
+      }).join(', ');
+      var stTally = stOrder.map(function (st) {
+        return stCounts[st] > 1 ? st + ' \xd7' + stCounts[st] : st;
+      }).join(', ');
+      var headerText = rows.length + ' tool calls (' + nameTally + ')' +
+                       (stTally ? ' \xb7 ' + stTally : '');
+
+      // Build group container.
+      var group = document.createElement('div');
+      group.className = 'acp-tool-group';
+      var groupToggle = document.createElement('button');
+      groupToggle.className = 'acp-tool-group-toggle';
+      groupToggle.type = 'button';
+      groupToggle.setAttribute('aria-expanded', 'false');
+      groupToggle.textContent = headerText;
+      group.appendChild(groupToggle);
+
+      var groupBody = document.createElement('div');
+      groupBody.className = 'acp-tool-group-body';
+      groupBody.hidden = true; // collapsed by default
+
+      // Move rows into group body.
+      for (var k = 0; k < rows.length; k++) {
+        transcriptEl.removeChild(rows[k]);
+        groupBody.appendChild(rows[k]);
+      }
+      group.appendChild(groupBody);
+
+      // Insert group at the position where the first row was.
+      transcriptEl.insertBefore(group, insertBefore);
+
+      // IIFE per iteration: `var` is function-scoped, so without this all
+      // click handlers in a multi-run turn share the final iteration's
+      // groupToggle + groupBody bindings — every toggle would control only
+      // the last group's body. Same IIFE pattern as renderCrewPanel (acp.html).
+      (function (gt, gb) {
+        gt.setAttribute('aria-label', 'Expand tool call group');
+        gt.addEventListener('click', function () {
+          var open = gt.getAttribute('aria-expanded') === 'true';
+          gt.setAttribute('aria-expanded', open ? 'false' : 'true');
+          gt.setAttribute('aria-label', open ? 'Expand tool call group' : 'Collapse tool call group');
+          gb.hidden = open;
+        });
+      }(groupToggle, groupBody));
+
+      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+    toolGroup = null;
   }
 
   // ---- the agent's markdown ---------------------------------------------
@@ -2129,6 +2254,7 @@
     transcriptEl.textContent = '';
     agentBody = null;
     toolRows = Object.create(null);
+    toolGroup = null; // reset grouping state when transcript is cleared
     // The row emptying just detached, if one was showing — nothing left to
     // remove a second time, and `showThinking` would otherwise believe one
     // still stands.
@@ -4493,6 +4619,7 @@
     if (type === 'meta' && payload.turn === 'start') {
       agentBody = null;
       pendingPrompt = null;
+      toolGroup = null; // reset grouping accumulator at each new turn
       // The turn really started, so the images that went with it are spent and
       // their object URLs can go. Guarded on `replaying` where `pendingPrompt`
       // is not: a replayed turn marker is history, and revoking on one would
@@ -4511,6 +4638,9 @@
     if (type === 'meta' && payload.turn === 'end') {
       dismissCrewPanelIfDone();
       agentBody = null;
+      // Group consecutive tool calls accumulated during this turn into
+      // collapsible containers. flushToolGroups() sets toolGroup = null.
+      flushToolGroups();
       if (!replaying) setTurn(false);
       if (!replaying) hideThinking();
       if (payload.stopReason && payload.stopReason !== 'end_turn') {
