@@ -196,7 +196,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    status-working kept for the dashboard (session_row.html, workspace_card.html);
    the /acp rail uses railDotClass() which maps working -> status-thinking. */
 .session-status.status-idle { background: #e5e7eb; }
-.session-status.status-unread { background: #22c55e; animation: status-pulse 2s ease-in-out infinite; }
+.session-status.status-unread { background: #22c55e; }
 .session-status.status-thinking { background: #3b82f6; animation: status-pulse 2s ease-in-out infinite; }
 /* Machine-driven session marker — `bg`, `daemon`, `daemon-worker` or `sdk`.
    Deliberately muted and typographic rather than coloured: it qualifies what
