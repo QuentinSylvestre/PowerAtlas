@@ -1,7 +1,7 @@
 # ACP Concurrent Subagent Attribution
 
 > **Date**: 2026-08-12
-> **Status**: In Progress
+> **Status**: Complete
 > **Scope**: Improve `_Supervisor._on_subagent_list` to attribute fan-out crews when more than one session is in-flight simultaneously
 
 ---
@@ -400,3 +400,23 @@ Post-review cycle 2 fixes (code: 416e4d8): Restored `isinstance(_kiro_meta, dict
 | 16 | Low | `_TERMINAL_TOOL_STATUSES` contained "terminated" with no wire evidence for tool_call_update status. | Fixed — added comment noting kiro-cli 2.16.2 uses it only on sub-agent entries. |
 
 ## Harness Improvement Opportunities
+
+### 2026-08-12 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer.
+4 findings (0 High, 0 Medium, 4 Low). All auto-fixed in commit bd79e3e.
+QA verification: BLOCKED — requires two concurrent live kiro-cli ACP sessions. Covered by 37 targeted tests exercising all code paths via production calls. 1244 tests pass.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Add spawner anchor and update attribution logic | pass (1244 tests) | BLOCKED | Requires two concurrent kiro-cli sessions; all code paths covered by 37 targeted tests |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | `crew_spawn_anchors` `__init__` comment overstated O(1) steady-state; pathological O(N) case exists until turn end. | Fixed — updated comment to describe both the typical O(1) and pathological O(N)-per-turn cases. |
+| 2 | Low | EC-3's "absent toolName" debug log was removed in cycle-1 (was O(n) noise); positive-only log left no diagnostic signal for toolName drift. | Fixed — added targeted `elif` log for when `_meta.kiro.toolName` is present but not "subagent". |
+| 3 | Low | `pop+break` on live `dict.items()` in `_on_subagent_list` is CPython-specific; other cleanup sites use safe list-snapshot pattern. | Fixed — replaced with `[k for k, v in ... if ...][:1]` list-snapshot consistent with rest of codebase. |
+| 4 | Low | `test_turn_end_clears_spawner_entries_logic` identity-vs-equality gap theoretical; no action required (short literals are interned). | User: accepted — theoretical gap only; string interning makes equality and identity equivalent for short session id literals used in tests. |
