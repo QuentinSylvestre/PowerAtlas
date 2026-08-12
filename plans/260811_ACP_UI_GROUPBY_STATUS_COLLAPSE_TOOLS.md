@@ -1,7 +1,7 @@
 # ACP UI: Group-by-Status Rail Mode, Collapse Tool Calls, Group Consecutive Tool Calls
 
 > **Date**: 2026-08-11
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Three independent front-end changes to `acp.html` and `style.css`: a new "Status" rail grouping mode, per-call command-body collapse, and turn-end grouping of consecutive tool calls.
 > **Estimated effort**: 1-2 days
@@ -669,7 +669,43 @@ Expected: all checks pass, 0 failed.
 
 ## 9) Implementation Divergences from Plan
 
-_Reserved — filled during implementation._
+- Phase 1: `toolGroup` and `_toolGroupSeq` placement at `acp.html:478`, after `toolRows` (plan said "after `var toolRows = Object.create(null);`" — correct).
+- Phase 2: `_makeToolToggle` placed between `appendThought` and `addToolCall` (plan said "near `addToolCall()`" — acceptable; 16 lines before first call site).
+- Phase 2: `El` harness gained `parentElement` getter (returns `parentNode`) — required by Phase 2 tests accessing `cmdEl.parentElement`.
+- Phase 3: Group body IDs use a monotonic counter `_toolGroupSeq` (final review upgraded from `Date.now() + '-' + r` which risked duplicates on rapid replay).
+
+### 2026-08-12 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, End-user advocate, Architect, Maintainability reviewer.
+20 findings total across holistic review (0 High, 1 Medium, 19 Low). 1 Medium auto-fixed; 19 Low applied or accepted.
+QA verification: PASS (4 surfaces: Status rail, tool collapse, tool grouping, cross-phase integration; 0 JS errors).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Status rail grouping mode | pass (214) | PASS | 22 new tests; 2 High bugs found and fixed in review |
+| 2: Collapse tool call command body | pass (223) | PASS | 9 new tests; 4 Medium findings auto-fixed |
+| 3: Group consecutive tool calls | pass (237) | PASS | 13 new tests + 2 final-review tests; 1 Medium fixed |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `groupBody.id` used `Date.now() + '-' + r` — duplicate IDs possible on rapid replay. | Fixed — monotonic `_toolGroupSeq` counter |
+| 2 | Low | Settings button missing `:focus-visible` (pre-existing gap). | Escalated — pre-existing; follow-up scope |
+| 3 | Low | `role="menu"` without arrow-key navigation (pre-existing gap, now 3 items). | Escalated — pre-existing; follow-up scope |
+| 4 | Low | `aria-controls` linkage untested. | Fixed — assertion added to existing P3 test |
+| 5 | Low | `toolGroup` three-reset-sites had no cross-reference comments. | Fixed — comments added at all three sites |
+| 6 | Low | `STATUS_BUCKET_ORDER` comment didn't explain array vs map distinction. | Fixed — comment updated |
+| 7 | Low | Tool name tally raw-pass-through asymmetry vs status tally undocumented. | Fixed — comment added in `flushToolGroups()` |
+| 8 | Low | Zero-identity test gap (`title='' kind=''`) deferred from Phase 2. | Escalated — edge case, behavior documented |
+| 9 | Low | Anonymous tool call test missing. | Fixed — test added |
+| 10 | Low | `TOOL_STATUS_LABEL` forward placement comment could note array/map distinction. | Fixed — comment improved |
+| 11 | Low | `insertBefore` comment misleading about DOM position logic. | Fixed in Phase 3 auto-fix |
+| 12 | Low | Sequential turns accumulator test missing. | Fixed in Phase 3 auto-fix |
+| 13 | Low | `deliverTurn` placement note for Phase 2 reuse. | Escalated — documentation-only; add if friction recurs |
+| 14 | Low | No comment in `known` branch explaining why `toolGroup.push` is absent. | Fixed — comment added |
+| 15–19 | Low | Various informational findings (Phase 2/3 integration verified clean; no-innerHTML rule intact; closed-set idiom coherent). | User: accepted — confirmed correct by review |
 
 ## Review Log
 
