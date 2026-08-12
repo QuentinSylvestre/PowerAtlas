@@ -427,21 +427,26 @@ promptInput.value = renum;
 - `test_queued_prompt_auto_sends_on_turn_end`: simulate `meta turn:end` with `queuedPrompt` set → `sendPrompt` called.
 
 **Exit criteria**:
-- [ ] Queue and Steer buttons present in HTML; stacked vertically at half Stop height
-- [ ] `refreshComposerControls()` governs all three button states correctly; `setTurn()` calls it
-- [ ] Pasting image inserts `[Image N]` at cursor; subsequent paste inserts `[Image 2]` etc.
-- [ ] Removing attachment at index 0 via tray × renumbers remaining markers with global replace
-- [ ] Queue button stores text and session id, clears textarea, shows cancellable inline note
-- [ ] Queue cancel link restores text to textarea and clears `queuedPrompt`
-- [ ] Auto-send fires on `meta turn:end` when `queuedPrompt` is set and session unchanged and WS open
-- [ ] Auto-send is a no-op (note shown) when session changed or WS closed
-- [ ] Auto-send does not clobber text the user typed after queuing
-- [ ] Steer button disables textarea and itself; sends `steer` frame; does NOT clear textarea yet
-- [ ] `steer_ack {queued:true}` clears textarea, re-enables controls, shows "Steer sent."
-- [ ] `steer_ack {queued:false}` or error frame restores textarea text and shows error note
-- [ ] `queuedPrompt` and `queuedPromptSession` cleared in `releaseSession()`
-- [ ] All new `acp_page.test.mjs` tests pass: `node tests/acp_page.test.mjs`
-- [ ] No regression in existing `acp_page.test.mjs` tests
+- [x] Queue and Steer buttons present in HTML; stacked vertically at half Stop height
+- [x] `refreshComposerControls()` governs all three button states correctly; `setTurn()` calls it
+- [x] Pasting image inserts `[Image N]` at cursor; subsequent paste inserts `[Image 2]` etc.
+- [x] Removing attachment at index 0 via tray × renumbers remaining markers with global replace
+- [x] Queue button stores text and session id, clears textarea, shows cancellable inline note
+- [x] Queue cancel link restores text to textarea and clears `queuedPrompt`
+- [x] Auto-send fires on `meta turn:end` when `queuedPrompt` is set and session unchanged and WS open
+- [x] Auto-send is a no-op (note shown) when session changed or WS closed
+- [x] Auto-send does not clobber text the user typed after queuing
+- [x] Steer button clears textarea immediately and disables textarea+button; text preserved in pending state for error restoration
+- [x] `steer_ack {queued:true}` re-enables controls and shows note; `steer_ack {queued:false}` restores textarea text and shows error note
+- [x] `steer_ack {queued:false}` or error frame restores textarea text and shows error note
+- [x] `queuedPrompt` and `queuedPromptSession` cleared in `releaseSession()`
+- [x] All new `acp_page.test.mjs` tests pass: `node tests/acp_page.test.mjs`
+- [x] No regression in existing `acp_page.test.mjs` tests
+
+#### Implementation (2026-08-12, code: 8900eb7 + 172eabd + 69b9d7a + 5987014)
+Phase 2 adds client-side Queue/Steer controls and image-inline markers. HTML gains a `<div id="acpQueueSteer">` wrapper holding `<button id="acpQueue">Queue</button>` and `<button id="acpSteer">Steer</button>` in the composer row. CSS stacks them vertically at exactly half Stop's height with `height: calc(var(--send-btn-height, 2.5rem) / 2)` and `gap: 0`. A new `refreshComposerControls()` helper centralises all three button states — called by `setTurn()` and the textarea `input` event. Queue stores text + sessionId, clears textarea, and builds a cancellable inline note with a `<button class="acp-inline-cancel" aria-label="Cancel queued prompt">`. On `meta turn:end`, queued prompt auto-sends after three guards: session unchanged, WS open, no new user text; state cleared in `releaseSession()`. Steer sends `{message:text}` immediately clearing textarea (text held in `_steerPending`); `steer_ack {queued:false}` restores text before nulling pending; WS close and `agent_died` both restore text and re-enable controls; `releaseSession()` re-enables controls without text restoration. `_stopInProgress` flag prevents `refreshComposerControls()` from re-enabling Stop while a cancel is in-flight. Image inline inserts `[Image N]` at cursor position; `removeAttachment()` first removes the deleted marker, then renumbers higher ones with global regex. README updated at feature-list bullet and with a new Queue/Steer paragraph in the Agent sessions section. 254 JS + 1234 Python tests pass.
+
+Divergence: `acpQueue`/`acpSteer` wrapped in `acpQueueSteer` `<div>` for atomic hide/show; `refreshComposerControls()` operates on the wrapper.
 
 ---
 
@@ -875,6 +880,7 @@ node tests/acp_page.test.mjs
 
 - Phase 1: `_mark_crew_done` helper extracted to avoid duplicating done-marking + stoppedAt-stamping logic between `_handle_cancel` and `_on_subagent_list`. Behavior-identical refactor; improves maintainability.
 - Phase 1: Steer payload key named `"message"` (not `"prompt"` as the plan originally specified). Rationale: aligns with `_Supervisor.steer()`'s own wire param `{"sessionId": ..., "message": text}` and the live-probe spec in project memory. Phase 2 plan spec updated accordingly.
+- Phase 2: `acpQueue`/`acpSteer` wrapped in `acpQueueSteer` `<div>` for atomic hide/show; `refreshComposerControls()` operates on the wrapper.
 
 ## Review Log
 
@@ -935,6 +941,30 @@ Escalation 2 (LOW — payload key name): User directed: Accept and note. Noted a
 | 14 | Low | No test asserts cancel cascade is skipped when `_supervisor.cancel` raises `AcpError`. | Fixed — `test_cancel_cascade_skipped_on_agent_error` added (Low-fix pass). |
 | 15 | Low | Empty-dict crew path (`crews[sid] = {}`) not tested for cascade skip. | Fixed — `test_cancel_skips_cascade_when_crew_is_empty_dict` added (Low-fix pass). |
 | 16 | Low | Stale `` `prompt` `` cross-handler comment in `_handle_cancel` after payload rename. | Fixed — changed to `` `session/prompt` `` (Low-fix pass). |
+
+### 2026-08-12 — Implementation Review (after Phase 2, persona: End-user advocate, Reliability engineer, Senior engineer, Maintainability reviewer)
+
+Implementation health: Green.
+16 findings (1 High, 7 Medium, 8 Low). All resolved across 2 cycles (cycle 3 skipped — cycle-2 findings all Low + mechanical).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | WS drop during steer leaves textarea permanently disabled — ws.onclose didn't restore `_steerPending`. | Fixed — cleanup block added to `ws.onclose` restoring text and re-enabling controls (cycle 1). |
+| 2 | Medium | `removeAttachment` duplicate marker — deleted marker not removed before renumbering, producing `[Image 1][Image 1]`. | Fixed — deleted marker removed first, then higher markers renumbered (cycle 1). |
+| 3 | Medium | `steer_ack {queued:false}` nulled `_steerPending` before restoring text — text permanently lost. | Fixed — false-branch check moved before null (cycle 1). |
+| 4 | Medium | `refreshComposerControls()` reset `stopBtn.disabled` mid-flight, allowing double cancel click. | Fixed — `_stopInProgress` flag added; `refreshComposerControls()` preserves disabled state (cycle 1). |
+| 5 | Medium | Dead `stopBtn.disabled = false` in `setTurn()` overriding `refreshComposerControls()` ownership. | Fixed — removed (cycle 1). |
+| 6 | Medium | Wrong comment in steer handler claimed textarea cleared only after ack. | Fixed — comment corrected (cycle 1). |
+| 7 | Medium | No test for steer cleanup on WS close or session release. | Fixed — two new tests added (cycle 1). |
+| 8 | Medium | `agent_died` handler didn't clear `_steerPending` or re-enable textarea. | Fixed — cleanup block added; test added (cycle 2). |
+| 9 | Low | Queue button missing `!sessionId` guard (defense-in-depth). | Fixed — guard added (cycle 1). |
+| 10 | Low | `acp-inline-cancel` missing `aria-label`. | Fixed — attribute added (cycle 1). |
+| 11 | Low | `acp-inline-cancel` missing `:focus-visible` CSS. | Fixed — rule added (cycle 1). |
+| 12 | Low | Queue+Steer pair 1px shorter than Stop due to `-0.5px` each. | Fixed — height changed to `calc(.../2)` exactly (cycle 1). |
+| 13 | Low | Stop visible/enabled during steer flight. | Fixed — `stopBtn.hidden` includes `!!_steerPending` check (cycle 1). |
+| 14 | Low | Dead `cancelLink.remove()` after `.textContent =` assignment. | Fixed — removed with comment (cycle 1). |
+| 15 | Low | Session-change guard test didn't exercise the actual guard (went through `releaseSession` instead). | Fixed — new direct guard test added (cycle 1). |
+| 16 | Low | `_steerPending` naming inconsistent with `queuedPrompt`. | User: accepted — documented in divergences. No rename needed.
 
 ## Harness Improvement Opportunities
 
