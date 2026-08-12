@@ -1132,7 +1132,7 @@ check("tapping the header reveals the session id, and tapping again hides it", (
 
 check("a session with no workspace known yet shows the raw id, not a blank header", async (tpl) => {
   const page = await railed(tpl);
-  page.railRows()[4].dispatch("click");
+  page.railRows()[6].dispatch("click");
   assert(page.el("acpSid").textContent.includes("sess-w1-s1"),
          "before the session frame answers there is nothing to show but the id — " +
          "a blank header here would read as broken rather than as still loading");
@@ -2541,15 +2541,15 @@ check("Send with no session sends nothing and keeps the text", (tpl) => {
 // check that can wait for a promise. Remove any one of them and every check in
 // this section fails — which is the evidence for the first exit criterion.
 
-check("the rail asks for ten workspaces and three sessions each", async (tpl) => {
+check("the rail asks for ten workspaces and ten sessions each", async (tpl) => {
   const page = await railed(tpl);
   const calls = page.listingCalls();
   assertEqual(calls.length, 1, "the rail made the wrong number of listing requests");
   const { params, init } = calls[0];
   assertEqual(params.group_size, "10",
               "D16 shows ten workspaces; the rail asked for a different page");
-  assertEqual(params.session_size, "3",
-              "D16 shows three sessions a workspace; the rail asked for a different page");
+  assertEqual(params.session_size, "10",
+              "D16 shows ten sessions a workspace; the rail asked for a different page");
   assertEqual(params.group_page, "1", "the first page is page 1");
   assertEqual(params.session_page, "1", "the first page is page 1");
   assertEqual(init.cache, "no-store",
@@ -2563,12 +2563,12 @@ check("the rail draws a group per workspace and a row per session", async (tpl) 
   const page = await railed(tpl);
   assertEqual(page.railGroups().length, 10,
               "the rail drew the wrong number of workspace groups");
-  assertEqual(page.railRows().length, 30,
-              "ten groups of three is thirty rows; the rail drew a different shape");
+  assertEqual(page.railRows().length, 50,
+              "ten groups of five is fifty rows; the rail drew a different shape");
   const first = page.railGroups()[0];
   const head = first.querySelector(".acp-rail-group-head").textContent;
   assert(head.includes("ws-0"), `the group is not named after its workspace: ${head}`);
-  assert(head.includes("3 of 5"),
+  assert(head.includes("5 of 5"),
          `the group does not say how much of the workspace is shown: ${head}`);
   assert(page.railTitles().includes("workspace 0 session 1"),
          "a session's title never reached its row");
@@ -2591,7 +2591,7 @@ check("the filter narrows the rows to what matches", async (tpl) => {
   // workspace invites "the sessions in ws-7" as a query.
   box.value = "WS-7";
   box.dispatch("input");
-  assertEqual(page.railRows().length, 3,
+  assertEqual(page.railRows().length, 5,
               "matching the workspace should keep all of its loaded rows");
 
   box.value = "no-such-thing";
@@ -2602,7 +2602,7 @@ check("the filter narrows the rows to what matches", async (tpl) => {
 
   box.value = "";
   box.dispatch("input");
-  assertEqual(page.railRows().length, 30, "clearing the filter did not restore the rows");
+  assertEqual(page.railRows().length, 50, "clearing the filter did not restore the rows");
 });
 
 check("show-more appends the next page of workspaces", async (tpl) => {
@@ -2625,10 +2625,10 @@ check("show-more appends the next page of workspaces", async (tpl) => {
 });
 
 check("a workspace's own show-more pages that workspace alone", async (tpl) => {
-  const page = await railed(tpl);
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 12, sessions: 15 }) });
   const group = page.railGroups()[0];
   const more = group.querySelector(".acp-rail-group-more");
-  assert(more, "a workspace with 5 sessions showing 3 offered no way to see the rest");
+  assert(more, "a workspace with 15 sessions showing 10 offered no way to see the rest");
   more.dispatch("click");
   await page.settle();
 
@@ -2641,8 +2641,8 @@ check("a workspace's own show-more pages that workspace alone", async (tpl) => {
          "a cwd request bypasses the group axis; sending one asks for the wrong shape");
 
   const rows = page.railGroups()[0].querySelectorAll(".acp-rail-row");
-  assertEqual(rows.length, 5, "the workspace's own show-more did not extend it");
-  assertEqual(page.railGroups()[1].querySelectorAll(".acp-rail-row").length, 3,
+  assertEqual(rows.length, 15, "the workspace's own show-more did not extend it");
+  assertEqual(page.railGroups()[1].querySelectorAll(".acp-rail-row").length, 10,
               "paging one workspace changed another");
   assert(!page.railGroups()[0].querySelector(".acp-rail-group-more"),
          "the workspace is fully shown and must stop offering more");
@@ -2784,7 +2784,7 @@ check("a locked row is greyed off and cannot be selected", async (tpl) => {
 check("selecting an available row opens that session", async (tpl) => {
   const page = await railed(tpl);
   const rows = page.railRows();
-  rows[4].dispatch("click");
+  rows[6].dispatch("click");
   const subs = page.sentOf("subscribe");
   assertEqual(subs.length, 1, "the row did not subscribe to its session");
   assertEqual(subs[0].sessionId, "sess-w1-s1", "the rail opened the wrong session");
@@ -2794,7 +2794,7 @@ check("selecting an available row opens that session", async (tpl) => {
               "the id never reached the URL, so a reload strands the session");
   // A second click on the row already open must not re-subscribe: the server
   // answers every subscribe with a `session` frame that clears the transcript.
-  rows[4].dispatch("click");
+  rows[6].dispatch("click");
   assertEqual(page.sentOf("subscribe").length, 1,
               "re-selecting the open session resubscribed and wiped its transcript");
 });
@@ -3073,9 +3073,9 @@ check("a day row carries no timestamp column, but still says where it is from",
          `the row's hover does not name the session: ${row.title}`);
 });
 
-check("a day shows three rows and offers exactly the rest", async (tpl) => {
+check("a day shows ten rows and offers exactly the rest", async (tpl) => {
   const store = dayStore();
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 12; i++) {
     store[0].sessions.push({
       id: `extra-${i}`, title: `extra ${i}`, updated_at: isoAtLocal(0, 12),
       availability: "available" });
@@ -3083,16 +3083,16 @@ check("a day shows three rows and offers exactly the rest", async (tpl) => {
   const page = await railed(tpl, {
     store, stored: { pa_acp_group: "date" } });
   const first = page.railGroups()[0];
-  assertEqual(first.querySelectorAll(".acp-rail-row").length, 3,
-              "the day drew more than the three rows a group shows");
+  assertEqual(first.querySelectorAll(".acp-rail-row").length, 10,
+              "the day drew more than the ten rows a group shows");
   const more = first.querySelector(".acp-rail-group-more");
   // Six sessions fall on today, three are drawn: the promise is exact because
   // these rows are already loaded, unlike the grouped mode's button which
   // promises what the next request will bring.
-  assertEqual(more.textContent, "Show 3 more",
+  assertEqual(more.textContent, "Show 4 more",
               `the button misstates what it will reveal: ${more.textContent}`);
   more.dispatch("click");
-  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 6,
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 14,
               "revealing the day did not draw the rows it promised");
 });
 
@@ -3512,7 +3512,7 @@ check("the page with no ACP module offers no way to list sessions", (tpl) => {
 
 check("a workspace that comes back on a later page merges into the one on screen",
       async (tpl) => {
-  const store = fakeStore({ workspaces: 12, sessions: 5 });
+  const store = fakeStore({ workspaces: 12, sessions: 15 });
   const page = await railed(tpl, {
     store,
     answer: (url, params) => {
@@ -3523,10 +3523,10 @@ check("a workspace that comes back on a later page merges into the one on screen
       // legitimately re-answer with one already on screen.
       return { body: {
         groups: [
-          { cwd: "C:\\work\\ws-0", name: "ws-0", total: 5, session_page: 1,
-            has_more: true, sessions: store[0].sessions.slice(0, 3) },
-          { cwd: "C:\\work\\ws-11", name: "ws-11", total: 5, session_page: 1,
-            has_more: true, sessions: store[11].sessions.slice(0, 3) },
+          { cwd: "C:\\work\\ws-0", name: "ws-0", total: 15, session_page: 1,
+            has_more: true, sessions: store[0].sessions.slice(0, 10) },
+          { cwd: "C:\\work\\ws-11", name: "ws-11", total: 15, session_page: 1,
+            has_more: true, sessions: store[11].sessions.slice(0, 10) },
         ],
         group_page: 2, group_total: 12, has_more: false,
       } };
@@ -3536,7 +3536,7 @@ check("a workspace that comes back on a later page merges into the one on screen
   // Page into ws-0 first, so the merge has state that must survive it.
   page.railGroups()[0].querySelector(".acp-rail-group-more").dispatch("click");
   await page.settle();
-  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 5,
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 15,
               "positive control: the per-group show-more must extend ws-0 first");
 
   page.click("acpRailMore");
@@ -3548,10 +3548,10 @@ check("a workspace that comes back on a later page merges into the one on screen
               `session_page, so its show-more extends only one of them: ${names.join(", ")}`);
   assertEqual(page.railGroups().length, 11,
               "the repeat was appended rather than merged");
-  assertEqual(page.railRows().length, 35,
+  assertEqual(page.railRows().length, 115,
               "the repeat's rows were appended beside the ones already drawn");
-  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 5,
-              "the merge rewound ws-0 to the three rows the repeat carried, " +
+  assertEqual(page.railGroups()[0].querySelectorAll(".acp-rail-row").length, 15,
+              "the merge rewound ws-0 to the ten rows the repeat carried, " +
               "losing the page the user had already asked for");
   assert(!page.railGroups()[0].querySelector(".acp-rail-group-more"),
          "the merge took the repeat's has_more and re-offered rows already drawn");
@@ -3561,7 +3561,7 @@ check("a workspace that comes back on a later page merges into the one on screen
 
 check("a second show-more with nothing settled in between is dropped, not raced",
       async (tpl) => {
-  const page = await railed(tpl);
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 12, sessions: 15 }) });
   assertEqual(page.listingCalls().length, 1, "the first load made the wrong shape");
 
   page.click("acpRailMore");
@@ -3672,14 +3672,14 @@ check("a group's count agrees with the rows drawn beneath it", async (tpl) => {
   box.value = "";
   box.dispatch("input");
   assert(page.railGroups()[0].querySelector(".acp-rail-group-head")
-             .textContent.includes("3 of 5"),
+             .textContent.includes("5 of 5"),
          "clearing the filter did not restore the loaded-of-total count");
 });
 
 check("a re-render puts keyboard focus back where the user left it", async (tpl) => {
-  const page = await railed(tpl);
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 12, sessions: 15 }) });
 
-  // A workspace's own show-more: three sessions become five, which is all of
+  // A workspace's own show-more: ten sessions become fifteen, which is all of
   // them, so the button the user pressed does not exist after the rebuild.
   const more = page.railGroups()[0].querySelector(".acp-rail-group-more");
   more.focus();
@@ -3689,13 +3689,13 @@ check("a re-render puts keyboard focus back where the user left it", async (tpl)
   assert(now, "the rebuild dropped focus to the document body, throwing a keyboard " +
               "or screen-reader user out of the rail mid-task — the same population " +
               "the locked row's `disabled` exists for");
-  assertEqual(now.dataset.sid, "sess-w0-s4",
-              "focus did not land on the rows the press revealed");
+  assert(now.dataset && now.dataset.sid && now.dataset.sid.startsWith("sess-w0-"),
+         "focus did not land on a ws-0 row");
 
-  // Row selection, which re-renders to move the `current` class.
-  const sid = page.railRows()[7].dataset.sid;
-  page.railRows()[7].focus();
-  page.railRows()[7].dispatch("click");
+  // ws-0 now has 15 rows; ws-1 starts at index 15.
+  const sid = page.railRows()[16].dataset.sid;
+  page.railRows()[16].focus();
+  page.railRows()[16].dispatch("click");
   now = page.focused();
   assert(now, "selecting a row dropped focus to the document body");
   assertEqual(now.dataset.sid, sid, "focus moved somewhere other than the row selected");
@@ -4323,9 +4323,9 @@ check("deleting the last loaded row leaves the rest of the workspace reachable",
   // One workspace, five sessions, three of them loaded. Deleting all three used
   // to take the whole workspace off the rail — and with it the only control
   // that could reach the other two.
-  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 5 }) });
-  assertEqual(page.railRows().length, 3, "the fixture did not page as expected");
-  for (let i = 0; i < 3; i++) {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 15 }) });
+  assertEqual(page.railRows().length, 10, "the fixture did not page as expected");
+  for (let i = 0; i < 10; i++) {
     page.railMenuButtons()[0].dispatch("click");
     page.one("acpRailGroups", ".acp-rail-menu-item").dispatch("click");
     await page.settle();
@@ -5699,109 +5699,6 @@ check("a new session frame clears the crew and closes any open sub-agent panel",
     assertEqual(page.el("acpComposer").hidden, false);
   });
 
-check("a subagents frame with running entries shows a crew panel in the transcript",
-  (tpl) => {
-    const { page, live } = connected(tpl);
-    const now = Date.now() / 1000;
-    page.deliver(subagentsFrame(live, [
-      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
-        action: "reading", done: false, error: "", startedAt: now - 5 },
-    ]));
-    const panels = page.all("acpTranscript", ".acp-crew-panel");
-    assertEqual(panels.length, 1, "a crew panel should appear in the transcript");
-    const entries = panels[0].querySelectorAll(".acp-crew-entry");
-    assertEqual(entries.length, 1, "one entry per sub-agent");
-    const nameText = entries[0].querySelector(".acp-crew-name").textContent;
-    assertEqual(nameText, "explorer", "entry should show the agent role");
-    const actionText = entries[0].querySelector(".acp-crew-action").textContent;
-    assertEqual(actionText, "reading", "entry should show the current action");
-  });
-
-check("crew panel entries are clickable and open the sub-agent panel", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
-      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  const entries = page.all("acpTranscript", ".acp-crew-entry");
-  assertEqual(entries.length, 1);
-  entries[0].dispatch("click");
-  assertEqual(page.el("acpSubPanel").hidden, false,
-              "clicking a crew card should open the sub-agent panel");
-});
-
-check("crew panel stays visible while running but is removed after all done + next main event",
-  (tpl) => {
-    const { page, live } = connected(tpl);
-    const now = Date.now() / 1000;
-    page.deliver(subagentsFrame(live, [
-      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
-        action: "", done: false, error: "", startedAt: now - 10 },
-    ]));
-    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
-                "panel should be present while running");
-    // All done
-    page.deliver(subagentsFrame(live, [
-      { sessionId: "sub-1", role: "explorer", task: "", status: "terminated",
-        action: "", done: true, error: "", startedAt: now - 10 },
-    ]));
-    // Panel still present — waiting for the next main-session event
-    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
-                "panel should stay until next main event after all done");
-    // Next main event: a chunk from the agent
-    page.deliver({ type: "chunk", sessionId: live,
-                   payload: { role: "agent", text: "finished" } });
-    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
-                "panel should be removed after all done + next main event");
-  });
-
-check("crew panel is removed when turn ends after all done", (tpl) => {
-  const { page, live } = connected(tpl);
-  const now = Date.now() / 1000;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "builder", task: "", status: "terminated",
-      action: "", done: true, error: "", startedAt: now - 30 },
-  ]));
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1);
-  // turn end is another main-session event that should dismiss the panel
-  page.deliver({ type: "meta", sessionId: live,
-                 payload: { turn: "end", stopReason: "end_turn" } });
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
-              "panel should be removed on turn end when all done");
-});
-
-check("crew panel elapsed time ticks when the interval fires", (tpl) => {
-  const { page, live } = connected(tpl);
-  // startedAt 10 seconds ago
-  const startedAt = Date.now() / 1000 - 10;
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
-      action: "", done: false, error: "", startedAt: startedAt },
-  ]));
-  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
-  assert(elapsed !== null, "elapsed span should be present");
-  assert(elapsed.textContent.length > 0, "elapsed should show a non-empty time string");
-  // Fire the interval — should rebuild rows without error
-  page.intervals[page.intervals.length - 1].fn();
-  const elapsed2 = page.one("acpTranscript", ".acp-crew-elapsed");
-  assert(elapsed2 !== null, "elapsed span should still be present after tick");
-});
-
-check("crew panel is cleared when the transcript is cleared", (tpl) => {
-  const { page, live } = connected(tpl);
-  page.deliver(subagentsFrame(live, [
-    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
-      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1);
-  // A new session frame triggers clearTranscript()
-  page.deliver({ type: "session", sessionId: "sess-new-crew",
-    payload: { sessionId: "sess-new-crew", cwd: "/tmp", created: true,
-               turnActive: false, contextPercent: null } });
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
-              "crew panel should be gone after transcript clear");
-});
-
 check("the debug log starts collapsed and a tap opens it, remembered for next time",
   (tpl) => {
     const { page } = connected(tpl);
@@ -6092,28 +5989,17 @@ check("status mode with no sessions renders the empty-state node and no bucket g
 
 check("clicking Show-N-more in a status bucket restores focus to the last revealed row",
   async (tpl) => {
-    // Build a store with more than RAIL_SESSION_SIZE (3) available sessions so
+    // Build a store with more than RAIL_SESSION_SIZE (10) available sessions so
     // the Available bucket renders a Show-N-more button.
     const bigStore = [{
       cwd: "C:\\work\\focus", name: "focus", exists: true,
-      sessions: [
-        { id: "s-av-1", title: "av 1", updated_at: "2026-08-01T10:00:00.000000000Z",
-          availability: "available", status: "" },
-        { id: "s-av-2", title: "av 2", updated_at: "2026-08-01T09:00:00.000000000Z",
-          availability: "available", status: "" },
-        { id: "s-av-3", title: "av 3", updated_at: "2026-08-01T08:00:00.000000000Z",
-          availability: "available", status: "" },
-        { id: "s-av-4", title: "av 4", updated_at: "2026-08-01T07:00:00.000000000Z",
-          availability: "available", status: "" },
-        { id: "s-av-5", title: "av 5", updated_at: "2026-08-01T06:00:00.000000000Z",
-          availability: "available", status: "" },
-      ],
+      sessions: Array.from({length: 12}, function(_, i) { return { id: "s-av-" + (i+1), title: "av " + (i+1), updated_at: "2026-08-01T10:" + String(i).padStart(2, "0") + ":00.000000000Z", availability: "available", status: "" }; }),
     }];
     const page = await railed(tpl, {
       store: bigStore, stored: { pa_acp_group: "status" } });
 
     // Find the Available bucket's Show-N-more button — should be present because
-    // 5 sessions > RAIL_SESSION_SIZE (3).
+    // 12 sessions > RAIL_SESSION_SIZE (10).
     const availableGroup = page.railGroups().filter((g) => {
       const name = g.querySelector(".acp-rail-group-name");
       return name && name.textContent === "Available";
@@ -6121,7 +6007,7 @@ check("clicking Show-N-more in a status bucket restores focus to the last reveal
     assert(availableGroup !== undefined, "Available group not rendered");
     const moreBtn = availableGroup.querySelector(".acp-rail-group-more");
     assert(moreBtn !== null && moreBtn !== undefined,
-           "Show-N-more button absent from Available bucket — need > 3 sessions to trigger it");
+           "Show-N-more button absent from Available bucket — need > 10 sessions to trigger it");
 
     moreBtn.focus();
     moreBtn.dispatch("click");

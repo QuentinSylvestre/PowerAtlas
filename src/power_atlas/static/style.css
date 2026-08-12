@@ -1003,7 +1003,7 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    scales the whole viewport in — measured on this exact element, since it is
    focused by every prompt sent. The desktop-sized override undoes it above
    the breakpoint where no such browser is in play. */
-.acp-prompt { flex: 1; min-height: 44px; max-height: 180px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
+.acp-prompt { flex: 1; min-height: 44px; max-height: 258px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-send { padding: 6px 20px; }
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone

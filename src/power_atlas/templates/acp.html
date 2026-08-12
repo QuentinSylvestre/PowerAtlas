@@ -244,7 +244,7 @@
          aria-label="Images attached to the next prompt"></div>
     <div class="acp-composer-row">
       <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
-                placeholder="Prompt the agent — Enter sends, Shift+Enter for a new line, Ctrl+V to attach an image"
+                placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
                 aria-label="Prompt"></textarea>
       <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
       <!-- Only during a turn. A stop control that is present and inert for the
@@ -490,11 +490,6 @@
   // changes — which is what lets a fan-out keep streaming into the main
   // transcript behind the panel exactly as Claude Code's own agent bar does.
   var subViewSid = null;
-  // The crew panel appended to the transcript while a fan-out is running.
-  // Removed by the first main-session event after all entries are done.
-  var crewPanel = null;
-  // Interval id for the elapsed-time ticker, or null.
-  var crewPanelTimer = null;
   // True once all crew entries are done; cleared by any new crew frame with
   // running entries, so a second fan-out in one turn re-arms it.
   var crewAllDone = false;
@@ -539,7 +534,7 @@
   // layout depends on them and a server-side default change should not silently
   // reshape the page.
   var RAIL_GROUP_SIZE = 10;
-  var RAIL_SESSION_SIZE = 3;
+  var RAIL_SESSION_SIZE = 10;
   // Where a row's Delete goes. A sibling of the listing route rather than a
   // verb on it, and **deliberately not on `_REMOTE_ALLOWED_PATHS`** — that
   // allowlist is default-deny, so this path 403s for a remote peer without a
@@ -954,7 +949,6 @@
     // server-side, so a bar or panel still showing them would be offering
     // pills that `subscribe` would now answer `unknown_session`.
     setCrew([]);
-    removeCrewPanel();
     closeSubagentView();
     // Images were staged against the conversation this page has just let go
     // of. Carrying them to whatever is opened next would put a screenshot in
@@ -2276,7 +2270,6 @@
     // and a sub-agent panel left open would be showing a conversation that no
     // longer has anything to do with what is on screen behind it.
     setCrew([]);
-    removeCrewPanel();
     closeSubagentView();
   }
 
@@ -2289,101 +2282,15 @@
   // sub-agent is done, the transcript card it is built from) is how a
   // finished fan-out is reviewed after the fact.
 
-  function renderCrewPanel() {
-    if (!crewPanel || !crewPanel.parentNode) return;
-    // Full rebuild of inner rows
-    crewPanel.textContent = '';
-    for (var i = 0; i < crew.length; i++) {
-      (function(entry) {
-        var row = document.createElement('button');
-        row.type = 'button';
-        var state = subagentState(entry);
-        row.className = 'acp-crew-entry acp-crew-' + state;
-        row.setAttribute('aria-label', (entry.role || 'sub-agent') + ': ' + (entry.action || entry.status || ''));
-        var nameSpan = document.createElement('span');
-        nameSpan.className = 'acp-crew-name';
-        nameSpan.textContent = entry.role || entry.task || 'sub-agent';
-        var actionSpan = document.createElement('span');
-        actionSpan.className = 'acp-crew-action';
-        actionSpan.textContent = state === 'error' ? 'errored'
-          : state === 'done' ? 'done'
-          : (entry.action || entry.status || 'working\u2026');
-        var elapsedSpan = document.createElement('span');
-        elapsedSpan.className = 'acp-crew-elapsed';
-        elapsedSpan.textContent = elapsedText(entry.startedAt);
-        row.appendChild(nameSpan);
-        row.appendChild(actionSpan);
-        row.appendChild(elapsedSpan);
-        row.addEventListener('click', function() { openSubagent(entry.sessionId); });
-        crewPanel.appendChild(row);
-      })(crew[i]);
-    }
-  }
-
-  function stopCrewPanelTimer() {
-    if (crewPanelTimer !== null) {
-      clearInterval(crewPanelTimer);
-      crewPanelTimer = null;
-    }
-  }
-
-  function removeCrewPanel() {
-    stopCrewPanelTimer();
-    if (crewPanel && crewPanel.parentNode) crewPanel.remove();
-    crewPanel = null;
-  }
-
-  function dismissCrewPanelIfDone() {
-    if (crewAllDone) removeCrewPanel();
-  }
-
   function setCrew(next) {
     crew = Array.isArray(next) ? next : [];
     renderAgentBar();
-    // The panel currently open may name a sub-agent this update no longer
-    // carries the same entry for - refresh its header from the latest
-    // `role`/`task`/`status` rather than leaving it showing the snapshot from
-    // whenever it was opened.
     if (subViewSid) renderSubHead();
-    // Transcript crew panel — appears below the fan-out's tool call while
-    // any stage is still running, disappears on the first main-session event
-    // after all are done.
     if (!crew.length) {
-      removeCrewPanel();
       crewAllDone = false;
       return;
     }
     crewAllDone = crew.every(function(e) { return e.done; });
-    if (crewAllDone) {
-      // All done: stop the ticker but keep the panel visible until the next
-      // main-session event removes it.
-      stopCrewPanelTimer();
-      if (!crewPanel || !crewPanel.parentNode) {
-        var stick = stuckToBottom();
-        crewPanel = document.createElement('div');
-        crewPanel.className = 'acp-crew-panel';
-        transcriptEl.appendChild(crewPanel);
-        if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      }
-      renderCrewPanel();
-      return;
-    }
-    // At least one still running: ensure the panel exists in the transcript.
-    if (!crewPanel || !crewPanel.parentNode) {
-      var stick = stuckToBottom();
-      crewPanel = document.createElement('div');
-      crewPanel.className = 'acp-crew-panel';
-      transcriptEl.appendChild(crewPanel);
-      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      // Tick the elapsed display once a second while running.
-      if (crewPanelTimer === null) {
-        crewPanelTimer = setInterval(function() {
-          if (crewPanel && crewPanel.parentNode) renderCrewPanel();
-          else stopCrewPanelTimer();
-        }, 1000);
-      }
-    }
-    renderCrewPanel();
   }
 
   function crewEntry(sid) {
@@ -4648,7 +4555,6 @@
       return;
     }
     if (type === 'meta' && payload.turn === 'end') {
-      dismissCrewPanelIfDone();
       agentBody = null;
       // Group consecutive tool calls accumulated during this turn into
       // collapsible containers. flushToolGroups() sets toolGroup = null.
@@ -4674,7 +4580,6 @@
       return;
     }
     if (type === 'chunk') {
-      dismissCrewPanelIfDone();
       hideThinking();
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
       return;
@@ -4696,7 +4601,6 @@
       return;
     }
     if (type === 'tool_call' || type === 'tool_update') {
-      dismissCrewPanelIfDone();
       hideThinking();
       addToolCall(payload);
       logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
@@ -5228,9 +5132,16 @@
   reloadBtn.addEventListener('click', function () { location.reload(); });
   sendBtn.addEventListener('click', sendPrompt);
   promptInput.addEventListener('keydown', function (ev) {
-    // Enter sends and Shift+Enter breaks the line, which is why this is a
-    // textarea and not an input: a prompt with a code block in it is normal.
-    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+    // Shift+Enter always inserts a newline (browser default — not intercepted).
+    // On touch devices (phones/tablets), plain Enter also inserts a newline so
+    // the on-screen keyboard Return does not fire a send. Desktop: Enter sends.
+    var isTouchDevice = (
+      (typeof navigator !== 'undefined' &&
+       typeof navigator.maxTouchPoints === 'number' &&
+       navigator.maxTouchPoints > 0) ||
+      (typeof window !== 'undefined' && 'ontouchstart' in window)
+    );
+    if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !isTouchDevice) {
       ev.preventDefault();
       sendPrompt();
     }
