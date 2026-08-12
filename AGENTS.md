@@ -2,6 +2,8 @@
 
 ## Doc & Test Guidelines
 
+- **Never restart PowerAtlas autonomously.** Restarting kills every kiro-cli ACP process the supervisor is managing, terminating all active sessions. Always defer to the user — present the restart as needed and let them do it when ready.
+
 - Update existing documentation files when implementing user-visible changes.
 - Do not create new documentation files unless the user requests them.
 - Update README.md only when changes affect installation, basic usage, or user-visible CLI/WebUI surface. **Exempt: a surface introduced by a plan whose Intent declares it a throwaway prototype**, for as long as it stays one — the README describes the product, and documenting a surface built to be deleted misleads the reader it exists for. The exemption ends the moment the surface is kept; promoting it to product is what makes the README row required work.
