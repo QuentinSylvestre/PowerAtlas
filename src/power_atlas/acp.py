@@ -416,7 +416,8 @@ _SUBAGENT_ACTIVE_STATUSES = frozenset(
 # actually dispatched). "completed", "failed", and "cancelled" are the
 # standard observed trio; "terminated" is included by analogy with kiro-cli
 # 2.16.2's sub-agent status vocabulary (sole terminal `status.type` for
-# sub-agent entries) — not yet observed on `tool_call_update` status fields.
+# sub-agent entries) — included defensively; kiro-cli 2.16.2 uses it only
+# on sub-agent entries, not on `tool_call_update` frames.
 _TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "cancelled", "terminated"})
 
 # Field names a sub-agent list entry may use for its session id, its display
@@ -2744,13 +2745,17 @@ class _Supervisor:
                     # membership: a session not currently mid-turn cannot be the
                     # fan-out parent, and its anchor would never be consumed.
                     _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
-                    _spawner_tool_name = _kiro_meta.get("toolName")
+                    _spawner_tool_name = (
+                        _kiro_meta.get("toolName") if isinstance(_kiro_meta, dict) else None
+                    )
                     if (
                         _spawner_tool_name == "subagent"
                         and session_id in self.inflight
                         and payload["toolCallId"]
                     ):
                         self.crew_spawn_anchors[payload["toolCallId"]] = session_id
+                        log.debug("ACP tool_call: spawner anchor recorded"
+                                  " session=%s id=%s", session_id, payload["toolCallId"])
                 elif not (payload["title"] or payload["kind"] or
                           payload["status"] or payload["command"]):
                     # `tool_call_update` can arrive in two shapes for the same

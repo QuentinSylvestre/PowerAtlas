@@ -2565,6 +2565,7 @@ def acp_session():
         acp_mod._supervisor.crews.pop(sid, None)
         acp_mod._supervisor.subagent_sessions.clear()
         acp_mod._supervisor.subagent_history.clear()
+        acp_mod._supervisor.crew_spawn_anchors.clear()
 
 
 class TestAcpServerTypeGuard:
@@ -10569,10 +10570,10 @@ class TestAcpSubagentListAttribution:
         assert acp_mod._supervisor.crew_spawn_anchors == {}
 
     def test_turn_end_clears_spawner_entries_logic(self, acp_store):
-        """Anchors for a session are removed when the session leaves inflight.
-        Tests the cleanup logic directly;
-        test_turn_end_clears_spawner_entries_via_production_code below tests
-        the production path.
+        """Verifies the cleanup algorithm in isolation: directly drives the
+        same dict-iteration pattern the ``_handle_prompt`` finally block uses,
+        without going through ``_handle_prompt`` itself. The production path is
+        exercised by ``test_turn_end_clears_spawner_entries_via_production_code``.
         """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
@@ -10606,6 +10607,8 @@ class TestAcpSubagentListAttribution:
 
         # The finally block in _handle_prompt must have cleared the anchor
         assert acp_mod._supervisor.crew_spawn_anchors == {}
+        # Confirm the turn ran (session left inflight on completion)
+        assert sid not in acp_mod._supervisor.inflight
 
 
 class TestAcpSubagentListParsing:
