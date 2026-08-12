@@ -4863,6 +4863,17 @@
       return;
     }
     if (type === 'agent_died') {
+      // If a steer was in-flight when the agent died, restore the textarea so
+      // the composer is usable again — the steer_ack that would have cleared
+      // _steerPending is never coming from an agent that has exited.
+      if (_steerPending) {
+        promptInput.value = _steerPending;
+        _steerPending = null;
+        promptInput.disabled = false;
+        steerBtn.disabled = false;
+        autoGrowPrompt();
+        refreshComposerControls();
+      }
       setPending(false);
       // Nothing is left to create against. The frame the pending create was
       // waiting for cannot come from an agent that has exited.
@@ -5136,6 +5147,10 @@
     // Fix 4: mark stop in-progress so refreshComposerControls does not
     // re-enable Stop before setTurn(false) clears the flag.
     _stopInProgress = true;
+    // stopBtn.disabled = true is kept as an eager visual update: refreshComposerControls()
+    // is NOT called here, so this is the only thing that disables the button immediately.
+    // If refreshComposerControls() were called after _stopInProgress = true, this line
+    // would be redundant (refreshComposerControls() sets stopBtn.disabled via _stopInProgress).
     stopBtn.disabled = true;
     stopBtn.textContent = 'Stopping…';
   });

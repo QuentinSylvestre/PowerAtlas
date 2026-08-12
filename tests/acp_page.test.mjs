@@ -6780,6 +6780,8 @@ check("steer_ack queued:false shows error note", (tpl) => {
     "transcript should contain rejection note when queued:false");
   assertEqual(page.el("acpPrompt").value, originalText,
     "steer_ack queued:false should restore the textarea text");
+  assertEqual(page.el("acpPrompt").disabled, false, "promptInput re-enabled");
+  assertEqual(page.el("acpSteer").disabled, false, "steerBtn re-enabled");
 });
 
 check("error frame during steer restores textarea text", (tpl) => {
@@ -6842,6 +6844,32 @@ check("removeAttachment renumbers [Image N] markers in textarea", async (tpl) =>
     "after removing first attachment, [Image 1] should appear exactly once for the remaining one — got: " + after);
 });
 
+check("removeAttachment handles middle element of 3", async (tpl) => {
+  const { page } = connected(tpl);
+  // Stage 3 images
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  page.paste([page.imageFile()]);
+  await settleStaging();
+  // Override textarea value to a known state with all 3 markers
+  page.el("acpPrompt").value = "[Image 1][Image 2][Image 3]";
+  // Remove the middle attachment (index 1)
+  const chips = page.trayChips();
+  assert(chips.length === 3, "fixture: 3 chips — got: " + chips.length);
+  chips[1].querySelector("button").dispatch("click");
+  const after = page.el("acpPrompt").value;
+  // [Image 1] should remain exactly once
+  const count1 = (after.match(/\[Image 1\]/g) || []).length;
+  assert(count1 === 1, "[Image 1] should appear exactly once — got: " + after);
+  // [Image 2] should appear exactly once (renumbered from [Image 3])
+  const count2 = (after.match(/\[Image 2\]/g) || []).length;
+  assert(count2 === 1, "[Image 2] should appear exactly once (renumbered from [Image 3]) — got: " + after);
+  // [Image 3] should NOT appear
+  assert(!after.includes("[Image 3]"), "[Image 3] should not appear after removal — got: " + after);
+});
+
 // Fix 7: steer textarea re-enabled on WS close during pending steer
 check("steer textarea re-enabled on ws close during pending steer", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
@@ -6876,6 +6904,26 @@ check("steer controls re-enabled on session release during pending steer", (tpl)
   });
   assertEqual(page.el("acpPrompt").disabled, false,
     "textarea should be re-enabled after session release with steer pending");
+  assertEqual(page.el("acpSteer").disabled, false, "steerBtn re-enabled after release");
+});
+
+check("steer textarea re-enabled on agent_died", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  // Set up turn active and click steer
+  page.type("steer during turn");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpSteer");
+  assert(page.el("acpPrompt").disabled === true,
+    "fixture: textarea should be disabled after clicking Steer");
+  // Deliver agent_died frame
+  page.deliver({
+    type: "agent_died", sessionId: live,
+    payload: { exitCode: 1, message: "agent process exited" },
+  });
+  assertEqual(page.el("acpPrompt").disabled, false,
+    "promptInput should be re-enabled after agent_died with steer pending");
+  assertEqual(page.el("acpSteer").disabled, false,
+    "steerBtn should be re-enabled after agent_died with steer pending");
 });
 
 // Fix 13: session-change guard — queue with sessionId=A, change to B, turn:end with A, no prompt sent
