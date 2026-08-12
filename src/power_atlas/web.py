@@ -693,9 +693,14 @@ _ACP_LISTING_PATH = "/api/acp/sessions"
 
 # The create picker's workspace list, up here for exactly the same mechanical
 # reason as its neighbour above — `_REMOTE_ALLOWED_PATHS` names it, and that
-# dict is built at import time. Its rationale, and why it is on the remote
-# surface while deletion is not, stay with the route further down.
+# dict is built at import time. Its rationale stays with the route further down.
 _ACP_WORKSPACES_PATH = "/api/acp/workspaces"
+
+# The session delete route. Up here for the same reason as the two paths above —
+# `_REMOTE_ALLOWED_PATHS` names it and the dict is built at import time. The full
+# rationale (auth posture, mobile-UA advisory gate, rename-staging safety net)
+# stays with the route and the block comment that precede it further down.
+_ACP_DELETE_PATH = "/api/acp/sessions/delete"
 
 
 def set_remote_host(address: str) -> None:
@@ -1039,6 +1044,26 @@ def _is_remote_peer(peer: str | None) -> bool:
         return True
 
 
+# Lowercase substrings that identify a mobile browser's User-Agent string.
+# Used by `_is_mobile_ua` to gate `ACP_CAN_DELETE` in the `/acp` template.
+# Advisory only — this affects whether the \u22ef menu is *rendered*, not whether
+# the delete route is reachable. A mobile browser that POSTs directly (bypassing
+# the JS gate) is stopped by the device cookie + Origin/Referer check in
+# `same_origin_guard`, the same posture the listing route already accepts. The
+# mobile exclusion is a UX promise, not a security boundary.
+_MOBILE_UA_TOKENS = ("mobile", "android", "iphone", "ipod", "ipad")
+
+
+def _is_mobile_ua(ua: str) -> bool:
+    """Return True when the User-Agent string looks like a mobile browser.
+
+    Matches case-insensitively against `_MOBILE_UA_TOKENS`. If the user
+    configures their mobile browser to request the desktop site, it sends a
+    desktop UA and gets the delete button — their deliberate choice.
+    """
+    return any(token in ua.lower() for token in _MOBILE_UA_TOKENS)
+
+
 # Default-deny (D6). A denylist over ~40 routes leaks by default on the next
 # route added; this makes every new route loopback-only until someone puts it
 # here deliberately. `_ACP_LISTING_PATH` (Phase 4) was held out of this map
@@ -1076,9 +1101,17 @@ _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     # `/ws/acp` — so a picker that could not list workspaces from a phone would
     # remove something that works today. It carries workspace paths and session
     # *counts* and no session content, i.e. a strict subset of what
-    # `_ACP_LISTING_PATH` above already discloses. Deletion is deliberately not
-    # here; see `_ACP_DELETE_PATH`.
+    # `_ACP_LISTING_PATH` above already discloses.
     _ACP_WORKSPACES_PATH: "http",
+    # Destructive / irreversible: admitted to authenticated remote peers so that
+    # desktop browsers at the NetBird address can delete sessions from the rail.
+    # The mobile-UA exclusion (`ACP_CAN_DELETE=false` in the rendered page) is
+    # advisory / UI-only — it affects whether the \u22ef menu is *rendered*, not
+    # whether the route is reachable. The device cookie + Origin/Referer check
+    # in `same_origin_guard` (`allow_missing=False` for all POSTs) is the
+    # transport-level auth boundary, identical to `_ACP_LISTING_PATH` above.
+    # The stop switch (`_REMOTE_SURFACE_STOPPED`) blocks this path when stopped.
+    _ACP_DELETE_PATH: "http",
     _REMOTE_STATIC_MOUNT: "http",
 }
 
@@ -1488,6 +1521,14 @@ async def acp_page(request: Request, sid: str = ""):
         # guard already refused or admitted this request — so a wrong reading
         # costs a link, not a boundary.
         "local": not _is_remote_peer((request.scope.get("client") or (None,))[0]),
+        # True for loopback viewers unconditionally; true for remote desktop
+        # browsers (non-mobile UA); false for remote mobile browsers. Governs
+        # whether the \u22ef rail-row menu (and its Delete option) is rendered.
+        # The mobile exclusion is UI-only — see `_MOBILE_UA_TOKENS`.
+        "can_delete": (
+            not _is_remote_peer((request.scope.get("client") or (None,))[0])
+            or not _is_mobile_ua(request.headers.get("user-agent", ""))
+        ),
         # Non-empty when the guarded import above failed. The page renders the
         # reason and does not open a socket, rather than retrying against a
         # route that cannot answer.
@@ -2243,17 +2284,18 @@ async def api_acp_workspaces(response: Response):
 # route above says "Read-only" in its first line. That is worth stating once,
 # here, because it is the property a reviewer would otherwise assume still held.
 #
-# **Loopback-only, and the enforcement is the absence below.** `_ACP_DELETE_PATH`
-# is deliberately NOT in `_REMOTE_ALLOWED_PATHS`, and that map is default-deny
-# (D6), so a remote peer is refused by the guard that already exists rather than
-# by a check written here that could be forgotten or inverted. Adding the path to
-# that map is the only edit that would make irreversible deletion reachable from
-# a phone — one line, in one place, which is where a decision like that belongs.
-# The page cooperates rather than relying on the 403: `/acp` renders the menu
-# only when `local` is true, so a remote viewer is never offered a control that
-# would fail. Being a POST, it also inherits `same_origin_guard`'s Origin/Referer
-# check (`:809`) for free.
-_ACP_DELETE_PATH = "/api/acp/sessions/delete"
+# **On `_REMOTE_ALLOWED_PATHS`**: `_ACP_DELETE_PATH` is now in that map, so
+# authenticated remote peers can reach this route. The mobile-UA exclusion
+# (`ACP_CAN_DELETE=false`) is advisory / UI-only — the auth boundary is the
+# device cookie + Origin/Referer check (`same_origin_guard`, `:809`), identical
+# to `_ACP_LISTING_PATH`. A mobile browser that POSTs directly (bypassing the
+# JS gate) is stopped by those two layers, not by a UA check here. The page
+# cooperates: `/acp` renders the menu only when `ACP_CAN_DELETE` is true, so
+# a mobile viewer is not offered a control in the first place. Being a POST,
+# it also inherits `same_origin_guard`'s Origin/Referer check (`:809`) for free.
+# (`_ACP_DELETE_PATH` is declared near `_REMOTE_ALLOWED_PATHS` above for the
+# same reason `_ACP_LISTING_PATH` and `_ACP_WORKSPACES_PATH` are — module-level
+# dict built at import time.)
 
 # Everything one session owns in the store — measured against the live store on
 # 2026-08-03, not inferred from the loader: 13,993 entries made of 5,958 `.json`,
@@ -2456,10 +2498,15 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
 
 @app.post(_ACP_DELETE_PATH)
 async def api_acp_delete_sessions(request: Request):
-    """Delete sessions from kiro-cli's store. Irreversible. Loopback-only.
+    """Delete sessions from kiro-cli's store. Irreversible.
 
-    Loopback-only by omission from `_REMOTE_ALLOWED_PATHS` — see the block
-    comment above this route, which is where that decision is recorded.
+    Reachable from authenticated remote peers (device cookie + Origin/Referer).
+    The mobile-UA exclusion (`ACP_CAN_DELETE=false`) is advisory / UI-only;
+    the auth boundary is `same_origin_guard`'s cookie + Origin/Referer check,
+    the same posture as `_ACP_LISTING_PATH`. Note that the `held` snapshot
+    taken on the event loop is a primary check; the rename-staging
+    sharing-violation (`winerror 32`) is the correctness backstop for the
+    TOCTOU gap between the snapshot and the rename.
 
     Answers `{"deleted": [...], "failed": [{"id", "code", "message"}]}` with a
     200 whenever the request itself was well-formed, including when every id in

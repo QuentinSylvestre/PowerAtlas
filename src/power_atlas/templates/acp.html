@@ -373,13 +373,17 @@
   // `scope["client"]` rather than the Host header (D26), so a remote peer
   // cannot claim it.
   //
-  // Read here for one reason: session deletion is loopback-only. The route is
-  // absent from `_REMOTE_ALLOWED_PATHS`, so a remote press would be refused by
-  // the guard anyway — but a control that exists only to fail is the dead end
-  // this page already refuses to draw elsewhere (the dashboard link renders as
-  // plain text remotely; a `locked` row is `disabled` rather than clickable and
-  // then refused). So the menu is not built at all when this is false.
-  var ACP_LOCAL = {{ local | tojson }};
+  // Note: session deletion used to be loopback-only and was gated on ACP_LOCAL.
+  // It is now gated on ACP_CAN_DELETE (below), which is true for loopback
+  // viewers unconditionally and for remote desktop browsers (non-mobile UA).
+  // Remote mobile browsers get ACP_CAN_DELETE=false and never see the menu.
+
+  // True when the viewer may use the \u22ef rail-row menu (delete). Loopback
+  // viewers always get true. Remote viewers get true for desktop UAs, false for
+  // mobile UAs. The server derives this from the User-Agent header; if the user
+  // requests the desktop site from a mobile browser, they get the desktop UA
+  // and therefore see the button \u2014 their deliberate choice.
+  var ACP_CAN_DELETE = {{ can_delete | tojson }};
 
   var statusEl = document.getElementById('acpStatus');
   var logEl = document.getElementById('acpLog');
@@ -572,11 +576,10 @@
   // reshape the page.
   var RAIL_GROUP_SIZE = 10;
   var RAIL_SESSION_SIZE = 10;
-  // Where a row's Delete goes. A sibling of the listing route rather than a
-  // verb on it, and **deliberately not on `_REMOTE_ALLOWED_PATHS`** — that
-  // allowlist is default-deny, so this path 403s for a remote peer without a
-  // line of code here relying on it. `ACP_LOCAL` is what keeps a remote viewer
-  // from being offered the control in the first place.
+  // Where a row's Delete goes. Now on `_REMOTE_ALLOWED_PATHS` for authenticated
+  // remote peers (desktop UA). `ACP_CAN_DELETE` gates whether the menu is
+  // rendered at all — mobile UA gets false, so the button is never offered.
+  // The device cookie + Origin/Referer check is the transport-level boundary.
   var RAIL_DELETE_PATH = '/api/acp/sessions/delete';
   // How often the rail re-reads availability, and why it re-reads it at all.
   //
@@ -1771,7 +1774,7 @@
       var stTally = stOrder.map(function (st) {
         return stCounts[st] > 1 ? st + ' \xd7' + stCounts[st] : st;
       }).join(', ');
-      var headerText = nameTally + (stTally ? ' \xb7 ' + stTally : '');
+      var headerText = 'Tool calls: ' + nameTally + (stTally ? ' \xb7 ' + stTally : '');
 
       // Build group container.
       var group = document.createElement('div');
@@ -1807,7 +1810,9 @@
       // the last group's body. Same IIFE pattern as renderCrewPanel (acp.html).
       (function (gt, gb) {
         // aria-label gives AT a terse action verb (textContent carries the visible
-        // count+tally for sighted users — split is intentional, not a gap).
+        // count+tally for sighted users, prefixed with "Tool calls: " — the split
+        // is intentional, not a gap: AT hears only the action verb, sighted users
+        // see the full tally with the label).
         gt.setAttribute('aria-label', 'Expand tool call group');
         gt.setAttribute('aria-controls', gb.id);
         gt.addEventListener('click', function () {
@@ -3666,7 +3671,7 @@
       selectSession(session.id, state);
     });
     item.appendChild(row);
-    if (ACP_LOCAL) item.appendChild(railMenuNode(session, state));
+    if (ACP_CAN_DELETE) item.appendChild(railMenuNode(session, state));
     return item;
   }
 

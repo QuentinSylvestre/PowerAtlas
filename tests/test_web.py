@@ -15360,21 +15360,18 @@ class TestAcpDeleteEndpoint:
 
         assert forgotten == []
 
-    def test_the_route_is_not_on_the_remote_surface(self):
-        """**The whole authorization story, and it is an absence.**
-
-        `_REMOTE_ALLOWED_PATHS` is default-deny (D6), so leaving this path out
-        of it is what refuses a remote peer — no check in the route relies on
-        being remembered. This test is the tripwire for the one-line edit that
-        would make irreversible deletion reachable from a phone.
+    def test_the_route_is_on_the_remote_surface_for_authenticated_peers(self):
+        """The delete path is on `_REMOTE_ALLOWED_PATHS` for authenticated remote
+        peers. Desktop browsers at the NetBird IP can reach it; mobile UA gets
+        ACP_CAN_DELETE=false and is never offered the button. The auth boundary
+        is the device cookie + Origin/Referer check (same_origin_guard), the same
+        posture as the listing route. The mobile exclusion is UI-only.
         """
         from power_atlas.web import _ACP_DELETE_PATH, _REMOTE_ALLOWED_PATHS
-        assert _ACP_DELETE_PATH not in _REMOTE_ALLOWED_PATHS
-        # And it is not reachable by prefix through the listing entry either:
-        # the two paths share one, and the matcher is exact for everything but
-        # the static mount.
+        assert _ACP_DELETE_PATH in _REMOTE_ALLOWED_PATHS
+        assert _REMOTE_ALLOWED_PATHS[_ACP_DELETE_PATH] == "http"
         from power_atlas.web import _remote_path_allowed
-        assert not _remote_path_allowed(_ACP_DELETE_PATH, "http")
+        assert _remote_path_allowed(_ACP_DELETE_PATH, "http")
 
     @pytest.mark.parametrize("payload", [
         {}, {"session_ids": []}, {"session_ids": "sess-1"},
@@ -15384,6 +15381,59 @@ class TestAcpDeleteEndpoint:
             self, client, acp_store_dir, payload):
         res = client.post(self._PATH, json=payload)
         assert res.status_code == 400
+
+
+class TestMobileUaDetection:
+    """Unit tests for _is_mobile_ua and the can_delete template variable."""
+
+    @pytest.mark.parametrize("ua_fragment", [
+        "mobile",
+        "android",
+        "iPhone",          # mixed-case — must be caught by .lower()
+        "iPod",
+        "iPad",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7)",
+    ])
+    def test_mobile_ua_is_detected(self, ua_fragment):
+        from power_atlas.web import _is_mobile_ua
+        assert _is_mobile_ua(ua_fragment) is True
+
+    @pytest.mark.parametrize("ua", [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+        "",
+    ])
+    def test_desktop_ua_is_not_detected(self, ua):
+        from power_atlas.web import _is_mobile_ua
+        assert _is_mobile_ua(ua) is False
+
+    def test_all_mobile_tokens_covered(self):
+        """Each token in _MOBILE_UA_TOKENS is detected individually."""
+        from power_atlas.web import _is_mobile_ua, _MOBILE_UA_TOKENS
+        for token in _MOBILE_UA_TOKENS:
+            assert _is_mobile_ua(token), f"token {token!r} not detected"
+            # Case-insensitive: uppercase form must also match.
+            assert _is_mobile_ua(token.upper()), \
+                f"uppercase token {token.upper()!r} not detected"
+
+    def test_can_delete_is_true_for_desktop_ua_on_loopback(self, client):
+        """Loopback + desktop UA → can_delete=True."""
+        resp = client.get(
+            "/acp",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
+        assert resp.status_code == 200
+        assert b"ACP_CAN_DELETE = true" in resp.content
+
+    def test_can_delete_is_true_for_mobile_ua_on_loopback(self, client):
+        """Loopback + mobile UA → can_delete=True (local always wins)."""
+        resp = client.get(
+            "/acp",
+            headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)"},
+        )
+        assert resp.status_code == 200
+        assert b"ACP_CAN_DELETE = true" in resp.content
 
 
 class TestAcpWorkspacesEndpoint:
@@ -15480,13 +15530,13 @@ class TestAcpWorkspacesEndpoint:
 
         Creating a session already works from a phone — `session/new` rides the
         allowlisted `/ws/acp` — so a picker that could not list workspaces
-        remotely would remove a capability that exists today. Deletion does not
-        exist yet, so keeping it local costs nothing.
+        remotely would remove a capability that exists today. Deletion is also
+        now on the remote surface; authenticated desktop browsers can reach it.
         """
         from power_atlas.web import (_ACP_WORKSPACES_PATH, _ACP_DELETE_PATH,
                                      _REMOTE_ALLOWED_PATHS)
         assert _REMOTE_ALLOWED_PATHS[_ACP_WORKSPACES_PATH] == "http"
-        assert _ACP_DELETE_PATH not in _REMOTE_ALLOWED_PATHS
+        assert _ACP_DELETE_PATH in _REMOTE_ALLOWED_PATHS
 
     def test_it_reads_the_store_only_once_per_request(self, client,
                                                       acp_listing_store,
@@ -16666,6 +16716,8 @@ class TestAcpCommandsExecuteHandler:
             conn, sid, {"name": "unknown_cmd"}))
         frames = _queued(conn)
         assert frames[0]["payload"]["code"] == "bad_payload"
+        # Verify the static message does NOT echo user-supplied name (S2 fix).
+        assert frames[0]["payload"]["message"] == "Unknown command."
 
     def test_empty_catalogue_skips_validation(self, acp_session):
         """When no ``commands`` key in meta, catalogue validation is skipped

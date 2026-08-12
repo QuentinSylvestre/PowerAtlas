@@ -554,6 +554,10 @@ function loadPage(templatePath, opts = {}) {
     // `web.py` derives this from `scope["client"]` (D26). Defaults to the
     // loopback reading, which is what a developer running the page sees.
     local: opts.local ?? true,
+    // `web.py` derives this from `local or not _is_mobile_ua(ua)`. Defaults
+    // to true (loopback reading). Pass `canDelete: false` to simulate a remote
+    // mobile viewer; pass `canDelete: true, local: false` for a remote desktop.
+    can_delete: opts.canDelete ?? true,
   });
 
   // `acp.html`'s own content block only — `{% extends %}` is stripped by
@@ -4185,17 +4189,38 @@ async function railedOne(tpl, { availability = "available", opts = {} } = {}) {
 
 check("a remote viewer is offered no delete control at all", async (tpl) => {
   const remote = await railed(tpl, {
-    local: false, store: fakeStore({ workspaces: 1, sessions: 2 }) });
+    local: false, canDelete: false,
+    store: fakeStore({ workspaces: 1, sessions: 2 }) });
   assertEqual(remote.railRows().length, 2,
               "the remote rail lost its rows, so this check is measuring nothing");
   assertEqual(remote.railMenuButtons().length, 0,
-              "the remote viewer is offered a row menu; the delete route is " +
-              "loopback-only, so every press of it would 403");
+              "a mobile/excluded remote viewer is offered a row menu; " +
+              "ACP_CAN_DELETE=false should suppress it");
   // And the loopback viewer is, or the check above passes on a page with no
   // menu anywhere.
   const local = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 2 }) });
   assertEqual(local.railMenuButtons().length, 2,
               "the loopback viewer has no row menu");
+});
+
+check("a remote desktop viewer is offered the delete control", async (tpl) => {
+  // local=false (remote IP), canDelete=true (desktop UA) → menu present.
+  const page = await railed(tpl, {
+    local: false, canDelete: true,
+    store: fakeStore({ workspaces: 1, sessions: 2 }) });
+  assertEqual(page.railRows().length, 2,
+              "the desktop-remote rail lost its rows");
+  assertEqual(page.railMenuButtons().length, 2,
+              "the remote desktop viewer is not offered a row menu");
+});
+
+check("a mobile remote viewer (canDelete false) is offered no delete control", async (tpl) => {
+  // Explicit named test for the mobile-remote combination.
+  const page = await railed(tpl, {
+    local: false, canDelete: false,
+    store: fakeStore({ workspaces: 1, sessions: 3 }) });
+  assertEqual(page.railMenuButtons().length, 0,
+              "a mobile-remote viewer should have no menu buttons");
 });
 
 check("the menu opens on its own row and closes the one before it", async (tpl) => {

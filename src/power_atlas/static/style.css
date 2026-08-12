@@ -794,13 +794,13 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-tool-group-toggle {
   width: 100%;
   background: none;
-  border: 1px solid var(--border);
+  border: none;
   border-radius: var(--radius-sm);
   padding: 4px 8px;
   text-align: left;
   cursor: pointer;
   font-size: 11px;
-  color: var(--text-dim);
+  color: #c084fc;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1228,10 +1228,10 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-row:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-rail-row-when { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-/* The row's actions menu. Present for a loopback viewer only — acp.html does
-   not build it at all when `local` is false — so nothing here needs a remote
-   variant. 32x40 keeps the row's touch height while taking as little of a
-   390 px line as a thumb can still hit. */
+/* The row's actions menu. Present for loopback viewers and authenticated remote
+   desktop browsers (non-mobile UA); absent for remote mobile browsers
+   (ACP_CAN_DELETE=false). 32x40 keeps the row's touch height while taking as
+   little of a 390 px line as a thumb can still hit. */
 .acp-rail-menu-wrap { flex-shrink: 0; position: relative; }
 .acp-rail-menu-btn { min-height: 40px; width: 32px; padding: 0; line-height: 1; background: transparent; border-color: transparent; color: var(--text-dim); }
 .acp-rail-menu-btn:hover { background: var(--surface-hover); color: var(--text); }

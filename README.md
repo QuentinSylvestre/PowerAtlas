@@ -208,8 +208,8 @@ the press.
 lock and its task files — after a confirmation. This is not the same as *Close*, which only releases
 the memory and leaves the conversation resumable. It cannot be undone, there is no trash, and it is
 refused for a session PowerAtlas has open (close it first) or one another process is using. The menu is
-not shown at all to a remote viewer and its endpoint is not on the remote path allowlist, so deletion
-is reachable only from the machine running PowerAtlas.
+not shown to mobile browsers; authenticated desktop browsers at the remote address can use it. It is
+never shown to a remote viewer who has not authenticated with the device secret.
 
 **Images go in with Ctrl+V.** Paste a screenshot into the prompt box, or drag an image file onto it, and
 it is staged as a thumbnail above the box before anything is sent — each one labelled *Image 1*, *Image 2*

@@ -4306,14 +4306,14 @@ async def _handle_commands_options(conn: _Connection, session_id: str | None,
         conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
         log.warning("ACP commands_options refused: [read_only_session] session=%s", session_id)
         return
+    if _supervisor.sessions.get(session_id) is None:
+        conn.send(error_frame("unknown_session", "No such live session.", session_id))
+        log.warning("ACP commands_options refused: [unknown_session] session=%s", session_id)
+        return
     if conn.session_id != session_id:
         conn.send(error_frame("not_subscribed",
             "Subscribe to this session first.", session_id))
         log.warning("ACP commands_options refused: [not_subscribed] session=%s", session_id)
-        return
-    if _supervisor.sessions.get(session_id) is None:
-        conn.send(error_frame("unknown_session", "No such live session.", session_id))
-        log.warning("ACP commands_options refused: [unknown_session] session=%s", session_id)
         return
     if session_id in _supervisor.closing:
         conn.send(error_frame("close_in_progress",
@@ -4353,15 +4353,15 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
         conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
         log.warning("ACP commands_execute refused: [read_only_session] session=%s", session_id)
         return
-    if conn.session_id != session_id:
-        conn.send(error_frame("not_subscribed",
-            "Subscribe to this session first.", session_id))
-        log.warning("ACP commands_execute refused: [not_subscribed] session=%s", session_id)
-        return
     meta = _supervisor.sessions.get(session_id)
     if meta is None:
         conn.send(error_frame("unknown_session", "No such live session.", session_id))
         log.warning("ACP commands_execute refused: [unknown_session] session=%s", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame("not_subscribed",
+            "Subscribe to this session first.", session_id))
+        log.warning("ACP commands_execute refused: [not_subscribed] session=%s", session_id)
         return
     if session_id in _supervisor.closing:
         conn.send(error_frame("close_in_progress",
