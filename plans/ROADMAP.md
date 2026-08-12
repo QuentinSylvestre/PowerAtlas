@@ -41,6 +41,7 @@
 - **[SECURITY] Loopback API token** — any local process can create sessions and run shell commands via `/api/*`; proposed fix is a startup-generated secret injected into the page
 - **[SECURITY — accepted] No NetBird access policy** — all 17 account peers can reach the remote bind; accepted because the account is shared; reopen conditions documented
 - **Claude Code sidecar fields inventory** — full table of every field PowerAtlas reads (or could read) from `~/.claude/sessions/<pid>.json`
+- /acp groupby date: sort by last_updated_at, not created_at
 
 ---
 
