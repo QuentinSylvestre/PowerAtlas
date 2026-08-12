@@ -830,16 +830,19 @@ promptDownBtn.addEventListener('click', function() {
 - `test_prompt_nav_cleared_on_clear_transcript`: `clearTranscript()` → `userMsgEls.length===0`, nav hidden.
 
 **Exit criteria**:
-- [ ] `elapsedText(startedAt, stoppedAt)` freezes at done elapsed; without `stoppedAt` uses live `Date.now()`
-- [ ] Working crew entry shows live elapsed (updating every second)
-- [ ] Done crew entry shows frozen elapsed
-- [ ] Crew timer interval cleared when all done or crew empty
-- [ ] Crew timer interval cleared when session is released
-- [ ] Prompt nav buttons appear when ≥2 user messages, hidden otherwise
-- [ ] Up arrow scrolls to previous user message
-- [ ] Down arrow scrolls to next user message, or to bottom if at last
-- [ ] `clearTranscript()` resets `userMsgEls` and hides nav
-- [ ] All new tests pass; no regression
+- [x] `elapsedText(startedAt, stoppedAt)` freezes at done elapsed; without `stoppedAt` uses live `Date.now()`
+- [x] Working crew entry shows live elapsed (updating every second)
+- [x] Done crew entry shows frozen elapsed
+- [x] Crew timer interval cleared when all done or crew empty
+- [x] Crew timer interval cleared when session is released
+- [x] Prompt nav buttons appear when ≥2 user messages, hidden otherwise
+- [x] Up arrow scrolls to previous user message
+- [x] Down arrow scrolls to next user message, or to bottom if at last
+- [x] `clearTranscript()` resets `userMsgEls` and hides nav
+- [x] All new tests pass; no regression
+
+#### Implementation (2026-08-12, code: e10f96a + aedd868 + 8cfbb90)
+Phase 5 completes SC-7 and adds SC-8. SC-7: The user's restore commit (172eabd) already wired `elapsedText(startedAt, endAt)` with optional freeze cap, `crewPanelTimer`/`stopCrewPanelTimer()`, and `renderCrewPanel`. This commit adds 4 required tests (frozen/live elapsed, timer starts on not-all-done, timer stops on all-done and session release) and adds `stopCrewPanelTimer()` explicitly in `releaseSession()` as a belt-and-suspenders guard. The `clearInterval` mock upgraded from no-op to splice-by-handle so timer cancellation is testable. SC-8: `#acpPromptNav` with `↑`/`↓` buttons added as a sibling to `#acpTranscript` inside a new `#acpTranscriptWrap` container (`position: relative`). Nav uses `position: absolute; bottom: 0.5rem; left: 0.5rem` anchored to the wrapper, visible in viewport regardless of scroll. `.acp-prompt-nav[hidden] { display: none; }` override prevents `display: flex` from defeating the `hidden` attribute. `addMessage('user')` tracks rows in `userMsgEls` and shows nav at ≥2; `clearTranscript()` resets state; `releaseSession()` clears `userMsgEls` and hides nav. `openSubagent()` hides `transcriptWrapEl` (not `transcriptEl`) so the subpanel gets full flex space. 279 JS + 1234 Python tests pass.
 
 ---
 
@@ -1013,6 +1016,28 @@ Implementation health: Green.
 | 11 | Low | No localStorage cleanup comment for accumulated orphaned unread markers. | Fixed — comment added explaining by-design accumulation (cycle 1). |
 | 12 | Low | `delete RAIL_STATUS_LABEL.working` noted as unnecessary (key never assigned). | Fixed — comment added (cycle 1). |
 | 13 | Low | Unknown wire status fallback in `railDotClass` untested. | Fixed — test added for `status: 'bogus_unknown_value'` → `status-thinking` (Low-fix pass). |
+
+### 2026-08-12 — Implementation Review (after Phase 5, persona: Reliability engineer, End-user advocate, Senior engineer, Maintainability reviewer)
+
+Implementation health: Green.
+12 findings (2 High, 5 Medium, 5 Low). All resolved in 3 cycles.
+
+Note: the cycle-2 HIGH was a regression introduced by cycle-1's wrapper div approach; cycle-3 verified clean.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `.acp-prompt-nav[hidden]` missing — `display: flex` overrides `[hidden]` UA rule; nav always visible. | Fixed — `.acp-prompt-nav[hidden] { display: none; }` added to style.css (cycle 1). |
+| 2 | High | Nav positioned `absolute` inside `overflow-y: auto` transcript — buttons scroll away with content. | Fixed — nav moved to sibling in new `#acpTranscriptWrap` wrapper (cycle 1). Regression from this fix resolved in cycle 2 (see #3). |
+| 3 | High (regression) | `openSubagent()` hidden `transcriptEl` but not `acpTranscriptWrap` — wrapper claimed flex space, halving subpanel height. | Fixed — `openSubagent()` now hides `transcriptWrapEl`; test added (cycle 2). |
+| 4 | Medium | `clearInterval` mock no-op — timer leaks untestable. | Fixed — splice-by-handle implementation; discriminating tests added (cycle 1). |
+| 5 | Medium | Explicit `stopCrewPanelTimer()` not in `releaseSession()`. | Fixed — added directly as belt-and-suspenders (cycle 1). |
+| 6 | Medium | No `:focus-visible` on nav buttons. | Fixed — CSS rule added (cycle 1). |
+| 7 | Medium | Redundant `userMsgEls.length < 2` after `= []` always true. | Fixed — changed to `promptNavEl.hidden = true` (cycle 2). |
+| 8 | Medium | Exit criteria EC4/EC5 (timer cleared) unverifiable with no-op mock. | Fixed — proper mock + discriminating tests (cycle 1). |
+| 9 | Low | Test named "crew timer does not start when all crew entries are done" — name implied stop, not no-start. | Fixed — renamed (cycle 1). |
+| 10 | Low | "prompt nav cleared on clearTranscript" missing re-attach coverage. | Fixed — extended with 2-message assertion (cycle 1). |
+| 11 | Low | Dead-zone `-10` comment missing in scroll math. | Fixed — comment added (cycle 1). |
+| 12 | Low | Down arrow at last message: no visual feedback of boundary reached. | Fixed — brief 400ms button disable added (cycle 1). |
 
 ## Harness Improvement Opportunities
 
