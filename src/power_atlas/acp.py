@@ -2863,17 +2863,24 @@ class _Supervisor:
                 for c in (params.get("commands") or [])[:MAX_COMMANDS_COUNT]
                 if isinstance(c, dict) and _as_text(c.get("name"))
             ]
-            # Attribute to the single inflight session; drop if 0 or 2+
+            # Attribute to the single inflight session if one exists; otherwise
+            # fall back to the single known session (commands/available fires
+            # after each turn ends, so inflight is typically 0 at delivery time).
             inflight = self.inflight
+            sid = None
             if len(inflight) == 1:
                 sid = next(iter(inflight))
+            elif len(inflight) == 0 and len(self.sessions) == 1:
+                sid = next(iter(self.sessions))
+            # Drop when 2+ inflight (ambiguous) or 0 sessions.
+            if sid is not None:
                 meta = self.sessions.get(sid)
                 if meta is not None:
                     meta["commands"] = commands
                     _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
             else:
-                log.debug("ACP commands_available: %d session(s) inflight, cannot "
-                          "attribute; dropped", len(inflight))
+                log.debug("ACP commands_available: %d session(s) inflight, %d known — "
+                          "cannot attribute; dropped", len(inflight), len(self.sessions))
             return
         if method == "_kiro.dev/compaction/status":
             status = params.get("status") or {}
@@ -2881,16 +2888,21 @@ class _Supervisor:
             error = _as_text(status.get("error")) if isinstance(status, dict) else ""
             summary = _as_text(params.get("summary"))
             inflight = self.inflight
+            sid = None
             if len(inflight) == 1:
                 sid = next(iter(inflight))
+            elif len(inflight) == 0 and len(self.sessions) == 1:
+                sid = next(iter(self.sessions))
+            if sid is not None:
                 if stype == "completed":
                     # Reset context meter
                     _note_context(sid, None)
                 _registry.broadcast(sid, envelope(
                     "compaction", {"status": stype, "error": error, "summary": summary}, sid))
             else:
-                log.debug("ACP compaction_status: %d session(s) inflight, cannot "
-                          "attribute; dropped (status=%r)", len(inflight), stype)
+                log.debug("ACP compaction_status: %d session(s) inflight, %d known — "
+                          "cannot attribute; dropped (status=%r)",
+                          len(inflight), len(self.sessions), stype)
             return
         if method == "_kiro.dev/clear/status":
             return  # silent consume; TUI logs debug only, nothing to display

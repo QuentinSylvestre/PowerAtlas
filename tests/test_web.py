@@ -16220,16 +16220,38 @@ class TestAcpCommandsAvailable:
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
-    def test_zero_inflight_drops_notification(self, acp_session):
-        """No sessions inflight: notification is dropped silently (no broadcast,
-        no modification to sessions)."""
+    def test_zero_inflight_routes_to_single_session(self, acp_session):
+        """No sessions inflight but exactly one known session: notification is
+        attributed to that session (commands/available fires after turn end)."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
         _queued(conn)  # drain
         # inflight is empty by default in the acp_session fixture
         self._notify(acp_mod, [{"name": "tools", "description": "x"}])
-        assert "commands" not in acp_mod._supervisor.sessions[sid]
-        assert _queued(conn) == []
+        assert acp_mod._supervisor.sessions[sid].get("commands") == [
+            {"name": "tools", "description": "x"}]
+        frames = _queued(conn)
+        assert len(frames) == 1 and frames[0]["type"] == "commands"
+
+    def test_zero_inflight_zero_sessions_drops_notification(self):
+        """No sessions at all: notification is dropped (nothing to attribute to)."""
+        import importlib
+        acp_mod = importlib.import_module("power_atlas.acp")
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        _queued(conn)
+        # Temporarily snapshot and clear sessions
+        saved = dict(acp_mod._supervisor.sessions)
+        acp_mod._supervisor.sessions.clear()
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": "_kiro.dev/commands/available",
+                "params": {"commands": [{"name": "tools", "description": "x"}]},
+            })
+            assert _queued(conn) == []
+        finally:
+            acp_mod._supervisor.sessions.update(saved)
+            acp_mod._registry.connections.discard(conn)
 
     def test_two_inflight_drops_notification(self, acp_session):
         """Two sessions inflight: cannot attribute; dropped."""
@@ -16391,14 +16413,17 @@ class TestAcpCompactionStatus:
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
-    def test_zero_inflight_drops_notification(self, acp_session):
-        """No sessions inflight: dropped silently (no broadcast)."""
+    def test_zero_inflight_routes_to_single_session(self, acp_session):
+        """No sessions inflight but exactly one known session: compaction notification
+        is attributed to that session (fires after turn end)."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
         _queued(conn)
         # inflight empty by default
         self._notify(acp_mod, "started")
-        assert _queued(conn) == []
+        frames = _queued(conn)
+        assert len(frames) == 1 and frames[0]["type"] == "compaction"
+        assert frames[0]["payload"]["status"] == "started"
 
 
 class TestAcpClearStatus:
