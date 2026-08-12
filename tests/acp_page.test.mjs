@@ -6986,6 +6986,23 @@ check("queued prompt not sent when sessionId changed before turn end", (tpl) => 
     "nothing said the queued prompt was discarded due to session change");
 });
 
+check("queued prompt not sent and note shown when turn ends with stopReason=cancelled", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("important followup");
+  page.el("acpPrompt").dispatch("input");
+  page.click("acpQueue");
+  // Confirm it was queued (no prompt sent yet)
+  const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
+  // Turn ends with stopReason=cancelled (user pressed Stop)
+  page.deliver({ type: "meta", sessionId: live,
+                 payload: { turn: "end", stopReason: "cancelled" } });
+  const promptsAfter = page.socket().sent.filter((f) => f.type === "prompt").length;
+  assertEqual(promptsAfter, promptsBefore,
+    "no prompt frame should be sent when turn ends with stopReason=cancelled");
+  assert(page.transcript().includes("not sent") || page.transcript().includes("stopped"),
+    "a note should be shown when the queued prompt is discarded due to a cancelled turn");
+});
+
 // --------------------------------------------------------- Phase 3: SC-3 auto-reconnect, SC-5 rail refresh --
 
 // SC-3 test 1: ws.onclose with opened=true schedules a reconnect timer

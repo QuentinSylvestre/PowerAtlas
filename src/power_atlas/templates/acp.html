@@ -1006,6 +1006,9 @@
     // opened next on this page.
     queuedPrompt = null;
     queuedPromptSession = null;
+    // Reset backoff so the next connection starts from the minimum delay,
+    // not from wherever an earlier disconnect left it.
+    _reconnectDelay = 1000;
     // Fix 1: re-enable steer controls if a steer was in-flight when the session
     // was released. Text is NOT restored here (session is gone); controls must
     // be re-enabled so the composer is usable after opening a new session.
@@ -4799,6 +4802,13 @@
         addMessage('note', 'turn ended: ' + payload.stopReason);
       }
       logLine('info', '← turn end (' + payload.stopReason + ')');
+      // Cancelled turns must not fire a queued auto-send — the user stopped
+      // the turn on purpose, so silently sending the next prompt would be
+      // surprising. Discard and inform.
+      if (!replaying && _toSend && payload.stopReason === 'cancelled') {
+        addMessage('note', 'Queued prompt not sent \u2014 the turn was stopped.');
+        return;
+      }
       // Auto-send the queued prompt if one was stored at queue time.
       if (!replaying && _toSend) {
         if (_queueSession && _queueSession !== sessionId) {
@@ -4996,6 +5006,8 @@
       // waiting for cannot come from an agent that has exited.
       pendingCreate = null;
       setLoading(null);
+      // Capture before sessionId is nulled so clearUnread sees the right id.
+      var _diedSid = sessionId;
       sessionId = null;
       setTurn(false);
       hideThinking();
@@ -5018,6 +5030,8 @@
       // the one hook where the rail is wrong about rows the page was never
       // reading. The counter goes to 0 with them.
       railRefreshSoon();
+      // The session is gone; clear any unread marker it left behind.
+      if (_diedSid) clearUnread(_diedSid);
       return;
     }
     if (type === 'error') {

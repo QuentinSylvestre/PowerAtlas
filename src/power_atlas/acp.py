@@ -440,6 +440,10 @@ _SUBAGENT_TASK_KEYS = ("initialQuery", "sessionName")
 # bounded.
 MAX_SUBAGENT_TASK_CHARS = 4000
 
+# Cap on a steer message. Mirrors MAX_SUBAGENT_TASK_CHARS — a steer is a
+# mid-turn human note, not a document, so the same bound makes sense.
+MAX_STEER_CHARS = 4000
+
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
 # targeting a sub-agent's own session id with. One string rather than one
 # per call site, so the three refusals cannot read differently for the same
@@ -4041,6 +4045,13 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
     if not text:
         conn.send(error_frame(
             "bad_payload", "Steer message must not be empty.", session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "bad_payload", session_id)
+        return
+    if len(text) > MAX_STEER_CHARS:
+        conn.send(error_frame(
+            "bad_payload",
+            f"Steer message too long ({len(text)} chars; max {MAX_STEER_CHARS}).",
+            session_id))
         log.warning("ACP steer refused: [%s] session=%s", "bad_payload", session_id)
         return
     try:

@@ -178,6 +178,7 @@ opens. The left rail lists workspaces with their sessions — ten workspaces and
 default, each axis paging independently — and marks every visible row *available*, *held by PowerAtlas*,
 or *locked* by another process. Selecting a row resumes that session and replays its history; sessions
 whose workspace directory no longer exists are marked so, since they cannot be resumed usefully.
+If the connection drops, the page reconnects automatically with exponential backoff (1 s, 2 s, … up to 30 s); the Reconnect button remains available for immediate retry.
 
 **The rail groups by workspace, by day, or by status.** The sliders button beside *Refresh* switches between them and
 remembers the choice. Grouped by day the rail shows every session across every workspace, newest first,
@@ -189,6 +190,8 @@ mode: `[{workspace}]: {session title} - {date & time}`, so the project a row cam
 for the rail's width and the full timestamp are one hover away. On a desktop the rail's right edge drags
 to resize it, between 220 px and half the window, and that width is remembered too; arrow keys move it
 when the handle has focus.
+
+Sessions in the /acp rail show a colour-coded status dot: blue (agent working), amber (waiting for you), red (error), white (idle), or static green (turn finished while you weren't looking).
 
 **Creating a session asks where first.** *New session* — in the rail and in the conversation toolbar —
 opens a picker offering the agent's own scratch folder, for general local work that lights up no
@@ -218,7 +221,7 @@ go with one prompt, within about 176 KB between them once decoded; both numbers 
 they are the same ones it enforces.
 
 The conversation itself shows `[Image 1]` where the picture went, and so does the copy the agent reads —
-so *"compare image 1 with image 2"* names something it can see. The thumbnails live above the prompt box
+so *"compare image 1 with image 2"* names something it can see. A `[Image N]` marker is inserted at the cursor in the prompt box, showing where the image falls within your text. The thumbnails live above the prompt box
 and only until the turn starts; the bytes go to the agent and are deliberately never written into the
 transcript, which is what keeps a reload from replaying megabytes and what stops a few screenshots
 evicting the conversation behind them. A reloaded transcript therefore shows `[Image 1]` rather than the
@@ -230,7 +233,7 @@ clears the box — showing a cancellable inline note — then sends it as a norm
 turn ends. **Steer** injects the text mid-turn via `_session/steer`, which kiro-cli processes without
 interrupting the turn in progress; a brief confirmation appears when the injection is accepted. Both
 discard safely if something unexpected happens: Queue restores the text if the connection drops or the
-session changes, and Steer restores it if the server returns an error.
+session changes, and Steer restores it if the server returns an error. Two floating arrow buttons (↑ / ↓) appear at the bottom-left of the transcript when there are at least two of your messages; they jump to the previous or next user message.
 
 **A finished answer is redrawn as markdown.** While the agent is still streaming, its text shows as it
 arrives; once the answer is complete the bubble is rebuilt with headings, lists, emphasis, code blocks
@@ -268,7 +271,7 @@ Three things are worth knowing before leaving a long task running:
   `session/cancel` and the session terminate the sweeper uses stop the ACP turn while leaving any
   shell subprocess the agent spawned running to completion. It is reaped only when PowerAtlas exits.
   So a cancelled build or long-running command keeps consuming CPU and memory that the per-session
-  figure above does not include.
+  figure above does not include. The crew bar shows each sub-agent's elapsed time; done entries freeze their timer at their actual stop time.
 
 Creating a session writes a permanent `.json`, `.jsonl` and `.lock` into your kiro-cli session store,
 as any kiro-cli session does. Resuming one without prompting leaves the transcript byte-identical.

@@ -15643,6 +15643,23 @@ class TestAcpSteer:
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
+    def test_steer_refused_when_message_exceeds_max_steer_chars(self, acp_session):
+        """``steer`` with a message longer than ``MAX_STEER_CHARS`` returns
+        ``bad_payload`` with a message that includes the char count."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        oversized = "x" * (acp_mod.MAX_STEER_CHARS + 1)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"message": oversized}))
+            outbound = _queued(conn)
+            assert len(outbound) == 1
+            assert outbound[0]["payload"]["code"] == "bad_payload"
+            assert str(acp_mod.MAX_STEER_CHARS) in outbound[0]["payload"]["message"]
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
 
 class TestAcpCancelCascade:
     """After a parent cancel, crew entries that were still running are marked
