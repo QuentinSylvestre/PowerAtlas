@@ -3158,10 +3158,14 @@ class _Supervisor:
         ``session_id`` is expected to be a validated non-empty string; callers
         in the handler guards verify it is non-falsy and that the session
         exists before reaching this method.
+
+        Uses the inactivity sentinel (same as ``session/prompt``) so a long
+        command that keeps streaming is never cut off at the wall-clock ceiling.
         """
         result = await self._request(
             "_kiro.dev/commands/execute",
             {"sessionId": session_id, "command": {"command": name, "args": {}}},
+            timeout=_INACTIVITY,
         )
         return result or {}
 
@@ -4397,20 +4401,33 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
         return
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
+    # Emit turn-start marker so the client's UI treats this command as an
+    # active turn (disables Send, shows the working indicator).  Mirrors
+    # _handle_prompt, which emits the same frame at the same point.
+    _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
+    stop_reason = "interrupted"
     _supervisor.inflight.add(session_id)
     try:
         result = await _supervisor.commands_execute(session_id, name)
+        stop_reason = "end_turn"
     except AcpError as exc:
         conn.send(error_frame(exc.code, str(exc), session_id))
         log.warning("ACP commands_execute error: session=%s: %s", session_id, exc)
+        stop_reason = "error"
         return
     except Exception:
         log.exception("ACP commands_execute: unexpected error session=%s", session_id)
         conn.send(error_frame("internal_error",
             "An unexpected error occurred executing the command.", session_id))
+        stop_reason = "error"
         return
     finally:
         _supervisor.inflight.discard(session_id)
+        # Mirror _handle_prompt: flush the bubble and emit turn-end so the
+        # client knows the command finished and re-enables the Send button.
+        _flush_bubble(session_id)
+        _emit(session_id, envelope(
+            "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
     conn.send(envelope("commands_execute_result",
         {"name": name, "status": "accepted"}, session_id))
 

@@ -16602,7 +16602,8 @@ class TestAcpCommandsExecuteHandler:
         return conn
 
     def test_successful_execution_returns_ack(self, acp_session):
-        """A valid ``commands_execute`` call returns a
+        """A valid ``commands_execute`` call emits ``meta {turn:start}``,
+        then ``meta {turn:end}`` in the finally, then returns a
         ``commands_execute_result {name, status:"accepted"}`` frame."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
@@ -16616,11 +16617,18 @@ class TestAcpCommandsExecuteHandler:
                 conn, sid, {"name": "tools"}))
 
         frames = _queued(conn)
-        assert len(frames) == 1
-        assert frames[0]["type"] == "commands_execute_result"
-        assert frames[0]["sessionId"] == sid
-        assert frames[0]["payload"]["name"] == "tools"
-        assert frames[0]["payload"]["status"] == "accepted"
+        # Frame 0: meta {turn:"start"} via _emit
+        assert frames[0]["type"] == "meta"
+        assert frames[0]["payload"]["turn"] == "start"
+        # Frame 1: meta {turn:"end"} via _emit in finally
+        assert frames[1]["type"] == "meta"
+        assert frames[1]["payload"]["turn"] == "end"
+        assert frames[1]["payload"]["stopReason"] == "end_turn"
+        # Frame 2: ack via conn.send
+        assert frames[2]["type"] == "commands_execute_result"
+        assert frames[2]["sessionId"] == sid
+        assert frames[2]["payload"]["name"] == "tools"
+        assert frames[2]["payload"]["status"] == "accepted"
 
     def test_no_session_id_returns_bad_envelope(self, acp_session):
         acp_mod, sid = acp_session
@@ -16760,7 +16768,9 @@ class TestAcpCommandsExecuteHandler:
                 conn, sid, {"name": "anything"}))
 
         frames = _queued(conn)
-        assert frames[0]["type"] == "commands_execute_result"
+        # Turn markers + ack: meta start, meta end, commands_execute_result
+        ack = next(f for f in frames if f["type"] == "commands_execute_result")
+        assert ack is not None
 
     def test_inflight_cleared_on_exception(self, acp_session):
         """Even when ``commands_execute`` raises, inflight is discarded in the
@@ -16792,8 +16802,9 @@ class TestAcpCommandsExecuteHandler:
                 conn, sid, {"name": "tools"}))
 
         frames = _queued(conn)
-        assert frames[0]["type"] == "error"
-        assert frames[0]["payload"]["code"] == "agent_rejected"
+        # meta start, error frame (conn.send), meta end (finally)
+        error_frame = next(f for f in frames if f["type"] == "error")
+        assert error_frame["payload"]["code"] == "agent_rejected"
         assert sid not in acp_mod._supervisor.inflight
 
     def test_unexpected_exception_returns_internal_error(self, acp_session):
@@ -16809,7 +16820,9 @@ class TestAcpCommandsExecuteHandler:
                 conn, sid, {"name": "tools"}))
 
         frames = _queued(conn)
-        assert frames[0]["payload"]["code"] == "internal_error"
+        # meta start, internal_error (conn.send), meta end (finally)
+        error_frame = next(f for f in frames if f["type"] == "error")
+        assert error_frame["payload"]["code"] == "internal_error"
         assert sid not in acp_mod._supervisor.inflight
 
     def test_leading_slash_stripped_from_name(self, acp_session):
@@ -16885,16 +16898,16 @@ class TestAcpCommandsExecuteHandler:
 
         frames_a = _queued(conn_a)
         frames_b = _queued(conn_b)
-        accepted = [f for f in [frames_a[0], frames_b[0]]
+        accepted = [f for f in frames_a + frames_b
                     if f["type"] == "commands_execute_result"
                     and f["payload"].get("status") == "accepted"]
-        refused = [f for f in [frames_a[0], frames_b[0]]
+        refused = [f for f in frames_a + frames_b
                    if f["type"] == "error"
                    and f["payload"].get("code") == "turn_in_progress"]
         assert len(accepted) == 1, \
-            f"expected exactly 1 accepted, got {[f['type'] for f in [frames_a[0], frames_b[0]]]}"
+            f"expected exactly 1 accepted, got types: {[f['type'] for f in frames_a + frames_b]}"
         assert len(refused) == 1, \
-            f"expected exactly 1 refused, got {[f['type'] for f in [frames_a[0], frames_b[0]]]}"
+            f"expected exactly 1 refused, got types: {[f['type'] for f in frames_a + frames_b]}"
         # Inflight must be empty once both tasks are done.
         assert sid not in acp_mod._supervisor.inflight
 
