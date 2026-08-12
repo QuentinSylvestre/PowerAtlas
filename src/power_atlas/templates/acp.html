@@ -623,15 +623,13 @@
   RAIL_STATUS.working = 'working';
   RAIL_STATUS.waiting = 'waiting';
   RAIL_STATUS.errored = 'errored';
-  RAIL_STATUS.idle = 'idle';
-  RAIL_STATUS.unread = 'unread';
-  RAIL_STATUS.thinking = 'thinking';
   var RAIL_STATUS_LABEL = Object.create(null);
   RAIL_STATUS_LABEL.thinking = 'open in this PowerAtlas — the agent is working';
   RAIL_STATUS_LABEL.waiting = 'open in this PowerAtlas — waiting for you';
   RAIL_STATUS_LABEL.errored = 'open in this PowerAtlas — something went wrong';
   RAIL_STATUS_LABEL.idle = 'open in this PowerAtlas — idle';
   RAIL_STATUS_LABEL.unread = 'open in this PowerAtlas — unread messages';
+  // 'working' was never assigned to this map; delete is not needed but the plan spec mentioned it.
   // Closed-set map for tool-call status strings used in the group header tally
   // (Phase 3). Wire values absent from this map are silently omitted from the
   // tally — no raw wire string reaches visible UI (no-raw-wire-value rule).
@@ -2943,17 +2941,18 @@
   // Marks a held session unread when its turn ends while the tab is not on it.
   // Cleared when the user subscribes to that session. Keyed by session id with
   // a prefix to avoid collisions with other localStorage users on this origin.
-  var UNREAD_PREFIX = 'pa_unread_';
+  // Unread markers persist across reloads (by design) and are only cleared on subscribe. Keys accumulate for sessions never re-opened.
+  var RAIL_UNREAD_PREFIX = 'pa_unread_';
   function markUnread(sid) {
     if (!sid) return;
-    try { localStorage.setItem(UNREAD_PREFIX + sid, '1'); } catch(e) {}
+    try { localStorage.setItem(RAIL_UNREAD_PREFIX + sid, '1'); } catch(e) {}
   }
   function clearUnread(sid) {
     if (!sid) return;
-    try { localStorage.removeItem(UNREAD_PREFIX + sid); } catch(e) {}
+    try { localStorage.removeItem(RAIL_UNREAD_PREFIX + sid); } catch(e) {}
   }
   function isUnread(sid) {
-    try { return localStorage.getItem(UNREAD_PREFIX + sid) === '1'; } catch(e) { return false; }
+    try { return localStorage.getItem(RAIL_UNREAD_PREFIX + sid) === '1'; } catch(e) { return false; }
   }
 
   // Tracks the last known status per session id for unread-detection.
@@ -3060,8 +3059,15 @@
       _prevSessionStatus[rows[i].id] = rows[i].status;
       if (railAvailability(rows[i].availability) === 'held'
           && rows[i].id !== sessionId
+          && sessionId !== null
           && prevStatus === 'working' && rows[i].status !== 'working') {
         markUnread(rows[i].id);
+        // Update the stored status to the raw wire value so railDotClass can
+        // distinguish idle (→ status-unread) from working (→ status-thinking).
+        // The normal status-update path below uses railRowStatus() which collapses
+        // 'idle' to 'working', so it would not write this through on its own.
+        if (found !== undefined) { found.session.status = rows[i].status; }
+        changed = true;  // dot state changed (thinking → unread); trigger re-render
       }
       if (found === undefined) continue;
       var row = found.session;
@@ -3089,6 +3095,12 @@
         row.title = rows[i].title;
         changed = true;
       }
+    }
+    // Evict sessions no longer in the rail to prevent unbounded growth
+    var seenIds = Object.create(null);
+    rows.forEach(function(s) { seenIds[s.id] = true; });
+    for (var k in _prevSessionStatus) {
+      if (!seenIds[k]) delete _prevSessionStatus[k];
     }
     return changed;
   }
@@ -3476,16 +3488,23 @@
   // 5-state dot class for held sessions on the /acp rail.
   // Returns a CSS class string (e.g. 'status-thinking') or null for non-held.
   // Maps working → thinking so the dashboard's status-working class is undisturbed.
+  // Does NOT use railRowStatus() here because that function's 'working' fallback
+  // is for the dashboard (non-held rows); for the dot we must distinguish 'idle'
+  // from unknown wire values — both would collapse to 'working' through that path.
   function railDotClass(session) {
     var avail = railAvailability(session.availability);
     if (avail !== 'held') return null;  // no dot for non-held
-    var srv = railRowStatus(session.status);
-    if (srv === 'errored') return 'status-errored';
-    if (srv === 'waiting') return 'status-waiting';
-    if (srv === 'working') return 'status-thinking';
-    // idle or unknown: check unread
-    if (isUnread(session.id || session.sessionId)) return 'status-unread';
-    return 'status-idle';
+    var status = session.status;
+    if (status === RAIL_STATUS.errored) return 'status-errored';
+    if (status === RAIL_STATUS.waiting) return 'status-waiting';
+    if (status === RAIL_STATUS.working) return 'status-thinking';
+    // 'idle' is the known non-active wire value: check unread before defaulting to idle.
+    if (status === 'idle') {
+      if (isUnread(session.id)) return 'status-unread';
+      return 'status-idle';
+    }
+    // Unknown or bogus wire value: treat as working (safe fallback, narrows to class).
+    return 'status-thinking';
   }
 
   function railRowNode(session, flat, workspace) {
@@ -3525,7 +3544,6 @@
       var dot = document.createElement('span');
       if (dotClass) {
         dot.className = 'session-status ' + dotClass;
-        dot.hidden = false;
       } else {
         dot.className = 'session-status';
         dot.hidden = true;
@@ -3826,6 +3844,7 @@
     // The container is resolved here rather than handed in. Which group holds a
     // row is a question only a rail with groups can answer, and the caller
     // should not have to know which shape it is drawing to delete from it.
+    delete _prevSessionStatus[sid];
     var found = railFindSession(sid);
     if (found) {
       found.list.splice(found.at, 1);

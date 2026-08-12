@@ -7129,6 +7129,8 @@ check("dot class unread when idle and unread", async (tpl) => {
   assert(dot, "held unread session must have a dot");
   assertEqual(String(dot.className), "session-status status-unread",
               `idle held session with unread should have status-unread dot, got: ${dot.className}`);
+  assertEqual(dot.getAttribute("aria-label"), "open in this PowerAtlas \u2014 unread messages",
+              `unread dot aria-label should be the unread label, got: ${dot.getAttribute("aria-label")}`);
 });
 
 // SC-4: idle held session with no unread flag → white idle dot
@@ -7141,6 +7143,8 @@ check("dot class idle when no unread", async (tpl) => {
   assert(dot, "held idle session must have a dot");
   assertEqual(String(dot.className), "session-status status-idle",
               `idle held session without unread should have status-idle dot, got: ${dot.className}`);
+  assertEqual(dot.getAttribute("aria-label"), "open in this PowerAtlas \u2014 idle",
+              `idle dot aria-label should be the idle label, got: ${dot.getAttribute("aria-label")}`);
 });
 
 // SC-4: non-held session → no dot element (or hidden dot)
@@ -7186,6 +7190,16 @@ check("mark unread on turn end for other session", async (tpl) => {
 
   assert(page.stored["pa_unread_sess-other"] === "1",
          "sess-other should be marked unread after its turn ended while sess-open was active");
+
+  // The rail should have re-rendered (changed=true when status moved); verify
+  // the dot for sess-other now shows status-unread.
+  const rows = page.railRows();
+  const otherRow = [...rows].find((r) => r.dataset.sid === "sess-other");
+  assert(otherRow, "sess-other row must be present in the rail after the tick");
+  const dot = otherRow.querySelector(".session-status");
+  assert(dot, "sess-other (held) must have a status dot");
+  assertEqual(String(dot.className), "session-status status-unread",
+              `dot for sess-other should be status-unread after turn ended, got: ${dot.className}`);
 });
 
 // SC-4: clear unread on subscribe
