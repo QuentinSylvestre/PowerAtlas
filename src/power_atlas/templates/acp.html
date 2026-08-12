@@ -4608,6 +4608,15 @@
    *  paged into — the same reason `railRefresh` does not use it either. */
   function railAdoptCreated(cwd) {
     if (!cwd) return;
+    // date/status modes render from `railFlat`, not `railGroups`, so the
+    // cwd-scoped workspace fetch below would update a store the renderer never
+    // reads — the new session would show in the capacity counter but not in the
+    // rail. Reload the flat listing instead; it already ends in
+    // `railSetCapacity`/`railSummary`/`renderRail`.
+    if (railMode === 'date' || railMode === 'status') {
+      loadFlatPage(1);
+      return;
+    }
     var isNew = !railGroupsByCwd['c:' + cwd];
     railFetch({ cwd: cwd, session_page: 1, session_size: RAIL_SESSION_SIZE })
       .then(function (data) {
