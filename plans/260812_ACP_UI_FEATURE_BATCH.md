@@ -511,16 +511,19 @@ railRefreshSoon();
 - `test_rail_refresh_called_after_stop`: stop button click → `railRefreshSoon` called.
 
 **Exit criteria**:
-- [ ] `ws.onclose` schedules retry when `opened===true`; delay starts at 1s, doubles, caps at 30s
-- [ ] `ws.onopen` resets `_reconnectDelay` to 1s and clears any pending timer
-- [ ] Manual reconnect button still works (calls `connect()` directly)
-- [ ] Stale-token path unchanged: `opened===false` → shows reload button only, no timer
-- [ ] `railRefreshSoon()` called after `send('prompt', ...)` returns true
-- [ ] `railRefreshSoon()` called after stop button press
-- [ ] All new `acp_page.test.mjs` tests pass
-- [ ] No regression in existing tests
+- [x] `ws.onclose` schedules retry when `opened===true`; delay starts at 1s, doubles, caps at 30s
+- [x] `ws.onopen` resets `_reconnectDelay` to 1s and clears any pending timer
+- [x] Manual reconnect button still works (calls `connect()` directly)
+- [x] Stale-token path unchanged: `opened===false` → shows reload button only, no timer
+- [x] `railRefreshSoon()` called after `send('prompt', ...)` returns true
+- [x] `railRefreshSoon()` called after stop button press
+- [x] All new `acp_page.test.mjs` tests pass
+- [x] No regression in existing tests
 
+#### Implementation (2026-08-12, code: 341dd2c + 9ceeb95)
+Phase 3 adds exponential-backoff auto-reconnect and rail refresh triggers on send/cancel. `_reconnectTimer` and `_reconnectDelay` (starting at 1000ms) are added near `var ws = null`. In `ws.onopen`, both are reset (delay→1000, timer cleared). In `ws.onclose` when `opened===true`: status set to "disconnected", then immediately to "reconnecting…"; `clearTimeout` guard cancels any previous pending timer before scheduling a new one at the current delay; delay doubles capped at 30s. The stale-token path (`opened===false`) is unchanged — it calls `diagnoseRejectedHandshake()` with no timer. `connect()` cancels any pending timer unconditionally at entry, preventing double-connect on manual click. `railRefreshSoon()` is called after a successful `send('prompt')` in `sendPrompt()` and after a successful `send('cancel')` in the stop button handler. Test harness `clearTimeout` mock upgraded from no-op to splice-by-handle so timer cancellation is actually tested. 262 JS + 1234 Python tests pass.
 
+---
 
 ### Phase 4: Dot color scheme [QA]
 
@@ -965,6 +968,24 @@ Implementation health: Green.
 | 14 | Low | Dead `cancelLink.remove()` after `.textContent =` assignment. | Fixed — removed with comment (cycle 1). |
 | 15 | Low | Session-change guard test didn't exercise the actual guard (went through `releaseSession` instead). | Fixed — new direct guard test added (cycle 1). |
 | 16 | Low | `_steerPending` naming inconsistent with `queuedPrompt`. | User: accepted — documented in divergences. No rename needed.
+
+### 2026-08-12 — Implementation Review (after Phase 3, persona: Reliability engineer, Senior engineer, Performance engineer, End-user advocate)
+
+Implementation health: Green.
+10 findings (0 High, 5 Medium, 5 Low). All resolved in 2 cycles (cycle-2 clean).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `ws.onclose` lacked `clearTimeout` before scheduling — ghost timer on double-close. | Fixed — `clearTimeout` guard added at top of `if (opened)` branch (cycle 1). |
+| 2 | Medium | `clearTimeout` mock was `() => {}` — cancelled timers still fired in tests. | Fixed — splice-by-handle implementation replacing no-op (cycle 1). |
+| 3 | Medium | "rail refresh after send" test used absolute fetch count — removal of `railRefreshSoon` undetectable. | Fixed — delta check (`fetchAfter > fetchesBefore`) (cycle 1). |
+| 4 | Medium | Status text showed raw WS close code "disconnected (1006)" — not user-friendly. | Fixed — changed to "disconnected" then "reconnecting…" (cycle 1). |
+| 5 | Medium | Silent auto-reconnect — user sees broken state with no retry indication. | Fixed — "reconnecting…" status text addresses this (cycle 1). |
+| 6 | Low | Missing test for onclose-while-timer-pending double-schedule. | Fixed — new test added; asserts `timers.length === 1` after two closes (cycle 1). |
+| 7 | Low | Stale-token test missing `reconnectBtn.hidden` assertion. | Fixed — assertion added (cycle 1). |
+| 8 | Low | Reconnect button visible during auto-reconnect with no label change. | Fixed — "reconnecting…" status text provides sufficient context (cycle 1). |
+| 9 | Low | "rail refresh after stop" test disjunction over-permissive. | Accepted — stop test uses correct delta; send test now also delta; both discriminating. |
+| 10 | Low | Plan test names used `test_` prefix; implementation uses natural strings. | User: accepted — convention difference, no functional impact.
 
 ## Harness Improvement Opportunities
 
