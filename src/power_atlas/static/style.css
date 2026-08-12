@@ -192,6 +192,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-status.status-working { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22); animation: status-pulse 2s ease-in-out infinite; }
 .session-status.status-waiting { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22); }
 .session-status.status-errored { background: #ef4444; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.22); }
+/* /acp rail 5-state dot scheme (idle/unread/thinking/waiting/errored).
+   status-working kept for the dashboard (session_row.html, workspace_card.html);
+   the /acp rail uses railDotClass() which maps working -> status-thinking. */
+.session-status.status-idle { background: #e5e7eb; }
+.session-status.status-unread { background: #22c55e; animation: status-pulse 2s ease-in-out infinite; }
+.session-status.status-thinking { background: #3b82f6; animation: status-pulse 2s ease-in-out infinite; }
 /* Machine-driven session marker — `bg`, `daemon`, `daemon-worker` or `sdk`.
    Deliberately muted and typographic rather than coloured: it qualifies what
    the row *is*, while the status dot beside it says what the row is *doing*,

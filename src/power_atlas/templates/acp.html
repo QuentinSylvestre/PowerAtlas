@@ -623,10 +623,15 @@
   RAIL_STATUS.working = 'working';
   RAIL_STATUS.waiting = 'waiting';
   RAIL_STATUS.errored = 'errored';
+  RAIL_STATUS.idle = 'idle';
+  RAIL_STATUS.unread = 'unread';
+  RAIL_STATUS.thinking = 'thinking';
   var RAIL_STATUS_LABEL = Object.create(null);
-  RAIL_STATUS_LABEL.working = 'open in this PowerAtlas — the agent is working';
+  RAIL_STATUS_LABEL.thinking = 'open in this PowerAtlas — the agent is working';
   RAIL_STATUS_LABEL.waiting = 'open in this PowerAtlas — waiting for you';
   RAIL_STATUS_LABEL.errored = 'open in this PowerAtlas — something went wrong';
+  RAIL_STATUS_LABEL.idle = 'open in this PowerAtlas — idle';
+  RAIL_STATUS_LABEL.unread = 'open in this PowerAtlas — unread messages';
   // Closed-set map for tool-call status strings used in the group header tally
   // (Phase 3). Wire values absent from this map are silently omitted from the
   // tally — no raw wire string reaches visible UI (no-raw-wire-value rule).
@@ -2934,6 +2939,27 @@
     try { localStorage.setItem(key, value); } catch (e) { /* not fatal */ }
   }
 
+  // ---- unread state (client-side, localStorage) ---------------------------
+  // Marks a held session unread when its turn ends while the tab is not on it.
+  // Cleared when the user subscribes to that session. Keyed by session id with
+  // a prefix to avoid collisions with other localStorage users on this origin.
+  var UNREAD_PREFIX = 'pa_unread_';
+  function markUnread(sid) {
+    if (!sid) return;
+    try { localStorage.setItem(UNREAD_PREFIX + sid, '1'); } catch(e) {}
+  }
+  function clearUnread(sid) {
+    if (!sid) return;
+    try { localStorage.removeItem(UNREAD_PREFIX + sid); } catch(e) {}
+  }
+  function isUnread(sid) {
+    try { return localStorage.getItem(UNREAD_PREFIX + sid) === '1'; } catch(e) { return false; }
+  }
+
+  // Tracks the last known status per session id for unread-detection.
+  // Seeded lazily in railRefreshStates on each poll tick.
+  var _prevSessionStatus = Object.create(null);
+
   // Narrowed against a closed set on the way in, like every other value this
   // page reads from somewhere it does not control. `localStorage` is writable
   // by anything else served from this origin, and the mode reaches a class name
@@ -3028,6 +3054,15 @@
     var changed = false;
     for (var i = 0; i < rows.length; i++) {
       var found = byId['s:' + rows[i].id];
+      // Unread tracking: when a held non-current session transitions from
+      // working to non-working, mark it unread (turn just ended while elsewhere).
+      var prevStatus = _prevSessionStatus[rows[i].id];
+      _prevSessionStatus[rows[i].id] = rows[i].status;
+      if (railAvailability(rows[i].availability) === 'held'
+          && rows[i].id !== sessionId
+          && prevStatus === 'working' && rows[i].status !== 'working') {
+        markUnread(rows[i].id);
+      }
       if (found === undefined) continue;
       var row = found.session;
       var availability = railAvailability(rows[i].availability);
@@ -3438,6 +3473,21 @@
          + (when ? ' - ' + when : '');
   }
 
+  // 5-state dot class for held sessions on the /acp rail.
+  // Returns a CSS class string (e.g. 'status-thinking') or null for non-held.
+  // Maps working → thinking so the dashboard's status-working class is undisturbed.
+  function railDotClass(session) {
+    var avail = railAvailability(session.availability);
+    if (avail !== 'held') return null;  // no dot for non-held
+    var srv = railRowStatus(session.status);
+    if (srv === 'errored') return 'status-errored';
+    if (srv === 'waiting') return 'status-waiting';
+    if (srv === 'working') return 'status-thinking';
+    // idle or unknown: check unread
+    if (isUnread(session.id || session.sessionId)) return 'status-unread';
+    return 'status-idle';
+  }
+
   function railRowNode(session, flat, workspace) {
     var state = railAvailability(session.availability);
     var locked = state === 'locked';
@@ -3471,13 +3521,22 @@
     // The classes are the dashboard's own, taken rather than copied: a rail
     // rule that restated the hue would drift the first time either moved.
     if (state === 'held') {
-      var status = railRowStatus(session.status);
+      var dotClass = railDotClass(session);
       var dot = document.createElement('span');
-      dot.className = 'session-status status-' + status;
+      if (dotClass) {
+        dot.className = 'session-status ' + dotClass;
+        dot.hidden = false;
+      } else {
+        dot.className = 'session-status';
+        dot.hidden = true;
+      }
       // The dot carries no text, so without this it is an indicator with no
       // accessible name.
-      dot.setAttribute('aria-label', RAIL_STATUS_LABEL[status]);
-      dot.title = RAIL_STATUS_LABEL[status];
+      var dotLabel = RAIL_STATUS_LABEL[dotClass ? dotClass.replace('status-', '') : ''] || '';
+      if (dotLabel) {
+        dot.setAttribute('aria-label', dotLabel);
+        dot.title = dotLabel;
+      }
       row.appendChild(dot);
     } else {
       // Holds the dot's width open so the titles line up down the list. A dot
@@ -4780,6 +4839,8 @@
       // This socket is now in the session's subscribers, so every frame the
       // session broadcasts — `session_closed` included — will reach it.
       subscribed = true;
+      // Clear the unread marker for this session: the user is now viewing it.
+      clearUnread(payload.sessionId);
       clearTranscript();
       // The server's answer, not an inference from whatever survived in the
       // buffer. A turn longer than the buffer replays without its start

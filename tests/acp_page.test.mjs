@@ -790,6 +790,10 @@ function loadPage(templatePath, opts = {}) {
         if (opts.storageThrows) throw new Error("storage is unavailable");
         stored[key] = String(value);
       },
+      removeItem(key) {
+        if (opts.storageThrows) throw new Error("storage is unavailable");
+        delete stored[key];
+      },
     },
     console: { log() {}, warn() {}, error() {} },
   };
@@ -2740,7 +2744,7 @@ check("a state or a status off the wire is narrowed before it reaches an attribu
                            [8, "__proto__"]]) {
     const dot = rows[i].querySelector(".session-status");
     assert(dot, `row ${i} is held and was given no dot to narrow`);
-    assertEqual(String(dot.className), "session-status status-working",
+    assertEqual(String(dot.className), "session-status status-thinking",
                 `the status ${JSON.stringify(sent)} reached a class name ` +
                 `rather than narrowing to the fallback: ${dot.className}`);
     assertEqual(dot.getAttribute("aria-label"),
@@ -3773,7 +3777,7 @@ check("a held row's dot follows the turn, not just the holding", async (tpl) => 
   const page = await railed(tpl, { store });
   const dotClass = () => String(
     page.railRows()[0].querySelector(".session-status").className);
-  assert(dotClass().includes("status-working"), "the fixture did not render working");
+  assert(dotClass().includes("status-thinking"), "the fixture did not render working");
 
   // The turn ends. Availability has not moved — this ACP holds the session
   // either way — so a refresh that carried availability alone would leave the
@@ -3890,7 +3894,7 @@ check("adopting a session refreshes the rail instead of waiting out the tick", a
               "adopting a session asked the server nothing, so its row stays " +
               "drawn as free until the 60 s tick");
   const dot = page.railRows()[0].querySelector(".session-status");
-  assert(dot && String(dot.className).includes("status-working"),
+  assert(dot && String(dot.className).includes("status-thinking"),
          "the adopted row carries no live dot, so nothing on it says this ACP " +
          "is now the thing driving it");
 });
@@ -7094,6 +7098,105 @@ check("onclose while timer pending replaces timer not stacks", (tpl) => {
   page.socket().onclose({ code: 1006, reason: "" });
   assertEqual(page.timers.length, 1,
     "onclose while timer pending should replace the old timer, not stack a second one");
+});
+
+// ---- Phase 4: dot color scheme (SC-4) -----------------------------------
+
+// SC-4: working held session → blue thinking dot
+check("dot class thinking when working", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "working";
+  const page = await railed(tpl, { store });
+  const dot = page.railRows()[0].querySelector(".session-status");
+  assert(dot, "held working session must have a dot");
+  assertEqual(String(dot.className), "session-status status-thinking",
+              `working held session should have status-thinking dot, got: ${dot.className}`);
+});
+
+// SC-4: idle held session with unread flag → green unread dot
+check("dot class unread when idle and unread", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].id = "sess-for-unread";
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "idle";
+  // Seed localStorage so isUnread returns true for this session
+  const page = await railed(tpl, {
+    store,
+    stored: { "pa_unread_sess-for-unread": "1" },
+  });
+  const dot = page.railRows()[0].querySelector(".session-status");
+  assert(dot, "held unread session must have a dot");
+  assertEqual(String(dot.className), "session-status status-unread",
+              `idle held session with unread should have status-unread dot, got: ${dot.className}`);
+});
+
+// SC-4: idle held session with no unread flag → white idle dot
+check("dot class idle when no unread", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "idle";
+  const page = await railed(tpl, { store });
+  const dot = page.railRows()[0].querySelector(".session-status");
+  assert(dot, "held idle session must have a dot");
+  assertEqual(String(dot.className), "session-status status-idle",
+              `idle held session without unread should have status-idle dot, got: ${dot.className}`);
+});
+
+// SC-4: non-held session → no dot element (or hidden dot)
+check("dot absent for non held", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store[0].sessions[0].availability = "available";
+  const page = await railed(tpl, { store });
+  const dot = page.railRows()[0].querySelector(".session-status");
+  // Non-held rows should have no dot drawn (the plan says: no dot for non-held)
+  assert(!dot || dot.hidden === true,
+         `available session should have no visible dot, but got: ${dot ? dot.className : "none"}`);
+});
+
+// SC-4: mark unread when non-open held session transitions working -> not working
+check("mark unread on turn end for other session", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 2 });
+  store[0].sessions[0].id = "sess-other";
+  store[0].sessions[0].availability = "held";
+  store[0].sessions[0].status = "working";
+  store[0].sessions[1].id = "sess-open";
+  store[0].sessions[1].availability = "held";
+  store[0].sessions[1].status = "idle";
+
+  // Subscribe to sess-open (making it the current session)
+  const page = loadPage(tpl, { store });
+  page.open();
+  page.deliver({
+    type: "session",
+    sessionId: "sess-open",
+    payload: { sessionId: "sess-open", cwd: "C:\\work", created: false,
+               turnActive: false, contextPercent: null },
+  });
+  await page.settle();
+
+  // First tick: seed _prevSessionStatus with working for sess-other
+  page.tick();
+  await page.settle();
+
+  // sess-other transitions from working to idle
+  store[0].sessions[0].status = "idle";
+  page.tick();
+  await page.settle();
+
+  assert(page.stored["pa_unread_sess-other"] === "1",
+         "sess-other should be marked unread after its turn ended while sess-open was active");
+});
+
+// SC-4: clear unread on subscribe
+check("clear unread on subscribe", (tpl) => {
+  const { page, live } = connected(tpl, {
+    stored: { ["pa_unread_" + "sess-live-0001"]: "1" },
+  });
+  // The connected() helper already delivered a session frame for "sess-live-0001"
+  // which should have called clearUnread
+  assert(page.stored["pa_unread_sess-live-0001"] !== "1",
+         "subscribing to a session should clear its unread marker");
 });
 
 // -------------------------------------------------------------------- main --
