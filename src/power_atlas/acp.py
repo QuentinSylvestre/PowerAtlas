@@ -4001,37 +4001,49 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
     """
     if not session_id:
         conn.send(error_frame("bad_envelope", "'steer' needs a sessionId."))
+        log.warning("ACP steer refused: [%s] session=%s", "bad_envelope", session_id)
         return
     if session_id in _supervisor.subagent_sessions:
         conn.send(error_frame(
             "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "read_only_session", session_id)
         return
     if session_id not in _supervisor.sessions:
         conn.send(error_frame(
             "unknown_session", "This server has no such live session.", session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "unknown_session", session_id)
         return
     if conn.session_id != session_id:
         conn.send(error_frame(
             "not_subscribed", "Subscribe to this session first.", session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "not_subscribed", session_id)
         return
     if session_id in _supervisor.closing:
         conn.send(error_frame(
             "close_in_progress", "Session is being released.", session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "close_in_progress", session_id)
         return
     if session_id not in _supervisor.inflight:
         conn.send(error_frame(
             "no_turn_in_progress",
             "No turn is running — steer is only available during an active turn.",
             session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "no_turn_in_progress", session_id)
         return
-    text = (payload.get("prompt") or "").strip()
+    raw = payload.get("prompt")
+    if not isinstance(raw, (str, type(None))):
+        conn.send(error_frame("bad_payload", "Steer message must be a string.", session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "bad_payload", session_id)
+        return
+    text = (raw or "").strip()
     if not text:
         conn.send(error_frame(
             "bad_payload", "Steer message must not be empty.", session_id))
+        log.warning("ACP steer refused: [%s] session=%s", "bad_payload", session_id)
         return
     try:
         result = await _supervisor.steer(session_id, text)
-        conn.send(envelope("steer_ack", {"queued": result.get("queued", False)},
+        conn.send(envelope("steer_ack", {"queued": result.get("queued", True)},
                            session_id))
     except AcpError as exc:
         conn.send(error_frame(exc.code, str(exc), session_id))
@@ -4063,6 +4075,13 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
         log.warning("ACP cancel refused: [read_only_session] session=%s",
                     session_id)
         return
+    if session_id not in _supervisor.sessions:
+        conn.send(error_frame(
+            "unknown_session",
+            "This server has no such live session. It may belong to an "
+            "earlier PowerAtlas process — create a new one.", session_id))
+        log.warning("ACP cancel refused: [unknown_session] session=%s", session_id)
+        return
     if conn.session_id != session_id:
         # The same requirement `prompt` carries, for the same reason: the turn
         # this ends belongs to the session's watchers, and a socket that is not
@@ -4084,6 +4103,7 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
     except AcpError as exc:
         log.warning("ACP session/cancel refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc), session_id))
+        return
     except Exception:
         log.exception("ACP session/cancel failed: session=%s", session_id)
         conn.send(error_frame(

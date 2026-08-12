@@ -15475,12 +15475,18 @@ class TestAcpSteer:
     def test_steer_frame_is_routed(self, acp_session):
         """A ``steer`` frame on a subscribed in-flight session calls
         ``_supervisor.steer`` with the correct args and queues a ``steer_ack``
-        frame back to the requesting socket only."""
+        frame back to the requesting socket only (unicast, not broadcast)."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor.inflight.add(sid)
         captured = []
         _queued(conn)
+
+        # A second subscriber on the same session — must NOT receive steer_ack.
+        conn2 = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn2)
+        acp_mod._registry.attach(conn2, sid)
+        _queued(conn2)
 
         async def fake_steer(self_ignored, session_id, text):
             captured.append((session_id, text))
@@ -15496,6 +15502,11 @@ class TestAcpSteer:
         assert outbound[0]["type"] == "steer_ack"
         assert outbound[0]["sessionId"] == sid
         assert outbound[0]["payload"]["queued"] is True
+
+        # The second subscriber must not have received a steer_ack frame.
+        outbound2 = _queued(conn2)
+        assert not any(f["type"] == "steer_ack" for f in outbound2), \
+            f"steer_ack was broadcast to a non-requesting socket: {outbound2}"
 
     def test_steer_refused_for_subagent_session(self, acp_session):
         """``steer`` on a sub-agent's own session id must return a
@@ -15541,6 +15552,95 @@ class TestAcpSteer:
         assert written[0]["method"] == "_session/steer"
         assert written[0]["params"]["sessionId"] == sid
         assert written[0]["params"]["message"] == "quick check"
+
+    def test_steer_refused_for_unknown_session(self, acp_session):
+        """``steer`` when session_id is not in ``_supervisor.sessions`` returns
+        ``unknown_session``."""
+        acp_mod, sid = acp_session
+        unknown_sid = "not-registered-steer"
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, unknown_sid, {"prompt": "x"}))
+            outbound = _queued(conn)
+            assert outbound[0]["payload"]["code"] == "unknown_session"
+        finally:
+            acp_mod._registry.connections.discard(conn)
+
+    def test_steer_refused_for_not_subscribed(self, acp_session):
+        """``steer`` when the socket is not subscribed to the session returns
+        ``not_subscribed``."""
+        acp_mod, sid = acp_session
+        acp_mod._supervisor.inflight.add(sid)
+        # conn is not attached to sid
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "x"}))
+            outbound = _queued(conn)
+            assert outbound[0]["payload"]["code"] == "not_subscribed"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+            acp_mod._registry.connections.discard(conn)
+
+    def test_steer_refused_for_close_in_progress(self, acp_session):
+        """``steer`` when the session is in ``closing`` returns
+        ``close_in_progress``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.closing.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "x"}))
+            outbound = _queued(conn)
+            assert outbound[0]["payload"]["code"] == "close_in_progress"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+            acp_mod._supervisor.closing.discard(sid)
+
+    def test_steer_refused_for_empty_payload(self, acp_session):
+        """``steer`` with an empty string ``""`` returns ``bad_payload``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": ""}))
+            outbound = _queued(conn)
+            assert outbound[0]["payload"]["code"] == "bad_payload"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_steer_refused_for_whitespace_only_payload(self, acp_session):
+        """``steer`` with a whitespace-only string returns ``bad_payload``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "  "}))
+            outbound = _queued(conn)
+            assert outbound[0]["payload"]["code"] == "bad_payload"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_steer_refused_for_non_string_payload(self, acp_session):
+        """``steer`` with a non-string ``prompt`` value (e.g. an int) returns an
+        error frame rather than raising AttributeError."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": 123}))
+            outbound = _queued(conn)
+            assert outbound, "Expected an error frame, got nothing"
+            assert outbound[0]["type"] == "error"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
 
 
 class TestAcpCancelCascade:
@@ -15607,15 +15707,19 @@ class TestAcpCancelCascade:
             f"Expected a subagents frame in broadcast: {broadcast}"
 
     def test_cancel_preserves_already_set_stoppedAt(self, acp_session):
-        """An entry with ``stoppedAt`` already set (e.g. from a list_update
-        that raced the cancel) must keep the existing timestamp."""
+        """An undone entry that already has ``stoppedAt`` set (e.g. from a
+        list_update that raced the cancel command) must keep the existing
+        precise timestamp after the cascade runs — ``if not entry.get(stoppedAt)``
+        must not overwrite it with a fresh ``time.time()``."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor.inflight.add(sid)
 
         precise_ts = time.time() - 1.5
         entry = self._crew_entry(0)
-        entry["done"] = True  # already done — should not be re-processed
+        # done=False so the cascade loop ENTERS the entry, but stoppedAt is
+        # already set — the guard must preserve it rather than overwriting it.
+        entry["done"] = False
         entry["stoppedAt"] = precise_ts
         acp_mod._supervisor.crews[sid] = {"child-a": entry}
 
@@ -15623,7 +15727,12 @@ class TestAcpCancelCascade:
                 patch.object(acp_mod._Supervisor, "alive", lambda self: True):
             asyncio.run(acp_mod._handle_cancel(conn, sid))
 
-        assert acp_mod._supervisor.crews[sid]["child-a"]["stoppedAt"] == precise_ts
+        result_entry = acp_mod._supervisor.crews[sid]["child-a"]
+        assert result_entry["done"] is True
+        assert result_entry["stoppedAt"] == precise_ts, (
+            f"stoppedAt was overwritten: expected {precise_ts!r}, "
+            f"got {result_entry['stoppedAt']!r}"
+        )
 
     def test_cancel_skips_cascade_when_no_crew(self, acp_session):
         """No crew for the session: cascade is a no-op — no exception raised."""
