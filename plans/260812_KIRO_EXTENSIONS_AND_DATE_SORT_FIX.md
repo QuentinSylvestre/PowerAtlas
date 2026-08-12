@@ -642,17 +642,36 @@ CSS class `acp-system-msg`. Does not participate in `agentBody`, is not in the s
 - `addSystemMessageUsesTextContent`: verify `addSystemMessage` sets `textContent` on the added element (not `innerHTML`); inject a `<script>` string as text; assert it appears as literal text, not executed.
 
 **Exit criteria**:
-- [ ] `onmessage` handles `commands`, `compaction`, `commands_options_result`, `commands_execute_result`
-- [ ] `sessionCommands` is declared and reset to `[]` in the `type === 'session'` branch of `handle()` (and in `releaseSession()` if it exists)
-- [ ] `#acpCmdDropdown` element exists and opens on `/` keydown in empty prompt
-- [ ] `Enter` keydown with dropdown visible confirms selection (sends `commands_execute`) rather than calling `sendPrompt`
-- [ ] Space after slash-token dismisses dropdown and returns to normal text-send mode
-- [ ] Live prefix filtering sends `commands_options` WS frame (debounced, only when `sessionId` non-null)
-- [ ] Selecting a command sends `commands_execute` WS frame (with `{name: commandName}`) and hides dropdown
-- [ ] `addSystemMessage` uses `textContent` or `createTextNode` (NEVER innerHTML) — verified by `addSystemMessageUsesTextContent` test
-- [ ] Compaction `started`/`completed`/`failed` each renders the correct system message
-- [ ] All new tests pass; existing prompt/steer/queue tests unaffected
-- [ ] `docs/KNOWLEDGE.md` updated: `commands/execute` correction note (string-form kills agent; TuiCommand object form confirmed and shipped); new bullets for `commands/available`, `compaction/status`, `clear/status`
+- [x] `onmessage` handles `commands`, `compaction`, `commands_options_result`, `commands_execute_result`
+- [x] `sessionCommands` is declared and reset to `[]` in the `type === 'session'` branch of `handle()` (and in `releaseSession()` if it exists)
+- [x] `#acpCmdDropdown` element exists and opens on `/` keydown in empty prompt
+- [x] `Enter` keydown with dropdown visible confirms selection (sends `commands_execute`) rather than calling `sendPrompt`
+- [x] Space after slash-token dismisses dropdown and returns to normal text-send mode
+- [x] Live prefix filtering sends `commands_options` WS frame (debounced, only when `sessionId` non-null)
+- [x] Selecting a command sends `commands_execute` WS frame (with `{name: commandName}`) and hides dropdown
+- [x] `addSystemMessage` uses `textContent` or `createTextNode` (NEVER innerHTML) — verified by `addSystemMessageUsesTextContent` test
+- [x] Compaction `started`/`completed`/`failed` each renders the correct system message
+- [x] All new tests pass; existing prompt/steer/queue tests unaffected
+- [x] `docs/KNOWLEDGE.md` updated: `commands/execute` correction note (string-form kills agent; TuiCommand object form confirmed and shipped); new bullets for `commands/available`, `compaction/status`, `clear/status`
+
+**Implementation (2026-08-12, code: a5015e2 / 28e65e2)**
+Added a complete `/` slash command palette to the ACP prompt box. Pressing `/` on an empty prompt opens `#acpCmdDropdown` with commands from the `commands` frame; typing after `/` filters client-side and sends debounced `commands_options` WS round-trips; `ArrowUp`/`ArrowDown` navigate; `Enter` or `Tab` sends `commands_execute`; `Escape` or typing a space closes the palette. Added mouse-click via delegated `mousedown` on the dropdown. Added `turnActive` guard so the palette doesn't open during a running turn. Added ARIA combobox attributes (`aria-haspopup`, `aria-expanded`, `aria-activedescendant`, `aria-controls`, per-item `id`). Added `onmessage` handlers for `commands`, `compaction`, `commands_options_result`, `commands_execute_result`. `addSystemMessage` uses `textContent` exclusively. `sessionCommands` reset on every `session` frame. Client-side partial length cap (`MAX_CMD_PARTIAL_CHARS = 256`).
+
+### 2026-08-12 -- Implementation Review (after Phase 3, persona: Security auditor, End-user advocate)
+
+Implementation health: Green.
+8 findings (0 High after fix, 2 Medium, 6 Low). All auto-fixed in cycle 1; cycle 2 clean.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| EU1 | High | No mouse-click handler on dropdown items; palette was keyboard-only with misleading cursor:pointer. | Fixed — delegated mousedown listener on #acpCmdDropdown added |
+| EU2 | Medium | Dropdown could open during active turn; no turnActive guard on `/` keydown intercept. | Fixed — `!turnActive` guard added; setTurn(true) calls hideCommandDropdown |
+| EU3 | Medium | showCommandDropdown sent commands_options WS frame, and input handler also sent one — double send on every `/`. | Fixed — WS send removed from showCommandDropdown; only debounced input handler sends |
+| EU4 | Low | Tab key not handled for dropdown confirmation (plan spec: Enter/Tab confirm). | Fixed — Tab added alongside Enter in dropdown navigation block |
+| EU5 | Low | Missing ARIA combobox relationship on textarea and dropdown items. | Fixed — aria-haspopup, aria-expanded, aria-activedescendant, aria-controls, li id attrs added |
+| EU6/S2 | Low | No mouse-click test (finding EU1's test gap). | Fixed — dropdownMouseClickSelectsCommand test added |
+| S1 | Low | addSystemMessageUsesTextContent test passed vacuously (status mapped to hardcoded strings, XSS payload never reached addSystemMessage). | Fixed — direct addSystemMessage XSS test added via _testAddSystemMessage hook |
+| S3 | Low | No client-side length cap on partial string sent in commands_options WS frames. | Fixed — MAX_CMD_PARTIAL_CHARS = 256 constant and slice added |
 
 ---
 
