@@ -15639,6 +15639,7 @@ class TestAcpSteer:
             outbound = _queued(conn)
             assert outbound, "Expected an error frame, got nothing"
             assert outbound[0]["type"] == "error"
+            assert outbound[0]["payload"]["code"] == "bad_payload"
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
@@ -15744,6 +15745,66 @@ class TestAcpCancelCascade:
         with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
                 patch.object(acp_mod._Supervisor, "alive", lambda self: True):
             asyncio.run(acp_mod._handle_cancel(conn, sid))  # must not raise
+
+    def test_cancel_cascade_skipped_on_agent_error(self, acp_session):
+        """When ``_supervisor.cancel`` raises an ``AcpError`` subclass (e.g.
+        ``AgentRejected``), the cancel cascade must NOT run — the crew entry
+        stays ``done=False`` and no ``subagents`` frame is broadcast."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+
+        # Seed an active crew entry
+        acp_mod._supervisor.crews[sid] = {
+            "child-a": self._crew_entry(0),
+        }
+
+        # Subscriber that would receive any broadcast
+        sub_conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(sub_conn)
+        acp_mod._registry.attach(sub_conn, sid)
+        _queued(sub_conn)
+
+        async def cancel_raises(self_, session_id):
+            raise acp_mod.AgentRejected("nope")
+
+        with patch.object(acp_mod._Supervisor, "cancel", cancel_raises), \
+                patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+
+        # Cascade must not have run: crew entry still undone
+        assert acp_mod._supervisor.crews[sid]["child-a"]["done"] is False
+        # No subagents frame broadcast
+        broadcast = _queued(sub_conn)
+        assert not any(f["type"] == "subagents" for f in broadcast), \
+            f"Unexpected subagents frame after agent error: {broadcast}"
+
+    def test_cancel_skips_cascade_when_crew_is_empty_dict(self, acp_session):
+        """An empty dict crew (``crews[sid] = {}``) is a valid state — the
+        cascade loop has nothing to iterate, no ``subagents`` frame is
+        broadcast, and cancel proceeds normally."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+
+        # Seed explicitly empty crew dict (not absent, not None)
+        acp_mod._supervisor.crews[sid] = {}
+
+        # Subscriber that would receive any broadcast
+        sub_conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(sub_conn)
+        acp_mod._registry.attach(sub_conn, sid)
+        _queued(sub_conn)
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))  # must not raise
+
+        # No subagents frame for an empty crew
+        broadcast = _queued(sub_conn)
+        assert not any(f["type"] == "subagents" for f in broadcast), \
+            f"Unexpected subagents frame for empty crew: {broadcast}"
 
 
 class TestAcpStoppedAt:

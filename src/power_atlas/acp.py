@@ -4106,7 +4106,7 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
         log.warning("ACP cancel refused: [unknown_session] session=%s", session_id)
         return
     if conn.session_id != session_id:
-        # The same requirement `prompt` carries, for the same reason: the turn
+        # The same requirement `session/prompt` carries, for the same reason: the turn
         # this ends belongs to the session's watchers, and a socket that is not
         # one of them is acting on a transcript it cannot see.
         conn.send(error_frame(
