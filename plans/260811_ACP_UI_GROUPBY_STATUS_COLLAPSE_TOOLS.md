@@ -360,13 +360,35 @@ Both call sites: `head.appendChild(_makeToolToggle(cmdWrap, payload.title || pay
 - Test: `toolRows[id].status.textContent` mutated correctly by `tool_update` when row is collapsed.
 
 **Exit criteria**:
-- [ ] Tool calls with `payload.command` render with `.acp-tool-toggle` in `.acp-tool-head`; command wrapper starts `hidden`.
-- [ ] Clicking toggle shows/hides command wrapper; `aria-expanded` reflects state.
-- [ ] Tool calls without `payload.command` have no toggle; head identical to today.
-- [ ] `tool_update` adding a command to existing row: toggle added, wrapper starts hidden.
-- [ ] In-place `status.textContent` mutation via `toolRows` works regardless of collapse state.
-- [ ] No class name derived from wire data.
-- [ ] `tests/acp_page.test.mjs` updated; suite green.
+- [x] Tool calls with `payload.command` render with `.acp-tool-toggle` in `.acp-tool-head`; command wrapper starts `hidden`.
+- [x] Clicking toggle shows/hides command wrapper; `aria-expanded` reflects state.
+- [x] Tool calls without `payload.command` have no toggle; head identical to today.
+- [x] `tool_update` adding a command to existing row: toggle added, wrapper starts hidden.
+- [x] In-place `status.textContent` mutation via `toolRows` works regardless of collapse state.
+- [x] No class name derived from wire data.
+- [x] `tests/acp_page.test.mjs` updated; suite green.
+
+**Implementation (2026-08-11, code: e00b677 + 0630f59 + 122ec87)**
+Phase 2 adds per-call command body collapse to the ACP transcript. A `_makeToolToggle(cmdWrap, toolTitle)` helper was extracted near `addToolCall()` — it builds a `<button class="acp-tool-toggle">` with `aria-expanded="false"` and an accessible label including the tool name (capped at 80 chars), wiring a click handler that toggles `cmdWrap.hidden` and updates both `aria-expanded` and `aria-label`. The new-row path in `addToolCall()` now wraps `commandBlock(payload)` in a hidden container and appends the toggle to the head; tool calls without a command are unchanged. The `known`-row path handles `tool_update` adding a command, with an idempotency guard. CSS adds chevron toggle animation via `aria-expanded` attribute selector, plus `:focus-visible` and `:hover` rules. A `parentElement` getter was added to the `El` harness class. Post-review auto-fixes: `toolTitle` 80-char cap, `:focus-visible`/`:hover` CSS rules, tests for kind-fallback and toggle idempotency. Final test count: 223 pass / 0 fail.
+
+### 2026-08-12 — Implementation Review (after Phase 2, personas: Senior engineer, End-user advocate, Maintainability reviewer, Security auditor)
+
+Implementation health: Green (after 1 auto-fix cycle).
+10 findings total (0 High, 4 Medium, 6 Low). All Medium auto-fixed.
+QA verification: PASS (browser — toggle visible with tool name, collapsed by default, expand/collapse works, 0 JS errors).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| S1 | Medium | `toolTitle` in aria-label unbounded — agent-authored wire value up to 10k chars could bloat the attribute. | Fixed — `safeTitle = (toolTitle || 'tool').slice(0, 80)` at `_makeToolToggle` entry |
+| UX-F1 | Medium | `.acp-tool-toggle` missing `:focus-visible` rule — inconsistent with all other interactive ACP elements. | Fixed — added `outline: 2px solid var(--accent); outline-offset: 2px` |
+| M1 | Medium | Missing test for `payload.kind` fallback when title absent. | Fixed — test added asserting aria-label includes kind value |
+| M2 | Medium | Missing test for toggle idempotency (two tool_updates with command = one toggle). | Fixed — test added asserting exactly one toggle after two updates |
+| UX-F2 | Low | No `:hover` state on toggle (inconsistent with other controls). | Fixed — added `color: var(--text)` on hover |
+| M3 | Low | `removeChild`/`insertBefore`/`nextSibling` not yet in El harness — Phase 3 will add as first step. | Escalated — Phase 3 prerequisite, handled there |
+| SE-F1 | Low | ROADMAP.md Phase 2/3 doc update deferred to Phase 3. | Escalated — Phase 3 handles both lines per plan §8 |
+| SE-F2 | Low | `subAddToolCall` has no collapse — documented scope boundary (SC5). | User: accepted — out of scope per plan intent, ROADMAP entry sufficient |
+| S3 | Low | `aria-live` comment in `_makeToolToggle` click handler missing. | Fixed — comment added |
+| M4 | Low | UX-F4: zero-identity test (`title='' kind=''`) missing. | Escalated — edge case, behavior documented in review; implementer may add |
 
 
 ---
