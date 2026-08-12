@@ -7225,6 +7225,98 @@ check("clear unread on subscribe", (tpl) => {
          "subscribing to a session should clear its unread marker");
 });
 
+// ---- Phase 5: SC-7 crew timer tests -----------------------------------------
+
+check("elapsed text with stopped at freezes at done elapsed", (tpl) => {
+  // Verify that a done crew entry's elapsed span shows the frozen time
+  // (stoppedAt - startedAt) and does not keep incrementing with Date.now().
+  const { page, live } = connected(tpl);
+  const t = Date.now() / 1000 - 200;  // 200s ago
+  const stoppedAt = t + 65;            // done 65s after start => "1m 5s"
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done",
+      action: "", done: true, error: "", startedAt: t, stoppedAt: stoppedAt },
+  ]));
+  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
+  assert(elapsed !== null, "elapsed span should be present for done entry");
+  assertEqual(elapsed.textContent, "1m 5s",
+    "done entry elapsed should be frozen at stoppedAt - startedAt (1m 5s)");
+});
+
+check("elapsed text without stopped at uses live Date.now", (tpl) => {
+  // Verify that a working entry's elapsed span reflects the real elapsed time.
+  const { page, live } = connected(tpl);
+  const startedAt = Date.now() / 1000 - 10;  // 10 seconds ago
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: startedAt },
+  ]));
+  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
+  assert(elapsed !== null, "elapsed span should be present for working entry");
+  assertEqual(elapsed.textContent, "10s",
+    "working entry elapsed should reflect current elapsed time (10s)");
+});
+
+check("crew timer starts when crew has a non-done entry", (tpl) => {
+  // setCrew([{done:false}]) must start a setInterval so the elapsed display ticks.
+  const { page, live } = connected(tpl);
+  const intervalsBefore = page.intervals.length;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(page.intervals.length > intervalsBefore,
+    "a setInterval should be registered when crew has a running entry");
+});
+
+check("crew timer does not start when all crew entries are done", (tpl) => {
+  // setCrew([{done:true}]) must NOT start a new interval.
+  const { page, live } = connected(tpl);
+  const intervalsBefore = page.intervals.length;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done",
+      action: "", done: true, error: "", startedAt: Date.now() / 1000 - 30, stoppedAt: Date.now() / 1000 },
+  ]));
+  assertEqual(page.intervals.length, intervalsBefore,
+    "no new setInterval should be registered when all entries are done");
+});
+
+// ---- Phase 5: SC-8 prompt navigation tests ----------------------------------
+
+check("prompt nav hidden when zero or one user message", (tpl) => {
+  const { page, live } = connected(tpl);
+  // 0 user messages: nav hidden
+  assert(page.el("acpPromptNav").hidden === true,
+    "prompt nav should be hidden when there are no user messages");
+  // 1 user message: still hidden
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "hello" } });
+  assert(page.el("acpPromptNav").hidden === true,
+    "prompt nav should still be hidden with only one user message");
+  // 2 user messages: visible
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "second message" } });
+  assertEqual(page.el("acpPromptNav").hidden, false,
+    "prompt nav should become visible when there are 2 or more user messages");
+});
+
+check("prompt nav cleared on clearTranscript", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Build up 2 user messages so the nav is visible
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "message 1" } });
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "message 2" } });
+  assertEqual(page.el("acpPromptNav").hidden, false,
+    "fixture: nav should be visible before clear");
+  // Clear the transcript via a new session frame
+  page.deliver({ type: "session", sessionId: "sess-new-nav",
+    payload: { sessionId: "sess-new-nav", cwd: "/tmp", created: true,
+               turnActive: false, contextPercent: null } });
+  assertEqual(page.el("acpPromptNav").hidden, true,
+    "prompt nav should be hidden after clearTranscript");
+});
+
 // -------------------------------------------------------------------- main --
 
 const template = process.argv[2]

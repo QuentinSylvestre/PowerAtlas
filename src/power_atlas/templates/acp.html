@@ -213,7 +213,14 @@
             class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
   </div>
   <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
-       aria-label="Conversation"></div>
+       aria-label="Conversation">
+    <div class="acp-prompt-nav" id="acpPromptNav" hidden>
+      <button class="acp-btn acp-prompt-nav-btn" id="acpPromptUp" type="button"
+              aria-label="Previous prompt">↑</button>
+      <button class="acp-btn acp-prompt-nav-btn" id="acpPromptDown" type="button"
+              aria-label="Next prompt or scroll to bottom">↓</button>
+    </div>
+  </div>
   <!-- A sub-agent's own conversation, shown in place of the transcript+composer
        while one is selected on the agent bar below. Read-only by design (the
        roadmap's own note on this feature: "the correct interaction model is
@@ -404,6 +411,11 @@
   var queueSteerEl = document.getElementById('acpQueueSteer');
   var queueBtn = document.getElementById('acpQueue');
   var steerBtn = document.getElementById('acpSteer');
+  var promptNavEl = document.getElementById('acpPromptNav');
+  var promptUpBtn = document.getElementById('acpPromptUp');
+  var promptDownBtn = document.getElementById('acpPromptDown');
+  // DOM elements of user message rows, in order — drives the prompt nav arrows.
+  var userMsgEls = [];
   var closeBtn = document.getElementById('acpClose');
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
@@ -1006,6 +1018,10 @@
     setCrew([]);
     removeCrewPanel();
     closeSubagentView();
+    // Prompt nav: rows belong to the session that just closed; stale refs must
+    // not survive to a new session's addMessage calls.
+    userMsgEls = [];
+    promptNavEl.hidden = true;
     // Images were staged against the conversation this page has just let go
     // of. Carrying them to whatever is opened next would put a screenshot in
     // front of a different agent in a different directory.
@@ -1496,6 +1512,10 @@
     row.appendChild(who);
     row.appendChild(body);
     transcriptEl.appendChild(row);
+    if (role === 'user') {
+      userMsgEls.push(row);
+      promptNavEl.hidden = userMsgEls.length < 2;
+    }
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     return body;
   }
@@ -2344,6 +2364,11 @@
     // Emptying by textContent rather than innerHTML: same effect, and it keeps
     // the no-innerHTML rule true of every line on this page without exception.
     transcriptEl.textContent = '';
+    // textContent = '' removed every child, including the acpPromptNav element.
+    // Re-attach it at the top of the (now empty) transcript so `addMessage`
+    // can show/hide it correctly as new messages arrive.
+    transcriptEl.appendChild(promptNavEl);
+    promptNavEl.hidden = true;
     agentBody = null;
     toolRows = Object.create(null);
     toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
@@ -2358,6 +2383,10 @@
     setCrew([]);
     removeCrewPanel();
     closeSubagentView();
+    // Reset prompt navigation state: the nav arrows track DOM rows that just
+    // got detached by the textContent = '' above, so stale refs must be cleared.
+    // (promptNavEl was re-attached and hidden in the textContent = '' block above.)
+    userMsgEls = [];
   }
 
   // ---- the crew panel ------------------------------------------------------
@@ -5305,6 +5334,41 @@
     refreshComposerControls();
     send('steer', {message: text}, sessionId);
     // Do NOT show "Steer sent." here — wait for steer_ack from the server.
+  });
+  // ---- prompt navigation arrows -------------------------------------------
+  //
+  // Up: scroll to the user message whose top is above the current scroll
+  // position (i.e., the previous one visible). Falls back to the very first
+  // user message when none is above the threshold.
+  promptUpBtn.addEventListener('click', function() {
+    if (!userMsgEls.length) return;
+    var threshold = transcriptEl.scrollTop;
+    var target = userMsgEls[0];
+    for (var i = userMsgEls.length - 1; i >= 0; i--) {
+      if (userMsgEls[i].offsetTop < threshold - 10) {
+        target = userMsgEls[i];
+        break;
+      }
+    }
+    target.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+  // Down: scroll to the next user message below the current scroll position,
+  // or to the very bottom of the transcript if already at the last one.
+  promptDownBtn.addEventListener('click', function() {
+    if (!userMsgEls.length) return;
+    var threshold = transcriptEl.scrollTop + 10;
+    var target = null;
+    for (var i = 0; i < userMsgEls.length; i++) {
+      if (userMsgEls[i].offsetTop > threshold) {
+        target = userMsgEls[i];
+        break;
+      }
+    }
+    if (target) {
+      target.scrollIntoView({behavior: 'smooth', block: 'start'});
+    } else {
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
   });
   closeBtn.addEventListener('click', function () {
     if (!sessionId) return;

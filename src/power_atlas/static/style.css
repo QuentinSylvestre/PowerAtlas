@@ -682,7 +682,24 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 
 /* Transcript is the primary pane; the transport log below it is a fixed strip,
    because once chunks stream the conversation is what the page is for. */
-.acp-transcript { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.65; display: flex; flex-direction: column; gap: 10px; }
+.acp-transcript { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.65; display: flex; flex-direction: column; gap: 10px; position: relative; }
+/* Floating prompt navigation arrows — positioned at bottom-left of the transcript.
+   Hidden when fewer than 2 user messages are present (see addMessage in acp.html). */
+.acp-prompt-nav {
+  position: absolute;
+  bottom: 0.5rem;
+  left: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  z-index: 10;
+}
+.acp-prompt-nav-btn {
+  padding: 0.25rem 0.5rem;
+  opacity: 0.7;
+  font-size: 0.875rem;
+}
+.acp-prompt-nav-btn:hover { opacity: 1; }
 /* `[hidden]` alone loses to the class rule above: both are one selector of
    specificity, `[hidden]` is the browser's UA stylesheet and an author rule
    beats it regardless of source order, and `display: flex` above is
