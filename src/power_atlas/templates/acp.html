@@ -5956,19 +5956,12 @@
     if (/^\/\S*$/.test(val)) {
       // In the command token: value is /word (no space yet).
       var partial = val.slice(1);
-      // Show client-side filtered results immediately for responsiveness; also
-      // send a debounced server request for authoritative suggestions.
+      // Show client-side filtered results from the catalogue received via the
+      // 'commands' frame. No server round-trip here: _kiro.dev/commands/options
+      // is for argument completion AFTER a command is selected (called with the
+      // command name as the first param), not for filtering the command list.
+      // Sending it with command="" causes kiro-cli to exit — confirmed 2026-08-12.
       showCommandDropdown(partial);
-      if (_cmdOptionsTimer) clearTimeout(_cmdOptionsTimer);
-      _cmdOptionsTimer = setTimeout(function() {
-        _cmdOptionsTimer = null;
-        if (ws && ws.readyState === WebSocket.OPEN && sessionId &&
-            /^\/\S*$/.test(promptInput.value)) {
-          var cappedPartial = promptInput.value.slice(1).slice(0, MAX_CMD_PARTIAL_CHARS);
-          send('commands_options',
-               { partial: cappedPartial }, sessionId);
-        }
-      }, 150);
     } else {
       // Value no longer starts with / alone or has a space — hide the palette.
       hideCommandDropdown();
