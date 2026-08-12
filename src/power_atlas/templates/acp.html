@@ -5106,9 +5106,10 @@
         autoGrowPrompt();
         refreshComposerControls();
       }
-      setState('closed', 'disconnected (' + ev.code + ')');
+      setState('closed', 'disconnected');
       logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
       if (opened) {
+        if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
         reconnectBtn.hidden = false;
         // SC-3: schedule automatic reconnect with exponential backoff.
         // The manual Reconnect button still works (calls connect() directly).
@@ -5117,6 +5118,7 @@
           connect();
         }, _reconnectDelay);
         _reconnectDelay = Math.min(_reconnectDelay * 2, 30000);
+        setState('closed', 'reconnecting\u2026');
       } else {
         diagnoseRejectedHandshake();
       }

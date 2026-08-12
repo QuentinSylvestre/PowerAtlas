@@ -752,7 +752,13 @@ function loadPage(templatePath, opts = {}) {
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
     clearInterval: () => {},
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
-    clearTimeout: () => {},
+    clearTimeout: function(id) {
+      // id is the 1-based index returned by the setTimeout mock above
+      if (id != null) {
+        var idx = timers.findIndex(function(_, i) { return i + 1 === id; });
+        if (idx !== -1) timers.splice(idx, 1);
+      }
+    },
     location: {
       protocol: "http:",
       host: "127.0.0.1:4915",
@@ -7034,12 +7040,16 @@ check("no auto reconnect when not opened", (tpl) => {
   page.socket().onclose({ code: 4401, reason: "token expired" });
   assertEqual(page.timers.length, timersBefore,
     "no reconnect timer should be scheduled when socket closes without having been opened");
+  assertEqual(page.el("acpReconnect").hidden, true,
+    "reconnect button must not appear on stale-token close");
 });
 
 // SC-5 test 1: railRefreshSoon called after sendPrompt success
 check("rail refresh called after send", (tpl) => {
   const { page, live } = connected(tpl);
   const timersBefore = page.timers.length;
+  const fetchesBefore = page.fetches.filter(
+    (f) => f.url.startsWith(LISTING_URL)).length;
   page.type("hello agent");
   page.click("acpSend");
   // A successful send queues a railRefreshSoon timer (or calls railRefresh directly if not busy)
@@ -7054,7 +7064,7 @@ check("rail refresh called after send", (tpl) => {
   // railRefreshSoon either scheduled a timer OR triggered a fetch. At minimum one of those happened.
   const fetchAfter = page.fetches.filter(
     (f) => f.url.startsWith(LISTING_URL)).length;
-  assert(fetchAfter > 0 || page.timers.length > timersBefore,
+  assert(fetchAfter > fetchesBefore || page.timers.length > timersBefore,
     "railRefreshSoon should have been called after sendPrompt (fetch or timer queued)");
 });
 
@@ -7071,6 +7081,19 @@ check("rail refresh called after stop", (tpl) => {
     (f) => f.url.startsWith(LISTING_URL)).length;
   assert(fetchAfter > fetchesBefore || page.timers.length > timersBefore,
     "railRefreshSoon should have been called after stop button press (fetch or timer queued)");
+});
+
+// SC-3 test 6: onclose while timer pending replaces timer not stacks
+check("onclose while timer pending replaces timer not stacks", (tpl) => {
+  const { page } = connected(tpl);
+  // First close while opened=true: schedules timer 1
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers.length, 1,
+    "fixture: first close should schedule exactly one timer");
+  // Second close without running the timer — should replace, not stack
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers.length, 1,
+    "onclose while timer pending should replace the old timer, not stack a second one");
 });
 
 // -------------------------------------------------------------------- main --
