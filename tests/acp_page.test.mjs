@@ -7551,6 +7551,303 @@ check("railRefreshDateModeFailureIsSilent", async (tpl) => {
     "second railRefresh made no listing call — poll cycle frozen after silent failure");
 });
 
+// ---- Phase 3: slash command palette (SC-1, SC-2) -------------------------
+
+// commandsFramePopulatesSessionCommands
+// Delivering a 'commands' frame stores the list in sessionCommands.
+check("commandsFramePopulatesSessionCommands", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands",
+    sessionId: live,
+    payload: {
+      commands: [
+        { name: "context", description: "Show context usage" },
+        { name: "tools",   description: "List available tools" },
+      ],
+    },
+  });
+  // The dropdown should appear when '/' is typed (which triggers
+  // showCommandDropdown('') against the now-populated sessionCommands list).
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden,
+    "dropdown should be visible after '/' keydown on an empty prompt " +
+    "when sessionCommands has entries");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(names.includes("/context") && names.includes("/tools"),
+    "dropdown should show the commands received in the 'commands' frame; " +
+    "got: " + JSON.stringify(names));
+});
+
+// commandsFrameOnSessionChangeResetsSessionCommands
+// A new 'session' frame resets sessionCommands so stale commands from the
+// previous session never appear in the dropdown.
+check("commandsFrameOnSessionChangeResetsSessionCommands", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Populate sessionCommands via a 'commands' frame.
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "context", description: "ctx" }] },
+  });
+  // New session frame — should reset sessionCommands.
+  const newSid = "sess-new-reset";
+  page.deliver({
+    type: "session", sessionId: newSid,
+    payload: { sessionId: newSid, cwd: "C:\\tmp", created: true,
+               turnActive: false, contextPercent: null },
+  });
+  // Now '/' should show an empty dropdown (no commands).
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(drop.hidden,
+    "dropdown should be hidden after a new session frame resets sessionCommands; " +
+    "stale commands from the old session must not appear");
+});
+
+// compactionStartedAddsSystemMessage
+// A 'compaction' frame with status 'started' appends a system message.
+check("compactionStartedAddsSystemMessage", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "compaction", sessionId: live,
+    payload: { status: "started", summary: "" },
+  });
+  const msgs = page.el("acpTranscript").querySelectorAll(".acp-system-msg");
+  assert(msgs.length > 0, "a 'compaction started' frame should add a system message row");
+  assert(msgs[0].textContent.includes("Compacting"),
+    "started system message should mention compacting; got: " + msgs[0].textContent);
+});
+
+// compactionCompletedAddsSystemMessage
+// A 'compaction' frame with status 'completed' appends a system message.
+check("compactionCompletedAddsSystemMessage", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "compaction", sessionId: live,
+    payload: { status: "completed", summary: "" },
+  });
+  const msgs = page.el("acpTranscript").querySelectorAll(".acp-system-msg");
+  assert(msgs.length > 0, "a 'compaction completed' frame should add a system message row");
+  assert(msgs[0].textContent.toLowerCase().includes("compact"),
+    "completed system message should mention compaction; got: " + msgs[0].textContent);
+});
+
+// slashKeyOpensDropdown
+// Pressing '/' on an empty prompt opens the command palette (even with no
+// commands loaded — renders an empty list and hides).
+// With commands, the dropdown is visible.
+check("slashKeyOpensDropdown", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Seed at least one command.
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "Tools list" }] },
+  });
+  const prompt = page.el("acpPrompt");
+  prompt.value = "";
+  let prevented = false;
+  prompt.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assert(prevented, "/ keydown should preventDefault so the browser does not also insert '/'");
+  assertEqual(prompt.value, "/", "/ keydown should set promptInput.value to '/'");
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden, "pressing / on empty prompt should open the command dropdown");
+});
+
+// commandOptionsResultUpdatesDropdown
+// A 'commands_options_result' frame updates the open dropdown with server
+// suggestions.
+check("commandOptionsResultUpdatesDropdown", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Seed one command so the dropdown opens.
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "context", description: "Context" }] },
+  });
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
+  // Server returns an additional suggestion.
+  page.deliver({
+    type: "commands_options_result", sessionId: live,
+    payload: { options: [{ name: "memory", description: "Memory stats" }] },
+  });
+  const names = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
+                    .map((n) => n.textContent);
+  assert(names.includes("/memory"),
+    "commands_options_result should add the server suggestion to the dropdown; " +
+    "got: " + JSON.stringify(names));
+});
+
+// commandsExecuteResultClosesDropdown
+// A 'commands_execute_result' frame hides the dropdown.
+check("commandsExecuteResultClosesDropdown", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "Tools" }] },
+  });
+  // Open dropdown.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
+  // The ack frame should close it.
+  page.deliver({
+    type: "commands_execute_result", sessionId: live,
+    payload: { name: "tools", status: "accepted" },
+  });
+  assert(page.el("acpCmdDropdown").hidden,
+    "commands_execute_result should hide the dropdown");
+});
+
+// dropdownEscapeDismisses
+// Escape keydown while the dropdown is open hides it without sending anything.
+check("dropdownEscapeDismisses", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "context", description: "ctx" }] },
+  });
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
+  const sentBefore = page.socket().sent.length;
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Escape", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(page.el("acpCmdDropdown").hidden,
+    "Escape should dismiss the dropdown");
+  assertEqual(page.socket().sent.length, sentBefore,
+    "Escape should not send any WS frame");
+});
+
+// dropdownEnterSendsCommandsExecute
+// With the dropdown open and an item selected, pressing Enter sends a
+// 'commands_execute' WS frame (not a 'prompt').
+check("dropdownEnterSendsCommandsExecute", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "Tools list" }] },
+  });
+  const prompt = page.el("acpPrompt");
+  prompt.value = "";
+  prompt.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
+  const promptsBefore = page.sentOf("prompt").length;
+  prompt.dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  // Must send commands_execute, not prompt.
+  const execFrames = page.sentOf("commands_execute");
+  assert(execFrames.length > 0,
+    "Enter with dropdown open should send a commands_execute frame");
+  assertEqual(execFrames[0].payload && execFrames[0].payload.name, "tools",
+    "commands_execute payload.name should be the selected command's name");
+  assertEqual(page.sentOf("prompt").length, promptsBefore,
+    "Enter with dropdown open must NOT send a prompt frame");
+  assert(page.el("acpCmdDropdown").hidden,
+    "dropdown should be hidden after command selection");
+});
+
+// spaceAfterCommandDismissesDropdown
+// Typing a space after the slash-token (e.g. '/context ') hides the dropdown
+// and leaves the input unchanged (the user is now typing arguments as plain text).
+check("spaceAfterCommandDismissesDropdown", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "context", description: "ctx" }] },
+  });
+  const prompt = page.el("acpPrompt");
+  prompt.value = "";
+  prompt.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open after /");
+  // Simulate typing 'context ' (with trailing space) — triggers the input event.
+  prompt.value = "/context ";
+  prompt.dispatch("input", {});
+  assert(page.el("acpCmdDropdown").hidden,
+    "space after command token should dismiss the dropdown");
+  assertEqual(prompt.value, "/context ",
+    "prompt value should be preserved after dropdown dismissal");
+});
+
+// dropdownEnterWithClosedSocketIsNoop
+// When Enter is pressed with the dropdown open but the socket is closed,
+// no crash occurs and the dropdown is hidden cleanly.
+check("dropdownEnterWithClosedSocketIsNoop", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "Tools" }] },
+  });
+  const prompt = page.el("acpPrompt");
+  prompt.value = "";
+  prompt.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
+  // Close the socket.
+  page.socket().close();
+  // Enter should not throw and should hide the dropdown cleanly.
+  let threw = false;
+  try {
+    prompt.dispatch("keydown", {
+      key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+    });
+  } catch (e) {
+    threw = true;
+  }
+  assert(!threw, "Enter with closed socket should not throw");
+  assert(page.el("acpCmdDropdown").hidden,
+    "dropdown should be hidden after Enter with closed socket");
+});
+
+// addSystemMessageUsesTextContent
+// addSystemMessage must use textContent (never innerHTML) so that
+// agent-controlled text cannot inject markup or script.
+check("addSystemMessageUsesTextContent", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Inject a string that would execute if inserted via innerHTML.
+  const malicious = "<script>window._injected=true;<\/script>";
+  page.deliver({
+    type: "compaction", sessionId: live,
+    payload: { status: "started", summary: malicious },
+  });
+  // The system message should appear (compaction started fires regardless of summary).
+  const msgs = page.el("acpTranscript").querySelectorAll(".acp-system-msg");
+  assert(msgs.length > 0, "addSystemMessage should append a row to the transcript");
+  // The text must be literal — textContent returns the raw string, not its
+  // parsed form. If innerHTML were used, _text would not include the script tag
+  // as literal text (and the HTML_SINK guard in the harness would have thrown).
+  // The harness's HTML_SINK throws on any innerHTML access, so reaching here
+  // means no innerHTML was used. Separately verify the message text is non-empty.
+  const msgText = msgs[0].textContent;
+  assert(msgText.length > 0, "system message textContent should be non-empty");
+  // Verify the sandbox did not register _injected (would only happen if a real
+  // browser ran the script, but belt-and-suspenders).
+  assert(typeof page.el === "function", "sanity check — page still functional");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

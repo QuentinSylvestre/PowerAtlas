@@ -250,7 +250,13 @@
          the rest of this page. -->
     <div class="acp-tray" id="acpTray" hidden role="group"
          aria-label="Images attached to the next prompt"></div>
-    <div class="acp-composer-row">
+    <div class="acp-composer-row" style="position:relative">
+      <!-- Slash command palette — opened by pressing / in an empty prompt.
+           Positioned absolutely above the textarea row.
+           Built with createElement + textContent; empty in the markup. -->
+      <div id="acpCmdDropdown" hidden role="listbox" aria-label="Slash commands">
+        <ul></ul>
+      </div>
       <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
                 placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
                 aria-label="Prompt"></textarea>
@@ -340,6 +346,62 @@
    `manual` before core runs, so nothing hooks DOMContentLoaded and nothing
    touches the DOM. If this file fails to load, every block below still renders
    — uncoloured, which is what a language Prism does not know already gets. #}
+<style>
+/* ---- slash command palette --------------------------------------------- */
+#acpCmdDropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  background: var(--surface, #1e2030);
+  border: 1px solid var(--border, #2d3150);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  z-index: 200;
+  max-height: 240px;
+  overflow-y: auto;
+}
+#acpCmdDropdown ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+#acpCmdDropdown li {
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+  align-items: baseline;
+}
+#acpCmdDropdown li:hover,
+#acpCmdDropdown li[aria-selected="true"] {
+  background: var(--accent-dim, rgba(99,102,241,0.18));
+}
+#acpCmdDropdown li .acp-cmd-name {
+  color: var(--accent, #818cf8);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  flex-shrink: 0;
+  min-width: 80px;
+}
+#acpCmdDropdown li .acp-cmd-desc {
+  color: var(--text-dim, #8b95b0);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ---- compaction / system message --------------------------------------- */
+.acp-system-msg {
+  padding: 4px 14px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-dim, #8b95b0);
+  text-align: center;
+}
+</style>
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 
 <script nonce="{{ csp_nonce }}">
@@ -529,6 +591,16 @@
   // True once all crew entries are done; cleared by any new crew frame with
   // running entries, so a second fan-out in one turn re-arms it.
   var crewAllDone = false;
+  // Slash command catalogue — populated from the server's 'commands' frame.
+  // [{name: str, description: str}], broadcast-only (not in history).
+  // Reset to [] on every new `session` frame and in releaseSession().
+  var sessionCommands = [];
+  // Debounce timer for commands_options requests.
+  var _cmdOptionsTimer = null;
+  // The command dropdown element (resolved once; matches #acpCmdDropdown).
+  var cmdDropdownEl = document.getElementById('acpCmdDropdown');
+  // Index of the currently highlighted row in the dropdown (-1 = none).
+  var _cmdSelectedIndex = -1;
   // A second, independent WebSocket, opened the first time a sub-agent pill is
   // pressed and left connected afterwards (switching pills re-subscribes it
   // rather than reopening it). Kept apart from `ws` on purpose: `_registry`
@@ -1022,6 +1094,9 @@
     setCrew([]);
     removeCrewPanel();
     closeSubagentView();
+    // The commands catalogue belonged to the released session too.
+    sessionCommands = [];
+    hideCommandDropdown();
     // Prompt nav: rows belong to the session that just closed; stale refs must
     // not survive to a new session's addMessage calls.
     userMsgEls = [];
@@ -1522,6 +1597,165 @@
     }
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     return body;
+  }
+
+  // ---- slash command palette helpers ----------------------------------------
+
+  /** Append a non-bubble, lightly styled system row to the transcript.
+   *
+   *  Used for compaction status indicators and other ephemeral notices.
+   *  SECURITY: MUST use textContent / createTextNode — never innerHTML.
+   *  The `text` parameter comes from the server (agent-controlled). */
+  function addSystemMessage(text) {
+    var stick = stuckToBottom();
+    var el = document.createElement('div');
+    el.className = 'acp-system-msg';
+    el.textContent = String(text);
+    transcriptEl.appendChild(el);
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  /** Returns true when the slash command dropdown is currently visible. */
+  function isCommandDropdownVisible() {
+    return !cmdDropdownEl.hidden;
+  }
+
+  /** Populate and show the slash command dropdown.
+   *
+   *  `partial` is the text after the leading `/`; an empty string shows all.
+   *  Sends a `commands_options` WS frame for server-side suggestions if a
+   *  session is active and the socket is open. */
+  function showCommandDropdown(partial) {
+    var lc = partial.toLowerCase();
+    var items = sessionCommands.filter(function(c) {
+      return !lc || (c.name || '').toLowerCase().indexOf(lc) !== -1;
+    });
+    renderCommandDropdown(items);
+    if (ws && ws.readyState === WebSocket.OPEN && sessionId) {
+      send('commands_options', { partial: partial }, sessionId);
+    }
+  }
+
+  /** Re-render the dropdown list from an array of `{name, description?}`. */
+  function renderCommandDropdown(items) {
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) {
+      ul = document.createElement('ul');
+      cmdDropdownEl.appendChild(ul);
+    }
+    ul.textContent = '';
+    if (!items.length) {
+      cmdDropdownEl.hidden = true;
+      _cmdSelectedIndex = -1;
+      return;
+    }
+    for (var i = 0; i < items.length; i++) {
+      var li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'acp-cmd-name';
+      nameSpan.textContent = '/' + (items[i].name || '');
+      var descSpan = document.createElement('span');
+      descSpan.className = 'acp-cmd-desc';
+      descSpan.textContent = items[i].description || '';
+      li.appendChild(nameSpan);
+      li.appendChild(descSpan);
+      ul.appendChild(li);
+    }
+    _cmdSelectedIndex = 0;
+    updateCommandSelection();
+    cmdDropdownEl.hidden = false;
+  }
+
+  /** Update the visual selection indicator in the dropdown. */
+  function updateCommandSelection() {
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) return;
+    var items = ul.childNodes;
+    for (var i = 0; i < items.length; i++) {
+      items[i].setAttribute('aria-selected',
+        String(i === _cmdSelectedIndex));
+    }
+  }
+
+  /** Hide the slash command dropdown. */
+  function hideCommandDropdown() {
+    cmdDropdownEl.hidden = true;
+    _cmdSelectedIndex = -1;
+    if (_cmdOptionsTimer) {
+      clearTimeout(_cmdOptionsTimer);
+      _cmdOptionsTimer = null;
+    }
+  }
+
+  /** Merge server-returned autocomplete options into the dropdown.
+   *
+   *  Deduplicates by name against the current local items.
+   *  If the dropdown is hidden (was dismissed before the response arrived),
+   *  does nothing. */
+  function applyCommandOptions(options) {
+    if (cmdDropdownEl.hidden) return;
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) return;
+    var existing = new Set();
+    var kids = ul.childNodes;
+    for (var i = 0; i < kids.length; i++) {
+      var nameEl = kids[i].querySelector('.acp-cmd-name');
+      if (nameEl) existing.add(nameEl.textContent.replace(/^\//, ''));
+    }
+    var added = false;
+    for (var j = 0; j < options.length; j++) {
+      var name = options[j] && options[j].name;
+      if (!name || existing.has(name)) continue;
+      var li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'acp-cmd-name';
+      nameSpan.textContent = '/' + name;
+      var descSpan = document.createElement('span');
+      descSpan.className = 'acp-cmd-desc';
+      descSpan.textContent = (options[j].description || '');
+      li.appendChild(nameSpan);
+      li.appendChild(descSpan);
+      ul.appendChild(li);
+      added = true;
+    }
+    if (added && _cmdSelectedIndex < 0) {
+      _cmdSelectedIndex = 0;
+      updateCommandSelection();
+    }
+  }
+
+  /** Send `commands_execute` for the currently selected command, then hide
+   *  the dropdown and clear the textarea. No-op when no command is selected
+   *  or the socket is not open. */
+  function confirmCommandSelection() {
+    if (!isCommandDropdownVisible()) return;
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) { hideCommandDropdown(); return; }
+    var items = ul.childNodes;
+    var idx = _cmdSelectedIndex >= 0 ? _cmdSelectedIndex : 0;
+    if (!items[idx]) { hideCommandDropdown(); return; }
+    var nameEl = items[idx].querySelector('.acp-cmd-name');
+    if (!nameEl) { hideCommandDropdown(); return; }
+    var name = nameEl.textContent.replace(/^\//, '');
+    hideCommandDropdown();
+    promptInput.value = '';
+    autoGrowPrompt();
+    refreshComposerControls();
+    if (!ws || ws.readyState !== WebSocket.OPEN || !sessionId) return;
+    send('commands_execute', { name: name }, sessionId);
+  }
+
+  /** Move the dropdown selection up or down. */
+  function moveCommandSelection(delta) {
+    if (!isCommandDropdownVisible()) return;
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) return;
+    var count = ul.childNodes.length;
+    if (!count) return;
+    _cmdSelectedIndex = (_cmdSelectedIndex + delta + count) % count;
+    updateCommandSelection();
   }
 
   /** Show the "thinking…" row, or do nothing if it is already showing.
@@ -4904,6 +5138,10 @@
       // Clear the unread marker for this session: the user is now viewing it.
       clearUnread(payload.sessionId);
       clearTranscript();
+      // A new session means any prior command catalogue is gone — reset so
+      // stale slash-command suggestions from the old session never show up.
+      sessionCommands = [];
+      hideCommandDropdown();
       // The server's answer, not an inference from whatever survived in the
       // buffer. A turn longer than the buffer replays without its start
       // marker, and Send would otherwise come back enabled against a session
@@ -4975,6 +5213,34 @@
       // right after every `subscribe`/`session` reply that has a crew to
       // report, which is this page's only source for it after a reload.
       setCrew(payload.subagents || []);
+      return;
+    }
+    if (type === 'commands') {
+      // Slash command catalogue from the server (SC-1). Broadcast-only (not
+      // in history), so this is the only source for it after a reconnect.
+      sessionCommands = (payload && payload.commands) || [];
+      return;
+    }
+    if (type === 'compaction') {
+      // Context compaction progress (SC-2). Render a non-bubble system row
+      // in the transcript so the user knows a compaction occurred.
+      var s = (payload && payload.status) || '';
+      var txt = s === 'started' ? 'Compacting conversation context\u2026'
+              : s === 'completed' ? 'Context compacted.'
+              : s === 'failed' ? 'Compaction failed.'
+              : null;
+      if (txt) addSystemMessage(txt);
+      return;
+    }
+    if (type === 'commands_options_result') {
+      // Server-side autocomplete suggestions for the current partial command.
+      applyCommandOptions((payload && payload.options) || []);
+      return;
+    }
+    if (type === 'commands_execute_result') {
+      // Lightweight ack frame — the command's text output arrives as normal
+      // 'chunk' frames via agent_message_chunk notifications.  Ack-only.
+      hideCommandDropdown();
       return;
     }
     if (type === 'session_closed') {
@@ -5577,6 +5843,43 @@
        navigator.maxTouchPoints > 0) ||
       (typeof window !== 'undefined' && 'ontouchstart' in window)
     );
+    // Slash intercept: open the command palette when `/` is pressed into an
+    // empty box (no modifier keys — a plain `/` in an ongoing sentence is left
+    // for the user). The value is still empty at keydown, so `ev.preventDefault`
+    // stops the browser writing it and we write it ourselves before opening the
+    // dropdown.
+    if (ev.key === '/' && promptInput.value === '' &&
+        !ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+      ev.preventDefault();
+      promptInput.value = '/';
+      autoGrowPrompt();
+      refreshComposerControls();
+      showCommandDropdown('');
+      return;
+    }
+    // Dropdown keyboard navigation.
+    if (isCommandDropdownVisible()) {
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        moveCommandSelection(1);
+        return;
+      }
+      if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        moveCommandSelection(-1);
+        return;
+      }
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        hideCommandDropdown();
+        return;
+      }
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        confirmCommandSelection();
+        return;
+      }
+    }
     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !isTouchDevice) {
       ev.preventDefault();
       sendPrompt();
@@ -5592,6 +5895,28 @@
     // Show Queue+Steer when the user types during a turn; show Stop when they
     // clear the textarea. Runs on every keystroke, which is cheap.
     refreshComposerControls();
+    // Live slash-command filtering: open or update the dropdown while the user
+    // is typing a /command token; hide it when they leave the command token.
+    var val = promptInput.value;
+    if (/^\/\S*$/.test(val)) {
+      // In the command token: value is /word (no space yet).
+      var partial = val.slice(1);
+      // Show client-side filtered results immediately for responsiveness; also
+      // send a debounced server request for authoritative suggestions.
+      showCommandDropdown(partial);
+      if (_cmdOptionsTimer) clearTimeout(_cmdOptionsTimer);
+      _cmdOptionsTimer = setTimeout(function() {
+        _cmdOptionsTimer = null;
+        if (ws && ws.readyState === WebSocket.OPEN && sessionId &&
+            /^\/\S*$/.test(promptInput.value)) {
+          send('commands_options',
+               { partial: promptInput.value.slice(1) }, sessionId);
+        }
+      }, 150);
+    } else {
+      // Value no longer starts with / alone or has a space — hide the palette.
+      hideCommandDropdown();
+    }
   });
   // Ctrl+V, and nothing had to be bound for it — this is the ordinary paste,
   // which in a browser carries the clipboard's image flavour alongside its
