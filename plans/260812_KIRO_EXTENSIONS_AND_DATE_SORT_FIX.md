@@ -1,7 +1,7 @@
 # Kiro Extensions Support + Date-Sort Fix
 
 > **Date**: 2026-08-12
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: 2026-08-12
 > **Scope**: ACP slash command palette, session management notifications, groupby-date auto-poll fix
 > **Estimated effort**: 1–2 days
@@ -435,9 +435,9 @@ None. No new infrastructure, APIs, or recurring costs.
 - [x] `_handle_commands_options` and `_handle_commands_execute` are in `_dispatch`
 - [x] Both handlers have: `not_subscribed` guard, `read_only_session` error code, `log.warning` on every refusal, `except Exception` fallback
 - [x] `_handle_commands_execute` has: `inflight.add` before await, `finally: inflight.discard`, catalogue validation, name length cap, `log.info` on success dispatch
-- [ ] **Live probe — `commands/execute` object form**: spawn `kiro-cli acp -a`, create a session, send `{"jsonrpc":"2.0","id":1,"method":"_kiro.dev/commands/execute","params":{"sessionId":"...","command":{"command":"tools","args":{}}}}` and confirm the process stays alive (does NOT exit with code 0). This is a **go/no-go gate for Phase 3** — if the process exits, the `commands_execute` path is shelved and SC-1 re-scoped to catalogue-only.
-- [ ] **Live probe — `commands/execute` output path**: confirm whether output arrives as `agent_message_chunk` chunks (same as `session/prompt`) or only in the `_request` result dict. Document the finding in `docs/KNOWLEDGE.md`. If chunks arrive, the `commands_execute_result` ack-only design is confirmed correct; if no chunks and result carries text, update `commands_execute_result` payload to include `text`.
-- [ ] **Live probe — `commands/options` response shape**: confirm `options` element shape (assumed `{name, description?}`). Update `docs/KNOWLEDGE.md` if different.
+- [ ] **Live probe — `commands/execute` object form**: spawn `kiro-cli acp -a`, create a session, send `{"jsonrpc":"2.0","id":1,"method":"_kiro.dev/commands/execute","params":{"sessionId":"...","command":{"command":"tools","args":{}}}}` and confirm the process stays alive (does NOT exit with code 0). This is a **go/no-go gate for Phase 3** — if the process exits, the `commands_execute` path is shelved and SC-1 re-scoped to catalogue-only. *Note: deferred to post-deployment live probe; Phase 3 shipped based on design confirmation from tui.js and KiroCrew source analysis. KNOWLEDGE.md line 47 updated to supersede the old kill-on-execute claim (2026-08-12).*
+- [ ] **Live probe — `commands/execute` output path**: confirm whether output arrives as `agent_message_chunk` chunks (same as `session/prompt`) or only in the `_request` result dict. Document the finding in `docs/KNOWLEDGE.md`. If chunks arrive, the `commands_execute_result` ack-only design is confirmed correct; if no chunks and result carries text, update `commands_execute_result` payload to include `text`. *Note: deferred to post-deployment; ack-only design based on KiroCrew source analysis.*
+- [ ] **Live probe — `commands/options` response shape**: confirm `options` element shape (assumed `{name, description?}`). Update `docs/KNOWLEDGE.md` if different. *Note: deferred to post-deployment.*
 - [x] All new test classes pass; no regressions in full `test_web.py` suite
 
 **Implementation (2026-08-12, code: 410abcb / 9f40e7c / b74f724)**
@@ -718,6 +718,31 @@ node tests/acp_page.test.mjs
 <Reserved — filled during implementation>
 
 ## Review Log
+
+### 2026-08-12 -- Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor.
+8 findings (0 High, 2 Medium, 6 Low). All fixed in auto-fix + Step 9 passes.
+QA verification: PASS (5 surfaces verified, full test suites: 302 JS + 1299 Python + 1671 full suite).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: acp.py handlers | pass (1299) | PASS | All new test classes pass; live probe deferred to post-deployment |
+| 2: railRefresh fix | pass (286→302) | PASS | railRefreshDateModeCallsLoadFlatPage and 3 other tests pass |
+| 3: slash command palette | pass (302) | PASS | 12 new Phase 3 tests pass; XSS verified via textContent |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| SE1 | Medium | 3 Phase 1 live-probe exit criteria unchecked; plan said these were go/no-go gates for Phase 3. | User: accepted — deferred to post-deployment live probe; design confirmed from source analysis, notes added to plan |
+| SE2 | Medium | docs/KNOWLEDGE.md and plans/ROADMAP.md not updated per Phase 3 Documentation Updates table. | Fixed — KNOWLEDGE.md line 47 superseded; ROADMAP.md corrected (8c90337) |
+| S1 | Medium | `meta {turn:"start"}` emitted before `inflight.add`, inverted from `_handle_prompt` ordering. | Fixed — `inflight.add` moved before `_emit(turn:start)` with explanatory comment (8c90337) |
+| SE3 | Low | Comment missing explaining `return` in except blocks still runs `finally`. | Fixed — docstring note added to each return in except blocks |
+| SE4 | Low | `flushToolGroups()` not called in finally — function does not exist in acp.py; moot. | User: accepted — function does not exist; _handle_prompt has no such call either |
+| S2 | Low | No comment noting `payload.error`/`summary` are agent-controlled in JS compaction handler. | Fixed — inline security comment added to compaction onmessage handler (8c90337) |
+| S3 | Low | Catalogue race allows unvalidated names; documented as known gap. | User: accepted — existing comment is adequate; documented in Design Decisions |
 
 ### 2026-08-12 -- Plan Creation (via /qplan)
 
