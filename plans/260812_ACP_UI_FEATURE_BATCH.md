@@ -652,15 +652,20 @@ delete RAIL_STATUS_LABEL.working;
 - `test_clear_unread_on_subscribe`: `session` frame received → `isUnread(sid)===false`.
 
 **Exit criteria**:
-- [ ] `status-working` CSS class removed; `status-thinking`, `status-idle`, `status-unread` added
-- [ ] Held `working` session shows blue thinking dot
-- [ ] Held `waiting` session shows amber dot
-- [ ] Held `errored` session shows red dot
-- [ ] Held idle session with unread shows green dot; without unread shows white dot
-- [ ] Non-held sessions show no dot
-- [ ] `meta turn:end` for non-active session marks it unread in localStorage
-- [ ] `subscribe` (session frame) clears unread from localStorage
-- [ ] All new tests pass; no regression
+- [x] `status-working` CSS class kept (not removed — dashboard depends on it); `status-thinking`, `status-idle`, `status-unread` added
+- [x] Held `working` session shows blue thinking dot
+- [x] Held `waiting` session shows amber dot
+- [x] Held `errored` session shows red dot
+- [x] Held idle session with unread shows green dot; without unread shows white dot
+- [x] Non-held sessions show no dot
+- [x] `meta turn:end` for non-active session marks it unread in localStorage
+- [x] `subscribe` (session frame) clears unread from localStorage
+- [x] All new tests pass; no regression
+
+#### Implementation (2026-08-12, code: 115a59a + ee74532 + 2396b68 + 858e125)
+Phase 4 adds a 5-state rail dot scheme. CSS gains `.status-idle` (white `#e5e7eb`), `.status-unread` (static green `#22c55e`, no animation — distinguishable from the pulsing `status-thinking`), and `.status-thinking` (pulsing blue `#3b82f6`). `.status-working` is preserved for the dashboard. JS adds `RAIL_UNREAD_PREFIX`/`markUnread`/`clearUnread`/`isUnread` localStorage helpers (all try/catch guarded), `_prevSessionStatus` dict for transition tracking (evicted per-poll for stale entries and on `railForgetSession`), and `railDotClass()` which maps: errored→status-errored, waiting→status-waiting, working→status-thinking, idle→status-unread-if-unread/status-idle, unknown→status-thinking. `railRefreshStates()` marks unread when a non-open held session transitions working→idle (guarded: `sessionId !== null`). `clearUnread` fires in the `session` frame handler on subscribe. `RAIL_STATUS` narrowing map purged of client-only states (only wire values remain). 269 JS + 1234 Python tests pass.
+
+Divergence: `status-unread` is static green (no pulse) per user direction, differing from the plan spec which included `status-pulse`.
 
 ---
 
@@ -884,6 +889,7 @@ node tests/acp_page.test.mjs
 - Phase 1: `_mark_crew_done` helper extracted to avoid duplicating done-marking + stoppedAt-stamping logic between `_handle_cancel` and `_on_subagent_list`. Behavior-identical refactor; improves maintainability.
 - Phase 1: Steer payload key named `"message"` (not `"prompt"` as the plan originally specified). Rationale: aligns with `_Supervisor.steer()`'s own wire param `{"sessionId": ..., "message": text}` and the live-probe spec in project memory. Phase 2 plan spec updated accordingly.
 - Phase 2: `acpQueue`/`acpSteer` wrapped in `acpQueueSteer` `<div>` for atomic hide/show; `refreshComposerControls()` operates on the wrapper.
+- Phase 4: `status-unread` is static green (no `status-pulse` animation) per user direction — distinguishes unread from the pulsing `status-thinking` and avoids the "pulsing green = busy" mental model confusion.
 
 ## Review Log
 
@@ -986,6 +992,27 @@ Implementation health: Green.
 | 8 | Low | Reconnect button visible during auto-reconnect with no label change. | Fixed — "reconnecting…" status text provides sufficient context (cycle 1). |
 | 9 | Low | "rail refresh after stop" test disjunction over-permissive. | Accepted — stop test uses correct delta; send test now also delta; both discriminating. |
 | 10 | Low | Plan test names used `test_` prefix; implementation uses natural strings. | User: accepted — convention difference, no functional impact.
+
+### 2026-08-12 — Implementation Review (after Phase 4, persona: End-user advocate, Reliability engineer, Senior engineer, Maintainability reviewer)
+
+Implementation health: Green.
+13 findings (0 High, 4 Medium, 9 Low). All resolved across 2 cycles + 1 Low-fix pass (cycle-3 skipped — cycle-2 all Low, mechanical).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `status-unread` (pulsing green) visually identical to `status-working` — users read "pulsing green = busy". | Fixed — animation removed from `status-unread`; now static green (user direction: option 2, cycle 2). |
+| 2 | Medium | No integrated test chaining turn-end → localStorage mark → dot renders `status-unread`. | Fixed — extended test asserts dot class after transition (cycle 1). |
+| 3 | Medium | Missing `aria-label` assertions for idle/unread dot states. | Fixed — assertions added to both tests (cycle 1). |
+| 4 | Medium | `_prevSessionStatus` grows unbounded — no eviction on session delete or poll update. | Fixed — per-poll eviction pass + `railForgetSession` deletion (cycle 1). |
+| 5 | Low | `UNREAD_PREFIX` should be `RAIL_UNREAD_PREFIX` for consistency with `RAIL_*` naming. | Fixed — renamed in all 4 occurrences (cycle 1). |
+| 6 | Low | Dead `session.id \|\| session.sessionId` fallback in `railDotClass`. | Fixed — removed; uses `session.id` only (cycle 1). |
+| 7 | Low | `null` sessionId window allows benign self-correcting unread flash. | Fixed — `sessionId !== null` guard added; null check first (cycle 1 + Low-fix pass). |
+| 8 | Low | `'thinking'`/`'unread'`/`'idle'` in `RAIL_STATUS` wire-narrowing map — latent trap. | Fixed — removed from wire map; kept in label map (cycle 1). |
+| 9 | Low | `dot.hidden = false` dead code on newly created elements. | Fixed — removed (cycle 1). |
+| 10 | Low | `_prevSessionStatus` not pruned in `railForgetSession`. | Fixed — `delete _prevSessionStatus[sid]` added (cycle 1). |
+| 11 | Low | No localStorage cleanup comment for accumulated orphaned unread markers. | Fixed — comment added explaining by-design accumulation (cycle 1). |
+| 12 | Low | `delete RAIL_STATUS_LABEL.working` noted as unnecessary (key never assigned). | Fixed — comment added (cycle 1). |
+| 13 | Low | Unknown wire status fallback in `railDotClass` untested. | Fixed — test added for `status: 'bogus_unknown_value'` → `status-thinking` (Low-fix pass). |
 
 ## Harness Improvement Opportunities
 
