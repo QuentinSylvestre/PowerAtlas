@@ -1,7 +1,7 @@
 # ACP UI Feature Batch
 
 > **Date**: 2026-08-12
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Eight /acp page improvements: image inline, steer/queue, auto-reconnect, new dot colors, rail refresh triggers, cancel-cascades-to-subagents, subagent timer freeze, prompt navigation arrows
 > **Estimated effort**: 2–3 days
@@ -86,8 +86,6 @@ Add 8 UX improvements to `/acp`: inline image markers, mid-turn queue/steer cont
 ## Harness Improvement Opportunities
 
 - The ACP probe pattern (spawn kiro-cli as a subprocess, drive JSON-RPC directly) proved useful for verifying behavioral assumptions before writing code. Consider documenting it in `plans/tests/HARNESS.md` as a reusable technique for ACP protocol questions — cost: ~15 min per verification saved vs. runtime testing.
-
-
 ## 4) External Dependencies & Costs
 
 ### Required external changes
@@ -212,14 +210,17 @@ None. No new API calls, cloud resources, or licensing changes.
 - `test_stoppedAt_in_subagents_payload`: `_subagents_payload` includes `stoppedAt` field.
 
 **Exit criteria**:
-- [ ] `"steer"` in `CLIENT_TYPES`, `"steer_ack"` in `SERVER_TYPES`
-- [ ] `_handle_steer` routes correctly; subagent session → `read_only_session` error
-- [ ] `_supervisor.steer()` calls `_request("_session/steer", ...)` (not `_notify`)
-- [ ] `_handle_cancel` marks all active crew entries `done=True` with `stoppedAt` and emits `subagents` frame
-- [ ] `stoppedAt` set in `_on_subagent_list` on first `done=True` transition
-- [ ] `stoppedAt` present in `_subagents_payload` output
-- [ ] All 5 new tests pass: `pytest tests/test_web.py -k "steer or cancel_marks_crew or stoppedAt" -x`
-- [ ] Full suite green: `pytest tests/test_web.py -x`
+- [x] `"steer"` in `CLIENT_TYPES`, `"steer_ack"` in `SERVER_TYPES`
+- [x] `_handle_steer` routes correctly; subagent session → `read_only_session` error
+- [x] `_supervisor.steer()` calls `_request("_session/steer", ...)` (not `_notify`)
+- [x] `_handle_cancel` marks all active crew entries `done=True` with `stoppedAt` and emits `subagents` frame
+- [x] `stoppedAt` set in `_on_subagent_list` on first `done=True` transition
+- [x] `stoppedAt` present in `_subagents_payload` output
+- [x] All 5 new tests pass: `pytest tests/test_web.py -k "steer or cancel_marks_crew or stoppedAt" -x`
+- [x] Full suite green: `pytest tests/test_web.py -x`
+
+#### Implementation (2026-08-12, code: 12d7690 + 19d3689 + 272c7e3 + 0d118e1)
+Phase 1 adds server-side support for mid-turn steering, cancel cascades to subagent crew entries, and the `stoppedAt` freeze timestamp. `CLIENT_TYPES` gains `"steer"` and `SERVER_TYPES` gains `"steer_ack"`. A new `_handle_steer` async handler runs six guards (session_id present, not subagent, session exists, subscribed, not closing, turn in-flight) plus an isinstance guard on the payload value before calling the new `_Supervisor.steer()` method — which issues `_request("_session/steer", ...)` (a JSON-RPC request with id, not a notify) — and sends a `steer_ack` frame to the requesting socket only. The handler is wired into `_dispatch` after the `cancel` arm. In `_handle_cancel`, a `_mark_crew_done(crew, now)` helper (extracted to avoid duplication with `_on_subagent_list`) marks every non-done crew entry `done=True` with `stoppedAt = time.time()` (preserving any more-precise timestamp kiro-cli already set), and calls `_emit_subagents_frame` in a try/except — critically guarded by `return` in the `except AcpError` branch so the cascade never runs on a rejected cancel. The steer payload key uses `"message"` (matching `_Supervisor.steer`'s own wire param and the live-probe spec). In `_on_subagent_list`, the `updated` dict carries `stoppedAt`, stamped at transition time or preserved from the existing entry. `_subagents_payload` includes `"stoppedAt": entry.get("stoppedAt")` in each wire entry. All 5 plan-required tests plus 11 additional guard/edge-case tests cover all scenarios. Full suite: 1234 passed, 0 failures.
 
 ---
 
@@ -335,7 +336,7 @@ steerBtn.addEventListener('click', function() {
   steerBtn.disabled = true;
   autoGrowPrompt();
   refreshComposerControls();
-  send('steer', {prompt: text}, sessionId);
+  send('steer', {message: text}, sessionId);
   // Do NOT show "Steer sent." yet — wait for steer_ack
 });
 ```
@@ -422,7 +423,7 @@ promptInput.value = renum;
 - `test_queue_button_hidden_when_textarea_empty`: `turnActive=true`, textarea empty → `queueBtn.hidden===true`, `stopBtn.hidden===false`.
 - `test_queue_button_visible_when_turn_active_and_text_present`: `turnActive=true`, textarea has text → `queueBtn.hidden===false`, `stopBtn.hidden===true`.
 - `test_queue_stores_text_and_clears_textarea`: click queue → `queuedPrompt` set, `promptInput.value===''`.
-- `test_steer_sends_frame_and_clears_textarea`: click steer → WS send called with `{type:'steer', payload:{prompt:...}}`.
+- `test_steer_sends_frame_and_clears_textarea`: click steer → WS send called with `{type:'steer', payload:{message:...}}`.
 - `test_queued_prompt_auto_sends_on_turn_end`: simulate `meta turn:end` with `queuedPrompt` set → `sendPrompt` called.
 
 **Exit criteria**:
@@ -872,7 +873,8 @@ node tests/acp_page.test.mjs
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved — filled during implementation>
+- Phase 1: `_mark_crew_done` helper extracted to avoid duplicating done-marking + stoppedAt-stamping logic between `_handle_cancel` and `_on_subagent_list`. Behavior-identical refactor; improves maintainability.
+- Phase 1: Steer payload key named `"message"` (not `"prompt"` as the plan originally specified). Rationale: aligns with `_Supervisor.steer()`'s own wire param `{"sessionId": ..., "message": text}` and the live-probe spec in project memory. Phase 2 plan spec updated accordingly.
 
 ## Review Log
 
@@ -904,6 +906,35 @@ High-effort, 4 personas: Architect, Senior Engineer, Reliability Engineer, End-U
 | 20 | Medium | `_crewTimerInterval` leaked if code path releases session without `setCrew([])`. | Fixed — explicit `clearInterval` added unconditionally in `releaseSession()`. |
 | 21 | Low | `steer_ack` no-op left false "Steer sent." note when `queued===false`. | Fixed — `steer_ack` handler checks `queued===false` and shows error note. |
 | 22 | Low | Various: scroll math for nav arrows, tooltip for Steer button, timer stoppedAt null guard in `elapsedText()`. | Fixed inline — `elapsedText` null-guards `stoppedAt`; `aria-label`/`title` on Steer button; scroll math note added. |
+
+### 2026-08-12 — Implementation Review (after Phase 1, persona: Security auditor, Reliability engineer, Senior engineer, Maintainability reviewer)
+
+Implementation health: Green.
+16 findings (1 High, 7 Medium, 8 Low). All resolved across 2 cycles + 1 Low-fix pass.
+
+Cycle 2 skipped for the Low-fix pass — all remaining findings were Low and auto-fixes were purely mechanical (test assertion strengthening, comment update, test additions).
+
+Escalation 1 (MEDIUM — duplicate cascade logic): User directed: Fix now. Resolved by extracting `_mark_crew_done` helper.
+Escalation 2 (LOW — payload key name): User directed: Accept and note. Noted as divergence in § Implementation Divergences.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `AcpError` path in `_handle_cancel` has no `return` — cascade runs on rejected cancel, desynchronising crew state. | Fixed — `return` added after error frame in `except AcpError` branch (cycle 1). |
+| 2 | Medium | Non-string steer `prompt` payload raises unhandled `AttributeError` as task exception; client hangs. | Fixed — `isinstance` guard added before text extraction (cycle 1). |
+| 3 | Medium | Missing tests for `unknown_session`, `not_subscribed`, `close_in_progress`, `bad_payload` guards. | Fixed — 5 new guard tests added to `TestAcpSteer` (cycle 1). |
+| 4 | Medium | `steer_ack` unicast not verified — broadcast mutation undetectable. | Fixed — second subscriber assertion added to routing test (cycle 1). |
+| 5 | Medium | `_handle_cancel` missing `unknown_session` guard, inconsistent with `_handle_steer` and `_handle_prompt`. | Fixed — guard added before `conn.session_id` check (cycle 1). |
+| 6 | Medium | Cancel cascade logic duplicated in `_handle_cancel` and `_on_subagent_list`. | Fixed — `_mark_crew_done` helper extracted; user directed Fix now (cycle 2). |
+| 7 | Medium | Missing `log.warning` on steer guard refusals — production steer failures invisible in logs. | Fixed — log lines added after each guard's error frame (cycle 1). |
+| 8 | Low | Steer payload key `"prompt"` conflicts with internal `"message"` name and wire spec. | User: accepted — noted as divergence; plan Phase 2 spec updated to use `"message"`. |
+| 9 | Low | `test_cancel_preserves_already_set_stoppedAt` tested wrong scenario (done=True entry skipped by cascade). | Fixed — test corrected to seed done=False with pre-set stoppedAt (cycle 1). |
+| 10 | Low | `_Supervisor.steer` `or {}` default returns `queued=False` for null result, misleading client. | Fixed — default changed to `True` (cycle 1). |
+| 11 | Low | `time.time()` for stoppedAt uses wall clock — negative elapsed possible on NTP rollback. | User: accepted — Phase 5 JS `Math.max(0,...)` guard is the mitigation. |
+| 12 | Low | `test_steer_refused_for_non_string_payload` asserts type==error but not specific code==bad_payload. | Fixed — assertion strengthened to check `"bad_payload"` code (Low-fix pass). |
+| 13 | Low | Plan Phase 2 spec still referenced `{prompt: text}` after server-side rename to `"message"`. | Fixed — Phase 2 spec updated in plan file (Low-fix pass). |
+| 14 | Low | No test asserts cancel cascade is skipped when `_supervisor.cancel` raises `AcpError`. | Fixed — `test_cancel_cascade_skipped_on_agent_error` added (Low-fix pass). |
+| 15 | Low | Empty-dict crew path (`crews[sid] = {}`) not tested for cascade skip. | Fixed — `test_cancel_skips_cascade_when_crew_is_empty_dict` added (Low-fix pass). |
+| 16 | Low | Stale `` `prompt` `` cross-handler comment in `_handle_cancel` after payload rename. | Fixed — changed to `` `session/prompt` `` (Low-fix pass). |
 
 ## Harness Improvement Opportunities
 
