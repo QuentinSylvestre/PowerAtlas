@@ -4794,18 +4794,20 @@
       queuedPromptSession = null;
       if (!replaying) setTurn(false);
       if (!replaying) hideThinking();
-      if (payload.stopReason && payload.stopReason !== 'end_turn') {
+      const queueDiscardNote = !replaying && _toSend && payload.stopReason === 'cancelled';
+      if (payload.stopReason && payload.stopReason !== 'end_turn' && !queueDiscardNote) {
         // Written into the transcript, not only the log strip, because the
         // log is not replayed: a turn that failed would otherwise come back
         // after a reload as a prompt with no answer and no explanation —
         // exactly the hung-turn appearance turn boundaries exist to prevent.
+        // Skipped when the queue-discard note below will fire instead.
         addMessage('note', 'turn ended: ' + payload.stopReason);
       }
       logLine('info', '← turn end (' + payload.stopReason + ')');
       // Cancelled turns must not fire a queued auto-send — the user stopped
       // the turn on purpose, so silently sending the next prompt would be
       // surprising. Discard and inform.
-      if (!replaying && _toSend && payload.stopReason === 'cancelled') {
+      if (queueDiscardNote) {
         addMessage('note', 'Queued prompt not sent \u2014 the turn was stopped.');
         return;
       }
