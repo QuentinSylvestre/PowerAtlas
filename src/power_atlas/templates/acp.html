@@ -1470,6 +1470,24 @@
     thinkingRow.body.textContent += text;
   }
 
+  // Creates a collapse toggle button for a tool call command wrapper.
+  // toolTitle is the human-readable tool name used in the accessible label.
+  function _makeToolToggle(cmdWrap, toolTitle) {
+    var toggle = document.createElement('button');
+    toggle.className = 'acp-tool-toggle';
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', 'Show command detail \u2014 ' + (toolTitle || 'tool'));
+    toggle.addEventListener('click', function () {
+      var open = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
+      toggle.setAttribute('aria-label',
+        (open ? 'Show' : 'Hide') + ' command detail \u2014 ' + (toolTitle || 'tool'));
+      cmdWrap.hidden = open;
+    });
+    return toggle;
+  }
+
   function addToolCall(payload) {
     // Every class name below is a literal. `status`, `kind` and `title` are
     // agent-authored and reach the page only through textContent — under -a
@@ -1480,7 +1498,14 @@
     if (known) {
       known.status.textContent = payload.status || 'update';
       if (payload.command && !known.body.querySelector('.acp-tool-cmd')) {
-        known.body.appendChild(commandBlock(payload));
+        var cmdWrap = commandBlock(payload);
+        cmdWrap.hidden = true;
+        var knownHead = known.body.querySelector('.acp-tool-head');
+        if (knownHead && !knownHead.querySelector('.acp-tool-toggle')) {
+          // head is always present (built in the new-row path above) but guard defensively
+          knownHead.appendChild(_makeToolToggle(cmdWrap, payload.title || payload.kind));
+        }
+        known.body.appendChild(cmdWrap);
       }
       return;
     }
@@ -1516,7 +1541,12 @@
     head.appendChild(status);
     body.appendChild(head);
 
-    if (payload.command) body.appendChild(commandBlock(payload));
+    if (payload.command) {
+      var cmdWrap = commandBlock(payload);
+      cmdWrap.hidden = true;
+      head.appendChild(_makeToolToggle(cmdWrap, payload.title || payload.kind));
+      body.appendChild(cmdWrap);
+    }
 
     row.appendChild(who);
     row.appendChild(body);

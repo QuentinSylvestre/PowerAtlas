@@ -720,6 +720,23 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-tool-name { font-size: 12px; font-weight: 600; color: #e9d5ff; }
 .acp-tool-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
 .acp-tool-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.acp-tool-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 4px;
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+}
+.acp-tool-toggle::before {
+  content: '\25B6';
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.acp-tool-toggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
 .acp-tool-cmd, .acp-msg-md pre { margin-top: 6px; max-height: 220px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; }
 .acp-tool-more { margin-top: 4px; font-size: 11px; font-style: italic; color: #fbbf24; }
 /* The agent's answer once its markdown has been rendered, which happens at the

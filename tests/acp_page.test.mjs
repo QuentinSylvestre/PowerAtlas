@@ -312,6 +312,12 @@ class El {
     walk(this);
     return out;
   }
+  get parentElement() {
+    // In the real DOM, parentElement is parentNode when the parent is an Element.
+    // All nodes in this harness are El instances (no Document/Text nodes as
+    // parents), so parentElement and parentNode are equivalent here.
+    return this.parentNode;
+  }
 }
 
 // -------------------------------------------------- the listing endpoint --
@@ -6105,6 +6111,151 @@ check("clicking Show-N-more in a status bucket restores focus to the last reveal
     assertEqual(now.dataset.sid, lastRow.dataset.sid,
                 "focus did not land on the last revealed row of the Available bucket");
   });
+
+// -------------------------------------------------------- Phase 2: collapse tool call command body --
+
+check("tool_call with command renders .acp-tool-toggle in head; cmdWrap starts hidden", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tc-col-1", title: "shell", kind: "execute",
+               status: "started", command: "ls -la" },
+  });
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  assert(toggle !== null, "tool_call with command should render .acp-tool-toggle in .acp-tool-head");
+  const head = transcript.querySelector(".acp-tool-head");
+  assert(head.querySelector(".acp-tool-toggle") !== null,
+         ".acp-tool-toggle should be a child of .acp-tool-head");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false",
+              "toggle should start with aria-expanded=false (collapsed)");
+  // The commandBlock wrapper (parent of .acp-tool-cmd) should start hidden
+  const cmdEl = transcript.querySelector(".acp-tool-cmd");
+  assert(cmdEl !== null, "tool_call with command should render .acp-tool-cmd");
+  const cmdWrap = cmdEl.parentElement;
+  assert(cmdWrap.hidden === true,
+         "command wrapper should start hidden (collapsed by default)");
+});
+
+check("clicking toggle reveals command body and sets aria-expanded=true", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tc-col-2", title: "shell", kind: "execute",
+               status: "started", command: "git status" },
+  });
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  const cmdWrap = transcript.querySelector(".acp-tool-cmd").parentElement;
+  assert(cmdWrap.hidden === true, "fixture: should start collapsed");
+  toggle.dispatch("click");
+  assertEqual(toggle.getAttribute("aria-expanded"), "true",
+              "after first click aria-expanded should be true");
+  assert(cmdWrap.hidden === false,
+         "after first click command wrapper should be visible (hidden=false)");
+});
+
+check("second click on toggle collapses command body again", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tc-col-3", title: "shell", kind: "execute",
+               status: "started", command: "echo hi" },
+  });
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  const cmdWrap = transcript.querySelector(".acp-tool-cmd").parentElement;
+  toggle.dispatch("click");
+  assert(cmdWrap.hidden === false, "fixture: first click should open");
+  toggle.dispatch("click");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false",
+              "after second click aria-expanded should be false again");
+  assert(cmdWrap.hidden === true,
+         "after second click command wrapper should be hidden again");
+});
+
+check("tool_call without command has no .acp-tool-toggle; head unchanged", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tc-col-4", title: "read_file", kind: "read",
+               status: "started" },
+  });
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  assert(toggle === null, "tool_call without command should not render .acp-tool-toggle");
+  const cmdEl = transcript.querySelector(".acp-tool-cmd");
+  assert(cmdEl === null, "tool_call without command should not render .acp-tool-cmd");
+});
+
+check("tool_update adding command to existing row appends toggle and starts collapsed", (tpl) => {
+  const { page, live } = connected(tpl);
+  // First deliver the initial call with no command
+  const call = { toolCallId: "tc-col-5", title: "shell", kind: "execute", status: "started" };
+  page.deliver({ type: "tool_call", sessionId: live, payload: call });
+  const transcript = page.el("acpTranscript");
+  assert(transcript.querySelector(".acp-tool-toggle") === null,
+         "fixture: no toggle before tool_update adds command");
+  // Now deliver an update that adds a command
+  page.deliver({
+    type: "tool_update", sessionId: live,
+    payload: { ...call, status: "completed", command: "git diff" },
+  });
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  assert(toggle !== null, "tool_update adding command should append .acp-tool-toggle to head");
+  const cmdWrap = transcript.querySelector(".acp-tool-cmd").parentElement;
+  assert(cmdWrap.hidden === true,
+         "command wrapper added by tool_update should start hidden");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false",
+              "toggle added by tool_update should start with aria-expanded=false");
+});
+
+check("tool_update status mutation works when row is collapsed", (tpl) => {
+  const { page, live } = connected(tpl);
+  const call = { toolCallId: "tc-col-6", title: "shell", kind: "execute",
+                 status: "started", command: "npm test" };
+  page.deliver({ type: "tool_call", sessionId: live, payload: call });
+  const transcript = page.el("acpTranscript");
+  const statusEl = transcript.querySelector(".acp-tool-status");
+  assertEqual(statusEl.textContent, "started", "fixture: initial status");
+  // Row is collapsed (default). Deliver a status-only update.
+  page.deliver({
+    type: "tool_update", sessionId: live,
+    payload: { ...call, status: "completed" },
+  });
+  assertEqual(statusEl.textContent, "completed",
+              "tool_update status should reach .acp-tool-status even when command wrapper is hidden");
+  // Toggle should still be present and still collapsed
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false",
+              "collapse state should be unaffected by a status-only tool_update");
+  const cmdWrap = transcript.querySelector(".acp-tool-cmd").parentElement;
+  assert(cmdWrap.hidden === true,
+         "command wrapper should remain hidden after status-only tool_update");
+});
+
+check("aria-label on toggle contains tool name", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tc-col-7", title: "shell", kind: "execute",
+               status: "started", command: "make build" },
+  });
+  const toggle = page.el("acpTranscript").querySelector(".acp-tool-toggle");
+  assert(toggle !== null, "fixture: toggle should be present");
+  const label = toggle.getAttribute("aria-label");
+  assert(label.includes("shell"),
+         "aria-label should contain the tool name — got: " + label);
+  assert(label.toLowerCase().includes("show"),
+         "initial aria-label should say 'Show' — got: " + label);
+  // Click and verify label updates
+  toggle.dispatch("click");
+  const labelAfter = toggle.getAttribute("aria-label");
+  assert(labelAfter.includes("shell"),
+         "aria-label after click should still contain tool name — got: " + labelAfter);
+  assert(labelAfter.toLowerCase().includes("hide"),
+         "aria-label after click should say 'Hide' — got: " + labelAfter);
+});
 
 
 // -------------------------------------------------------------------- main --
