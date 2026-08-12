@@ -10534,6 +10534,39 @@ class TestAcpSubagentListParsing:
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": "nope"})
         assert acp_mod._supervisor.crews == {}
 
+    def test_started_at_is_set_when_an_entry_is_first_created(self, acp_store):
+        """startedAt is a unix timestamp float set when a child_id first appears
+        in the crew — used by the frontend to compute elapsed time."""
+        import time
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        before = time.time()
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        after = time.time()
+        entry = acp_mod._supervisor.crews[sid]["sub-1"]
+        assert isinstance(entry["startedAt"], float)
+        assert before <= entry["startedAt"] <= after
+
+    def test_started_at_is_preserved_on_subsequent_updates(self, acp_store):
+        """startedAt must not change when the crew entry is updated — it records
+        when the sub-agent first appeared, not when it was last seen."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        original_started_at = acp_mod._supervisor.crews[sid]["sub-1"]["startedAt"]
+        # Second update: status change
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "terminated"}},
+        ]})
+        assert acp_mod._supervisor.crews[sid]["sub-1"]["startedAt"] == original_started_at
+
 
 class TestAcpSubagentActivity:
     """`_kiro.dev/session/update` — SUBAGENT_ACTIVITY_METHOD — a sub-agent's
@@ -10631,6 +10664,29 @@ class TestAcpSubagentsFrameDelivery:
         acp_mod._handle_subscribe(conn, sid)
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["session", "history", "subagents"]
+
+    def test_started_at_is_included_in_the_wire_payload(self, acp_store):
+        """_subagents_payload must include startedAt so the frontend can compute
+        elapsed time without a second round-trip."""
+        import time
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        _queued(conn)  # drain attach noise
+        before = time.time()
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-1", "role": "explorer",
+             "status": {"type": "working"}},
+        ]})
+        after = time.time()
+        frames = _queued(conn)
+        subagents_frame = next(f for f in frames if f["type"] == "subagents")
+        entry = subagents_frame["payload"]["subagents"][0]
+        assert "startedAt" in entry
+        assert isinstance(entry["startedAt"], float)
+        assert before <= entry["startedAt"] <= after
 
 
 class TestAcpSubagentReadOnlyAccess:

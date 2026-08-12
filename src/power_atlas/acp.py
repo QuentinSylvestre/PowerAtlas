@@ -2522,6 +2522,7 @@ class _Supervisor:
                 "done": done,
                 "error": error,
                 "order": existing["order"] if existing else len(crew),
+                "startedAt": existing["startedAt"] if existing else time.time(),
             }
             if updated != existing:
                 changed = True
@@ -3049,6 +3050,7 @@ def _subagents_payload(crew: dict) -> list:
             "action": entry["action"],
             "done": entry["done"],
             "error": entry["error"],
+            "startedAt": entry.get("startedAt"),
         }
         for child_id, entry in sorted(crew.items(), key=lambda kv: kv[1]["order"])
     ]

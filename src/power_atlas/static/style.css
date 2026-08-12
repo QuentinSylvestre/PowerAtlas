@@ -899,6 +899,24 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-agentbar-sub-error { color: #f87171; }
 .acp-agentbar-pill-active .acp-agentbar-sub-error { color: #f87171; }
 
+/* Crew panel - the in-transcript subagent card strip that appears while a
+   fan-out is running. Removed by the first main-session event after all
+   entries are done. */
+.acp-crew-panel { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; margin: 4px 0; border-left: 2px solid var(--border); flex-shrink: 0; }
+.acp-crew-entry { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; font-family: inherit; font-size: 12px; text-align: left; width: 100%; }
+.acp-crew-entry:hover { border-color: var(--accent); color: var(--text); }
+.acp-crew-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* State-keyed left border so running/done/errored are visually distinct
+   without competing with the transcript's own status dots. */
+.acp-crew-working { border-left-color: #22c55e; }
+.acp-crew-done { border-left-color: var(--text-dim); }
+.acp-crew-error { border-left-color: #ef4444; }
+.acp-crew-name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+.acp-crew-action { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-crew-working .acp-crew-action { color: #4ade80; }
+.acp-crew-error .acp-crew-action { color: #f87171; }
+.acp-crew-elapsed { font-variant-numeric: tabular-nums; color: var(--text-dim); white-space: nowrap; flex-shrink: 0; }
+
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; }
 /* Wraps rather than scrolls: at most four chips fit in a prompt and a wrapped

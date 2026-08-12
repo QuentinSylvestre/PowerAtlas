@@ -5661,6 +5661,109 @@ check("a new session frame clears the crew and closes any open sub-agent panel",
     assertEqual(page.el("acpComposer").hidden, false);
   });
 
+check("a subagents frame with running entries shows a crew panel in the transcript",
+  (tpl) => {
+    const { page, live } = connected(tpl);
+    const now = Date.now() / 1000;
+    page.deliver(subagentsFrame(live, [
+      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+        action: "reading", done: false, error: "", startedAt: now - 5 },
+    ]));
+    const panels = page.all("acpTranscript", ".acp-crew-panel");
+    assertEqual(panels.length, 1, "a crew panel should appear in the transcript");
+    const entries = panels[0].querySelectorAll(".acp-crew-entry");
+    assertEqual(entries.length, 1, "one entry per sub-agent");
+    const nameText = entries[0].querySelector(".acp-crew-name").textContent;
+    assertEqual(nameText, "explorer", "entry should show the agent role");
+    const actionText = entries[0].querySelector(".acp-crew-action").textContent;
+    assertEqual(actionText, "reading", "entry should show the current action");
+  });
+
+check("crew panel entries are clickable and open the sub-agent panel", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const entries = page.all("acpTranscript", ".acp-crew-entry");
+  assertEqual(entries.length, 1);
+  entries[0].dispatch("click");
+  assertEqual(page.el("acpSubPanel").hidden, false,
+              "clicking a crew card should open the sub-agent panel");
+});
+
+check("crew panel stays visible while running but is removed after all done + next main event",
+  (tpl) => {
+    const { page, live } = connected(tpl);
+    const now = Date.now() / 1000;
+    page.deliver(subagentsFrame(live, [
+      { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+        action: "", done: false, error: "", startedAt: now - 10 },
+    ]));
+    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
+                "panel should be present while running");
+    // All done
+    page.deliver(subagentsFrame(live, [
+      { sessionId: "sub-1", role: "explorer", task: "", status: "terminated",
+        action: "", done: true, error: "", startedAt: now - 10 },
+    ]));
+    // Panel still present — waiting for the next main-session event
+    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
+                "panel should stay until next main event after all done");
+    // Next main event: a chunk from the agent
+    page.deliver({ type: "chunk", sessionId: live,
+                   payload: { role: "agent", text: "finished" } });
+    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
+                "panel should be removed after all done + next main event");
+  });
+
+check("crew panel is removed when turn ends after all done", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "builder", task: "", status: "terminated",
+      action: "", done: true, error: "", startedAt: now - 30 },
+  ]));
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1);
+  // turn end is another main-session event that should dismiss the panel
+  page.deliver({ type: "meta", sessionId: live,
+                 payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
+              "panel should be removed on turn end when all done");
+});
+
+check("crew panel elapsed time ticks when the interval fires", (tpl) => {
+  const { page, live } = connected(tpl);
+  // startedAt 10 seconds ago
+  const startedAt = Date.now() / 1000 - 10;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: startedAt },
+  ]));
+  const elapsed = page.one("acpTranscript", ".acp-crew-elapsed");
+  assert(elapsed !== null, "elapsed span should be present");
+  assert(elapsed.textContent.length > 0, "elapsed should show a non-empty time string");
+  // Fire the interval — should rebuild rows without error
+  page.intervals[page.intervals.length - 1].fn();
+  const elapsed2 = page.one("acpTranscript", ".acp-crew-elapsed");
+  assert(elapsed2 !== null, "elapsed span should still be present after tick");
+});
+
+check("crew panel is cleared when the transcript is cleared", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1);
+  // A new session frame triggers clearTranscript()
+  page.deliver({ type: "session", sessionId: "sess-new-crew",
+    payload: { sessionId: "sess-new-crew", cwd: "/tmp", created: true,
+               turnActive: false, contextPercent: null } });
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
+              "crew panel should be gone after transcript clear");
+});
+
 check("the debug log starts collapsed and a tap opens it, remembered for next time",
   (tpl) => {
     const { page } = connected(tpl);
