@@ -420,6 +420,10 @@
   var railGroupsEl = document.getElementById('acpRailGroups');
   var railMore = document.getElementById('acpRailMore');
   var ws = null;
+  // Exponential-backoff state for auto-reconnect (SC-3). Both variables are
+  // reset on every successful open and advanced on every close-while-opened.
+  var _reconnectTimer = null;
+  var _reconnectDelay = 1000;  // ms; doubles each attempt, capped at 30000
   // Whether the most recent attempt ever reached onopen. A close without one
   // means the handshake was rejected, which is a different failure from a
   // socket that lived and then dropped, and needs a different recovery.
@@ -4552,6 +4556,9 @@
       });
     }
     if (!send('prompt', payload, sessionId)) return;
+    // SC-5: prompt send succeeded — trigger a rail refresh so the dot state
+    // updates promptly rather than waiting for the 60-second polling cycle.
+    railRefreshSoon();
     // Anything still held from an earlier send that never reached a turn.
     releasePendingAttachments();
     pendingPrompt = text;
@@ -5045,6 +5052,9 @@
   }
 
   function connect() {
+    // SC-3: cancel any pending backoff timer — prevents double-connect when the
+    // user presses Reconnect while a timer is already scheduled.
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
     setState('connecting', 'connecting…');
     reconnectBtn.hidden = true;
     reloadBtn.hidden = true;
@@ -5057,6 +5067,9 @@
     ws = new WebSocket(wsUrl());
     ws.onopen = function () {
       opened = true;
+      // SC-3: successful open — reset backoff and cancel any pending retry timer.
+      _reconnectDelay = 1000;
+      if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
       setState('open', 'connected');
       logLine('info', 'socket open to ' + location.host);
       if (sessionId) send('subscribe', {}, sessionId);
@@ -5097,6 +5110,13 @@
       logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
       if (opened) {
         reconnectBtn.hidden = false;
+        // SC-3: schedule automatic reconnect with exponential backoff.
+        // The manual Reconnect button still works (calls connect() directly).
+        _reconnectTimer = setTimeout(function() {
+          _reconnectTimer = null;
+          connect();
+        }, _reconnectDelay);
+        _reconnectDelay = Math.min(_reconnectDelay * 2, 30000);
       } else {
         diagnoseRejectedHandshake();
       }
@@ -5140,6 +5160,9 @@
   stopBtn.addEventListener('click', function () {
     if (!sessionId || !turnActive) return;
     if (!send('cancel', {}, sessionId)) return;
+    // SC-5: cancel sent — trigger a rail refresh so the dot state updates
+    // promptly rather than waiting for the 60-second polling cycle.
+    railRefreshSoon();
     // The turn does not end here. The agent finishes the request it is
     // holding and answers `stopReason: "cancelled"`, which arrives as an
     // ordinary turn boundary — so the button reports that it has asked, and

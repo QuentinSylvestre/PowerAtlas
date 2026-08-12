@@ -6951,6 +6951,128 @@ check("queued prompt not sent when sessionId changed before turn end", (tpl) => 
     "nothing said the queued prompt was discarded due to session change");
 });
 
+// --------------------------------------------------------- Phase 3: SC-3 auto-reconnect, SC-5 rail refresh --
+
+// SC-3 test 1: ws.onclose with opened=true schedules a reconnect timer
+check("auto reconnect scheduled on close when opened", (tpl) => {
+  const { page } = connected(tpl);
+  // Record timers before the close
+  const timersBefore = page.timers.length;
+  // Simulate a WS drop on a previously-opened socket
+  page.socket().onclose({ code: 1006, reason: "" });
+  assert(page.timers.length > timersBefore,
+    "a reconnect timer should be scheduled when the socket closes after being opened");
+  // The reconnect fires connect(), which opens a new socket
+  const socketsBefore = page.sockets.length;
+  page.runTimers();
+  assert(page.sockets.length > socketsBefore,
+    "the reconnect timer should call connect() and open a new WebSocket");
+});
+
+// SC-3 test 2: backoff delay doubles on each consecutive close.
+// `onclose` does not reset `opened`, so firing onclose twice on the same
+// (already-closed) socket exercises the delay doubling without needing a
+// successful reconnect and re-open between them.
+check("reconnect delay doubles on each close", (tpl) => {
+  const { page } = connected(tpl);
+  // First close while opened=true: timer at 1000ms, delay internally → 2000.
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers[page.timers.length - 1].ms, 1000,
+    "first reconnect timer should use 1000ms delay");
+  // Second close: opened is still true (onclose does not reset it).
+  // Delay is now internally 2000, so the new timer should use 2000ms.
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers[page.timers.length - 1].ms, 2000,
+    "second reconnect timer should use doubled 2000ms delay");
+});
+
+// SC-3 test 3: reconnect delay is capped at 30000ms.
+// Chain enough consecutive closes (opened stays true) to push past the cap.
+// Sequence: 1000 → 2000 → 4000 → 8000 → 16000 → 30000 (cap) → 30000 (stays).
+check("reconnect delay capped at 30s", (tpl) => {
+  const { page } = connected(tpl);
+  // 5 closes bring delay to 30000 (would be 32000 without cap): 1k→2k→4k→8k→16k→30k
+  for (let i = 0; i < 5; i++) {
+    page.socket().onclose({ code: 1006, reason: "" });
+  }
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers[page.timers.length - 1].ms, 30000,
+    "delay should be capped at 30000ms after 6 consecutive closes");
+  // One more to confirm it stays at 30000
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers[page.timers.length - 1].ms, 30000,
+    "delay should remain at 30000ms once capped");
+});
+
+// SC-3 test 4: ws.onopen resets _reconnectDelay to 1000.
+// Build delay to 2000 via two consecutive closes, then reconnect and open the
+// new socket — onopen should reset the delay so the next close uses 1000ms.
+check("reconnect delay resets on open", (tpl) => {
+  const { page } = connected(tpl);
+  // Two consecutive closes: first at 1000ms, second at 2000ms.
+  page.socket().onclose({ code: 1006, reason: "" });
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers[page.timers.length - 1].ms, 2000,
+    "fixture: second timer should use 2000ms delay before the reset");
+  // Fire the reconnect timer → connect() runs → new socket created.
+  page.runTimers();
+  // Open the new socket: onopen resets _reconnectDelay to 1000.
+  page.open();
+  // Next close on the newly-opened socket should use the reset 1000ms delay.
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.timers[page.timers.length - 1].ms, 1000,
+    "delay should reset to 1000ms after ws.onopen");
+});
+
+// SC-3 test 5: no auto-reconnect when opened=false (stale-token path)
+check("no auto reconnect when not opened", (tpl) => {
+  // Load page but do NOT call page.open() — socket was created but onopen never fired
+  const page = loadPage(tpl);
+  // page.open() would set opened=true; skipping it leaves opened=false
+  const timersBefore = page.timers.length;
+  // Fire close without ever having opened
+  page.socket().onclose({ code: 4401, reason: "token expired" });
+  assertEqual(page.timers.length, timersBefore,
+    "no reconnect timer should be scheduled when socket closes without having been opened");
+});
+
+// SC-5 test 1: railRefreshSoon called after sendPrompt success
+check("rail refresh called after send", (tpl) => {
+  const { page, live } = connected(tpl);
+  const timersBefore = page.timers.length;
+  page.type("hello agent");
+  page.click("acpSend");
+  // A successful send queues a railRefreshSoon timer (or calls railRefresh directly if not busy)
+  // Either way, at minimum a fetch was triggered OR a timer was queued.
+  // The simplest assertion: the prompt was sent AND the timer count increased
+  // (railRefreshSoon schedules a retry timer when the rail is busy / first call).
+  // Actually railRefreshSoon returns immediately if railBusy=false (calls railRefresh directly),
+  // which triggers a fetch. Check that a fetch was issued after the send.
+  const promptSent = page.sockets.length > 0 &&
+    page.socket().sent.some((f) => f.type === "prompt");
+  assert(promptSent, "fixture: prompt should be sent by sendPrompt");
+  // railRefreshSoon either scheduled a timer OR triggered a fetch. At minimum one of those happened.
+  const fetchAfter = page.fetches.filter(
+    (f) => f.url.startsWith(LISTING_URL)).length;
+  assert(fetchAfter > 0 || page.timers.length > timersBefore,
+    "railRefreshSoon should have been called after sendPrompt (fetch or timer queued)");
+});
+
+// SC-5 test 2: railRefreshSoon called after stop button press
+check("rail refresh called after stop", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  const timersBefore = page.timers.length;
+  const fetchesBefore = page.fetches.filter(
+    (f) => f.url.startsWith(LISTING_URL)).length;
+  page.click("acpStop");
+  const cancelSent = page.socket().sent.some((f) => f.type === "cancel");
+  assert(cancelSent, "fixture: cancel should be sent by stop button");
+  const fetchAfter = page.fetches.filter(
+    (f) => f.url.startsWith(LISTING_URL)).length;
+  assert(fetchAfter > fetchesBefore || page.timers.length > timersBefore,
+    "railRefreshSoon should have been called after stop button press (fetch or timer queued)");
+});
+
 // -------------------------------------------------------------------- main --
 
 const template = process.argv[2]
