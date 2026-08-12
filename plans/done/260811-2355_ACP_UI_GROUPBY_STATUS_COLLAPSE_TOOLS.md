@@ -2,9 +2,18 @@
 
 > **Date**: 2026-08-11
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-12
 > **Scope**: Three independent front-end changes to `acp.html` and `style.css`: a new "Status" rail grouping mode, per-call command-body collapse, and turn-end grouping of consecutive tool calls.
 > **Estimated effort**: 1-2 days
+
+## Completion Summary
+
+All three phases delivered and verified. 202→237 tests (35 new). Three browser-verified surfaces. Final health: Green across all phases.
+
+### Acknowledged at archival
+
+- `Accepted (harness opportunity): deliverTurn helper — resolved by implementation` — The `deliverTurn(page, live, toolCallPayloads)` helper was added to `tests/acp_page.test.mjs` during Phase 3, satisfying this opportunity.
+- `User: accepted — UX-3` — Failed status pills hidden in collapsed group; `failed` appears in header tally text only. Visual indicator deferred to future.
 
 ---
 
