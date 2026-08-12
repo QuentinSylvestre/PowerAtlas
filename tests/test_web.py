@@ -15459,3 +15459,266 @@ class TestWorkspaceStatIsBoundedPerRequest:
         monkeypatch.setattr(web_mod, "_acp_cwd_exists", lambda cwd: False)
         assert web_mod._acp_exists_flags(["C:\\only"]) == [False]
         assert web_mod._acp_exists_flags(["C:\\a", "C:\\b"]) == [False, True]
+
+
+class TestAcpSteer:
+    """``steer`` client frame injects a mid-turn message via ``_session/steer``
+    (a JSON-RPC *request*, not a notification — verified by live probe 2026-08-12).
+    """
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def test_steer_frame_is_routed(self, acp_session):
+        """A ``steer`` frame on a subscribed in-flight session calls
+        ``_supervisor.steer`` with the correct args and queues a ``steer_ack``
+        frame back to the requesting socket only."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        captured = []
+        _queued(conn)
+
+        async def fake_steer(self_ignored, session_id, text):
+            captured.append((session_id, text))
+            return {"queued": True}
+
+        with patch.object(acp_mod._Supervisor, "steer", fake_steer):
+            asyncio.run(acp_mod._handle_steer(
+                conn, sid, {"prompt": "focus on the login bug"}))
+
+        assert captured == [(sid, "focus on the login bug")]
+        outbound = _queued(conn)
+        assert len(outbound) == 1
+        assert outbound[0]["type"] == "steer_ack"
+        assert outbound[0]["sessionId"] == sid
+        assert outbound[0]["payload"]["queued"] is True
+
+    def test_steer_refused_for_subagent_session(self, acp_session):
+        """``steer`` on a sub-agent's own session id must return a
+        ``read_only_session`` error — sub-agents cannot be steered directly."""
+        acp_mod, sid = acp_session
+        child_id = "sub-steer-01"
+        acp_mod._supervisor.subagent_sessions[child_id] = {"parent": sid}
+        # A connection not subscribed to the child — guard fires on subagent_sessions
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        _queued(conn)
+        try:
+            asyncio.run(acp_mod._handle_steer(conn, child_id, {"prompt": "x"}))
+            outbound = _queued(conn)
+            assert outbound[0]["payload"]["code"] == "read_only_session"
+        finally:
+            acp_mod._supervisor.subagent_sessions.pop(child_id, None)
+            acp_mod._registry.connections.discard(conn)
+
+    def test_steer_refused_when_no_turn_in_progress(self, acp_session):
+        """Steering with no active turn returns ``no_turn_in_progress`` rather
+        than hanging for ``REQUEST_TIMEOUT_SECONDS``."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        # inflight is empty (default for acp_session fixture)
+        _queued(conn)
+        asyncio.run(acp_mod._handle_steer(conn, sid, {"prompt": "hurry up"}))
+        outbound = _queued(conn)
+        assert outbound[0]["payload"]["code"] == "no_turn_in_progress"
+
+    def test_steer_supervisor_uses_request_not_notify(self, acp_session):
+        """``_supervisor.steer`` must put an ``id`` on the wire — a notification
+        (no ``id``) would hang the caller for ``REQUEST_TIMEOUT_SECONDS``."""
+        acp_mod, sid = acp_session
+        written = []
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            _run_bound(acp_mod,
+                       lambda: acp_mod._supervisor.steer(sid, "quick check"))
+
+        assert len(written) == 1
+        assert "id" in written[0], "steer must use _request (has id), not _notify"
+        assert written[0]["method"] == "_session/steer"
+        assert written[0]["params"]["sessionId"] == sid
+        assert written[0]["params"]["message"] == "quick check"
+
+
+class TestAcpCancelCascade:
+    """After a parent cancel, crew entries that were still running are marked
+    done=True locally and a ``subagents`` frame is broadcast — because kiro-cli
+    never emits terminal subagent status after a parent cancel (probe-verified,
+    2026-08-12: 11 post-cancel list_update frames, all children still working).
+    """
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _crew_entry(self, order=0):
+        return {
+            "role": "worker",
+            "task": "do something",
+            "status": "working",
+            "action": "",
+            "done": False,
+            "error": "",
+            "order": order,
+            "startedAt": time.time() - 5.0,
+            "stoppedAt": None,
+        }
+
+    def test_cancel_marks_crew_done_and_emits_subagents(self, acp_session):
+        """After a successful cancel, all non-done crew entries have
+        ``done=True``, ``stoppedAt`` set, and a ``subagents`` broadcast was
+        sent to the session's subscribers."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+
+        # Seed two active crew entries
+        acp_mod._supervisor.crews[sid] = {
+            "child-a": self._crew_entry(0),
+            "child-b": self._crew_entry(1),
+        }
+
+        # Subscriber that will receive the broadcast
+        sub_conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(sub_conn)
+        acp_mod._registry.attach(sub_conn, sid)
+        _queued(sub_conn)
+
+        before = time.time()
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+        after = time.time()
+
+        crew = acp_mod._supervisor.crews[sid]
+        assert crew["child-a"]["done"] is True
+        assert crew["child-b"]["done"] is True
+        assert before <= crew["child-a"]["stoppedAt"] <= after
+        assert before <= crew["child-b"]["stoppedAt"] <= after
+
+        # A subagents frame must have been broadcast
+        broadcast = _queued(sub_conn)
+        assert any(f["type"] == "subagents" for f in broadcast), \
+            f"Expected a subagents frame in broadcast: {broadcast}"
+
+    def test_cancel_preserves_already_set_stoppedAt(self, acp_session):
+        """An entry with ``stoppedAt`` already set (e.g. from a list_update
+        that raced the cancel) must keep the existing timestamp."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+
+        precise_ts = time.time() - 1.5
+        entry = self._crew_entry(0)
+        entry["done"] = True  # already done — should not be re-processed
+        entry["stoppedAt"] = precise_ts
+        acp_mod._supervisor.crews[sid] = {"child-a": entry}
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))
+
+        assert acp_mod._supervisor.crews[sid]["child-a"]["stoppedAt"] == precise_ts
+
+    def test_cancel_skips_cascade_when_no_crew(self, acp_session):
+        """No crew for the session: cascade is a no-op — no exception raised."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        # crews has no entry for sid
+
+        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, [])), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._handle_cancel(conn, sid))  # must not raise
+
+
+class TestAcpStoppedAt:
+    """``stoppedAt`` is stamped on a crew entry when it first transitions to
+    done, and is included in the ``subagents`` wire payload."""
+
+    def _seed(self, acp_mod, sid="stopped-01"):
+        acp_mod._supervisor.sessions[sid] = acp_mod._new_session_record(r"C:\scratch")
+        acp_mod._supervisor.history[sid] = acp_mod._History()
+        acp_mod._supervisor.inflight.add(sid)
+        return sid
+
+    def test_stoppedAt_set_on_list_update_terminal(self, acp_store):
+        """``_on_subagent_list`` sets ``stoppedAt`` when an entry transitions
+        to done for the first time."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        before = time.time()
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-ts-01", "role": "worker",
+             "status": {"type": "terminated"}},
+        ]})
+        after = time.time()
+
+        entry = acp_mod._supervisor.crews[sid]["sub-ts-01"]
+        assert entry["done"] is True
+        assert entry["stoppedAt"] is not None
+        assert before <= entry["stoppedAt"] <= after
+
+    def test_stoppedAt_not_set_for_active_entry(self, acp_store):
+        """A still-working entry must have ``stoppedAt`` as ``None``."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-ts-02", "role": "worker",
+             "status": {"type": "working"}},
+        ]})
+        entry = acp_mod._supervisor.crews[sid]["sub-ts-02"]
+        assert entry["done"] is False
+        assert entry["stoppedAt"] is None
+
+    def test_stoppedAt_preserved_on_subsequent_list_update(self, acp_store):
+        """A stoppedAt already on a done entry must not be overwritten by a
+        later (stale/reordered) list_update — terminal is sticky."""
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-ts-03", "role": "worker",
+             "status": {"type": "terminated"}},
+        ]})
+        original_ts = acp_mod._supervisor.crews[sid]["sub-ts-03"]["stoppedAt"]
+        assert original_ts is not None
+
+        # A repeated update for the same child — must be ignored (terminal sticky)
+        time.sleep(0.01)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-ts-03", "role": "worker",
+             "status": {"type": "terminated"}},
+        ]})
+        assert acp_mod._supervisor.crews[sid]["sub-ts-03"]["stoppedAt"] == original_ts
+
+    def test_stoppedAt_in_subagents_payload(self):
+        """``_subagents_payload`` includes the ``stoppedAt`` field in each
+        entry dict."""
+        from power_atlas import acp as acp_mod
+
+        ts = 1_700_000_000.0
+        crew = {
+            "sub-pay-01": {
+                "role": "worker", "task": "x", "status": "terminated",
+                "action": "", "done": True, "error": "",
+                "order": 0, "startedAt": ts - 10.0, "stoppedAt": ts,
+            },
+            "sub-pay-02": {
+                "role": "helper", "task": "y", "status": "working",
+                "action": "", "done": False, "error": "",
+                "order": 1, "startedAt": ts - 3.0, "stoppedAt": None,
+            },
+        }
+        payload = acp_mod._subagents_payload(crew)
+        by_id = {e["sessionId"]: e for e in payload}
+
+        assert "stoppedAt" in by_id["sub-pay-01"]
+        assert by_id["sub-pay-01"]["stoppedAt"] == ts
+
+        assert "stoppedAt" in by_id["sub-pay-02"]
+        assert by_id["sub-pay-02"]["stoppedAt"] is None

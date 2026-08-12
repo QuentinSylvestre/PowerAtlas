@@ -156,11 +156,11 @@ except Exception as _e:  # pragma: no cover - only when the dep is missing
     log.warning("mistune unavailable — /acp renders the agent's markdown as "
                 "plain text: %s", _e)
 
-CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close"})
+CLIENT_TYPES = frozenset({"subscribe", "new", "load", "prompt", "cancel", "close", "steer"})
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history", "thought",
-    "subagents",
+    "subagents", "steer_ack",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -2523,6 +2523,14 @@ class _Supervisor:
                 "error": error,
                 "order": existing["order"] if existing else len(crew),
                 "startedAt": existing["startedAt"] if existing else time.time(),
+                # Preserve an already-set stoppedAt (e.g. from a cancel cascade
+                # that ran before this list update arrived); only stamp now when
+                # transitioning to done for the first time.
+                "stoppedAt": (
+                    existing["stoppedAt"]
+                    if (existing and existing.get("stoppedAt"))
+                    else (time.time() if done else None)
+                ),
             }
             if updated != existing:
                 changed = True
@@ -2967,6 +2975,23 @@ class _Supervisor:
             raise AgentDied("The agent is not running.")
         await self._notify("session/cancel", {"sessionId": session_id})
 
+    async def steer(self, session_id: str, text: str) -> dict:
+        """Inject a mid-turn steer message via ``_session/steer``.
+
+        ``_session/steer`` is a JSON-RPC **request** (has ``id``, returns
+        ``{"result": {"queued": true}}``). Verified by live probe 2026-08-12
+        against kiro-cli 2.16.x: answered in milliseconds; never a
+        notification.
+        """
+        if session_id not in self.sessions:
+            raise AgentRejected("That session no longer exists on this agent.")
+        if not self.alive():
+            raise AgentDied("The agent is not running.")
+        return await self._request(
+            "_session/steer",
+            {"sessionId": session_id, "message": text},
+        ) or {}
+
     async def close_session(self, session_id: str) -> None:
         """Release one session on the agent, and everything it holds here.
 
@@ -3051,6 +3076,7 @@ def _subagents_payload(crew: dict) -> list:
             "done": entry["done"],
             "error": entry["error"],
             "startedAt": entry.get("startedAt"),
+            "stoppedAt": entry.get("stoppedAt"),
         }
         for child_id, entry in sorted(crew.items(), key=lambda kv: kv[1]["order"])
     ]
@@ -3277,6 +3303,9 @@ def _dispatch(conn: _Connection, frame: dict) -> None:
         return
     if type_ == "cancel":
         _spawn_task(_handle_cancel(conn, session_id))
+        return
+    if type_ == "steer":
+        _spawn_task(_handle_steer(conn, session_id, payload))
         return
     if type_ == "close":
         _spawn_task(_handle_close(conn, session_id))
@@ -3960,6 +3989,58 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
             "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
 
 
+async def _handle_steer(conn: _Connection, session_id: str | None,
+                        payload: dict) -> None:
+    """Inject a mid-turn message into the running agent turn via
+    ``_session/steer``.
+
+    Runs the same pre-flight guards as ``_handle_prompt`` plus an extra
+    ``inflight`` check — steering when no turn is active would silently
+    queue a request that kiro-cli answers only once the *next* turn starts,
+    holding the handler for up to ``REQUEST_TIMEOUT_SECONDS``.
+    """
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'steer' needs a sessionId."))
+        return
+    if session_id in _supervisor.subagent_sessions:
+        conn.send(error_frame(
+            "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        return
+    if session_id not in _supervisor.sessions:
+        conn.send(error_frame(
+            "unknown_session", "This server has no such live session.", session_id))
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame(
+            "not_subscribed", "Subscribe to this session first.", session_id))
+        return
+    if session_id in _supervisor.closing:
+        conn.send(error_frame(
+            "close_in_progress", "Session is being released.", session_id))
+        return
+    if session_id not in _supervisor.inflight:
+        conn.send(error_frame(
+            "no_turn_in_progress",
+            "No turn is running — steer is only available during an active turn.",
+            session_id))
+        return
+    text = (payload.get("prompt") or "").strip()
+    if not text:
+        conn.send(error_frame(
+            "bad_payload", "Steer message must not be empty.", session_id))
+        return
+    try:
+        result = await _supervisor.steer(session_id, text)
+        conn.send(envelope("steer_ack", {"queued": result.get("queued", False)},
+                           session_id))
+    except AcpError as exc:
+        conn.send(error_frame(exc.code, str(exc), session_id))
+    except Exception:
+        log.exception("ACP _handle_steer: unexpected error")
+        conn.send(error_frame(
+            "internal_error", "Steer failed unexpectedly.", session_id))
+
+
 async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
     """Interrupt the turn a session is running.
 
@@ -4008,6 +4089,29 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
         conn.send(error_frame(
             "internal_error",
             "Cancelling the turn failed; see orchestrator.log.", session_id))
+        return
+    # Cancel cascade — kiro-cli never emits terminal subagent status after a
+    # parent cancel (verified by live probe 2026-08-12: 11 post-cancel
+    # list_update frames, all children still "working"). Mark every non-done
+    # crew entry done locally and broadcast so the page clears its crew bar.
+    crew = _supervisor.crews.get(session_id)
+    if crew:
+        changed = False
+        now = time.time()
+        for entry in crew.values():
+            if not entry["done"]:
+                entry["done"] = True
+                # Preserve a more-precise kiro timestamp when already set
+                # (e.g. from a list_update that arrived before the cancel
+                # command was processed).
+                if not entry.get("stoppedAt"):
+                    entry["stoppedAt"] = now
+                changed = True
+        if changed:
+            try:
+                _emit_subagents_frame(session_id)
+            except Exception:
+                log.exception("ACP cancel cascade: failed to emit subagents frame")
 
 
 def _session_closed_frame(session_id: str) -> dict:
