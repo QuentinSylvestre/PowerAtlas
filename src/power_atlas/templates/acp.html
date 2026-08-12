@@ -1473,16 +1473,22 @@
   // Creates a collapse toggle button for a tool call command wrapper.
   // toolTitle is the human-readable tool name used in the accessible label.
   function _makeToolToggle(cmdWrap, toolTitle) {
+    // Cap toolTitle at 80 chars to prevent an agent-authored string from producing
+    // a thousands-character aria-label attribute (no XSS risk via setAttribute,
+    // but unbounded wire data in an attribute is a hygiene violation).
+    var safeTitle = (toolTitle || 'tool').slice(0, 80);
     var toggle = document.createElement('button');
     toggle.className = 'acp-tool-toggle';
     toggle.type = 'button';
     toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-label', 'Show command detail \u2014 ' + (toolTitle || 'tool'));
+    toggle.setAttribute('aria-label', 'Show command detail \u2014 ' + safeTitle);
     toggle.addEventListener('click', function () {
       var open = toggle.getAttribute('aria-expanded') === 'true';
       toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
       toggle.setAttribute('aria-label',
-        (open ? 'Show' : 'Hide') + ' command detail \u2014 ' + (toolTitle || 'tool'));
+        (open ? 'Show' : 'Hide') + ' command detail \u2014 ' + safeTitle);
+      // cmdWrap.hidden is an attribute mutation, not a DOM addition, so aria-live
+      // re-announcement is not expected per spec (role="log" tracks additions only).
       cmdWrap.hidden = open;
     });
     return toggle;

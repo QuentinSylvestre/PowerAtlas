@@ -737,6 +737,13 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-tool-toggle[aria-expanded="true"]::before {
   transform: rotate(90deg);
 }
+.acp-tool-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.acp-tool-toggle:hover {
+  color: var(--text);
+}
 .acp-tool-cmd, .acp-msg-md pre { margin-top: 6px; max-height: 220px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; }
 .acp-tool-more { margin-top: 4px; font-size: 11px; font-style: italic; color: #fbbf24; }
 /* The agent's answer once its markdown has been rendered, which happens at the

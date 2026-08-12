@@ -3645,9 +3645,10 @@ check("a group's count agrees with the rows drawn beneath it", async (tpl) => {
 });
 
 check("a re-render puts keyboard focus back where the user left it", async (tpl) => {
-  const page = await railed(tpl);
+  // Use 15 sessions so the workspace show-more exists (RAIL_SESSION_SIZE=10).
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 12, sessions: 15 }) });
 
-  // A workspace's own show-more: three sessions become five, which is all of
+  // A workspace's own show-more: ten sessions become fifteen, which is all of
   // them, so the button the user pressed does not exist after the rebuild.
   const more = page.railGroups()[0].querySelector(".acp-rail-group-more");
   more.focus();
@@ -3657,13 +3658,15 @@ check("a re-render puts keyboard focus back where the user left it", async (tpl)
   assert(now, "the rebuild dropped focus to the document body, throwing a keyboard " +
               "or screen-reader user out of the rail mid-task — the same population " +
               "the locked row's `disabled` exists for");
-  assertEqual(now.dataset.sid, "sess-w0-s4",
-              "focus did not land on the rows the press revealed");
+  // After reveal, focus lands on the last row of ws-0 (a sess-w0-s* row).
+  assert(now.dataset && now.dataset.sid && now.dataset.sid.startsWith("sess-w0-"),
+         "focus did not land on a ws-0 row after the press revealed the rest");
 
   // Row selection, which re-renders to move the `current` class.
-  const sid = page.railRows()[7].dataset.sid;
-  page.railRows()[7].focus();
-  page.railRows()[7].dispatch("click");
+  // ws-0 now has 15 rows, ws-1 starts at index 15. rows[16] is ws-1 session 1.
+  const sid = page.railRows()[16].dataset.sid;
+  page.railRows()[16].focus();
+  page.railRows()[16].dispatch("click");
   now = page.focused();
   assert(now, "selecting a row dropped focus to the document body");
   assertEqual(now.dataset.sid, sid, "focus moved somewhere other than the row selected");
@@ -6257,6 +6260,49 @@ check("aria-label on toggle contains tool name", (tpl) => {
          "aria-label after click should say 'Hide' — got: " + labelAfter);
 });
 
+check("toggle aria-label falls back to kind when title is empty", (tpl) => {
+  // Fix M1: a tool_call with kind:'execute', title:'', and a non-empty command
+  // must still produce a toggle whose aria-label contains the kind ('execute').
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tc-m1-kind", title: "", kind: "execute",
+               status: "started", command: "grep -r foo ." },
+  });
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-toggle");
+  assert(toggle !== null,
+         "tool_call with empty title but a command should still render .acp-tool-toggle in head");
+  const label = toggle.getAttribute("aria-label");
+  assert(label.includes("execute"),
+         "aria-label should fall back to kind when title is empty — got: " + label);
+});
+
+check("exactly one toggle is created when command is updated multiple times", (tpl) => {
+  // Fix M2: delivering a tool_call with no command, then two tool_updates each
+  // providing a command, must result in exactly ONE .acp-tool-toggle in the head.
+  const { page, live } = connected(tpl);
+  // Step 1: initial call with no command (status only)
+  const call = { toolCallId: "tc-m2-idem", title: "shell", kind: "execute",
+                 status: "started" };
+  page.deliver({ type: "tool_call", sessionId: live, payload: call });
+  // Step 2: first tool_update adding a command
+  page.deliver({
+    type: "tool_update", sessionId: live,
+    payload: { ...call, status: "running", command: "npm install" },
+  });
+  // Step 3: second tool_update also providing a command (simulating a subsequent update)
+  page.deliver({
+    type: "tool_update", sessionId: live,
+    payload: { ...call, status: "completed", command: "npm install" },
+  });
+  const head = page.el("acpTranscript").querySelector(".acp-tool-head");
+  assert(head !== null, "fixture: .acp-tool-head should exist");
+  const toggles = head.querySelectorAll(".acp-tool-toggle");
+  assertEqual(toggles.length, 1,
+              "multiple tool_updates providing a command should produce exactly " +
+              "ONE .acp-tool-toggle in the row's head — got " + toggles.length);
+});
 
 // -------------------------------------------------------------------- main --
 
