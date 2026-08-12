@@ -259,7 +259,9 @@
       </div>
       <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
                 placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
-                aria-label="Prompt"></textarea>
+                aria-label="Prompt"
+                aria-haspopup="listbox" aria-controls="acpCmdDropdown"
+                aria-expanded="false"></textarea>
       <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
       <!-- Only during a turn. A stop control that is present and inert for the
            whole idle time is indistinguishable from one that has stopped
@@ -601,6 +603,10 @@
   var cmdDropdownEl = document.getElementById('acpCmdDropdown');
   // Index of the currently highlighted row in the dropdown (-1 = none).
   var _cmdSelectedIndex = -1;
+  // Maximum length of the partial string sent to the server for command
+  // autocomplete. Caps an attacker-influenced wire value before it leaves
+  // the page as a WS frame.
+  var MAX_CMD_PARTIAL_CHARS = 256;
   // A second, independent WebSocket, opened the first time a sub-agent pill is
   // pressed and left connected afterwards (switching pills re-subscribes it
   // rather than reopening it). Kept apart from `ws` on purpose: `_registry`
@@ -1021,6 +1027,9 @@
     // Fix 5: dead `stopBtn.disabled = false` removed — refreshComposerControls owns this field.
     // Fix 4: clear _stopInProgress so the Stop button is re-enabled when the turn ends.
     if (!active) _stopInProgress = false;
+    // If a turn starts while the command dropdown is open, close it — a mid-turn
+    // dropdown cannot be acted on and would just be confusing.
+    if (active) hideCommandDropdown();
     stopBtn.textContent = 'Stop';
     refreshComposerControls();
     // Closing under a live turn is refused by the server — the outstanding
@@ -1623,17 +1632,15 @@
   /** Populate and show the slash command dropdown.
    *
    *  `partial` is the text after the leading `/`; an empty string shows all.
-   *  Sends a `commands_options` WS frame for server-side suggestions if a
-   *  session is active and the socket is open. */
+   *  Renders from the local `sessionCommands` list only — the WS frame for
+   *  server-side suggestions is sent by the debounced input handler path, not
+   *  here, to avoid a double send when the input handler also calls this. */
   function showCommandDropdown(partial) {
     var lc = partial.toLowerCase();
     var items = sessionCommands.filter(function(c) {
       return !lc || (c.name || '').toLowerCase().indexOf(lc) !== -1;
     });
     renderCommandDropdown(items);
-    if (ws && ws.readyState === WebSocket.OPEN && sessionId) {
-      send('commands_options', { partial: partial }, sessionId);
-    }
   }
 
   /** Re-render the dropdown list from an array of `{name, description?}`. */
@@ -1647,11 +1654,13 @@
     if (!items.length) {
       cmdDropdownEl.hidden = true;
       _cmdSelectedIndex = -1;
+      promptInput.setAttribute('aria-expanded', 'false');
       return;
     }
     for (var i = 0; i < items.length; i++) {
       var li = document.createElement('li');
       li.setAttribute('role', 'option');
+      li.id = 'acp-cmd-opt-' + i;
       var nameSpan = document.createElement('span');
       nameSpan.className = 'acp-cmd-name';
       nameSpan.textContent = '/' + (items[i].name || '');
@@ -1665,6 +1674,7 @@
     _cmdSelectedIndex = 0;
     updateCommandSelection();
     cmdDropdownEl.hidden = false;
+    promptInput.setAttribute('aria-expanded', 'true');
   }
 
   /** Update the visual selection indicator in the dropdown. */
@@ -1676,12 +1686,20 @@
       items[i].setAttribute('aria-selected',
         String(i === _cmdSelectedIndex));
     }
+    if (_cmdSelectedIndex >= 0 && items[_cmdSelectedIndex]) {
+      var selectedId = items[_cmdSelectedIndex].id || ('acp-cmd-opt-' + _cmdSelectedIndex);
+      promptInput.setAttribute('aria-activedescendant', selectedId);
+    } else {
+      promptInput.setAttribute('aria-activedescendant', '');
+    }
   }
 
   /** Hide the slash command dropdown. */
   function hideCommandDropdown() {
     cmdDropdownEl.hidden = true;
     _cmdSelectedIndex = -1;
+    promptInput.setAttribute('aria-expanded', 'false');
+    promptInput.setAttribute('aria-activedescendant', '');
     if (_cmdOptionsTimer) {
       clearTimeout(_cmdOptionsTimer);
       _cmdOptionsTimer = null;
@@ -5833,6 +5851,32 @@
   reconnectBtn.addEventListener('click', connect);
   reloadBtn.addEventListener('click', function () { location.reload(); });
   sendBtn.addEventListener('click', sendPrompt);
+  // Delegated mousedown on the dropdown container: fires before the blur event
+  // on the textarea, so the dropdown is not hidden before the click registers.
+  // On mousedown, check if the target (or a closest ancestor within the
+  // dropdown) is an <li>; if so, prevent the textarea from losing focus,
+  // set the selection index to match the clicked <li>, then confirm.
+  cmdDropdownEl.addEventListener('mousedown', function (ev) {
+    var target = ev.target;
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) return;
+    var items = ul.childNodes;
+    var clickedIdx = -1;
+    // Walk up to find the <li> inside this dropdown.
+    var node = target;
+    while (node && node !== cmdDropdownEl) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] === node) { clickedIdx = i; break; }
+      }
+      if (clickedIdx >= 0) break;
+      node = node.parentNode;
+    }
+    if (clickedIdx < 0) return;
+    ev.preventDefault(); // prevent blur on the textarea
+    _cmdSelectedIndex = clickedIdx;
+    updateCommandSelection();
+    confirmCommandSelection();
+  });
   promptInput.addEventListener('keydown', function (ev) {
     // Shift+Enter always inserts a newline (browser default — not intercepted).
     // On touch devices (phones/tablets), plain Enter also inserts a newline so
@@ -5849,7 +5893,7 @@
     // stops the browser writing it and we write it ourselves before opening the
     // dropdown.
     if (ev.key === '/' && promptInput.value === '' &&
-        !ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+        !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !turnActive) {
       ev.preventDefault();
       promptInput.value = '/';
       autoGrowPrompt();
@@ -5875,6 +5919,11 @@
         return;
       }
       if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        confirmCommandSelection();
+        return;
+      }
+      if (ev.key === 'Tab' && !ev.shiftKey) {
         ev.preventDefault();
         confirmCommandSelection();
         return;
@@ -5909,8 +5958,9 @@
         _cmdOptionsTimer = null;
         if (ws && ws.readyState === WebSocket.OPEN && sessionId &&
             /^\/\S*$/.test(promptInput.value)) {
+          var cappedPartial = promptInput.value.slice(1).slice(0, MAX_CMD_PARTIAL_CHARS);
           send('commands_options',
-               { partial: promptInput.value.slice(1) }, sessionId);
+               { partial: cappedPartial }, sessionId);
         }
       }, 150);
     } else {
@@ -5997,6 +6047,12 @@
       if (document.visibilityState === 'hidden') return;
       railRefresh();
     }, RAIL_REFRESH_MS);
+  }
+  // Expose addSystemMessage for the test harness. Not a behavioral change —
+  // the function is unchanged; this just makes it callable from outside the
+  // IIFE so acp_page.test.mjs can test it directly with an XSS payload.
+  if (typeof window !== 'undefined') {
+    window._testAddSystemMessage = addSystemMessage;
   }
 })();
 </script>

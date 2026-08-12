@@ -860,6 +860,9 @@ function loadPage(templatePath, opts = {}) {
       if (!found) throw new Error(`this page has no element with id '${id}'`);
       return found;
     },
+    // Expose the sandbox so tests can access page-level functions exposed on
+    // window (e.g., window._testAddSystemMessage for the XSS test).
+    sandbox,
     socket() {
       if (sockets.length === 0) throw new Error("the page opened no socket");
       return sockets[sockets.length - 1];
@@ -7846,6 +7849,111 @@ check("addSystemMessageUsesTextContent", (tpl) => {
   // Verify the sandbox did not register _injected (would only happen if a real
   // browser ran the script, but belt-and-suspenders).
   assert(typeof page.el === "function", "sanity check — page still functional");
+});
+
+// Fix 6 (S1): direct addSystemMessage XSS test — call with an HTML payload,
+// verify it appears as literal text rather than executing.
+check("addSystemMessageDirectXssTest", (tpl) => {
+  const { page } = connected(tpl);
+  const xssPayload = '<img src=x onerror="window._xss_executed=true">';
+  // _testAddSystemMessage is exposed on the sandbox window by the page's IIFE.
+  const addSystemMessage = page.sandbox._testAddSystemMessage;
+  assert(typeof addSystemMessage === "function",
+    "page did not expose _testAddSystemMessage — the test hook is missing");
+  addSystemMessage(xssPayload);
+  const msgs = page.el("acpTranscript").querySelectorAll(".acp-system-msg");
+  assert(msgs.length > 0, "addSystemMessage did not append a .acp-system-msg element");
+  const lastMsg = msgs[msgs.length - 1];
+  // textContent returns the raw string, including all characters. If innerHTML
+  // were used the harness HTML_SINK would have thrown before reaching here.
+  assert(lastMsg.textContent === xssPayload,
+    `XSS payload should appear as literal text, got: ${lastMsg.textContent}`);
+  // _xss_executed should be absent — the onerror handler cannot fire in the
+  // DOM stand-in.
+  assert(!page.sandbox._xss_executed,
+    "onerror handler fired — addSystemMessage used innerHTML");
+});
+
+// Fix 1 (EU1): mousedown on a dropdown item selects and confirms the command.
+check("dropdownMouseClickSelectsCommand", async (tpl) => {
+  const { page, live } = connected(tpl);
+  // Seed the commands catalogue.
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [
+      { name: "qplan", description: "Write a plan" },
+      { name: "qdev",  description: "Execute a plan" },
+    ] },
+  });
+  // Open the dropdown via keydown.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault: () => {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden,
+    "dropdown should be open after pressing /");
+  const ul = page.el("acpCmdDropdown").querySelector("ul");
+  assert(ul, "dropdown <ul> not found");
+  const items = ul.childNodes;
+  assert(items.length >= 2, "expected at least 2 dropdown items");
+  // Dispatch a mousedown on the dropdown container, simulating a click on the
+  // second <li>. The delegated handler uses ev.target to find the clicked item.
+  // In a real browser the event would bubble up to cmdDropdownEl; in the
+  // harness we dispatch directly on the container with the target set.
+  page.el("acpCmdDropdown").dispatch("mousedown", { target: items[1], preventDefault: () => {} });
+  // commands_execute should have been sent for 'qdev'.
+  const executed = page.sentOf("commands_execute");
+  assert(executed.length >= 1, "commands_execute was not sent after mousedown");
+  assertEqual(executed[executed.length - 1].payload.name, "qdev",
+    "wrong command name sent");
+  assert(page.el("acpCmdDropdown").hidden,
+    "dropdown should be hidden after mousedown selection");
+});
+
+// Fix 2 (EU2): slash key should not open dropdown during an active turn.
+check("slashKeyBlockedDuringActiveTurn", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Start a turn.
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  assert(page.el("acpSend").disabled, "fixture: turn should be active");
+  // Attempt to open the dropdown via keydown on '/'.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault: () => {},
+  });
+  assert(page.el("acpCmdDropdown").hidden,
+    "dropdown should remain hidden when a turn is active");
+});
+
+// Fix 4 (EU4): Tab key confirms dropdown selection.
+check("dropdownTabConfirmsSelection", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "qexplore", description: "Explore" }] },
+  });
+  // Open the dropdown.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault: () => {},
+  });
+  assert(!page.el("acpCmdDropdown").hidden, "dropdown should be open");
+  // Press Tab.
+  let prevented = false;
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Tab", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault: () => { prevented = true; },
+  });
+  assert(prevented, "Tab should call preventDefault when dropdown is open");
+  const executed = page.sentOf("commands_execute");
+  assert(executed.length >= 1, "Tab should have sent commands_execute");
+  assertEqual(executed[executed.length - 1].payload.name, "qexplore",
+    "wrong command sent on Tab");
+  assert(page.el("acpCmdDropdown").hidden,
+    "dropdown should be hidden after Tab confirm");
 });
 
 let failed = 0;
