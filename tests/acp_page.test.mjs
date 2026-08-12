@@ -3080,7 +3080,7 @@ check("choosing a grouping mode is remembered", async (tpl) => {
   assertEqual(page.listingCalls()[0].params.mode, undefined,
               "an unconfigured rail did not start in workspace grouping");
   const options = page.openSettings();
-  assertEqual(options.length, 2, "the settings popup did not offer both modes");
+  assertEqual(options.length, 3, "the settings popup did not offer all three modes");
   const byDate = options.filter((o) => o.dataset.mode === "date")[0];
   byDate.dispatch("click");
   await page.settle();
@@ -5781,6 +5781,173 @@ check("a stored open preference reopens the debug log on load", (tpl) => {
   assertEqual(page.el("acpLog").hidden, false,
               "a previously-opened debug log should not reopen closed");
 });
+
+// ---- status rail grouping mode (Phase 1) ----
+
+/** A flat store with sessions in each availability/status bucket for status-mode tests. */
+function statusStore() {
+  return [{
+    cwd: "C:\\work\\alpha", name: "alpha", exists: true,
+    sessions: [
+      { id: "s-working",   title: "working session",   updated_at: "2026-08-01T10:00:00.000000000Z",
+        availability: "held",      status: "working" },
+      { id: "s-waiting",   title: "waiting session",   updated_at: "2026-08-01T09:00:00.000000000Z",
+        availability: "held",      status: "waiting" },
+      { id: "s-errored",   title: "errored session",   updated_at: "2026-08-01T08:00:00.000000000Z",
+        availability: "held",      status: "errored" },
+      { id: "s-available", title: "available session", updated_at: "2026-08-01T07:00:00.000000000Z",
+        availability: "available", status: "" },
+      { id: "s-locked",    title: "locked session",    updated_at: "2026-08-01T06:00:00.000000000Z",
+        availability: "locked",    status: "" },
+    ],
+  }];
+}
+
+check("railSetMode('status') sets railMode to 'status' and stores it in localStorage",
+  async (tpl) => {
+    const page = await railed(tpl, { store: statusStore() });
+    // Default starts in project mode. Switch to status via settings.
+    const options = page.openSettings();
+    const statusOption = options.filter((o) => o.dataset.mode === "status")[0];
+    assert(statusOption !== undefined, "settings menu has no 'status' option");
+    statusOption.dispatch("click");
+    await page.settle();
+    assertEqual(page.stored.pa_acp_group, "status",
+                "switching to status mode did not write 'status' to localStorage");
+    // Reload: should restore status mode from storage.
+    const page2 = await railed(tpl, {
+      store: statusStore(), stored: { pa_acp_group: "status" } });
+    // In status mode the rail loads flat sessions — verify it asked for ?mode=recent.
+    const asked = page2.listingCalls().map((c) => c.params);
+    assert(asked.length > 0, "railed page made no listing request");
+    assertEqual(asked[0].mode, "recent",
+                "status mode on load did not request the flat listing");
+  });
+
+check("switching to status mode dispatches a ?mode=recent listing request", async (tpl) => {
+  const page = await railed(tpl, { store: statusStore() });
+  const callsBefore = page.listingCalls().length;
+  const statusOption = page.openSettings().filter((o) => o.dataset.mode === "status")[0];
+  statusOption.dispatch("click");
+  await page.settle();
+  const newCalls = page.listingCalls().slice(callsBefore);
+  assert(newCalls.length > 0, "switching to status mode made no listing request");
+  assertEqual(newCalls[0].params.mode, "recent",
+              "status mode did not request the flat (recent) listing");
+});
+
+check("renderRailStatus groups sessions into correct buckets in priority order",
+  async (tpl) => {
+    const page = await railed(tpl, {
+      store: statusStore(), stored: { pa_acp_group: "status" } });
+    const headings = page.railHeadings();
+    // Working > Waiting > Errored > Available > Locked — order is what we are testing.
+    assert(headings.indexOf("Working")   < headings.indexOf("Waiting"),
+           "Working bucket should appear before Waiting");
+    assert(headings.indexOf("Waiting")   < headings.indexOf("Available"),
+           "Waiting bucket should appear before Available");
+    assert(headings.indexOf("Available") < headings.indexOf("Locked"),
+           "Available bucket should appear before Locked");
+    // All five occupied buckets rendered.
+    assert(headings.includes("Working"),   "Working bucket absent");
+    assert(headings.includes("Waiting"),   "Waiting bucket absent");
+    assert(headings.includes("Errored"),   "Errored bucket absent");
+    assert(headings.includes("Available"), "Available bucket absent");
+    assert(headings.includes("Locked"),    "Locked bucket absent");
+    // Sessions under each group: each bucket has 1 session in the fixture.
+    assertEqual(page.railRows().length, 5,
+                "wrong total number of session rows under status mode");
+  });
+
+check("statusBucketKey maps availability/status pairs to correct bucket keys", async (tpl) => {
+  // Load the page so the script is evaluated and statusBucketKey is in scope.
+  // We verify by switching to status mode and checking the DOM groupings.
+  // Held+working -> Working bucket; available -> Available; locked -> Locked.
+  const store = [{
+    cwd: "C:\\work\\test", name: "test", exists: true,
+    sessions: [
+      { id: "h-w", title: "h-w", updated_at: "2026-08-01T10:00:00.000000000Z",
+        availability: "held",      status: "working" },
+      { id: "av",  title: "av",  updated_at: "2026-08-01T09:00:00.000000000Z",
+        availability: "available", status: "" },
+      { id: "lk",  title: "lk",  updated_at: "2026-08-01T08:00:00.000000000Z",
+        availability: "locked",    status: "" },
+    ],
+  }];
+  const page = await railed(tpl, { store });
+  const statusOption = page.openSettings().filter((o) => o.dataset.mode === "status")[0];
+  statusOption.dispatch("click");
+  await page.settle();
+  const headings = page.railHeadings();
+  assert(headings.includes("Working"),   "held+working should land in Working bucket");
+  assert(headings.includes("Available"), "available should land in Available bucket");
+  assert(headings.includes("Locked"),    "locked should land in Locked bucket");
+  assert(!headings.includes("Errored"),  "Errored bucket should be absent (no errored sessions)");
+  assert(!headings.includes("Waiting"),  "Waiting bucket should be absent (no waiting sessions)");
+});
+
+check("the rail settings menu contains a third menuitemradio for Status", async (tpl) => {
+  const page = await railed(tpl);
+  const options = page.openSettings();
+  assertEqual(options.length, 3, "settings menu should have exactly 3 options");
+  const statusOption = options.filter((o) => o.dataset.mode === "status")[0];
+  assert(statusOption !== undefined, "no option with data-mode='status'");
+  assertEqual(statusOption.getAttribute("role"), "menuitemradio",
+              "status option should have role=menuitemradio");
+  assertEqual(statusOption.getAttribute("aria-checked"), "false",
+              "status option should start unchecked when mode is project");
+  // Switch to status mode and verify aria-checked updates.
+  statusOption.dispatch("click");
+  await page.settle();
+  const options2 = page.openSettings();
+  const statusOption2 = options2.filter((o) => o.dataset.mode === "status")[0];
+  assertEqual(statusOption2.getAttribute("aria-checked"), "true",
+              "status option aria-checked should be true after selecting status mode");
+});
+
+check("railCollapsed with s: prefix collapses/expands status buckets via group head click",
+  async (tpl) => {
+    // statusStore() puts one held/working session, so Working bucket is present.
+    const page = await railed(tpl, {
+      store: statusStore(), stored: { pa_acp_group: "status" } });
+    // Helper to find Working group by heading text.
+    const workingGroup = () => page.railGroups().filter((g) => {
+      const name = g.querySelector(".acp-rail-group-name");
+      return name && name.textContent === "Working";
+    })[0];
+    const wg = workingGroup();
+    assert(wg !== undefined, "Working group not found");
+    const toggle = () => workingGroup().querySelector(".acp-rail-group-toggle");
+    // Starts expanded.
+    assertEqual(toggle().getAttribute("aria-expanded"), "true",
+                "Working bucket should start expanded");
+    assert(workingGroup().querySelectorAll(".acp-rail-row").length > 0,
+           "Working bucket should show rows when expanded");
+    // Click to collapse — renderRail() rebuilds the DOM, so re-query.
+    toggle().dispatch("click");
+    assertEqual(toggle().getAttribute("aria-expanded"), "false",
+                "Working bucket toggle should report collapsed after click");
+    assertEqual(workingGroup().querySelectorAll(".acp-rail-row").length, 0,
+                "Working bucket should show no rows after collapsing");
+    // Click again to expand.
+    toggle().dispatch("click");
+    assertEqual(toggle().getAttribute("aria-expanded"), "true",
+                "Working bucket toggle should report expanded after second click");
+    assert(workingGroup().querySelectorAll(".acp-rail-row").length > 0,
+           "Working bucket should show rows after re-expanding");
+  });
+
+check("railSummary() shows session count not workspace count under status mode",
+  async (tpl) => {
+    const page = await railed(tpl, {
+      store: statusStore(), stored: { pa_acp_group: "status" } });
+    const summaryText = page.el("acpRailStatus").textContent;
+    // statusStore() has 5 sessions total.
+    assert(summaryText.includes("5 session"),
+           `railSummary under status mode should say "5 sessions loaded", got: ${summaryText}`);
+    assert(!summaryText.includes("workspaces"),
+           `railSummary under status mode should not mention "workspaces", got: ${summaryText}`);
+  });
 
 // -------------------------------------------------------------------- main --
 

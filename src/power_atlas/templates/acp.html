@@ -604,6 +604,26 @@
   RAIL_STATUS_LABEL.working = 'open in this PowerAtlas — the agent is working';
   RAIL_STATUS_LABEL.waiting = 'open in this PowerAtlas — waiting for you';
   RAIL_STATUS_LABEL.errored = 'open in this PowerAtlas — something went wrong';
+  // Closed-set map for tool-call status strings used in the group header tally
+  // (Phase 3). Wire values absent from this map are silently omitted from the
+  // tally — no raw wire string reaches visible UI (no-raw-wire-value rule).
+  var TOOL_STATUS_LABEL = Object.create(null);
+  TOOL_STATUS_LABEL.started   = 'started';
+  TOOL_STATUS_LABEL.completed = 'completed';
+  TOOL_STATUS_LABEL.failed    = 'failed';
+  TOOL_STATUS_LABEL.denied    = 'denied';
+  TOOL_STATUS_LABEL.approved  = 'approved';
+  TOOL_STATUS_LABEL.update    = 'update';
+  // Status bucket order: priority order, highest urgency first.
+  // NOTE: 'working', 'waiting', 'errored' mirror the RAIL_STATUS keys above.
+  // Keep in sync if RAIL_STATUS changes.
+  var STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available', 'locked'];
+  var STATUS_BUCKET_LABEL = Object.create(null);
+  STATUS_BUCKET_LABEL.working   = 'Working';
+  STATUS_BUCKET_LABEL.waiting   = 'Waiting';
+  STATUS_BUCKET_LABEL.errored   = 'Errored';
+  STATUS_BUCKET_LABEL.available = 'Available';
+  STATUS_BUCKET_LABEL.locked    = 'Locked';
   // Why a locked row cannot be picked. It lives on the row now rather than on
   // an indicator, because the dot is drawn for held sessions only: a row that
   // is greyed out and does not say why reads as broken rather than as taken.
@@ -2468,7 +2488,7 @@
     // without reading all of it — so this says how many are loaded and stops
     // there.
     var text;
-    if (railMode === 'date') {
+    if (railMode === 'date' || railMode === 'status') {
       text = railFlat.length
         ? railFlat.length + ' session' + (railFlat.length === 1 ? '' : 's')
           + ' loaded' + (railFlatHasMore ? ', more available' : '')
@@ -2652,11 +2672,11 @@
   }
 
   function railLoadFirstPage() {
-    if (railMode === 'date') loadFlatPage(1); else loadGroupPage(1);
+    if (railMode === 'date' || railMode === 'status') { loadFlatPage(1); } else { loadGroupPage(1); }
   }
 
   function railSetMode(mode) {
-    var next = mode === 'date' ? 'date' : 'project';
+    var next = mode === 'date' ? 'date' : mode === 'status' ? 'status' : 'project';
     if (next === railMode) return;
     railMode = next;
     railStore(RAIL_MODE_KEY, next);
@@ -2723,7 +2743,8 @@
   // page reads from somewhere it does not control. `localStorage` is writable
   // by anything else served from this origin, and the mode reaches a class name
   // and a `dataset` value.
-  var railMode = railStored(RAIL_MODE_KEY) === 'date' ? 'date' : 'project';
+  var _storedMode = railStored(RAIL_MODE_KEY);
+  var railMode = _storedMode === 'date' ? 'date' : _storedMode === 'status' ? 'status' : 'project';
 
   // ---- addressing a session without knowing how the rail is grouped -------
   //
@@ -3001,6 +3022,15 @@
   // the shadowing would be silent.
   function railRowStatus(value) {
     return RAIL_STATUS[value] || 'working';
+  }
+
+  function statusBucketKey(session) {
+    // Uses (availability, status) pair — status is '' for non-held sessions
+    // by server contract, so we must check availability first.
+    var avail = railAvailability(session.availability);
+    if (avail === 'held')   return railRowStatus(session.status); // 'working'|'waiting'|'errored'
+    if (avail === 'locked') return 'locked';
+    return 'available';
   }
 
   // `getMonth()` and its siblings return unpadded numbers, and the timestamp
@@ -3382,7 +3412,7 @@
     head.className = 'acp-rail-menu-head';
     head.textContent = 'Group by';
     railSettingsMenu.appendChild(head);
-    var modes = [['date', 'Date'], ['project', 'Project']];
+    var modes = [['date', 'Date'], ['project', 'Project'], ['status', 'Status']];
     for (var i = 0; i < modes.length; i++) {
       railSettingsMenu.appendChild(railSettingOption(modes[i][0], modes[i][1]));
     }
@@ -3801,21 +3831,21 @@
     // Emptied by textContent rather than innerHTML: same effect, and it keeps
     // the no-innerHTML rule true of every line on this page without exception.
     railGroupsEl.textContent = '';
-    var shown = railMode === 'date' ? renderRailDate() : renderRailProject();
+    var shown = railMode === 'date' ? renderRailDate() : railMode === 'status' ? renderRailStatus() : renderRailProject();
     if (shown === 0) {
       var empty = document.createElement('div');
       empty.className = 'acp-rail-empty';
       empty.textContent = railFilter
         ? 'nothing listed matches that — the filter narrows the sessions '
           + 'already loaded, so load '
-          + (railMode === 'date' ? 'more sessions' : 'more workspaces')
+          + (railMode !== 'project' ? 'more sessions' : 'more workspaces')
           + ' to widen it'
         : 'no sessions to show';
       railGroupsEl.appendChild(empty);
     }
     // One control, two cursors. Each mode has its own idea of what is left and
     // its own word for what pressing this brings back.
-    if (railMode === 'date') {
+    if (railMode === 'date' || railMode === 'status') {
       railMore.hidden = !railFlatHasMore;
       railMore.textContent = 'Load more sessions';
     } else {
@@ -3836,6 +3866,35 @@
     for (i = 0; i < buckets.length; i++) {
       railGroupsEl.appendChild(railBucketNode(buckets[i]));
       shown += buckets[i].sessions.length;
+    }
+    return shown;
+  }
+
+  function renderRailStatus() {
+    var byBucket = Object.create(null);
+    for (var i = 0; i < railFlat.length; i++) {
+      if (!railMatchesFlat(railFlat[i])) continue;
+      var bk = statusBucketKey(railFlat[i]);
+      if (!byBucket[bk]) byBucket[bk] = [];
+      byBucket[bk].push(railFlat[i]);
+    }
+    var shown = 0;
+    for (var b = 0; b < STATUS_BUCKET_ORDER.length; b++) {
+      var key = STATUS_BUCKET_ORDER[b];
+      var sessions = byBucket[key];
+      if (!sessions || !sessions.length) continue;
+      var wrap = document.createElement('div');
+      wrap.className = 'acp-rail-group';
+      // railHeadNode(key, label, countText, opts) — null opts omits the + create button
+      wrap.appendChild(railHeadNode('s:' + key, STATUS_BUCKET_LABEL[key],
+                                    String(sessions.length), null));
+      if (!railCollapsed['s:' + key]) {
+        for (var j = 0; j < sessions.length; j++) {
+          wrap.appendChild(railRowNode(sessions[j], true));
+        }
+      }
+      railGroupsEl.appendChild(wrap);
+      shown += sessions.length;
     }
     return shown;
   }
