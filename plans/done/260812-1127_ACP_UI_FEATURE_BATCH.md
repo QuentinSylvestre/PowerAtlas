@@ -2,9 +2,15 @@
 
 > **Date**: 2026-08-12
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-12T11:26
 > **Scope**: Eight /acp page improvements: image inline, steer/queue, auto-reconnect, new dot colors, rail refresh triggers, cancel-cascades-to-subagents, subagent timer freeze, prompt navigation arrows
 > **Estimated effort**: 2–3 days
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- `Accepted (harness opportunity)`: The ACP probe pattern (spawn kiro-cli as a subprocess, drive JSON-RPC directly) proved useful for verifying behavioral assumptions before writing code. Consider documenting it in `plans/tests/HARNESS.md` as a reusable technique for ACP protocol questions — cost: ~15 min per verification saved vs. runtime testing. (The method is already captured in `memory/MEMORY.md` § `kiro-cli subagent wire shapes were unmeasured until 2026-08-11`; HARNESS.md addition deferred.)
 
 ---
 
