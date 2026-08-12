@@ -3155,27 +3155,14 @@
     // per group.
     if (railBusy) return;
     if (railMode === 'date' || railMode === 'status') {
-      if (!railFlat.length) return;
-      railBusy = true;
-      // Re-reads the rows already on screen, capped at the server's own
-      // ceiling. A user who has pressed "Load more" past that keeps the state
-      // rows beyond it were fetched with until a reload — the same staleness
-      // the grouped path accepts past its group clamp, and for the same reason:
-      // one request beats one per page.
-      railFetch({ mode: 'recent', page: 1,
-                  size: Math.min(100, railFlat.length) })
-        .then(function (data) {
-          railBusy = false;
-          // Handed straight to the same write-back the grouped path uses.
-          // `railRefreshStates` reads only `sessions` now, so the flat payload
-          // needs no adapting and there is no second copy of the merge rules
-          // to drift.
-          if (railRefreshStates({ sessions: (data && data.sessions) || [] })) {
-            renderRail();
-          }
-        }).catch(function () {
-          railBusy = false;
-        });
+      // Full re-fetch rather than state-only update: newly-active sessions
+      // must appear at the top without a manual Refresh press.
+      // The !railFlat.length early-return from the previous implementation is
+      // intentionally removed: loadFlatPage(1) is safe to call on an empty rail
+      // (it resets railFlat=[] and fetches fresh), and railBusy already prevents
+      // double-fetches while a request is in flight. A spurious tick before the
+      // first page loads is benign.
+      loadFlatPage(1);
       return;
     }
     if (!railGroups.length) return;

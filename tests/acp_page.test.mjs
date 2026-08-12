@@ -7453,6 +7453,69 @@ const template = process.argv[2]
   : DEFAULT_TEMPLATE;
 
 console.log(`browser-side behavioural harness — ${template}\n`);
+// ---- Phase 2: railRefresh date/status fix (SC-4) -------------------------
+
+// railRefreshDateModeCallsLoadFlatPage: In date mode, a tick calls loadFlatPage(1)
+// (mode=recent fetch) rather than the state-only railRefreshStates path.
+check("railRefreshDateModeCallsLoadFlatPage", async (tpl) => {
+  // Use status store for a non-empty flat response; set date mode via localStorage.
+  const page = await railed(tpl, {
+    store: statusStore(),
+    stored: { pa_acp_group: "date" },
+  });
+  // The initial railed() load issued listing calls for date mode. Record the count.
+  const before = page.listingCalls().length;
+  // A tick fires railRefresh(). In date mode the new code calls loadFlatPage(1),
+  // which emits a ?mode=recent fetch — the same call the initial load makes.
+  page.tick();
+  await page.settle();
+  const newCalls = page.listingCalls().slice(before);
+  assert(newCalls.length > 0,
+    "railRefresh in date mode made no listing call; it should call loadFlatPage(1)");
+  assertEqual(newCalls[0].params.mode, "recent",
+    "railRefresh in date mode did not request the flat (recent) listing");
+  // Confirm page=1: loadFlatPage(1) resets the list rather than appending.
+  assertEqual(String(newCalls[0].params.page), "1",
+    "railRefresh in date mode should request page 1, not a continuation page");
+});
+
+// railRefreshStatusModeCallsLoadFlatPage: same as date mode for status mode.
+check("railRefreshStatusModeCallsLoadFlatPage", async (tpl) => {
+  const page = await railed(tpl, {
+    store: statusStore(),
+    stored: { pa_acp_group: "status" },
+  });
+  const before = page.listingCalls().length;
+  page.tick();
+  await page.settle();
+  const newCalls = page.listingCalls().slice(before);
+  assert(newCalls.length > 0,
+    "railRefresh in status mode made no listing call; it should call loadFlatPage(1)");
+  assertEqual(newCalls[0].params.mode, "recent",
+    "railRefresh in status mode did not request the flat (recent) listing");
+  assertEqual(String(newCalls[0].params.page), "1",
+    "railRefresh in status mode should request page 1, not a continuation page");
+});
+
+// railRefreshProjectModeUsesRefreshStates: regression — project mode is unchanged.
+// The tick should NOT emit a mode=recent fetch; it uses the grouped path instead.
+check("railRefreshProjectModeUsesRefreshStates", async (tpl) => {
+  // Default mode is project (no stored pa_acp_group override).
+  const page = await railed(tpl, {
+    store: fakeStore({ workspaces: 1, sessions: 2 }),
+  });
+  const before = page.listingCalls().length;
+  page.tick();
+  await page.settle();
+  const newCalls = page.listingCalls().slice(before);
+  // The tick must issue some request (the grouped refresh), but it must NOT
+  // be a mode=recent flat-list request.
+  assert(newCalls.length > 0,
+    "railRefresh in project mode made no listing call at all");
+  assert(newCalls.every((c) => c.params.mode !== "recent"),
+    "railRefresh in project mode issued a mode=recent fetch — the grouped path is broken");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
