@@ -1736,14 +1736,15 @@
       var insertionRef = rows[rows.length - 1].nextSibling;
 
       // Build name tally (preserves first-seen order).
-      // Tool names are operator-authored titles, not a closed wire-status vocabulary.
-      // They pass through textContent (not innerHTML) so no narrowing is applied.
-      // Status values use TOOL_STATUS_LABEL to omit unknown wire strings.
+      // Use the tool's semantic kind (execute, read, write…) rather than its
+      // title, which is a command preview and far too verbose for a header.
+      // Fall back to the name span only when kind is absent (e.g. legacy rows).
       var nameCounts = Object.create(null);
       var nameOrder = [];
       for (var n = 0; n < rows.length; n++) {
+        var kindEl = rows[n].querySelector('.acp-tool-kind');
         var nameEl = rows[n].querySelector('.acp-tool-name');
-        var nm = nameEl ? nameEl.textContent : 'tool';
+        var nm = (kindEl ? kindEl.textContent : '') || (nameEl ? nameEl.textContent : 'tool');
         if (!nameCounts[nm]) { nameCounts[nm] = 0; nameOrder.push(nm); }
         nameCounts[nm]++;
       }

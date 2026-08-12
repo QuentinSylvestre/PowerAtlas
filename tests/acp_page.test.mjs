@@ -6382,15 +6382,17 @@ check("P3: group header format: name xCount · status xCount", async (tpl) => {
   const toggle = transcript.querySelector(".acp-tool-group-toggle");
   assert(toggle !== null, "group toggle should exist");
   const text = toggle.textContent;
-  // Expected: "shell ×2, read_file · completed ×3"
+  // Expected: "execute ×2, read · completed ×3"
   assert(!text.includes("tool calls"),
     "header should not contain 'tool calls' — got: " + text);
-  assert(text.includes("shell"),
-    "header should contain 'shell' — got: " + text);
+  assert(!text.includes("shell"),
+    "header should not contain title 'shell' (kind is used instead) — got: " + text);
+  assert(text.includes("execute"),
+    "header should contain kind 'execute' — got: " + text);
   assert(text.includes("\xd72"),
     "header should use \xd7 (multiplication sign) for counts — got: " + text);
-  assert(text.includes("read_file"),
-    "header should contain 'read_file' — got: " + text);
+  assert(text.includes("read"),
+    "header should contain kind 'read' — got: " + text);
   assert(text.includes("\xb7"),
     "header should contain \xb7 (middle dot) separator — got: " + text);
   assert(text.includes("completed"),
