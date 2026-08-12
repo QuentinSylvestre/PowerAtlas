@@ -4404,13 +4404,15 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
         return
     # Validate name against the received catalogue when available.
     # Allow-and-proceed when catalogue not yet received (race before first
-    # commands/available notification).
+    # commands/available notification). Log a warning for unknown names but
+    # do not block — kiro-cli enforces its own command list and will reject
+    # names it doesn't know, while a mismatched catalogue (e.g. names stored
+    # with a leading "/" vs without) would otherwise permanently break dispatch.
     valid_names = {c.get("name") for c in meta.get("commands") or [] if isinstance(c, dict) and c.get("name")}
     if valid_names and name not in valid_names:
-        conn.send(error_frame("bad_payload", "Unknown command.", session_id))
-        log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
-                    "session=%s", name, session_id)
-        return
+        log.warning("ACP commands_execute: name %r not in catalogue (%d entries, first=%r); "
+                    "forwarding anyway — kiro-cli will reject if truly unknown",
+                    name, len(valid_names), next(iter(valid_names)) if valid_names else None)
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
     # Claim the inflight slot BEFORE emitting the turn-start marker — matching

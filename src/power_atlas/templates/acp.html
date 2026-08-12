@@ -1684,7 +1684,7 @@
       li.id = 'acp-cmd-opt-' + i;
       var nameSpan = document.createElement('span');
       nameSpan.className = 'acp-cmd-name';
-      nameSpan.textContent = '/' + (items[i].name || '');
+      nameSpan.textContent = '/' + (items[i].name || '').replace(/^\//, '');
       var descSpan = document.createElement('span');
       descSpan.className = 'acp-cmd-desc';
       descSpan.textContent = items[i].description || '';

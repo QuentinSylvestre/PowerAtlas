@@ -16761,21 +16761,29 @@ class TestAcpCommandsExecuteHandler:
         frames = _queued(conn)
         assert frames[0]["payload"]["code"] == "bad_payload"
 
-    def test_unknown_command_returns_bad_payload(self, acp_session):
-        """When catalogue is populated and name is not in it, returns
-        ``bad_payload``."""
+    def test_unknown_command_warns_and_forwards(self, acp_session):
+        """When catalogue is populated and name is not in it, the handler logs a
+        warning but still forwards to kiro-cli rather than returning bad_payload.
+        This prevents catalogue mismatch (e.g. names with vs without leading /)
+        from permanently breaking dispatch."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor.sessions[sid]["commands"] = [
             {"name": "tools", "description": "x"},
         ]
         _queued(conn)
-        asyncio.run(acp_mod._handle_commands_execute(
-            conn, sid, {"name": "unknown_cmd"}))
+
+        async def fake_execute(self_ignored, session_id, name):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "unknown_cmd"}))
+
+        # Should NOT return bad_payload — should forward to kiro-cli
         frames = _queued(conn)
-        assert frames[0]["payload"]["code"] == "bad_payload"
-        # Verify the static message does NOT echo user-supplied name (S2 fix).
-        assert frames[0]["payload"]["message"] == "Unknown command."
+        result = next((f for f in frames if f["type"] == "commands_execute_result"), None)
+        assert result is not None, "should forward unknown command rather than reject"
 
     def test_empty_catalogue_skips_validation(self, acp_session):
         """When no ``commands`` key in meta, catalogue validation is skipped
