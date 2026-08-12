@@ -1,7 +1,7 @@
 # ACP UI Feature Batch
 
 > **Date**: 2026-08-12
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Eight /acp page improvements: image inline, steer/queue, auto-reconnect, new dot colors, rail refresh triggers, cancel-cascades-to-subagents, subagent timer freeze, prompt navigation arrows
 > **Estimated effort**: 2–3 days
@@ -1038,6 +1038,35 @@ Note: the cycle-2 HIGH was a regression introduced by cycle-1's wrapper div appr
 | 10 | Low | "prompt nav cleared on clearTranscript" missing re-attach coverage. | Fixed — extended with 2-message assertion (cycle 1). |
 | 11 | Low | Dead-zone `-10` comment missing in scroll math. | Fixed — comment added (cycle 1). |
 | 12 | Low | Down arrow at last message: no visual feedback of boundary reached. | Fixed — brief 400ms button disable added (cycle 1). |
+
+### 2026-08-12 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Security auditor, Reliability engineer, Senior engineer, End-user advocate.
+7 findings (0 High, 1 Medium, 6 Low).
+QA verification: PASS — Playwright browser verification against live instance at `http://127.0.0.1:4915/acp`. Verified: Queue/Steer wrapper `[hidden]` CSS override (fixed inline, commit 13f5ea8); rail dots showing `status-waiting` (amber) and `status-thinking` (blue); prompt nav hidden when no messages; auto-reconnect "reconnecting…" status text; all 280 JS + 1235 Python tests green.
+
+Invoked on fully-executed plan; performed standalone holistic review.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Server-side ACP | pass (1234→1235) | PASS | — |
+| 2: Client-side queue/steer | pass (254→280) | PASS | steer cleanup, attachment renumber, stop guard |
+| 3: Auto-reconnect | pass | PASS | clearTimeout guard, delta tests |
+| 4: Dot color scheme | pass | PASS | static unread dot per user direction |
+| 5: Subagent timer + nav | pass | PASS | subpanel regression fixed in cycle 2 |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Queue auto-send fires after cancelled turn — user pressed Stop with a queued prompt. | Fixed — `stopReason === 'cancelled'` guard added before auto-send (cycle 1). |
+| 2 | Low | `.acp-queue-steer[hidden]` missing CSS override — wrapper visible despite `hidden=true`. | Fixed — `display: none` override added; verified via Playwright (QA, commit 13f5ea8). |
+| 3 | Low | README missing 5 feature descriptions (SC-1, SC-3, SC-4, SC-7, SC-8). | Fixed — all 5 added (cycle 1). |
+| 4 | Low | `MAX_STEER_CHARS` cap missing in `_handle_steer`. | Fixed — 4000 char limit added (cycle 1). |
+| 5 | Low | `_reconnectDelay` not reset in `releaseSession()`. | Fixed — reset to 1000ms (cycle 1). |
+| 6 | Low | Unread marker not cleared on `agent_died`. | Fixed — `clearUnread(_diedSid)` added in handler (cycle 1). |
+| 7 | Low | Double note on cancelled turn with queued prompt (pre-existing + new guard). | Fixed — de-duplicated to single note (cycle 2, commit e29df93). |
 
 ## Harness Improvement Opportunities
 
