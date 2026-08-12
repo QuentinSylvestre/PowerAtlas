@@ -5844,6 +5844,10 @@ check("renderRailStatus groups sessions into correct buckets in priority order",
     // Working > Waiting > Errored > Available > Locked — order is what we are testing.
     assert(headings.indexOf("Working")   < headings.indexOf("Waiting"),
            "Working bucket should appear before Waiting");
+    assert(headings.indexOf("Waiting")   < headings.indexOf("Errored"),
+           "Waiting bucket should appear before Errored");
+    assert(headings.indexOf("Errored")   < headings.indexOf("Available"),
+           "Errored bucket should appear before Available");
     assert(headings.indexOf("Waiting")   < headings.indexOf("Available"),
            "Waiting bucket should appear before Available");
     assert(headings.indexOf("Available") < headings.indexOf("Locked"),
@@ -5948,6 +5952,106 @@ check("railSummary() shows session count not workspace count under status mode",
     assert(!summaryText.includes("workspaces"),
            `railSummary under status mode should not mention "workspaces", got: ${summaryText}`);
   });
+
+
+check("Load-more click in status mode dispatches a flat request, not a group request",
+  async (tpl) => {
+    // Build a store big enough that serveFlat returns has_more: true.
+    // serveFlat uses RAIL_FLAT_SIZE=30 as the page size, so 31+ sessions trigger it.
+    const bigStore = [{ cwd: "C:\\work\\big", name: "big", exists: true, sessions: [] }];
+    for (let i = 0; i < 35; i++) {
+      bigStore[0].sessions.push({
+        id: `s-${i}`, title: `session ${i}`,
+        updated_at: `2026-08-01T${String(10 + (i % 10)).padStart(2, "0")}:00:00.000000000Z`,
+        availability: "available", status: "",
+      });
+    }
+    const page = await railed(tpl, {
+      store: bigStore,
+      stored: { pa_acp_group: "status" },
+    });
+
+    // Verify the Load-more button is visible (has_more=true from the fixture).
+    assert(!page.el("acpRailMore").hidden,
+           "Load-more button should be visible when railFlatHasMore is true");
+
+    const callsBefore = page.listingCalls().length;
+    page.click("acpRailMore");
+    await page.settle();
+
+    const newCalls = page.listingCalls().slice(callsBefore);
+    assert(newCalls.length > 0,
+           "Load-more click in status mode made no listing request");
+    // Must use the flat endpoint (mode=recent), not the grouped endpoint.
+    assertEqual(newCalls[0].params.mode, "recent",
+                "Load-more click in status mode did not dispatch a flat (?mode=recent) request");
+    assert(!("group_page" in newCalls[0].params),
+           "Load-more click in status mode dispatched a group-page request instead of flat");
+  });
+
+check("tick-poll in status mode dispatches a flat request, not a group request",
+  async (tpl) => {
+    const page = await railed(tpl, {
+      store: statusStore(),
+      stored: { pa_acp_group: "status" },
+    });
+
+    const callsBefore = page.listingCalls().length;
+    page.tick();
+    await page.settle();
+
+    const newCalls = page.listingCalls().slice(callsBefore);
+    assert(newCalls.length > 0,
+           "tick-poll in status mode made no listing request");
+    // Must use the flat endpoint (mode=recent), not the grouped endpoint.
+    assertEqual(newCalls[0].params.mode, "recent",
+                "tick-poll in status mode did not dispatch a flat (?mode=recent) request");
+    assert(!("group_page" in newCalls[0].params),
+           "tick-poll in status mode dispatched a group-page request instead of flat");
+  });
+
+check("statusBucketKey: held+waiting maps to Waiting bucket, held+errored maps to Errored bucket",
+  async (tpl) => {
+    // Covers {availability:'held', status:'waiting'} -> 'waiting'
+    // and    {availability:'held', status:'errored'}  -> 'errored'.
+    const store = [{
+      cwd: "C:\\work\\held-test", name: "held-test", exists: true,
+      sessions: [
+        { id: "held-waiting", title: "held waiting",
+          updated_at: "2026-08-01T10:00:00.000000000Z",
+          availability: "held", status: "waiting" },
+        { id: "held-errored", title: "held errored",
+          updated_at: "2026-08-01T09:00:00.000000000Z",
+          availability: "held", status: "errored" },
+      ],
+    }];
+    const page = await railed(tpl, { store, stored: { pa_acp_group: "status" } });
+    const headings = page.railHeadings();
+    assert(headings.includes("Waiting"),
+           "{availability:'held', status:'waiting'} should map to the Waiting bucket");
+    assert(headings.includes("Errored"),
+           "{availability:'held', status:'errored'} should map to the Errored bucket");
+    assert(!headings.includes("Working"),
+           "Waiting/Errored fixtures should not produce a Working bucket");
+    assert(!headings.includes("Available"),
+           "Waiting/Errored fixtures should not produce an Available bucket");
+  });
+
+check("status mode with no sessions renders the empty-state node and no bucket groups",
+  async (tpl) => {
+    // renderRailStatus returns 0, which triggers renderRail()'s existing empty-state path.
+    const page = await railed(tpl, {
+      store: [{ cwd: "C:\\work\\empty", name: "empty", exists: true, sessions: [] }],
+      stored: { pa_acp_group: "status" },
+    });
+    const groups = page.railGroups();
+    assertEqual(groups.length, 0,
+                "no bucket groups should be rendered when the session list is empty");
+    const emptyNode = page.one("acpRailGroups", ".acp-rail-empty");
+    assert(emptyNode !== null && emptyNode !== undefined,
+           "the empty-state node should appear when status mode has no sessions");
+  });
+
 
 // -------------------------------------------------------------------- main --
 

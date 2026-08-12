@@ -607,6 +607,7 @@
   // Closed-set map for tool-call status strings used in the group header tally
   // (Phase 3). Wire values absent from this map are silently omitted from the
   // tally — no raw wire string reaches visible UI (no-raw-wire-value rule).
+  // First used in flushToolGroups() — declared here near RAIL_STATUS for co-location.
   var TOOL_STATUS_LABEL = Object.create(null);
   TOOL_STATUS_LABEL.started   = 'started';
   TOOL_STATUS_LABEL.completed = 'completed';
@@ -2700,23 +2701,24 @@
 
   // ---- grouping mode -------------------------------------------------------
   //
-  // The rail draws one of two shapes. `project` is the original: workspace
+  // The rail draws one of three shapes. `project` is the original: workspace
   // groups, server-paged on both axes. `date` is one flat recency list from
-  // `?mode=recent`, cut into local days here. They keep separate stores and
-  // switching empties the one being left, so exactly one is ever populated —
-  // two live stores would need `railIndex`, the delete path and the poll to
-  // agree on which copy of a session is authoritative, for no gain, since a
-  // switch refetches anyway.
+  // `?mode=recent`, cut into local days here. `status` uses the same flat list,
+  // bucketed client-side into Working / Waiting / Errored / Available / Locked.
+  // They keep separate stores and switching empties the one being left, so
+  // exactly one is ever populated — two live stores would need `railIndex`, the
+  // delete path and the poll to agree on which copy of a session is
+  // authoritative, for no gain, since a switch refetches anyway.
 
   var RAIL_MODE_KEY = 'pa_acp_group';
   var RAIL_FLAT_SIZE = 30;
-  /** Sessions for `date`, newest first, exactly as the server ordered them. */
+  /** Sessions for `date` and `status`, newest first, exactly as the server ordered them. */
   var railFlat = [];
   var railFlatPage = 0;
   var railFlatHasMore = false;
-  /** Day keys the user pressed "Show N more" on. Reset when the list reloads. */
+  /** Day or status-bucket keys the user pressed "Show N more" on. Reset when the list reloads. */
   var railRevealed = Object.create(null);
-  // Collapsed groups, keyed `g:<cwd>` or `d:<day>`. Absent means expanded,
+  // Collapsed groups, keyed `g:<cwd>` or `d:<day>` or `s:<status>`. Absent means expanded,
   // which makes expanded the default without anything having to say so, and
   // makes a group the rail has never drawn before open rather than hidden.
   //
@@ -2879,7 +2881,7 @@
     // narrower gap than the one measured and costs one request instead of one
     // per group.
     if (railBusy) return;
-    if (railMode === 'date') {
+    if (railMode === 'date' || railMode === 'status') {
       if (!railFlat.length) return;
       railBusy = true;
       // Re-reads the rows already on screen, capped at the server's own
@@ -3889,8 +3891,26 @@
       wrap.appendChild(railHeadNode('s:' + key, STATUS_BUCKET_LABEL[key],
                                     String(sessions.length), null));
       if (!railCollapsed['s:' + key]) {
-        for (var j = 0; j < sessions.length; j++) {
-          wrap.appendChild(railRowNode(sessions[j], true));
+        var all = sessions;
+        var revealed = !!railRevealed['s:' + key];
+        var limit = revealed ? all.length : Math.min(RAIL_SESSION_SIZE, all.length);
+        for (var j = 0; j < limit; j++) {
+          wrap.appendChild(railRowNode(all[j], true));
+        }
+        if (limit < all.length) {
+          var more = document.createElement('button');
+          more.className = 'acp-btn acp-rail-group-more';
+          more.type = 'button';
+          more.textContent = 'Show ' + (all.length - limit) + ' more';
+          // IIFE to capture `key` per iteration — var is function-scoped.
+          (function (k) {
+            more.addEventListener('click', function () {
+              railRevealed['s:' + k] = true;
+              railFocus = { status: k };
+              renderRail();
+            });
+          }(key));
+          wrap.appendChild(more);
         }
       }
       railGroupsEl.appendChild(wrap);
@@ -4862,7 +4882,7 @@
   });
   railMore.addEventListener('click', function () {
     railFocus = { more: true };
-    if (railMode === 'date') { loadFlatPage(railFlatPage + 1); return; }
+    if (railMode === 'date' || railMode === 'status') { loadFlatPage(railFlatPage + 1); return; }
     loadGroupPage(railGroupPage + 1);
   });
   // ---- the rail's width ----------------------------------------------------

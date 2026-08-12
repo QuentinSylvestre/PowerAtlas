@@ -181,9 +181,9 @@ whose workspace directory no longer exists are marked so, since they cannot be r
 **The rail groups by workspace, by day, or by status.** The sliders button beside *Refresh* switches between them and
 remembers the choice. Grouped by day the rail shows every session across every workspace, newest first,
 cut into *Today*, *Yesterday* and dated groups — by **your** clock, not the machine's, so the grouping is
-right on a phone in another timezone. Status groups every session into Working / Waiting / Errored / Available / Locked buckets, showing only occupied buckets — useful when you want to see all active sessions at a glance. Either way each group shows three sessions and offers the rest, and
+right on a phone in another timezone. Status groups every session into Working / Waiting / Errored / Available / Locked buckets, showing only occupied buckets — useful when you want to see all active sessions at a glance. In each mode each group shows three sessions and offers the rest, and
 any group can be collapsed by its heading. Timestamps show only what distinguishes them — a clock for
-today, a day for this year. Hovering a row states all three of its facts at once, in either grouping
+today, a day for this year. Hovering a row states all three of its facts at once, in any grouping
 mode: `[{workspace}]: {session title} - {date & time}`, so the project a row came from, a title too long
 for the rail's width and the full timestamp are one hover away. On a desktop the rail's right edge drags
 to resize it, between 220 px and half the window, and that width is remembered too; arrow keys move it
