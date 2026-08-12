@@ -16642,18 +16642,13 @@ class TestAcpCommandsExecuteHandler:
                 conn, sid, {"name": "tools"}))
 
         frames = _queued(conn)
-        # Frame 0: meta {turn:"start"} via _emit
-        assert frames[0]["type"] == "meta"
-        assert frames[0]["payload"]["turn"] == "start"
-        # Frame 1: meta {turn:"end"} via _emit in finally
-        assert frames[1]["type"] == "meta"
-        assert frames[1]["payload"]["turn"] == "end"
-        assert frames[1]["payload"]["stopReason"] == "end_turn"
-        # Frame 2: ack via conn.send
-        assert frames[2]["type"] == "commands_execute_result"
-        assert frames[2]["sessionId"] == sid
-        assert frames[2]["payload"]["name"] == "tools"
-        assert frames[2]["payload"]["status"] == "accepted"
+        # No turn markers — commands output arrives as agent_message_chunk
+        # notifications AFTER the ack; emitting turn:end before them would
+        # swallow the output. The ack is the only frame sent.
+        assert frames[0]["type"] == "commands_execute_result"
+        assert frames[0]["sessionId"] == sid
+        assert frames[0]["payload"]["name"] == "tools"
+        assert frames[0]["payload"]["status"] == "accepted"
 
     def test_no_session_id_returns_bad_envelope(self, acp_session):
         acp_mod, sid = acp_session

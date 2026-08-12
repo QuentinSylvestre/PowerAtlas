@@ -4415,44 +4415,26 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
                     name, len(valid_names), next(iter(valid_names)) if valid_names else None)
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
-    # Claim the inflight slot BEFORE emitting the turn-start marker — matching
-    # _handle_prompt's ordering.  If two concurrent callers race here (both
-    # passed the inflight guard above but hit this line simultaneously), the
-    # first to .add wins the slot; the second's turn-start would already be
-    # emitted by the time the second caller's later _request fires, which is
-    # less bad than the alternative.  Both are synchronous, so no asyncio
-    # interleaving is possible here, but the ordering is the defensive one.
+    # Hold inflight to block concurrent prompts while the command runs.
+    # Do NOT emit meta {turn:"start"} here — the command output arrives as
+    # agent_message_chunk notifications AFTER the _request ack returns, and
+    # emitting turn:end in the finally would close the bubble before those
+    # chunks arrive, swallowing the output. Let the chunks render naturally
+    # into the existing open bubble; inflight alone prevents re-entry.
     _supervisor.inflight.add(session_id)
-    # Emit turn-start marker so the client's UI treats this command as an
-    # active turn (disables Send, shows the working indicator).  Mirrors
-    # _handle_prompt, which emits this after inflight.add.
-    _emit(session_id, envelope("meta", {"turn": "start"}, session_id))
-    stop_reason = "interrupted"
     try:
         result = await _supervisor.commands_execute(session_id, name)
-        stop_reason = "end_turn"
     except AcpError as exc:
         conn.send(error_frame(exc.code, str(exc), session_id))
         log.warning("ACP commands_execute error: session=%s: %s", session_id, exc)
-        stop_reason = "error"
-        # `return` here does NOT skip the `finally` block — Python always runs
-        # `finally` before the return propagates, so `inflight.discard` and the
-        # `turn:end` emit below are still guaranteed regardless of which path
-        # exits.
         return
     except Exception:
         log.exception("ACP commands_execute: unexpected error session=%s", session_id)
         conn.send(error_frame("internal_error",
             "An unexpected error occurred executing the command.", session_id))
-        stop_reason = "error"
-        return  # finally still runs — see note above
+        return
     finally:
         _supervisor.inflight.discard(session_id)
-        # Mirror _handle_prompt: flush the bubble and emit turn-end so the
-        # client knows the command finished and re-enables the Send button.
-        _flush_bubble(session_id)
-        _emit(session_id, envelope(
-            "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
     conn.send(envelope("commands_execute_result",
         {"name": name, "status": "accepted"}, session_id))
 
