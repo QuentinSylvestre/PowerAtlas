@@ -499,8 +499,25 @@ if (railMode === 'date' || railMode === 'status') {
 - `railRefreshProjectModeUsesRefreshStates`: regression — `railMode = 'project'`; call `railRefresh()`; assert `loadFlatPage` was NOT called.
 
 **Exit criteria**:
-- [ ] `railRefresh` date/status branch calls `loadFlatPage(1)` (not `railRefreshStates`)
-- [ ] New tests pass; existing `railRefresh` tests pass
+- [x] `railRefresh` date/status branch calls `loadFlatPage(1)` (not `railRefreshStates`)
+- [x] New tests pass; existing `railRefresh` tests pass
+
+**Implementation (2026-08-12, code: d78de92 / 36443f7)**
+Replaced the `railRefresh` date/status branch (which called `railFetch + railRefreshStates`) with `loadFlatPage(1, true)`. Added a `silent` parameter to `loadFlatPage` (default falsy): when `true`, skips the pre-fetch "loading sessions…" status write and uses a silent catch (`railBusy = false`) instead of `railFailed`, matching the grouped-mode auto-poll's "silent on purpose" contract. The `!railFlat.length` early-return guard was intentionally removed (loadFlatPage is safe on an empty rail; railBusy already prevents double-fetches). Added 4 tests: date-mode calls loadFlatPage(1), status-mode calls loadFlatPage(1), project-mode regression (unchanged), and failure-path silence test.
+
+---
+
+### 2026-08-12 -- Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer)
+
+Implementation health: Green.
+4 findings (0 High, 1 Medium, 3 Low). All auto-fixed in cycle 1; cycle 2 clean.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| M1 | Medium | Background-tick error now calls `railFailed`, overwriting user's last status message; grouped-mode path is deliberately silent. | Fixed — `loadFlatPage(page, silent)` added; `railRefresh` passes `silent=true` |
+| M2 | Low | Status text flashes "loading sessions…" on every 60-second tick from `loadFlatPage`'s pre-fetch write. | Fixed — `if (!silent)` guard on pre-fetch status write |
+| M3 | Low | No failure-path test verifying railBusy cleared and poll cycle unfrozen on tick error. | Fixed — `railRefreshDateModeFailureIsSilent` test added |
+| M4 | Low | Comment on removed `!railFlat.length` guard incomplete for the failed-initial-load case. | Fixed — comment extended with silent-catch behavior explanation |
 
 ---
 
@@ -722,8 +739,8 @@ Implementation health: Yellow.
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
-| R1 | Medium | `commands_execute` holds `inflight` but emits no `meta {turn:"start"}` frame; client Send button stays enabled during blocking call. | Escalated — recommend emitting turn-start/end markers around commands_execute |
-| R2 | Medium | `commands_execute` uses 90 s wall-clock timeout (`REQUEST_TIMEOUT_SECONDS`) rather than the inactivity sentinel; long commands are cut off abruptly at 90 s. | Escalated — recommend switching to `_INACTIVITY` sentinel (same as `session/prompt`) |
+| R1 | Medium | `commands_execute` holds `inflight` but emits no `meta {turn:"start"}` frame; client Send button stays enabled during blocking call. | Fixed — emit meta turn:start/end around inflight block, matching _handle_prompt pattern (b2d3847) |
+| R2 | Medium | `commands_execute` uses 90 s wall-clock timeout (`REQUEST_TIMEOUT_SECONDS`) rather than the inactivity sentinel; long commands are cut off abruptly at 90 s. | Fixed — timeout=_INACTIVITY added to _Supervisor.commands_execute (b2d3847) |
 | R3 | Medium | `_handle_commands_options` was missing `closing` guard, unlike parallel handler. | Fixed — closing guard added matching canonical steer order |
 | S1 | Medium | Unbounded commands list stored in `meta["commands"]`; a compromised kiro-cli could inflate per-session memory. | Fixed — `MAX_COMMANDS_COUNT = 200` constant and slice added |
 | S2 | Medium | Error frame echoed user-supplied `name` in f-string (`f"Unknown command '{name}'."`), potential XSS vector via Phase 3 innerHTML. | Fixed — static "Unknown command." message |
