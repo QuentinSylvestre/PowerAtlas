@@ -2,6 +2,7 @@
 
 > **Date**: 2026-08-12
 > **Status**: Complete
+> **Last Updated**: 2026-08-12 12:21
 > **Scope**: Improve `_Supervisor._on_subagent_list` to attribute fan-out crews when more than one session is in-flight simultaneously
 
 ---
