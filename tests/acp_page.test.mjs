@@ -6377,6 +6377,10 @@ check("P3: group is collapsed by default; toggle has aria-expanded=false", async
   const body = transcript.querySelector(".acp-tool-group-body");
   assert(body !== null, "group body should exist");
   assert(body.hidden === true, "group body should be hidden by default");
+  // aria-controls linkage: toggle must reference the body by id
+  if (body && toggle) {
+    assertEqual(toggle.getAttribute('aria-controls'), body.id, 'toggle aria-controls should link to body id');
+  }
 });
 
 check("P3: group header format: N tool calls (name xCount) · status xCount", async (tpl) => {
@@ -6650,6 +6654,23 @@ check("P3: group toggle aria-label toggles between Expand and Collapse", async (
   const collapsed = toggle.getAttribute("aria-label");
   assert(collapsed.toLowerCase().includes("expand"),
     "aria-label after re-collapse should say 'Expand' — got: " + collapsed);
+});
+
+check("P3: anonymous tool calls (no toolCallId) form a group", async (tpl) => {
+  // Anonymous tool calls have no toolCallId — they always take the new-row
+  // path in addToolCall (id is falsy, known is always null). flushToolGroups
+  // should still collect and group them at turn:end.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { title: "shell", kind: "execute", status: "completed", command: "a" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { title: "shell", kind: "execute", status: "completed", command: "b" } });
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 1,
+    "two anonymous tool calls should produce exactly one .acp-tool-group");
 });
 
 // -------------------------------------------------------------------- main --

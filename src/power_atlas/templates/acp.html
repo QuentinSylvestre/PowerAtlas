@@ -475,6 +475,7 @@
   // collapsible group containers at meta turn:end by flushToolGroups().
   // Null between turns (reset at turn:start and after each flush).
   var toolGroup = null; // accumulates tool-call rows during a turn; flushed at turn:end
+  var _toolGroupSeq = 0; // monotonic counter for unique group-body ids (aria-controls linkage)
   // ---- sub-agents (the agent bar + the read-only sub-agent panel) ---------
   //
   // The current session's crew, as last sent on a `subagents` frame — an
@@ -620,8 +621,8 @@
   TOOL_STATUS_LABEL.approved  = 'approved';
   TOOL_STATUS_LABEL.update    = 'update'; // synthetic fallback (payload.status || 'update' in known branch); not a real kiro-cli wire status
   // Status bucket order: priority order, highest urgency first.
-  // NOTE: 'working', 'waiting', 'errored' mirror the RAIL_STATUS keys above.
-  // Keep in sync if RAIL_STATUS changes.
+  // Array (not a map) — ordering defines bucket display priority.
+  // 'working', 'waiting', 'errored' mirror the RAIL_STATUS keys; keep in sync.
   var STATUS_BUCKET_ORDER = ['working', 'waiting', 'errored', 'available', 'locked'];
   var STATUS_BUCKET_LABEL = Object.create(null);
   STATUS_BUCKET_LABEL.working   = 'Working';
@@ -1629,6 +1630,9 @@
       var insertionRef = rows[rows.length - 1].nextSibling;
 
       // Build name tally (preserves first-seen order).
+      // Tool names are operator-authored titles, not a closed wire-status vocabulary.
+      // They pass through textContent (not innerHTML) so no narrowing is applied.
+      // Status values use TOOL_STATUS_LABEL to omit unknown wire strings.
       var nameCounts = Object.create(null);
       var nameOrder = [];
       for (var n = 0; n < rows.length; n++) {
@@ -1674,7 +1678,7 @@
       group.appendChild(groupToggle);
 
       var groupBody = document.createElement('div');
-      groupBody.id = 'acp-tg-' + Date.now() + '-' + r; // unique id for aria-controls
+      groupBody.id = 'acp-tg-' + (++_toolGroupSeq); // unique id for aria-controls
       groupBody.className = 'acp-tool-group-body';
       groupBody.hidden = true; // collapsed by default
 
@@ -1710,11 +1714,10 @@
 
       if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
-    toolGroup = null;
+    toolGroup = null; // also reset in clearTranscript() and at meta turn:start
   }
 
   // ---- the agent's markdown ---------------------------------------------
-  //
   // The server parses a finished bubble's prose with mistune and sends the
   // **token tree**, never HTML. Everything below turns that tree into elements
   // with createElement + textContent, so the no-HTML-parser rule at the top of
@@ -2263,7 +2266,7 @@
     transcriptEl.textContent = '';
     agentBody = null;
     toolRows = Object.create(null);
-    toolGroup = null; // reset grouping state when transcript is cleared
+    toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
     // The row emptying just detached, if one was showing — nothing left to
     // remove a second time, and `showThinking` would otherwise believe one
     // still stands.
@@ -4628,7 +4631,7 @@
     if (type === 'meta' && payload.turn === 'start') {
       agentBody = null;
       pendingPrompt = null;
-      toolGroup = null; // reset grouping accumulator at each new turn
+      toolGroup = null; // also reset in clearTranscript() and at end of flushToolGroups()
       // The turn really started, so the images that went with it are spent and
       // their object URLs can go. Guarded on `replaying` where `pendingPrompt`
       // is not: a replayed turn marker is history, and revoking on one would
