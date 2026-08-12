@@ -212,8 +212,9 @@
             aria-expanded="false" aria-controls="acpLog">Debug log<span
             class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
   </div>
-  <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
-       aria-label="Conversation">
+  <div class="acp-transcript-wrap">
+    <div class="acp-transcript" id="acpTranscript" role="log" aria-live="polite"
+         aria-label="Conversation"></div>
     <div class="acp-prompt-nav" id="acpPromptNav" hidden>
       <button class="acp-btn acp-prompt-nav-btn" id="acpPromptUp" type="button"
               aria-label="Previous prompt">↑</button>
@@ -995,6 +996,7 @@
     // tests/acp_page.test.mjs that drive the frame and read the effects, each
     // one verified to fail when its clear is removed.
     sessionId = null;
+    stopCrewPanelTimer();
     setTurn(false);
     hideThinking();
     setContext(null);
@@ -2364,11 +2366,11 @@
     // Emptying by textContent rather than innerHTML: same effect, and it keeps
     // the no-innerHTML rule true of every line on this page without exception.
     transcriptEl.textContent = '';
-    // textContent = '' removed every child, including the acpPromptNav element.
-    // Re-attach it at the top of the (now empty) transcript so `addMessage`
-    // can show/hide it correctly as new messages arrive.
-    transcriptEl.appendChild(promptNavEl);
-    promptNavEl.hidden = true;
+    // promptNavEl is now outside the transcript (sibling in .acp-transcript-wrap),
+    // so textContent = '' above does not remove it. Just hide it and clear the
+    // userMsgEls tracking array.
+    userMsgEls = [];
+    promptNavEl.hidden = userMsgEls.length < 2;
     agentBody = null;
     toolRows = Object.create(null);
     toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
@@ -2383,10 +2385,8 @@
     setCrew([]);
     removeCrewPanel();
     closeSubagentView();
-    // Reset prompt navigation state: the nav arrows track DOM rows that just
-    // got detached by the textContent = '' above, so stale refs must be cleared.
-    // (promptNavEl was re-attached and hidden in the textContent = '' block above.)
-    userMsgEls = [];
+    // Reset prompt navigation state: the nav arrows track DOM rows that were
+    // just cleared by textContent = '' above, so stale refs are cleared here.
   }
 
   // ---- the crew panel ------------------------------------------------------
@@ -5345,7 +5345,7 @@
     var threshold = transcriptEl.scrollTop;
     var target = userMsgEls[0];
     for (var i = userMsgEls.length - 1; i >= 0; i--) {
-      if (userMsgEls[i].offsetTop < threshold - 10) {
+      if (userMsgEls[i].offsetTop < threshold - 10) { // -10px dead zone: prevents re-selecting the element already at the top of the visible area
         target = userMsgEls[i];
         break;
       }
@@ -5368,6 +5368,9 @@
       target.scrollIntoView({behavior: 'smooth', block: 'start'});
     } else {
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      // Brief visual feedback that we're at the bottom
+      promptDownBtn.disabled = true;
+      setTimeout(function() { promptDownBtn.disabled = false; }, 400);
     }
   });
   closeBtn.addEventListener('click', function () {

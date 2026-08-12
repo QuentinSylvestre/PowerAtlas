@@ -682,7 +682,11 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 
 /* Transcript is the primary pane; the transport log below it is a fixed strip,
    because once chunks stream the conversation is what the page is for. */
-.acp-transcript { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.65; display: flex; flex-direction: column; gap: 10px; position: relative; }
+/* Wrapper holds the scrollable transcript + the floating nav overlay. flex: 1
+   gives it the same growth slot .acp-transcript used to own; position: relative
+   makes it the containing block for the absolutely-placed nav. */
+.acp-transcript-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+.acp-transcript { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.65; display: flex; flex-direction: column; gap: 10px; }
 /* Floating prompt navigation arrows — positioned at bottom-left of the transcript.
    Hidden when fewer than 2 user messages are present (see addMessage in acp.html). */
 .acp-prompt-nav {
@@ -700,6 +704,11 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
   font-size: 0.875rem;
 }
 .acp-prompt-nav-btn:hover { opacity: 1; }
+.acp-prompt-nav-btn:focus-visible {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: 2px;
+}
+.acp-prompt-nav[hidden] { display: none; }
 /* `[hidden]` alone loses to the class rule above: both are one selector of
    specificity, `[hidden]` is the browser's UA stylesheet and an author rule
    beats it regardless of source order, and `display: flex` above is

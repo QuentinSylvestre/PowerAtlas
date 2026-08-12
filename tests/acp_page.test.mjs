@@ -750,7 +750,12 @@ function loadPage(templatePath, opts = {}) {
       write: () => HTML_SINK("document.write"),
     },
     setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
-    clearInterval: () => {},
+    clearInterval: function(id) {
+      if (id != null) {
+        var idx = intervals.findIndex(function(_, i) { return i + 1 === id; });
+        if (idx !== -1) intervals.splice(idx, 1);
+      }
+    },
     setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout: function(id) {
       // id is the 1-based index returned by the setTimeout mock above
@@ -7269,7 +7274,7 @@ check("crew timer starts when crew has a non-done entry", (tpl) => {
     "a setInterval should be registered when crew has a running entry");
 });
 
-check("crew timer does not start when all crew entries are done", (tpl) => {
+check("crew timer does not start for an all-done crew", (tpl) => {
   // setCrew([{done:true}]) must NOT start a new interval.
   const { page, live } = connected(tpl);
   const intervalsBefore = page.intervals.length;
@@ -7315,6 +7320,66 @@ check("prompt nav cleared on clearTranscript", (tpl) => {
                turnActive: false, contextPercent: null } });
   assertEqual(page.el("acpPromptNav").hidden, true,
     "prompt nav should be hidden after clearTranscript");
+  // Deliver 2 more user messages in the new session and verify re-attach worked
+  page.deliver({ type: "chunk", sessionId: "sess-new-nav",
+    payload: { role: "user", text: "re-attach msg 1" } });
+  page.deliver({ type: "chunk", sessionId: "sess-new-nav",
+    payload: { role: "user", text: "re-attach msg 2" } });
+  assertEqual(page.el("acpPromptNav").hidden, false,
+    "prompt nav should become visible again after 2 messages in the new session (re-attach worked)");
+});
+
+check("crew timer stops when all crew entries are done", (tpl) => {
+  // setCrew([{done:false}]) starts a timer; updating to all-done must clear it.
+  const { page, live } = connected(tpl);
+  const intervalsBaseline = page.intervals.length;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(page.intervals.length > intervalsBaseline,
+    "fixture: a setInterval should be registered for a running crew entry");
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done",
+      action: "", done: true, error: "", startedAt: Date.now() / 1000 - 5, stoppedAt: Date.now() / 1000 },
+  ]));
+  assertEqual(page.intervals.length, intervalsBaseline,
+    "crew timer should be cleared when all entries become done");
+});
+
+check("crew timer clears on session release", (tpl) => {
+  // setCrew([{done:false}]) starts a timer; a session_closed frame must clear it.
+  const { page, live } = connected(tpl);
+  const intervalsBaseline = page.intervals.length;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(page.intervals.length > intervalsBaseline,
+    "fixture: a setInterval should be registered for a running crew entry");
+  page.deliver({ type: "session_closed", sessionId: live });
+  assertEqual(page.intervals.length, intervalsBaseline,
+    "crew timer should be cleared when the session is released");
+});
+
+check("crew timer does not fire after session release", (tpl) => {
+  // Verify the interval is removed so tick() after release does not re-render crew.
+  const { page, live } = connected(tpl);
+  const intervalsBaseline = page.intervals.length;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(page.intervals.length > intervalsBaseline,
+    "fixture: interval should be registered before release");
+  page.deliver({ type: "session_closed", sessionId: live });
+  assertEqual(page.intervals.length, intervalsBaseline,
+    "crew interval should be removed after session release");
+  // tick() should not throw or re-render the crew panel
+  page.tick();
+  const crewPanel = page.one("acpTranscript", ".acp-crew-panel");
+  assert(crewPanel === null,
+    "crew panel should not be re-rendered after session release");
 });
 
 // -------------------------------------------------------------------- main --
