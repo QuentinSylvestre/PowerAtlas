@@ -264,13 +264,6 @@
       </div>
     </div>
   </div>
-  <!-- The agent bar: Main plus one pill per sub-agent in the session's current
-       crew, Claude-Code-style — the one currently viewed is highlighted, and
-       tapping any pill switches between it and Main. Hidden whenever the
-       session has no crew at all, which is every session that has never run a
-       fan-out. Built with createElement + textContent; empty in the markup. -->
-  <div class="acp-agentbar" id="acpAgentBar" hidden role="tablist"
-       aria-label="Agents"></div>
   <!-- Collapsed by default and remembered per browser: the transport log is a
        debugging aid, not something most sessions of this page ever need open.
        Its toggle lives in the toolbar above, next to the workspace pill —
@@ -403,7 +396,6 @@
   var subRoleEl = document.getElementById('acpSubRole');
   var subStatusEl = document.getElementById('acpSubStatus');
   var subTranscriptEl = document.getElementById('acpSubTranscript');
-  var agentBarEl = document.getElementById('acpAgentBar');
   var promptInput = document.getElementById('acpPrompt');
   var composerEl = document.getElementById('acpComposer');
   var trayEl = document.getElementById('acpTray');
@@ -496,14 +488,18 @@
   // Null between turns (reset at turn:start and after each flush).
   var toolGroup = null; // accumulates tool-call rows during a turn; flushed at turn:end
   var _toolGroupSeq = 0; // monotonic counter for unique group-body ids (aria-controls linkage)
-  // ---- sub-agents (the agent bar + the read-only sub-agent panel) ---------
+  // ---- sub-agents (the crew panel in-transcript + the read-only sub-agent panel) ---------
   //
   // The current session's crew, as last sent on a `subagents` frame — an
-  // array of `{sessionId, role, task, status, action, done, error}`, arrival-
-  // ordered by the server. `[]` for every session that has never run a
-  // fan-out, which is why `renderAgentBar` hides the bar on an empty array
-  // rather than the bar existing and being empty.
+  // array of `{sessionId, role, task, status, action, done, error, startedAt, stoppedAt}`,
+  // arrival-ordered by the server. `[]` for every session that has never run a
+  // fan-out.
   var crew = [];
+  // The crew panel appended to the transcript while a fan-out is running.
+  // Removed by the first main-session event after all entries are done.
+  var crewPanel = null;
+  // Interval id for the elapsed-time ticker, or null.
+  var crewPanelTimer = null;
   // The sub-agent currently shown in `subPanelEl`, or null while looking at
   // the main transcript. Distinct from `sessionId`: the *page* never stops
   // holding the parent session while a sub-agent is open — only what is drawn
@@ -985,9 +981,10 @@
     _steerPending = null;
     // The crew belonged to the session just released — `close_session`
     // (acp.py) has already torn down every one of its sub-agent records
-    // server-side, so a bar or panel still showing them would be offering
-    // pills that `subscribe` would now answer `unknown_session`.
+    // server-side, so a panel still showing them would be offering
+    // entries that `subscribe` would now answer `unknown_session`.
     setCrew([]);
+    removeCrewPanel();
     closeSubagentView();
     // Images were staged against the conversation this page has just let go
     // of. Carrying them to whatever is opened next would put a screenshot in
@@ -1035,9 +1032,10 @@
              - transcriptEl.clientHeight < 60;
   }
 
-  function elapsedText(startedAt) {
+  function elapsedText(startedAt, endAt) {
     if (typeof startedAt !== 'number' || !startedAt) return '';
-    var secs = Math.round(Date.now() / 1000 - startedAt);
+    var now = (typeof endAt === 'number' && endAt) ? endAt : Date.now() / 1000;
+    var secs = Math.round(now - startedAt);
     if (secs < 0) secs = 0;
     var m = Math.floor(secs / 60);
     var s = secs % 60;
@@ -2333,27 +2331,116 @@
     // and a sub-agent panel left open would be showing a conversation that no
     // longer has anything to do with what is on screen behind it.
     setCrew([]);
+    removeCrewPanel();
     closeSubagentView();
   }
 
-  // ---- the agent bar -------------------------------------------------------
+  // ---- the crew panel ------------------------------------------------------
   //
-  // Claude-Code-style: Main plus one pill per sub-agent the current session's
-  // crew carries, the one being viewed highlighted, tapping any pill switches
-  // between it and Main. Q&A, 2026-08-11 — a finished sub-agent stays listed
-  // and clickable rather than disappearing, so the bar (and, once every
-  // sub-agent is done, the transcript card it is built from) is how a
-  // finished fan-out is reviewed after the fact.
+  // A finished sub-agent stays listed and clickable in the crew panel so a
+  // finished fan-out is still reviewable after the fact — clicking its row
+  // opens the read-only sub-agent panel behind the main transcript.
+
+  function renderCrewPanel() {
+    if (!crewPanel || !crewPanel.parentNode) return;
+    // Full rebuild of inner rows
+    crewPanel.textContent = '';
+    for (var i = 0; i < crew.length; i++) {
+      (function(entry) {
+        var row = document.createElement('button');
+        row.type = 'button';
+        var state = subagentState(entry);
+        row.className = 'acp-crew-entry acp-crew-' + state;
+        row.setAttribute('aria-label', (entry.role || 'sub-agent') + ': ' + (entry.action || entry.status || ''));
+        var nameSpan = document.createElement('span');
+        nameSpan.className = 'acp-crew-name';
+        nameSpan.textContent = entry.role || entry.task || 'sub-agent';
+        var actionSpan = document.createElement('span');
+        actionSpan.className = 'acp-crew-action';
+        actionSpan.textContent = state === 'error' ? 'errored'
+          : state === 'done' ? 'done'
+          : (entry.action || entry.status || 'working\u2026');
+        // SC-7: elapsed is capped at stoppedAt for done entries so it does not
+        // keep incrementing after the sub-agent finished.
+        var elapsedSpan = document.createElement('span');
+        elapsedSpan.className = 'acp-crew-elapsed';
+        var start = entry.startedAt;
+        var stop = entry.stoppedAt;
+        elapsedSpan.textContent = (typeof stop === 'number' && stop)
+          ? elapsedText(start, stop)
+          : elapsedText(start);
+        row.appendChild(nameSpan);
+        row.appendChild(actionSpan);
+        row.appendChild(elapsedSpan);
+        row.addEventListener('click', function() { openSubagent(entry.sessionId); });
+        crewPanel.appendChild(row);
+      })(crew[i]);
+    }
+  }
+
+  function stopCrewPanelTimer() {
+    if (crewPanelTimer !== null) {
+      clearInterval(crewPanelTimer);
+      crewPanelTimer = null;
+    }
+  }
+
+  function removeCrewPanel() {
+    stopCrewPanelTimer();
+    if (crewPanel && crewPanel.parentNode) crewPanel.remove();
+    crewPanel = null;
+  }
+
+  function dismissCrewPanelIfDone() {
+    if (crewAllDone) removeCrewPanel();
+  }
 
   function setCrew(next) {
     crew = Array.isArray(next) ? next : [];
-    renderAgentBar();
+    // The panel currently open may name a sub-agent this update no longer
+    // carries the same entry for — refresh its header from the latest
+    // `role`/`task`/`status` rather than leaving it showing the snapshot from
+    // whenever it was opened.
     if (subViewSid) renderSubHead();
+    // Transcript crew panel — appears below the fan-out's tool call while
+    // any stage is still running, disappears on the first main-session event
+    // after all are done.
     if (!crew.length) {
+      removeCrewPanel();
       crewAllDone = false;
       return;
     }
     crewAllDone = crew.every(function(e) { return e.done; });
+    if (crewAllDone) {
+      // All done: stop the ticker but keep the panel visible until the next
+      // main-session event removes it.
+      stopCrewPanelTimer();
+      if (!crewPanel || !crewPanel.parentNode) {
+        var stick = stuckToBottom();
+        crewPanel = document.createElement('div');
+        crewPanel.className = 'acp-crew-panel';
+        transcriptEl.appendChild(crewPanel);
+        if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      }
+      renderCrewPanel();
+      return;
+    }
+    // At least one still running: ensure the panel exists in the transcript.
+    if (!crewPanel || !crewPanel.parentNode) {
+      var stick = stuckToBottom();
+      crewPanel = document.createElement('div');
+      crewPanel.className = 'acp-crew-panel';
+      transcriptEl.appendChild(crewPanel);
+      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      // Tick the elapsed display once a second while running.
+      if (crewPanelTimer === null) {
+        crewPanelTimer = setInterval(function() {
+          if (crewPanel && crewPanel.parentNode) renderCrewPanel();
+          else stopCrewPanelTimer();
+        }, 1000);
+      }
+    }
+    renderCrewPanel();
   }
 
   function crewEntry(sid) {
@@ -2363,72 +2450,13 @@
     return null;
   }
 
-  // One of 'working' / 'done' / 'error', the state the agent bar's dot and
-  // the panel header's status text both key off — a single source so the two
-  // surfaces cannot read differently for the same crew entry. `null`/missing
-  // reads as 'working': a slot the bar already has a pill for but the crew
-  // has no entry for yet (the panel opened a beat before the first
-  // `subagents` frame naming it) is a sub-agent that has not finished, not
-  // one that has.
+  // One of 'working' / 'done' / 'error', shared by the crew panel and the
+  // sub-agent panel header. `null`/missing reads as 'working': a slot the
+  // panel already has a row for but the crew has no entry for yet is a
+  // sub-agent that has not finished, not one that has.
   function subagentState(entry) {
     if (!entry || !entry.done) return 'working';
     return entry.error ? 'error' : 'done';
-  }
-
-  function renderAgentBar() {
-    agentBarEl.textContent = '';
-    if (!crew.length) {
-      agentBarEl.hidden = true;
-      return;
-    }
-    agentBarEl.hidden = false;
-    agentBarEl.appendChild(agentPill('Main', !subViewSid, function () {
-      closeSubagentView();
-    }));
-    for (var i = 0; i < crew.length; i++) {
-      (function (entry) {
-        var label = entry.role || entry.task || 'sub-agent';
-        var state = subagentState(entry);
-        var sublabel = state === 'error' ? 'errored'
-          : state === 'done' ? 'done' : (entry.action || 'working…');
-        agentBarEl.appendChild(agentPill(label, entry.sessionId === subViewSid,
-          function () { openSubagent(entry.sessionId); }, sublabel, state));
-      })(crew[i]);
-    }
-  }
-
-  function agentPill(label, active, onClick, sublabel, state) {
-    var pill = document.createElement('button');
-    pill.type = 'button';
-    pill.className = 'acp-agentbar-pill' + (active ? ' acp-agentbar-pill-active' : '');
-    pill.setAttribute('role', 'tab');
-    pill.setAttribute('aria-selected', active ? 'true' : 'false');
-    var head = document.createElement('span');
-    head.className = 'acp-agentbar-head';
-    if (state) {
-      // The dashboard's own live-status dot language
-      // (`.session-status`/`.ws-status`) — working pulses green, errored is a
-      // steady red. `done` is new here rather than borrowed: neither of those
-      // has a "finished" state to reuse, because for a session that concept
-      // does not exist the way it does for a sub-agent stage.
-      var dot = document.createElement('span');
-      dot.className = 'acp-agentbar-dot status-' + state;
-      dot.setAttribute('aria-hidden', 'true');
-      head.appendChild(dot);
-    }
-    var name = document.createElement('span');
-    name.className = 'acp-agentbar-name';
-    name.textContent = label;
-    head.appendChild(name);
-    pill.appendChild(head);
-    if (sublabel) {
-      var sub = document.createElement('span');
-      sub.className = 'acp-agentbar-sub' + (state ? ' acp-agentbar-sub-' + state : '');
-      sub.textContent = sublabel;
-      pill.appendChild(sub);
-    }
-    pill.addEventListener('click', onClick);
-    return pill;
   }
 
   // ---- the sub-agent panel -------------------------------------------------
@@ -2457,7 +2485,6 @@
     subAgentBody = null;
     subToolRows = Object.create(null);
     renderSubHead();
-    renderAgentBar();
     connectSubWs(sid);
   }
 
@@ -2467,12 +2494,12 @@
     subPanelEl.hidden = true;
     transcriptEl.hidden = false;
     composerEl.hidden = false;
-    if (wasOpen) renderAgentBar();
     // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
     // budgets for a handful of sockets per viewer for exactly this shape — "a
     // second one while comparing two conversations" is that module's own
-    // phrase for it — and reopening it on every pill tap would pay a fresh
+    // phrase for it — and reopening it on every click would pay a fresh
     // handshake for what is often a few seconds of switching back and forth.
+    void wasOpen;
   }
 
   subBackBtn.addEventListener('click', closeSubagentView);
@@ -4618,6 +4645,7 @@
       return;
     }
     if (type === 'meta' && payload.turn === 'end') {
+      dismissCrewPanelIfDone();
       agentBody = null;
       // Group consecutive tool calls accumulated during this turn into
       // collapsible containers. flushToolGroups() sets toolGroup = null.
@@ -4670,6 +4698,7 @@
       return;
     }
     if (type === 'chunk') {
+      dismissCrewPanelIfDone();
       hideThinking();
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
       return;
@@ -4691,6 +4720,7 @@
       return;
     }
     if (type === 'tool_call' || type === 'tool_update') {
+      dismissCrewPanelIfDone();
       hideThinking();
       addToolCall(payload);
       logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
