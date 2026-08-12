@@ -5242,6 +5242,12 @@
     if (type === 'compaction') {
       // Context compaction progress (SC-2). Render a non-bubble system row
       // in the transcript so the user knows a compaction occurred.
+      // Security note: `payload.error` and `payload.summary` are
+      // agent-controlled strings forwarded from the kiro-cli process. They
+      // are intentionally ignored here — only `payload.status` is read, and
+      // it is mapped to hardcoded UI strings via this switch. Any future use
+      // of `payload.error` or `payload.summary` MUST go through
+      // addSystemMessage (textContent only) rather than innerHTML.
       var s = (payload && payload.status) || '';
       var txt = s === 'started' ? 'Compacting conversation context\u2026'
               : s === 'completed' ? 'Context compacted.'
