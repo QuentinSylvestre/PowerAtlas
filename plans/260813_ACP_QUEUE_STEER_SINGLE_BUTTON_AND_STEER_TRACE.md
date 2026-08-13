@@ -462,6 +462,12 @@ if (type === 'steer_sent') {
 - [x] `node tests/acp_page.test.mjs` passes; actual count: **329/330** (326 baseline + 3 new; 1 pre-existing dashboard-link failure)
 - [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q` passes (pre-existing dashboard-link failure only; `test_steer_frame_is_routed` updated for new steer_sent broadcast behavior)
 
+#### Implementation (2026-08-13, code: 96384c9 + 5ff0fd2)
+
+Phase 2 adds `"steer_sent"` to `SERVER_TYPES` and emits it to the ring buffer from `_handle_steer` on success (gated on `if bool(queued):`, inside the `try:` block), making steer text survive WebSocket reconnects. The client `handle()` function gains a `steer_sent` handler that renders a dimmed user-band message (`.acp-msg-steer` CSS in `acp.html` inline `<style>`: `rgba(108,140,255,0.06)` background, `rgba(108,140,255,0.4)` left border, `var(--text-dim)` body) with no `!replaying` guard so it works during ring-buffer replay (SC-5), plus `_steerPending` cleanup and WS-drop-before-ack textarea clearing. Three new JS tests cover band rendering, replay path, and empty-text no-op. `test_steer_frame_is_routed` in `test_web.py` updated for two-frame behavior. Cycle-1 auto-fix added `queued=False` test, WS-drop-before-ack textarea clear, CSS class assertion, `bool()` normalization, conn2 count assertion, and plan corrections.
+
+Step 5b QA: BLOCKED — requires PowerAtlas running for browser verification. Deferred to Step 9b exhaustive QA.
+
 ---
 
 ## 6) Risk Assessment
@@ -538,6 +544,22 @@ node tests/acp_page.test.mjs
 | 10 | Medium | Exit criteria didn't verify all `_steerPending` recovery paths restore `sendModeBtn.disabled`, `promptInput.disabled`, and `modeSelect.disabled`. | Fixed — explicit exit criterion bullet added covering all 5 recovery paths. |
 | 11 | Low | `sendModeBtn` had no `aria-label` beyond button text; mode change needed to update `aria-label` too. | Fixed — `aria-label` set at init and updated by change handler. |
 | 12 | Low | Line numbers in Section 1 were ~50 lines off from actual file. | Fixed — Section 1 now says "approximate" and instructs implementer to grep for exact locations. |
+
+### 2026-08-13 — Implementation Review (after Phase 2, personas: Senior engineer, Reliability engineer, Security auditor, Maintainability reviewer)
+
+Implementation health: Green (after cycle-1 auto-fix).
+2 cycles. Cycle 1: 8 findings (4 Medium, 4 Low) — all auto-fixed. Cycle 2: 0 findings.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Missing test: `steer_sent` not emitted on `queued=False` path — the `if queued:` guard was untested. | Fixed — `test_steer_sent_not_emitted_on_queued_false` added to `test_web.py`. |
+| 2 | Medium | WS-drop-before-ack dual state: band confirmed send + textarea still populated by `ws.onclose`. | Fixed — `else if (promptInput.value === steerText)` branch added to clear textarea when band renders. |
+| 3 | Medium | CSS class presence not asserted in band test — removing `.acp-msg-steer` CSS class would not fail the test. | Fixed — `className.split().includes('acp-msg-steer')` assertion added. |
+| 4 | Medium | Section 9 divergences log missing Phase 2 CSS-placement entry (plan said `style.css`, code used `acp.html`). | Fixed — entry added. |
+| 5 | Low | Phase 2 CSS-changes section heading said `(style.css)` — inconsistent with actual placement in `acp.html`. | Fixed — heading updated to `(acp.html inline <style>)`. |
+| 6 | Low | `queued=None` from supervisor silently skips `_emit` without documentation. | Fixed — `queued = bool(result.get("queued", True))` with comment. |
+| 7 | Low | `test_steer_frame_is_routed` missing `len(outbound2) == 1` assertion. | Fixed — assertion added. |
+| 8 | Low | Replay test had no comment explaining the `replaying=True` active-during-dispatch intent. | Fixed — clarifying comment added. |
 
 ### 2026-08-13 — Implementation Review (after Phase 1, personas: Senior engineer, End-user advocate, Maintainability reviewer, Reliability engineer)
 
