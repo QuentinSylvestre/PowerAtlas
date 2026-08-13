@@ -6944,6 +6944,53 @@ check("P3: anonymous tool calls (no toolCallId) form a group", async (tpl) => {
     "two anonymous tool calls should produce exactly one .acp-tool-group");
 });
 
+check("P3: flushToolGroups fires at user-chunk boundary (no intervening turn:end)", async (tpl) => {
+  // During session replay kiro-cli may never emit meta turn:end frames.
+  // Two adjacent tool_calls followed by a user-role chunk (without turn:end)
+  // should flush the tool group when the user chunk arrives.
+  const { page, live } = connected(tpl);
+  // Simulate an agent turn with two tool calls during replay
+  page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ub1", title: "shell", kind: "execute",
+               status: "completed", command: "ls" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ub2", title: "shell", kind: "execute",
+               status: "completed", command: "pwd" } });
+  // No turn:end — directly deliver a user chunk (as happens during replay)
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "hello" } });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  // The tool group should have been flushed when the user chunk arrived
+  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 1,
+    "tool group should be flushed at user-chunk boundary even without turn:end");
+});
+
+check("P3: flushToolGroups fires at post-replay tail (tool_calls at end of history with no turn:end)", async (tpl) => {
+  // A session/load history frame may end with tool_calls and no following
+  // turn:end. The post-replay tail flush should produce a group.
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "meta", sessionId: live, payload: { turn: "start" } },
+      { type: "tool_call", sessionId: live,
+        payload: { toolCallId: "tail1", title: "shell", kind: "execute",
+                   status: "completed", command: "git status" } },
+      { type: "tool_call", sessionId: live,
+        payload: { toolCallId: "tail2", title: "shell", kind: "execute",
+                   status: "completed", command: "git log" } },
+      // No meta turn:end — history ends with the two tool_calls
+    ] },
+  });
+  await page.settle();
+  const transcript = page.el("acpTranscript");
+  // The post-replay tail flush should have produced exactly one tool group
+  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 1,
+    "post-replay tail flush should produce a tool group when history ends with tool_calls");
+});
+
 // ---- Phase 2: Queue/Steer controls and image inline -----------------------
 
 check("image inline: [Image N] marker inserted at cursor position", async (tpl) => {
@@ -7128,6 +7175,7 @@ check("error frame during steer restores textarea text", (tpl) => {
     "error frame should restore steer text to textarea");
   assert(page.el("acpPrompt").disabled === false,
     "textarea should be re-enabled after error frame");
+  assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled after error frame");
 });
 
 check("queuedPrompt and _steerPending cleared on releaseSession", (tpl) => {

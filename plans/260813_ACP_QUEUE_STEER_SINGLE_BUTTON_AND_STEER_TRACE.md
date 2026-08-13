@@ -314,17 +314,17 @@ if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !isTouchD
 - `"Enter during turn in queue mode stores queued prompt"` — set up turn active, text in textarea, `_sendMode = 'queue'`; fire Enter keydown; assert `queuedPrompt` is set, no `steer` frame.
 
 **Exit criteria**:
-- [ ] `#acpQueueSteer` wrapper contains `#acpSendMode` button and `#acpModeSelect` select; `#acpQueue` and `#acpSteer` elements do not exist in DOM
-- [ ] `grep 'steerBtn\.' acp.html` returns zero hits; `grep 'queueBtn\.' acp.html` returns zero hits (both fully replaced)
-- [ ] `pa_acp_send_mode` defaults to `"steer"` on fresh load; invalid stored values fall back to `"steer"`; persists across reload after change
-- [ ] Button label and `aria-label` track selected mode
-- [ ] `modeSelect.disabled` is set alongside `sendModeBtn.disabled` at all 6 re-enable sites plus the click handler's steer path
-- [ ] All 5 `_steerPending` recovery paths restore both `sendModeBtn.disabled = false` AND `promptInput.disabled = false` AND `modeSelect.disabled = false`
-- [ ] `addMessage('note', 'Steer sent.')` removed from `steer_ack` success path
-- [ ] `"Steer was not accepted by the agent."` error message remains in `steer_ack` rejection path (unchanged)
-- [ ] Enter during turn with steer mode → steer frame sent; Enter during turn with queue mode → queued prompt stored; Enter outside turn → `sendPrompt()` called
-- [ ] `README.md` updated: "two stacked half-height buttons" reworded to describe single button + mode selector
-- [ ] `node tests/acp_page.test.mjs` passes; expected count: **324/324** (319 baseline + 5 new; pre-existing dashboard-link failure is a known pre-existing failure, not a regression)
+- [x] `#acpQueueSteer` wrapper contains `#acpSendMode` button and `#acpModeSelect` select; `#acpQueue` and `#acpSteer` elements do not exist in DOM
+- [x] `grep 'steerBtn\.' acp.html` returns zero hits; `grep 'queueBtn\.' acp.html` returns zero hits (both fully replaced)
+- [x] `pa_acp_send_mode` defaults to `"steer"` on fresh load; invalid stored values fall back to `"steer"`; persists across reload after change
+- [x] Button label and `aria-label` track selected mode
+- [x] `modeSelect.disabled` is set alongside `sendModeBtn.disabled` at all 6 re-enable sites plus the click handler's steer path
+- [x] All 5 `_steerPending` recovery paths restore both `sendModeBtn.disabled = false` AND `promptInput.disabled = false` AND `modeSelect.disabled = false`
+- [x] `addMessage('note', 'Steer sent.')` removed from `steer_ack` success path
+- [x] `"Steer was not accepted by the agent."` error message remains in `steer_ack` rejection path (unchanged)
+- [x] Enter during turn with steer mode → steer frame sent; Enter during turn with queue mode → queued prompt stored; Enter outside turn → `sendPrompt()` called
+- [x] `README.md` updated: "two stacked half-height buttons" reworded to describe single button + mode selector
+- [x] `node tests/acp_page.test.mjs` passes; expected count: **324/324** (319 baseline + 5 new; pre-existing dashboard-link failure is a known pre-existing failure, not a regression)
 
 ---
 
@@ -507,7 +507,9 @@ node tests/acp_page.test.mjs
 | `README.md` | Sentence "a brief confirmation appears when the injection is accepted" → describe the dimmed transcript band | 2 |
 
 ## 9) Implementation Divergences from Plan
-<Reserved — filled during implementation>
+
+- **flushToolGroups at user-chunk boundary**: Added `if (role === 'user' && toolGroup) flushToolGroups()` in `appendChunk()` to fix tool-group display during live streaming when a user message arrives without a preceding `turn:end`. Rationale: discovered as a correctness gap while implementing the Enter-during-turn path; closely related to the transcript changes being made. Tests added in cycle-1 auto-fix.
+- **flushToolGroups at post-replay tail**: Added `if (toolGroup) flushToolGroups()` after history replay to flush any open tool group at replay end. Rationale: same discovery, prevents orphaned tool-group state after a session load. Tests added in cycle-1 auto-fix.
 
 ## Review Log
 

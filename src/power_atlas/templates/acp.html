@@ -254,19 +254,22 @@
            whole idle time is indistinguishable from one that has stopped
            working, and a turn under -a can run tools for minutes. -->
       <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
-      <!-- Queue and Steer: visible during a turn only when the textarea has
-           text. They replace Stop in that state — two half-height buttons
-           that together match Stop's height so the composer row stays stable.
-           Queue holds the text until the turn ends then sends it normally.
-           Steer injects the text mid-turn via _session/steer. -->
+      <!-- Queue and Steer: single action button + native mode selector visible
+           during a turn only when the textarea has text. They replace Stop in
+           that state — the single button matches Stop's height so the composer
+           row stays stable. Queue holds the text until the turn ends then
+           sends it normally. Steer injects the text mid-turn via _session/steer.
+           The mode selector persists the chosen mode across reloads. -->
       <div class="acp-queue-steer" id="acpQueueSteer" hidden>
         <button class="acp-btn acp-send-mode" id="acpSendMode" type="button"
                 aria-label="Inject this text into the current agent turn">Steer</button>
-        <select class="acp-mode-select" id="acpModeSelect" aria-label="Send mode">
+        <select class="acp-mode-select" id="acpModeSelect" aria-label="Send mode" aria-controls="acpSendMode">
           <option value="steer">Steer</option>
           <option value="queue">Queue</option>
         </select>
       </div>
+      <span id="acpModeLiveRegion" aria-live="polite" aria-atomic="true"
+            style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></span>
     </div>
   </div>
   <!-- Collapsed by default and remembered per browser: the transport log is a
@@ -5503,10 +5506,10 @@
       // _steerPending is never coming from an agent that has exited.
       if (_steerPending) {
         promptInput.value = _steerPending;
-        _steerPending = null;
         promptInput.disabled = false;
         sendModeBtn.disabled = false;
         modeSelect.disabled = false;
+        _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();
       }
@@ -5822,6 +5825,8 @@
       _sendMode === 'queue'
         ? 'Queue this prompt \u2014 it will send when the agent finishes'
         : 'Inject this text into the current agent turn');
+    var liveRegion = document.getElementById('acpModeLiveRegion');
+    if (liveRegion) liveRegion.textContent = 'Send mode: ' + (_sendMode === 'queue' ? 'Queue' : 'Steer');
   });
   sendModeBtn.addEventListener('click', function () {
     var text = promptInput.value.trim();
@@ -5866,7 +5871,17 @@
       promptInput.value = '';
       autoGrowPrompt();
       refreshComposerControls();
-      send('steer', {message: text}, sessionId);
+      // If send() returns false (WS not open), restore controls immediately
+      // rather than waiting for ws.onclose to fire.
+      if (!send('steer', {message: text}, sessionId)) {
+        promptInput.disabled = false;
+        sendModeBtn.disabled = false;
+        modeSelect.disabled = false;
+        _steerPending = null;
+        autoGrowPrompt();
+        refreshComposerControls();
+        return;
+      }
       // Do NOT show "Steer sent." here — wait for steer_ack from the server.
     }
   });
