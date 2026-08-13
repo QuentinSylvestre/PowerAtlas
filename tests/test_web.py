@@ -15784,15 +15784,22 @@ class TestAcpSteer:
 
         assert captured == [(sid, "focus on the login bug")]
         outbound = _queued(conn)
-        assert len(outbound) == 1
+        # steer_ack (unicast conn.send) + steer_sent (broadcast via _emit)
+        assert len(outbound) == 2
         assert outbound[0]["type"] == "steer_ack"
         assert outbound[0]["sessionId"] == sid
         assert outbound[0]["payload"]["queued"] is True
+        assert outbound[1]["type"] == "steer_sent"
+        assert outbound[1]["sessionId"] == sid
+        assert outbound[1]["payload"]["text"] == "focus on the login bug"
 
-        # The second subscriber must not have received a steer_ack frame.
+        # The second subscriber must not have received steer_ack (unicast),
+        # but WILL receive steer_sent (broadcast via _emit — SC-5 replay).
         outbound2 = _queued(conn2)
         assert not any(f["type"] == "steer_ack" for f in outbound2), \
             f"steer_ack was broadcast to a non-requesting socket: {outbound2}"
+        assert any(f["type"] == "steer_sent" for f in outbound2), \
+            f"steer_sent was not broadcast to the second subscriber: {outbound2}"
 
     def test_steer_refused_for_subagent_session(self, acp_session):
         """``steer`` on a sub-agent's own session id must return a

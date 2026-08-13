@@ -7161,6 +7161,43 @@ check("steer_ack queued:false shows error note", (tpl) => {
   assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled");
 });
 
+check("steer_sent frame adds dimmed steer band", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "steer_sent", sessionId: live, payload: { text: "do X" } });
+  const steerBands = page.el("acpTranscript").querySelectorAll(".acp-msg-steer");
+  assertEqual(steerBands.length, 1, "transcript should contain exactly one .acp-msg-steer element");
+  const body = steerBands[0].querySelector(".acp-msg-body");
+  assert(body !== null, ".acp-msg-steer should contain .acp-msg-body");
+  assertEqual(body.textContent, "do X", ".acp-msg-steer body should contain steer text");
+});
+
+check("steer_sent frame renders during replay", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "steer_sent", sessionId: live, payload: { text: "replayed steer" } },
+    ] },
+  });
+  const steerBands = page.el("acpTranscript").querySelectorAll(".acp-msg-steer");
+  assertEqual(steerBands.length, 1,
+    "steer_sent during history replay should add a steer band (no !replaying guard)");
+  const body = steerBands[0].querySelector(".acp-msg-body");
+  assert(body !== null, ".acp-msg-steer replayed should contain .acp-msg-body");
+  assertEqual(body.textContent, "replayed steer", "replayed steer band should contain steer text");
+});
+
+check("steer_sent frame with empty text is no-op", (tpl) => {
+  const { page, live } = connected(tpl);
+  const before = page.el("acpTranscript").childNodes.length;
+  page.deliver({ type: "steer_sent", sessionId: live, payload: { text: "" } });
+  const after = page.el("acpTranscript").childNodes.length;
+  assertEqual(after, before,
+    "steer_sent with empty text should not append any element to transcript");
+  const steerBands = page.el("acpTranscript").querySelectorAll(".acp-msg-steer");
+  assertEqual(steerBands.length, 0, "transcript should have no .acp-msg-steer for empty text");
+});
+
 check("error frame during steer restores textarea text", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("important steer");

@@ -229,7 +229,8 @@ text, the Stop button is replaced by a single full-height action button and a mo
 selection persists across page reloads. **Queue** stores the text and
 clears the box — showing a cancellable inline note — then sends it as a normal prompt the moment the
 turn ends. **Steer** injects the text mid-turn via `_session/steer`, which kiro-cli processes without
-interrupting the turn in progress. Pressing Enter during a turn triggers whichever mode is selected,
+interrupting the turn in progress; the injected text appears as a dimmed band in the transcript and
+persists across WebSocket reconnects within the same PowerAtlas session. Pressing Enter during a turn triggers whichever mode is selected,
 consistent with Enter sending a prompt outside a turn. Both discard safely if something unexpected
 happens: Queue restores the text if the connection drops or the session changes, and Steer restores
 it if the server returns an error. Two floating arrow buttons (↑ / ↓) appear at the bottom-left of the transcript when there are at least two of your messages; they jump to the previous or next user message.

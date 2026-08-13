@@ -163,7 +163,7 @@ CLIENT_TYPES = frozenset({
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history", "thought",
-    "subagents", "steer_ack",
+    "subagents", "steer_ack", "steer_sent",
     "commands", "compaction", "commands_options_result", "commands_execute_result",
 })
 
@@ -4304,8 +4304,14 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
         return
     try:
         result = await _supervisor.steer(session_id, text)
-        conn.send(envelope("steer_ack", {"queued": result.get("queued", True)},
-                           session_id))
+        queued = result.get("queued", True)
+        conn.send(envelope("steer_ack", {"queued": queued}, session_id))
+        if queued:
+            # Emit to ring buffer so steer text is visible in transcript
+            # and survives WS reconnects (SC-4, SC-5). Not emitted on
+            # queued=False (rejected steer) to avoid showing a band for
+            # an injection that didn't land.
+            _emit(session_id, envelope("steer_sent", {"text": text}, session_id))
     except AcpError as exc:
         conn.send(error_frame(exc.code, str(exc), session_id))
     except Exception:

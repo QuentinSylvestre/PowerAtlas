@@ -517,6 +517,15 @@
   outline: 2px solid var(--accent, #6c8cff);
   outline-offset: -2px;
 }
+/* Steered messages: same band as user prompts, dimmed to distinguish injected text */
+.acp-msg-steer {
+  background: rgba(108, 140, 255, 0.06);
+  border-left: 2px solid rgba(108, 140, 255, 0.4);
+  margin: 0 -14px;
+  padding: 6px 14px 6px 12px;
+}
+.acp-msg-steer .acp-msg-role { color: var(--text-dim); }
+.acp-msg-steer .acp-msg-body { color: var(--text-dim); }
 </style>
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 
@@ -5419,6 +5428,29 @@
       modeSelect.disabled = false;
       _steerPending = null;
       refreshComposerControls();
+      return;
+    }
+    if (type === 'steer_sent') {
+      // Steer text emitted to ring buffer by _handle_steer on success.
+      // Rendered as a dimmed user-band message (SC-4).
+      // No !replaying guard — this frame IS the reconnect replay mechanism
+      // for SC-5; suppressing it during replay would defeat the feature.
+      var steerText = payload && typeof payload.text === 'string' ? payload.text : '';
+      if (steerText) {
+        // If _steerPending is still set (WS drop before steer_ack), the steer
+        // text was restored to textarea by ws.onclose. Clear it here since
+        // the band confirms the steer was accepted by the server.
+        if (_steerPending) {
+          promptInput.value = '';
+          promptInput.disabled = false;
+          sendModeBtn.disabled = false;
+          modeSelect.disabled = false;
+          _steerPending = null;
+          autoGrowPrompt();
+          refreshComposerControls();
+        }
+        addMessage('steer', steerText);
+      }
       return;
     }
     if (type === 'subagents') {
