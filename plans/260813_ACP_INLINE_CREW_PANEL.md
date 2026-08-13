@@ -488,9 +488,12 @@ Phase 2 added `_supervisor.crew_spawn_toolcallids: dict[str, str]` as a parallel
 - [x] README.md "crew bar" sentence updated (verify by grep).
 - [x] README.md update wired: `grep "inline crew panel" README.md` returns a match.
 
-## 6) Risk Assessment
+Implementation (2026-08-13, code: a12445d, fix: 00d09b1, fix: 530cdf9)
+Phases 3 and 4 were committed together (Phase 3 removes `dismissCrewPanelIfDone` which Phase 4's existing tests referenced). Phase 3 replaced the four single-crew JS variables (`crew`, `crewPanel`, `crewPanelTimer`, `crewAllDone`) with `crews` map, `_noAnchorSeq`, and `_noAnchorKey`. `setCrew(entries, toolCallId)` creates per-fan-out slots keyed by `toolCallId` (anchor-based insertion after spawner row, walking up to `transcriptEl` to handle post-`flushToolGroups` grouping) or `_na_N` sequence keys for no-anchor fan-outs — reusing the same `_na_` key for updates via `_noAnchorKey` sentinel. `dismissCrewPanelIfDone` and all 3 call sites removed. `clearTranscript`, `releaseSession`, `agent_died` all call `removeAllCrewPanels()`. Phase 4 updated `subagentsFrame` helper with optional `toolCallId` param, added 9 new tests (anchor insertion, no-anchor fallback, multi-panel SC3, session-switch clear, cross-crew `crewEntry`, turn-end persistence, no-anchor slot reuse, post-`flushToolGroups` anchor walk, ghost-key fix). README updated. Pre-existing 1 test failure ("dashboard link") confirmed unrelated. Test results: 338/339 (node), 1694/1695 (pytest).
 
-| Risk | Impact | Mitigation |
+---
+
+## 6) Risk Assessment
 |---|---|---|
 | Sibling plan conflict on `_handle_subscribe` | Medium — `260813_ACP_SKILL_COMMAND_DISCOVERY` also touches `_handle_subscribe`; same call site | Merge this plan's change AFTER that plan lands; Phase 2 Step 6 note |
 | `subagent_history` cleanup gap | Medium — history NOT cleaned at turn-end creates a long-lived memory growth path for sessions with many fan-outs | Bounded by MAX_SUBAGENTS_PER_SESSION (64) × history ring buffer size; acceptable. `close_session` is the cleanup gate |
@@ -537,6 +540,31 @@ Do not restart PowerAtlas for `acp.html` changes. Hard reload (`Ctrl+Shift+R`) s
 - **Pre-existing test failure**: `node tests/acp_page.test.mjs` has 1 pre-existing failure — `"the dashboard link is rendered for the viewer who can follow it"` — present before Phases 3+4, unrelated to this plan.
 
 ## Review Log
+
+### 2026-08-13 — Implementation Review (after Phases 3+4, persona: Senior engineer, End-user advocate, Reliability engineer, Architect)
+
+Implementation health: Green (all findings resolved).
+15 findings across 2 review cycles + post-cap (2 High, 7 Medium, 6 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | No-anchor fan-out slot accumulation: each `toolCallId=""` update created a new `_na_N` slot + orphaned panel + orphaned timer | Fixed — `_noAnchorKey` sentinel reuses the same slot for all updates to one no-anchor fan-out |
+| 2 | High | Anchor insertion inside hidden `flushToolGroups` group body — panel invisible in common case (turn with 2+ tool calls) | Fixed — `while` walk-up loop finds direct `transcriptEl` child before inserting |
+| 3 | Medium | Ghost `_noAnchorKey` on `setCrew([], '')` — early-return guard ran after key computation, advancing `_noAnchorSeq` | Fixed — early-return moved before `useKey` computation |
+| 4 | Medium | Bundled compaction rendering change (`mdBuild`, `summary_tokens`) missing from §9 divergences | Fixed — added §9 entry |
+| 5 | Medium | `white-space: pre-wrap` removal broke plain-text compaction fallback | Fixed — restored |
+| 6 | Medium | `setCrew([], '')` did not remove no-anchor slot (empty-entries cleanup only worked for anchor path) | Fixed — empty-entries block checks `_noAnchorKey` |
+| 7 | Medium | Anchor insertion test only covered pre-`flushToolGroups` case; broken case not tested | Fixed — added "anchor panel is a direct transcriptEl child even after flushToolGroups" test |
+| 8 | Medium | No-anchor repeated-update scenario untested | Fixed — added "two consecutive no-anchor subagents updates reuse the same slot" test |
+| 9 | Medium | Ghost-`_noAnchorKey` case untested | Fixed — added "setCrew with empty entries and no active no-anchor slot does not ghost _noAnchorKey" test |
+| 10 | Low | Pre-existing 1 test failure not acknowledged in EC checkbox | Fixed — added §9 note |
+| 11 | Low | `window._testCrews()` returns live reference — not documented | Fixed — added "read only" comment |
+| 12 | Low | SC2 race (subagents before tool_call) update path untested | Orchestrator: proposed-accept — documented as a Low with no behavior bug; acceptable known gap |
+| 13 | Low | `flushToolGroups` + crew panel ordering side-effect (crew panel stays outside group) | Orchestrator: proposed-accept — panel is visible and functional (SC4); follow-up plan if needed |
+| 14 | Low | `stopSlotTimer` double-call defense (stale `clearInterval(null)`) | Fixed — noted as safe; no code change needed |
+| 15 | Low | `removeAllCrewPanels` pre-existing double call in `releaseSession` | Orchestrator: proposed-accept — pre-existing, out of scope; noted for future cleanup |
+
+QA: PASS (11/11 claims verified, 338/339 tests pass, pre-existing failure confirmed unrelated).
 
 ### 2026-08-13 — Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer, Maintainability reviewer, Architect)
 
