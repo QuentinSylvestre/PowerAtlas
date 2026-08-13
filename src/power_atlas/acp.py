@@ -2772,27 +2772,6 @@ class _Supervisor:
             self._on_subagent_list(params)
             return
         if kind in ("agent_message_chunk", "user_message_chunk"):
-            # Compaction started detection: the TUI never forwards the
-            # summarization_started event over ACP. The only observable signal
-            # is an agent_message_chunk arriving for a session that has no
-            # inflight turn — that burst is the compaction summary being
-            # written. Tag it on the first chunk; subsequent chunks are no-ops
-            # because the session is already in _compacting.
-            # Guard on _registry.loading: session/load replays the full
-            # conversation history as agent_message_chunks outside of inflight,
-            # and must not be misidentified as compaction.
-            if (kind == "agent_message_chunk"
-                    and isinstance(session_id, str)
-                    and session_id not in self.inflight
-                    and session_id not in self._compacting
-                    and session_id not in _registry.loading
-                    and session_id in self.sessions):
-                self._compacting.add(session_id)
-                _registry.broadcast(
-                    session_id,
-                    envelope("compaction", {"status": "started",
-                                            "error": "", "summary": ""},
-                             session_id))
             # `user_message_chunk` is what makes a loaded conversation a
             # conversation: `session/load` replays both halves of it, and
             # without this arm the transcript would come back as the agent
@@ -4433,6 +4412,16 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     _supervisor.crew_spawn_toolcallids.pop(session_id, None)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
+    # Compaction started detection: when the user sends /compact, fire the
+    # started frame immediately. The TUI never forwards summarization_started
+    # over ACP, so we detect it from the prompt text. The completed signal
+    # arrives later via METADATA_METHOD when the context percent drops.
+    if text.strip() == "/compact" and session_id not in _supervisor._compacting:
+        _supervisor._compacting.add(session_id)
+        _registry.broadcast(
+            session_id,
+            envelope("compaction", {"status": "started", "error": "", "summary": ""},
+                     session_id))
     # What stands for this prompt everywhere it is not the raw bytes: the
     # transcript frame below, and the agent's own text block. One string for
     # both, so the numbering a person reads and the numbering the model reads
@@ -4705,6 +4694,17 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
         return
     _supervisor.touch_used(session_id)
     log.info("ACP commands_execute: session=%s name=%r", session_id, name)
+    # Compaction started detection: the /compact slash command is the canonical
+    # way to invoke compaction from the ACP UI. Fire started here (before the
+    # inflight guard and before the round-trip) so the frame reaches the
+    # browser immediately. The completed signal arrives ~40s later via
+    # METADATA_METHOD when the context percentage drops.
+    if name == "compact" and session_id not in _supervisor._compacting:
+        _supervisor._compacting.add(session_id)
+        _registry.broadcast(
+            session_id,
+            envelope("compaction", {"status": "started", "error": "", "summary": ""},
+                     session_id))
     # Hold inflight to block concurrent prompts while the command runs.
     # Do NOT emit meta {turn:"start"} here — the command output arrives as
     # agent_message_chunk notifications AFTER the _request ack returns, and
