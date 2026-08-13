@@ -6215,6 +6215,49 @@ check("panels persist after meta turn:end", (tpl) => {
          "crew panel should still be in the DOM after turn:end (SC4)");
 });
 
+check("two consecutive no-anchor subagents updates reuse the same slot", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Deliver two no-anchor subagents frames for the same fan-out
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub1", role: "worker", task: "", sessionName: "agent-1",
+      status: "working", action: "", done: false, error: "", startedAt: now },
+  ], ""));
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub1", role: "worker", task: "", sessionName: "agent-1",
+      status: "terminated", action: "", done: true, error: "", startedAt: now, stoppedAt: now + 1 },
+  ], ""));
+  const crewsMap = page.sandbox._testCrews();
+  const keys = Object.keys(crewsMap);
+  assertEqual(keys.length, 1, "exactly one no-anchor slot after two updates");
+  assert(keys[0].startsWith("_na_"), "key has _na_ prefix");
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  assertEqual(panels.length, 1, "exactly one crew panel in DOM");
+});
+
+check("anchor panel is a direct transcriptEl child even after flushToolGroups", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Deliver two tool_call frames to trigger grouping at turn:end
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tcid-group", name: "subagent_call", title: "orchestrate",
+               kind: "execute", status: "started" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tcid-other", name: "read_file", title: "read",
+               kind: "read", status: "started" } });
+  // Turn:end triggers flushToolGroups — moves tool rows into a hidden group body
+  page.deliver({ type: "meta", sessionId: live,
+                 payload: { turn: "end", stopReason: "end_turn" } });
+  // Now deliver the subagents frame anchored to the grouped tool call
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-grp1", role: "worker", task: "", sessionName: "agent-grp",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tcid-group"));
+  const panels = page.all("acpTranscript", ".acp-crew-panel");
+  assertEqual(panels.length, 1, "one crew panel");
+  assertEqual(panels[0].parentNode, page.el("acpTranscript"),
+              "panel is direct child of transcriptEl");
+});
+
 check("the debug log starts collapsed and a tap opens it, remembered for next time",
   (tpl) => {
     const { page } = connected(tpl);

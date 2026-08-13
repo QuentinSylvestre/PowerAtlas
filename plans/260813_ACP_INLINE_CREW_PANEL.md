@@ -422,17 +422,17 @@ Phase 2 added `_supervisor.crew_spawn_toolcallids: dict[str, str]` as a parallel
 **Note on anchor timing**: the `subagents` frame can arrive before the matching `tool_call` frame (race between server notification ordering). If `toolRows['t:' + stableKey]` is `undefined`, the panel falls back to `transcriptEl.appendChild`. This is acceptable — the plan does not attempt re-anchoring on a later `tool_call` frame.
 
 **Exit criteria**:
-- [ ] `var crews = {}` and `_noAnchorSeq = 0` replace the four removed crew variables.
-- [ ] `dismissCrewPanelIfDone` function and all three call sites removed (verify by function-name grep, not line number).
-- [ ] `subagents` frame handler passes `payload.toolCallId || ''` to `setCrew`.
-- [ ] A panel with a known `toolCallId` (anchor present) is inserted after the matching tool call row.
-- [ ] A panel with no anchor falls back to `transcriptEl.appendChild`.
-- [ ] Two fan-outs with different `toolCallId` values produce two independent slots and panels.
-- [ ] No-anchor fan-outs use unique `_na_N` keys, not the shared `""` key.
-- [ ] `clearTranscript()`, `releaseSession()`, and `agent_died` handler all call `removeAllCrewPanels()`.
-- [ ] No orphaned `removeCrewPanel()`, `setCrew([])`, or `crewPanel` references remain.
-- [ ] `crewEntry(sid)` searches all active crew slots.
-- [ ] `node tests/acp_page.test.mjs` passes after Phase 4 test updates (gate: merge Phase 3 and Phase 4 together, not separately).
+- [x] `var crews = {}` and `_noAnchorSeq = 0` replace the four removed crew variables.
+- [x] `dismissCrewPanelIfDone` function and all three call sites removed (verify by function-name grep, not line number).
+- [x] `subagents` frame handler passes `payload.toolCallId || ''` to `setCrew`.
+- [x] A panel with a known `toolCallId` (anchor present) is inserted after the matching tool call row.
+- [x] A panel with no anchor falls back to `transcriptEl.appendChild`.
+- [x] Two fan-outs with different `toolCallId` values produce two independent slots and panels.
+- [x] No-anchor fan-outs use unique `_na_N` keys, not the shared `""` key.
+- [x] `clearTranscript()`, `releaseSession()`, and `agent_died` handler all call `removeAllCrewPanels()`.
+- [x] No orphaned `removeCrewPanel()`, `setCrew([])`, or `crewPanel` references remain.
+- [x] `crewEntry(sid)` searches all active crew slots.
+- [x] `node tests/acp_page.test.mjs` passes after Phase 4 test updates (gate: merge Phase 3 and Phase 4 together, not separately).
 
 ---
 
@@ -476,17 +476,17 @@ Phase 2 added `_supervisor.crew_spawn_toolcallids: dict[str, str]` as a parallel
    Locate by `grep -n "crew bar" README.md` before editing; do not rely on the line-number reference from the doc-impact report.
 
 **Exit criteria**:
-- [ ] `subagentsFrame` helper updated with optional `toolCallId` param.
-- [ ] `dismissCrewPanelIfDone` assertions removed from all test cases.
-- [ ] Anchor-insertion test passing.
-- [ ] No-anchor fallback test passing.
-- [ ] Multi-panel test passing.
-- [ ] Session-switch clear test passing.
-- [ ] `crewEntry` cross-crew test passing.
-- [ ] Panel-persistence-after-turn-end test passing.
-- [ ] `node tests/acp_page.test.mjs` green.
-- [ ] README.md "crew bar" sentence updated (verify by grep).
-- [ ] README.md update wired: `grep "inline crew panel" README.md` returns a match.
+- [x] `subagentsFrame` helper updated with optional `toolCallId` param.
+- [x] `dismissCrewPanelIfDone` assertions removed from all test cases.
+- [x] Anchor-insertion test passing.
+- [x] No-anchor fallback test passing.
+- [x] Multi-panel test passing.
+- [x] Session-switch clear test passing.
+- [x] `crewEntry` cross-crew test passing.
+- [x] Panel-persistence-after-turn-end test passing.
+- [x] `node tests/acp_page.test.mjs` green.
+- [x] README.md "crew bar" sentence updated (verify by grep).
+- [x] README.md update wired: `grep "inline crew panel" README.md` returns a match.
 
 ## 6) Risk Assessment
 
@@ -531,6 +531,10 @@ Do not restart PowerAtlas for `acp.html` changes. Hard reload (`Ctrl+Shift+R`) s
 ## 9) Implementation Divergences from Plan
 
 - **Phase 2 bundled fix**: `session/update` dual-shape support for `kind: "compaction_status"` was discovered and fixed during Phase 2 implementation. The fix (handling both `sessionUpdate: str` and `sessionUpdate: {kind, ...}` shapes) was bundled into the Phase 2 commit (babd14c) rather than a separate commit. Not in Phase 2's plan scope but was a related acp.py change encountered during the session.
+
+- **Phase 3+4 bundled fix**: compaction recap now renders via `mdBuild` when `summary_tokens` is supplied (improves markdown rendering of compaction summaries); `white-space: pre-wrap` removed from `.acp-compaction-recap` (then restored in the auto-fix commit — see M2 below). Not in Phase 3/4 plan scope.
+
+- **Pre-existing test failure**: `node tests/acp_page.test.mjs` has 1 pre-existing failure — `"the dashboard link is rendered for the viewer who can follow it"` — present before Phases 3+4, unrelated to this plan.
 
 ## Review Log
 

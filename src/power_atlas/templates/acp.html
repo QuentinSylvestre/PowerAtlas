@@ -484,6 +484,7 @@
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-dim, #8b95b0);
+  white-space: pre-wrap;
   word-break: break-word;
   border-top: 1px solid var(--border, #2d3148);
   max-height: 400px;
@@ -711,6 +712,7 @@
   // {key: {entries: [], panel: null|Element, timer: null|int, allDone: false}}
   var crews = {};
   var _noAnchorSeq = 0; // counter for no-anchor fan-out keys
+  var _noAnchorKey = null; // stable key for the current no-anchor fan-out
   // The sub-agent currently shown in `subPanelEl`, or null while looking at
   // the main transcript. Distinct from `sessionId`: the *page* never stops
   // holding the parent session while a sub-agent is open — only what is drawn
@@ -2896,26 +2898,44 @@
     if (slot.panel && slot.panel.parentNode) slot.panel.remove();
     slot.panel = null;
     delete crews[key];
+    if (key === _noAnchorKey) _noAnchorKey = null; // allow a fresh no-anchor slot next time
   }
 
   function removeAllCrewPanels() {
     Object.keys(crews).forEach(function(k) { removeSingleCrewPanel(k); });
     crews = {};
     _noAnchorSeq = 0;
+    _noAnchorKey = null; // reset for the next session
   }
 
   function setCrew(entries, toolCallId) {
     var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
-    var slot = key ? (crews[key] || null) : null;
+
+    // For no-anchor fan-outs (key === null), reuse the current slot if one
+    // exists; only create a new _na_ key if there's no active no-anchor slot.
+    var useKey;
+    if (key) {
+      useKey = key;
+    } else {
+      // No-anchor path: reuse the active no-anchor slot across updates.
+      if (_noAnchorKey && crews[_noAnchorKey]) {
+        useKey = _noAnchorKey;
+      } else {
+        useKey = '_na_' + (++_noAnchorSeq);
+        _noAnchorKey = useKey;
+      }
+    }
 
     if (!entries.length) {
-      if (key && slot) {
+      if (key && crews[key]) {
         removeSingleCrewPanel(key);
+      } else if (!key && _noAnchorKey && crews[_noAnchorKey]) {
+        // Server signaling no-anchor crew is done: remove it
+        removeSingleCrewPanel(_noAnchorKey);
       }
       return;
     }
 
-    var useKey = key || ('_na_' + (++_noAnchorSeq));
     if (!crews[useKey]) {
       crews[useKey] = {entries: [], panel: null, timer: null, allDone: false};
     }
@@ -2945,9 +2965,14 @@
       s.panel = document.createElement('div');
       s.panel.className = 'acp-crew-panel';
       // Anchor insertion: after the spawner tool call row if known.
+      // Walk up to find a direct child of transcriptEl (handles post-flushToolGroups
+      // case where the spawner row is inside a .acp-tool-group body).
       var anchor = key ? toolRows['t:' + key] : null;
       var row = anchor ? anchor.body.parentNode : null;
-      if (row && row.parentNode) {
+      while (row && row.parentNode && row.parentNode !== transcriptEl) {
+        row = row.parentNode;
+      }
+      if (row && row.parentNode === transcriptEl) {
         row.parentNode.insertBefore(s.panel, row.nextSibling);
       } else {
         transcriptEl.appendChild(s.panel);
