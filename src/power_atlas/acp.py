@@ -74,6 +74,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Final
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -1737,7 +1738,7 @@ class _Supervisor:
         # `crew_spawn_toolcallids`: session_id -> spawner toolCallId for the most-recent
         # active fan-out. Updated on each `_on_subagent_list` call when an anchor is
         # consumed or the single-inflight path fires. Cleared at turn-end, turn-start
-        # empty-crew branch, close_session, and _detach.
+        # (unconditional), close_session, and _detach.
         self.crew_spawn_toolcallids: dict[str, str] = {}
         # Sessions with a compaction currently in progress. Set when a
         # `compaction/status started` notification arrives, cleared on
@@ -2530,7 +2531,7 @@ class _Supervisor:
             # Single-inflight: no anchor to consume; record empty string so the
             # client falls back to bottom-append for this fan-out.
             if parent_id not in self.crew_spawn_toolcallids:
-                self.crew_spawn_toolcallids[parent_id] = ""  # no anchor; client falls back
+                self.crew_spawn_toolcallids[parent_id] = _NO_ANCHOR_TOOLCALLID  # no anchor; client falls back
         else:
             # Zero or 2+ in-flight sessions — try the spawner anchor as a fallback.
             # `inflight ⊆ sessions` always holds; a session that closed has had
@@ -2552,8 +2553,7 @@ class _Supervisor:
                 for _tcid in [k for k, v in self.crew_spawn_anchors.items()
                               if v == parent_id][:1]:
                     # Record spawner toolCallId for the inline panel anchor (Phase 2).
-                    # Only record on first call for this parent; subsequent list_updates
-                    # keep the same toolCallId (the fan-out doesn't change mid-turn).
+                    # Only record on first list_update for this parent (same guard as single-inflight path below).
                     if parent_id not in self.crew_spawn_toolcallids:
                         self.crew_spawn_toolcallids[parent_id] = _tcid
                     self.crew_spawn_anchors.pop(_tcid, None)
@@ -3306,6 +3306,16 @@ class _Supervisor:
 _supervisor = _Supervisor()
 
 
+# Sentinel used when a `subagents` fan-out has no recorded spawner tool-call id
+# (single-inflight path) — the client falls back to bottom-appending the panel.
+_NO_ANCHOR_TOOLCALLID: Final[str] = ""
+
+
+def _crew_toolcallid(parent_id: str) -> str:
+    """Return the spawner tool-call id for the current fan-out, or '' if unknown."""
+    return _supervisor.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
+
+
 def _emit(session_id: str, frame: dict) -> None:
     """Record a frame in a session's history and fan it out to its sockets.
 
@@ -3367,7 +3377,7 @@ def _emit_subagents_frame(parent_id: str) -> None:
     crew = _supervisor.crews.get(parent_id)
     if not crew:
         return
-    toolcall_id = _supervisor.crew_spawn_toolcallids.get(parent_id, "")
+    toolcall_id = _crew_toolcallid(parent_id)
     _registry.broadcast(parent_id, envelope(
         "subagents",
         {"subagents": _subagents_payload(crew), "toolCallId": toolcall_id},
@@ -3720,7 +3730,7 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         # reload's only source for "which sub-agents does this session have"
         # is rebuilding it here, the same way `turnActive`/`contextPercent`
         # are rebuilt onto the `session` frame above rather than replayed.
-        toolcall_id = _supervisor.crew_spawn_toolcallids.get(session_id, "")
+        toolcall_id = _crew_toolcallid(session_id)
         conn.send(envelope(
             "subagents",
             {"subagents": _subagents_payload(crew), "toolCallId": toolcall_id},
@@ -4279,6 +4289,8 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     _evict_crew_children(session_id, keep_history=False, broadcast_empty=True)
     # Clear any stale spawner toolCallId from the prior turn so the next
     # fan-out starts with a clean mapping.
+    # Unconditional — clears any toolCallId from the previous turn regardless of
+    # whether crew entries were evicted.
     _supervisor.crew_spawn_toolcallids.pop(session_id, None)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))

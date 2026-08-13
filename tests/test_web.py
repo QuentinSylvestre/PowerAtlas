@@ -17432,30 +17432,77 @@ class TestAcpCrewSpawnerToolCallId:
         ]})
         assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == ""
 
-    def test_second_list_update_does_not_overwrite_toolcallid(self, acp_store):
-        """Subsequent _on_subagent_list calls for the same parent do not overwrite
-        the toolCallId set on the first call."""
+    def test_second_list_update_does_not_overwrite_anchor_toolcallid(self, acp_store):
+        """Anchor-path then single-inflight: guard preserves the anchor toolCallId.
+
+        Exercises the mutation-detecting scenario:
+        1. Two sessions in inflight + anchor → first _on_subagent_list sets via anchor path.
+        2. Second session removed from inflight → single-inflight path would overwrite with ''.
+        3. Guard prevents overwrite; original anchor toolCallId is preserved.
+        """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
+        sid2 = _live_session(acp_mod, sid="other-session-2")
+        # Register anchor tcid-1 → sid
+        acp_mod._supervisor.crew_spawn_anchors["tcid-1"] = sid
+        # Two sessions in-flight so anchor path fires (not single-inflight)
         acp_mod._supervisor.inflight.add(sid)
-        # First call — sets the empty-string value via the single-inflight path.
+        acp_mod._supervisor.inflight.add(sid2)
+        # First call: anchor path sets crew_spawn_toolcallids[sid] = "tcid-1"
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
-            {"sessionId": "sub-c", "role": "worker", "status": {"type": "working"}},
+            {"sessionId": "sub-d", "role": "worker", "status": {"type": "working"}},
         ]})
-        first_value = acp_mod._supervisor.crew_spawn_toolcallids.get(sid)
-        # Second call — should not overwrite.
+        assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == "tcid-1"
+        # Remove the second session → now single-inflight; that path would set ""
+        acp_mod._supervisor.inflight.discard(sid2)
+        # Second call: single-inflight path fires, but guard prevents overwrite
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
-            {"sessionId": "sub-c", "role": "worker", "status": {"type": "working"}},
+            {"sessionId": "sub-d", "role": "worker", "status": {"type": "working"}},
         ]})
-        assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == first_value
+        # Guard preserved the anchor value
+        assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == "tcid-1"
 
     def test_turn_end_cleanup_pops_toolcallid(self, acp_store):
-        """After _run_turn_with_crew, crew_spawn_toolcallids has no entry for session."""
+        """After _run_turn_with_crew, crew_spawn_toolcallids has no entry for session.
+
+        _run_turn_with_crew seeds crew_spawn_toolcallids during the turn via
+        _on_subagent_list (through the turn-start fan-out). The turn-end pop in
+        _handle_prompt's finally block removes it. The turn-start pop also
+        runs unconditionally, but at this point no pre-seeded value exists —
+        _run_turn_with_crew itself sets the value mid-turn via the crew path.
+        """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
-        # Seed a toolcallid entry to make sure cleanup actually runs.
-        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "tc-turn-end"
+        # Do NOT pre-seed crew_spawn_toolcallids[sid] here; _run_turn_with_crew
+        # sets it mid-turn. Pre-seeding would make the turn-start pop clear it,
+        # leaving the turn-end pop a no-op and proving nothing.
         TestAcpCrewCleanupOnTurnEnd()._run_turn_with_crew(acp_mod, sid)
+        assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
+
+    def test_turn_start_clears_stale_toolcallid(self, acp_store):
+        """Turn-start unconditional pop removes a stale toolCallId from the prior turn.
+
+        Seeds crew_spawn_toolcallids[sid] directly (simulating a stale value left
+        from a previous turn), then runs _handle_prompt with no crew so the turn-end
+        pop has nothing to clear. Asserts the entry is absent after the turn — proving
+        the turn-start pop (not the turn-end pop) did the cleanup.
+        """
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        # Seed a stale value as if a prior turn left it behind
+        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "stale-value"
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+
+        async def fake_request(self_, method, params, timeout=None):
+            return {"stopReason": "end_turn"}
+
+        # Run a turn with no crew so the turn-end pop is a no-op.
+        # The turn-start pop (unconditional) clears the stale value.
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+
         assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
 
     def test_close_session_pops_toolcallid(self, acp_store):

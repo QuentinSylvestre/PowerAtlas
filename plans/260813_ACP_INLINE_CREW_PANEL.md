@@ -259,15 +259,18 @@ Phase 1 extracted `_evict_crew_children(session_id, *, keep_history, broadcast_e
 - Update `TestAcpSubagentsFrameDelivery`: assert `subagents` frame payload has top-level `"toolCallId"` key (not per-entry).
 
 **Exit criteria**:
-- [ ] `_supervisor.crew_spawn_toolcallids` initialized in `__init__` and cleared in `_detach`.
-- [ ] `_on_subagent_list` sets `crew_spawn_toolcallids[parent_id]` on first call; does not overwrite on subsequent calls.
-- [ ] `crew_spawn_toolcallids.pop` runs unconditionally at turn-end, in turn-start empty-crew branch, and in `close_session`.
-- [ ] `_emit_subagents_frame` broadcasts `{"subagents": [...], "toolCallId": "..."}`.
-- [ ] `_handle_subscribe` snapshot includes `toolCallId`.
-- [ ] `_subagents_payload` signature is unchanged (no per-entry `toolCallId` field).
-- [ ] `TestAcpCrewSpawnerToolCallId` passes all four sub-cases.
-- [ ] Updated `TestAcpSubagentsFrameDelivery` passes.
-- [ ] Full pytest suite green.
+- [x] `_supervisor.crew_spawn_toolcallids` initialized in `__init__` and cleared in `_detach`.
+- [x] `_on_subagent_list` sets `crew_spawn_toolcallids[parent_id]` on first call; does not overwrite on subsequent calls.
+- [x] `crew_spawn_toolcallids.pop` runs unconditionally at turn-end, turn-start (unconditional), and in `close_session`.
+- [x] `_emit_subagents_frame` broadcasts `{"subagents": [...], "toolCallId": "..."}`.
+- [x] `_handle_subscribe` snapshot includes `toolCallId`.
+- [x] `_subagents_payload` signature is unchanged (no per-entry `toolCallId` field).
+- [x] `TestAcpCrewSpawnerToolCallId` passes all four sub-cases.
+- [x] Updated `TestAcpSubagentsFrameDelivery` passes.
+- [x] Full pytest suite green.
+
+Implementation (2026-08-13)
+Added `_supervisor.crew_spawn_toolcallids: dict[str, str]` to `_Supervisor.__init__` and `_detach`. `_on_subagent_list` records the spawner toolCallId on first call via both the anchor-consumption path (stores `_tcid` before popping the anchor) and the single-inflight path (stores `""`); subsequent calls are guarded with `if parent_id not in self.crew_spawn_toolcallids`. Cleanup added unconditionally at turn-end (replacing Phase 1 placeholder comment), at turn-start (after `_evict_crew_children`), and in `close_session`. `_emit_subagents_frame` now looks up `crew_spawn_toolcallids.get(parent_id, "")` and emits `{"subagents": [...], "toolCallId": toolcall_id}`. `_handle_subscribe` snapshot updated to include the same `toolCallId` field. `_subagents_payload` signature unchanged. Tests: `TestAcpCrewSpawnerToolCallId` (5 tests) + updated `TestAcpSubagentsFrameDelivery.test_a_subagents_frame_is_broadcast_but_not_recorded_into_history` to assert `toolCallId` at frame level and absence in per-entry payload. 1693 non-pre-existing tests pass (1 pre-existing failure confirmed unrelated to Phase 2).
 
 ---
 
@@ -524,7 +527,7 @@ Do not restart PowerAtlas for `acp.html` changes. Hard reload (`Ctrl+Shift+R`) s
 
 ## 9) Implementation Divergences from Plan
 
-*Reserved — filled during implementation.*
+- **Phase 2 bundled fix**: `session/update` dual-shape support for `kind: "compaction_status"` was discovered and fixed during Phase 2 implementation. The fix (handling both `sessionUpdate: str` and `sessionUpdate: {kind, ...}` shapes) was bundled into the Phase 2 commit (babd14c) rather than a separate commit. Not in Phase 2's plan scope but was a related acp.py change encountered during the session.
 
 ## Review Log
 
