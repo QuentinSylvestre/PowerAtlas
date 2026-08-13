@@ -421,6 +421,14 @@
   white-space: nowrap;
   flex-shrink: 0;
 }
+/* Separator dot between name and description */
+#acpCmdDropdown li .acp-cmd-name::after {
+  content: '·';
+  color: var(--border, #2d3244);
+  font-family: inherit;
+  margin-left: 8px;
+  font-weight: 400;
+}
 /* Description — muted, truncated, fills remaining width */
 #acpCmdDropdown li .acp-cmd-desc {
   color: var(--text-muted, #8b90a0);
@@ -430,7 +438,7 @@
   white-space: nowrap;
   flex: 1;
   min-width: 0;
-  opacity: 0.8;
+  opacity: 0.75;
 }
 #acpCmdDropdown li.acp-cmd-placeholder {
   color: var(--text-dim, #5c6070);
