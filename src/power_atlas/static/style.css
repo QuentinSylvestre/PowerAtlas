@@ -969,7 +969,7 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-crew-label  { font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:45%; }
 .acp-crew-role   { color:var(--text-dim); white-space:nowrap; flex-shrink:0; font-size:11px; }
 .acp-crew-action { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.acp-crew-row-working .acp-crew-action { color:#4ade80; }  /* matches rail's working glow */
+.acp-crew-row-working .acp-crew-action { color:#4ade80; }  /* green action text (pre-existing convention for in-progress crew actions) */
 .acp-crew-row-error   .acp-crew-action { color:#f87171; }  /* matches rail's error red */
 .acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
 

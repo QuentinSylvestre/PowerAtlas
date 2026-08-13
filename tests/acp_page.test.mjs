@@ -5987,6 +5987,34 @@ check("acp-crew-action shows 'working\u2026' fallback when action is empty and s
               "action should show 'working\u2026' fallback when action is empty and state is working");
 });
 
+check("acp-crew-action shows 'done' for a done:true row with no action field", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "kiro_default", task: "do something", sessionName: "stage-1",
+      status: "terminated", done: true, error: "", startedAt: Date.now() / 1000 - 5 },
+  ]));
+  const row = page.one("acpTranscript", ".acp-crew-row");
+  assert(row !== null, "crew panel should have a row");
+  const actionSpan = row.querySelector(".acp-crew-action");
+  assert(actionSpan !== null, "row should have a .acp-crew-action element");
+  assertEqual(actionSpan.textContent, "done",
+              "action should show 'done' for a done:true row with no action field");
+});
+
+check("acp-crew-action shows 'errored' for an error:true row", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "kiro_default", task: "do something", sessionName: "stage-1",
+      status: "terminated", done: true, error: "tool failed", startedAt: Date.now() / 1000 - 5 },
+  ]));
+  const row = page.one("acpTranscript", ".acp-crew-row");
+  assert(row !== null, "crew panel should have a row");
+  const actionSpan = row.querySelector(".acp-crew-action");
+  assert(actionSpan !== null, "row should have a .acp-crew-action element");
+  assertEqual(actionSpan.textContent, "errored",
+              "action should show 'errored' for an error:true row");
+});
+
 check("renderSubHead subRoleEl shows sessionName when present", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver(subagentsFrame(live, [

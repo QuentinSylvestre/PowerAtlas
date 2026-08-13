@@ -2674,7 +2674,7 @@
       : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
 
     // Remove old rows (keep header)
-    while (crewPanel.lastChild && !crewPanel.lastChild.classList.contains('acp-crew-header')) {
+    while (crewPanel.lastChild && crewPanel.lastChild.className !== 'acp-crew-header') {
       crewPanel.removeChild(crewPanel.lastChild);
     }
 
@@ -2814,7 +2814,7 @@
 
   function renderSubHead() {
     var entry = crewEntry(subViewSid);
-    subRoleEl.textContent = crewLabel(entry) || subViewSid;  // crewLabel always returns non-empty
+    subRoleEl.textContent = crewLabel(entry) || subViewSid;  // crewLabel always returns non-empty (sessionName → 30-char task → 'agent')
     if (!entry) {
       subStatusEl.className = 'acp-subpanel-status';
       subStatusEl.textContent = '';
