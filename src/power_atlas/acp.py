@@ -2895,7 +2895,7 @@ class _Supervisor:
                 log.debug("ACP commands_available: %d session(s) inflight, %d known — "
                           "cannot attribute; dropped", len(inflight), len(self.sessions))
             return
-        if method == "_kiro.dev/compaction/status":
+        if method == "kiro.dev/compaction/status":
             status = params.get("status") or {}
             stype = _as_text(status.get("type")) if isinstance(status, dict) else _as_text(status)
             error = _as_text(status.get("error")) if isinstance(status, dict) else ""
@@ -2945,7 +2945,7 @@ class _Supervisor:
                           "cannot attribute; dropped (status=%r)",
                           len(inflight), len(self.sessions), stype)
             return
-        if method == "_kiro.dev/clear/status":
+        if method == "kiro.dev/clear/status":
             return  # silent consume; TUI logs debug only, nothing to display
         if log.isEnabledFor(logging.DEBUG):
             # Params and not only the method name. This module talks to an
@@ -3266,6 +3266,13 @@ class _Supervisor:
             for target in tuple(_registry.subscribers.get(child_id, ())):
                 target.send(frame)
                 _registry.detach(target)
+        # Also evict any subagent_sessions/subagent_history entries whose parent was
+        # this session but whose crews entry was already removed at turn-end cleanup.
+        for _orphan_id in [cid for cid, m in self.subagent_sessions.items()
+                           if m.get("parent") == session_id]:
+            self.subagent_sessions.pop(_orphan_id, None)
+            self.subagent_history.pop(_orphan_id, None)
+            _bubbles.pop(_orphan_id, None)
         log.info("ACP session closed: %s; %d live", session_id, len(self.sessions))
 
 
@@ -4136,8 +4143,8 @@ def _evict_crew_children(session_id: str, *, keep_history: bool,
         if not keep_history:
             _supervisor.subagent_sessions.pop(_child_id, None)
             _supervisor.subagent_history.pop(_child_id, None)
-        # _bubbles[child_id] is never populated by the current production path
-        # — defensive cleanup for future proofing
+        # sub-agent sessions accumulate bubbles via agent_message_chunk on SUBAGENT_ACTIVITY_METHOD;
+        # always pop to avoid leaking prose for done children.
         _bubbles.pop(_child_id, None)
     if not crew:
         _supervisor.crews.pop(session_id, None)

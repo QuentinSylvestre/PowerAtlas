@@ -4330,6 +4330,7 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.subagent_sessions.clear()
         acp_mod._supervisor.subagent_history.clear()
         acp_mod._supervisor.crew_spawn_anchors.clear()
+        acp_mod._supervisor._compacting.clear()
         acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
@@ -16471,7 +16472,7 @@ class TestAcpCommandsAvailable:
 
 
 class TestAcpCompactionStatus:
-    """``_kiro.dev/compaction/status`` notification handler.
+    """``kiro.dev/compaction/status`` notification handler.
 
     Broadcasts a ``compaction`` frame to subscribers.  On ``completed`` also
     calls ``_note_context(sid, None)`` which broadcasts a ``meta`` frame with
@@ -16492,7 +16493,7 @@ class TestAcpCompactionStatus:
         if summary is not None:
             params["summary"] = summary
         acp_mod._supervisor._on_notification({
-            "method": "_kiro.dev/compaction/status",
+            "method": "kiro.dev/compaction/status",
             "params": params,
         })
 

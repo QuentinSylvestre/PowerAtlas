@@ -159,14 +159,14 @@ None.
 - Update `TestAcpSubagentsFrameDelivery.test_subscribing_after_the_fact_gets_a_crew_snapshot` and any other subscribe test that expects a subagents snapshot after a completed turn — these should now expect no frame.
 
 **Exit criteria**:
-- [ ] Turn-end `finally` block pops done entries from `crews`, `subagent_sessions`, and `_bubbles` (not `subagent_history`) for every done child id.
-- [ ] `subagent_history` for done children is preserved at turn-end (assert in test).
-- [ ] `_handle_subscribe` snapshot sends non-empty `subagents` only when inflight or has not-done entries.
-- [ ] `TestAcpCrewCleanupOnTurnEnd` passes with `subagent_history` retention assertion.
-- [ ] `TestAcpSubscribeSnapshotGate` passes (all three sub-cases).
-- [ ] `test_turn_end_clears_spawner_entries_via_production_code` updated and passing.
-- [ ] Existing subscribe tests updated for no-stale-snapshot behavior.
-- [ ] Full pytest suite green (`pytest tests/`).
+- [x] Turn-end `finally` block pops done entries from `crews` and `_bubbles` (not `subagent_sessions`, not `subagent_history`) via `_evict_crew_children(keep_history=True, broadcast_empty=False)`; `subagent_sessions` is preserved as the routing key for click-to-view until `close_session`.
+- [x] `subagent_history` for done children is preserved at turn-end (assert in test).
+- [x] `_handle_subscribe` snapshot sends non-empty `subagents` only when inflight or has not-done entries.
+- [x] `TestAcpCrewCleanupOnTurnEnd` passes with `subagent_history` retention assertion.
+- [x] `TestAcpSubscribeSnapshotGate` passes (all three sub-cases).
+- [x] `test_turn_end_clears_spawner_entries_via_production_code` updated and passing.
+- [x] Existing subscribe tests updated for no-stale-snapshot behavior.
+- [x] Full pytest suite green (`pytest tests/`).
 
 ---
 
