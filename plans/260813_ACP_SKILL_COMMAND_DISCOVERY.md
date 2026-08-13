@@ -1,7 +1,7 @@
 # ACP Skill and Command Discovery Before First Turn
 
 > **Date**: 2026-08-13
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Parse and display kiro-cli skills in the /acp slash-command palette before the first user prompt
 > **Estimated effort**: 1 day
 
@@ -290,15 +290,41 @@ if skills is not None:
 ```
 
 **Exit criteria**:
-- [ ] `"skills"` added to `SERVER_TYPES` frozenset at acp.py:163
-- [ ] `_parse_skills(entries)` helper added as a module-level function near `_as_text`
-- [ ] `self._pending_commands` initialized to `None` in `_Supervisor.__init__` adjacent to `self._reserved = 0` (acp.py:1681)
-- [ ] `_kiro.dev/commands/available` handler uses `_parse_skills(params.get("prompts") or [])`, stores `meta["skills"]`, broadcasts `"skills"` frame
-- [ ] O1 resolved: `available_commands_update` handler reads `availableCommands` from the correct nesting (verified by probe); comment updated to confirm
-- [ ] `available_commands_update` `elif kind == ...` branch added in `_on_notification`'s kind-dispatch chain
-- [ ] `_pending_commands` buffer flushed in `new_session` after session registration, cleared in `finally` block; broadcast failure caught and logged
-- [ ] `_handle_subscribe` sends `meta["skills"]` frame alongside `meta["commands"]` frame
-- [ ] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py -k "TestAcpCommandsAvailable"` passes (no regression)
+- [x] `"skills"` added to `SERVER_TYPES` frozenset at acp.py:163
+- [x] `_parse_skills(entries)` helper added as a module-level function near `_as_text`
+- [x] `self._pending_commands` initialized to `None` in `_Supervisor.__init__` adjacent to `self._reserved = 0` (acp.py:1681)
+- [x] `_kiro.dev/commands/available` handler uses `_parse_skills(params.get("prompts") or [])`, stores `meta["skills"]`, broadcasts `"skills"` frame
+- [x] O1 resolved: `available_commands_update` handler reads `availableCommands` from the correct nesting (verified by probe); comment updated to confirm
+- [x] `available_commands_update` `elif kind == ...` branch added in `_on_notification`'s kind-dispatch chain
+- [x] `_pending_commands` buffer flushed in `new_session` after session registration, cleared in `finally` block; broadcast failure caught and logged
+- [x] `_handle_subscribe` sends `meta["skills"]` frame alongside `meta["commands"]` frame
+- [x] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py -k "TestAcpCommandsAvailable"` passes (no regression)
+
+#### Implementation (2026-08-13, code: 34d507d, fix: 1f42f3b, fix: 50633d4)
+
+Seven changes were made to `src/power_atlas/acp.py` plus corrections to two existing tests in `tests/test_web.py`. (1) `"skills"` was added to `SERVER_TYPES` so `envelope()` doesn't raise on the new frame type. (2) `_parse_skills(entries)` was added as a module-level helper near `_as_text`, using `_meta.kiro.type == "skill"` as the primary discriminant and `serverName.startswith("skill:")` as fallback, capped at `MAX_COMMANDS_COUNT`. (3) `self._pending_commands: tuple[list, list] | None = None` was added to `_Supervisor.__init__` immediately after `self._reserved = 0`. (4) The `_kiro.dev/commands/available` handler was replaced to also call `_parse_skills(params.get("prompts") or [])`, store `meta["skills"]`, broadcast a `"skills"` frame alongside `"commands"`, and buffer `(commands, skills)` in `_pending_commands` when `_reserved > 0` and no session is registered yet. (5) A new `if kind == "available_commands_update":` handler was inserted; O1 was resolved by probing tui.js (confirmed `availableCommands` is nested in `params["update"]`, not at `params` level). (6) `new_session()` now flushes `_pending_commands` after `sessions[session_id] = _new_session_record(cwd)`, consuming the slot before broadcasting (broadcast errors caught and logged); the `finally` block clears `_pending_commands` unconditionally. (7) `_handle_subscribe` now sends a `"skills"` frame immediately after the `"commands"` frame replay. Post-review fixes: `log.info` diagnostic downgraded to `log.debug`; `available_commands_update` fallback corrected; `commands/available` truncation moved to after filter; coupling comments and docstrings updated.
+
+**Divergence**: Phase 1 sub-agent also modified `acp.html` (Phase 3 scope) — removed old placeholder CSS and rewrote empty-dropdown handler to call `hideCommandDropdown()`. Left as uncommitted working-tree changes for Phase 3 to incorporate.
+
+### 2026-08-13 — Implementation Review (after Phase 1, personas: Reliability engineer, Senior engineer, Maintainability reviewer, Architect)
+
+Implementation health: Green.
+10 findings (0 High after plan-design acceptance, 4 Medium, 6 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | All new code paths have zero discriminating test coverage — exit criterion 9 passes vacuously. | User: accepted — Phase 2 owns the 10 new test cases by plan design |
+| 2 | Medium | `log.info` diagnostic fires on every `session/update` notification including streamed token chunks. | Fixed — downgraded to `log.debug` in commit 1f42f3b |
+| 3 | Medium | `available_commands_update` missing single-session fallback (`inflight==0, sessions==1`). | Fixed — added `elif` fallback in commit 1f42f3b |
+| 4 | Medium | `commands/available` slices input before filter; inconsistent with `_parse_skills` and `available_commands_update`. | Fixed — moved `[:MAX_COMMANDS_COUNT]` to after filter in commit 1f42f3b |
+| 5 | Medium | Exclusion-filter logic in `available_commands_update` is `_parse_skills`'s structural inverse with no coupling note. | Fixed — comment added in commit 1f42f3b |
+| 6 | Low | `_parse_skills` `serverName` branch convention reliance uncommented. | Fixed — comment added in commit 1f42f3b |
+| 7 | Low | `finally` block clears non-None buffer silently. | Fixed — `log.debug` added in commit 1f42f3b |
+| 8 | Low | `TestAcpCommandsAvailable` docstring omitted skills behavior and new paths. | Fixed — docstring updated in commit 1f42f3b |
+| 9 | Low | `commands/available` handler missing pre-partition explanation comment. | Fixed — comment added in commit 1f42f3b |
+| 10 | Low | `_parse_skills` docstring implied OR'd evaluation; actual logic is primary + fallback. | Fixed — docstring clarified in commit 1f42f3b |
+
+Cycle 2: duplicate `elif` from Fix 2 removed in-session (commit 50633d4). QA: SKIP — no independently exercisable runtime surface in Phase 1 alone.
 
 ### Phase 2: Backend — tests [QA]
 
