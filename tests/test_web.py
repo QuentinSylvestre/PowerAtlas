@@ -16941,6 +16941,42 @@ class TestAcpCompactionStatus:
         assert completed_frames[0]["payload"]["status"] == "completed"
         assert sid not in acp_mod._supervisor._compacting
 
+    def test_summary_chunks_collected_and_included_in_completed_frame(
+            self, acp_session):
+        """agent_message_chunk notifications arriving while _compacting is set
+        are accumulated into _compaction_buf and flushed into the completed
+        frame's summary field."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        # Simulate: /compact fired started, session is now _compacting.
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            # Simulate two summary chunks arriving from kiro-cli.
+            for chunk_text in ("Summary part 1. ", "Summary part 2."):
+                acp_mod._supervisor._on_notification({
+                    "method": "session/update",
+                    "params": {"sessionId": sid, "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": chunk_text}}},
+                })
+            # Both chunks render as normal agent chunks too.
+            chunk_frames = [f for f in _queued(conn) if f["type"] == "chunk"]
+            assert len(chunk_frames) == 2
+            # Now fire completed via context_usage drop.
+            self._send_context_usage(acp_mod, sid, percent=9.0)
+            completed_frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(completed_frames) == 1
+            assert completed_frames[0]["payload"]["status"] == "completed"
+            assert completed_frames[0]["payload"]["summary"] == \
+                "Summary part 1. Summary part 2."
+            # Buffer must be cleared.
+            assert sid not in acp_mod._supervisor._compaction_buf
+            assert sid not in acp_mod._supervisor._compacting
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+            acp_mod._supervisor._compaction_buf.pop(sid, None)
+
 
 class TestAcpClearStatus:
     """``_kiro.dev/clear/status`` is silently consumed — no broadcast, no error."""

@@ -1799,6 +1799,11 @@ class _Supervisor:
         # empty (e.g. compaction triggered by `/compact` command, whose inflight
         # entry is already removed before the kiro-cli notification fires).
         self._compacting: set[str] = set()
+        # Per-session buffer for compaction summary text. kiro-cli streams the
+        # summary as agent_message_chunk notifications while _compacting is set.
+        # Accumulated here and flushed into the `completed` frame's `summary`
+        # field so the ACP page can render the recap.
+        self._compaction_buf: dict[str, list[str]] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2078,6 +2083,7 @@ class _Supervisor:
         self.crew_spawn_anchors.clear()
         self.crew_spawn_toolcallids.clear()
         self._compacting.clear()
+        self._compaction_buf.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -2764,8 +2770,10 @@ class _Supervisor:
                     self._compacting.discard(session_id)
                     _registry.broadcast(
                         session_id,
-                        envelope("compaction", {"status": "completed",
-                                                "error": "", "summary": ""},
+                        envelope("compaction",
+                                 {"status": "completed", "error": "",
+                                  "summary": "".join(
+                                      self._compaction_buf.pop(session_id, []))},
                                  session_id))
             return
         if method == SUBAGENT_LIST_METHOD:
@@ -2830,6 +2838,13 @@ class _Supervisor:
                     "chunk", {"role": role, "text": text}, session_id))
                 if role == "agent":
                     _bubble_append(session_id, text)
+                    # Accumulate compaction summary text. kiro-cli streams the
+                    # summary as agent_message_chunk while _compacting is set;
+                    # these chunks are also rendered normally, but a copy goes
+                    # into _compaction_buf so the completed frame can carry the
+                    # full summary for the "Show recap" collapsible.
+                    if session_id in self._compacting:
+                        self._compaction_buf.setdefault(session_id, []).append(text)
             return
         if kind in ("tool_call", "tool_call_update"):
             payload = _tool_payload(update)
