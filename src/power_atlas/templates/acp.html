@@ -447,6 +447,45 @@
   color: var(--text-dim, #8b95b0);
   text-align: center;
 }
+/* Compaction recap: collapsible summary below the system row */
+.acp-compaction-details {
+  margin: 2px 14px 6px;
+  border: 1px solid var(--border, #2d3148);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.acp-compaction-details summary {
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--text-dim, #8b95b0);
+  cursor: pointer;
+  user-select: none;
+  list-style: none; /* hide default triangle on some browsers */
+}
+.acp-compaction-details summary::-webkit-details-marker { display: none; }
+.acp-compaction-details summary::before {
+  content: '▶\00a0';
+  font-size: 9px;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+.acp-compaction-details[open] summary::before {
+  transform: rotate(90deg);
+}
+.acp-compaction-details summary:hover {
+  color: var(--text-main, #c9d1e8);
+}
+.acp-compaction-recap {
+  padding: 8px 12px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim, #8b95b0);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--border, #2d3148);
+  max-height: 400px;
+  overflow-y: auto;
+}
 </style>
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 
@@ -5340,17 +5379,32 @@
       // Context compaction progress (SC-2). Render a non-bubble system row
       // in the transcript so the user knows a compaction occurred.
       // Security note: `payload.error` and `payload.summary` are
-      // agent-controlled strings forwarded from the kiro-cli process. They
-      // are intentionally ignored here — only `payload.status` is read, and
-      // it is mapped to hardcoded UI strings via this switch. Any future use
-      // of `payload.error` or `payload.summary` MUST go through
-      // addSystemMessage (textContent only) rather than innerHTML.
+      // agent-controlled strings forwarded from the kiro-cli process.
+      // `payload.summary` is rendered as textContent only — never innerHTML.
+      // `payload.error` is intentionally ignored.
       var s = (payload && payload.status) || '';
+      var summary = (payload && typeof payload.summary === 'string') ? payload.summary.trim() : '';
       var txt = s === 'started' ? 'Compacting conversation context\u2026'
               : s === 'completed' ? 'Context compacted.'
               : s === 'failed' ? 'Compaction failed.'
               : null;
-      if (txt) addSystemMessage(txt);
+      if (txt) {
+        var stick = stuckToBottom();
+        addSystemMessage(txt);
+        if (s === 'completed' && summary) {
+          var details = document.createElement('details');
+          details.className = 'acp-compaction-details';
+          var sum = document.createElement('summary');
+          sum.textContent = 'Show recap';
+          var pre = document.createElement('div');
+          pre.className = 'acp-compaction-recap';
+          pre.textContent = summary;
+          details.appendChild(sum);
+          details.appendChild(pre);
+          transcriptEl.appendChild(details);
+          if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        }
+      }
       return;
     }
     if (type === 'commands_options_result') {

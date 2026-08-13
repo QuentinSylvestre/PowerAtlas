@@ -7893,6 +7893,32 @@ check("compactionCompletedAddsSystemMessage", (tpl) => {
     "completed system message should mention compaction; got: " + msgs[0].textContent);
 });
 
+// compactionCompletedWithSummaryAddsRecapDetails
+// A 'compaction' frame with status 'completed' and a non-empty summary
+// appends both the system message and a collapsible <details> containing
+// the recap text.
+check("compactionCompletedWithSummaryAddsRecapDetails", (tpl) => {
+  const { page, live } = connected(tpl);
+  const recap = "## OBJECTIVE\nDo something important.\n\n## NEXT STEPS\n1. Continue.";
+  page.deliver({
+    type: "compaction", sessionId: live,
+    payload: { status: "completed", summary: recap },
+  });
+  const transcript = page.el("acpTranscript");
+  const msgs = transcript.querySelectorAll(".acp-system-msg");
+  assert(msgs.length > 0, "system message row should appear");
+  const details = transcript.querySelector(".acp-compaction-details");
+  assert(details !== null, "a <details> recap element should be appended");
+  const pre = details.querySelector(".acp-compaction-recap");
+  assert(pre !== null, "recap content div should be present");
+  assert(pre.textContent === recap, "recap text should match summary verbatim; got: " + pre.textContent);
+  // No <details> when summary is empty (guard against false rendering)
+  const { page: p2, live: l2 } = connected(tpl);
+  p2.deliver({ type: "compaction", sessionId: l2, payload: { status: "completed", summary: "" } });
+  const noDetails = p2.el("acpTranscript").querySelector(".acp-compaction-details");
+  assert(noDetails === null, "no <details> should appear when summary is empty");
+});
+
 // slashKeyOpensDropdown
 // Pressing '/' on an empty prompt opens the command palette (even with no
 // commands loaded — renders an empty list and hides).
