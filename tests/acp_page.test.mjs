@@ -749,6 +749,10 @@ function loadPage(templatePath, opts = {}) {
         }
         return el;
       },
+      // SVG elements are constructed through createElementNS in the page; the
+      // mock treats them identically to HTML elements — the harness only checks
+      // the DOM tree and never renders SVG shapes.
+      createElementNS: (_ns, tag) => new El(tag),
       getElementById: (id) => byId.get(id) ?? null,
       addEventListener: (type, fn) => {
         if (!docListeners.has(type)) docListeners.set(type, []);
@@ -8617,6 +8621,346 @@ check("dropdownTabConfirmsSelection", (tpl) => {
     "wrong command sent on Tab");
   assert(page.el("acpCmdDropdown").hidden,
     "dropdown should be hidden after Tab confirm");
+});
+
+// ----------------------- Phase 4: skills palette tests -------------------
+
+// Test 1: skillsFramePopulatesSessionSkills
+// Delivering a 'skills' frame stores the list and the skill appears in the
+// dropdown when '/' is pressed.
+check("skillsFramePopulatesSessionSkills", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills",
+    sessionId: live,
+    payload: { skills: [{ name: "qtest", description: "d" }] },
+  });
+  // Open the dropdown to verify the skill was stored.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden,
+    "dropdown should be visible after '/' when sessionSkills has entries");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(names.includes("/qtest"),
+    "skill 'qtest' should appear in the dropdown after the 'skills' frame; " +
+    "got: " + JSON.stringify(names));
+  // Verify the description is correct via the desc span.
+  const lis = drop.querySelectorAll("li");
+  const li = lis.find((l) => {
+    const s = l.querySelector(".acp-cmd-name");
+    return s && s.textContent === "/qtest";
+  });
+  assert(li, "could not find <li> for qtest");
+  const desc = li.querySelector(".acp-cmd-desc");
+  assert(desc && desc.textContent === "d",
+    "skill description should be 'd'; got: " + (desc && desc.textContent));
+});
+
+// Test 2: skillsFrameOnSessionChangeResetsSessionSkills
+// A new 'session' frame resets sessionSkills so old skills never appear in
+// the dropdown.
+check("skillsFrameOnSessionChangeResetsSessionSkills", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Populate sessionSkills via a 'skills' frame.
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  // Verify the skill is present before reset.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  {
+    const names = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
+                      .map((n) => n.textContent);
+    assert(names.includes("/qexplore"),
+      "fixture: 'qexplore' skill should appear before the session reset");
+  }
+  // Close the dropdown.
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Escape", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  // New session frame — should reset sessionSkills.
+  const newSid = "sess-new-reset-skills";
+  page.deliver({
+    type: "session", sessionId: newSid,
+    payload: { sessionId: newSid, cwd: "C:\\tmp", created: true,
+               turnActive: false, contextPercent: null },
+  });
+  // '/' should now show only a loading placeholder — no skill names.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(!names.includes("/qexplore"),
+    "old session skill 'qexplore' should not appear after a new 'session' frame; " +
+    "got: " + JSON.stringify(names));
+  // Should show the loading placeholder since both lists are now empty.
+  const placeholder = drop.querySelector(".acp-cmd-placeholder");
+  assert(placeholder && /loading/i.test(placeholder.textContent),
+    "placeholder should say 'Loading' after session reset (both lists empty); " +
+    "got: " + (placeholder && placeholder.textContent));
+});
+
+// Test 3: releaseSessionClearsSessionSkills
+// A session_closed frame triggers releaseSession(), which clears sessionSkills
+// so the dropdown shows the loading placeholder on the next '/' press.
+check("releaseSessionClearsSessionSkills", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qdream", description: "d" }] },
+  });
+  // Verify the skill appears.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrtKey: false, altKey: false, preventDefault() {},
+  });
+  {
+    const names = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
+                      .map((n) => n.textContent);
+    assert(names.includes("/qdream"),
+      "fixture: 'qdream' skill should appear before session_closed");
+  }
+  // Close dropdown.
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Escape", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  // session_closed triggers releaseSession() which clears sessionSkills.
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { sessionId: live, message: "Session closed." },
+  });
+  // '/' should now show the loading placeholder — sessionSkills was cleared.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(!names.includes("/qdream"),
+    "skill 'qdream' should be gone after session_closed (releaseSession clears it); " +
+    "got: " + JSON.stringify(names));
+  const placeholder = drop.querySelector(".acp-cmd-placeholder");
+  assert(placeholder && /loading/i.test(placeholder.textContent),
+    "placeholder should say 'Loading' after releaseSession clears both lists; " +
+    "got: " + (placeholder && placeholder.textContent));
+});
+
+// Test 4: slashKeyShowsSkillsInDropdown
+// Both command entries and skill entries appear when '/' is pressed with
+// both sessionCommands and sessionSkills populated.
+check("slashKeyShowsSkillsInDropdown", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "d" }] },
+  });
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden, "dropdown should be visible after '/' with both lists populated");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(names.includes("/tools"),
+    "dropdown should include the command entry '/tools'; got: " + JSON.stringify(names));
+  assert(names.includes("/qexplore"),
+    "dropdown should include the skill entry '/qexplore'; got: " + JSON.stringify(names));
+});
+
+// Test 5: skillEntriesShowBadge
+// Skill entries rendered in the dropdown carry an .acp-cmd-skill-badge element.
+check("skillEntriesShowBadge", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qplan", description: "Write a plan" }] },
+  });
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden, "fixture: dropdown should be open");
+  // Find the <li> for the skill entry.
+  const lis = drop.querySelectorAll("li");
+  const skillLi = lis.find((li) => {
+    const nameSpan = li.querySelector(".acp-cmd-name");
+    return nameSpan && nameSpan.textContent === "/qplan";
+  });
+  assert(skillLi, "could not find the <li> for '/qplan' skill entry");
+  const badge = skillLi.querySelector(".acp-cmd-skill-badge");
+  assert(badge,
+    "skill entry <li> should contain an element with class 'acp-cmd-skill-badge'");
+});
+
+// Test 6: commandEntriesDoNotShowBadge
+// Command entries rendered in the dropdown do NOT carry an .acp-cmd-skill-badge.
+check("commandEntriesDoNotShowBadge", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "context", description: "Context usage" }] },
+  });
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden, "fixture: dropdown should be open");
+  const badges = drop.querySelectorAll(".acp-cmd-skill-badge");
+  assertEqual(badges.length, 0,
+    "command entries should not render any .acp-cmd-skill-badge elements; " +
+    "found " + badges.length);
+});
+
+// Test 7: slashFilterMatchesSkillsByName
+// Typing '/qex' filters to skills whose name contains 'qex' and excludes
+// commands whose name does not match.
+check("slashFilterMatchesSkillsByName", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "d" }] },
+  });
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  // Open with '/' first, then type 'qex' to simulate the filtered state.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  // Simulate the filter: update prompt to '/qex' and fire input event.
+  page.el("acpPrompt").value = "/qex";
+  page.el("acpPrompt").dispatch("input");
+  const drop = page.el("acpCmdDropdown");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(names.includes("/qexplore"),
+    "'/qex' filter should match the 'qexplore' skill; got: " + JSON.stringify(names));
+  assert(!names.includes("/tools"),
+    "'/qex' filter should exclude 'tools' command; got: " + JSON.stringify(names));
+});
+
+// Test 8: emptyBothListsShowsLoadingPlaceholder
+// With both sessionCommands and sessionSkills empty (no frames delivered),
+// pressing '/' shows a placeholder that contains "Loading".
+check("emptyBothListsShowsLoadingPlaceholder", (tpl) => {
+  const { page } = connected(tpl);
+  // Neither 'commands' nor 'skills' frame has been delivered — both lists are empty.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  const placeholder = drop.querySelector(".acp-cmd-placeholder");
+  assert(placeholder,
+    "a placeholder element should be present when both lists are empty");
+  assert(/loading/i.test(placeholder.textContent),
+    "placeholder text should contain 'Loading' when catalogue not yet loaded; " +
+    "got: " + JSON.stringify(placeholder.textContent));
+  assert(!/no matching/i.test(placeholder.textContent),
+    "placeholder should not say 'No matching' when data has not loaded yet; " +
+    "got: " + JSON.stringify(placeholder.textContent));
+});
+
+// Test 9: loadedButNoMatchShowsNoMatchingPlaceholder
+// With data loaded but a filter that matches nothing, the placeholder says
+// "No matching" (not "Loading").
+check("loadedButNoMatchShowsNoMatchingPlaceholder", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "d" }] },
+  });
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  // Type a filter that matches nothing.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  page.el("acpPrompt").value = "/zzznotexists";
+  page.el("acpPrompt").dispatch("input");
+  const drop = page.el("acpCmdDropdown");
+  const placeholder = drop.querySelector(".acp-cmd-placeholder");
+  assert(placeholder,
+    "a placeholder element should be present when filter matches nothing");
+  assert(/no matching/i.test(placeholder.textContent),
+    "placeholder text should contain 'No matching' when data is loaded but nothing matched; " +
+    "got: " + JSON.stringify(placeholder.textContent));
+  assert(!/loading/i.test(placeholder.textContent),
+    "placeholder should not say 'Loading' when data is loaded; " +
+    "got: " + JSON.stringify(placeholder.textContent));
+});
+
+// Test 10: copyButtonPresentForLabeledCodeBlocks
+// A fenced block with a language label produces a .acp-md-copy button.
+check("copyButtonPresentForLabeledCodeBlocks", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "```python\nx = 1\n```\n", [
+    { type: "block_code", raw: "x = 1\n", style: "fenced", marker: "```",
+      attrs: { info: "python" } },
+  ]);
+  const body = bubble(page);
+  const copyBtns = body.querySelectorAll(".acp-md-copy");
+  assert(copyBtns.length > 0,
+    "a labeled code block should have an .acp-md-copy button; none found");
+});
+
+// Test 11: copyButtonAbsentForUnlabeledCodeBlocks
+// A fenced block with no language label produces no .acp-md-copy button.
+check("copyButtonAbsentForUnlabeledCodeBlocks", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "```\nplain block\n```\n", [
+    { type: "block_code", raw: "plain block\n", style: "fenced", marker: "```" },
+  ]);
+  const body = bubble(page);
+  const copyBtns = body.querySelectorAll(".acp-md-copy");
+  assertEqual(copyBtns.length, 0,
+    "an unlabeled code block should not have an .acp-md-copy button; " +
+    "found " + copyBtns.length);
+});
+
+// Test 12: copyButtonNotPresentInNonCodeBlocks
+// A response with only prose (no fenced block) produces no .acp-md-copy element.
+check("copyButtonNotPresentInNonCodeBlocks", (tpl) => {
+  const { page, live } = connected(tpl);
+  answered(page, live, "Plain prose with `inline code` only.\n", [
+    { type: "paragraph", children: [
+      { type: "text", raw: "Plain prose with " },
+      { type: "codespan", raw: "inline code" },
+      { type: "text", raw: " only." },
+    ] },
+  ]);
+  const body = bubble(page);
+  const copyBtns = body.querySelectorAll(".acp-md-copy");
+  assertEqual(copyBtns.length, 0,
+    "a response with no fenced code block should not have any .acp-md-copy element; " +
+    "found " + copyBtns.length);
 });
 
 let failed = 0;
