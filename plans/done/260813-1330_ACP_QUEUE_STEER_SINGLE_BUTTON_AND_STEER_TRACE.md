@@ -2,7 +2,7 @@
 
 > **Date**: 2026-08-13
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-13 13:42
 > **Scope**: Two /acp composer UX improvements — replace the two-button Queue/Steer group with a single-button+mode-select, and make injected steer text visible in the transcript during the session and across WS reconnects.
 > **Estimated effort**: 0.5–1 day
 
