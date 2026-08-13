@@ -236,7 +236,8 @@
          of the row and cannot affect the row's size or cause the textarea to
          shift when the dropdown opens. Built with createElement + textContent;
          empty in the markup. -->
-    <div id="acpCmdDropdown" hidden role="listbox" aria-label="Slash commands">
+    <!-- aria-label updated to reflect skills: 'Commands & skills' -->
+    <div id="acpCmdDropdown" hidden role="listbox" aria-label="Commands &amp; skills">
       <div class="acp-cmd-header">
         <span class="acp-cmd-header-label">Slash commands</span>
         <kbd class="acp-cmd-header-hint">↑↓ navigate · Enter select · Esc close</kbd>
@@ -455,7 +456,8 @@
   border-radius: 3px;
   background: var(--badge-bg, rgba(148, 163, 184, 0.18));
   color: var(--badge-fg, #94a3b8);
-  vertical-align: middle;
+  align-self: center;
+  user-select: none;
   line-height: 1.6;
 }
 /* ---- compaction / system message --------------------------------------- */
@@ -1784,6 +1786,7 @@
    *  handler path, not here, to avoid a double send when the input handler
    *  also calls this. */
   function showCommandDropdown(partial) {
+    // partial may be empty string (show all) or absent in programmatic invocations
     var lc = partial ? partial.toLowerCase() : '';
     // Merge commands and skills into one flat list; preserve server order
     // within each type (commands first, then skills).
@@ -1840,6 +1843,7 @@
         var badge = document.createElement('span');
         badge.className = 'acp-cmd-skill-badge';
         badge.textContent = 'skill';
+        badge.setAttribute('aria-hidden', 'true');
         li.appendChild(badge);
       }
       var descSpan = document.createElement('span');
@@ -2614,6 +2618,47 @@
     for (var i = 0; i < tokens.length; i++) mdNode(parent, tokens[i]);
   }
 
+  // Icon factories hoisted to module scope so they are created once rather
+  // than re-declared inside every mdNode call that renders a code block.
+  // Using createElementNS throughout because SVG elements must live in the
+  // SVG namespace — createElement produces HTML elements that browsers do
+  // not render as SVG shapes.
+  function makeCopyIcon() {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.5');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    var rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('x', '5');
+    rect.setAttribute('y', '1');
+    rect.setAttribute('width', '9');
+    rect.setAttribute('height', '11');
+    rect.setAttribute('rx', '1.5');
+    var path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', 'M2 5v9a1.5 1.5 0 0 0 1.5 1.5H11');
+    svg.appendChild(rect);
+    svg.appendChild(path);
+    return svg;
+  }
+  function makeCheckIcon() {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.8');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    var poly = document.createElementNS(NS, 'polyline');
+    poly.setAttribute('points', '2,8 6,13 14,4');
+    svg.appendChild(poly);
+    return svg;
+  }
+
   function mdNode(parent, token) {
     if (!token || typeof token !== 'object') return;
     var type = typeof token.type === 'string' ? token.type : '';
@@ -2650,54 +2695,23 @@
       // served without the highlighter is the transcript as it was.
       if (!mdColour(code, codeRaw, word)) code.textContent = codeRaw;
       pre.appendChild(code);
-      // Build a copy-to-clipboard button. The SVG is a minimal clipboard icon
-      // matching the rail settings button's shape. Clipboard API is best-effort:
-      // the block is still usable for selection+copy when it is unavailable.
+      // Language-less blocks are appended directly — no wrapper, no copy
+      // button (there is no label and no wrapper to pin the button to).
+      if (!word) {
+        parent.appendChild(pre);
+        return;
+      }
+      // Only labeled code blocks get the wrapper and copy-to-clipboard button.
+      // The SVG is a minimal clipboard icon matching the rail settings button's
+      // shape. Clipboard API is best-effort: the block is still usable for
+      // selection+copy when it is unavailable.
       // All DOM construction uses createElement/setAttribute — no innerHTML.
+      // makeCopyIcon / makeCheckIcon are hoisted to module scope above mdNode.
       var copyBtn = document.createElement('button');
       copyBtn.className = 'acp-md-copy';
       copyBtn.setAttribute('type', 'button');
       copyBtn.setAttribute('aria-label', 'Copy code');
       copyBtn.setAttribute('title', 'Copy code');
-      // Helper to build a minimal SVG clipboard or checkmark icon.
-      // Using createElementNS throughout because SVG elements must live in the
-      // SVG namespace — createElement produces HTML elements that browsers do
-      // not render as SVG shapes.
-      function makeCopyIcon() {
-        var NS = 'http://www.w3.org/2000/svg';
-        var svg = document.createElementNS(NS, 'svg');
-        svg.setAttribute('viewBox', '0 0 16 16');
-        svg.setAttribute('fill', 'none');
-        svg.setAttribute('stroke', 'currentColor');
-        svg.setAttribute('stroke-width', '1.5');
-        svg.setAttribute('stroke-linecap', 'round');
-        svg.setAttribute('stroke-linejoin', 'round');
-        var rect = document.createElementNS(NS, 'rect');
-        rect.setAttribute('x', '5');
-        rect.setAttribute('y', '1');
-        rect.setAttribute('width', '9');
-        rect.setAttribute('height', '11');
-        rect.setAttribute('rx', '1.5');
-        var path = document.createElementNS(NS, 'path');
-        path.setAttribute('d', 'M2 5v9a1.5 1.5 0 0 0 1.5 1.5H11');
-        svg.appendChild(rect);
-        svg.appendChild(path);
-        return svg;
-      }
-      function makeCheckIcon() {
-        var NS = 'http://www.w3.org/2000/svg';
-        var svg = document.createElementNS(NS, 'svg');
-        svg.setAttribute('viewBox', '0 0 16 16');
-        svg.setAttribute('fill', 'none');
-        svg.setAttribute('stroke', 'currentColor');
-        svg.setAttribute('stroke-width', '1.8');
-        svg.setAttribute('stroke-linecap', 'round');
-        svg.setAttribute('stroke-linejoin', 'round');
-        var poly = document.createElementNS(NS, 'polyline');
-        poly.setAttribute('points', '2,8 6,13 14,4');
-        svg.appendChild(poly);
-        return svg;
-      }
       copyBtn.appendChild(makeCopyIcon());
       (function (btn, text) {
         btn.addEventListener('click', function () {
@@ -2713,10 +2727,6 @@
           });
         });
       }(copyBtn, codeRaw));
-      if (!word) {
-        parent.appendChild(pre);
-        return;
-      }
       var named = MD_LANG_NAME[word];
       var lang = typeof named === 'string' ? named : word;
       // Drawn by the stylesheet out of `data-lang` rather than appended as an
