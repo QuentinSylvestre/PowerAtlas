@@ -1779,14 +1779,15 @@
    *  the WS frame for server-side suggestions is sent by the debounced input
    *  handler path, not here, to avoid a double send when the input handler
    *  also calls this. */
-  function showCommandDropdown(partial) {
+  function showCommandDropdown(partial, filter) {
     // partial may be empty string (show all) or absent in programmatic invocations
+    // filter: 'skills' = skills only (mid-text /); 'all' or undefined = both
     var lc = partial ? partial.toLowerCase() : '';
     // Merge commands and skills into one flat list; preserve server order
     // within each type (commands first, then skills).
-    var allItems = sessionCommands.map(function(c) {
+    var allItems = (filter === 'skills' ? [] : sessionCommands.map(function(c) {
       return {name: c.name, description: c.description, isSkill: false};
-    }).concat(sessionSkills.map(function(s) {
+    })).concat(sessionSkills.map(function(s) {
       // Skill descriptions are verbose multi-sentence paragraphs — show only
       // the first sentence so the row stays compact.
       var desc = s.description || '';
@@ -1799,7 +1800,10 @@
     });
     // Cap at 5 items to keep the palette compact.
     if (items.length > 5) items = items.slice(0, 5);
-    renderCommandDropdown(items, sessionCommands.length === 0 && sessionSkills.length === 0);
+    var catalogueEmpty = filter === 'skills'
+      ? sessionSkills.length === 0
+      : sessionCommands.length === 0 && sessionSkills.length === 0;
+    renderCommandDropdown(items, catalogueEmpty);
   }
 
   /** Re-render the dropdown list from an array of `{name, description?, isSkill?}`.
@@ -6421,12 +6425,10 @@
     var cmdMatch = val.match(/(?:^|\s)(\/\S*)$/);
     if (cmdMatch) {
       var partial = cmdMatch[1].slice(1);
-      // Show client-side filtered results from the catalogue received via the
-      // 'commands' frame. No server round-trip here: _kiro.dev/commands/options
-      // is for argument completion AFTER a command is selected (called with the
-      // command name as the first param), not for filtering the command list.
-      // Sending it with command="" causes kiro-cli to exit — confirmed 2026-08-12.
-      showCommandDropdown(partial);
+      var isMidText = cmdMatch[0].charAt(0) === ' ' || (cmdMatch.index > 0);
+      // Mid-text (space before /): show skills only — slash-commands replace the
+      // whole prompt so they are not useful mid-sentence; skills are.
+      showCommandDropdown(partial, isMidText ? 'skills' : 'all');
     } else {
       // Value no longer starts with / alone or has a space — hide the palette.
       hideCommandDropdown();
