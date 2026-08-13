@@ -3317,6 +3317,10 @@ _supervisor = _Supervisor()
 
 def _crew_toolcallid(parent_id: str) -> str:
     """Return the spawner tool-call id for the current fan-out, or '' if unknown."""
+    # Returns '' when the session has no recorded toolCallId (turn not started yet,
+    # or toolCallId already popped at turn-end). The subscribe gate (`if crew and ...`)
+    # ensures this helper is only called while a live crew entry exists, so the
+    # '' fallback is reached only by the single-inflight no-anchor path.
     return _supervisor.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
 
 
@@ -4180,8 +4184,13 @@ def _evict_crew_children(session_id: str, *, keep_history: bool,
     ``subagent_sessions`` is popped only when ``keep_history=False`` (turn-start
     path), so the routing key stays alive on the turn-end path — clicking a
     sub-agent after the turn ends still routes to ``_handle_subagent_subscribe``
-    rather than returning ``unknown_session``.
+    rather than returning ``unknown_session``. ``subagent_sessions`` is the
+    routing key ``_handle_subagent_subscribe`` consults for click-to-view
+    (SC6); preserve it until ``close_session``.
     """
+    # NOTE: crew_spawn_toolcallids is NOT cleaned here — it is a per-session-fan-out
+    # scalar (not a per-child-entry key). Both call sites pop it unconditionally
+    # after this call. See _handle_prompt turn-start and turn-end.
     crew = _supervisor.crews.get(session_id)
     if not crew:
         return
@@ -4197,6 +4206,8 @@ def _evict_crew_children(session_id: str, *, keep_history: bool,
         _supervisor.crews.pop(session_id, None)
         if broadcast_empty:
             # Nothing left — tell attached sockets to clear the old panel.
+            # toolCallId intentionally absent from the empty frame — the client
+            # handles this via `payload.toolCallId || ''` fallback.
             _registry.broadcast(session_id, envelope(
                 "subagents", {"subagents": []}, session_id))
     elif broadcast_empty:

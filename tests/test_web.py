@@ -17370,6 +17370,8 @@ class TestAcpSubscribeSnapshotGate:
         subagents_frame = next(f for f in frames if f["type"] == "subagents")
         assert any(e["sessionId"] == "sub-active"
                    for e in subagents_frame["payload"]["subagents"])
+        assert "toolCallId" in subagents_frame.get("payload", {}), \
+            "subscribe snapshot must include toolCallId"
 
     def test_inflight_session_with_all_done_crew_sends_subagents_frame(
             self, acp_store):
@@ -17392,6 +17394,9 @@ class TestAcpSubscribeSnapshotGate:
         acp_mod._handle_subscribe(conn, sid)
         frames = _queued(conn)
         assert "subagents" in [f["type"] for f in frames]
+        subagents_frame = next(f for f in frames if f["type"] == "subagents")
+        assert "toolCallId" in subagents_frame.get("payload", {}), \
+            "subscribe snapshot must include toolCallId"
 
 
 class TestAcpCrewSpawnerToolCallId:
