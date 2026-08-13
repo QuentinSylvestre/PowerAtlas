@@ -616,8 +616,14 @@ QA: SKIP — test-only phase, runtime surface is the test run itself (352/353 pa
 - **`plans/ROADMAP.md` (line 134)** (Skills support item): Mark the "skills in palette" and "skills discoverable before first turn" sub-gaps as resolved by this plan. Narrow the remaining scope to: `$ARGUMENTS` verification (unverified over ACP) and Claude Code skill invocation (out of scope here).
 
 **Exit criteria**:
-- [ ] `docs/KNOWLEDGE.md` updated to describe skills extraction, `"skills"` frame, and badged palette; counts reconciled
-- [ ] `plans/ROADMAP.md` Skills support item updated to reflect resolved sub-gaps
+- [x] `docs/KNOWLEDGE.md` updated to describe skills extraction, `"skills"` frame, and badged palette; counts reconciled
+- [x] `plans/ROADMAP.md` Skills support item updated to reflect resolved sub-gaps
+
+#### Implementation (2026-08-13, code: 1caee22)
+
+`docs/KNOWLEDGE.md` — the `_kiro.dev/commands/available` bullet was expanded to cover the full skills-discovery implementation: probe-verified counts (25 commands + 26 skill prompts), `_parse_skills()` helper and its two discriminants, `meta["skills"]` storage, `"skills"` WS frame broadcast and subscribe replay, `_pending_commands` single-slot buffer, `available_commands_update` handler for mid-session mode switches, and frontend palette behavior (flat list, skill badge, two-state placeholder). `plans/ROADMAP.md` — Skills support item rewritten: two sub-gaps closed (skills in palette before first turn), two items left open (`$ARGUMENTS` verification unverified over ACP; Claude Code skills out of scope).
+
+Per-phase review deferred to Step 9: documentation-only, 7 lines changed, no executable code.
 
 ## 6) Risk Assessment
 
