@@ -1734,6 +1734,11 @@ class _Supervisor:
         # is used; cleaned up on turn end (`_handle_prompt` finally), terminal
         # `tool_call_update`, `close_session`, and `_detach`.
         self.crew_spawn_anchors: dict[str, str] = {}
+        # `crew_spawn_toolcallids`: session_id -> spawner toolCallId for the most-recent
+        # active fan-out. Updated on each `_on_subagent_list` call when an anchor is
+        # consumed or the single-inflight path fires. Cleared at turn-end, turn-start
+        # empty-crew branch, close_session, and _detach.
+        self.crew_spawn_toolcallids: dict[str, str] = {}
         # Sessions with a compaction currently in progress. Set when a
         # `compaction/status started` notification arrives, cleared on
         # `completed` or `failed`. Used for attribution when `inflight` is
@@ -2017,6 +2022,7 @@ class _Supervisor:
         self.subagent_sessions.clear()
         self.subagent_history.clear()
         self.crew_spawn_anchors.clear()
+        self.crew_spawn_toolcallids.clear()
         self._compacting.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
@@ -2521,6 +2527,10 @@ class _Supervisor:
         inflight = self.inflight
         if len(inflight) == 1:
             parent_id = next(iter(inflight))
+            # Single-inflight: no anchor to consume; record empty string so the
+            # client falls back to bottom-append for this fan-out.
+            if parent_id not in self.crew_spawn_toolcallids:
+                self.crew_spawn_toolcallids[parent_id] = ""  # no anchor; client falls back
         else:
             # Zero or 2+ in-flight sessions — try the spawner anchor as a fallback.
             # `inflight ⊆ sessions` always holds; a session that closed has had
@@ -2541,6 +2551,11 @@ class _Supervisor:
                 # Use list-snapshot to avoid mutating the dict during iteration.
                 for _tcid in [k for k, v in self.crew_spawn_anchors.items()
                               if v == parent_id][:1]:
+                    # Record spawner toolCallId for the inline panel anchor (Phase 2).
+                    # Only record on first call for this parent; subsequent list_updates
+                    # keep the same toolCallId (the fan-out doesn't change mid-turn).
+                    if parent_id not in self.crew_spawn_toolcallids:
+                        self.crew_spawn_toolcallids[parent_id] = _tcid
                     self.crew_spawn_anchors.pop(_tcid, None)
                 log.debug("ACP subagent_list: attributed to %s via spawner anchor"
                           " (%d in-flight sessions)", parent_id, len(inflight))
@@ -2895,11 +2910,22 @@ class _Supervisor:
                 log.debug("ACP commands_available: %d session(s) inflight, %d known — "
                           "cannot attribute; dropped", len(inflight), len(self.sessions))
             return
-        if method == "kiro.dev/compaction/status":
-            status = params.get("status") or {}
+        if method == "kiro.dev/compaction/status" or kind == "compaction_status":
+            # Two delivery shapes observed in the wild:
+            # 1. method == "kiro.dev/compaction/status": KAS → TUI direction.
+            #    params = {status: {type, error}, summary}
+            # 2. kind == "compaction_status" (session/update notification): TUI → ACP
+            #    client direction. update = {sessionUpdate: "compaction_status",
+            #    status: "started"|"completed"|"failed", summary, ...}
+            #    The TUI translates KAS's summarization_* session/update kinds into
+            #    this shape before forwarding to connected ACP clients.
+            # Both shapes are supported; the isinstance check below handles the
+            # nested-dict (shape 1) vs plain-string (shape 2) status field.
+            src = update if kind == "compaction_status" else params
+            status = src.get("status") or {}
             stype = _as_text(status.get("type")) if isinstance(status, dict) else _as_text(status)
             error = _as_text(status.get("error")) if isinstance(status, dict) else ""
-            summary = _as_text(params.get("summary"))
+            summary = _as_text(src.get("summary"))
             inflight = self.inflight
             sid = None
             if len(inflight) == 1:
@@ -3251,6 +3277,7 @@ class _Supervisor:
         for _tcid in [k for k, v in self.crew_spawn_anchors.items()
                       if v == session_id]:
             self.crew_spawn_anchors.pop(_tcid, None)
+        self.crew_spawn_toolcallids.pop(session_id, None)
         _bubbles.pop(session_id, None)
         # This session's crew, if it ever dispatched a fan-out. A sub-agent's
         # own history/bubble go with it — nothing else can ever name a child
@@ -3340,8 +3367,11 @@ def _emit_subagents_frame(parent_id: str) -> None:
     crew = _supervisor.crews.get(parent_id)
     if not crew:
         return
+    toolcall_id = _supervisor.crew_spawn_toolcallids.get(parent_id, "")
     _registry.broadcast(parent_id, envelope(
-        "subagents", {"subagents": _subagents_payload(crew)}, parent_id))
+        "subagents",
+        {"subagents": _subagents_payload(crew), "toolCallId": toolcall_id},
+        parent_id))
 
 
 # session id -> the agent prose accumulated for the **bubble** currently open on
@@ -3690,8 +3720,11 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         # reload's only source for "which sub-agents does this session have"
         # is rebuilding it here, the same way `turnActive`/`contextPercent`
         # are rebuilt onto the `session` frame above rather than replayed.
+        toolcall_id = _supervisor.crew_spawn_toolcallids.get(session_id, "")
         conn.send(envelope(
-            "subagents", {"subagents": _subagents_payload(crew)}, session_id))
+            "subagents",
+            {"subagents": _subagents_payload(crew), "toolCallId": toolcall_id},
+            session_id))
     commands = meta.get("commands")
     if commands is not None:
         conn.send(envelope("commands", {"commands": commands}, session_id))
@@ -4244,6 +4277,9 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     # stacking on top of earlier fan-outs' cards.  Running entries (shouldn't
     # exist at turn start, but guard defensively) are left alone.
     _evict_crew_children(session_id, keep_history=False, broadcast_empty=True)
+    # Clear any stale spawner toolCallId from the prior turn so the next
+    # fan-out starts with a clean mapping.
+    _supervisor.crew_spawn_toolcallids.pop(session_id, None)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
     # What stands for this prompt everywhere it is not the raw bytes: the
@@ -4316,7 +4352,9 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # _finishing_crew is the same dict object as above — force-mark only mutated
         # values, never removed keys.
         _evict_crew_children(session_id, keep_history=True, broadcast_empty=False)
-        # Phase 2 adds unconditionally after the if-block: _supervisor.crew_spawn_toolcallids.pop(session_id, None)
+        # Unconditionally clear the spawner toolCallId at turn-end so a
+        # subscribe snapshot after the turn never sees a stale value.
+        _supervisor.crew_spawn_toolcallids.pop(session_id, None)
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         # In the `finally` and above the end marker, so the markdown of a turn
         # that was cancelled or that errored is still rendered — `stop_reason`

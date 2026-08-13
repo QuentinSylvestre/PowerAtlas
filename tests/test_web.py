@@ -2566,6 +2566,7 @@ def acp_session():
         acp_mod._supervisor.subagent_sessions.clear()
         acp_mod._supervisor.subagent_history.clear()
         acp_mod._supervisor.crew_spawn_anchors.clear()
+        acp_mod._supervisor.crew_spawn_toolcallids.clear()
 
 
 class TestAcpServerTypeGuard:
@@ -4330,6 +4331,7 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.subagent_sessions.clear()
         acp_mod._supervisor.subagent_history.clear()
         acp_mod._supervisor.crew_spawn_anchors.clear()
+        acp_mod._supervisor.crew_spawn_toolcallids.clear()
         acp_mod._supervisor._compacting.clear()
         acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
@@ -10854,6 +10856,9 @@ class TestAcpSubagentsFrameDelivery:
         frames = _queued(conn)
         assert frames and frames[-1]["type"] == "subagents"
         assert frames[-1]["payload"]["subagents"][0]["sessionId"] == "sub-1"
+        # Phase 2: toolCallId must be present at the frame level (not per-entry).
+        assert "toolCallId" in frames[-1]["payload"]
+        assert "toolCallId" not in frames[-1]["payload"]["subagents"][0]
         assert all(e["type"] != "subagents"
                    for e in acp_mod._supervisor.history[sid].events())
 
@@ -16485,15 +16490,37 @@ class TestAcpCompactionStatus:
         acp_mod._registry.attach(conn, sid)
         return conn
 
-    def _notify(self, acp_mod, status_type, error=None, summary=None):
+    def _notify(self, acp_mod, status_type, error=None, summary=None, sid=None):
+        """Shape 1: method == 'kiro.dev/compaction/status' with nested status dict."""
         status = {"type": status_type}
         if error is not None:
             status["error"] = error
         params = {"status": status}
         if summary is not None:
             params["summary"] = summary
+        if sid is not None:
+            params["sessionId"] = sid
         acp_mod._supervisor._on_notification({
             "method": "kiro.dev/compaction/status",
+            "params": params,
+        })
+
+    def _notify_via_session_update(self, acp_mod, status_type, error=None, summary=None, sid=None):
+        """Shape 2: _kiro.dev/session/update with sessionUpdate=='compaction_status'.
+
+        This is the actual wire shape used when PowerAtlas is the ACP client —
+        the TUI translates KAS summarization_* events into this shape.
+        """
+        update: dict = {"sessionUpdate": "compaction_status", "status": status_type}
+        if error is not None:
+            update["error"] = error
+        if summary is not None:
+            update["summary"] = summary
+        params: dict = {"update": update}
+        if sid is not None:
+            params["sessionId"] = sid
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/session/update",
             "params": params,
         })
 
@@ -16566,6 +16593,57 @@ class TestAcpCompactionStatus:
         _queued(conn)
         # inflight empty by default
         self._notify(acp_mod, "started")
+        frames = _queued(conn)
+        assert len(frames) == 1 and frames[0]["type"] == "compaction"
+        assert frames[0]["payload"]["status"] == "started"
+
+    # --- Shape 2: session/update with kind == "compaction_status" ---
+    # This is the actual wire shape used when PowerAtlas is the ACP client.
+    # The TUI translates KAS summarization_* events into this shape before
+    # forwarding to connected ACP clients.
+
+    def test_session_update_started_broadcasts_compaction_frame(self, acp_session):
+        """session/update shape: ``started`` broadcasts a ``compaction`` frame."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+        try:
+            self._notify_via_session_update(acp_mod, "started", summary="Compacting…")
+            frames = _queued(conn)
+            assert len(frames) == 1
+            assert frames[0]["type"] == "compaction"
+            assert frames[0]["payload"]["status"] == "started"
+            assert frames[0]["payload"]["error"] == ""
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_session_update_completed_broadcasts_compaction_and_resets_context(self, acp_session):
+        """session/update shape: ``completed`` broadcasts compaction + meta frames."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.sessions[sid]["contextPercent"] = 90.0
+        _queued(conn)
+        try:
+            self._notify_via_session_update(acp_mod, "completed", summary="Done")
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert "compaction" in types
+            assert "meta" in types
+            comp = next(f for f in frames if f["type"] == "compaction")
+            assert comp["payload"]["status"] == "completed"
+            meta = next(f for f in frames if f["type"] == "meta")
+            assert meta["payload"]["contextPercent"] is None
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
+
+    def test_session_update_zero_inflight_routes_to_single_session(self, acp_session):
+        """session/update shape: fires after turn end, attributed to last-used session."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        self._notify_via_session_update(acp_mod, "started")
         frames = _queued(conn)
         assert len(frames) == 1 and frames[0]["type"] == "compaction"
         assert frames[0]["payload"]["status"] == "started"
@@ -17314,3 +17392,83 @@ class TestAcpSubscribeSnapshotGate:
         acp_mod._handle_subscribe(conn, sid)
         frames = _queued(conn)
         assert "subagents" in [f["type"] for f in frames]
+
+
+class TestAcpCrewSpawnerToolCallId:
+    """Phase 2: _supervisor.crew_spawn_toolcallids lifecycle.
+
+    Tests cover the anchor-consumption path, the single-inflight path, the
+    no-overwrite guarantee on subsequent list_updates, turn-end cleanup, and
+    close_session cleanup.
+    """
+
+    def test_anchor_path_sets_toolcallid(self, acp_store):
+        """Anchor-consumption path: consumed _tcid becomes the value for parent_id."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        # Register an anchor (toolCallId -> session_id) before the list update.
+        tcid = "tc-anchor-1"
+        acp_mod._supervisor.crew_spawn_anchors[tcid] = sid
+        # Two in-flight sessions would make attribution ambiguous; add a second
+        # session to the inflight set that has *no* anchor, so the anchor path fires.
+        sid2 = _live_session(acp_mod, sid="other-session")
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.inflight.add(sid2)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-a", "role": "worker", "status": {"type": "working"}},
+        ]})
+        assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == tcid
+        # Anchor should be consumed.
+        assert tcid not in acp_mod._supervisor.crew_spawn_anchors
+
+    def test_single_inflight_path_sets_empty_toolcallid(self, acp_store):
+        """Single-inflight path (no anchor): crew_spawn_toolcallids[parent_id] == ''."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        # No anchor registered — single-inflight path.
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-b", "role": "worker", "status": {"type": "working"}},
+        ]})
+        assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == ""
+
+    def test_second_list_update_does_not_overwrite_toolcallid(self, acp_store):
+        """Subsequent _on_subagent_list calls for the same parent do not overwrite
+        the toolCallId set on the first call."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        # First call — sets the empty-string value via the single-inflight path.
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-c", "role": "worker", "status": {"type": "working"}},
+        ]})
+        first_value = acp_mod._supervisor.crew_spawn_toolcallids.get(sid)
+        # Second call — should not overwrite.
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-c", "role": "worker", "status": {"type": "working"}},
+        ]})
+        assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == first_value
+
+    def test_turn_end_cleanup_pops_toolcallid(self, acp_store):
+        """After _run_turn_with_crew, crew_spawn_toolcallids has no entry for session."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        # Seed a toolcallid entry to make sure cleanup actually runs.
+        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "tc-turn-end"
+        TestAcpCrewCleanupOnTurnEnd()._run_turn_with_crew(acp_mod, sid)
+        assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
+
+    def test_close_session_pops_toolcallid(self, acp_store):
+        """close_session removes the crew_spawn_toolcallids entry for the session."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "some-id"
+
+        async def fake_request(self_, method, params, timeout=None):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._supervisor.close_session(sid))
+
+        assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
