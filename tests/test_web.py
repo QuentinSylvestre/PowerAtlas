@@ -17463,46 +17463,66 @@ class TestAcpCrewSpawnerToolCallId:
         assert acp_mod._supervisor.crew_spawn_toolcallids.get(sid) == "tcid-1"
 
     def test_turn_end_cleanup_pops_toolcallid(self, acp_store):
-        """After _run_turn_with_crew, crew_spawn_toolcallids has no entry for session.
+        """Turn-end finally pop removes a toolCallId seeded mid-turn.
 
-        _run_turn_with_crew seeds crew_spawn_toolcallids during the turn via
-        _on_subagent_list (through the turn-start fan-out). The turn-end pop in
-        _handle_prompt's finally block removes it. The turn-start pop also
-        runs unconditionally, but at this point no pre-seeded value exists —
-        _run_turn_with_crew itself sets the value mid-turn via the crew path.
+        Strategy: patch _supervisor.prompt to a coroutine that seeds
+        crew_spawn_toolcallids[sid] AFTER the turn-start pop has already fired
+        (the prompt coroutine runs inside the try block). The turn-end finally
+        pop must then clear it — if the finally pop were absent the assertion
+        would fail. This exclusively tests the turn-end pop: the seed is
+        injected after the turn-start pop, so the turn-start pop cannot be
+        responsible for the cleanup.
         """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
-        # Do NOT pre-seed crew_spawn_toolcallids[sid] here; _run_turn_with_crew
-        # sets it mid-turn. Pre-seeding would make the turn-start pop clear it,
-        # leaving the turn-end pop a no-op and proving nothing.
-        TestAcpCrewCleanupOnTurnEnd()._run_turn_with_crew(acp_mod, sid)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+
+        async def fake_prompt_that_seeds(session_id, text, images=None):
+            # Executes inside the try block, after turn-start pop has already
+            # fired.  Seed a value that only the turn-end finally pop can clear.
+            acp_mod._supervisor.crew_spawn_toolcallids[session_id] = "seeded-mid-turn"
+            return {"stopReason": "end_turn"}
+
+        with patch.object(acp_mod._Supervisor, "prompt", fake_prompt_that_seeds), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+
+        # The turn-end finally pop must have cleared the mid-turn seed.
         assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
 
     def test_turn_start_clears_stale_toolcallid(self, acp_store):
         """Turn-start unconditional pop removes a stale toolCallId from the prior turn.
 
-        Seeds crew_spawn_toolcallids[sid] directly (simulating a stale value left
-        from a previous turn), then runs _handle_prompt with no crew so the turn-end
-        pop has nothing to clear. Asserts the entry is absent after the turn — proving
-        the turn-start pop (not the turn-end pop) did the cleanup.
+        Strategy: pre-seed crew_spawn_toolcallids[sid], then patch
+        _supervisor.prompt to a coroutine that asserts the value is ALREADY
+        ABSENT when the prompt executes — proving the turn-start pop ran before
+        the prompt body.  The coroutine then re-seeds a fresh value so the
+        turn-end pop also exercises (absence after the full turn confirms both
+        sites cleared correctly).  The key discriminating assertion is the one
+        INSIDE the coroutine: it fires after turn-start and before turn-end.
         """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
-        # Seed a stale value as if a prior turn left it behind
+        # Pre-seed a stale value simulating a prior turn that did not clean up.
         acp_mod._supervisor.crew_spawn_toolcallids[sid] = "stale-value"
         conn = _acp_conn(acp_mod)
         acp_mod._registry.attach(conn, sid)
 
-        async def fake_request(self_, method, params, timeout=None):
+        async def fake_prompt_that_witnesses(session_id, text, images=None):
+            # Turn-start pop must have run BEFORE this coroutine executes.
+            assert session_id not in acp_mod._supervisor.crew_spawn_toolcallids, (
+                "turn-start pop did NOT run before prompt — stale value still present"
+            )
+            # Re-seed so the turn-end pop also has something to clean.
+            acp_mod._supervisor.crew_spawn_toolcallids[session_id] = "mid-turn"
             return {"stopReason": "end_turn"}
 
-        # Run a turn with no crew so the turn-end pop is a no-op.
-        # The turn-start pop (unconditional) clears the stale value.
-        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+        with patch.object(acp_mod._Supervisor, "prompt", fake_prompt_that_witnesses), \
                 patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
             asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
 
+        # Both pops ran: stale cleared at turn-start, mid-turn cleared at turn-end.
         assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
 
     def test_close_session_pops_toolcallid(self, acp_store):

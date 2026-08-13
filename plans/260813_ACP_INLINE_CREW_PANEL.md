@@ -265,7 +265,7 @@ Phase 1 extracted `_evict_crew_children(session_id, *, keep_history, broadcast_e
 - [x] `_emit_subagents_frame` broadcasts `{"subagents": [...], "toolCallId": "..."}`.
 - [x] `_handle_subscribe` snapshot includes `toolCallId`.
 - [x] `_subagents_payload` signature is unchanged (no per-entry `toolCallId` field).
-- [x] `TestAcpCrewSpawnerToolCallId` passes all four sub-cases.
+- [x] `TestAcpCrewSpawnerToolCallId` passes all six sub-cases (anchor path, single-inflight, no-overwrite guard, turn-end cleanup, turn-start cleanup, close_session).
 - [x] Updated `TestAcpSubagentsFrameDelivery` passes.
 - [x] Full pytest suite green.
 

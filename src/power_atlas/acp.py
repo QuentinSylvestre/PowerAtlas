@@ -1622,6 +1622,11 @@ def _new_session_record(cwd: str) -> dict:
     }
 
 
+# Sentinel used when a `subagents` fan-out has no recorded spawner tool-call id
+# (single-inflight path) — the client falls back to bottom-appending the panel.
+_NO_ANCHOR_TOOLCALLID: Final[str] = ""
+
+
 class _Supervisor:
     """The single ``kiro-cli acp`` process, and the JSON-RPC channel to it.
 
@@ -2954,6 +2959,10 @@ class _Supervisor:
                 self._compacting.add(sid)
             elif stype in ("completed", "failed") and sid is not None:
                 self._compacting.discard(sid)
+            log.info("ACP compaction_status: stype=%r sid=%s kind=%r "
+                     "_compacting=%r inflight=%d sessions=%d",
+                     stype, sid, kind, self._compacting,
+                     len(inflight), len(self.sessions))
             if sid is not None:
                 if stype == "completed":
                     # Reset context meter
@@ -3304,11 +3313,6 @@ class _Supervisor:
 
 
 _supervisor = _Supervisor()
-
-
-# Sentinel used when a `subagents` fan-out has no recorded spawner tool-call id
-# (single-inflight path) — the client falls back to bottom-appending the panel.
-_NO_ANCHOR_TOOLCALLID: Final[str] = ""
 
 
 def _crew_toolcallid(parent_id: str) -> str:
