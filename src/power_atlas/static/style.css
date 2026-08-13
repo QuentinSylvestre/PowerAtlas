@@ -915,7 +915,7 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    is a transcript somebody reads, and prose is what it holds. */
 .acp-msg-md th, .acp-msg-md td { border: 1px solid var(--border); padding: 3px 8px; text-align: left; min-width: 4ch; word-break: normal; overflow-wrap: anywhere; }
 .acp-msg-md th { background: var(--surface); color: var(--text); font-weight: 600; }
-.acp-msg-md td { color: var(--text-muted); }
+.acp-msg-md td { color: var(--text); }
 .acp-msg-md tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
 /* The `:---:` delimiter's alignment, arriving as a class rather than as an
    inline style — the page puts no wire string into a CSS property. `left` is
