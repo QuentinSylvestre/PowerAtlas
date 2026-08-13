@@ -1,7 +1,7 @@
 # ACP Queue/Steer Single-Button Mode Picker and Steer Trace Visibility
 
 > **Date**: 2026-08-13
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Two /acp composer UX improvements — replace the two-button Queue/Steer group with a single-button+mode-select, and make injected steer text visible in the transcript during the session and across WS reconnects.
 > **Estimated effort**: 0.5–1 day
@@ -324,7 +324,13 @@ if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !isTouchD
 - [x] `"Steer was not accepted by the agent."` error message remains in `steer_ack` rejection path (unchanged)
 - [x] Enter during turn with steer mode → steer frame sent; Enter during turn with queue mode → queued prompt stored; Enter outside turn → `sendPrompt()` called
 - [x] `README.md` updated: "two stacked half-height buttons" reworded to describe single button + mode selector
-- [x] `node tests/acp_page.test.mjs` passes; expected count: **324/324** (319 baseline + 5 new; pre-existing dashboard-link failure is a known pre-existing failure, not a regression)
+- [x] `node tests/acp_page.test.mjs` passes; expected count: **326/327** (321 baseline + 5 Phase-1 + 2 cycle-1 auto-fix additions = 328 total registrations minus 2 skipped groups = 326 pass; pre-existing dashboard-link failure unchanged)
+
+#### Implementation (2026-08-13, code: 8102e9d + c718b87)
+
+Phase 1 replaced the two half-height Queue/Steer buttons in `acp.html` with a single full-height `#acpSendMode` button and an adjacent `#acpModeSelect` select element. CSS rules added to the page's inline `<style>` block (not `style.css`, per AGENTS.md). JS variables updated to `sendModeBtn`/`modeSelect`/`SEND_MODE_KEY`/`_sendMode` with localStorage persistence and validation; `modeSelect.addEventListener('change')` handler updates button label/aria-label and persists selection; separate `queueBtn`/`steerBtn` click handlers merged into single `sendModeBtn.addEventListener('click')` dispatcher with `modeSelect.disabled` toggled alongside `sendModeBtn.disabled` at all sites. "Steer sent." note removed from `steer_ack` success path. Enter-during-turn branch added. All 16 existing queue/steer tests updated; 5 new tests added; `El.click()` added to test harness. Cycle-1 auto-fix added 2 `flushToolGroups` tests and corrected `style.css` dead rules, `aria-controls`, `aria-live`, and `send()` return guard.
+
+Step 5b QA: BLOCKED — requires PowerAtlas running for browser verification. Deferred to Step 9b exhaustive QA.
 
 ---
 
@@ -531,6 +537,25 @@ node tests/acp_page.test.mjs
 | 10 | Medium | Exit criteria didn't verify all `_steerPending` recovery paths restore `sendModeBtn.disabled`, `promptInput.disabled`, and `modeSelect.disabled`. | Fixed — explicit exit criterion bullet added covering all 5 recovery paths. |
 | 11 | Low | `sendModeBtn` had no `aria-label` beyond button text; mode change needed to update `aria-label` too. | Fixed — `aria-label` set at init and updated by change handler. |
 | 12 | Low | Line numbers in Section 1 were ~50 lines off from actual file. | Fixed — Section 1 now says "approximate" and instructs implementer to grep for exact locations. |
+
+### 2026-08-13 — Implementation Review (after Phase 1, personas: Senior engineer, End-user advocate, Maintainability reviewer, Reliability engineer)
+
+Implementation health: Green (after cycle-1 auto-fix).
+2 cycles. Cycle 1: 9 findings (3 Medium, 6 Low) — all auto-fixed. Cycle 2: 2 findings (0 Medium, 1 Low + 1 refuted).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `style.css` dead `.acp-queue-steer {flex-direction:column}` and `.acp-queue,.acp-steer` rules not removed; old column rule creates fragile cascade dependency. | Fixed — dead CSS rules deleted from style.css; comment updated. |
+| 2 | Medium | Two `flushToolGroups()` hunks added out of Phase 1 scope with no tests and not in divergences log. | Fixed — 2 tests added; Section 9 divergences log filled. |
+| 3 | Medium | `aria-controls="acpSendMode"` missing on `modeSelect`; SR user doesn't know select controls adjacent button. | Fixed — attribute added to select element. |
+| 4 | Medium | `send()` return value not checked in steer path; if WS CLOSING, controls disabled with no immediate recovery. | Fixed — `if (!send(...)) { restore controls; return; }` guard added. |
+| 5 | Low | Error-frame steer recovery test missing `modeSelect.disabled === false` assertion (5th recovery path). | Fixed — assertion added. |
+| 6 | Low | Stale HTML comment near `#acpQueueSteer` described "two half-height buttons". | Fixed — comment updated. |
+| 7 | Low | No `aria-live` region for mode change announcement. | Fixed — visually-hidden `acpModeLiveRegion` span added; updated by change handler. |
+| 8 | Low | `agent_died` handler assigned `_steerPending = null` before `disabled = false` lines — ordering inconsistency. | Fixed — moved `_steerPending = null` after control re-enable lines. |
+| C2-1 | Low | Missing `.acp-queue-steer` display/flex rule (cycle-2 finding). | Refuted — `display:flex;flex-direction:row` rule exists in acp.html inline `<style>` at L498, correct per AGENTS.md. |
+| C2-2 | Low | Phase 1 exit criterion test count stale (324 vs actual 326). | Fixed — exit criterion updated to 326/327. |
+| F8 | Low | README leaves gap between Phase 1 (note removed) and Phase 2 (band not yet landed). | User: accepted — Phase 2 lands the band description; documenting an interim state would mislead. README Phase-1 update correctly describes the button structure only. |
 
 ## Harness Improvement Opportunities
 
