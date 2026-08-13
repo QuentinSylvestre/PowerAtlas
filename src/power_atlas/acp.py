@@ -2561,10 +2561,9 @@ class _Supervisor:
                 continue
             role = _first_text(entry, _SUBAGENT_ROLE_KEYS)
             task = _first_text(entry, _SUBAGENT_TASK_KEYS)[:MAX_SUBAGENT_TASK_CHARS]
-            # `sessionName` is _SUBAGENT_TASK_KEYS[1] — the short per-stage slug (e.g. "count_src").
-            # Extracted separately from `task` (= initialQuery, the full prompt) because they serve
-            # different purposes: task is for fallback display, sessionName is for the primary label.
-            session_name = _first_text(entry, ("sessionName",))  # always the second key in _SUBAGENT_TASK_KEYS; using literal to avoid index coupling
+            # `sessionName` is the per-stage slug. Extracted as a literal key rather than
+            # _SUBAGENT_TASK_KEYS[1] to avoid index coupling if the tuple order changes.
+            session_name = _first_text(entry, ("sessionName",))
             if not role and not task and existing is None:
                 # kiro-cli sometimes announces a slot before it has anything
                 # to say about it — corroborated by kirocrew's own

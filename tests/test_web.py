@@ -10736,8 +10736,6 @@ class TestAcpSubagentListParsing:
         ``TestAcpSessionName`` exercise ``_subagents_payload`` directly; this
         test ensures the field actually arrives there via ``_on_subagent_list``.
         """
-        from power_atlas import acp as acp_mod_direct
-
         acp_mod, _ = acp_store
         sid = self._seed(acp_mod)
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
@@ -10749,7 +10747,7 @@ class TestAcpSubagentListParsing:
                 "status": {"type": "working"},
             },
         ]})
-        payload = acp_mod_direct._subagents_payload(acp_mod._supervisor.crews[sid])
+        payload = acp_mod._subagents_payload(acp_mod._supervisor.crews[sid])
         by_id = {e["sessionId"]: e for e in payload}
         assert by_id["sub-sn-wire-01"]["sessionName"] == "count_src"
 
@@ -16200,15 +16198,7 @@ class TestAcpStoppedAt:
 
 
 class TestAcpSessionName:
-    """``sessionName`` field: round-trips through ``_subagents_payload``
-    correctly for present, empty, and absent keys.
-
-    Moved from ``TestAcpStoppedAt`` (Fix 3 — test class misplacement): these
-    tests cover ``_subagents_payload``'s ``sessionName`` serialisation, which
-    has no topical relation to ``stoppedAt``.  The wire-entry extraction path
-    (``_on_subagent_list`` → ``_subagents_payload``) is covered by
-    ``TestAcpSubagentListParsing.test_session_name_extracted_from_wire_entry``.
-    """
+    """Covers `_subagents_payload`'s `sessionName` serialisation for present, empty, and absent keys."""
 
     def test_session_name_round_trips_through_subagents_payload(self):
         """``_subagents_payload`` forwards ``sessionName`` verbatim."""
