@@ -1853,6 +1853,7 @@
     if (_cmdSelectedIndex >= 0 && items[_cmdSelectedIndex]) {
       var selectedId = items[_cmdSelectedIndex].id || ('acp-cmd-opt-' + _cmdSelectedIndex);
       promptInput.setAttribute('aria-activedescendant', selectedId);
+      items[_cmdSelectedIndex].scrollIntoView({block: 'nearest'});
     } else {
       promptInput.setAttribute('aria-activedescendant', '');
     }
