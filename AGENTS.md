@@ -4,6 +4,8 @@
 
 - **Never restart PowerAtlas autonomously.** Restarting kills every kiro-cli ACP process the supervisor is managing, terminating all active sessions. Always defer to the user — present the restart as needed and let them do it when ready.
 
+- **ACP UI iteration does not require a restart.** All CSS and JS for `/acp` is inline in `src/power_atlas/templates/acp.html` — there is no external stylesheet linked from that page (`style.css` is the dashboard's stylesheet only). `acp.html` is a Jinja2 template served with `Cache-Control: no-store` and `auto_reload=True`, so the server always reads the current file from disk. After editing `acp.html`, a **hard reload** (`Ctrl+Shift+R`) in the browser picks up the changes immediately — no PowerAtlas restart needed. A normal F5 may serve a stale copy from the browser's memory cache; hard reload bypasses that. Do not instruct the user to restart PowerAtlas for ACP UI-only changes.
+
 - Update existing documentation files when implementing user-visible changes.
 - Do not create new documentation files unless the user requests them.
 - Update README.md only when changes affect installation, basic usage, or user-visible CLI/WebUI surface. **Exempt: a surface introduced by a plan whose Intent declares it a throwaway prototype**, for as long as it stays one — the README describes the product, and documenting a surface built to be deleted misleads the reader it exists for. The exemption ends the moment the surface is kept; promoting it to product is what makes the README row required work.
