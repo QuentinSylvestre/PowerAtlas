@@ -646,7 +646,7 @@ async def _background_refresh():
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR), auto_reload=True)
 
 
 # Loopback host names the server is legitimately reached by. Validating the Host
