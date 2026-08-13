@@ -1,7 +1,7 @@
 # ACP Skill and Command Discovery Before First Turn
 
 > **Date**: 2026-08-13
-> **Status**: In Progress
+> **Status**: Complete
 > **Scope**: Parse and display kiro-cli skills in the /acp slash-command palette before the first user prompt
 > **Estimated effort**: 1 day
 
@@ -695,3 +695,35 @@ node tests/acp_page.test.mjs
 ## Harness Improvement Opportunities
 
 - The probe step (running a live kiro-cli subprocess to settle the commands/available timing) was not covered by the trio's "decidable-by-probe" list in the way it should have been — the mutation-finder labeled it as open ("requires live observation") but it was settable with a 15-line script. The `/qexplore` decidable-by-probe gate could benefit from a note clarifying that "launch a local subprocess and read its stdout" counts as a read-only probe the orchestrator can and should run before the interview. Cost: one extra Q&A round that could have been replaced by the probe result.
+
+### 2026-08-13 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Reliability engineer, Senior engineer, End-user advocate, Architect.
+12 findings (1 High, 3 Medium, 8 Low). High fixed (skill execution gate). All findings resolved.
+QA verification: SKIP (automated — backend: 37/37 pytest pass; frontend: 352/353 acp_page.test.mjs pass, 1 pre-existing unrelated failure). Browser UI surface BLOCKED per AGENTS.md governance (cannot start PowerAtlas autonomously). SC1 manual check open for user.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Backend acp.py | pass (7/7) | SKIP | Pure Python, no independent UI surface |
+| 2: Backend tests | pass (18/18 → 37 after post-impl fix) | SKIP | Test-only phase |
+| 3: Frontend acp.html | pass (338/339 pre-existing) | BLOCKED | AGENTS.md bars autonomous restart |
+| 4: Frontend tests | pass (352/353, 1 pre-existing) | SKIP | Test-only phase |
+| 5: Documentation | not_run | SKIP | Prose-only |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `commands_execute` only checked `meta["commands"]`, not `meta["skills"]` — skill selection returned "Unknown command". | Fixed — `valid_names` now unions both lists; `test_commands_execute_accepts_skill_name` added (commit 43ef161) |
+| 2 | Medium | `aria-activedescendant` ghost ID when placeholder is only item; ArrowDown wraps to placeholder unexpectedly. | Fixed — `placeholder.id` set; `moveCommandSelection` guard added (commit 43ef161) |
+| 3 | Medium | Stale count in `docs/KNOWLEDGE.md` ("24 built-ins, all 25 user skills"). | Fixed — updated to "25 built-in commands + 26 skill prompts" (commit 43ef161) |
+| 4 | Medium | `available_commands_update` broadcasts without try/except wrapper. | Fixed — wrapped in try/except with log.warning (commit 43ef161) |
+| 5 | Low | `finally` comment mentioned "concurrent slot" (asyncio is single-threaded). | Fixed — comment clarified (commit 43ef161) |
+| 6 | Low | `'skills'` and `'commands'` frames didn't refresh an already-open dropdown. | Fixed — both handlers now call showCommandDropdown when dropdown visible (commit 43ef161) |
+| 7 | Low | `<ul>` between listbox and options lacked `role="presentation"`. | Fixed — added to static markup and dynamic ul (commit 43ef161) |
+| 8 | Low | `available_commands_update` drop log message used static string instead of counts. | Fixed — `%d session(s), %d inflight` format (commit 43ef161) |
+| 9 | Low | Copy-to-clipboard feature (Phase 3 divergence) undocumented in KNOWLEDGE.md. | Fixed — bullet added to KNOWLEDGE.md (commit 43ef161) |
+| 10 | Low | Combined 400-item dropdown cap undocumented. | User: accepted — reviewer misread; no such cap; CSS height is visual, not a data limit |
+| 11 | Low | `updateCommandSelection` didn't scroll selected item into view. | Fixed — `scrollIntoView` added with typeof guard (commits 2b83947, 33b683b) |
+| 12 | Low | SC1 manual check still open. | Pending user — requires hard-reload in running PowerAtlas before `/qclose` |
