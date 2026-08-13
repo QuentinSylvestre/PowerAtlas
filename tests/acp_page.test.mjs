@@ -7169,6 +7169,8 @@ check("steer_sent frame adds dimmed steer band", (tpl) => {
   const body = steerBands[0].querySelector(".acp-msg-body");
   assert(body !== null, ".acp-msg-steer should contain .acp-msg-body");
   assertEqual(body.textContent, "do X", ".acp-msg-steer body should contain steer text");
+  assert(String(steerBands[0].className).split(/\s+/).includes('acp-msg-steer'),
+    'steer band element must carry acp-msg-steer CSS class; got classes: ' + steerBands[0].className);
 });
 
 check("steer_sent frame renders during replay", (tpl) => {
@@ -7180,6 +7182,8 @@ check("steer_sent frame renders during replay", (tpl) => {
     ] },
   });
   const steerBands = page.el("acpTranscript").querySelectorAll(".acp-msg-steer");
+  // Feeds via history wrapper which sets replaying=true during dispatch.
+  // Band appearing confirms no !replaying guard is present in the steer_sent handler.
   assertEqual(steerBands.length, 1,
     "steer_sent during history replay should add a steer band (no !replaying guard)");
   const body = steerBands[0].querySelector(".acp-msg-body");

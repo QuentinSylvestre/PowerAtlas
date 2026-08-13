@@ -4304,7 +4304,8 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
         return
     try:
         result = await _supervisor.steer(session_id, text)
-        queued = result.get("queued", True)
+        queued = bool(result.get("queued", True))
+        # bool() normalizes None → False; default True when key absent.
         conn.send(envelope("steer_ack", {"queued": queued}, session_id))
         if queued:
             # Emit to ring buffer so steer text is visible in transcript

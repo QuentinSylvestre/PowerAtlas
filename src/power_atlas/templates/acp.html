@@ -5437,15 +5437,19 @@
       // for SC-5; suppressing it during replay would defeat the feature.
       var steerText = payload && typeof payload.text === 'string' ? payload.text : '';
       if (steerText) {
-        // If _steerPending is still set (WS drop before steer_ack), the steer
-        // text was restored to textarea by ws.onclose. Clear it here since
-        // the band confirms the steer was accepted by the server.
         if (_steerPending) {
+          // Live frame received while steer still in-flight (e.g. very fast server).
           promptInput.value = '';
           promptInput.disabled = false;
           sendModeBtn.disabled = false;
           modeSelect.disabled = false;
           _steerPending = null;
+          autoGrowPrompt();
+          refreshComposerControls();
+        } else if (promptInput.value === steerText) {
+          // WS dropped before steer_ack; ws.onclose restored text to textarea.
+          // The band confirms the steer landed — clear the textarea.
+          promptInput.value = '';
           autoGrowPrompt();
           refreshComposerControls();
         }

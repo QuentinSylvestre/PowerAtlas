@@ -338,7 +338,7 @@ Step 5b QA: BLOCKED — requires PowerAtlas running for browser verification. De
 
 **Goal**: Add a `steer_sent` frame type to the server ring buffer, emit it from `_handle_steer` on success, and render it in the client as a dimmed user-band message.
 
-**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/templates/acp.html`, `src/power_atlas/static/style.css`, `tests/acp_page.test.mjs`, `README.md` (steer-sent description sentence)
+**File scope**: `src/power_atlas/acp.py`, `src/power_atlas/templates/acp.html`, `tests/acp_page.test.mjs`, `README.md` (steer-sent description sentence)
 
 **Covers**: SC-4, SC-5, SC-6 (partial — steer_sent frame tests)
 
@@ -379,9 +379,9 @@ if queued:
 
 > **Rejected**: placing `_emit` outside the `try:` block — if `"steer_sent"` were missing from `SERVER_TYPES`, `envelope()` would raise `ValueError` and the `except Exception` handler would send a second `internal_error` frame after `steer_ack` already succeeded. **Use instead**: keep both `conn.send(steer_ack)` and `_emit(steer_sent)` inside the same `try:` block. Both changes above are one atomic edit; `SERVER_TYPES` is updated in the same commit.
 
-#### CSS changes (`style.css`)
+#### CSS changes (`acp.html` inline `<style>`)
 
-Add `.acp-msg-steer` after `.acp-msg-user` rule:
+Add `.acp-msg-steer` after `.acp-msg-user` rule in `acp.html`'s inline `<style>` block:
 
 ```css
 /* Steered messages: same band layout as user prompts, dimmed to distinguish
@@ -453,14 +453,14 @@ if (type === 'steer_sent') {
 - `"steer_sent frame with empty text is no-op"` — dispatch `{type:'steer_sent', payload:{text:''}}` through `handle()`; assert `transcriptEl` children count is unchanged (no new element appended).
 
 **Exit criteria**:
-- [ ] `"steer_sent"` added to `SERVER_TYPES` in same commit as `_emit` call — run `python -c "from power_atlas.acp import SERVER_TYPES; assert 'steer_sent' in SERVER_TYPES"` to verify
-- [ ] `_emit` call in `_handle_steer` is gated on `if queued:` and placed inside the `try:` block
-- [ ] `steer_sent` frame handler added in client `handle()`, renders band only for non-empty text
-- [ ] `steer_sent` handler includes `_steerPending` cleanup for WS-drop-before-ack scenario
-- [ ] `.acp-msg-steer` CSS rule added to `style.css`
-- [ ] `README.md` updated: "a brief confirmation appears when the injection is accepted" updated to describe the dimmed transcript band
-- [ ] `node tests/acp_page.test.mjs` passes; expected count: **327/327** (324 from Phase 1 + 3 new)
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q` passes (PowerAtlas restart required)
+- [x] `"steer_sent"` added to `SERVER_TYPES` in same commit as `_emit` call — run `python -c "from power_atlas.acp import SERVER_TYPES; assert 'steer_sent' in SERVER_TYPES"` to verify
+- [x] `_emit` call in `_handle_steer` is gated on `if queued:` and placed inside the `try:` block
+- [x] `steer_sent` frame handler added in client `handle()`, renders band only for non-empty text
+- [x] `steer_sent` handler includes `_steerPending` cleanup for WS-drop-before-ack scenario
+- [x] `.acp-msg-steer` CSS rule added to `acp.html` inline `<style>` block (per AGENTS.md, all /acp CSS is inline in acp.html, not style.css)
+- [x] `README.md` updated: steer description updated to describe the dimmed transcript band and WS reconnect persistence
+- [x] `node tests/acp_page.test.mjs` passes; actual count: **329/330** (326 baseline + 3 new; 1 pre-existing dashboard-link failure)
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q` passes (pre-existing dashboard-link failure only; `test_steer_frame_is_routed` updated for new steer_sent broadcast behavior)
 
 ---
 
@@ -516,6 +516,7 @@ node tests/acp_page.test.mjs
 
 - **flushToolGroups at user-chunk boundary**: Added `if (role === 'user' && toolGroup) flushToolGroups()` in `appendChunk()` to fix tool-group display during live streaming when a user message arrives without a preceding `turn:end`. Rationale: discovered as a correctness gap while implementing the Enter-during-turn path; closely related to the transcript changes being made. Tests added in cycle-1 auto-fix.
 - **flushToolGroups at post-replay tail**: Added `if (toolGroup) flushToolGroups()` after history replay to flush any open tool group at replay end. Rationale: same discovery, prevents orphaned tool-group state after a session load. Tests added in cycle-1 auto-fix.
+- **Phase 2 CSS for .acp-msg-steer placed in acp.html inline `<style>`, not style.css**: Phase 2 `**File scope**` and `#### CSS changes` section named `style.css`, but AGENTS.md requires all /acp CSS in `acp.html`'s inline `<style>`. The exit criterion correctly names `acp.html`; the file-scope line and CSS-changes section heading were not updated to match.
 
 ## Review Log
 

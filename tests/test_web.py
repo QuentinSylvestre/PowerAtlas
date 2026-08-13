@@ -15800,6 +15800,8 @@ class TestAcpSteer:
             f"steer_ack was broadcast to a non-requesting socket: {outbound2}"
         assert any(f["type"] == "steer_sent" for f in outbound2), \
             f"steer_sent was not broadcast to the second subscriber: {outbound2}"
+        assert len(outbound2) == 1, \
+            f"conn2 should receive exactly steer_sent and nothing else, got: {[f['type'] for f in outbound2]}"
 
     def test_steer_refused_for_subagent_session(self, acp_session):
         """``steer`` on a sub-agent's own session id must return a
@@ -15952,6 +15954,31 @@ class TestAcpSteer:
             assert str(acp_mod.MAX_STEER_CHARS) in outbound[0]["payload"]["message"]
         finally:
             acp_mod._supervisor.inflight.discard(sid)
+
+    def test_steer_sent_not_emitted_on_queued_false(self, acp_session):
+        """When ``_handle_steer`` returns ``queued=False``, ``steer_sent`` must
+        NOT be emitted — the steer was rejected. Only ``steer_ack`` with
+        ``queued:false`` goes to the sender."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.inflight.add(sid)
+        _queued(conn)
+
+        async def fake_steer(self_ignored, session_id, text):
+            return {"queued": False}
+
+        with patch.object(acp_mod._Supervisor, "steer", fake_steer):
+            asyncio.run(acp_mod._handle_steer(
+                conn, sid, {"message": "do X"}))
+
+        outbound = _queued(conn)
+        types = [f["type"] for f in outbound]
+        assert "steer_ack" in types
+        assert "steer_sent" not in types, \
+            "steer_sent must not be emitted when queued=False"
+        # Exactly steer_ack (unicast) and nothing else — no broadcast.
+        assert len(outbound) == 1, \
+            f"Expected only steer_ack on queued=False, got: {types}"
 
 
 class TestAcpCancelCascade:
