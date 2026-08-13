@@ -969,8 +969,13 @@ def _parse_skills(entries: list) -> list:
     - ``session/update`` with ``available_commands_update``: discriminates by
       ``entry._meta.kiro.type == "skill"``.
 
-    Both discriminants are checked so neither path silently misses skills when
-    the other field is absent.  The result is capped at ``MAX_COMMANDS_COUNT``
+    The ``_meta.kiro.type == "skill"`` check runs first (canonical discriminant
+    for ``available_commands_update``).  The ``serverName.startswith("skill:")``
+    check is the fallback, reached only when ``_meta`` is absent or contains no
+    ``kiro.type`` field (the discriminant used by ``commands/available``).
+    Entries matching either criterion are included once.
+
+    The result is capped at ``MAX_COMMANDS_COUNT``
     (same ceiling as commands) to bound ``meta["skills"]`` storage.
     """
     result = []
@@ -988,6 +993,8 @@ def _parse_skills(entries: list) -> list:
                 result.append({"name": name, "description": _as_text(s.get("description"))})
                 continue
         # serverName.startswith("skill:") is the discriminant on commands/available.
+        # Convention: non-skill entries never use a "skill:" serverName prefix.
+        # If kiro-cli violates this in a future build, add a _meta.kiro.type exclusion here.
         if _as_text(s.get("serverName")).startswith("skill:"):
             result.append({"name": name, "description": _as_text(s.get("description"))})
     return result[:MAX_COMMANDS_COUNT]
@@ -2745,8 +2752,8 @@ class _Supervisor:
         # Temporary diagnostic: log every _kiro.dev/session/update notification kind
         # to diagnose the compaction_status delivery path.
         if method and "session/update" in method:
-            log.info("ACP _on_notification: method=%r kind=%r session_id=%r",
-                     method, kind, session_id)
+            log.debug("ACP _on_notification: method=%r kind=%r session_id=%r",
+                      method, kind, session_id)
         # Above every branch below, including the fall-through at the end.
         self._stamp_activity(session_id)
         if method == METADATA_METHOD:
@@ -2957,6 +2964,8 @@ class _Supervisor:
                      and c["_meta"]["kiro"].get("type") in ("skill", "steering", "prompt"))
                     or _as_text(c.get("serverName")).startswith("skill:")
                 )
+                # Exclusion logic is the structural inverse of _parse_skills() — any new
+                # entry type added there must be excluded here too.
             ][:MAX_COMMANDS_COUNT]
             skills = _parse_skills(available)
             # Attribution: direct sessionId lookup first (works for multi-session);
@@ -2966,6 +2975,8 @@ class _Supervisor:
                 inflight = self.inflight
                 if len(inflight) == 1:
                     sid = next(iter(inflight))
+                elif len(inflight) == 0 and len(self.sessions) == 1:
+                    sid = next(iter(self.sessions))
                 elif len(inflight) == 0 and len(self.sessions) == 1:
                     sid = next(iter(self.sessions))
             if sid is not None:
@@ -2980,12 +2991,14 @@ class _Supervisor:
                           "(multi-session without sessionId in params, or no sessions)")
             return
         if method == "_kiro.dev/commands/available":
+            # params["commands"] is pre-partitioned by kiro-cli: slash-command entries only.
+            # Skills/steering/prompt entries arrive in params["prompts"] — handled by _parse_skills below.
             commands = [
                 {"name": _as_text(c.get("name")).lstrip("/"),
                  "description": _as_text(c.get("description"))}
-                for c in (params.get("commands") or [])[:MAX_COMMANDS_COUNT]
+                for c in (params.get("commands") or [])
                 if isinstance(c, dict) and _as_text(c.get("name"))
-            ]
+            ][:MAX_COMMANDS_COUNT]
             skills = _parse_skills(params.get("prompts") or [])
             # Attribute to the single inflight session if one exists; otherwise
             # fall back to the single known session (commands/available fires
@@ -3201,6 +3214,10 @@ class _Supervisor:
             # Load-bearing: clears the buffer if an exception occurred before
             # the flush block above ran. On the success path the flush already
             # set _pending_commands to None; this is a no-op in that case.
+            if self._pending_commands is not None:
+                log.debug("ACP new_session: finally clearing non-None _pending_commands "
+                          "(%d commands, %d skills) — pre-flush exception path or concurrent slot",
+                          len(self._pending_commands[0]), len(self._pending_commands[1]))
             self._pending_commands = None
         log.info("ACP session created: %s (cwd %s); %d live",
                  session_id, cwd, len(self.sessions))

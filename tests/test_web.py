@@ -16331,6 +16331,12 @@ class TestAcpCommandsAvailable:
     Attributed to the single inflight session when exactly one is in-flight;
     stored in ``sessions[sid]["commands"]`` and broadcast as a ``commands``
     frame.  Dropped (debug-logged) when 0 or 2+ sessions are inflight.
+
+    Also covers: meta["skills"] storage, the "skills" broadcast frame,
+    _parse_skills extraction from params["prompts"], the _pending_commands
+    buffer (set during session/new window, flushed on registration),
+    available_commands_update notifications, and _handle_subscribe skills
+    replay.
     """
 
     def _attached(self, acp_mod, sid):
@@ -16465,8 +16471,8 @@ class TestAcpCommandsAvailable:
 
     def test_oversized_list_is_truncated_to_max_commands_count(self, acp_session):
         """A notification carrying 300 entries stores at most MAX_COMMANDS_COUNT
-        (200) entries.  The slice runs before the comprehension so at most 200
-        items are ever processed."""
+        (200) entries.  The slice is applied AFTER filtering so at most 200
+        valid items are kept."""
         acp_mod, sid = acp_session
         acp_mod._supervisor.inflight.add(sid)
         try:
