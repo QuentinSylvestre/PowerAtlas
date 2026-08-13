@@ -260,10 +260,12 @@
            Queue holds the text until the turn ends then sends it normally.
            Steer injects the text mid-turn via _session/steer. -->
       <div class="acp-queue-steer" id="acpQueueSteer" hidden>
-        <button class="acp-btn acp-queue" id="acpQueue" type="button"
-                aria-label="Queue this prompt — it will send when the agent finishes">Queue</button>
-        <button class="acp-btn acp-steer" id="acpSteer" type="button"
+        <button class="acp-btn acp-send-mode" id="acpSendMode" type="button"
                 aria-label="Inject this text into the current agent turn">Steer</button>
+        <select class="acp-mode-select" id="acpModeSelect" aria-label="Send mode">
+          <option value="steer">Steer</option>
+          <option value="queue">Queue</option>
+        </select>
       </div>
     </div>
   </div>
@@ -486,6 +488,32 @@
   max-height: 400px;
   overflow-y: auto;
 }
+/* ---- single-button + mode-select composer row ----------------------------- */
+/* Queue/Steer row: single full-height action button + inline mode selector.
+   Replaces the two half-height buttons; wrapper #acpQueueSteer visibility is
+   unchanged — refreshComposerControls() still toggles it. */
+.acp-queue-steer { display: flex; flex-direction: row; gap: 0; align-items: stretch; }
+.acp-queue-steer[hidden] { display: none; }
+.acp-send-mode {
+  flex: 1;
+  border-radius: var(--radius-sm, 6px) 0 0 var(--radius-sm, 6px);
+}
+.acp-mode-select {
+  padding: 0 4px;
+  height: 100%;
+  background: var(--surface, #1e2030);
+  border: 1px solid var(--border, #2d3150);
+  border-left: none;
+  border-radius: 0 var(--radius-sm, 6px) var(--radius-sm, 6px) 0;
+  color: var(--text-muted, #8b95b0);
+  font-size: 11px;
+  cursor: pointer;
+  min-width: 0;
+}
+.acp-mode-select:focus-visible {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: -2px;
+}
 </style>
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 
@@ -556,8 +584,18 @@
   var sendBtn = document.getElementById('acpSend');
   var stopBtn = document.getElementById('acpStop');
   var queueSteerEl = document.getElementById('acpQueueSteer');
-  var queueBtn = document.getElementById('acpQueue');
-  var steerBtn = document.getElementById('acpSteer');
+  var sendModeBtn = document.getElementById('acpSendMode');
+  var modeSelect = document.getElementById('acpModeSelect');
+  var SEND_MODE_KEY = 'pa_acp_send_mode';
+  // Validate stored value; default to 'steer' for any missing/invalid value.
+  var _sendMode = railStored(SEND_MODE_KEY);
+  if (_sendMode !== 'steer' && _sendMode !== 'queue') _sendMode = 'steer';
+  modeSelect.value = _sendMode;
+  sendModeBtn.textContent = _sendMode === 'queue' ? 'Queue' : 'Steer';
+  sendModeBtn.setAttribute('aria-label',
+    _sendMode === 'queue'
+      ? 'Queue this prompt \u2014 it will send when the agent finishes'
+      : 'Inject this text into the current agent turn');
   var promptNavEl = document.getElementById('acpPromptNav');
   var promptUpBtn = document.getElementById('acpPromptUp');
   var promptDownBtn = document.getElementById('acpPromptDown');
@@ -1175,7 +1213,8 @@
     // be re-enabled so the composer is usable after opening a new session.
     if (_steerPending) {
       promptInput.disabled = false;
-      steerBtn.disabled = false;
+      sendModeBtn.disabled = false;
+      modeSelect.disabled = false;
     }
     _steerPending = null;
     // The crew belonged to the session just released — `close_session`
@@ -2708,6 +2747,13 @@
       if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
       return;
     }
+    // A user chunk marks the start of a new turn, which means the previous
+    // agent turn has ended. During a loaded session replay kiro-cli never
+    // sends meta turn:end frames, so flushToolGroups() would otherwise never
+    // fire and consecutive tool calls stay as individual rows. Flushing here
+    // mirrors the bubble-flush the server already performs at the same
+    // boundary (_flush_bubble is called before every user_message_chunk).
+    if (role === 'user' && toolGroup) flushToolGroups();
     var body = addMessage(role, text);
     agentBody = role === 'agent' ? body : null;
   }
@@ -5277,6 +5323,16 @@
       } finally {
         replaying = false;
       }
+      // Flush any tool group left open after the last turn. For sessions
+      // loaded via session/load (v2 format), kiro-cli never emits meta
+      // turn:end frames, so flushToolGroups() fires on user-chunk boundaries
+      // (see appendChunk) but misses the final turn — the conversation ends
+      // with the last agent answer, with no subsequent user chunk to trigger
+      // it. The user-chunk path handles all interior turns; this handles the
+      // tail. Also covers the history ring-buffer replay for live sessions:
+      // a reconnect replays buffered frames which do include meta turn:end,
+      // so toolGroup is null here and this is a no-op.
+      if (toolGroup) flushToolGroups();
       logLine('info', '← history: ' + events.length + ' event(s) replayed');
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
       return;
@@ -5346,7 +5402,8 @@
         // Steer rejected — restore the textarea text so the user can retry.
         promptInput.value = _steerPending;
         promptInput.disabled = false;
-        steerBtn.disabled = false;
+        sendModeBtn.disabled = false;
+        modeSelect.disabled = false;
         _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();
@@ -5355,10 +5412,10 @@
       }
       // queued===true (or absent — default success path)
       promptInput.disabled = false;
-      steerBtn.disabled = false;
+      sendModeBtn.disabled = false;
+      modeSelect.disabled = false;
       _steerPending = null;
       refreshComposerControls();
-      addMessage('note', 'Steer sent.');
       return;
     }
     if (type === 'subagents') {
@@ -5448,7 +5505,8 @@
         promptInput.value = _steerPending;
         _steerPending = null;
         promptInput.disabled = false;
-        steerBtn.disabled = false;
+        sendModeBtn.disabled = false;
+        modeSelect.disabled = false;
         autoGrowPrompt();
         refreshComposerControls();
       }
@@ -5497,7 +5555,8 @@
       if (_steerPending) {
         promptInput.value = _steerPending;
         promptInput.disabled = false;
-        steerBtn.disabled = false;
+        sendModeBtn.disabled = false;
+        modeSelect.disabled = false;
         _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();
@@ -5677,7 +5736,8 @@
         promptInput.value = _steerPending;
         _steerPending = null;
         promptInput.disabled = false;
-        steerBtn.disabled = false;
+        sendModeBtn.disabled = false;
+        modeSelect.disabled = false;
         autoGrowPrompt();
         refreshComposerControls();
       }
@@ -5754,52 +5814,61 @@
     stopBtn.disabled = true;
     stopBtn.textContent = 'Stopping…';
   });
-  queueBtn.addEventListener('click', function () {
+  modeSelect.addEventListener('change', function () {
+    _sendMode = modeSelect.value;
+    railStore(SEND_MODE_KEY, _sendMode);
+    sendModeBtn.textContent = _sendMode === 'queue' ? 'Queue' : 'Steer';
+    sendModeBtn.setAttribute('aria-label',
+      _sendMode === 'queue'
+        ? 'Queue this prompt \u2014 it will send when the agent finishes'
+        : 'Inject this text into the current agent turn');
+  });
+  sendModeBtn.addEventListener('click', function () {
     var text = promptInput.value.trim();
     if (!text || !turnActive || !sessionId) return;
-    queuedPrompt = text;
-    queuedPromptSession = sessionId;
-    promptInput.value = '';
-    autoGrowPrompt();
-    refreshComposerControls();
-    // Show a cancellable inline note so the user can recover the text if
-    // they change their mind before the turn ends.
-    var queueNoteEl = addMessage('note', '');
-    var preview = text.length > 30 ? text.slice(0, 30) + '\u2026' : text;
-    var noteSpan = document.createElement('span');
-    noteSpan.textContent = 'Queued: ' + preview + ' \u2014 ';
-    queueNoteEl.appendChild(noteSpan);
-    var cancelLink = document.createElement('button');
-    cancelLink.className = 'acp-inline-cancel';
-    cancelLink.type = 'button';
-    cancelLink.textContent = 'Cancel';
-    cancelLink.setAttribute('aria-label', 'Cancel queued prompt');
-    cancelLink.addEventListener('click', function () {
-      if (!queuedPrompt) return;
-      promptInput.value = queuedPrompt;
-      queuedPrompt = null;
-      queuedPromptSession = null;
+    if (_sendMode === 'queue') {
+      queuedPrompt = text;
+      queuedPromptSession = sessionId;
+      promptInput.value = '';
       autoGrowPrompt();
       refreshComposerControls();
-      queueNoteEl.textContent = 'Queued prompt cancelled.';
-      // textContent replaces all child nodes, cancel button already removed
-    });
-    queueNoteEl.appendChild(cancelLink);
-  });
-  steerBtn.addEventListener('click', function () {
-    var text = promptInput.value.trim();
-    if (!text || !turnActive || !sessionId) return;
-    _steerPending = text;
-    // Disable the textarea and steer button while awaiting steer_ack.
-    // Textarea cleared immediately; text preserved in `_steerPending` for
-    // restoration on error or ack-false.
-    promptInput.disabled = true;
-    steerBtn.disabled = true;
-    promptInput.value = '';
-    autoGrowPrompt();
-    refreshComposerControls();
-    send('steer', {message: text}, sessionId);
-    // Do NOT show "Steer sent." here — wait for steer_ack from the server.
+      // Show a cancellable inline note so the user can recover the text if
+      // they change their mind before the turn ends.
+      var queueNoteEl = addMessage('note', '');
+      var preview = text.length > 30 ? text.slice(0, 30) + '\u2026' : text;
+      var noteSpan = document.createElement('span');
+      noteSpan.textContent = 'Queued: ' + preview + ' \u2014 ';
+      queueNoteEl.appendChild(noteSpan);
+      var cancelLink = document.createElement('button');
+      cancelLink.className = 'acp-inline-cancel';
+      cancelLink.type = 'button';
+      cancelLink.textContent = 'Cancel';
+      cancelLink.setAttribute('aria-label', 'Cancel queued prompt');
+      cancelLink.addEventListener('click', function () {
+        if (!queuedPrompt) return;
+        promptInput.value = queuedPrompt;
+        queuedPrompt = null;
+        queuedPromptSession = null;
+        autoGrowPrompt();
+        refreshComposerControls();
+        queueNoteEl.textContent = 'Queued prompt cancelled.';
+        // textContent replaces all child nodes, cancel button already removed
+      });
+      queueNoteEl.appendChild(cancelLink);
+    } else {
+      _steerPending = text;
+      // Disable the textarea, button, and mode select while awaiting steer_ack.
+      // Textarea cleared immediately; text preserved in `_steerPending` for
+      // restoration on error or ack-false.
+      promptInput.disabled = true;
+      sendModeBtn.disabled = true;
+      modeSelect.disabled = true;
+      promptInput.value = '';
+      autoGrowPrompt();
+      refreshComposerControls();
+      send('steer', {message: text}, sessionId);
+      // Do NOT show "Steer sent." here — wait for steer_ack from the server.
+    }
   });
   // ---- prompt navigation arrows -------------------------------------------
   //
@@ -6095,7 +6164,17 @@
     }
     if (ev.key === 'Enter' && !ev.shiftKey && !ev.ctrlKey && !ev.altKey && !isTouchDevice) {
       ev.preventDefault();
-      sendPrompt();
+      if (turnActive && promptInput.value.trim()) {
+        // Dispatch to queue or steer based on selected mode.
+        // sendModeBtn.click() avoids duplicating the guard logic.
+        // Safety invariant: promptInput is disabled while a steer is in-flight
+        // (_steerPending set), which prevents the keydown handler from firing
+        // in that state. The wrapper #acpQueueSteer is hidden when !hasText,
+        // so sendModeBtn is only reachable when text is present.
+        sendModeBtn.click();
+      } else {
+        sendPrompt();
+      }
     }
   });
   // `input` rather than `keydown`: it is the one event that fires for every way

@@ -299,6 +299,10 @@ class El {
   // exists to configure. Recorded rather than ignored so a check can see it.
   select() { this.selected = true; ACTIVE = this; }
   focus() { ACTIVE = this; }
+  // `click()` is a standard DOM method: triggers the element's click listener.
+  // Needed by code that calls element.click() programmatically (e.g. Enter-
+  // during-turn dispatching to sendModeBtn.click()).
+  click() { this.dispatch("click"); }
   addEventListener(type, fn) {
     (this._listeners[type] = this._listeners[type] || []).push(fn);
   }
@@ -6993,7 +6997,9 @@ check("queue button stores text and clears textarea", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("hello agent");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   assertEqual(page.el("acpPrompt").value, "",
     "textarea should be cleared after Queue");
   // Queue note should contain cancel button in transcript
@@ -7006,7 +7012,9 @@ check("queue cancel link restores text to textarea", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("queued text");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   assertEqual(page.el("acpPrompt").value, "", "fixture: textarea cleared after queue");
   // Find the cancel button inside the transcript note
   const cancelBtn = page.one("acpTranscript", ".acp-inline-cancel");
@@ -7020,7 +7028,9 @@ check("queued prompt auto-sends on meta turn:end when WS open and textarea empty
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("queued message");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   // Turn ends
   page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
   const prompts = page.socket().sent.filter((f) => f.type === "prompt");
@@ -7036,7 +7046,9 @@ check("queued prompt discarded when session changed", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("to discard");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   // Simulate session change: release current session
   page.deliver({
     type: "session_closed", sessionId: live,
@@ -7058,7 +7070,8 @@ check("steer sends steer frame and clears/disables textarea", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("inject this");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  // Default mode is steer — just click sendModeBtn
+  page.click("acpSendMode");
   const steers = page.socket().sent.filter((f) => f.type === "steer");
   assertEqual(steers.length, 1, "exactly one steer frame should be sent");
   assertEqual(steers[0].payload && steers[0].payload.message, "inject this",
@@ -7069,18 +7082,20 @@ check("steer sends steer frame and clears/disables textarea", (tpl) => {
     "textarea should be disabled while awaiting steer_ack");
 });
 
-check("steer_ack re-enables controls and shows note", (tpl) => {
+check("steer_ack re-enables controls", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("steer text");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  page.click("acpSendMode");
   page.deliver({ type: "steer_ack", sessionId: live, payload: { queued: true } });
   assert(page.el("acpPrompt").disabled === false,
     "textarea should be re-enabled after steer_ack");
-  assert(page.el("acpSteer").disabled === false,
-    "steer button should be re-enabled after steer_ack");
-  assert(page.el("acpTranscript").textContent.includes("Steer sent"),
-    "transcript should contain 'Steer sent' note");
+  assert(page.el("acpSendMode").disabled === false,
+    "send mode button should be re-enabled after steer_ack");
+  assert(page.el("acpModeSelect").disabled === false,
+    "mode select should be re-enabled after steer_ack");
+  assert(!page.el("acpTranscript").textContent.includes("Steer sent"),
+    "transcript should NOT contain 'Steer sent' note (removed in Phase 1)");
 });
 
 check("steer_ack queued:false shows error note", (tpl) => {
@@ -7088,21 +7103,22 @@ check("steer_ack queued:false shows error note", (tpl) => {
   const originalText = "bad steer";
   page.type(originalText);
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  page.click("acpSendMode");
   page.deliver({ type: "steer_ack", sessionId: live, payload: { queued: false } });
   assert(page.el("acpTranscript").textContent.includes("not accepted"),
     "transcript should contain rejection note when queued:false");
   assertEqual(page.el("acpPrompt").value, originalText,
     "steer_ack queued:false should restore the textarea text");
   assertEqual(page.el("acpPrompt").disabled, false, "promptInput re-enabled");
-  assertEqual(page.el("acpSteer").disabled, false, "steerBtn re-enabled");
+  assertEqual(page.el("acpSendMode").disabled, false, "sendModeBtn re-enabled");
+  assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled");
 });
 
 check("error frame during steer restores textarea text", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("important steer");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  page.click("acpSendMode");
   assert(page.el("acpPrompt").disabled === true, "fixture: textarea disabled after steer click");
   page.deliver({
     type: "error", sessionId: live,
@@ -7119,7 +7135,9 @@ check("queuedPrompt and _steerPending cleared on releaseSession", (tpl) => {
   // Queue a prompt
   page.type("queue me");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   // Release session
   page.deliver({
     type: "session_closed", sessionId: live,
@@ -7189,15 +7207,17 @@ check("steer textarea re-enabled on ws close during pending steer", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("steer text");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  page.click("acpSendMode");
   assert(page.el("acpPrompt").disabled === true,
     "fixture: textarea should be disabled after clicking Steer");
   // Simulate WS close mid-steer
   page.socket().onclose({ code: 1006, reason: "" });
   assertEqual(page.el("acpPrompt").disabled, false,
     "textarea should be re-enabled when WS closes during a pending steer");
-  assertEqual(page.el("acpSteer").disabled, false,
-    "steer button should be re-enabled when WS closes during a pending steer");
+  assertEqual(page.el("acpSendMode").disabled, false,
+    "send mode button should be re-enabled when WS closes during a pending steer");
+  assertEqual(page.el("acpModeSelect").disabled, false,
+    "mode select should be re-enabled when WS closes during a pending steer");
   // Textarea text should be restored from _steerPending
   assertEqual(page.el("acpPrompt").value, "steer text",
     "textarea text should be restored from _steerPending on WS close");
@@ -7208,7 +7228,7 @@ check("steer controls re-enabled on session release during pending steer", (tpl)
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("steer before close");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  page.click("acpSendMode");
   assert(page.el("acpPrompt").disabled === true,
     "fixture: textarea disabled after steer click");
   // Release session via session_closed
@@ -7218,7 +7238,8 @@ check("steer controls re-enabled on session release during pending steer", (tpl)
   });
   assertEqual(page.el("acpPrompt").disabled, false,
     "textarea should be re-enabled after session release with steer pending");
-  assertEqual(page.el("acpSteer").disabled, false, "steerBtn re-enabled after release");
+  assertEqual(page.el("acpSendMode").disabled, false, "sendModeBtn re-enabled after release");
+  assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled after release");
 });
 
 check("steer textarea re-enabled on agent_died", (tpl) => {
@@ -7226,7 +7247,7 @@ check("steer textarea re-enabled on agent_died", (tpl) => {
   // Set up turn active and click steer
   page.type("steer during turn");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpSteer");
+  page.click("acpSendMode");
   assert(page.el("acpPrompt").disabled === true,
     "fixture: textarea should be disabled after clicking Steer");
   // Deliver agent_died frame
@@ -7236,8 +7257,10 @@ check("steer textarea re-enabled on agent_died", (tpl) => {
   });
   assertEqual(page.el("acpPrompt").disabled, false,
     "promptInput should be re-enabled after agent_died with steer pending");
-  assertEqual(page.el("acpSteer").disabled, false,
-    "steerBtn should be re-enabled after agent_died with steer pending");
+  assertEqual(page.el("acpSendMode").disabled, false,
+    "sendModeBtn should be re-enabled after agent_died with steer pending");
+  assertEqual(page.el("acpModeSelect").disabled, false,
+    "modeSelect should be re-enabled after agent_died with steer pending");
 });
 
 // Fix 13: session-change guard — queue with sessionId=A, change to B, turn:end with A, no prompt sent
@@ -7245,7 +7268,9 @@ check("queued prompt not sent when sessionId changed before turn end", (tpl) => 
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("queue this");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   // Verify the prompt was queued (sent no prompt yet)
   const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
   // Change sessionId to a different session (without closing), by delivering
@@ -7269,7 +7294,9 @@ check("queued prompt not sent and note shown when turn ends with stopReason=canc
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("important followup");
   page.el("acpPrompt").dispatch("input");
-  page.click("acpQueue");
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  page.click("acpSendMode");
   // Confirm it was queued (no prompt sent yet)
   const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
   // Turn ends with stopReason=cancelled (user pressed Stop)
@@ -7280,6 +7307,79 @@ check("queued prompt not sent and note shown when turn ends with stopReason=canc
     "no prompt frame should be sent when turn ends with stopReason=cancelled");
   assert(page.transcript().includes("not sent") || page.transcript().includes("stopped"),
     "a note should be shown when the queued prompt is discarded due to a cancelled turn");
+});
+
+// --------------------------------------------------------- Phase 1 new tests: mode select and Enter-during-turn --
+
+check("mode select defaults to steer", (tpl) => {
+  const { page } = connected(tpl);
+  assertEqual(page.el("acpModeSelect").value, "steer",
+    "mode select should default to 'steer' when no stored value");
+  assertEqual(page.el("acpSendMode").textContent, "Steer",
+    "send mode button text should be 'Steer' by default");
+});
+
+check("mode select change updates button label and persists", (tpl) => {
+  const { page } = connected(tpl);
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  assertEqual(page.el("acpSendMode").textContent, "Queue",
+    "send mode button text should update to 'Queue' after mode change");
+  assertEqual(page.stored["pa_acp_send_mode"], "queue",
+    "localStorage should persist the new mode value");
+});
+
+check("mode select with invalid stored value defaults to steer", (tpl) => {
+  // Pre-seed localStorage with an invalid value
+  const page = loadPage(tpl, { stored: { pa_acp_send_mode: "invalid" } });
+  page.open();
+  const live = "sess-live-0001";
+  page.deliver({
+    type: "session", sessionId: live,
+    payload: { sessionId: live, cwd: "C:\\work\\repo", created: true, turnActive: false },
+  });
+  assertEqual(page.el("acpModeSelect").value, "steer",
+    "invalid stored value should fall back to 'steer'");
+  assertEqual(page.el("acpSendMode").textContent, "Steer",
+    "button text should be 'Steer' when invalid stored value falls back to default");
+});
+
+check("Enter during turn in steer mode triggers steer send", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("steer via enter");
+  page.el("acpPrompt").dispatch("input");
+  // Default mode is steer; fire Enter keydown
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  const steers = page.socket().sent.filter((f) => f.type === "steer");
+  assertEqual(steers.length, 1, "exactly one steer frame should be sent via Enter during turn");
+  assertEqual(steers[0].payload && steers[0].payload.message, "steer via enter",
+    "steer payload.message should match typed text");
+});
+
+check("Enter during turn in queue mode stores queued prompt", (tpl) => {
+  const { page, live } = connected(tpl, { turnActive: true });
+  page.type("queue via enter");
+  page.el("acpPrompt").dispatch("input");
+  // Switch to queue mode
+  page.el("acpModeSelect").value = "queue";
+  page.el("acpModeSelect").dispatch("change");
+  // Fire Enter keydown
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false,
+    preventDefault() {},
+  });
+  // No steer frame should be sent
+  const steers = page.socket().sent.filter((f) => f.type === "steer");
+  assertEqual(steers.length, 0, "no steer frame should be sent when queue mode is active");
+  // Textarea should be cleared (queued)
+  assertEqual(page.el("acpPrompt").value, "",
+    "textarea should be cleared after queue via Enter");
+  // Cancel button should appear in transcript (confirms queued)
+  const cancelBtn = page.one("acpTranscript", ".acp-inline-cancel");
+  assert(cancelBtn !== null, "queue note with cancel button should appear after Enter in queue mode");
 });
 
 // --------------------------------------------------------- Phase 3: SC-3 auto-reconnect, SC-5 rail refresh --
