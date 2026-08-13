@@ -443,6 +443,21 @@
 #acpCmdDropdown li.acp-cmd-placeholder:hover {
   background: none;
 }
+/* skill badge — displayed inline after the command name in the palette */
+.acp-cmd-skill-badge {
+  display: inline-block;
+  margin-left: 0.35em;
+  padding: 0 0.3em;
+  font-size: 0.65em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 3px;
+  background: var(--badge-bg, rgba(148, 163, 184, 0.18));
+  color: var(--badge-fg, #94a3b8);
+  vertical-align: middle;
+  line-height: 1.6;
+}
 /* ---- compaction / system message --------------------------------------- */
 .acp-system-msg {
   padding: 4px 14px;
@@ -723,6 +738,10 @@
   // [{name: str, description: str}], broadcast-only (not in history).
   // Reset to [] on every new `session` frame and in releaseSession().
   var sessionCommands = [];
+  // kiro-cli skills — populated from the server's 'skills' frame.
+  // [{name, description}], badged in the slash-command palette.
+  // Reset to [] on every new `session` frame and in releaseSession().
+  var sessionSkills = [];
   // Debounce timer for commands_options requests.
   var _cmdOptionsTimer = null;
   // The command dropdown element (resolved once; matches #acpCmdDropdown).
@@ -1232,6 +1251,7 @@
     closeSubagentView();
     // The commands catalogue belonged to the released session too.
     sessionCommands = [];
+    sessionSkills = [];
     hideCommandDropdown();
     // Prompt nav: rows belong to the session that just closed; stale refs must
     // not survive to a new session's addMessage calls.
@@ -1759,19 +1779,31 @@
   /** Populate and show the slash command dropdown.
    *
    *  `partial` is the text after the leading `/`; an empty string shows all.
-   *  Renders from the local `sessionCommands` list only — the WS frame for
-   *  server-side suggestions is sent by the debounced input handler path, not
-   *  here, to avoid a double send when the input handler also calls this. */
+   *  Renders from the local `sessionCommands` and `sessionSkills` lists —
+   *  the WS frame for server-side suggestions is sent by the debounced input
+   *  handler path, not here, to avoid a double send when the input handler
+   *  also calls this. */
   function showCommandDropdown(partial) {
-    var lc = partial.toLowerCase();
-    var items = sessionCommands.filter(function(c) {
+    var lc = partial ? partial.toLowerCase() : '';
+    // Merge commands and skills into one flat list; preserve server order
+    // within each type (commands first, then skills).
+    var allItems = sessionCommands.map(function(c) {
+      return {name: c.name, description: c.description, isSkill: false};
+    }).concat(sessionSkills.map(function(s) {
+      return {name: s.name, description: s.description, isSkill: true};
+    }));
+    var items = allItems.filter(function(c) {
       return !lc || (c.name || '').toLowerCase().indexOf(lc) !== -1;
     });
-    renderCommandDropdown(items);
+    renderCommandDropdown(items, sessionCommands.length === 0 && sessionSkills.length === 0);
   }
 
-  /** Re-render the dropdown list from an array of `{name, description?}`. */
-  function renderCommandDropdown(items) {
+  /** Re-render the dropdown list from an array of `{name, description?, isSkill?}`.
+   *  `catalogueEmpty` is true when both sessionCommands and sessionSkills are
+   *  empty (catalogue not yet loaded), false when data is loaded but nothing
+   *  matched the filter. The two cases produce different placeholder text so
+   *  the user can distinguish "still loading" from "no match". */
+  function renderCommandDropdown(items, catalogueEmpty) {
     var ul = cmdDropdownEl.querySelector('ul');
     if (!ul) {
       ul = document.createElement('ul');
@@ -1779,17 +1811,16 @@
     }
     ul.textContent = '';
     if (!items.length) {
-      // Show the dropdown open but with a placeholder rather than hiding
-      // silently — the user needs to know they are in slash-command mode.
-      // Commands arrive via the 'commands' frame after the first turn starts;
-      // on a freshly resumed session they may not be loaded yet.
+      // Show the dropdown open with a placeholder — the user is in
+      // slash-command mode and needs to know whether data is loading
+      // or there are simply no matches.
       var placeholder = document.createElement('li');
       placeholder.className = 'acp-cmd-placeholder';
       placeholder.setAttribute('role', 'option');
       placeholder.setAttribute('aria-disabled', 'true');
-      placeholder.textContent = sessionCommands.length === 0
-        ? 'No commands loaded — start a turn to load the catalogue'
-        : 'No matching commands';
+      placeholder.textContent = catalogueEmpty
+        ? 'Loading catalogue\u2026'
+        : 'No matching commands or skills';
       ul.appendChild(placeholder);
       cmdDropdownEl.hidden = false;
       _cmdSelectedIndex = -1;
@@ -1803,10 +1834,17 @@
       var nameSpan = document.createElement('span');
       nameSpan.className = 'acp-cmd-name';
       nameSpan.textContent = '/' + (items[i].name || '').replace(/^\//, '');
+      li.appendChild(nameSpan);
+      if (items[i].isSkill === true) {
+        // Badge appended as a flex sibling after nameSpan inside <li>.
+        var badge = document.createElement('span');
+        badge.className = 'acp-cmd-skill-badge';
+        badge.textContent = 'skill';
+        li.appendChild(badge);
+      }
       var descSpan = document.createElement('span');
       descSpan.className = 'acp-cmd-desc';
       descSpan.textContent = items[i].description || '';
-      li.appendChild(nameSpan);
       li.appendChild(descSpan);
       ul.appendChild(li);
     }
@@ -2612,6 +2650,69 @@
       // served without the highlighter is the transcript as it was.
       if (!mdColour(code, codeRaw, word)) code.textContent = codeRaw;
       pre.appendChild(code);
+      // Build a copy-to-clipboard button. The SVG is a minimal clipboard icon
+      // matching the rail settings button's shape. Clipboard API is best-effort:
+      // the block is still usable for selection+copy when it is unavailable.
+      // All DOM construction uses createElement/setAttribute — no innerHTML.
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'acp-md-copy';
+      copyBtn.setAttribute('type', 'button');
+      copyBtn.setAttribute('aria-label', 'Copy code');
+      copyBtn.setAttribute('title', 'Copy code');
+      // Helper to build a minimal SVG clipboard or checkmark icon.
+      // Using createElementNS throughout because SVG elements must live in the
+      // SVG namespace — createElement produces HTML elements that browsers do
+      // not render as SVG shapes.
+      function makeCopyIcon() {
+        var NS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '1.5');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        var rect = document.createElementNS(NS, 'rect');
+        rect.setAttribute('x', '5');
+        rect.setAttribute('y', '1');
+        rect.setAttribute('width', '9');
+        rect.setAttribute('height', '11');
+        rect.setAttribute('rx', '1.5');
+        var path = document.createElementNS(NS, 'path');
+        path.setAttribute('d', 'M2 5v9a1.5 1.5 0 0 0 1.5 1.5H11');
+        svg.appendChild(rect);
+        svg.appendChild(path);
+        return svg;
+      }
+      function makeCheckIcon() {
+        var NS = 'http://www.w3.org/2000/svg';
+        var svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '1.8');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.setAttribute('stroke-linejoin', 'round');
+        var poly = document.createElementNS(NS, 'polyline');
+        poly.setAttribute('points', '2,8 6,13 14,4');
+        svg.appendChild(poly);
+        return svg;
+      }
+      copyBtn.appendChild(makeCopyIcon());
+      (function (btn, text) {
+        btn.addEventListener('click', function () {
+          if (!navigator.clipboard) return;
+          navigator.clipboard.writeText(text).then(function () {
+            // Brief checkmark feedback — swap to a tick, then back.
+            while (btn.firstChild) btn.removeChild(btn.firstChild);
+            btn.appendChild(makeCheckIcon());
+            setTimeout(function () {
+              while (btn.firstChild) btn.removeChild(btn.firstChild);
+              btn.appendChild(makeCopyIcon());
+            }, 1500);
+          });
+        });
+      }(copyBtn, codeRaw));
       if (!word) {
         parent.appendChild(pre);
         return;
@@ -2631,6 +2732,7 @@
       codeWrap.className = 'acp-md-code';
       codeWrap.setAttribute('data-lang', lang);
       codeWrap.appendChild(pre);
+      codeWrap.appendChild(copyBtn);
       parent.appendChild(codeWrap);
       return;
     }
@@ -5392,6 +5494,7 @@
       // A new session means any prior command catalogue is gone — reset so
       // stale slash-command suggestions from the old session never show up.
       sessionCommands = [];
+      sessionSkills = [];
       hideCommandDropdown();
       // The server's answer, not an inference from whatever survived in the
       // buffer. A turn longer than the buffer replays without its start
@@ -5498,6 +5601,12 @@
       // Slash command catalogue from the server (SC-1). Broadcast-only (not
       // in history), so this is the only source for it after a reconnect.
       sessionCommands = (payload && payload.commands) || [];
+      return;
+    }
+    if (type === 'skills') {
+      // kiro-cli skills catalogue from the server. Broadcast-only (not in
+      // history), so this is the only source for it after a reconnect.
+      sessionSkills = (payload && payload.skills) || [];
       return;
     }
     if (type === 'compaction') {

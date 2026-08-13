@@ -842,9 +842,15 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    appended element so it stays out of `textContent`, and so out of a snippet
    the reader selects and copies. Sized like `.acp-tool-kind`, which is the same
    kind of chip. */
-.acp-msg-md .acp-md-code { margin: 6px 0 8px; }
+.acp-msg-md .acp-md-code { margin: 6px 0 8px; position: relative; }
 .acp-msg-md .acp-md-code > pre { margin: 0; }
 .acp-msg-md .acp-md-code::before { content: attr(data-lang); display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
+/* Copy button — square, top-right corner of the code block, hidden until hover */
+.acp-md-copy { position: absolute; top: 3px; right: 3px; width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; opacity: 0; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
+.acp-msg-md .acp-md-code:hover .acp-md-copy,
+.acp-md-copy:focus-visible { opacity: 1; }
+.acp-md-copy:hover { color: var(--accent); border-color: var(--accent); }
+.acp-md-copy svg { width: 13px; height: 13px; display: block; }
 /* Syntax colours for a highlighted block. The page walks Prism's `tokenize()`
    output itself and names each span `acp-tok-<type>`, so these are the only
    rules involved — no Prism theme is vendored, and the palette is the one the
