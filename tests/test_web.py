@@ -16363,10 +16363,13 @@ class TestAcpCommandsAvailable:
                 {"name": "stats", "description": "Show stats"},
             ]
             frames = _queued(conn)
-            assert len(frames) == 1
+            assert len(frames) == 2
             assert frames[0]["type"] == "commands"
             assert frames[0]["sessionId"] == sid
             assert frames[0]["payload"]["commands"] == stored
+            assert frames[1]["type"] == "skills"
+            assert frames[1]["sessionId"] == sid
+            assert frames[1]["payload"]["skills"] == []
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
@@ -16381,7 +16384,10 @@ class TestAcpCommandsAvailable:
         assert acp_mod._supervisor.sessions[sid].get("commands") == [
             {"name": "tools", "description": "x"}]
         frames = _queued(conn)
-        assert len(frames) == 1 and frames[0]["type"] == "commands"
+        assert len(frames) == 2
+        assert frames[0]["type"] == "commands"
+        assert frames[1]["type"] == "skills"
+        assert frames[1]["payload"]["skills"] == []
 
     def test_zero_inflight_zero_sessions_drops_notification(self):
         """No sessions at all: notification is dropped (nothing to attribute to)."""

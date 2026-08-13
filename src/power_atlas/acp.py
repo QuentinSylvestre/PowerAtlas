@@ -165,7 +165,8 @@ SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history", "thought",
     "subagents", "steer_ack", "steer_sent",
-    "commands", "compaction", "commands_options_result", "commands_execute_result",
+    "commands", "skills",  # "skills" carries the list of kiro-cli skill entries
+    "compaction", "commands_options_result", "commands_execute_result",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -959,6 +960,39 @@ def _as_text(value) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _parse_skills(entries: list) -> list:
+    """Extract skill entries from a prompts/availableCommands list.
+
+    Accepts entries from either delivery path:
+    - ``_kiro.dev/commands/available``: discriminates by
+      ``entry.serverName.startswith("skill:")``.
+    - ``session/update`` with ``available_commands_update``: discriminates by
+      ``entry._meta.kiro.type == "skill"``.
+
+    Both discriminants are checked so neither path silently misses skills when
+    the other field is absent.  The result is capped at ``MAX_COMMANDS_COUNT``
+    (same ceiling as commands) to bound ``meta["skills"]`` storage.
+    """
+    result = []
+    for s in entries:
+        if not isinstance(s, dict):
+            continue
+        name = _as_text(s.get("name")).lstrip("/")
+        if not name:
+            continue
+        # _meta.kiro.type is the canonical discriminant on available_commands_update.
+        kiro_meta = s.get("_meta")
+        if isinstance(kiro_meta, dict):
+            kiro = kiro_meta.get("kiro")
+            if isinstance(kiro, dict) and kiro.get("type") == "skill":
+                result.append({"name": name, "description": _as_text(s.get("description"))})
+                continue
+        # serverName.startswith("skill:") is the discriminant on commands/available.
+        if _as_text(s.get("serverName")).startswith("skill:"):
+            result.append({"name": name, "description": _as_text(s.get("description"))})
+    return result[:MAX_COMMANDS_COUNT]
+
+
 def _tool_input_text(update: dict) -> str:
     """The command — or the nearest thing to one — a tool call is about to run.
 
@@ -1685,6 +1719,13 @@ class _Supervisor:
         # against MAX_SESSIONS alongside `sessions`, because the creation of one
         # spans two awaits and the cap has to hold across them.
         self._reserved = 0
+        # Buffered (commands, skills) from _kiro.dev/commands/available notifications
+        # that arrived during a session/new round-trip before sessions[session_id] was
+        # set. Cleared in new_session()'s finally block on every exit path.
+        # Single-slot: last-writer wins. All 5 observed notifications carry identical
+        # content (probe-verified kiro-cli 2.16.x), so earlier discards are safe.
+        # A log.debug fires when the slot is replaced to make discards observable.
+        self._pending_commands: tuple[list, list] | None = None
 
         # ── Sub-agent crews (SUBAGENT_LIST_METHOD) ──
         #
@@ -2701,6 +2742,11 @@ class _Supervisor:
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
+        # Temporary diagnostic: log every _kiro.dev/session/update notification kind
+        # to diagnose the compaction_status delivery path.
+        if method and "session/update" in method:
+            log.info("ACP _on_notification: method=%r kind=%r session_id=%r",
+                     method, kind, session_id)
         # Above every branch below, including the fall-through at the end.
         self._stamp_activity(session_id)
         if method == METADATA_METHOD:
@@ -2889,6 +2935,50 @@ class _Supervisor:
                 _flush_bubble(session_id)
                 _emit(session_id, envelope("thought", {"text": text}, session_id))
             return
+        if kind == "available_commands_update":
+            # Mid-session agent mode switch: kiro-cli re-advertises the full catalogue.
+            # O1 verified (probe against tui.js 2026-08-13): availableCommands is nested
+            # inside the update object — i.e. params["update"]["availableCommands"] — not
+            # at the top-level params. The tui.js case shows `e.availableCommands` where
+            # e is the session/update payload object, matching `update.get(...)` here.
+            available = update.get("availableCommands") or []
+            # Filter commands: exclude entries with _meta.kiro.type in (skill, steering,
+            # prompt) or serverName starting with "skill:". Apply MAX_COMMANDS_COUNT
+            # AFTER filtering (not before), so skill entries never displace commands.
+            commands = [
+                {"name": _as_text(c.get("name")).lstrip("/"),
+                 "description": _as_text(c.get("description"))}
+                for c in available
+                if isinstance(c, dict)
+                and _as_text(c.get("name"))
+                and not (
+                    (isinstance(c.get("_meta"), dict)
+                     and isinstance(c["_meta"].get("kiro"), dict)
+                     and c["_meta"]["kiro"].get("type") in ("skill", "steering", "prompt"))
+                    or _as_text(c.get("serverName")).startswith("skill:")
+                )
+            ][:MAX_COMMANDS_COUNT]
+            skills = _parse_skills(available)
+            # Attribution: direct sessionId lookup first (works for multi-session);
+            # fall back to inflight/sessions heuristic (single-session fallback).
+            sid = session_id if (session_id and session_id in self.sessions) else None
+            if sid is None:
+                inflight = self.inflight
+                if len(inflight) == 1:
+                    sid = next(iter(inflight))
+                elif len(inflight) == 0 and len(self.sessions) == 1:
+                    sid = next(iter(self.sessions))
+            if sid is not None:
+                meta = self.sessions.get(sid)
+                if meta is not None:
+                    meta["commands"] = commands
+                    meta["skills"] = skills
+                    _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
+                    _registry.broadcast(sid, envelope("skills", {"skills": skills}, sid))
+            else:
+                log.debug("ACP available_commands_update: cannot attribute; dropped "
+                          "(multi-session without sessionId in params, or no sessions)")
+            return
         if method == "_kiro.dev/commands/available":
             commands = [
                 {"name": _as_text(c.get("name")).lstrip("/"),
@@ -2896,6 +2986,7 @@ class _Supervisor:
                 for c in (params.get("commands") or [])[:MAX_COMMANDS_COUNT]
                 if isinstance(c, dict) and _as_text(c.get("name"))
             ]
+            skills = _parse_skills(params.get("prompts") or [])
             # Attribute to the single inflight session if one exists; otherwise
             # fall back to the single known session (commands/available fires
             # after each turn ends, so inflight is typically 0 at delivery time).
@@ -2905,12 +2996,21 @@ class _Supervisor:
                 sid = next(iter(inflight))
             elif len(inflight) == 0 and len(self.sessions) == 1:
                 sid = next(iter(self.sessions))
-            # Drop when 2+ inflight (ambiguous) or 0 sessions.
             if sid is not None:
                 meta = self.sessions.get(sid)
                 if meta is not None:
                     meta["commands"] = commands
+                    meta["skills"] = skills
                     _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
+                    _registry.broadcast(sid, envelope("skills", {"skills": skills}, sid))
+            elif len(inflight) == 0 and len(self.sessions) == 0 and self._reserved > 0:
+                # session/new is in flight — buffer for flush in new_session().
+                # Single-slot: last-writer wins. All probe-observed notifications
+                # carry identical content, so earlier discards are safe.
+                if self._pending_commands is not None:
+                    log.debug("ACP commands_available: replacing buffered pending commands "
+                              "(last-writer wins, concurrent new_session window)")
+                self._pending_commands = (commands, skills)
             else:
                 log.debug("ACP commands_available: %d session(s) inflight, %d known — "
                           "cannot attribute; dropped", len(inflight), len(self.sessions))
@@ -3066,6 +3166,31 @@ class _Supervisor:
                     "The agent returned an unusable sessionId: "
                     f"{session_id!r:.200}")
             self.sessions[session_id] = _new_session_record(cwd)
+            # Flush any commands/available notifications buffered during this
+            # session/new round-trip. Consume before broadcast: if broadcast
+            # raises, the buffer is already cleared so the next new_session call
+            # is not handed stale data. The finally block below also clears it
+            # on exception paths that bypass this block.
+            if self._pending_commands is not None:
+                pending_commands, pending_skills = self._pending_commands
+                self._pending_commands = None  # consume before broadcast
+                meta = self.sessions.get(session_id)
+                if meta is not None:
+                    meta["commands"] = pending_commands
+                    meta["skills"] = pending_skills
+                    try:
+                        _registry.broadcast(
+                            session_id,
+                            envelope("commands", {"commands": pending_commands}, session_id))
+                        _registry.broadcast(
+                            session_id,
+                            envelope("skills", {"skills": pending_skills}, session_id))
+                        log.debug("ACP new_session: flushed %d pending commands, "
+                                  "%d pending skills to %s",
+                                  len(pending_commands), len(pending_skills), session_id)
+                    except Exception:
+                        log.warning("ACP new_session: flush broadcast failed for session %s",
+                                    session_id, exc_info=True)
             self._publish_live()
             self.history[session_id] = _History()
         finally:
@@ -3073,6 +3198,10 @@ class _Supervisor:
             # it stood for is either recorded above (and counted by `sessions`
             # from now on) or never existed.
             self._reserved -= 1
+            # Load-bearing: clears the buffer if an exception occurred before
+            # the flush block above ran. On the success path the flush already
+            # set _pending_commands to None; this is a no-op in that case.
+            self._pending_commands = None
         log.info("ACP session created: %s (cwd %s); %d live",
                  session_id, cwd, len(self.sessions))
         return {"sessionId": session_id, "cwd": cwd}
@@ -3746,6 +3875,9 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
     commands = meta.get("commands")
     if commands is not None:
         conn.send(envelope("commands", {"commands": commands}, session_id))
+    skills = meta.get("skills")
+    if skills is not None:
+        conn.send(envelope("skills", {"skills": skills}, session_id))
 
 
 def _handle_subagent_subscribe(conn: _Connection, session_id: str,
