@@ -973,7 +973,7 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-crew-row-error   .acp-crew-action { color:#f87171; }  /* matches rail's error red */
 .acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
 
-.acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; }
+.acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; }
 /* Wraps rather than scrolls: at most four chips fit in a prompt and a wrapped
    second line is cheaper to read than a horizontal scroller holding two. */

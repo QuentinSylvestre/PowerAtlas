@@ -229,13 +229,21 @@
          the rest of this page. -->
     <div class="acp-tray" id="acpTray" hidden role="group"
          aria-label="Images attached to the next prompt"></div>
-    <div class="acp-composer-row" style="position:relative">
-      <!-- Slash command palette — opened by pressing / in an empty prompt.
-           Positioned absolutely above the textarea row.
-           Built with createElement + textContent; empty in the markup. -->
-      <div id="acpCmdDropdown" hidden role="listbox" aria-label="Slash commands">
-        <ul></ul>
+    <!-- Slash command palette — opened by pressing / in an empty prompt.
+         Positioned absolutely above the composer area (its containing block
+         is .acp-composer which carries position:relative in style.css).
+         Placed here, outside .acp-composer-row, so it is never a flex child
+         of the row and cannot affect the row's size or cause the textarea to
+         shift when the dropdown opens. Built with createElement + textContent;
+         empty in the markup. -->
+    <div id="acpCmdDropdown" hidden role="listbox" aria-label="Slash commands">
+      <div class="acp-cmd-header">
+        <span class="acp-cmd-header-label">Slash commands</span>
+        <kbd class="acp-cmd-header-hint">↑↓ navigate · Enter select · Esc close</kbd>
       </div>
+      <ul></ul>
+    </div>
+    <div class="acp-composer-row">
       <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
                 placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
                 aria-label="Prompt"
@@ -331,31 +339,73 @@
 /* ---- slash command palette --------------------------------------------- */
 #acpCmdDropdown {
   position: absolute;
-  bottom: 100%;
+  /* Sit above the whole composer (acp-composer is the containing block). The
+     bottom value accounts for the composer-row height (~2.5rem textarea +
+     border) plus the tray-to-row gap (8px). Using bottom:0 + transform keeps
+     it flush against the top edge of the composer-row without hard-coding
+     pixel values that would drift when the textarea auto-grows. */
+  bottom: 0;
   left: 0;
   right: 0;
-  margin-bottom: 4px;
+  transform: translateY(calc(-100% - 6px));
   background: var(--surface, #1e2030);
   border: 1px solid var(--border, #2d3150);
-  border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  border-radius: 8px;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.04);
   z-index: 200;
-  max-height: 240px;
-  overflow-y: auto;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.acp-cmd-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 12px 6px;
+  border-bottom: 1px solid var(--border, #2d3150);
+  flex-shrink: 0;
+  gap: 8px;
+}
+.acp-cmd-header-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-dim, #8b95b0);
+}
+.acp-cmd-header-hint {
+  font-size: 10px;
+  color: var(--text-dim, #8b95b0);
+  background: none;
+  border: none;
+  font-family: inherit;
+  opacity: 0.7;
+  white-space: nowrap;
 }
 #acpCmdDropdown ul {
   list-style: none;
   margin: 0;
   padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  /* Thin custom scrollbar so it doesn't widen the dropdown unexpectedly. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border, #2d3150) transparent;
 }
+#acpCmdDropdown ul::-webkit-scrollbar { width: 4px; }
+#acpCmdDropdown ul::-webkit-scrollbar-thumb { background: var(--border, #2d3150); border-radius: 2px; }
+#acpCmdDropdown ul::-webkit-scrollbar-track { background: transparent; }
 #acpCmdDropdown li {
   display: flex;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 7px 12px;
   cursor: pointer;
   font-size: 13px;
   line-height: 1.4;
   align-items: baseline;
+  transition: background 0.08s;
 }
 #acpCmdDropdown li:hover,
 #acpCmdDropdown li[aria-selected="true"] {
@@ -364,8 +414,10 @@
 #acpCmdDropdown li .acp-cmd-name {
   color: var(--accent, #818cf8);
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 13px;
   flex-shrink: 0;
-  min-width: 80px;
+  min-width: 100px;
+  font-weight: 500;
 }
 #acpCmdDropdown li .acp-cmd-desc {
   color: var(--text-dim, #8b95b0);
@@ -373,12 +425,16 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+  min-width: 0;
 }
 #acpCmdDropdown li.acp-cmd-placeholder {
   color: var(--text-dim, #8b95b0);
   font-size: 12px;
   font-style: italic;
   cursor: default;
+  justify-content: center;
+  padding: 10px 12px;
 }
 #acpCmdDropdown li.acp-cmd-placeholder:hover {
   background: none;
