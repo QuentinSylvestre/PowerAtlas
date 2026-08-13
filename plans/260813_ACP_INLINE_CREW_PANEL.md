@@ -1,7 +1,7 @@
 # ACP Inline Crew Panel
 
 > **Date**: 2026-08-13
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix stale/cross-session crew panel bugs and redesign crew panel as inline transcript artifact anchored per fan-out tool call
 > **Estimated effort**: 1–2 days
@@ -167,6 +167,9 @@ None.
 - [x] `test_turn_end_clears_spawner_entries_via_production_code` updated and passing.
 - [x] Existing subscribe tests updated for no-stale-snapshot behavior.
 - [x] Full pytest suite green (`pytest tests/`).
+
+Implementation (2026-08-13, code: c1d227a, fix: b41c736, fix: b94f27f)
+Phase 1 extracted `_evict_crew_children(session_id, *, keep_history, broadcast_empty)` to unify the near-identical turn-start stale-crew loop and the new turn-end cleanup block. The `keep_history=True` turn-end path preserves `subagent_sessions` (the routing key for sub-agent click-to-view) and `subagent_history` (the replay buffer); only `crews` done entries and `_bubbles` are popped. The `keep_history=False` turn-start path still clears all four dicts for a clean fan-out. `_handle_subscribe` gained an `inflight or any-not-done` gate replacing the bare `if crew` check, fixing Bug 1. `close_session` gained an orphan-sweep loop catching `subagent_sessions`/`subagent_history` entries whose crew was already evicted at turn-end. Tests added: `TestAcpCrewCleanupOnTurnEnd` (5 tests including `subagent_history` retention assertion), `TestAcpSubscribeSnapshotGate` (3 tests), SC6 integration test `test_subagent_click_to_view_works_after_turn_ends`, updated `test_subscribing_after_the_fact_gets_a_crew_snapshot` (Case 2 now drives production `_handle_prompt`). All Phase 1 tests pass; 1685/1685 non-pre-existing tests pass.
 
 ---
 
@@ -524,6 +527,34 @@ Do not restart PowerAtlas for `acp.html` changes. Hard reload (`Ctrl+Shift+R`) s
 *Reserved — filled during implementation.*
 
 ## Review Log
+
+### 2026-08-13 — Implementation Review (after Phase 1, persona: Reliability engineer, Senior engineer, Maintainability reviewer, Architect)
+
+Implementation health: Green (all findings resolved).
+18 findings across 2 review cycles + post-cap user-directed fixes (1 High, 9 Medium, 6 Low, 2 post-cap Medium fixed).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `subagent_sessions.pop` at turn-end breaks SC6 click-to-view routing — `_handle_subscribe` would return `unknown_session` after turn ends | Fixed — removed from turn-end path; `_evict_crew_children(keep_history=True)` preserves `subagent_sessions` |
+| 2 | Medium | Case 2 of `test_subscribing_after_the_fact_gets_a_crew_snapshot` hand-rolled production cleanup — fragile and omitted `_bubbles` | Fixed — replaced with `_run_turn_with_crew` call using distinct session id |
+| 3 | Medium | `_bubbles.clear()` missing from `acp_store` fixture teardown — latent cross-test contamination | Fixed — added to `acp_store` `finally` block |
+| 4 | Medium | Phase 2 placeholder comment inside `if not _finishing_crew` branch, should be unconditional | Fixed — moved outside the branch with updated wording |
+| 5 | Medium | No SC6 click-to-view integration test after full `_handle_prompt` turn | Fixed — added `test_subagent_click_to_view_works_after_turn_ends` |
+| 6 | Medium | `_finishing_crew` redundant re-fetch in finally block — same object, dual binding | Fixed — removed redundant re-fetch; `_evict_crew_children` consumes it |
+| 7 | Medium | `_handle_cancel` implicit ordering invariant undocumented | Fixed — added ordering invariant comment |
+| 8 | Medium | Turn-end and turn-start cleanup loops near-identical — maintenance duplication | Fixed — extracted `_evict_crew_children` helper |
+| 9 | Medium | Plan EC-1 wording contradicted implementation (said `subagent_sessions` is popped) | Fixed — EC-1 updated to say preserved |
+| 10 | Medium | `close_session` orphans `subagent_sessions`/`subagent_history` when crew already evicted at turn-end | Fixed — added orphan-sweep loop in `close_session` |
+| 11 | Low | `_bubbles.pop` comment said "never populated" but sub-agents do write bubbles | Fixed — corrected comment |
+| 12 | Low | `acp_store` fixture missing `_compacting.clear()` | Fixed — added to fixture |
+| 13 | Low | Subscribe gate has no explaining comment for two-predicate logic | Fixed — added SC5/defence-in-depth comment |
+| 14 | Low | Test method naming — outcome-named vs condition-named | Fixed — renamed 4 test methods |
+| 15 | Low | Duplicate NOTE comment on `subagent_history` inside loop | Fixed — removed redundant mid-loop comment |
+| 16 | Low | `test_done_crew_entries_removed_from_subagent_sessions` asserted wrong behavior | Fixed — inverted to assert preservation |
+| 17 | Low | Phase 2 placeholder comment location (Architect finding, same as #4) | Fixed — same fix as #4 |
+| 18 | Low | Subscribe gate predicate unnamed abstraction (Architect) | Fixed — comment added (same as #13) |
+
+QA: PASS (5 claims verified, 1685 tests pass, pre-existing failure confirmed unrelated).
 
 ### 2026-08-13 — Plan Creation (via /qplan)
 
