@@ -404,13 +404,15 @@
 #acpCmdDropdown ul::-webkit-scrollbar-track { background: transparent; }
 #acpCmdDropdown li {
   display: flex;
-  gap: 10px;
-  padding: 7px 12px;
+  gap: 6px;
+  padding: 6px 12px;
   cursor: pointer;
   font-size: 13px;
   line-height: 1.4;
-  align-items: baseline;
+  align-items: center;
   transition: background 0.08s;
+  white-space: nowrap;
+  overflow: hidden;
 }
 #acpCmdDropdown li:hover,
 #acpCmdDropdown li[aria-selected="true"] {
@@ -421,7 +423,6 @@
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
   font-size: 13px;
   flex-shrink: 0;
-  min-width: 100px;
   font-weight: 500;
 }
 #acpCmdDropdown li .acp-cmd-desc {
@@ -446,19 +447,18 @@
 }
 /* skill badge — displayed inline after the command name in the palette */
 .acp-cmd-skill-badge {
-  display: inline-block;
-  margin-left: 0.35em;
-  padding: 0 0.3em;
-  font-size: 0.65em;
+  flex-shrink: 0;
+  padding: 1px 5px;
+  font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   border-radius: 3px;
-  background: var(--badge-bg, rgba(148, 163, 184, 0.18));
-  color: var(--badge-fg, #94a3b8);
-  align-self: center;
+  background: var(--badge-bg, rgba(148, 163, 184, 0.15));
+  color: var(--badge-fg, #64748b);
   user-select: none;
   line-height: 1.6;
+  white-space: nowrap;
 }
 /* ---- compaction / system message --------------------------------------- */
 .acp-system-msg {
@@ -1784,11 +1784,20 @@
     var allItems = sessionCommands.map(function(c) {
       return {name: c.name, description: c.description, isSkill: false};
     }).concat(sessionSkills.map(function(s) {
-      return {name: s.name, description: s.description, isSkill: true};
+      // Skill descriptions are verbose multi-sentence paragraphs — show only
+      // the first sentence so the row stays compact.
+      var desc = s.description || '';
+      var dot = desc.indexOf('. ');
+      if (dot > 0) desc = desc.slice(0, dot + 1);
+      return {name: s.name, description: desc, isSkill: true};
     }));
     var items = allItems.filter(function(c) {
       return !lc || (c.name || '').toLowerCase().indexOf(lc) !== -1;
     });
+    // Cap at 12 items to prevent the dropdown covering the whole screen.
+    // When filtering the user is typing so they can narrow down; on open-all
+    // (empty partial) show the first 12 to keep the palette compact.
+    if (items.length > 12) items = items.slice(0, 12);
     renderCommandDropdown(items, sessionCommands.length === 0 && sessionSkills.length === 0);
   }
 
