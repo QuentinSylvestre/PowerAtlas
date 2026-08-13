@@ -2561,6 +2561,10 @@ class _Supervisor:
                 continue
             role = _first_text(entry, _SUBAGENT_ROLE_KEYS)
             task = _first_text(entry, _SUBAGENT_TASK_KEYS)[:MAX_SUBAGENT_TASK_CHARS]
+            # `sessionName` is _SUBAGENT_TASK_KEYS[1] — the short per-stage slug (e.g. "count_src").
+            # Extracted separately from `task` (= initialQuery, the full prompt) because they serve
+            # different purposes: task is for fallback display, sessionName is for the primary label.
+            session_name = _first_text(entry, (_SUBAGENT_TASK_KEYS[1],))
             if not role and not task and existing is None:
                 # kiro-cli sometimes announces a slot before it has anything
                 # to say about it — corroborated by kirocrew's own
@@ -2586,6 +2590,8 @@ class _Supervisor:
             updated = {
                 "role": role or (existing["role"] if existing else ""),
                 "task": task or (existing["task"] if existing else ""),
+                # short per-stage slug for display; "" when absent — use task (initialQuery) as fallback
+                "sessionName": session_name or (existing.get("sessionName", "") if existing else ""),
                 "status": stype or (existing["status"] if existing else ""),
                 "action": existing["action"] if existing else "",
                 "done": done,
@@ -3267,6 +3273,7 @@ def _subagents_payload(crew: dict) -> list:
             "sessionId": child_id,
             "role": entry["role"],
             "task": entry["task"],
+            "sessionName": entry.get("sessionName", ""),
             "status": entry["status"],
             "action": entry["action"],
             "done": entry["done"],

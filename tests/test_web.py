@@ -16174,6 +16174,52 @@ class TestAcpStoppedAt:
         assert "stoppedAt" in by_id["sub-pay-02"]
         assert by_id["sub-pay-02"]["stoppedAt"] is None
 
+    def test_session_name_round_trips_through_subagents_payload(self):
+        """``_subagents_payload`` forwards ``sessionName`` verbatim."""
+        from power_atlas import acp as acp_mod
+
+        crew = {
+            "sub-sn-01": {
+                "role": "worker", "task": "do something", "sessionName": "stage_one",
+                "status": "working", "action": "", "done": False, "error": "",
+                "order": 0, "startedAt": 1_700_000_000.0, "stoppedAt": None,
+            },
+        }
+        payload = acp_mod._subagents_payload(crew)
+        assert payload[0]["sessionName"] == "stage_one"
+
+    def test_empty_session_name_serializes_as_empty_string_not_none(self):
+        """An empty ``sessionName`` must appear as ``""`` in the wire payload,
+        never ``None`` — the JS reads it as a string."""
+        from power_atlas import acp as acp_mod
+
+        crew = {
+            "sub-sn-02": {
+                "role": "worker", "task": "do something", "sessionName": "",
+                "status": "working", "action": "", "done": False, "error": "",
+                "order": 0, "startedAt": 1_700_000_000.0, "stoppedAt": None,
+            },
+        }
+        payload = acp_mod._subagents_payload(crew)
+        assert payload[0]["sessionName"] == ""
+        assert payload[0]["sessionName"] is not None
+
+    def test_missing_session_name_key_produces_empty_string_not_key_error(self):
+        """A crew dict that predates the ``sessionName`` field (no key at all)
+        must serialize as ``""`` — not raise ``KeyError``."""
+        from power_atlas import acp as acp_mod
+
+        crew = {
+            "sub-sn-03": {
+                "role": "worker", "task": "do something",
+                # no "sessionName" key — simulates a pre-Phase-1 in-memory entry
+                "status": "working", "action": "", "done": False, "error": "",
+                "order": 0, "startedAt": 1_700_000_000.0, "stoppedAt": None,
+            },
+        }
+        payload = acp_mod._subagents_payload(crew)
+        assert payload[0]["sessionName"] == ""
+
 
 class TestAcpCommandsAvailable:
     """``_kiro.dev/commands/available`` notification handler.
