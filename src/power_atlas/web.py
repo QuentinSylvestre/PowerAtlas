@@ -27,6 +27,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
+import jinja2 as _jinja2
+
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -646,7 +648,13 @@ async def _background_refresh():
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-templates = Jinja2Templates(directory=str(_TEMPLATES_DIR), auto_reload=True)
+templates = Jinja2Templates(
+    env=_jinja2.Environment(
+        loader=_jinja2.FileSystemLoader(str(_TEMPLATES_DIR)),
+        auto_reload=True,
+        autoescape=True,
+    )
+)
 
 
 # Loopback host names the server is legitimately reached by. Validating the Host
@@ -1480,6 +1488,7 @@ def _acp_csp(nonce: str, host: str) -> str:
     return "; ".join((
         "default-src 'self'",
         f"script-src 'nonce-{nonce}'",
+        f"style-src 'self' 'nonce-{nonce}'",
         "img-src 'self' blob:",
         f"connect-src 'self' ws://{host} wss://{host}",
         "object-src 'none'",

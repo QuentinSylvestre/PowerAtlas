@@ -340,7 +340,7 @@
    `manual` before core runs, so nothing hooks DOMContentLoaded and nothing
    touches the DOM. If this file fails to load, every block below still renders
    — uncoloured, which is what a language Prism does not know already gets. #}
-<style>
+<style nonce="{{ csp_nonce }}">
 /* ---- slash command palette --------------------------------------------- */
 #acpCmdDropdown {
   position: absolute;
