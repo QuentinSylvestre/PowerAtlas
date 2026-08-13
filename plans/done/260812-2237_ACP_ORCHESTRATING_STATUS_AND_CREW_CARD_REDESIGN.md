@@ -1,9 +1,16 @@
 # ACP Orchestrating Status and Crew Card Redesign
 
 > **Date**: 2026-08-12
-> **Status**: Done
+> **Status**: Complete
+> **Last Updated**: 2026-08-12 22:37
 > **Scope**: /acp crew panel — add orchestrating header + redesign crew rows as lean dot-rows with sessionName
 > **Estimated effort**: ~2–4 hours
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): /qexplore generated YYMMDD-HHMM_ filename instead of YYMMDD_, breaking qvalidate filename-grammar check. Root cause is agent deviation from the spec (qexplore/SKILL.md:467 already mandates YYMMDD_ without time suffix). No governance edit needed — spec is correct, agent needs to follow it.
 
 ---
 
