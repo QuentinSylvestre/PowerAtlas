@@ -2058,7 +2058,13 @@
         var knownHead = known.body.querySelector('.acp-tool-head');
         if (knownHead && !knownHead.querySelector('.acp-tool-toggle')) {
           // head is always present (built in the new-row path above) but guard defensively
-          knownHead.appendChild(_makeToolToggle(cmdWrap, payload.title || payload.kind));
+          var lateToggle = _makeToolToggle(cmdWrap, payload.title || payload.kind);
+          knownHead.appendChild(lateToggle);
+          var lateName = knownHead.querySelector('.acp-tool-name');
+          if (lateName) {
+            lateName.style.cursor = 'pointer';
+            lateName.addEventListener('click', function () { lateToggle.click(); });
+          }
         }
         known.body.appendChild(cmdWrap);
       }
@@ -2099,7 +2105,11 @@
     if (payload.command) {
       var cmdWrap = commandBlock(payload);
       cmdWrap.hidden = true;
-      head.appendChild(_makeToolToggle(cmdWrap, payload.title || payload.kind));
+      var toggle = _makeToolToggle(cmdWrap, payload.title || payload.kind);
+      head.appendChild(toggle);
+      // Clicking the name (pink text) is equivalent to clicking the toggle arrow.
+      name.style.cursor = 'pointer';
+      name.addEventListener('click', function () { toggle.click(); });
       body.appendChild(cmdWrap);
     }
 
@@ -2132,8 +2142,8 @@
     return wrap;
   }
 
-  // Wraps consecutive sub-runs of >=2 tool-call rows into collapsible group
-  // containers. Called at meta turn:end. Sets toolGroup = null when done.
+  // Wraps all consecutive sub-runs of tool-call rows (even single calls) into
+  // collapsible group containers. Called at meta turn:end. Sets toolGroup = null when done.
   //
   // Key invariants:
   //   - toolRows[id].status and toolRows[id].body are DOM refs; reparenting
@@ -2143,7 +2153,7 @@
   //   - toolGroup is reset in clearTranscript() and meta turn:start, so this
   //     function always operates on a single turn's accumulation.
   function flushToolGroups() {
-    if (!toolGroup || toolGroup.length < 2) { toolGroup = null; return; }
+    if (!toolGroup || toolGroup.length < 1) { toolGroup = null; return; }
 
     // Split toolGroup into consecutive sub-runs by DOM adjacency.
     // A prose bubble between two tool calls in the same turn makes them
@@ -2167,7 +2177,7 @@
 
     for (var r = 0; r < runs.length; r++) {
       var rows = runs[r];
-      if (rows.length < 2) continue; // single-call sub-run stays as individual row
+      // Every sub-run, even a single tool call, is now wrapped in a group.
 
       // Capture insertion point BEFORE removing any row — once rows are moved
       // out, the last row has no nextSibling in the transcript.
@@ -2209,7 +2219,8 @@
       var stTally = stOrder.map(function (st) {
         return stCounts[st] > 1 ? st + ' \xd7' + stCounts[st] : st;
       }).join(', ');
-      var headerText = 'Tool calls: ' + nameTally + (stTally ? ' \xb7 ' + stTally : '');
+      var toolWord = rows.length === 1 ? 'tool' : 'tools';
+      var headerText = 'Called ' + rows.length + ' ' + toolWord + ': ' + nameTally + (stTally ? ' \xb7 ' + stTally : '');
 
       // Build group container.
       var group = document.createElement('div');

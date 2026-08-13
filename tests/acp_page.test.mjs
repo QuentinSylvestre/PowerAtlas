@@ -6863,9 +6863,9 @@ check("P3: group header format: name xCount · status xCount", async (tpl) => {
   const toggle = transcript.querySelector(".acp-tool-group-toggle");
   assert(toggle !== null, "group toggle should exist");
   const text = toggle.textContent;
-  // Expected: "Tool calls: execute ×2, read · completed ×3"
-  assert(text.toLowerCase().startsWith("tool calls:"),
-    "header should start with 'Tool calls:' prefix — got: " + text);
+  // Expected: "Called 3 tools: execute ×2, read · completed ×3"
+  assert(text.toLowerCase().startsWith("called"),
+    "header should start with 'Called' prefix — got: " + text);
   assert(!text.toLowerCase().includes("shell"),
     "header should not contain title 'shell' (kind is used instead) — got: " + text);
   assert(text.includes("execute"),
@@ -6907,20 +6907,25 @@ check("P3: clicking group toggle reveals rows; individual rows start collapsed",
   }
 });
 
-check("P3: turn with 1 tool call: no group; row stays at transcript root", async (tpl) => {
+check("P3: turn with 1 tool call: wrapped in a group with 'Called 1 tool' header", async (tpl) => {
   const { page, live } = connected(tpl);
   await deliverTurn(page, live, [
     { toolCallId: "g5a", title: "shell", kind: "execute", status: "completed", command: "ls" },
   ]);
   const transcript = page.el("acpTranscript");
   const groups = transcript.querySelectorAll(".acp-tool-group");
-  assertEqual(groups.length, 0, "single call should not produce a group");
+  assertEqual(groups.length, 1, "single call should produce a group");
+  const toggle = transcript.querySelector(".acp-tool-group-toggle");
+  assert(toggle !== null, "group toggle should exist");
+  const text = toggle.textContent;
+  assert(text.toLowerCase().startsWith("called 1 tool"),
+    "single-call header should read 'Called 1 tool' — got: " + text);
   const rootToolRows = transcript.childNodes.filter(
     (n) => n.className && String(n.className).includes("acp-msg-tool"));
-  assertEqual(rootToolRows.length, 1, "single call should remain at transcript root");
+  assertEqual(rootToolRows.length, 0, "single call row should be inside the group, not at transcript root");
 });
 
-check("P3: tool_call + prose + tool_call+tool_call: first stays individual; last two form group", async (tpl) => {
+check("P3: tool_call + prose + tool_call+tool_call: all get grouped; first as a solo group, last two as a pair", async (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
   // First tool call
@@ -6942,11 +6947,11 @@ check("P3: tool_call + prose + tool_call+tool_call: first stays individual; last
   await page.settle();
   const transcript = page.el("acpTranscript");
   const groups = transcript.querySelectorAll(".acp-tool-group");
-  assertEqual(groups.length, 1, "only the adjacent pair should form a group");
+  assertEqual(groups.length, 2, "both sub-runs (1 and 2) should each form a group");
   const rootToolRows = transcript.childNodes.filter(
     (n) => n.className && String(n.className).includes("acp-msg-tool"));
-  assertEqual(rootToolRows.length, 1,
-    "the first call (non-adjacent) should remain at root");
+  assertEqual(rootToolRows.length, 0,
+    "no tool rows should remain at transcript root; all are in groups");
 });
 
 check("P3: IIFE closure — two groups A+B and C+D; clicking A+B expands only A+B", async (tpl) => {
@@ -7097,12 +7102,13 @@ check("P3: toolGroup is null after clearTranscript", async (tpl) => {
   const transcript = page.el("acpTranscript");
   assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 0,
     "no groups should exist after clearTranscript");
-  // New single-call turn should not form a group (old toolGroup cleared)
+  // New single-call turn should form its own fresh group (toolGroup was properly
+  // reset by clearTranscript, so no stale accumulation from the old session leaks in)
   await deliverTurn(page, newSid, [
     { toolCallId: "g10b", title: "shell", kind: "execute", status: "completed", command: "new" },
   ]);
-  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 0,
-    "single call after clear should not form a group (toolGroup was properly reset)");
+  assertEqual(transcript.querySelectorAll(".acp-tool-group").length, 1,
+    "single call after clear should form its own group (toolGroup was properly reset)");
 });
 
 check("P3: group toggle aria-label toggles between Expand and Collapse", async (tpl) => {
