@@ -2749,22 +2749,50 @@ class _Supervisor:
         update = params.get("update") or {}
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
-        # Temporary diagnostic: log every _kiro.dev/session/update notification kind
-        # to diagnose the compaction_status delivery path.
-        if method and "session/update" in method:
-            log.debug("ACP _on_notification: method=%r kind=%r session_id=%r",
-                      method, kind, session_id)
         # Above every branch below, including the fall-through at the end.
         self._stamp_activity(session_id)
         if method == METADATA_METHOD:
             percent = _context_percent(params)
             if percent is not None and isinstance(session_id, str):
                 _note_context(session_id, percent)
+                # Compaction completion signal: the context_usage notification
+                # fires immediately after the compaction turn ends, with the
+                # new (lower) usage. Since the TUI never forwards the
+                # summarization_completed event over ACP, this is the only
+                # reliable wire signal that compaction has finished.
+                if session_id in self._compacting:
+                    self._compacting.discard(session_id)
+                    _registry.broadcast(
+                        session_id,
+                        envelope("compaction", {"status": "completed",
+                                                "error": "", "summary": ""},
+                                 session_id))
             return
         if method == SUBAGENT_LIST_METHOD:
             self._on_subagent_list(params)
             return
         if kind in ("agent_message_chunk", "user_message_chunk"):
+            # Compaction started detection: the TUI never forwards the
+            # summarization_started event over ACP. The only observable signal
+            # is an agent_message_chunk arriving for a session that has no
+            # inflight turn — that burst is the compaction summary being
+            # written. Tag it on the first chunk; subsequent chunks are no-ops
+            # because the session is already in _compacting.
+            # Guard on _registry.loading: session/load replays the full
+            # conversation history as agent_message_chunks outside of inflight,
+            # and must not be misidentified as compaction.
+            if (kind == "agent_message_chunk"
+                    and isinstance(session_id, str)
+                    and session_id not in self.inflight
+                    and session_id not in self._compacting
+                    and session_id not in _registry.loading
+                    and session_id in self.sessions):
+                self._compacting.add(session_id)
+                _registry.broadcast(
+                    session_id,
+                    envelope("compaction", {"status": "started",
+                                            "error": "", "summary": ""},
+                             session_id))
             # `user_message_chunk` is what makes a loaded conversation a
             # conversation: `session/load` replays both halves of it, and
             # without this arm the transcript would come back as the agent
@@ -3030,71 +3058,6 @@ class _Supervisor:
             else:
                 log.debug("ACP commands_available: %d session(s) inflight, %d known — "
                           "cannot attribute; dropped", len(inflight), len(self.sessions))
-            return
-        if method == "kiro.dev/compaction/status" or kind == "compaction_status":
-            # Two delivery shapes observed in the wild:
-            # 1. method == "kiro.dev/compaction/status": KAS → TUI direction.
-            #    params = {status: {type, error}, summary}
-            # 2. kind == "compaction_status" (session/update notification): TUI → ACP
-            #    client direction. update = {sessionUpdate: "compaction_status",
-            #    status: "started"|"completed"|"failed", summary, ...}
-            #    The TUI translates KAS's summarization_* session/update kinds into
-            #    this shape before forwarding to connected ACP clients.
-            # Both shapes are supported; the isinstance check below handles the
-            # nested-dict (shape 1) vs plain-string (shape 2) status field.
-            src = update if kind == "compaction_status" else params
-            status = src.get("status") or {}
-            stype = _as_text(status.get("type")) if isinstance(status, dict) else _as_text(status)
-            error = _as_text(status.get("error")) if isinstance(status, dict) else ""
-            summary = _as_text(src.get("summary"))
-            inflight = self.inflight
-            sid = None
-            if len(inflight) == 1:
-                sid = next(iter(inflight))
-            elif len(self._compacting) == 1:
-                # Terminal notification (completed/failed): inflight was already
-                # cleared when the prompt turn ended, but _compacting still
-                # holds the session we tagged on `started`.
-                sid = next(iter(self._compacting))
-            elif len(inflight) == 0:
-                # `started` notification arriving after turn end (kiro-cli emits
-                # compaction status asynchronously, well after `end_turn`).
-                # _compacting is empty here because we haven't seen `started`
-                # yet. Use the session that was used most recently — whichever
-                # session sent the `/compact` prompt will have the freshest
-                # `last_used` timestamp.
-                best = max(
-                    ((s, m.get("last_used", 0)) for s, m in self.sessions.items()),
-                    key=lambda x: x[1],
-                    default=None,
-                )
-                if best is not None:
-                    sid = best[0]
-            # Maintain _compacting: add on `started`, remove on terminal status.
-            if stype == "started" and sid is not None:
-                self._compacting.add(sid)
-            elif stype in ("completed", "failed") and sid is not None:
-                self._compacting.discard(sid)
-            log.info("ACP compaction_status: stype=%r sid=%s kind=%r "
-                     "_compacting=%r inflight=%d sessions=%d",
-                     stype, sid, kind, self._compacting,
-                     len(inflight), len(self.sessions))
-            if sid is not None:
-                if stype == "completed":
-                    # Reset context meter
-                    _note_context(sid, None)
-                payload: dict = {"status": stype, "error": error, "summary": summary}
-                if stype == "completed" and summary and _markdown is not None:
-                    try:
-                        payload["summary_tokens"] = _markdown(summary)
-                    except Exception:
-                        log.debug("ACP compaction: markdown tokenise failed; "
-                                  "client will fall back to plain text")
-                _registry.broadcast(sid, envelope("compaction", payload, sid))
-            else:
-                log.debug("ACP compaction_status: %d session(s) inflight, %d known — "
-                          "cannot attribute; dropped (status=%r)",
-                          len(inflight), len(self.sessions), stype)
             return
         if method == "kiro.dev/clear/status":
             return  # silent consume; TUI logs debug only, nothing to display

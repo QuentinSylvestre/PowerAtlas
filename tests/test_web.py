@@ -2904,20 +2904,26 @@ class TestAcpNotificationFanout:
         conn = acp_mod._Connection(_SinkWs())
         acp_mod._registry.connections.add(conn)
         acp_mod._registry.attach(conn, sid)
+        # Mark the session as inflight so this chunk is not misidentified as a
+        # compaction turn (compaction detection fires when agent_message_chunk
+        # arrives outside of an active inflight turn).
+        acp_mod._supervisor.inflight.add(sid)
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    # Measured shape for kiro-cli 2.14.2: one object, not a list.
+                    "content": {"type": "text", "text": "partial"}}},
+            })
 
-        acp_mod._supervisor._on_notification({
-            "method": "session/update",
-            "params": {"sessionId": sid, "update": {
-                "sessionUpdate": "agent_message_chunk",
-                # Measured shape for kiro-cli 2.14.2: one object, not a list.
-                "content": {"type": "text", "text": "partial"}}},
-        })
-
-        assert _queued(conn) == [{
-            "type": "chunk", "sessionId": sid,
-            "payload": {"role": "agent", "text": "partial"}}]
-        assert acp_mod._supervisor.history[sid].events()[0][
-            "payload"]["text"] == "partial"
+            assert _queued(conn) == [{
+                "type": "chunk", "sessionId": sid,
+                "payload": {"role": "agent", "text": "partial"}}]
+            assert acp_mod._supervisor.history[sid].events()[0][
+                "payload"]["text"] == "partial"
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
 
     def test_chunk_for_another_session_does_not_cross_over(self, acp_session):
         acp_mod, sid = acp_session
@@ -3670,18 +3676,25 @@ class TestAcpMarkdownRendering:
         coming back to a loaded session would see it twice."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
-        self._notify(acp_mod, sid, self._says("First **answer**."))
-        self._notify(acp_mod, sid, self._says("next question", role="user"))
-        self._notify(acp_mod, sid, self._says("Second *answer*."))
-        # What `_handle_load` does once the agent's replay is complete: the
-        # last bubble has no boundary behind it and is the one being read.
-        acp_mod._flush_bubble(sid)
-        frames = _queued(conn)
-        assert [f["type"] for f in frames] == [
-            "chunk", "rendered", "chunk", "chunk", "rendered"]
-        assert "First" in json.dumps(frames[1]["payload"]["tokens"])
-        assert "First" not in json.dumps(frames[4]["payload"]["tokens"])
-        assert "Second" in json.dumps(frames[4]["payload"]["tokens"])
+        # Simulate the session/load state: _registry.loading holds sid during
+        # load, preventing these replay chunks from being misidentified as a
+        # compaction turn (which also arrives outside of inflight).
+        acp_mod._registry.loading[sid] = []
+        try:
+            self._notify(acp_mod, sid, self._says("First **answer**."))
+            self._notify(acp_mod, sid, self._says("next question", role="user"))
+            self._notify(acp_mod, sid, self._says("Second *answer*."))
+            # What `_handle_load` does once the agent's replay is complete: the
+            # last bubble has no boundary behind it and is the one being read.
+            acp_mod._flush_bubble(sid)
+            frames = _queued(conn)
+            assert [f["type"] for f in frames] == [
+                "chunk", "rendered", "chunk", "chunk", "rendered"]
+            assert "First" in json.dumps(frames[1]["payload"]["tokens"])
+            assert "First" not in json.dumps(frames[4]["payload"]["tokens"])
+            assert "Second" in json.dumps(frames[4]["payload"]["tokens"])
+        finally:
+            acp_mod._registry.loading.pop(sid, None)
 
     def test_the_tree_is_not_sanitized_and_the_page_is_the_boundary(self, acp_session):
         """Two halves of one property, both asserted rather than commented.
@@ -6118,14 +6131,20 @@ class TestAcpContextWindow:
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
         _queued(conn)
-        acp_mod._supervisor._on_notification({
-            "method": "session/update",
-            "params": {"sessionId": sid, "update": {
-                "sessionUpdate": "agent_message_chunk",
-                acp_mod.CONTEXT_PERCENT_KEY: 42.0,
-                "content": {"type": "text", "text": "hi"}}},
-        })
-        assert [f["payload"].get("contextPercent") for f in _queued(conn)] == [None]
+        # Mark inflight so this agent_message_chunk is not misidentified as a
+        # compaction turn.
+        acp_mod._supervisor.inflight.add(sid)
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    acp_mod.CONTEXT_PERCENT_KEY: 42.0,
+                    "content": {"type": "text", "text": "hi"}}},
+            })
+            assert [f["payload"].get("contextPercent") for f in _queued(conn)] == [None]
+        finally:
+            acp_mod._supervisor.inflight.discard(sid)
 
     def test_it_is_not_recorded_in_the_replay_buffer(self, acp_session):
         """A level, not an event: recording each would spend an eviction per
@@ -16830,11 +16849,18 @@ class TestAcpCommandsAvailable:
 
 
 class TestAcpCompactionStatus:
-    """``kiro.dev/compaction/status`` notification handler.
+    """Compaction detection via observable ACP wire signals.
 
-    Broadcasts a ``compaction`` frame to subscribers.  On ``completed`` also
-    calls ``_note_context(sid, None)`` which broadcasts a ``meta`` frame with
-    ``contextPercent: null`` (the dual-frame effect).
+    The TUI does not forward summarization_* events to ACP clients over the
+    session/update path. PowerAtlas therefore detects compaction from two
+    observable signals:
+
+    - ``started``: an ``agent_message_chunk`` arrives for a session that has
+      no inflight turn (the compaction summary being written by kiro-cli).
+    - ``completed``: a METADATA_METHOD context_usage notification arrives for
+      a session that is in ``_compacting`` (fires right after compaction ends).
+
+    Both broadcast a ``compaction`` frame to subscribers.
     """
 
     def _attached(self, acp_mod, sid):
@@ -16843,163 +16869,113 @@ class TestAcpCompactionStatus:
         acp_mod._registry.attach(conn, sid)
         return conn
 
-    def _notify(self, acp_mod, status_type, error=None, summary=None, sid=None):
-        """Shape 1: method == 'kiro.dev/compaction/status' with nested status dict."""
-        status = {"type": status_type}
-        if error is not None:
-            status["error"] = error
-        params = {"status": status}
-        if summary is not None:
-            params["summary"] = summary
-        if sid is not None:
-            params["sessionId"] = sid
+    def _send_chunk(self, acp_mod, sid, text="summary text"):
+        """Send an agent_message_chunk for a session with no inflight turn."""
         acp_mod._supervisor._on_notification({
-            "method": "kiro.dev/compaction/status",
-            "params": params,
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text}}},
         })
 
-    def _notify_via_session_update(self, acp_mod, status_type, error=None, summary=None, sid=None):
-        """Shape 2: _kiro.dev/session/update with sessionUpdate=='compaction_status'.
-
-        This is the actual wire shape used when PowerAtlas is the ACP client —
-        the TUI translates KAS summarization_* events into this shape.
-        """
-        update: dict = {"sessionUpdate": "compaction_status", "status": status_type}
-        if error is not None:
-            update["error"] = error
-        if summary is not None:
-            update["summary"] = summary
-        params: dict = {"update": update}
-        if sid is not None:
-            params["sessionId"] = sid
+    def _send_context_usage(self, acp_mod, sid, percent=10.0):
+        """Send a METADATA_METHOD context_usage notification."""
         acp_mod._supervisor._on_notification({
-            "method": "_kiro.dev/session/update",
-            "params": params,
+            "method": acp_mod.METADATA_METHOD,
+            "params": {"sessionId": sid,
+                       acp_mod.CONTEXT_PERCENT_KEY: percent},
         })
 
-    def test_started_broadcasts_compaction_frame(self, acp_session):
-        """``started`` status broadcasts a ``compaction`` frame; no
-        ``_note_context`` call (contextPercent not changed)."""
+    def test_started_detected_on_chunk_outside_inflight(self, acp_session):
+        """First agent_message_chunk arriving outside an inflight turn broadcasts
+        a compaction started frame and adds the session to _compacting."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
-        acp_mod._supervisor.inflight.add(sid)
         _queued(conn)  # drain
-        try:
-            self._notify(acp_mod, "started", summary="Compacting…")
-            frames = _queued(conn)
-            assert len(frames) == 1
-            assert frames[0]["type"] == "compaction"
-            assert frames[0]["payload"]["status"] == "started"
-            assert frames[0]["payload"]["error"] == ""
-            # No meta frame — _note_context not called
-            assert not any(f["type"] == "meta" for f in frames)
-        finally:
-            acp_mod._supervisor.inflight.discard(sid)
-
-    def test_completed_broadcasts_compaction_and_resets_context(self, acp_session):
-        """``completed`` status broadcasts a ``compaction`` frame AND a ``meta``
-        frame with ``contextPercent: null`` (via ``_note_context(sid, None)``)."""
-        acp_mod, sid = acp_session
-        conn = self._attached(acp_mod, sid)
-        acp_mod._supervisor.inflight.add(sid)
-        # Prime contextPercent so the reset is visible
-        acp_mod._supervisor.sessions[sid]["contextPercent"] = 90.0
-        _queued(conn)  # drain
-        try:
-            self._notify(acp_mod, "completed", summary="Done")
-            frames = _queued(conn)
-            # Expect at least 2 frames: compaction + meta
-            types = [f["type"] for f in frames]
-            assert "compaction" in types
-            assert "meta" in types
-            comp = next(f for f in frames if f["type"] == "compaction")
-            assert comp["payload"]["status"] == "completed"
-            meta = next(f for f in frames if f["type"] == "meta")
-            assert meta["payload"]["contextPercent"] is None
-            # contextPercent stored as None
-            assert acp_mod._supervisor.sessions[sid]["contextPercent"] is None
-        finally:
-            acp_mod._supervisor.inflight.discard(sid)
-
-    def test_failed_broadcasts_with_error_field(self, acp_session):
-        """``failed`` status broadcasts a ``compaction`` frame with the error
-        field populated."""
-        acp_mod, sid = acp_session
-        conn = self._attached(acp_mod, sid)
-        acp_mod._supervisor.inflight.add(sid)
-        _queued(conn)
-        try:
-            self._notify(acp_mod, "failed", error="out of memory")
-            frames = _queued(conn)
-            comp = next((f for f in frames if f["type"] == "compaction"), None)
-            assert comp is not None
-            assert comp["payload"]["status"] == "failed"
-            assert comp["payload"]["error"] == "out of memory"
-        finally:
-            acp_mod._supervisor.inflight.discard(sid)
-
-    def test_zero_inflight_routes_to_single_session(self, acp_session):
-        """No sessions inflight but exactly one known session: compaction notification
-        is attributed to that session (fires after turn end)."""
-        acp_mod, sid = acp_session
-        conn = self._attached(acp_mod, sid)
-        _queued(conn)
-        # inflight empty by default
-        self._notify(acp_mod, "started")
+        # inflight is empty by default
+        self._send_chunk(acp_mod, sid)
         frames = _queued(conn)
-        assert len(frames) == 1 and frames[0]["type"] == "compaction"
-        assert frames[0]["payload"]["status"] == "started"
+        compaction_frames = [f for f in frames if f["type"] == "compaction"]
+        assert len(compaction_frames) == 1
+        assert compaction_frames[0]["payload"]["status"] == "started"
+        assert sid in acp_mod._supervisor._compacting
 
-    # --- Shape 2: session/update with kind == "compaction_status" ---
-    # This is the actual wire shape used when PowerAtlas is the ACP client.
-    # The TUI translates KAS summarization_* events into this shape before
-    # forwarding to connected ACP clients.
-
-    def test_session_update_started_broadcasts_compaction_frame(self, acp_session):
-        """session/update shape: ``started`` broadcasts a ``compaction`` frame."""
+    def test_subsequent_chunks_do_not_re_broadcast_started(self, acp_session):
+        """Only the first chunk triggers started; subsequent chunks are no-ops
+        for the compaction broadcast (session already in _compacting)."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        self._send_chunk(acp_mod, sid)
+        _queued(conn)  # drain the started frame
+        try:
+            self._send_chunk(acp_mod, sid, text="more text")
+            frames = _queued(conn)
+            assert not any(f["type"] == "compaction" for f in frames)
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_chunk_during_active_turn_does_not_trigger_compaction(self, acp_session):
+        """agent_message_chunk during a live inflight turn is a normal turn
+        chunk, not a compaction signal."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        # Ensure clean state — a previous test may have left sid in _compacting.
+        acp_mod._supervisor._compacting.discard(sid)
         acp_mod._supervisor.inflight.add(sid)
         _queued(conn)
         try:
-            self._notify_via_session_update(acp_mod, "started", summary="Compacting…")
+            self._send_chunk(acp_mod, sid)
             frames = _queued(conn)
-            assert len(frames) == 1
-            assert frames[0]["type"] == "compaction"
-            assert frames[0]["payload"]["status"] == "started"
-            assert frames[0]["payload"]["error"] == ""
+            assert not any(f["type"] == "compaction" for f in frames)
+            assert sid not in acp_mod._supervisor._compacting
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
-    def test_session_update_completed_broadcasts_compaction_and_resets_context(self, acp_session):
-        """session/update shape: ``completed`` broadcasts compaction + meta frames."""
+    def test_completed_detected_on_context_usage_for_compacting_session(
+            self, acp_session):
+        """context_usage notification for a _compacting session broadcasts
+        completed and removes the session from _compacting."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
-        acp_mod._supervisor.inflight.add(sid)
-        acp_mod._supervisor.sessions[sid]["contextPercent"] = 90.0
+        # Simulate: started phase already set _compacting
+        acp_mod._supervisor._compacting.add(sid)
         _queued(conn)
-        try:
-            self._notify_via_session_update(acp_mod, "completed", summary="Done")
-            frames = _queued(conn)
-            types = [f["type"] for f in frames]
-            assert "compaction" in types
-            assert "meta" in types
-            comp = next(f for f in frames if f["type"] == "compaction")
-            assert comp["payload"]["status"] == "completed"
-            meta = next(f for f in frames if f["type"] == "meta")
-            assert meta["payload"]["contextPercent"] is None
-        finally:
-            acp_mod._supervisor.inflight.discard(sid)
-
-    def test_session_update_zero_inflight_routes_to_single_session(self, acp_session):
-        """session/update shape: fires after turn end, attributed to last-used session."""
-        acp_mod, sid = acp_session
-        conn = self._attached(acp_mod, sid)
-        _queued(conn)
-        self._notify_via_session_update(acp_mod, "started")
+        self._send_context_usage(acp_mod, sid, percent=10.0)
         frames = _queued(conn)
-        assert len(frames) == 1 and frames[0]["type"] == "compaction"
-        assert frames[0]["payload"]["status"] == "started"
+        compaction_frames = [f for f in frames if f["type"] == "compaction"]
+        assert len(compaction_frames) == 1
+        assert compaction_frames[0]["payload"]["status"] == "completed"
+        assert sid not in acp_mod._supervisor._compacting
+
+    def test_context_usage_outside_compaction_does_not_broadcast_completed(
+            self, acp_session):
+        """A normal context_usage notification (session not in _compacting)
+        does not broadcast a compaction frame."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        # _compacting is empty
+        self._send_context_usage(acp_mod, sid, percent=50.0)
+        frames = _queued(conn)
+        assert not any(f["type"] == "compaction" for f in frames)
+
+    def test_full_cycle_started_then_completed(self, acp_session):
+        """End-to-end: chunk outside inflight → started; context_usage → completed."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        # Trigger started
+        self._send_chunk(acp_mod, sid)
+        started_frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+        assert len(started_frames) == 1
+        assert started_frames[0]["payload"]["status"] == "started"
+        # Trigger completed
+        self._send_context_usage(acp_mod, sid, percent=10.0)
+        completed_frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+        assert len(completed_frames) == 1
+        assert completed_frames[0]["payload"]["status"] == "completed"
+        assert sid not in acp_mod._supervisor._compacting
 
 
 class TestAcpClearStatus:
