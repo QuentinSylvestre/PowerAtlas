@@ -227,6 +227,24 @@
 **Source**: session 2026-08-12 — live probe, `acp_steer_probe3.py`, kiro-cli 2.16.x | **Verified**: 2026-08-12
 **Stale-when**: kiro-cli minor version changes past 2.16.x
 
+### `subagent_sessions` must survive turn-end — it is the click-to-view routing key
+
+**Why**: Phase 1 of 260813-1559_ACP_INLINE_CREW_PANEL popped `subagent_sessions[child_id]` at turn-end as part of crew cleanup. This produced a High finding: after a fan-out completes, `_handle_subscribe(child_id)` routes to `_handle_subagent_subscribe` via `subagent_sessions.get(child_id)` — without it, every post-turn click on a sub-agent row returns `unknown_session`. `subagent_sessions` looks like a crew membership cache (alongside `crews` and `_bubbles`, which ARE safe to pop at turn-end), but it doubles as a live routing key for a user interaction that occurs after the turn ends.
+**How to apply**: In `_evict_crew_children` (or any equivalent cleanup helper), always use `keep_history=True` at turn-end — preserving both `subagent_sessions` and `subagent_history` for click-to-view. Only the turn-start full-evict path (`keep_history=False`, before a new fan-out begins) clears them. Add a comment at the `subagent_sessions` field declaration noting it is the routing key for click-to-view, not just a fan-out membership cache.
+**Source**: `260813-1559_ACP_INLINE_CREW_PANEL` — Phase 1, H1 finding | **Verified**: 2026-08-13
+
+### No-anchor fan-out JS slot: assign a sentinel key on first creation, reuse on updates
+
+**Why**: The initial Phase 3 design computed a fresh `_na_N` sequence key on every `setCrew` call when `toolCallId` was empty. Each status update to the same no-anchor fan-out created a new slot, a new orphaned panel, and a new running `setInterval` timer. A single fan-out with 5 updates produced 5 invisible panels and 5 live timers (High finding, Phase 3+4 review). The fix: a module-level `_noAnchorKey` sentinel stores the key assigned on first creation; subsequent updates reuse it. The sequence counter still advances for genuinely new fan-outs (SC3), but not for updates.
+**How to apply**: Whenever a JS slot map is keyed by a server-provided identifier that can be empty/null, assign a locally-generated key (`_na_` + `++_noAnchorSeq`) on first creation, store it in a sentinel variable, and return that sentinel on all subsequent calls until `removeAllCrewPanels()` resets it to `null`. Guard the empty-entries early-return before the key computation to avoid ghost-key side effects from spurious empty frames.
+**Source**: `260813-1559_ACP_INLINE_CREW_PANEL` — Phase 3+4 review, H1 finding | **Verified**: 2026-08-13
+
+### Use `patch.object` coroutine injection to seed mid-turn dict state in cleanup tests
+
+**Why**: Two Phase 2 tests (`test_turn_end_cleanup_pops_toolcallid`, `test_turn_start_clears_stale_toolcallid`) were vacuous: the dict key they asserted was removed had never been set during the synthetic turn. Without a real `_on_subagent_list` call inside `_handle_prompt`, `crew_spawn_toolcallids` stayed empty, so both a correct and a broken cleanup passed identically (Medium findings M4+M5). Pre-seeding outside the call fails because the turn-start unconditional pop clears the value before the turn-end pop can be tested.
+**How to apply**: To prove a specific cleanup site (turn-start vs turn-end) fired, inject state using `patch.object(_Supervisor, 'prompt', ...)` — replace the coroutine with an async lambda that seeds the target dict mid-turn (after turn-start pop has run) before returning. This gives discriminating coverage for both sites independently. Verify discrimination by commenting out the production cleanup line and confirming the test fails.
+**Source**: `260813-1559_ACP_INLINE_CREW_PANEL` — Phase 2 review, M4+M5 findings | **Verified**: 2026-08-13
+
 ## Declined
 
 <!-- Declination records: the user's Skip of an agent-initiated memory proposal. A live row here suppresses re-proposal of that subject for 60 days (window owned by shared/skills/qdream/memory-rules.md § Memory File Format → Declined records). NOT a fourth type and rows are NOT entries (no Type/Usage/Outcome; excluded from the Size advisory and the prune order). Sessions append rows only; the /qdream sweep prunes expired rows and rows whose subject is now a live entry. This heading is guarded by verify-citations — never remove it, even with zero rows. Row format: - "<proposed heading>" — declined <YYYY-MM-DD> (<reason, if given>) -->
