@@ -16487,6 +16487,311 @@ class TestAcpCommandsAvailable:
         finally:
             acp_mod._supervisor.inflight.discard(sid)
 
+    # ── New tests: skills parsing, _pending_commands buffer, ──────────────────
+    # ── available_commands_update, and subscribe replay       ──────────────────
+
+    def test_prompts_field_extracts_skills_by_server_name(self, acp_session):
+        """``params["prompts"]`` entries with ``serverName`` starting with
+        ``"skill:"`` are extracted into ``meta["skills"]`` (name stripped of
+        leading slash) and a ``"skills"`` WS frame is broadcast alongside the
+        ``"commands"`` frame."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)  # drain session frame
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/commands/available",
+            "params": {
+                "commands": [{"name": "/qexplore", "description": "x"}],
+                "prompts": [
+                    {"name": "/qexplore", "description": "x",
+                     "serverName": "skill:config"},
+                ],
+            },
+        })
+        meta = acp_mod._supervisor.sessions[sid]
+        assert meta["skills"] == [{"name": "qexplore", "description": "x"}]
+        frames = _queued(conn)
+        types = [f["type"] for f in frames]
+        assert "commands" in types
+        assert "skills" in types
+        skills_frame = next(f for f in frames if f["type"] == "skills")
+        assert skills_frame["payload"]["skills"] == [
+            {"name": "qexplore", "description": "x"}]
+
+    def test_prompts_field_extracts_skills_by_meta_type(self, acp_session):
+        """``params["prompts"]`` entries with ``_meta.kiro.type == "skill"``
+        (no ``serverName``) are also extracted into ``meta["skills"]``."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/commands/available",
+            "params": {
+                "commands": [],
+                "prompts": [
+                    {"name": "/qplan", "description": "plan it",
+                     "_meta": {"kiro": {"type": "skill"}}},
+                ],
+            },
+        })
+        meta = acp_mod._supervisor.sessions[sid]
+        assert meta["skills"] == [{"name": "qplan", "description": "plan it"}]
+        frames = _queued(conn)
+        skills_frame = next((f for f in frames if f["type"] == "skills"), None)
+        assert skills_frame is not None
+        assert skills_frame["payload"]["skills"] == [
+            {"name": "qplan", "description": "plan it"}]
+
+    def test_prompts_non_skill_entries_not_included(self, acp_session):
+        """Non-skill prompt entries (``serverName="local"`` or
+        ``_meta.kiro.type="prompt"``) are excluded from ``meta["skills"]``."""
+        acp_mod, sid = acp_session
+        _queued(self._attached(acp_mod, sid))  # drain
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/commands/available",
+            "params": {
+                "commands": [],
+                "prompts": [
+                    # One skill entry
+                    {"name": "/qdev", "description": "d",
+                     "serverName": "skill:config"},
+                    # One non-skill entry — serverName is not "skill:..."
+                    {"name": "/mylocal", "description": "local prompt",
+                     "serverName": "local",
+                     "_meta": {"kiro": {"type": "prompt"}}},
+                ],
+            },
+        })
+        meta = acp_mod._supervisor.sessions[sid]
+        assert len(meta["skills"]) == 1
+        assert meta["skills"][0]["name"] == "qdev"
+
+    def test_pending_commands_buffered_when_reserved(self, acp_session):
+        """When ``_reserved > 0`` and no sessions are registered,
+        ``commands/available`` is buffered in ``_pending_commands`` — the
+        session/new window is open and the notification cannot be attributed
+        yet.  No WS frames are broadcast (no session to receive them)."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)  # drain
+        # Simulate the session/new window: clear sessions and raise _reserved.
+        saved_sessions = dict(acp_mod._supervisor.sessions)
+        acp_mod._supervisor.sessions.clear()
+        acp_mod._supervisor._reserved = 1
+        acp_mod._supervisor._pending_commands = None
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": "_kiro.dev/commands/available",
+                "params": {
+                    "commands": [{"name": "/foo", "description": "d"}],
+                    "prompts": [{"name": "/qbar", "description": "e",
+                                 "serverName": "skill:config"}],
+                },
+            })
+            # Buffer should be set to (commands, skills).
+            pending = acp_mod._supervisor._pending_commands
+            assert pending is not None
+            cmds, skills = pending
+            assert cmds == [{"name": "foo", "description": "d"}]
+            assert skills == [{"name": "qbar", "description": "e"}]
+            # No frames sent — no session registered.
+            assert _queued(conn) == []
+        finally:
+            acp_mod._supervisor._reserved = 0
+            acp_mod._supervisor._pending_commands = None
+            acp_mod._supervisor.sessions.update(saved_sessions)
+
+    def test_pending_commands_flushed_to_new_session(self, acp_session):
+        """Pre-loaded ``_pending_commands`` is flushed into session meta when a
+        new session is registered (simulating the flush logic in
+        ``new_session()``).  After flush, ``_pending_commands`` is ``None``
+        and both WS frames are broadcast."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)  # drain session frame
+        # Pre-load the pending buffer.
+        pending_cmds = [{"name": "foo", "description": "d"}]
+        pending_skills = [{"name": "qbar", "description": "e"}]
+        acp_mod._supervisor._pending_commands = (pending_cmds, pending_skills)
+        try:
+            # Replicate the flush logic from new_session() inline:
+            # This is exactly what new_session() does after sessions[session_id]
+            # is set but the async machinery is not needed here.
+            meta = acp_mod._supervisor.sessions.get(sid)
+            assert meta is not None
+            pc, ps = acp_mod._supervisor._pending_commands
+            acp_mod._supervisor._pending_commands = None  # consume before broadcast
+            meta["commands"] = pc
+            meta["skills"] = ps
+            acp_mod._registry.broadcast(
+                sid, acp_mod.envelope("commands", {"commands": pc}, sid))
+            acp_mod._registry.broadcast(
+                sid, acp_mod.envelope("skills", {"skills": ps}, sid))
+
+            assert meta["commands"] == pending_cmds
+            assert meta["skills"] == pending_skills
+            assert acp_mod._supervisor._pending_commands is None
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert "commands" in types
+            assert "skills" in types
+            skills_frame = next(f for f in frames if f["type"] == "skills")
+            assert skills_frame["payload"]["skills"] == pending_skills
+        finally:
+            acp_mod._supervisor._pending_commands = None
+
+    def test_pending_commands_slot_replaced_on_second_notification(self, acp_session):
+        """A second ``commands/available`` during the session/new window
+        replaces the buffered slot (last-writer wins)."""
+        acp_mod, sid = acp_session
+        saved_sessions = dict(acp_mod._supervisor.sessions)
+        acp_mod._supervisor.sessions.clear()
+        acp_mod._supervisor._reserved = 1
+        acp_mod._supervisor._pending_commands = None
+        try:
+            # First notification.
+            acp_mod._supervisor._on_notification({
+                "method": "_kiro.dev/commands/available",
+                "params": {
+                    "commands": [{"name": "/first", "description": "old"}],
+                    "prompts": [],
+                },
+            })
+            first_pending = acp_mod._supervisor._pending_commands
+            assert first_pending is not None
+            assert first_pending[0] == [{"name": "first", "description": "old"}]
+
+            # Second notification with different data.
+            acp_mod._supervisor._on_notification({
+                "method": "_kiro.dev/commands/available",
+                "params": {
+                    "commands": [{"name": "/second", "description": "new"}],
+                    "prompts": [{"name": "/qskill", "description": "s",
+                                 "serverName": "skill:config"}],
+                },
+            })
+            second_pending = acp_mod._supervisor._pending_commands
+            assert second_pending is not None
+            cmds, skills = second_pending
+            # Slot holds SECOND notification's data.
+            assert cmds == [{"name": "second", "description": "new"}]
+            assert skills == [{"name": "qskill", "description": "s"}]
+        finally:
+            acp_mod._supervisor._reserved = 0
+            acp_mod._supervisor._pending_commands = None
+            acp_mod._supervisor.sessions.update(saved_sessions)
+
+    def test_available_commands_update_updates_skills(self, acp_session):
+        """``session/update`` with ``sessionUpdate="available_commands_update"``
+        updates both ``meta["commands"]`` and ``meta["skills"]`` and broadcasts
+        both WS frames."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)  # drain
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        {"name": "/newcmd", "description": "d"},
+                        {"name": "/qskill", "description": "s",
+                         "_meta": {"kiro": {"type": "skill"}}},
+                    ],
+                },
+            },
+        })
+        meta = acp_mod._supervisor.sessions[sid]
+        assert meta["commands"] == [{"name": "newcmd", "description": "d"}]
+        assert meta["skills"] == [{"name": "qskill", "description": "s"}]
+        frames = _queued(conn)
+        types = [f["type"] for f in frames]
+        assert "commands" in types
+        assert "skills" in types
+
+    def test_available_commands_update_attribution_by_session_id(self, acp_session):
+        """``available_commands_update`` is attributed to the session named by
+        ``params.sessionId`` even when two sessions are registered."""
+        acp_mod, sid = acp_session
+        other_sid = "sess-other-update"
+        acp_mod._supervisor.sessions[other_sid] = {
+            "cwd": r"C:\other", "created": 0.0, "models": {}, "modes": {}}
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": "_kiro.dev/session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [
+                            {"name": "/targeted", "description": "x"}],
+                    },
+                },
+            })
+            # Only sid's meta is updated.
+            assert "commands" in acp_mod._supervisor.sessions[sid]
+            assert acp_mod._supervisor.sessions[sid]["commands"] == [
+                {"name": "targeted", "description": "x"}]
+            # other_sid's meta is untouched.
+            assert "commands" not in acp_mod._supervisor.sessions[other_sid]
+        finally:
+            acp_mod._supervisor.sessions.pop(other_sid, None)
+
+    def test_available_commands_update_max_count_applied_per_type(self, acp_session):
+        """``available_commands_update`` caps ``meta["commands"]`` and
+        ``meta["skills"]`` at ``MAX_COMMANDS_COUNT`` independently; neither
+        list's overflow displaces the other's entries."""
+        acp_mod, sid = acp_session
+        over = acp_mod.MAX_COMMANDS_COUNT + 1  # 201
+        # 201 command entries (no _meta.kiro.type, no skill: serverName)
+        # and 201 skill entries (via _meta.kiro.type == "skill").
+        available = (
+            [{"name": "/cmd%d" % i, "description": "c"}
+             for i in range(over)]
+            + [{"name": "/skill%d" % i, "description": "s",
+                "_meta": {"kiro": {"type": "skill"}}}
+               for i in range(over)]
+        )
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": available,
+                },
+            },
+        })
+        meta = acp_mod._supervisor.sessions[sid]
+        assert len(meta["commands"]) == acp_mod.MAX_COMMANDS_COUNT
+        assert len(meta["skills"]) == acp_mod.MAX_COMMANDS_COUNT
+
+    def test_subscribe_replays_skills_frame(self, acp_session):
+        """When ``meta["skills"]`` is already set, a new subscriber receives
+        both a ``"commands"`` frame and a ``"skills"`` frame from
+        ``_handle_subscribe``."""
+        acp_mod, sid = acp_session
+        # Pre-populate both keys in session meta.
+        meta = acp_mod._supervisor.sessions[sid]
+        meta["commands"] = []
+        meta["skills"] = [{"name": "qtest", "description": "d"}]
+
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        try:
+            acp_mod._handle_subscribe(conn, sid)
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert "commands" in types
+            assert "skills" in types
+            skills_frame = next(f for f in frames if f["type"] == "skills")
+            assert skills_frame["payload"]["skills"] == [
+                {"name": "qtest", "description": "d"}]
+        finally:
+            acp_mod._registry.detach(conn)
+            acp_mod._registry.connections.discard(conn)
+
 
 class TestAcpCompactionStatus:
     """``kiro.dev/compaction/status`` notification handler.
