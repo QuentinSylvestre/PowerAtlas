@@ -2650,35 +2650,77 @@
   // finished fan-out is still reviewable after the fact — clicking its row
   // opens the read-only sub-agent panel behind the main transcript.
 
+  function crewLabel(entry) {
+    if (!entry) return 'agent';
+    var sn = entry.sessionName || '';
+    if (sn) return sn;
+    var t = entry.task || '';
+    if (t) return t.length > 30 ? t.slice(0, 30).trim() + '\u2026' : t.trim();
+    return 'agent';
+  }
+
   function renderCrewPanel() {
     if (!crewPanel || !crewPanel.parentNode) return;
-    // Full rebuild of inner rows
-    crewPanel.textContent = '';
+    // Update or create the header element (first child)
+    var hdr = crewPanel.querySelector('.acp-crew-header');
+    if (!hdr) {
+      hdr = document.createElement('div');
+      hdr.className = 'acp-crew-header';
+      crewPanel.insertBefore(hdr, crewPanel.firstChild);
+    }
+    var n = crew.length;
+    hdr.textContent = crewAllDone
+      ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
+      : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
+
+    // Remove old rows (keep header)
+    while (crewPanel.lastChild && !crewPanel.lastChild.classList.contains('acp-crew-header')) {
+      crewPanel.removeChild(crewPanel.lastChild);
+    }
+
+    // Append new lean rows
     for (var i = 0; i < crew.length; i++) {
       (function(entry) {
+        var state = subagentState(entry);  // 'working' | 'done' | 'error'
+        var dotClass = state === 'working' ? 'status-thinking'
+                     : state === 'error'   ? 'status-errored'
+                     : 'status-idle';
+        var label = crewLabel(entry);
+        var stateText = state === 'error' ? 'errored' : state === 'done' ? 'done' : (entry.action || 'working');
+
         var row = document.createElement('button');
         row.type = 'button';
-        var state = subagentState(entry);
-        row.className = 'acp-crew-entry acp-crew-' + state;
-        row.setAttribute('aria-label', (entry.role || 'sub-agent') + ': ' + (entry.action || entry.status || ''));
+        row.className = 'acp-crew-row acp-crew-row-' + state;
+        row.setAttribute('aria-label',
+          label + (entry.role ? ', ' + entry.role : '') + ', ' + stateText);
+
+        var dot = document.createElement('span');
+        dot.className = 'session-status ' + dotClass;
+        dot.setAttribute('aria-hidden', 'true');
+
         var nameSpan = document.createElement('span');
-        nameSpan.className = 'acp-crew-name';
-        nameSpan.textContent = entry.role || entry.task || 'sub-agent';
+        nameSpan.className = 'acp-crew-label';
+        nameSpan.textContent = label;
+
+        var roleSpan = document.createElement('span');
+        roleSpan.className = 'acp-crew-role';
+        roleSpan.textContent = entry.role || '';
+
         var actionSpan = document.createElement('span');
         actionSpan.className = 'acp-crew-action';
-        actionSpan.textContent = state === 'error' ? 'errored'
-          : state === 'done' ? 'done'
-          : (entry.action || entry.status || 'working\u2026');
-        // SC-7: elapsed is capped at stoppedAt for done entries so it does not
-        // keep incrementing after the sub-agent finished.
+        actionSpan.textContent = state === 'working' && !entry.action
+          ? 'working\u2026' : stateText;
+
         var elapsedSpan = document.createElement('span');
         elapsedSpan.className = 'acp-crew-elapsed';
         var start = entry.startedAt;
         var stop = entry.stoppedAt;
         elapsedSpan.textContent = (typeof stop === 'number' && stop)
-          ? elapsedText(start, stop)
-          : elapsedText(start);
+          ? elapsedText(start, stop) : elapsedText(start);
+
+        row.appendChild(dot);
         row.appendChild(nameSpan);
+        row.appendChild(roleSpan);
         row.appendChild(actionSpan);
         row.appendChild(elapsedSpan);
         row.addEventListener('click', function() { openSubagent(entry.sessionId); });
@@ -2772,7 +2814,7 @@
 
   function renderSubHead() {
     var entry = crewEntry(subViewSid);
-    subRoleEl.textContent = (entry && (entry.role || entry.task)) || subViewSid;
+    subRoleEl.textContent = crewLabel(entry) || subViewSid;
     if (!entry) {
       subStatusEl.className = 'acp-subpanel-status';
       subStatusEl.textContent = '';
