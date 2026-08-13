@@ -1,7 +1,7 @@
 # ACP Queue/Steer Single-Button Mode Picker and Steer Trace Visibility
 
 > **Date**: 2026-08-13
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Two /acp composer UX improvements — replace the two-button Queue/Steer group with a single-button+mode-select, and make injected steer text visible in the transcript during the session and across WS reconnects.
 > **Estimated effort**: 0.5–1 day
@@ -544,6 +544,27 @@ node tests/acp_page.test.mjs
 | 10 | Medium | Exit criteria didn't verify all `_steerPending` recovery paths restore `sendModeBtn.disabled`, `promptInput.disabled`, and `modeSelect.disabled`. | Fixed — explicit exit criterion bullet added covering all 5 recovery paths. |
 | 11 | Low | `sendModeBtn` had no `aria-label` beyond button text; mode change needed to update `aria-label` too. | Fixed — `aria-label` set at init and updated by change handler. |
 | 12 | Low | Line numbers in Section 1 were ~50 lines off from actual file. | Fixed — Section 1 now says "approximate" and instructs implementer to grep for exact locations. |
+
+### 2026-08-13 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer.
+5 findings (1 Medium, 4 Low). QA verification: PASS (browser runtime verified via Playwright; 1 pre-existing CSP error, not introduced by this plan).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Single-button + mode-select UI | pass (326/327) | BLOCKED→PASS | Per-phase BLOCKED (no app); Step 9b confirmed via Playwright |
+| 2: Steer trace server frame + rendering | pass (329/330) | BLOCKED→PASS | Per-phase BLOCKED (no app); Step 9b confirmed via Playwright |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | WS-drop-before-ack: `steer_sent` textarea-clear used strict equality but server emits trimmed text while `ws.onclose` restores un-trimmed text. | Fixed — changed to `promptInput.value.trim() === steerText`. (a353f87) |
+| 2 | Low | `style.css` had an orphaned comment block for the removed `.acp-queue-steer` column-layout rules. | Fixed — comment removed. (a353f87) |
+| 3 | Low | `releaseSession()` silently discarded steer text with no feedback — inconsistent with `agent_died`/`error` which restore text. | Fixed — added `addMessage('note', 'Steer could not complete — session was closed.')`. (a353f87) |
+| 4 | Low | `acpModeLiveRegion` span used inline `style` attribute for visually-hidden pattern — blocked by CSP, span not properly hidden. | Fixed — replaced inline `style` with `.sr-only` CSS class; class added to inline `<style>` block. (a353f87) |
+| 5 | Low | Two pre-existing CSP inline-style violations at lines 279/339 (the `<div id="acpLog">` and another pre-existing element). | Pre-existing — not introduced by this plan; confirmed by git stash + browser reload. Not fixed (out of scope). |
 
 ### 2026-08-13 — Implementation Review (after Phase 2, personas: Senior engineer, Reliability engineer, Security auditor, Maintainability reviewer)
 
