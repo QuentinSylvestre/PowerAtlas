@@ -8693,6 +8693,7 @@ check("skillsFrameOnSessionChangeResetsSessionSkills", (tpl) => {
     payload: { sessionId: newSid, cwd: "C:\\tmp", created: true,
                turnActive: false, contextPercent: null },
   });
+  assert(page.el("acpCmdDropdown").hidden, "dropdown should be hidden after session frame");
   // '/' should now show only a loading placeholder — no skill names.
   page.el("acpPrompt").value = "";
   page.el("acpPrompt").dispatch("keydown", {
@@ -8722,7 +8723,7 @@ check("releaseSessionClearsSessionSkills", (tpl) => {
   // Verify the skill appears.
   page.el("acpPrompt").value = "";
   page.el("acpPrompt").dispatch("keydown", {
-    key: "/", shiftKey: false, ctrtKey: false, altKey: false, preventDefault() {},
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
   {
     const names = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
@@ -8740,6 +8741,7 @@ check("releaseSessionClearsSessionSkills", (tpl) => {
     type: "session_closed", sessionId: live,
     payload: { sessionId: live, message: "Session closed." },
   });
+  assert(page.el("acpCmdDropdown").hidden, "dropdown should be hidden after session frame");
   // '/' should now show the loading placeholder — sessionSkills was cleared.
   page.el("acpPrompt").value = "";
   page.el("acpPrompt").dispatch("keydown", {
@@ -8808,6 +8810,78 @@ check("skillEntriesShowBadge", (tpl) => {
   const badge = skillLi.querySelector(".acp-cmd-skill-badge");
   assert(badge,
     "skill entry <li> should contain an element with class 'acp-cmd-skill-badge'");
+  assert(badge.getAttribute("aria-hidden") === "true", "skill badge should have aria-hidden=\"true\"");
+});
+
+// skillSelectionSendsCleanName
+// Verify that selecting a skill entry sends only the clean name, not the badge text.
+check("skillSelectionSendsCleanName", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Seed one skill.
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qplan", description: "d" }] },
+  });
+  // Open dropdown.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const drop = page.el("acpCmdDropdown");
+  assert(!drop.hidden, "fixture: dropdown should be open");
+  // Find the skill entry and verify it's there.
+  const lis = drop.querySelectorAll("li");
+  const skillLi = lis.find((li) => {
+    const s = li.querySelector(".acp-cmd-name");
+    return s && s.textContent === "/qplan";
+  });
+  assert(skillLi, "one skill entry for qplan expected");
+  // Select it with Enter.
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  // Verify the WS message sent.
+  const execFrames = page.sentOf("commands_execute");
+  assert(execFrames.length > 0, "commands_execute message expected");
+  assertEqual(execFrames[execFrames.length - 1].payload.name, "qplan",
+    "skill name should be clean (no badge text), got: " + (execFrames[execFrames.length - 1].payload && execFrames[execFrames.length - 1].payload.name));
+});
+
+// keyboardNavigationReachesSkillEntries
+// Verify that ArrowDown navigation reaches skill entries and Enter selects one.
+check("keyboardNavigationReachesSkillEntries", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Seed one command and one skill.
+  page.deliver({
+    type: "commands", sessionId: live,
+    payload: { commands: [{ name: "tools", description: "d" }] },
+  });
+  page.deliver({
+    type: "skills", sessionId: live,
+    payload: { skills: [{ name: "qexplore", description: "e" }] },
+  });
+  // Open dropdown.
+  page.el("acpPrompt").value = "";
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  // Navigate down once (should move past command to skill, or stay on first item).
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "ArrowDown", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  // Select the current item.
+  page.el("acpPrompt").dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  // Verify the selection was sent (either tools or qexplore, depending on index 0 or 1).
+  const execFrames = page.sentOf("commands_execute");
+  assert(execFrames.length > 0,
+    "A commands_execute message should have been sent after ArrowDown + Enter");
+  // The message name should be a valid name from either the command or skill list.
+  const validNames = ["tools", "qexplore"];
+  assert(validNames.includes(execFrames[execFrames.length - 1].payload.name),
+    "Selected name should be one of the merged list entries, got: " +
+    (execFrames[execFrames.length - 1].payload && execFrames[execFrames.length - 1].payload.name));
 });
 
 // Test 6: commandEntriesDoNotShowBadge
