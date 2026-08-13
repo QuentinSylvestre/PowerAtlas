@@ -1,7 +1,7 @@
 # ACP Orchestrating Status and Crew Card Redesign
 
 > **Date**: 2026-08-12
-> **Status**: In Progress
+> **Status**: Done
 > **Scope**: /acp crew panel — add orchestrating header + redesign crew rows as lean dot-rows with sessionName
 > **Estimated effort**: ~2–4 hours
 
@@ -260,8 +260,8 @@ subRoleEl.textContent = crewLabel(entry) || subViewSid;
 - [x] No rendered output contains class names `acp-crew-entry`, `acp-crew-name`, `acp-crew-working`, `acp-crew-done`, `acp-crew-error`
 - [x] Sub-panel header (`subRoleEl`) shows `sessionName` when present, same fallback chain via `crewLabel()`
 - [x] `prefers-reduced-motion` suppresses `.session-status.status-thinking` animation
-- [ ] Hover on a row changes text color only (no background fill)
-- [ ] Manual check at 390 px viewport: rows do not overflow, label truncates with `…`
+- [x] Hover on a row changes text color only (no background fill) — verified: `.acp-crew-row:hover { color: var(--text); }` only, no background
+- [x] Manual check at 390 px viewport: rows do not overflow, label truncates with `…` — verified: row 372px within 390px panel, text-overflow:ellipsis
 
 **Implementation (2026-08-12, code: 52b705c)**
 Replaced the old bordered card-button crew panel with a lean dot-row design. Added `crewLabel(entry)` shared helper (sessionName → 30-char truncated task with `…` → `'agent'`). `renderCrewPanel` rewritten: creates/updates a `div.acp-crew-header` as first child with "Orchestrating (N agents)" / "Done (N agents)" text, then removes old `.acp-crew-row` children tail-to-head, then appends new `button.acp-crew-row` elements each containing a `session-status` dot + label + role + action + elapsed spans. Dot class maps: working→`status-thinking`, error→`status-errored`, done→`status-idle`. `renderSubHead` updated to use `crewLabel()`. The `.acp-crew-*` CSS block replaced with lean row rules; `prefers-reduced-motion` updated to suppress `status-thinking`. Two exit criteria deferred to Step 9b manual QA (hover color and mobile viewport — CSS visual checks not exercisable in DOM stand-in harness). All 11 old test selector references updated to new class names; 13 new tests added covering header text, dot classes, label fallback chain, roleSpan guard, and absence of old class names.
@@ -309,6 +309,8 @@ No documentation updates needed — no project docs reference the changed identi
 
 - **Phase 1**: `existing` can be `None` for first-seen sub-agents. The plan's `updated` dict snippet used `existing.get("sessionName", "")` without a None guard. The committed code uses `session_name or (existing.get("sessionName", "") if existing else "")` — the defensive form matching the pattern used for all other optional fields in the same dict.
 - **Phase 1**: `session_name = _first_text(entry, ("sessionName",))` uses the string literal rather than `_SUBAGENT_TASK_KEYS[1]` (which the plan mentioned) to avoid index coupling. Functionally identical.
+- **Phase 2**: `entry.status` fallback for `actionSpan` content was dropped from the plan pseudocode (`entry.action || entry.status || 'working' + [char]0x2026`). The shipped code uses `entry.action || 'working'` only `entry.status` is a machine enum (`"working"`, `"terminated"`) not a display string, so dropping it was intentional.
+- **Phase 2**: `entry.status` fallback for `actionSpan` content was dropped from the plan pseudocode (`entry.action || entry.status || 'working…'`). The shipped code uses `entry.action || 'working'` only — `entry.status` is a machine enum (`"working"`, `"terminated"`) not a display string, so dropping it was intentional.
 
 ## Review Log
 
@@ -361,6 +363,25 @@ Implementation health: Green.
 | 7 | Low | Empty `roleSpan` always appended even when `entry.role` is `""`, adding 8px gap. | Fixed — conditional `if (entry.role)` guard in `cf37578`. |
 | 8 | Low | `roleSpan` guard untested in both directions. | Fixed — two guard tests added in `52b705c`. |
 
-## Harness Improvement Opportunities
+### 2026-08-12 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Maintainability reviewer.
+5 findings (0 High, 0 Medium, 5 Low). QA verification: PASS (3 surfaces verified: CSS rules, mobile layout at 390px, prefers-reduced-motion suppression).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Python — forward sessionName | pass (1303/1304, 1 pre-existing failure) | PASS | Integration test mutation-confirmed discriminating |
+| 2: JS + CSS — crew panel redesign | pass (318/319, 1 pre-existing failure) | PASS | Two deferred criteria verified via browser layout injection |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | `done`/`error` action-text paths untested. | Fixed — two tests added in `4dca31c`. |
+| 2 | Low | `classList.contains` not safe in test harness `El` class. | Fixed — `className !==` equality used in `4dca31c`. |
+| 3 | Low | `entry.status` drop from action-text undocumented in divergences. | Fixed — divergence note added to plan. |
+| 4 | Low | `renderSubHead` `crewLabel` call missing comment explaining shared fallback. | Fixed — comment added in `4dca31c`. |
+| 5 | Low | CSS comment "matches rail's working glow" slightly misleading (hex is action text, not dot color). | Fixed — comment reworded in `4dca31c`. |
 
 - `/qexplore`-generated project files use a time-suffix filename convention (`YYMMDD-HHMM_NAME.md`) that fails the `/qvalidate` `filename-grammar` check (expects `^[0-9]{6}_[A-Z0-9_]+\.md$`). The qvalidate applicability guard correctly rejects it as a precondition failure (exit 2). — cost: qvalidate cannot run on any explore-started plan, so the `sc-coverage` and `status-grammar` checks are silently skipped. — suggested change: either have `/qexplore` use the active-plan convention (`YYMMDD_NAME.md`) or have `/qvalidate` accept both conventions for active plans.
