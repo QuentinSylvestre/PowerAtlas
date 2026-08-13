@@ -6417,10 +6417,10 @@
     // Live slash-command filtering: open or update the dropdown while the user
     // is typing a /command token; hide it when they leave the command token.
     var val = promptInput.value;
-    if (/^\/\S+$/.test(val)) {
-      // In the command token: value is /word (at least one char after /).
-      // Bare '/' alone does not open the palette — wait for the first character.
-      var partial = val.slice(1);
+    // Match /word at start OR after whitespace — handles bare /, /cmd, " /cmd".
+    var cmdMatch = val.match(/(?:^|\s)(\/\S*)$/);
+    if (cmdMatch) {
+      var partial = cmdMatch[1].slice(1);
       // Show client-side filtered results from the catalogue received via the
       // 'commands' frame. No server round-trip here: _kiro.dev/commands/options
       // is for argument completion AFTER a command is selected (called with the
