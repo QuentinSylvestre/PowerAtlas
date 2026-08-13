@@ -2,11 +2,19 @@
 
 > **Date**: 2026-08-13
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-13 15:58
 > **Scope**: Fix stale/cross-session crew panel bugs and redesign crew panel as inline transcript artifact anchored per fan-out tool call
 > **Estimated effort**: 1–2 days
 
 ---
+
+## Completion Summary
+
+Fixed two ACP crew panel bugs (Bug 1: stale crew snapshot on subscribe; Bug 2: cross-session contamination) and redesigned the crew panel as a per-fan-out inline transcript artifact. Each fan-out now produces its own panel anchored below its spawner tool call row, keyed by `toolCallId`. Server-side: `_evict_crew_children` helper unifies turn-end (history-preserving) and turn-start (full-evict) cleanup; `crew_spawn_toolcallids` tracks the spawner toolCallId per session; subscribe gate gates on `inflight or any-not-done`. Client-side: `crews` map replaces single-panel variables; `_noAnchorKey` sentinel reuses one slot per no-anchor fan-out; anchor walk-up loop handles post-`flushToolGroups` grouping. `dismissCrewPanelIfDone` removed (panels persist per SC4). All 6 success criteria verified.
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): "The mandatory dispatch gate (Step 1.5) executed correctly; no friction." — positive-run note, no actionable friction.
 
 ## Intent
 
