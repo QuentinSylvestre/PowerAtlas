@@ -8335,8 +8335,16 @@ check("slashKeyOpensDropdown", (tpl) => {
   });
   assert(prevented, "/ keydown should preventDefault so the browser does not also insert '/'");
   assertEqual(prompt.value, "/", "/ keydown should set promptInput.value to '/'");
+  // Bare '/' does not show the dropdown — must type at least one character.
+  // Simulate typing 't' after '/' via the input event.
+  prompt.value = "/t";
+  prompt.dispatch("input", {});
   const drop = page.el("acpCmdDropdown");
-  assert(!drop.hidden, "pressing / on empty prompt should open the command dropdown");
+  assert(!drop.hidden, "typing /t should open the command dropdown");
+  // Clearing the value hides the dropdown.
+  prompt.value = "";
+  prompt.dispatch("input", {});
+  assert(drop.hidden, "clearing the prompt should hide the command dropdown");
 });
 
 // commandOptionsResultUpdatesDropdown

@@ -362,6 +362,7 @@
   flex-direction: column;
   overflow: hidden;
 }
+#acpCmdDropdown[hidden] { display: none; }
 .acp-cmd-header {
   display: flex;
   align-items: center;
@@ -6416,8 +6417,9 @@
     // Live slash-command filtering: open or update the dropdown while the user
     // is typing a /command token; hide it when they leave the command token.
     var val = promptInput.value;
-    if (/^\/\S*$/.test(val)) {
-      // In the command token: value is /word (no space yet).
+    if (/^\/\S+$/.test(val)) {
+      // In the command token: value is /word (at least one char after /).
+      // Bare '/' alone does not open the palette — wait for the first character.
       var partial = val.slice(1);
       // Show client-side filtered results from the catalogue received via the
       // 'commands' frame. No server round-trip here: _kiro.dev/commands/options
