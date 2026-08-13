@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import copy
 import datetime as dt
 import errno
 import json
@@ -16347,7 +16348,7 @@ class TestAcpCommandsAvailable:
         acp_mod._registry.attach(conn, sid)
         return conn
 
-    def _notify(self, acp_mod, commands_list, prompts=None, *, inflight_set=None, session_map=None):
+    def _notify(self, acp_mod, commands_list, prompts=None):
         params = {"commands": commands_list}
         if prompts is not None:
             params["prompts"] = prompts
@@ -16582,7 +16583,7 @@ class TestAcpCommandsAvailable:
         conn = self._attached(acp_mod, sid)
         _queued(conn)  # drain
         # Simulate the session/new window: clear sessions and raise _reserved.
-        saved_sessions = dict(acp_mod._supervisor.sessions)
+        saved_sessions = copy.deepcopy(acp_mod._supervisor.sessions)
         acp_mod._supervisor.sessions.clear()
         acp_mod._supervisor._reserved = 1
         acp_mod._supervisor._pending_commands = None
@@ -16668,7 +16669,7 @@ class TestAcpCommandsAvailable:
         """A second ``commands/available`` during the session/new window
         replaces the buffered slot (last-writer wins)."""
         acp_mod, sid = acp_session
-        saved_sessions = dict(acp_mod._supervisor.sessions)
+        saved_sessions = copy.deepcopy(acp_mod._supervisor.sessions)
         acp_mod._supervisor.sessions.clear()
         acp_mod._supervisor._reserved = 1
         acp_mod._supervisor._pending_commands = None
