@@ -2564,7 +2564,7 @@ class _Supervisor:
             # `sessionName` is _SUBAGENT_TASK_KEYS[1] — the short per-stage slug (e.g. "count_src").
             # Extracted separately from `task` (= initialQuery, the full prompt) because they serve
             # different purposes: task is for fallback display, sessionName is for the primary label.
-            session_name = _first_text(entry, (_SUBAGENT_TASK_KEYS[1],))
+            session_name = _first_text(entry, ("sessionName",))  # always the second key in _SUBAGENT_TASK_KEYS; using literal to avoid index coupling
             if not role and not task and existing is None:
                 # kiro-cli sometimes announces a slot before it has anything
                 # to say about it — corroborated by kirocrew's own
@@ -3273,7 +3273,7 @@ def _subagents_payload(crew: dict) -> list:
             "sessionId": child_id,
             "role": entry["role"],
             "task": entry["task"],
-            "sessionName": entry.get("sessionName", ""),
+            "sessionName": entry.get("sessionName", ""),  # .get(): pre-Phase-1 in-memory entries lack this key
             "status": entry["status"],
             "action": entry["action"],
             "done": entry["done"],

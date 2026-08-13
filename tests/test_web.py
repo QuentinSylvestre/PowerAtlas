@@ -10729,6 +10729,30 @@ class TestAcpSubagentListParsing:
         ]})
         assert acp_mod._supervisor.crews[sid]["sub-1"]["startedAt"] == original_started_at
 
+    def test_session_name_extracted_from_wire_entry(self, acp_store):
+        """Full wire→crew→payload pipeline: ``sessionName`` from the wire entry
+        is extracted by ``_on_subagent_list`` and forwarded by
+        ``_subagents_payload``.  The 3 ``test_session_name_*`` tests in
+        ``TestAcpSessionName`` exercise ``_subagents_payload`` directly; this
+        test ensures the field actually arrives there via ``_on_subagent_list``.
+        """
+        from power_atlas import acp as acp_mod_direct
+
+        acp_mod, _ = acp_store
+        sid = self._seed(acp_mod)
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {
+                "sessionId": "sub-sn-wire-01",
+                "role": "worker",
+                "sessionName": "count_src",
+                "initialQuery": "count all src files",
+                "status": {"type": "working"},
+            },
+        ]})
+        payload = acp_mod_direct._subagents_payload(acp_mod._supervisor.crews[sid])
+        by_id = {e["sessionId"]: e for e in payload}
+        assert by_id["sub-sn-wire-01"]["sessionName"] == "count_src"
+
 
 class TestAcpSubagentActivity:
     """`_kiro.dev/session/update` — SUBAGENT_ACTIVITY_METHOD — a sub-agent's
@@ -16173,6 +16197,18 @@ class TestAcpStoppedAt:
 
         assert "stoppedAt" in by_id["sub-pay-02"]
         assert by_id["sub-pay-02"]["stoppedAt"] is None
+
+
+class TestAcpSessionName:
+    """``sessionName`` field: round-trips through ``_subagents_payload``
+    correctly for present, empty, and absent keys.
+
+    Moved from ``TestAcpStoppedAt`` (Fix 3 — test class misplacement): these
+    tests cover ``_subagents_payload``'s ``sessionName`` serialisation, which
+    has no topical relation to ``stoppedAt``.  The wire-entry extraction path
+    (``_on_subagent_list`` → ``_subagents_payload``) is covered by
+    ``TestAcpSubagentListParsing.test_session_name_extracted_from_wire_entry``.
+    """
 
     def test_session_name_round_trips_through_subagents_payload(self):
         """``_subagents_payload`` forwards ``sessionName`` verbatim."""
