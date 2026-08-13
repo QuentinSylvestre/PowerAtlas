@@ -17508,6 +17508,39 @@ class TestAcpCommandsExecuteHandler:
         # Inflight must be empty once both tasks are done.
         assert sid not in acp_mod._supervisor.inflight
 
+    def test_commands_execute_accepts_skill_name(self, acp_session):
+        """When meta has both commands and skills, a skill name is accepted.
+
+        The ``valid_names`` set must union both catalogues so a slash-command
+        palette selection for a skill (e.g. ``qplan``) does not return
+        ``bad_payload`` / Unknown command.
+        """
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.sessions[sid]["commands"] = [
+            {"name": "tools", "description": "d"},
+        ]
+        acp_mod._supervisor.sessions[sid]["skills"] = [
+            {"name": "qplan", "description": "d"},
+        ]
+        _queued(conn)
+
+        async def fake_execute(self_ignored, session_id, name):
+            return {}
+
+        with patch.object(acp_mod._Supervisor, "commands_execute", fake_execute):
+            asyncio.run(acp_mod._handle_commands_execute(
+                conn, sid, {"name": "qplan"}))
+
+        frames = _queued(conn)
+        # Must not be an error frame — skill name should be accepted.
+        error_frames = [f for f in frames if f["type"] == "error"]
+        assert not error_frames, \
+            f"Expected no error frames for a valid skill name; got: {error_frames}"
+        ack = next((f for f in frames if f["type"] == "commands_execute_result"), None)
+        assert ack is not None, "Expected a commands_execute_result ack for skill name"
+        assert ack["payload"]["name"] == "qplan"
+
 
 class TestHandleSubscribeCommandsReplay:
     """On subscribe, if ``meta["commands"]`` is set a ``commands`` frame is

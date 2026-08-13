@@ -242,7 +242,7 @@
         <span class="acp-cmd-header-label">Commands &amp; skills</span>
         <kbd class="acp-cmd-header-hint">↑↓ navigate · Enter select · Esc close</kbd>
       </div>
-      <ul></ul>
+      <ul role="presentation"></ul>
     </div>
     <div class="acp-composer-row">
       <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
@@ -1801,24 +1801,16 @@
     var ul = cmdDropdownEl.querySelector('ul');
     if (!ul) {
       ul = document.createElement('ul');
+      ul.setAttribute('role', 'presentation');
       cmdDropdownEl.appendChild(ul);
     }
     ul.textContent = '';
     if (!items.length) {
-      // Show the dropdown open with a placeholder — the user is in
-      // slash-command mode and needs to know whether data is loading
-      // or there are simply no matches.
-      var placeholder = document.createElement('li');
-      placeholder.className = 'acp-cmd-placeholder';
-      placeholder.setAttribute('role', 'option');
-      placeholder.setAttribute('aria-disabled', 'true');
-      placeholder.textContent = catalogueEmpty
-        ? 'Loading catalogue\u2026'
-        : 'No matching commands or skills';
-      ul.appendChild(placeholder);
-      cmdDropdownEl.hidden = false;
-      _cmdSelectedIndex = -1;
-      promptInput.setAttribute('aria-expanded', 'true');
+      // No matches (or catalogue loading): hide the dropdown so Enter falls
+      // through to sendPrompt() rather than being consumed here. The user can
+      // see /text in the box already — no need for a visible "no match" signal
+      // that blocks the send key.
+      hideCommandDropdown();
       return;
     }
     for (var i = 0; i < items.length; i++) {
@@ -1944,7 +1936,12 @@
     if (!ul) return;
     var count = ul.childNodes.length;
     if (!count) return;
-    _cmdSelectedIndex = (_cmdSelectedIndex + delta + count) % count;
+    var newIdx = (_cmdSelectedIndex + delta + count) % count;
+    // Skip the placeholder when it is the only item (aria-disabled=true).
+    if (ul.childNodes[newIdx] && ul.childNodes[newIdx].getAttribute('aria-disabled') === 'true') {
+      return;
+    }
+    _cmdSelectedIndex = newIdx;
     updateCommandSelection();
   }
 
@@ -5602,12 +5599,18 @@
       // Slash command catalogue from the server (SC-1). Broadcast-only (not
       // in history), so this is the only source for it after a reconnect.
       sessionCommands = (payload && payload.commands) || [];
+      if (!cmdDropdownEl.hidden) {
+        showCommandDropdown(promptInput.value.slice(1));
+      }
       return;
     }
     if (type === 'skills') {
       // kiro-cli skills catalogue from the server. Broadcast-only (not in
       // history), so this is the only source for it after a reconnect.
       sessionSkills = (payload && payload.skills) || [];
+      if (!cmdDropdownEl.hidden) {
+        showCommandDropdown(promptInput.value.slice(1));
+      }
       return;
     }
     if (type === 'compaction') {

@@ -8704,11 +8704,9 @@ check("skillsFrameOnSessionChangeResetsSessionSkills", (tpl) => {
   assert(!names.includes("/qexplore"),
     "old session skill 'qexplore' should not appear after a new 'session' frame; " +
     "got: " + JSON.stringify(names));
-  // Should show the loading placeholder since both lists are now empty.
-  const placeholder = drop.querySelector(".acp-cmd-placeholder");
-  assert(placeholder && /loading/i.test(placeholder.textContent),
-    "placeholder should say 'Loading' after session reset (both lists empty); " +
-    "got: " + (placeholder && placeholder.textContent));
+  // Dropdown should be hidden — no items means no dropdown (Enter sends instead).
+  assert(drop.hidden,
+    "dropdown should be hidden when both lists are empty after session reset");
 });
 
 // Test 3: releaseSessionClearsSessionSkills
@@ -8752,10 +8750,9 @@ check("releaseSessionClearsSessionSkills", (tpl) => {
   assert(!names.includes("/qdream"),
     "skill 'qdream' should be gone after session_closed (releaseSession clears it); " +
     "got: " + JSON.stringify(names));
-  const placeholder = drop.querySelector(".acp-cmd-placeholder");
-  assert(placeholder && /loading/i.test(placeholder.textContent),
-    "placeholder should say 'Loading' after releaseSession clears both lists; " +
-    "got: " + (placeholder && placeholder.textContent));
+  // Dropdown should be hidden — no items means no dropdown (Enter sends instead).
+  assert(drop.hidden,
+    "dropdown should be hidden when both lists are empty after releaseSession");
 });
 
 // Test 4: slashKeyShowsSkillsInDropdown
@@ -8932,10 +8929,10 @@ check("slashFilterMatchesSkillsByName", (tpl) => {
     "'/qex' filter should exclude 'tools' command; got: " + JSON.stringify(names));
 });
 
-// Test 8: emptyBothListsShowsLoadingPlaceholder
+// Test 8: emptyBothListsDropdownIsHidden
 // With both sessionCommands and sessionSkills empty (no frames delivered),
-// pressing '/' shows a placeholder that contains "Loading".
-check("emptyBothListsShowsLoadingPlaceholder", (tpl) => {
+// pressing '/' hides the dropdown immediately — no placeholder blocks Enter.
+check("emptyBothListsDropdownIsHidden", (tpl) => {
   const { page } = connected(tpl);
   // Neither 'commands' nor 'skills' frame has been delivered — both lists are empty.
   page.el("acpPrompt").value = "";
@@ -8944,21 +8941,14 @@ check("emptyBothListsShowsLoadingPlaceholder", (tpl) => {
     preventDefault() {},
   });
   const drop = page.el("acpCmdDropdown");
-  const placeholder = drop.querySelector(".acp-cmd-placeholder");
-  assert(placeholder,
-    "a placeholder element should be present when both lists are empty");
-  assert(/loading/i.test(placeholder.textContent),
-    "placeholder text should contain 'Loading' when catalogue not yet loaded; " +
-    "got: " + JSON.stringify(placeholder.textContent));
-  assert(!/no matching/i.test(placeholder.textContent),
-    "placeholder should not say 'No matching' when data has not loaded yet; " +
-    "got: " + JSON.stringify(placeholder.textContent));
+  assert(drop.hidden,
+    "dropdown should be hidden when both lists are empty so Enter can send the prompt");
 });
 
-// Test 9: loadedButNoMatchShowsNoMatchingPlaceholder
-// With data loaded but a filter that matches nothing, the placeholder says
-// "No matching" (not "Loading").
-check("loadedButNoMatchShowsNoMatchingPlaceholder", (tpl) => {
+// Test 9: loadedButNoMatchHidesDropdown
+// With data loaded but a filter that matches nothing, the dropdown is hidden
+// so Enter sends the prompt rather than being consumed by the dropdown.
+check("loadedButNoMatchHidesDropdown", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({
     type: "commands", sessionId: live,
@@ -8977,15 +8967,8 @@ check("loadedButNoMatchShowsNoMatchingPlaceholder", (tpl) => {
   page.el("acpPrompt").value = "/zzznotexists";
   page.el("acpPrompt").dispatch("input");
   const drop = page.el("acpCmdDropdown");
-  const placeholder = drop.querySelector(".acp-cmd-placeholder");
-  assert(placeholder,
-    "a placeholder element should be present when filter matches nothing");
-  assert(/no matching/i.test(placeholder.textContent),
-    "placeholder text should contain 'No matching' when data is loaded but nothing matched; " +
-    "got: " + JSON.stringify(placeholder.textContent));
-  assert(!/loading/i.test(placeholder.textContent),
-    "placeholder should not say 'Loading' when data is loaded; " +
-    "got: " + JSON.stringify(placeholder.textContent));
+  assert(drop.hidden,
+    "dropdown should be hidden when filter matches nothing so Enter can send the prompt");
 });
 
 // Test 10: copyButtonPresentForLabeledCodeBlocks

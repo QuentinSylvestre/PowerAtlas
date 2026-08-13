@@ -2982,11 +2982,16 @@ class _Supervisor:
                 if meta is not None:
                     meta["commands"] = commands
                     meta["skills"] = skills
-                    _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
-                    _registry.broadcast(sid, envelope("skills", {"skills": skills}, sid))
+                    try:
+                        _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
+                        _registry.broadcast(sid, envelope("skills", {"skills": skills}, sid))
+                    except Exception:
+                        log.warning("ACP available_commands_update: broadcast failed for session %s",
+                                    sid, exc_info=True)
             else:
                 log.debug("ACP available_commands_update: cannot attribute; dropped "
-                          "(multi-session without sessionId in params, or no sessions)")
+                          "(%d session(s), %d inflight, no sessionId)",
+                          len(self.sessions), len(self.inflight))
             return
         if method == "_kiro.dev/commands/available":
             # params["commands"] is pre-partitioned by kiro-cli: slash-command entries only.
@@ -3193,7 +3198,7 @@ class _Supervisor:
             # set _pending_commands to None; this is a no-op in that case.
             if self._pending_commands is not None:
                 log.debug("ACP new_session: finally clearing non-None _pending_commands "
-                          "(%d commands, %d skills) — pre-flush exception path or concurrent slot",
+                          "(%d commands, %d skills) — pre-flush exception path (asyncio single-threaded, no concurrent slot possible)",
                           len(self._pending_commands[0]), len(self._pending_commands[1]))
             self._pending_commands = None
         log.info("ACP session created: %s (cwd %s); %d live",
@@ -4726,7 +4731,10 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
     # Allow-and-proceed when catalogue not yet received (race before first
     # commands/available notification). Names are stored without leading slash;
     # the client also strips it, so this comparison is always slash-free.
-    valid_names = {c.get("name") for c in meta.get("commands") or [] if isinstance(c, dict) and c.get("name")}
+    # Both commands and skills are valid targets — skill prompts are executed
+    # the same way as built-in slash commands via _kiro.dev/commands/execute.
+    all_catalogue = (meta.get("commands") or []) + (meta.get("skills") or [])
+    valid_names = {c.get("name") for c in all_catalogue if isinstance(c, dict) and c.get("name")}
     if valid_names and name not in valid_names:
         conn.send(error_frame("bad_payload", "Unknown command.", session_id))
         log.warning("ACP commands_execute refused: [bad_payload] unknown command %r "
