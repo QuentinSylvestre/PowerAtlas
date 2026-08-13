@@ -361,8 +361,33 @@ Cycle 2: duplicate `elif` from Fix 2 removed in-session (commit 50633d4). QA: SK
 10. `test_subscribe_replays_skills_frame` — after `meta["skills"]` is set, call `_handle_subscribe` and assert the subscriber receives both a `"commands"` and a `"skills"` frame.
 
 **Exit criteria**:
-- [ ] All 10 new test cases added and passing
-- [ ] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py -k "TestAcpCommandsAvailable"` — full class passes (including pre-existing tests)
+- [x] All 10 new test cases added and passing
+- [x] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py -k "TestAcpCommandsAvailable"` — full class passes (including pre-existing tests)
+
+#### Implementation (2026-08-13, code: 5cbbda2, fix: ca16aa3, fix: 767aedf)
+
+Ten new test cases were added to `TestAcpCommandsAvailable` in `tests/test_web.py`. Tests 1–3 cover `_parse_skills` extraction from `params["prompts"]` via both discriminants (`serverName.startswith("skill:")` and `_meta.kiro.type == "skill"`) and verify non-skill entries are excluded. Tests 4 and 6 cover the `_pending_commands` single-slot buffer: Test 4 asserts the buffer is set (and no WS frames are sent) when `_reserved > 0` and no session is registered; Test 6 asserts last-writer wins when the slot is replaced by a second notification. Test 5 covers the flush path by calling `_flush_pending_commands()` (the new sync helper extracted from `new_session()` during post-review fixes). Tests 7–9 cover `available_commands_update`: attribution by `sessionId`, isolation to the named session when two sessions exist, and independent `MAX_COMMANDS_COUNT` capping. Test 10 covers `_handle_subscribe` skills replay. An 11th test (`test_pending_commands_buffer_cleared_when_broadcast_raises`) was added during review fixes. A sync `_flush_pending_commands` helper was extracted from `new_session()` in `acp.py` so tests exercise the real code path.
+
+### 2026-08-13 — Implementation Review (after Phase 2, personas: Reliability engineer, Senior engineer, Maintainability reviewer, Architect)
+
+Implementation health: Green.
+11 findings (2 High, 4 Medium, 5 Low). Both Highs resolved by extracting the flush helper and adding the missing broadcast-raises test.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Flush test inlined production code copy — vacuous, could not detect regressions in `new_session`. | Fixed — extracted `_flush_pending_commands` sync helper; test calls production code in commit ca16aa3 |
+| 2 | High | `test_pending_commands_buffer_cleared_when_broadcast_raises` absent — catch block untested. | Fixed — test added in commit ca16aa3 |
+| 3 | Medium | Skills from prompts not asserted to be excluded from `meta["commands"]`. | Fixed — assertion added in commit ca16aa3 |
+| 4 | Medium | `steering`-typed entry not tested in `available_commands_update` exclusion filter. | Fixed — steering entry case added to test in commit ca16aa3 |
+| 5 | Medium | `_notify` helper not extended with `prompts` parameter — two authoring styles in tests. | Fixed — `_notify` updated with `prompts=None` in commit ca16aa3 |
+| 6 | Medium | Snapshot-restore teardown used shallow `dict()` copy — fragile state isolation. | Fixed — replaced with `copy.deepcopy()` in commit 767aedf |
+| 7 | Low | `other_sid` skills isolation not asserted (only commands isolation was checked). | Fixed — assertion added in commit ca16aa3 |
+| 8 | Low | `acp_session` fixture teardown didn't reset `_reserved` or `_pending_commands`. | Fixed — reset lines added to fixture in commit ca16aa3 |
+| 9 | Low | Test name `test_pending_commands_flushed_to_new_session` implied `new_session()` was called. | Fixed — renamed to `test_pending_commands_flush_logic` in commit ca16aa3 |
+| 10 | Low | Comment gap in truncation test. | Fixed — comment added in commit ca16aa3 |
+| 11 | Low | Hardcoded sparse meta dict in attribution test. | Fixed — replaced with `_new_session_record()` call in commit ca16aa3 |
+
+Dead `_notify` keyword params removed; `import copy` added (commit 767aedf). QA: SKIP — test-only phase, no independently exercisable runtime surface.
 
 ### Phase 3: Frontend — skills in palette, badge [QA]
 
