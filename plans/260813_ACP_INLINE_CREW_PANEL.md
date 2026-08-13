@@ -1,7 +1,7 @@
 # ACP Inline Crew Panel
 
 > **Date**: 2026-08-13
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix stale/cross-session crew panel bugs and redesign crew panel as inline transcript artifact anchored per fan-out tool call
 > **Estimated effort**: 1–2 days
@@ -541,6 +541,31 @@ Do not restart PowerAtlas for `acp.html` changes. Hard reload (`Ctrl+Shift+R`) s
 
 ## Review Log
 
+### 2026-08-13 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, Architect, End-user advocate.
+7 findings (0 High, 1 Medium, 6 Low).
+QA verification: PASS (11 surfaces verified, 4 adversarial probes executed; 338/339 JS tests, 1694/1695 Python tests — 1 pre-existing unrelated failure in both suites).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Server turn-end cleanup + subscribe gate | pass (1685→1694) | PASS | SC1, SC5 verified |
+| 2: spawnerToolCallId tracking | pass (1694) | PASS | toolCallId on subagents frame verified |
+| 3+4: Client inline crew panel + tests | pass (338/339 JS, 1694 Python) | PASS | SC2-SC4, SC6 verified; 1 pre-existing JS failure |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | SC3 gap — same-turn concurrent fan-outs merge into one panel; `crew_spawn_toolcallids` guard prevents recording second fan-out's toolCallId | User: accepted — server-side design constraint (Design Decisions); affects only multi-orchestrator advanced usage |
+| 2 | Low | `_evict_crew_children` docstring lacked SC6 cross-reference for `subagent_sessions` preservation | Fixed — added SC6 routing-key note |
+| 3 | Low | Subscribe-snapshot tests lacked `toolCallId` assertion in frame payload | Fixed — added to two `TestAcpSubscribeSnapshotGate` tests |
+| 4 | Low | `_evict_crew_children` did not document that `crew_spawn_toolcallids` is caller-managed | Fixed — added comment |
+| 5 | Low | `_crew_toolcallid` fallback path lacked mutual-exclusivity comment with subscribe gate | Fixed — added comment |
+| 6 | Low | Untracked scratch files in project root | Fixed — removed `tmp_*.py`, `acp-desktop.png`, `search_handlers.py` |
+| 7 | Low | SC2 race update-path (subagents before tool_call, subsequent update stays at fallback) untested | User: accepted — correct by code analysis; Low probability |
+
 ### 2026-08-13 — Implementation Review (after Phases 3+4, persona: Senior engineer, End-user advocate, Reliability engineer, Architect)
 
 Implementation health: Green (all findings resolved).
@@ -559,10 +584,10 @@ Implementation health: Green (all findings resolved).
 | 9 | Medium | Ghost-`_noAnchorKey` case untested | Fixed — added "setCrew with empty entries and no active no-anchor slot does not ghost _noAnchorKey" test |
 | 10 | Low | Pre-existing 1 test failure not acknowledged in EC checkbox | Fixed — added §9 note |
 | 11 | Low | `window._testCrews()` returns live reference — not documented | Fixed — added "read only" comment |
-| 12 | Low | SC2 race (subagents before tool_call) update path untested | Orchestrator: proposed-accept — documented as a Low with no behavior bug; acceptable known gap |
-| 13 | Low | `flushToolGroups` + crew panel ordering side-effect (crew panel stays outside group) | Orchestrator: proposed-accept — panel is visible and functional (SC4); follow-up plan if needed |
+| 12 | Low | SC2 race (subagents before tool_call) update path untested | User: accepted — behavior is correct; update-path stays at bottom-append by design |
+| 13 | Low | `flushToolGroups` + crew panel ordering side-effect (crew panel stays outside group) | User: accepted — panel visible and functional (SC4 satisfied); aesthetic only; follow-up if needed |
 | 14 | Low | `stopSlotTimer` double-call defense (stale `clearInterval(null)`) | Fixed — noted as safe; no code change needed |
-| 15 | Low | `removeAllCrewPanels` pre-existing double call in `releaseSession` | Orchestrator: proposed-accept — pre-existing, out of scope; noted for future cleanup |
+| 15 | Low | `removeAllCrewPanels` pre-existing double call in `releaseSession` | User: accepted — pre-existing no-op, out of scope; noted for future cleanup |
 
 QA: PASS (11/11 claims verified, 338/339 tests pass, pre-existing failure confirmed unrelated).
 
