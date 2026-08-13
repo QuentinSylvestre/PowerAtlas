@@ -236,15 +236,16 @@
          of the row and cannot affect the row's size or cause the textarea to
          shift when the dropdown opens. Built with createElement + textContent;
          empty in the markup. -->
-    <!-- aria-label updated to reflect skills: 'Commands & skills' -->
-    <div id="acpCmdDropdown" hidden role="listbox" aria-label="Commands &amp; skills">
-      <div class="acp-cmd-header">
-        <span class="acp-cmd-header-label">Commands &amp; skills</span>
-        <kbd class="acp-cmd-header-hint">↑↓ navigate · Enter select · Esc close</kbd>
-      </div>
-      <ul role="presentation"></ul>
-    </div>
     <div class="acp-composer-row">
+      <!-- Slash command palette — absolutely positioned above the textarea,
+           anchored to the top of .acp-composer-row via bottom:100%.
+           First child so it is never a flex item (display:none when hidden). -->
+      <div id="acpCmdDropdown" hidden role="listbox" aria-label="Commands &amp; skills">
+        <div class="acp-cmd-header">
+          <kbd class="acp-cmd-header-hint">↑↓&nbsp;navigate&nbsp; · &nbsp;Enter&nbsp;select&nbsp; · &nbsp;Esc&nbsp;close</kbd>
+        </div>
+        <ul role="presentation"></ul>
+      </div>
       <textarea class="acp-prompt" id="acpPrompt" rows="2" spellcheck="false"
                 placeholder="Prompt the agent — Shift+Enter for a new line, Enter sends on desktop, Ctrl+V to attach an image"
                 aria-label="Prompt"
@@ -344,12 +345,13 @@
 /* ---- slash command palette --------------------------------------------- */
 #acpCmdDropdown {
   position: absolute;
-  /* Sits above the composer row. bottom:0 + translateY keeps it flush against
-     the top edge of the composer without hard-coding pixel values. */
-  bottom: 0;
+  /* Anchored to the top of .acp-composer-row (its containing block).
+     bottom: 100% places the dropdown's bottom edge flush with the top
+     of the row; margin-bottom adds a small gap above the textarea. */
+  bottom: 100%;
   left: 0;
   right: 0;
-  transform: translateY(calc(-100% - 6px));
+  margin-bottom: 4px;
   background: var(--surface, #1a1d27);
   border: 1px solid var(--border, #2d3244);
   border-radius: 10px;
@@ -363,18 +365,10 @@
 .acp-cmd-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px 7px;
+  justify-content: flex-end;
+  padding: 5px 10px 4px;
   border-bottom: 1px solid var(--border, #2d3244);
   flex-shrink: 0;
-  gap: 8px;
-}
-.acp-cmd-header-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.6px;
-  text-transform: uppercase;
-  color: var(--text-dim, #5c6070);
 }
 .acp-cmd-header-hint {
   font-size: 10px;
@@ -383,6 +377,7 @@
   border: none;
   font-family: inherit;
   white-space: nowrap;
+  letter-spacing: 0.02em;
 }
 #acpCmdDropdown ul {
   list-style: none;
@@ -1801,10 +1796,8 @@
     var items = allItems.filter(function(c) {
       return !lc || (c.name || '').toLowerCase().indexOf(lc) !== -1;
     });
-    // Cap at 12 items to prevent the dropdown covering the whole screen.
-    // When filtering the user is typing so they can narrow down; on open-all
-    // (empty partial) show the first 12 to keep the palette compact.
-    if (items.length > 12) items = items.slice(0, 12);
+    // Cap at 5 items to keep the palette compact.
+    if (items.length > 5) items = items.slice(0, 5);
     renderCommandDropdown(items, sessionCommands.length === 0 && sessionSkills.length === 0);
   }
 
