@@ -268,8 +268,7 @@
           <option value="queue">Queue</option>
         </select>
       </div>
-      <span id="acpModeLiveRegion" aria-live="polite" aria-atomic="true"
-            style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"></span>
+      <span id="acpModeLiveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></span>
     </div>
   </div>
   <!-- Collapsed by default and remembered per browser: the transport log is a
@@ -526,6 +525,8 @@
 }
 .acp-msg-steer .acp-msg-role { color: var(--text-dim); }
 .acp-msg-steer .acp-msg-body { color: var(--text-dim); }
+/* Screen-reader-only visually hidden utility — used for aria-live regions */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 
@@ -1227,6 +1228,7 @@
       promptInput.disabled = false;
       sendModeBtn.disabled = false;
       modeSelect.disabled = false;
+      addMessage('note', 'Steer could not complete \u2014 session was closed.');
     }
     _steerPending = null;
     // The crew belonged to the session just released — `close_session`
@@ -5446,7 +5448,7 @@
           _steerPending = null;
           autoGrowPrompt();
           refreshComposerControls();
-        } else if (promptInput.value === steerText) {
+        } else if (promptInput.value.trim() === steerText) {
           // WS dropped before steer_ack; ws.onclose restored text to textarea.
           // The band confirms the steer landed — clear the textarea.
           promptInput.value = '';

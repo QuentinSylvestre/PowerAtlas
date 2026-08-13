@@ -657,10 +657,6 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 /* Stop and Close both end something the user cannot get back in place, so they
    read as destructive rather than as two more grey buttons in the row. */
 .acp-danger:hover { border-color: #f87171; color: #f87171; }
-/* Queue and Steer: single action button + mode selector in a row, together
-   occupying the same space as the Stop button they replace during a turn with
-   text in the textarea. `.acp-queue-steer` is the wrapper that hides as a unit
-   so the composer row height stays stable when the pair swaps with Stop. */
 /* Inline cancel link in a queue note — styled as a de-emphasised inline
    button so it reads as secondary to the note text around it. */
 .acp-inline-cancel { background: none; border: none; padding: 0; color: var(--accent); font-size: inherit; cursor: pointer; text-decoration: underline; }
