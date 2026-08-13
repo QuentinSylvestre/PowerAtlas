@@ -2567,6 +2567,8 @@ def acp_session():
         acp_mod._supervisor.subagent_history.clear()
         acp_mod._supervisor.crew_spawn_anchors.clear()
         acp_mod._supervisor.crew_spawn_toolcallids.clear()
+        acp_mod._supervisor._reserved = 0
+        acp_mod._supervisor._pending_commands = None
 
 
 class TestAcpServerTypeGuard:
@@ -16345,10 +16347,13 @@ class TestAcpCommandsAvailable:
         acp_mod._registry.attach(conn, sid)
         return conn
 
-    def _notify(self, acp_mod, commands_list):
+    def _notify(self, acp_mod, commands_list, prompts=None, *, inflight_set=None, session_map=None):
+        params = {"commands": commands_list}
+        if prompts is not None:
+            params["prompts"] = prompts
         acp_mod._supervisor._on_notification({
             "method": "_kiro.dev/commands/available",
-            "params": {"commands": commands_list},
+            "params": params,
         })
 
     def test_single_inflight_stores_commands_and_broadcasts(self, acp_session):
@@ -16517,6 +16522,8 @@ class TestAcpCommandsAvailable:
         skills_frame = next(f for f in frames if f["type"] == "skills")
         assert skills_frame["payload"]["skills"] == [
             {"name": "qexplore", "description": "x"}]
+        # Skills from prompts must not appear in commands list
+        assert meta["commands"] == [{"name": "qexplore", "description": "x"}]  # only the commands entry, not the skill
 
     def test_prompts_field_extracts_skills_by_meta_type(self, acp_session):
         """``params["prompts"]`` entries with ``_meta.kiro.type == "skill"``
@@ -16601,11 +16608,13 @@ class TestAcpCommandsAvailable:
             acp_mod._supervisor._pending_commands = None
             acp_mod._supervisor.sessions.update(saved_sessions)
 
-    def test_pending_commands_flushed_to_new_session(self, acp_session):
-        """Pre-loaded ``_pending_commands`` is flushed into session meta when a
-        new session is registered (simulating the flush logic in
-        ``new_session()``).  After flush, ``_pending_commands`` is ``None``
-        and both WS frames are broadcast."""
+    def test_pending_commands_flush_logic(self, acp_session):
+        """Pre-loaded ``_pending_commands`` is flushed into session meta when
+        ``_flush_pending_commands`` is called.  After flush,
+        ``_pending_commands`` is ``None`` and both WS frames are broadcast.
+
+        Note: exercises _flush_pending_commands directly, not through new_session().
+        """
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
         _queued(conn)  # drain session frame
@@ -16614,20 +16623,10 @@ class TestAcpCommandsAvailable:
         pending_skills = [{"name": "qbar", "description": "e"}]
         acp_mod._supervisor._pending_commands = (pending_cmds, pending_skills)
         try:
-            # Replicate the flush logic from new_session() inline:
-            # This is exactly what new_session() does after sessions[session_id]
-            # is set but the async machinery is not needed here.
-            meta = acp_mod._supervisor.sessions.get(sid)
-            assert meta is not None
-            pc, ps = acp_mod._supervisor._pending_commands
-            acp_mod._supervisor._pending_commands = None  # consume before broadcast
-            meta["commands"] = pc
-            meta["skills"] = ps
-            acp_mod._registry.broadcast(
-                sid, acp_mod.envelope("commands", {"commands": pc}, sid))
-            acp_mod._registry.broadcast(
-                sid, acp_mod.envelope("skills", {"skills": ps}, sid))
+            # Call the extracted helper directly.
+            acp_mod._supervisor._flush_pending_commands(sid)
 
+            meta = acp_mod._supervisor.sessions[sid]
             assert meta["commands"] == pending_cmds
             assert meta["skills"] == pending_skills
             assert acp_mod._supervisor._pending_commands is None
@@ -16637,6 +16636,31 @@ class TestAcpCommandsAvailable:
             assert "skills" in types
             skills_frame = next(f for f in frames if f["type"] == "skills")
             assert skills_frame["payload"]["skills"] == pending_skills
+        finally:
+            acp_mod._supervisor._pending_commands = None
+
+    def test_pending_commands_buffer_cleared_when_broadcast_raises(self, acp_session):
+        """Buffer slot is consumed (set to None) BEFORE broadcast so that a
+        broadcast failure does not leave stale data for the next new_session call.
+        The meta dict is also written before broadcast, so it holds the commands
+        even after the failure."""
+        import unittest.mock
+        acp_mod, sid = acp_session
+        commands = [{"name": "foo", "description": "d"}]
+        skills = [{"name": "qbar", "description": "e"}]
+        acp_mod._supervisor._pending_commands = (commands, skills)
+        # Register session meta (fixture already does this).
+        meta = acp_mod._supervisor.sessions[sid]
+        try:
+            with unittest.mock.patch.object(
+                    acp_mod._registry, "broadcast",
+                    side_effect=RuntimeError("broadcast test error")):
+                acp_mod._supervisor._flush_pending_commands(sid)
+            # Buffer must be cleared (consumed before broadcast).
+            assert acp_mod._supervisor._pending_commands is None
+            # Meta must have been written before broadcast raised.
+            assert meta["commands"] == commands
+            assert meta["skills"] == skills
         finally:
             acp_mod._supervisor._pending_commands = None
 
@@ -16684,7 +16708,7 @@ class TestAcpCommandsAvailable:
     def test_available_commands_update_updates_skills(self, acp_session):
         """``session/update`` with ``sessionUpdate="available_commands_update"``
         updates both ``meta["commands"]`` and ``meta["skills"]`` and broadcasts
-        both WS frames."""
+        both WS frames.  Steering-typed entries are excluded from both lists."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
         _queued(conn)  # drain
@@ -16698,6 +16722,8 @@ class TestAcpCommandsAvailable:
                         {"name": "/newcmd", "description": "d"},
                         {"name": "/qskill", "description": "s",
                          "_meta": {"kiro": {"type": "skill"}}},
+                        {"name": "/steercmd", "description": "s",
+                         "_meta": {"kiro": {"type": "steering"}}},
                     ],
                 },
             },
@@ -16709,14 +16735,19 @@ class TestAcpCommandsAvailable:
         types = [f["type"] for f in frames]
         assert "commands" in types
         assert "skills" in types
+        # Steering entry excluded from both commands and skills
+        all_names = (
+            [c["name"] for c in meta["commands"]]
+            + [s["name"] for s in meta["skills"]]
+        )
+        assert "steercmd" not in all_names
 
     def test_available_commands_update_attribution_by_session_id(self, acp_session):
         """``available_commands_update`` is attributed to the session named by
         ``params.sessionId`` even when two sessions are registered."""
         acp_mod, sid = acp_session
         other_sid = "sess-other-update"
-        acp_mod._supervisor.sessions[other_sid] = {
-            "cwd": r"C:\other", "created": 0.0, "models": {}, "modes": {}}
+        acp_mod._supervisor.sessions[other_sid] = acp_mod._new_session_record(r"C:\other")
         try:
             acp_mod._supervisor._on_notification({
                 "method": "_kiro.dev/session/update",
@@ -16735,13 +16766,17 @@ class TestAcpCommandsAvailable:
                 {"name": "targeted", "description": "x"}]
             # other_sid's meta is untouched.
             assert "commands" not in acp_mod._supervisor.sessions[other_sid]
+            assert "skills" not in acp_mod._supervisor.sessions[other_sid]
         finally:
             acp_mod._supervisor.sessions.pop(other_sid, None)
 
     def test_available_commands_update_max_count_applied_per_type(self, acp_session):
         """``available_commands_update`` caps ``meta["commands"]`` and
         ``meta["skills"]`` at ``MAX_COMMANDS_COUNT`` independently; neither
-        list's overflow displaces the other's entries."""
+        list's overflow displaces the other's entries.
+
+        # Structural inverse of _parse_skills inclusion logic
+        """
         acp_mod, sid = acp_session
         over = acp_mod.MAX_COMMANDS_COUNT + 1  # 201
         # 201 command entries (no _meta.kiro.type, no skill: serverName)

@@ -3178,30 +3178,9 @@ class _Supervisor:
                     f"{session_id!r:.200}")
             self.sessions[session_id] = _new_session_record(cwd)
             # Flush any commands/available notifications buffered during this
-            # session/new round-trip. Consume before broadcast: if broadcast
-            # raises, the buffer is already cleared so the next new_session call
-            # is not handed stale data. The finally block below also clears it
-            # on exception paths that bypass this block.
-            if self._pending_commands is not None:
-                pending_commands, pending_skills = self._pending_commands
-                self._pending_commands = None  # consume before broadcast
-                meta = self.sessions.get(session_id)
-                if meta is not None:
-                    meta["commands"] = pending_commands
-                    meta["skills"] = pending_skills
-                    try:
-                        _registry.broadcast(
-                            session_id,
-                            envelope("commands", {"commands": pending_commands}, session_id))
-                        _registry.broadcast(
-                            session_id,
-                            envelope("skills", {"skills": pending_skills}, session_id))
-                        log.debug("ACP new_session: flushed %d pending commands, "
-                                  "%d pending skills to %s",
-                                  len(pending_commands), len(pending_skills), session_id)
-                    except Exception:
-                        log.warning("ACP new_session: flush broadcast failed for session %s",
-                                    session_id, exc_info=True)
+            # session/new round-trip. The finally block below also clears it
+            # on exception paths that bypass this call.
+            self._flush_pending_commands(session_id)
             self._publish_live()
             self.history[session_id] = _History()
         finally:
@@ -3220,6 +3199,36 @@ class _Supervisor:
         log.info("ACP session created: %s (cwd %s); %d live",
                  session_id, cwd, len(self.sessions))
         return {"sessionId": session_id, "cwd": cwd}
+
+    def _flush_pending_commands(self, session_id: str) -> None:
+        """Flush buffered commands/available data into a newly registered session.
+
+        Consumes ``_pending_commands`` before broadcasting so that if broadcast
+        raises, the buffer is cleared and the next ``new_session`` call is not
+        handed stale data.  A no-op when the buffer is empty.
+        """
+        if self._pending_commands is None:
+            return
+        pending_commands, pending_skills = self._pending_commands
+        self._pending_commands = None  # consume before broadcast
+        meta = self.sessions.get(session_id)
+        if meta is None:
+            return
+        meta["commands"] = pending_commands
+        meta["skills"] = pending_skills
+        try:
+            _registry.broadcast(
+                session_id,
+                envelope("commands", {"commands": pending_commands}, session_id))
+            _registry.broadcast(
+                session_id,
+                envelope("skills", {"skills": pending_skills}, session_id))
+            log.debug("ACP new_session: flushed %d pending commands, "
+                      "%d pending skills to %s",
+                      len(pending_commands), len(pending_skills), session_id)
+        except Exception:
+            log.warning("ACP new_session: flush broadcast failed for session %s",
+                        session_id, exc_info=True)
 
     async def load_session(self, session_id: str, cwd: str) -> dict:
         """Adopt a session that exists in the agent's store but not here.
