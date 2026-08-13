@@ -251,19 +251,20 @@ subRoleEl.textContent = crewLabel(entry) || subViewSid;
    - Old class names `acp-crew-entry`, `acp-crew-name`, `acp-crew-working`, `acp-crew-done`, `acp-crew-error` absent from rendered output.
 
 **Exit criteria**:
-- [ ] `node tests/acp_page.test.mjs` passes with all new and updated assertions (zero failures on old-class selectors)
-- [ ] All existing `.acp-crew-entry` / `.acp-crew-name` test assertions updated to new class names (grep returns 0 hits on old names in active test assertions)
-- [ ] Crew panel header shows "Orchestrating (N agents)" for N>1; "Orchestrating (1 agent)" for N=1
-- [ ] Crew panel header shows "Done (N agents)" / "Done (1 agent)" when `crewAllDone === true`
-- [ ] Each row has a `session-status` dot with `status-thinking` (working), `status-idle` (done), or `status-errored` (error)
-- [ ] Row label shows `sessionName`; fallback to 30-char truncated `task` with `…`; fallback to `"agent"`
-- [ ] No rendered output contains class names `acp-crew-entry`, `acp-crew-name`, `acp-crew-working`, `acp-crew-done`, `acp-crew-error`
-- [ ] Sub-panel header (`subRoleEl`) shows `sessionName` when present, same fallback chain via `crewLabel()`
-- [ ] `prefers-reduced-motion` suppresses `.session-status.status-thinking` animation
+- [x] `node tests/acp_page.test.mjs` passes with all new and updated assertions (zero failures on old-class selectors)
+- [x] All existing `.acp-crew-entry` / `.acp-crew-name` test assertions updated to new class names (grep returns 0 hits on old names in active test assertions)
+- [x] Crew panel header shows "Orchestrating (N agents)" for N>1; "Orchestrating (1 agent)" for N=1
+- [x] Crew panel header shows "Done (N agents)" / "Done (1 agent)" when `crewAllDone === true`
+- [x] Each row has a `session-status` dot with `status-thinking` (working), `status-idle` (done), or `status-errored` (error)
+- [x] Row label shows `sessionName`; fallback to 30-char truncated `task` with `…`; fallback to `"agent"`
+- [x] No rendered output contains class names `acp-crew-entry`, `acp-crew-name`, `acp-crew-working`, `acp-crew-done`, `acp-crew-error`
+- [x] Sub-panel header (`subRoleEl`) shows `sessionName` when present, same fallback chain via `crewLabel()`
+- [x] `prefers-reduced-motion` suppresses `.session-status.status-thinking` animation
 - [ ] Hover on a row changes text color only (no background fill)
 - [ ] Manual check at 390 px viewport: rows do not overflow, label truncates with `…`
 
-## 6) Risk Assessment
+**Implementation (2026-08-12, code: 52b705c)**
+Replaced the old bordered card-button crew panel with a lean dot-row design. Added `crewLabel(entry)` shared helper (sessionName → 30-char truncated task with `…` → `'agent'`). `renderCrewPanel` rewritten: creates/updates a `div.acp-crew-header` as first child with "Orchestrating (N agents)" / "Done (N agents)" text, then removes old `.acp-crew-row` children tail-to-head, then appends new `button.acp-crew-row` elements each containing a `session-status` dot + label + role + action + elapsed spans. Dot class maps: working→`status-thinking`, error→`status-errored`, done→`status-idle`. `renderSubHead` updated to use `crewLabel()`. The `.acp-crew-*` CSS block replaced with lean row rules; `prefers-reduced-motion` updated to suppress `status-thinking`. Two exit criteria deferred to Step 9b manual QA (hover color and mobile viewport — CSS visual checks not exercisable in DOM stand-in harness). All 11 old test selector references updated to new class names; 13 new tests added covering header text, dot classes, label fallback chain, roleSpan guard, and absence of old class names.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
@@ -343,6 +344,22 @@ Implementation health: Green.
 | 6 | Low | `TestAcpSessionName` docstring contained change-narrative. | Fixed — replaced with present-state description. |
 | 7 | Low | Redundant `acp_mod_direct` import in integration test. | Fixed — removed; `acp_mod` from fixture used directly. |
 | 8 | Low | Block comment and inline comment redundant post-fix. | Fixed — merged to single clear 2-line block comment. |
+
+### 2026-08-12 — Implementation Review (after Phase 2, persona: Senior engineer + End-user advocate)
+
+Implementation health: Green.
+2 cycles. Cycle 1: 7 findings (2 Medium, 5 Low). Cycle 2: 1 Low. Cycle 3 short-circuited (cycle 2 all Low + purely mechanical fix).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `"Done (1 agent)"` singular header had no test (exit criterion 4 listed it). | Fixed — test added in `cf37578`. |
+| 2 | Medium | `working…` action-text fallback path (`!entry.action`) was untested. | Fixed — test added in `cf37578`. |
+| 3 | Low | `.session-status.status-unread` in `prefers-reduced-motion` is a no-op (class has no animation). | Fixed — removed in `cf37578`. |
+| 4 | Low | `|| subViewSid` in `renderSubHead` is dead code (`crewLabel` always returns non-empty). | Fixed — clarifying comment added in `cf37578`. |
+| 5 | Low | Crew struct comment missing `sessionName` field. | Fixed — added in `cf37578`. |
+| 6 | Low | `typeof stop === 'number' && stop` less clear than `stop > 0`. | Fixed — `stop > 0` used in `cf37578`. |
+| 7 | Low | Empty `roleSpan` always appended even when `entry.role` is `""`, adding 8px gap. | Fixed — conditional `if (entry.role)` guard in `cf37578`. |
+| 8 | Low | `roleSpan` guard untested in both directions. | Fixed — two guard tests added in `52b705c`. |
 
 ## Harness Improvement Opportunities
 
