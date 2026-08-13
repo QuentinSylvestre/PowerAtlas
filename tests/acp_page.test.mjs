@@ -5588,8 +5588,8 @@ check("hiding a capped tooltip gives back the cap the narrow window imposed", as
 
 // ---------------------------------------------- the agent bar + debug log --
 
-function subagentsFrame(live, subagents) {
-  return { type: "subagents", sessionId: live, payload: { subagents } };
+function subagentsFrame(live, subagents, toolCallId) {
+  return { type: "subagents", sessionId: live, payload: { subagents, toolCallId: toolCallId || '' } };
 }
 
 check("no crew panel appears until the session has a crew", (tpl) => {
@@ -5629,44 +5629,45 @@ check("crew panel entries are clickable and open the sub-agent panel", (tpl) => 
               "clicking a crew row should open the sub-agent panel");
 });
 
-check("crew panel stays visible while running but is removed after all done + next main event",
+check("crew panel persists after all done — panels no longer auto-dismiss",
   (tpl) => {
     const { page, live } = connected(tpl);
     const now = Date.now() / 1000;
     page.deliver(subagentsFrame(live, [
       { sessionId: "sub-1", role: "explorer", task: "", status: "working",
         action: "", done: false, error: "", startedAt: now - 10 },
-    ]));
+    ], "tcid-persist"));
     assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
                 "panel should be present while running");
-    // All done
+    // All done — same toolCallId, same slot
     page.deliver(subagentsFrame(live, [
       { sessionId: "sub-1", role: "explorer", task: "", status: "terminated",
         action: "", done: true, error: "", startedAt: now - 10 },
-    ]));
-    // Panel still present — waiting for the next main-session event
+    ], "tcid-persist"));
+    // Panel stays — no auto-dismiss per SC4
     assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
-                "panel should stay until next main event after all done");
-    // Next main event: a chunk from the agent
+                "panel should stay visible after all done (SC4: no dismissal)");
+    // Next main event: a chunk from the agent — panel still persists
     page.deliver({ type: "chunk", sessionId: live,
                    payload: { role: "agent", text: "finished" } });
-    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
-                "panel should be removed after all done + next main event");
+    assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
+                "panel should persist after main event — SC4");
   });
 
-check("crew panel is removed when turn ends after all done", (tpl) => {
+check("crew panel persists after turn ends — no auto-dismiss on turn end", (tpl) => {
   const { page, live } = connected(tpl);
   const now = Date.now() / 1000;
   page.deliver(subagentsFrame(live, [
     { sessionId: "sub-1", role: "builder", task: "", status: "terminated",
       action: "", done: true, error: "", startedAt: now - 30 },
-  ]));
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1);
-  // turn end is another main-session event that should dismiss the panel
+  ], "tcid-turnend"));
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
+              "panel should be present");
+  // turn end must NOT dismiss the panel per SC4
   page.deliver({ type: "meta", sessionId: live,
                  payload: { turn: "end", stopReason: "end_turn" } });
-  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
-              "panel should be removed on turn end when all done");
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 1,
+              "panel should persist after turn end (SC4: no auto-dismiss)");
 });
 
 check("crew panel elapsed time ticks when the interval fires", (tpl) => {
@@ -5799,15 +5800,16 @@ check("a live subagents update refreshes the crew panel while a sub-agent panel 
   page.deliver(subagentsFrame(live, [
     { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
       status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
-  ]));
+  ], "tcid-update"));
   page.all("acpTranscript", ".acp-crew-row")[0].dispatch("click");
   page.openAt(1);
   // On the MAIN socket (index 0) — `page.deliver()` alone would now target the
   // sub-agent socket, since it always addresses whichever opened last.
+  // Use same toolCallId so the update lands in the same slot.
   page.deliverTo(0, subagentsFrame(live, [
     { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
       status: "done", action: "", done: true, error: "", startedAt: now - 5 },
-  ]));
+  ], "tcid-update"));
   assertEqual(page.el("acpSubPanel").hidden, false,
               "the panel should stay open across a crew update");
   assertEqual(page.el("acpSubStatus").textContent, "done");
@@ -6080,6 +6082,137 @@ check("role span shows role text when entry.role is non-empty", (tpl) => {
   assert(roleSpan !== null, "role span should be present when entry.role is non-empty");
   assertEqual(roleSpan.textContent, "kiro_default",
               "role span should show the role text");
+});
+
+// ---- Phase 4: per-toolCallId inline crew panel tests ----
+
+check("setCrew with toolCallId anchors panel after tool call row", (tpl) => {
+  const { page, live } = connected(tpl);
+  // First deliver a tool_call frame so toolRows has the entry
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "tcid-1", title: "orchestrate", kind: "execute",
+               status: "started" } });
+  const toolRow = page.one("acpTranscript", ".acp-msg-tool");
+  assert(toolRow !== null, "tool call row should exist in the transcript");
+  // Now deliver the subagents frame with the same toolCallId
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-a", role: "worker", task: "", sessionName: "stage-a",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tcid-1"));
+  // crews['tcid-1'] should exist
+  assert(page.sandbox._testCrews() && page.sandbox._testCrews()["tcid-1"],
+         "crews['tcid-1'] should exist after subagents frame with toolCallId");
+  const panel = page.sandbox._testCrews()["tcid-1"].panel;
+  assert(panel !== null && panel !== undefined, "crew panel should be created");
+  // The panel should be inserted after the tool call row (as nextSibling of the row)
+  const transcriptKids = page.el("acpTranscript").childNodes;
+  const toolRowIdx = transcriptKids.indexOf(toolRow);
+  const panelIdx = transcriptKids.indexOf(panel);
+  assert(toolRowIdx >= 0, "tool call row should be a direct child of transcript");
+  assert(panelIdx >= 0, "crew panel should be a direct child of transcript");
+  assert(panelIdx === toolRowIdx + 1,
+         "crew panel should be inserted directly after the tool call row");
+});
+
+check("setCrew with empty toolCallId creates no-anchor panel appended to transcript", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-b", role: "worker", task: "", sessionName: "stage-b",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], ""));
+  const crewKeys = Object.keys(page.sandbox._testCrews());
+  assertEqual(crewKeys.length, 1, "exactly one crew slot should be created");
+  assert(crewKeys[0].startsWith("_na_"),
+         "no-anchor slot key should start with _na_");
+  // Panel should be last child of transcriptEl
+  const transcriptKids = page.el("acpTranscript").childNodes;
+  const panel = page.sandbox._testCrews()[crewKeys[0]].panel;
+  assert(panel !== null, "panel should be created");
+  assertEqual(transcriptKids[transcriptKids.length - 1], panel,
+              "no-anchor panel should be appended as last child of transcript");
+});
+
+check("two subagents frames with different toolCallIds produce two independent panels", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Deliver two tool_call frames
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "a", title: "orchestrate-a", kind: "execute", status: "started" } });
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "b", title: "orchestrate-b", kind: "execute", status: "started" } });
+  // Deliver two subagents frames with different toolCallIds
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-a1", role: "worker", task: "", sessionName: "agent-a",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "a"));
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-b1", role: "worker", task: "", sessionName: "agent-b",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "b"));
+  assertEqual(Object.keys(page.sandbox._testCrews()).length, 2,
+              "two different toolCallIds should produce two independent crew slots");
+  assert(page.all("acpTranscript", ".acp-crew-panel").length === 2,
+         "two panels should appear in the transcript");
+});
+
+check("session frame clears all crew panels", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-c", role: "worker", task: "", sessionName: "agent-c",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tcid-clear"));
+  assertEqual(Object.keys(page.sandbox._testCrews()).length, 1,
+              "one crew slot should exist before session frame");
+  // Deliver a session frame (triggers clearTranscript)
+  page.deliver({ type: "session", sessionId: "sess-new",
+    payload: { sessionId: "sess-new", cwd: "C:\\work\\new", created: true,
+               turnActive: false, contextPercent: null } });
+  assertEqual(Object.keys(page.sandbox._testCrews()).length, 0,
+              "all crew slots should be cleared after session frame");
+  assertEqual(page.all("acpTranscript", ".acp-crew-panel").length, 0,
+              "no acp-crew-panel elements should remain in the DOM");
+});
+
+check("crewEntry finds entries across multiple active crews", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Create two crew slots with different toolCallIds and different sessionIds
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-x1", role: "worker", task: "", sessionName: "agent-x",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tcid-x"));
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-y1", role: "worker", task: "", sessionName: "agent-y",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tcid-y"));
+  // crewEntry should find entries in either slot
+  const entryX = page.sandbox._testCrewEntry("sub-x1");
+  const entryY = page.sandbox._testCrewEntry("sub-y1");
+  assert(entryX !== null, "crewEntry should find sub-x1 across crew slots");
+  assert(entryY !== null, "crewEntry should find sub-y1 across crew slots");
+  assertEqual(entryX.sessionId, "sub-x1", "crewEntry should return the correct entry for sub-x1");
+  assertEqual(entryY.sessionId, "sub-y1", "crewEntry should return the correct entry for sub-y1");
+  // Should return null for an unknown session
+  assert(page.sandbox._testCrewEntry("not-a-session") === null,
+         "crewEntry should return null for an unknown sessionId");
+});
+
+check("panels persist after meta turn:end", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  // Deliver an all-done crew frame (the previously auto-dismissed case)
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-z", role: "worker", task: "", sessionName: "agent-z",
+      status: "terminated", action: "", done: true, error: "",
+      startedAt: now - 30, stoppedAt: now },
+  ], "tcid-persist2"));
+  // meta turn:end
+  page.deliver({ type: "meta", sessionId: live,
+                 payload: { turn: "end", stopReason: "end_turn" } });
+  // crews['tcid-persist2'] should still exist
+  assert(page.sandbox._testCrews() && page.sandbox._testCrews()["tcid-persist2"],
+         "crews['tcid-persist2'] should still exist after turn:end (SC4)");
+  const panel = page.sandbox._testCrews()["tcid-persist2"].panel;
+  assert(panel !== null && panel !== undefined && panel.parentNode !== null,
+         "crew panel should still be in the DOM after turn:end (SC4)");
 });
 
 check("the debug log starts collapsed and a tap opens it, remembered for next time",
@@ -7841,13 +7974,14 @@ check("crew timer stops when all crew entries are done", (tpl) => {
   page.deliver(subagentsFrame(live, [
     { sessionId: "sub-1", role: "worker", task: "", status: "working",
       action: "", done: false, error: "", startedAt: Date.now() / 1000 },
-  ]));
+  ], "tcid-timer-stop"));
   assert(page.intervals.length > intervalsBaseline,
     "fixture: a setInterval should be registered for a running crew entry");
+  // Update the SAME slot using the same toolCallId — all done, timer should clear
   page.deliver(subagentsFrame(live, [
     { sessionId: "sub-1", role: "worker", task: "", status: "done",
       action: "", done: true, error: "", startedAt: Date.now() / 1000 - 5, stoppedAt: Date.now() / 1000 },
-  ]));
+  ], "tcid-timer-stop"));
   assertEqual(page.intervals.length, intervalsBaseline,
     "crew timer should be cleared when all entries become done");
 });

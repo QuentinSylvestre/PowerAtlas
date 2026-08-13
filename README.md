@@ -271,7 +271,7 @@ Three things are worth knowing before leaving a long task running:
   `session/cancel` and the session terminate the sweeper uses stop the ACP turn while leaving any
   shell subprocess the agent spawned running to completion. It is reaped only when PowerAtlas exits.
   So a cancelled build or long-running command keeps consuming CPU and memory that the per-session
-  figure above does not include. The crew bar shows each sub-agent's elapsed time; done entries freeze their timer at their actual stop time.
+  figure above does not include. When a fan-out runs, an inline crew panel appears directly below the spawner tool call in the transcript, listing each sub-agent with its elapsed time; done entries freeze their timer at their actual stop time. Each fan-out produces its own panel.
 
 Creating a session writes a permanent `.json`, `.jsonl` and `.lock` into your kiro-cli session store,
 as any kiro-cli session does. Resuming one without prompting leaves the transcript byte-identical.

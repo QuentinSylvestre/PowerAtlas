@@ -484,7 +484,6 @@
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-dim, #8b95b0);
-  white-space: pre-wrap;
   word-break: break-word;
   border-top: 1px solid var(--border, #2d3148);
   max-height: 400px;
@@ -707,25 +706,17 @@
   var _toolGroupSeq = 0; // monotonic counter for unique group-body ids (aria-controls linkage)
   // ---- sub-agents (the crew panel in-transcript + the read-only sub-agent panel) ---------
   //
-  // The current session's crew, as last sent on a `subagents` frame — an
-  // array of `{sessionId, role, task, status, action, done, error, startedAt, stoppedAt, sessionName}`,
-  // arrival-ordered by the server. `[]` for every session that has never run a
-  // fan-out.
-  var crew = [];
-  // The crew panel appended to the transcript while a fan-out is running.
-  // Removed by the first main-session event after all entries are done.
-  var crewPanel = null;
-  // Interval id for the elapsed-time ticker, or null.
-  var crewPanelTimer = null;
+  // Per-fan-out crew state, keyed by spawner toolCallId (non-empty string)
+  // or a unique sequence counter for no-anchor fan-outs ('_na_N').
+  // {key: {entries: [], panel: null|Element, timer: null|int, allDone: false}}
+  var crews = {};
+  var _noAnchorSeq = 0; // counter for no-anchor fan-out keys
   // The sub-agent currently shown in `subPanelEl`, or null while looking at
   // the main transcript. Distinct from `sessionId`: the *page* never stops
   // holding the parent session while a sub-agent is open — only what is drawn
   // changes — which is what lets a fan-out keep streaming into the main
   // transcript behind the panel exactly as Claude Code's own agent bar does.
   var subViewSid = null;
-  // True once all crew entries are done; cleared by any new crew frame with
-  // running entries, so a second fan-out in one turn re-arms it.
-  var crewAllDone = false;
   // Slash command catalogue — populated from the server's 'commands' frame.
   // [{name: str, description: str}], broadcast-only (not in history).
   // Reset to [] on every new `session` frame and in releaseSession().
@@ -1209,7 +1200,7 @@
     // tests/acp_page.test.mjs that drive the frame and read the effects, each
     // one verified to fail when its clear is removed.
     sessionId = null;
-    stopCrewPanelTimer();
+    removeAllCrewPanels();
     setTurn(false);
     hideThinking();
     setContext(null);
@@ -1235,8 +1226,7 @@
     // (acp.py) has already torn down every one of its sub-agent records
     // server-side, so a panel still showing them would be offering
     // entries that `subscribe` would now answer `unknown_session`.
-    setCrew([]);
-    removeCrewPanel();
+    removeAllCrewPanels();
     closeSubagentView();
     // The commands catalogue belonged to the released session too.
     sessionCommands = [];
@@ -2792,8 +2782,7 @@
     // whatever the previous session's fan-out looked like does not carry over,
     // and a sub-agent panel left open would be showing a conversation that no
     // longer has anything to do with what is on screen behind it.
-    setCrew([]);
-    removeCrewPanel();
+    removeAllCrewPanels();
     closeSubagentView();
     // Reset prompt navigation state: the nav arrows track DOM rows that were
     // just cleared by textContent = '' above, so stale refs are cleared here.
@@ -2814,27 +2803,28 @@
     return 'agent';
   }
 
-  function renderCrewPanel() {
-    if (!crewPanel || !crewPanel.parentNode) return;
+  function renderCrewPanel(slot) {
+    // slot: {entries, panel, allDone}
+    if (!slot || !slot.panel || !slot.panel.parentNode) return;
     // Update or create the header element (first child)
-    var hdr = crewPanel.querySelector('.acp-crew-header');
+    var hdr = slot.panel.querySelector('.acp-crew-header');
     if (!hdr) {
       hdr = document.createElement('div');
       hdr.className = 'acp-crew-header';
-      crewPanel.insertBefore(hdr, crewPanel.firstChild);
+      slot.panel.insertBefore(hdr, slot.panel.firstChild);
     }
-    var n = crew.length;
-    hdr.textContent = crewAllDone
+    var n = slot.entries.length;
+    hdr.textContent = slot.allDone
       ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
       : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
 
     // Remove old rows (keep header)
-    while (crewPanel.lastChild && crewPanel.lastChild.className !== 'acp-crew-header') {
-      crewPanel.removeChild(crewPanel.lastChild);
+    while (slot.panel.lastChild && slot.panel.lastChild.className !== 'acp-crew-header') {
+      slot.panel.removeChild(slot.panel.lastChild);
     }
 
     // Append new lean rows
-    for (var i = 0; i < crew.length; i++) {
+    for (var i = 0; i < slot.entries.length; i++) {
       (function(entry) {
         var state = subagentState(entry);  // 'working' | 'done' | 'error'
         var dotClass = state === 'working' ? 'status-thinking'
@@ -2879,81 +2869,9 @@
         row.appendChild(actionSpan);
         row.appendChild(elapsedSpan);
         row.addEventListener('click', function() { openSubagent(entry.sessionId); });
-        crewPanel.appendChild(row);
-      })(crew[i]);
+        slot.panel.appendChild(row);
+      })(slot.entries[i]);
     }
-  }
-
-  function stopCrewPanelTimer() {
-    if (crewPanelTimer !== null) {
-      clearInterval(crewPanelTimer);
-      crewPanelTimer = null;
-    }
-  }
-
-  function removeCrewPanel() {
-    stopCrewPanelTimer();
-    if (crewPanel && crewPanel.parentNode) crewPanel.remove();
-    crewPanel = null;
-  }
-
-  function dismissCrewPanelIfDone() {
-    if (crewAllDone) removeCrewPanel();
-  }
-
-  function setCrew(next) {
-    crew = Array.isArray(next) ? next : [];
-    // The panel currently open may name a sub-agent this update no longer
-    // carries the same entry for — refresh its header from the latest
-    // `role`/`task`/`status` rather than leaving it showing the snapshot from
-    // whenever it was opened.
-    if (subViewSid) renderSubHead();
-    // Transcript crew panel — appears below the fan-out's tool call while
-    // any stage is still running, disappears on the first main-session event
-    // after all are done.
-    if (!crew.length) {
-      removeCrewPanel();
-      crewAllDone = false;
-      return;
-    }
-    crewAllDone = crew.every(function(e) { return e.done; });
-    if (crewAllDone) {
-      // All done: stop the ticker but keep the panel visible until the next
-      // main-session event removes it.
-      stopCrewPanelTimer();
-      if (!crewPanel || !crewPanel.parentNode) {
-        var stick = stuckToBottom();
-        crewPanel = document.createElement('div');
-        crewPanel.className = 'acp-crew-panel';
-        transcriptEl.appendChild(crewPanel);
-        if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      }
-      renderCrewPanel();
-      return;
-    }
-    // At least one still running: ensure the panel exists in the transcript.
-    if (!crewPanel || !crewPanel.parentNode) {
-      var stick = stuckToBottom();
-      crewPanel = document.createElement('div');
-      crewPanel.className = 'acp-crew-panel';
-      transcriptEl.appendChild(crewPanel);
-      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-      // Tick the elapsed display once a second while running.
-      if (crewPanelTimer === null) {
-        crewPanelTimer = setInterval(function() {
-          if (crewPanel && crewPanel.parentNode) renderCrewPanel();
-          else stopCrewPanelTimer();
-        }, 1000);
-      }
-    }
-    renderCrewPanel();
-  }
-
-  function crewEntry(sid) {
-    for (var i = 0; i < crew.length; i++) {
-      if (crew[i].sessionId === sid) return crew[i];
-    }
-    return null;
   }
 
   // One of 'working' / 'done' / 'error', shared by the crew panel and the
@@ -2966,6 +2884,89 @@
   }
 
   // ---- the sub-agent panel -------------------------------------------------
+
+  function stopSlotTimer(slot) {
+    if (slot.timer !== null) { clearInterval(slot.timer); slot.timer = null; }
+  }
+
+  function removeSingleCrewPanel(key) {
+    var slot = crews[key];
+    if (!slot) return;
+    stopSlotTimer(slot);
+    if (slot.panel && slot.panel.parentNode) slot.panel.remove();
+    slot.panel = null;
+    delete crews[key];
+  }
+
+  function removeAllCrewPanels() {
+    Object.keys(crews).forEach(function(k) { removeSingleCrewPanel(k); });
+    crews = {};
+    _noAnchorSeq = 0;
+  }
+
+  function setCrew(entries, toolCallId) {
+    var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
+    var slot = key ? (crews[key] || null) : null;
+
+    if (!entries.length) {
+      if (key && slot) {
+        removeSingleCrewPanel(key);
+      }
+      return;
+    }
+
+    var useKey = key || ('_na_' + (++_noAnchorSeq));
+    if (!crews[useKey]) {
+      crews[useKey] = {entries: [], panel: null, timer: null, allDone: false};
+    }
+    var s = crews[useKey];
+    s.entries = entries;
+    s.allDone = entries.every(function(e) { return e.done; });
+
+    // The panel currently open may name a sub-agent this update no longer
+    // carries the same entry for — refresh its header from the latest
+    // `role`/`task`/`status` rather than leaving it showing the snapshot from
+    // whenever it was opened.
+    if (subViewSid) renderSubHead();
+
+    if (s.allDone) {
+      stopSlotTimer(s);
+    } else {
+      if (s.timer === null) {
+        s.timer = setInterval(function() {
+          if (s.panel && s.panel.parentNode) renderCrewPanel(s);
+          else stopSlotTimer(s);
+        }, 1000);
+      }
+    }
+
+    if (!s.panel || !s.panel.parentNode) {
+      var stick = stuckToBottom();
+      s.panel = document.createElement('div');
+      s.panel.className = 'acp-crew-panel';
+      // Anchor insertion: after the spawner tool call row if known.
+      var anchor = key ? toolRows['t:' + key] : null;
+      var row = anchor ? anchor.body.parentNode : null;
+      if (row && row.parentNode) {
+        row.parentNode.insertBefore(s.panel, row.nextSibling);
+      } else {
+        transcriptEl.appendChild(s.panel);
+      }
+      if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+    renderCrewPanel(s);
+  }
+
+  function crewEntry(sid) {
+    var keys = Object.keys(crews);
+    for (var i = 0; i < keys.length; i++) {
+      var entries = crews[keys[i]].entries;
+      for (var j = 0; j < entries.length; j++) {
+        if (entries[j].sessionId === sid) return entries[j];
+      }
+    }
+    return null;
+  }
 
   function renderSubHead() {
     var entry = crewEntry(subViewSid);
@@ -5230,7 +5231,6 @@
       return;
     }
     if (type === 'meta' && payload.turn === 'end') {
-      dismissCrewPanelIfDone();
       agentBody = null;
       // Group consecutive tool calls accumulated during this turn into
       // collapsible containers. flushToolGroups() sets toolGroup = null.
@@ -5292,7 +5292,6 @@
       return;
     }
     if (type === 'chunk') {
-      dismissCrewPanelIfDone();
       hideThinking();
       appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
       return;
@@ -5314,7 +5313,6 @@
       return;
     }
     if (type === 'tool_call' || type === 'tool_update') {
-      dismissCrewPanelIfDone();
       hideThinking();
       addToolCall(payload);
       logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
@@ -5464,7 +5462,7 @@
       // keeps it out of the replay buffer) — it arrives live, and once more
       // right after every `subscribe`/`session` reply that has a crew to
       // report, which is this page's only source for it after a reload.
-      setCrew(payload.subagents || []);
+      setCrew(payload.subagents || [], payload.toolCallId || '');
       return;
     }
     if (type === 'commands') {
@@ -5478,10 +5476,13 @@
       // in the transcript so the user knows a compaction occurred.
       // Security note: `payload.error` and `payload.summary` are
       // agent-controlled strings forwarded from the kiro-cli process.
-      // `payload.summary` is rendered as textContent only — never innerHTML.
-      // `payload.error` is intentionally ignored.
+      // `payload.summary` is rendered via mdBuild (same DOM-construction path
+      // as assistant bubbles) when the server supplies `summary_tokens`;
+      // otherwise falls back to textContent. `payload.error` is intentionally
+      // ignored.
       var s = (payload && payload.status) || '';
       var summary = (payload && typeof payload.summary === 'string') ? payload.summary.trim() : '';
+      var summaryTokens = (payload && Array.isArray(payload.summary_tokens)) ? payload.summary_tokens : null;
       var txt = s === 'started' ? 'Compacting conversation context\u2026'
               : s === 'completed' ? 'Context compacted.'
               : s === 'failed' ? 'Compaction failed.'
@@ -5494,11 +5495,18 @@
           details.className = 'acp-compaction-details';
           var sum = document.createElement('summary');
           sum.textContent = 'Show recap';
-          var pre = document.createElement('div');
-          pre.className = 'acp-compaction-recap';
-          pre.textContent = summary;
+          var recapEl = document.createElement('div');
+          recapEl.className = 'acp-compaction-recap';
+          if (summaryTokens) {
+            // Render as formatted markdown using the same path as agent bubbles.
+            recapEl.className += ' acp-msg-md';
+            var built = mdBuild(summaryTokens);
+            for (var bi = 0; bi < built.length; bi++) recapEl.appendChild(built[bi]);
+          } else {
+            recapEl.textContent = summary;
+          }
           details.appendChild(sum);
-          details.appendChild(pre);
+          details.appendChild(recapEl);
           transcriptEl.appendChild(details);
           if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
         }
@@ -5569,7 +5577,7 @@
       // Every sub-agent process went with the agent, the same as every
       // session did — the crew and any open panel are naming processes that
       // no longer exist.
-      setCrew([]);
+      removeAllCrewPanels();
       closeSubagentView();
       addMessage('error', 'the agent exited (code ' + payload.exitCode + ') — ' +
                           payload.message);
@@ -6342,6 +6350,9 @@
   // IIFE so acp_page.test.mjs can test it directly with an XSS payload.
   if (typeof window !== 'undefined') {
     window._testAddSystemMessage = addSystemMessage;
+    // Test-only exports for acp_page.test.mjs Phase 4 crew panel checks.
+    window._testCrews = function() { return crews; };
+    window._testCrewEntry = function(sid) { return crewEntry(sid); };
   }
 })();
 </script>
