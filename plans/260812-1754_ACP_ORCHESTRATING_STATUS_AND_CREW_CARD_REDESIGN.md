@@ -1,7 +1,7 @@
 # ACP Orchestrating Status and Crew Card Redesign
 
 > **Date**: 2026-08-12
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: /acp crew panel — add orchestrating header + redesign crew rows as lean dot-rows with sessionName
 > **Estimated effort**: ~2–4 hours
 
@@ -108,11 +108,14 @@ Note: use `existing.get("sessionName", "")` (not `existing["sessionName"]`) — 
 `test_web.py` — in the test covering `_subagents_payload` (extend the existing `TestAcpSubagentsPayload` class or whichever test class uses the `acp_store` fixture): add `"sessionName": "stage_one"` to the crew fixture and assert it round-trips. Add a second case: `"sessionName": ""` serializes as `""` not `None`. Add a third case: a crew dict missing the `"sessionName"` key entirely produces `""` in the payload (covers pre-Phase-1 in-memory entries).
 
 **Exit criteria**:
-- [ ] `_on_subagent_list` stores `"sessionName"` in every crew dict entry (from wire or `""`)
-- [ ] `_subagents_payload` includes `"sessionName"` in every serialized entry
-- [ ] `test_web.py` passes: `sessionName` field present and round-trips correctly
-- [ ] `test_web.py` passes: empty `sessionName` serializes as `""` not `None`
-- [ ] `test_web.py` passes: crew dict missing `"sessionName"` key entirely produces `""` in payload (not a KeyError)
+- [x] `_on_subagent_list` stores `"sessionName"` in every crew dict entry (from wire or `""`)
+- [x] `_subagents_payload` includes `"sessionName"` in every serialized entry
+- [x] `test_web.py` passes: `sessionName` field present and round-trips correctly
+- [x] `test_web.py` passes: empty `sessionName` serializes as `""` not `None`
+- [x] `test_web.py` passes: crew dict missing `"sessionName"` key entirely produces `""` in payload (not a KeyError)
+
+**Implementation (2026-08-12, code: a21fdfa)**
+`_subagents_payload` was missing the `"sessionName"` field — the extraction was already present in `_on_subagent_list` from a prior refactor, but the serialization step was not forwarding it. Added `"sessionName": entry.get("sessionName", "")` to the list comprehension in `_subagents_payload` using `.get()` with a `""` default to handle pre-Phase-1 in-memory entries that lack the key. The `session_name` extraction in `_on_subagent_list` uses the literal key `"sessionName"` (rather than `_SUBAGENT_TASK_KEYS[1]`) to avoid positional coupling to the tuple order. Four tests added: three unit tests in a new `TestAcpSessionName` class covering round-trip, empty, and missing-key cases; one integration test in `TestAcpSubagentListParsing` exercising the full wire→crew→payload pipeline via `_on_subagent_list`. All 1303 passing tests unaffected.
 
 ### Phase 2: JS + CSS — crew panel header and lean row redesign [QA]
 
@@ -260,122 +263,6 @@ subRoleEl.textContent = crewLabel(entry) || subViewSid;
 - [ ] Hover on a row changes text color only (no background fill)
 - [ ] Manual check at 390 px viewport: rows do not overflow, label truncates with `…`
 
-1. Header element — create or update a `div.acp-crew-header` as `crewPanel`'s **first child**. Do not re-create if it already exists; update `textContent` only:
-   ```js
-   var hdr = crewPanel.querySelector('.acp-crew-header');
-   if (!hdr) {
-     hdr = document.createElement('div');
-     hdr.className = 'acp-crew-header';
-     crewPanel.insertBefore(hdr, crewPanel.firstChild);
-   }
-   var n = crew.length;
-   hdr.textContent = crewAllDone
-     ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
-     : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
-   ```
-
-2. Row rendering — replace the IIFE card-building block with lean rows. Remove all existing children except the header, then append rows:
-   ```js
-   // remove old rows (keep header)
-   var children = Array.prototype.slice.call(crewPanel.children);
-   for (var ci = 0; ci < children.length; ci++) {
-     if (!children[ci].classList.contains('acp-crew-header')) {
-       crewPanel.removeChild(children[ci]);
-     }
-   }
-   ```
-   Per crew entry (replacing the IIFE):
-   ```js
-   (function(entry) {
-     var state = subagentState(entry);  // 'working' | 'done' | 'error'
-     var dotClass = state === 'working' ? 'status-thinking'
-                  : state === 'error'   ? 'status-errored'
-                  : 'status-idle';
-     var label = (entry.sessionName || (entry.task || '').slice(0, 30).trim()) || 'agent';
-
-     var row = document.createElement('button');
-     row.type = 'button';
-     row.className = 'acp-crew-row acp-crew-row-' + state;
-     row.setAttribute('aria-label',
-       label + (entry.role ? ' (' + entry.role + ')' : '') + ': ' +
-       (state === 'error' ? 'errored' : state === 'done' ? 'done' : (entry.action || 'working')));
-
-     var dot = document.createElement('span');
-     dot.className = 'session-status ' + dotClass;
-     dot.setAttribute('aria-hidden', 'true');
-
-     var nameSpan = document.createElement('span');
-     nameSpan.className = 'acp-crew-label';
-     nameSpan.textContent = label;
-
-     var roleSpan = document.createElement('span');
-     roleSpan.className = 'acp-crew-role';
-     roleSpan.textContent = entry.role || '';
-
-     var actionSpan = document.createElement('span');
-     actionSpan.className = 'acp-crew-action';
-     actionSpan.textContent = state === 'error' ? 'errored'
-       : state === 'done' ? 'done'
-       : (entry.action || entry.status || 'working\u2026');
-
-     var elapsedSpan = document.createElement('span');
-     elapsedSpan.className = 'acp-crew-elapsed';
-     var start = entry.startedAt;
-     var stop = entry.stoppedAt;
-     elapsedSpan.textContent = (typeof stop === 'number' && stop)
-       ? elapsedText(start, stop) : elapsedText(start);
-
-     row.appendChild(dot);
-     row.appendChild(nameSpan);
-     row.appendChild(roleSpan);
-     row.appendChild(actionSpan);
-     row.appendChild(elapsedSpan);
-     row.addEventListener('click', function() { openSubagent(entry.sessionId); });
-     crewPanel.appendChild(row);
-   })(crew[i]);
-   ```
-
-**`renderSubHead()` at `acp.html:2795`** — the sub-panel header reads `entry.role || entry.task`. After Phase 2 the natural display label is `entry.sessionName || entry.task.slice(0,30).trim() || entry.role`. Update `subRoleEl.textContent` accordingly:
-```js
-var label = (entry && (entry.sessionName || (entry.task || '').slice(0, 30).trim() || entry.role)) || subViewSid;
-subRoleEl.textContent = label;
-```
-
-**`style.css:971–987`** — replace the entire `.acp-crew-*` block with:
-```css
-/* Crew panel — lean rows replacing the old card-button design */
-.acp-crew-panel  { display:flex; flex-direction:column; gap:2px; padding:6px 8px; margin:4px 0; border-left:2px solid var(--border); flex-shrink:0; }
-.acp-crew-header { font-size:11px; color:var(--text-dim); padding:0 2px 4px; text-transform:uppercase; letter-spacing:0.05em; }
-.acp-crew-row    { display:flex; align-items:center; gap:8px; padding:3px 2px; background:transparent; border:none; cursor:pointer; font-family:inherit; font-size:12px; text-align:left; width:100%; color:var(--text-muted); border-radius:var(--radius-sm); transition:color 0.1s; }
-.acp-crew-row:hover       { color:var(--text); }
-.acp-crew-row:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
-.acp-crew-label  { font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:45%; }
-.acp-crew-role   { color:var(--text-dim); white-space:nowrap; flex-shrink:0; font-size:11px; }
-.acp-crew-action { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.acp-crew-row-working .acp-crew-action { color:#4ade80; }
-.acp-crew-row-error   .acp-crew-action { color:#f87171; }
-.acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
-```
-
-> **Rejected**: keeping `.acp-crew-entry` class and adding dot CSS alongside it — leaves dead CSS and requires sub-panel to also be updated. Use instead: full replacement of the CSS block so no stale rules remain.
-
-**`tests/acp_page.test.mjs`** — add/update tests covering:
-- Header text shows "Orchestrating (N agents)" with N running entries; "Done (N agents)" when all done; singular "1 agent" form.
-- Each row has class `acp-crew-row` and a `session-status` child with the correct `status-*` class (`status-thinking` for working, `status-idle` for done, `status-errored` for error).
-- Row `acp-crew-label` shows `entry.sessionName` when present; falls back to first 30 chars of `entry.task` when `sessionName` is empty/absent; falls back to `"agent"` when both are empty.
-- `renderSubHead()` shows `sessionName` when available.
-- Old class names `acp-crew-entry`, `acp-crew-name`, `acp-crew-working`, `acp-crew-done`, `acp-crew-error` are **absent** from rendered output (regression guard).
-
-**Exit criteria**:
-- [ ] `node tests/acp_page.test.mjs` passes with all new assertions
-- [ ] Crew panel header shows "Orchestrating (N agents)" when entries are running
-- [ ] Crew panel header shows "Done (N agents)" when `crewAllDone === true`
-- [ ] Each row has a `session-status` dot with `status-thinking` (working), `status-idle` (done), or `status-errored` (error)
-- [ ] Row label shows `sessionName`; fallback to 30-char truncated `task`; fallback to `"agent"`
-- [ ] No rendered output contains class names `acp-crew-entry`, `acp-crew-name`, `acp-crew-working`, `acp-crew-done`, `acp-crew-error`
-- [ ] Sub-panel header (`subRoleEl`) shows `sessionName` when present
-- [ ] Hover on a row changes text color only (no background fill)
-
 ## 6) Risk Assessment
 
 | Risk | Impact | Mitigation |
@@ -385,7 +272,7 @@ subRoleEl.textContent = label;
 | CSS block start misidentified as line 971 | Old `.acp-crew-panel` survives, two conflicting rules cascade | Fixed in plan: replacement targets the block from `.acp-crew-panel` (line ~966), not line 971 |
 | `session-status.status-thinking` not in `prefers-reduced-motion` | Crew row animations fire for users with vestibular disorder preference | Fixed in plan: Phase 2 CSS adds `status-thinking` and `status-unread` to the suppression rule |
 | `existing["sessionName"]` KeyError on pre-Phase-1 crew entries | `_on_subagent_list` crashes on second `list_update` during deploy window | Fixed in plan: Phase 1 uses `.get("sessionName", "")` |
-| Sensitive prompt content in fallback label | `initialQuery` may contain API keys, passwords, paths visible to remote viewers | **Escalated** — design trade-off: fallback is a 30-char snippet of user-authored content already in the session's own transcript, same origin as all other visible content. The remote viewer requires authentication. Accept as-is: severity is low for the expected use case. |
+| Sensitive prompt content in fallback label | `initialQuery` may contain API keys, passwords, paths visible to remote viewers | Accepted (user decision) — fallback is 30 chars of transcript content; remote access requires authentication |
 | Sub-panel header still shows `role` after Phase 2 | Inconsistent display label between crew row and sub-panel | Fixed: `renderSubHead()` update uses shared `crewLabel()` helper with same fallback chain |
 
 ## 7) Verification
@@ -419,7 +306,8 @@ No documentation updates needed — no project docs reference the changed identi
 
 ## 9) Implementation Divergences from Plan
 
-_Reserved — filled during implementation._
+- **Phase 1**: `existing` can be `None` for first-seen sub-agents. The plan's `updated` dict snippet used `existing.get("sessionName", "")` without a None guard. The committed code uses `session_name or (existing.get("sessionName", "") if existing else "")` — the defensive form matching the pattern used for all other optional fields in the same dict.
+- **Phase 1**: `session_name = _first_text(entry, ("sessionName",))` uses the string literal rather than `_SUBAGENT_TASK_KEYS[1]` (which the plan mentioned) to avoid index coupling. Functionally identical.
 
 ## Review Log
 
@@ -439,6 +327,22 @@ _Reserved — filled during implementation._
 | 8 | Medium | Label fallback chain duplicated in `renderCrewPanel` and `renderSubHead` — will drift. | Fixed — Phase 2 introduces shared `crewLabel(entry)` helper used by both sites. |
 | 9 | Medium | Hex literals in `.acp-crew-row-working`/`.acp-crew-row-error` CSS vs CSS variables. | Fixed — inline comments added to the CSS block; hex values retained (matching the rail's existing hex values; no CSS variables define these colors in `style.css`). |
 | 10 | Low | Sensitive `initialQuery` content could appear in fallback label visible to remote viewers. | Escalated — User: accepted — fallback content is a 30-char snippet of user-authored transcript content; remote access requires authentication; severity is low for expected use case. |
+
+### 2026-08-12 — Implementation Review (after Phase 1, persona: Senior engineer + Maintainability reviewer)
+
+Implementation health: Green.
+2 cycles. Cycle 1: 5 findings (2 High, 1 Medium, 2 Low). Cycle 2: 3 Low. Cycle 3 short-circuited (cycle 2 all Low + purely mechanical fixes).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Operator precedence risk on `session_name or existing.get(...) if existing else ""` (reported by Maintainability) | Fixed — was already correct in f781664; no-op confirmed by Senior engineer mutation test. |
+| 2 | High | `_on_subagent_list` extraction path untested; all 3 tests bypass it via pre-built dicts. | Fixed — `test_session_name_extracted_from_wire_entry` integration test added; mutation-confirmed discriminating (`assert '' == 'count_src'` on mutation). |
+| 3 | Medium | Three tests placed in `TestAcpStoppedAt` (wrong class). | Fixed — moved to new `TestAcpSessionName` class. |
+| 4 | Low | `_SUBAGENT_TASK_KEYS[1]` index coupling in `session_name =` line. | Fixed — literal `"sessionName"` used with comment. |
+| 5 | Low | `.get()` asymmetry in `_subagents_payload` undocumented. | Fixed — inline comment added. |
+| 6 | Low | `TestAcpSessionName` docstring contained change-narrative. | Fixed — replaced with present-state description. |
+| 7 | Low | Redundant `acp_mod_direct` import in integration test. | Fixed — removed; `acp_mod` from fixture used directly. |
+| 8 | Low | Block comment and inline comment redundant post-fix. | Fixed — merged to single clear 2-line block comment. |
 
 ## Harness Improvement Opportunities
 
