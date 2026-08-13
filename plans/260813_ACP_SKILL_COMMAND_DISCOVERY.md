@@ -1,7 +1,7 @@
 # ACP Skill and Command Discovery Before First Turn
 
 > **Date**: 2026-08-13
-> **Status**: Complete
+> **Status**: In Progress — implementation complete; SC1 manual check pending (hard-reload `/acp`, press `/` on fresh session before `/qclose`)
 > **Scope**: Parse and display kiro-cli skills in the /acp slash-command palette before the first user prompt
 > **Estimated effort**: 1 day
 
