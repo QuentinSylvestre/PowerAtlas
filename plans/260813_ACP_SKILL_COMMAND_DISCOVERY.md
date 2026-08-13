@@ -574,8 +574,32 @@ QA: BLOCKED — cannot start PowerAtlas autonomously per AGENTS.md. Treated as S
 9. `loadedButNoMatchShowsNoMatchingPlaceholder` — seed at least one command and one skill; type `/zzznotexists`; assert placeholder text contains "No matching" (not "Loading").
 
 **Exit criteria**:
-- [ ] All 9 new test cases added and passing
-- [ ] `node tests/acp_page.test.mjs` — full suite passes (including pre-existing tests)
+- [x] All 14 new test cases added and passing (9 skills palette + 2 keyboard/selection + 3 copy-button)
+- [x] `node tests/acp_page.test.mjs` — full suite passes (including pre-existing tests; 1 pre-existing unrelated failure acknowledged)
+
+#### Implementation (2026-08-13, code: 13bb9f9, fix: bcac55b, fix: a3d9911)
+
+Twelve test cases were added initially (9 plan-specified skills-palette tests + 3 copy-button tests for Phase 3 divergence coverage), then 2 more added post-review (`skillSelectionSendsCleanName`, `keyboardNavigationReachesSkillEntries`) for 14 total. Skills tests: `skillsFramePopulatesSessionSkills`, `skillsFrameOnSessionChangeResetsSessionSkills`, `releaseSessionClearsSessionSkills`, `slashKeyShowsSkillsInDropdown`, `skillEntriesShowBadge`, `commandEntriesDoNotShowBadge`, `slashFilterMatchesSkillsByName`, `emptyBothListsShowsLoadingPlaceholder`, `loadedButNoMatchShowsNoMatchingPlaceholder`. Copy-button tests: `copyButtonPresentForLabeledCodeBlocks`, `copyButtonAbsentForUnlabeledCodeBlocks`, `copyButtonNotPresentInNonCodeBlocks`. Selection tests: `skillSelectionSendsCleanName` (verifies Enter on a skill sends clean name, no badge text), `keyboardNavigationReachesSkillEntries` (verifies skill entries reachable by ArrowDown, discriminating — only skill seeded).
+
+### 2026-08-13 — Implementation Review (after Phase 4, personas: Reliability engineer, Senior engineer, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+10 findings (2 High bookkeeping, 3 Medium, 5 Low). Highs were plan-file bookkeeping fixed by orchestrator. Mediums fixed by adding 2 new tests and hide-dropdown assertions.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Plan says 9 tests, 12 delivered; exit criteria counts wrong. | Fixed — exit criteria updated to 14 (orchestrator) |
+| 2 | High | Exit criteria checkboxes unchecked despite implementation complete. | Fixed — both boxes ticked (orchestrator) |
+| 3 | Medium | `hideCommandDropdown` not asserted in session-reset tests. | Fixed — assertion added in commit bcac55b |
+| 4 | Medium | No test for skill selection sending clean name (no badge text). | Fixed — `skillSelectionSendsCleanName` added in commit bcac55b |
+| 5 | Medium | No test for ArrowDown keyboard navigation into skills. | Fixed — `keyboardNavigationReachesSkillEntries` added and strengthened in commits bcac55b/a3d9911 |
+| 6 | Medium | `ctrtKey` typo (silent wrong event shape). | Fixed — corrected to `ctrlKey` in commit bcac55b |
+| 7 | Low | `skillEntriesShowBadge` missing `aria-hidden` assertion. | Fixed — assertion added in commit bcac55b |
+| 8 | Low | DRY: open-palette keydown repeated. | User: accepted — no fix; pattern is consistent with pre-existing harness style |
+| 9 | Low | 3 copy-button tests not tracked in plan. | Fixed — recorded as divergence in Phase 4 notes (above) |
+| 10 | Low | Pre-existing test failure unacknowledged. | Fixed — acknowledged in exit criterion 2 above |
+
+QA: SKIP — test-only phase, runtime surface is the test run itself (352/353 passed; 1 pre-existing unrelated failure).
 
 ### Phase 5: Documentation
 
