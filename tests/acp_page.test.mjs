@@ -6024,6 +6024,32 @@ check("old crew class names are absent from rendered output", (tpl) => {
          "old class acp-crew-error should not appear in output");
 });
 
+check("role span is omitted when entry.role is empty", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "", task: "do work", sessionName: "stage-a",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const crewPanel = page.one("acpTranscript", ".acp-crew-panel");
+  assert(crewPanel !== null, "crew panel should exist");
+  assertEqual(crewPanel.querySelector(".acp-crew-role"), null,
+              "role span should be absent when entry.role is empty");
+});
+
+check("role span shows role text when entry.role is non-empty", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "kiro_default", task: "do work", sessionName: "stage-a",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const crewPanel = page.one("acpTranscript", ".acp-crew-panel");
+  assert(crewPanel !== null, "crew panel should exist");
+  const roleSpan = crewPanel.querySelector(".acp-crew-role");
+  assert(roleSpan !== null, "role span should be present when entry.role is non-empty");
+  assertEqual(roleSpan.textContent, "kiro_default",
+              "role span should show the role text");
+});
+
 check("the debug log starts collapsed and a tap opens it, remembered for next time",
   (tpl) => {
     const { page } = connected(tpl);
