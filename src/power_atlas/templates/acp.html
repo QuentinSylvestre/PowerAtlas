@@ -1732,8 +1732,8 @@
     row.className = 'acp-msg acp-msg-' + role;
     var who = document.createElement('span');
     who.className = 'acp-msg-role';
-    who.textContent = role === 'user' ? 'you'
-      : (role === 'agent' ? 'agent' : (role === 'error' ? 'error' : (role === 'steer' ? 'you' : '')));
+    who.textContent = role === 'user' ? 'user'
+      : (role === 'agent' ? 'agent' : (role === 'error' ? 'error' : (role === 'steer' ? 'user' : '')));
     var body = document.createElement('div');
     body.className = 'acp-msg-body';
     body.textContent = text;
