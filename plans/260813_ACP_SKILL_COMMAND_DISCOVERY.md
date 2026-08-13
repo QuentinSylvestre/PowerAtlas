@@ -508,14 +508,42 @@ function renderCommandDropdown(items, catalogueEmpty) {
 ```
 
 **Exit criteria**:
-- [ ] `var sessionSkills = []` declared at acp.html:681 area
-- [ ] `sessionSkills = []` reset in both the `'session'` frame handler and `releaseSession()`; full reset block shown — not just the added line
-- [ ] `'skills'` WS frame handler sets `sessionSkills`
-- [ ] `showCommandDropdown` merges commands and skills into a flat list, passes `catalogueEmpty` flag
-- [ ] `renderCommandDropdown` accepts `catalogueEmpty`, renders "Loading catalogue…" when both lists empty, "No matching commands or skills" when data is loaded but nothing matched
-- [ ] `renderCommandDropdown` adds `.acp-cmd-skill-badge` span (as `<li>` child sibling after nameSpan) on skill entries only; command entries have no badge
-- [ ] CSS for `.acp-cmd-skill-badge` added
+- [x] `var sessionSkills = []` declared at acp.html:681 area
+- [x] `sessionSkills = []` reset in both the `'session'` frame handler and `releaseSession()`; full reset block shown — not just the added line
+- [x] `'skills'` WS frame handler sets `sessionSkills`
+- [x] `showCommandDropdown` merges commands and skills into a flat list, passes `catalogueEmpty` flag
+- [x] `renderCommandDropdown` accepts `catalogueEmpty`, renders "Loading catalogue…" when both lists empty, "No matching commands or skills" when data is loaded but nothing matched
+- [x] `renderCommandDropdown` adds `.acp-cmd-skill-badge` span (as `<li>` child sibling after nameSpan) on skill entries only; command entries have no badge
+- [x] CSS for `.acp-cmd-skill-badge` added
 - [ ] Hard-reload (`Ctrl+Shift+R`) on running PowerAtlas — press `/` on a fresh session — skills appear with badge before any prompt (SC1 manual check)
+
+#### Implementation (2026-08-13, code: 082e330, fix: 037feea, fix: 7071728)
+
+Phase 3 added `var sessionSkills = []` alongside `sessionCommands` with resets in both `releaseSession()` and the `'session'` WS frame handler (both including `hideCommandDropdown()`). A new `'skills'` WS frame handler populates `sessionSkills` from the server payload. `showCommandDropdown` was rewritten to merge both lists into a flat array with `isSkill` flags and pass `catalogueEmpty` to `renderCommandDropdown`. `renderCommandDropdown` was updated with a two-state placeholder: "Loading catalogue…" when both lists are empty (pre-delivery), "No matching commands or skills" when filter yields nothing. For skill entries, a `<span class="acp-cmd-skill-badge" aria-hidden="true">skill</span>` is appended as a sibling after nameSpan. The `.acp-cmd-skill-badge` CSS rule was added with `align-self: center`, `user-select: none`. The dropdown header label and `aria-label` were updated to "Commands & skills". Post-review: hoisted `makeCopyIcon`/`makeCheckIcon` to module scope; moved copy button after language-guard; added `aria-hidden`, `user-select: none`, flex alignment fix, header label update.
+
+**Divergence**: Phase 3 sub-agent included an unplanned copy-to-clipboard button feature for labeled code blocks. Not in plan scope, no Phase 4 test yet. Functional defect fixed in 037feea. Phase 4 should add tests for `copyBtn`.
+
+### 2026-08-13 — Implementation Review (after Phase 3, personas: Reliability engineer, Senior engineer, End-user advocate, Maintainability reviewer)
+
+Implementation health: Green.
+12 findings (2 High, 3 Medium, 7 Low). Both Highs were about the unplanned copy button (fixed). Planned skills/badge feature was clean.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Copy button silently dropped for language-less blocks (early-return before append). | Fixed — `copyBtn` moved after `!word` guard in commit 037feea |
+| 2 | High | `makeCopyIcon`/`makeCheckIcon` re-created on each `mdNode` call. | Fixed — hoisted to module scope in commit 037feea |
+| 3 | Medium | Copy-to-clipboard feature undeclared scope creep (no plan entry, no test). | Fixed (partial) — documented as divergence; Phase 4 to add tests |
+| 4 | Medium | Badge `aria-hidden` missing. | Fixed — `aria-hidden="true"` added in commit 037feea |
+| 5 | Medium | Alleged `applyCommandOptions` call without `catalogueEmpty`. | Fixed (N/A) — no such call exists |
+| 6 | Low | `vertical-align: middle` no-op in flex context. | Fixed — replaced with `align-self: center` in commit 037feea |
+| 7 | Low | `§9` divergences not filled. | Fixed — divergence recorded in implementation notes |
+| 8 | Low | `user-select: none` missing from badge CSS. | Fixed — added in commit 037feea |
+| 9 | Low | `aria-label="Slash commands"` stale. | Fixed — updated to "Commands & skills" in commit 037feea |
+| 10 | Low | `catalogueEmpty` false-positive in sub-millisecond window. | User: accepted — unreachable in practice |
+| 11 | Low | `partial` guard undocumented. | Fixed — comment added in commit 037feea |
+| 12 | Low | Visible header contradicted updated `aria-label`. | Fixed — header text updated in commit 7071728 |
+
+QA: BLOCKED — cannot start PowerAtlas autonomously per AGENTS.md. Treated as SKIP. SC1 manual check left open for user.
 
 ### Phase 4: Frontend — tests [QA]
 
