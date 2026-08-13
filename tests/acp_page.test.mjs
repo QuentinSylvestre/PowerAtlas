@@ -8851,11 +8851,9 @@ check("skillSelectionSendsCleanName", (tpl) => {
 // Verify that ArrowDown navigation reaches skill entries and Enter selects one.
 check("keyboardNavigationReachesSkillEntries", (tpl) => {
   const { page, live } = connected(tpl);
-  // Seed one command and one skill.
-  page.deliver({
-    type: "commands", sessionId: live,
-    payload: { commands: [{ name: "tools", description: "d" }] },
-  });
+  // Seed ONE skill only (no commands) — so the only valid selection is "qexplore".
+  // This makes the test discriminating: if ArrowDown navigation skips skill entries,
+  // Enter would find nothing to select and no commands_execute would be sent.
   page.deliver({
     type: "skills", sessionId: live,
     payload: { skills: [{ name: "qexplore", description: "e" }] },
@@ -8865,7 +8863,7 @@ check("keyboardNavigationReachesSkillEntries", (tpl) => {
   page.el("acpPrompt").dispatch("keydown", {
     key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
-  // Navigate down once (should move past command to skill, or stay on first item).
+  // Navigate down once — the first entry is the skill (index 0 since no commands).
   page.el("acpPrompt").dispatch("keydown", {
     key: "ArrowDown", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
@@ -8873,15 +8871,14 @@ check("keyboardNavigationReachesSkillEntries", (tpl) => {
   page.el("acpPrompt").dispatch("keydown", {
     key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
-  // Verify the selection was sent (either tools or qexplore, depending on index 0 or 1).
+  // The skill must be reachable by keyboard: commands_execute sent with exact skill name.
   const execFrames = page.sentOf("commands_execute");
   assert(execFrames.length > 0,
     "A commands_execute message should have been sent after ArrowDown + Enter");
-  // The message name should be a valid name from either the command or skill list.
-  const validNames = ["tools", "qexplore"];
-  assert(validNames.includes(execFrames[execFrames.length - 1].payload.name),
-    "Selected name should be one of the merged list entries, got: " +
-    (execFrames[execFrames.length - 1].payload && execFrames[execFrames.length - 1].payload.name));
+  // The skill must be reachable: only "qexplore" is a valid selection.
+  const sentName = execFrames[execFrames.length - 1].payload.name;
+  assertEqual(sentName, "qexplore",
+    "Keyboard navigation must reach the skill entry; got: " + sentName);
 });
 
 // Test 6: commandEntriesDoNotShowBadge
