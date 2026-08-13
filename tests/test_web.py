@@ -10589,7 +10589,9 @@ class TestAcpSubagentListAttribution:
 
     def test_turn_end_clears_spawner_entries_via_production_code(self, acp_store):
         """Anchors are cleared by _handle_prompt's finally block when the turn
-        ends, driving the real production code path.
+        ends, driving the real production code path.  Phase 1 extends this:
+        done crew entries, subagent_sessions for those entries, and any
+        _bubbles entries are also cleared at turn-end.
         """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
@@ -10597,6 +10599,16 @@ class TestAcpSubagentListAttribution:
         acp_mod._registry.attach(conn, sid)
         # Seed an anchor before calling _handle_prompt
         acp_mod._supervisor.crew_spawn_anchors["tc-prod"] = sid
+        # Seed a crew entry and subagent_sessions for it
+        acp_mod._supervisor.crews[sid] = {
+            "sub-prod": {
+                "done": False, "role": "worker", "task": "do work",
+                "sessionName": "", "status": "working", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": None,
+            },
+        }
+        acp_mod._supervisor.subagent_sessions["sub-prod"] = {"parent": sid}
+        acp_mod._supervisor.subagent_history["sub-prod"] = acp_mod._History()
 
         async def fake_request(self, method, params, timeout=None):
             return {"stopReason": "end_turn"}
@@ -10609,6 +10621,12 @@ class TestAcpSubagentListAttribution:
         assert acp_mod._supervisor.crew_spawn_anchors == {}
         # Confirm the turn ran (session left inflight on completion)
         assert sid not in acp_mod._supervisor.inflight
+        # Phase 1: done crew entries are removed at turn-end
+        assert acp_mod._supervisor.crews.get(sid) is None
+        # Phase 1: subagent_sessions for done children are removed
+        assert "sub-prod" not in acp_mod._supervisor.subagent_sessions
+        # Phase 1: subagent_history is preserved at turn-end (not cleaned here)
+        assert "sub-prod" in acp_mod._supervisor.subagent_history
 
 
 class TestAcpSubagentListParsing:
@@ -10836,10 +10854,15 @@ class TestAcpSubagentsFrameDelivery:
                    for e in acp_mod._supervisor.history[sid].events())
 
     def test_subscribing_after_the_fact_gets_a_crew_snapshot(self, acp_store):
-        """A reload's only source for the bar — see `_emit_subagents_frame`'s
-        docstring for why it is deliberately not in the replay buffer."""
+        """While a turn is in-flight with active (not-done) crew, a subscribe
+        still delivers a subagents snapshot — SC5.  After Phase 1's turn-end
+        cleanup, done crew is removed, so a subscribe *after* the turn ends
+        yields no subagents frame (SC1 / Bug-1 fix).
+        """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
+
+        # --- Case 1: inflight + not-done crew → snapshot is delivered. ---
         acp_mod._supervisor.inflight.add(sid)
         _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
             {"sessionId": "sub-1", "role": "explorer", "status": {"type": "working"}},
@@ -10848,6 +10871,24 @@ class TestAcpSubagentsFrameDelivery:
         acp_mod._handle_subscribe(conn, sid)
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["session", "history", "subagents"]
+
+        # --- Case 2: turn ended with all-done crew → no snapshot on subscribe. ---
+        # Simulate what _handle_prompt finally does: mark all entries done,
+        # then run the turn-end cleanup block.
+        acp_mod._supervisor.inflight.discard(sid)
+        crew = acp_mod._supervisor.crews.get(sid)
+        if crew:
+            for entry in crew.values():
+                entry["done"] = True
+            for _done_id in [cid for cid, e in crew.items() if e["done"]]:
+                crew.pop(_done_id, None)
+                acp_mod._supervisor.subagent_sessions.pop(_done_id, None)
+            if not crew:
+                acp_mod._supervisor.crews.pop(sid, None)
+        conn2 = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn2, sid)
+        frames2 = _queued(conn2)
+        assert "subagents" not in [f["type"] for f in frames2]
 
     def test_started_at_is_included_in_the_wire_payload(self, acp_store):
         """_subagents_payload must include startedAt so the frontend can compute
@@ -17073,3 +17114,170 @@ class TestHandleSubscribeCommandsReplay:
 
         frames = _queued(conn)
         assert not any(f["type"] == "commands" for f in frames)
+
+
+class TestAcpCrewCleanupOnTurnEnd:
+    """Phase 1: turn-end _handle_prompt finally block pops done crew entries
+    from crews, subagent_sessions, and _bubbles, while preserving
+    subagent_history for click-to-view replay.
+    """
+
+    def _run_turn_with_crew(self, acp_mod, sid, child_id="sub-cleanup"):
+        """Run _handle_prompt on `sid` with a pre-seeded crew entry.
+
+        The fake_request returns immediately so the turn ends synchronously.
+        The crew entry starts as done=False; the finally force-mark loop sets
+        it to done=True before the cleanup block runs.
+        """
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        acp_mod._supervisor.crews[sid] = {
+            child_id: {
+                "done": False, "role": "worker", "task": "do work",
+                "sessionName": "", "status": "working", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": None,
+            },
+        }
+        acp_mod._supervisor.subagent_sessions[child_id] = {"parent": sid}
+        acp_mod._supervisor.subagent_history[child_id] = acp_mod._History()
+        # Seed a bubble for the child to test _bubbles cleanup
+        acp_mod._bubbles[child_id] = ["some prose"]
+
+        async def fake_request(self_, method, params, timeout=None):
+            return {"stopReason": "end_turn"}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+
+    def test_done_crew_entries_removed_from_crews(self, acp_store):
+        """After a turn with an all-done crew, crews.get(sid) is None/empty."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        self._run_turn_with_crew(acp_mod, sid)
+        assert acp_mod._supervisor.crews.get(sid) is None
+
+    def test_done_crew_entries_removed_from_subagent_sessions(self, acp_store):
+        """subagent_sessions has no entry for the done child after turn-end."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        self._run_turn_with_crew(acp_mod, sid)
+        assert "sub-cleanup" not in acp_mod._supervisor.subagent_sessions
+
+    def test_subagent_history_preserved_at_turn_end(self, acp_store):
+        """subagent_history for done children is NOT cleaned at turn-end —
+        preserved for the sub-agent click-to-view feature until close_session.
+        """
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        self._run_turn_with_crew(acp_mod, sid)
+        assert "sub-cleanup" in acp_mod._supervisor.subagent_history
+
+    def test_done_crew_entries_removed_from_bubbles(self, acp_store):
+        """_bubbles entries for done children are popped at turn-end."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        self._run_turn_with_crew(acp_mod, sid)
+        assert "sub-cleanup" not in acp_mod._bubbles
+
+    def test_multiple_done_children_all_cleaned(self, acp_store):
+        """All done child entries are removed when a crew has multiple children."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+        for child in ("sub-a", "sub-b", "sub-c"):
+            acp_mod._supervisor.crews.setdefault(sid, {})[child] = {
+                "done": False, "role": "worker", "task": "do work",
+                "sessionName": "", "status": "working", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": None,
+            }
+            acp_mod._supervisor.subagent_sessions[child] = {"parent": sid}
+            acp_mod._supervisor.subagent_history[child] = acp_mod._History()
+            acp_mod._bubbles[child] = ["prose"]
+
+        async def fake_request(self_, method, params, timeout=None):
+            return {"stopReason": "end_turn"}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
+
+        assert acp_mod._supervisor.crews.get(sid) is None
+        for child in ("sub-a", "sub-b", "sub-c"):
+            assert child not in acp_mod._supervisor.subagent_sessions
+            assert child in acp_mod._supervisor.subagent_history
+            assert child not in acp_mod._bubbles
+
+
+class TestAcpSubscribeSnapshotGate:
+    """Phase 1: _handle_subscribe sends a subagents snapshot only when the
+    session is inflight OR has at least one not-done crew entry.
+    All-done (or empty) crew after a completed turn → no snapshot.
+    """
+
+    def test_all_done_crew_no_inflight_sends_no_subagents_frame(self, acp_store):
+        """Subscribing to a completed session whose crew is all-done yields no
+        subagents frame — Bug 1 / SC1 fix."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        # Seed an all-done crew (as if turn-end cleanup didn't fully remove it,
+        # e.g. a partially-done crew at turn-end edge case).
+        acp_mod._supervisor.crews[sid] = {
+            "sub-done": {
+                "done": True, "role": "worker", "task": "done work",
+                "sessionName": "", "status": "done", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": 2.0,
+            },
+        }
+        # Session is NOT inflight
+        assert sid not in acp_mod._supervisor.inflight
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        assert "subagents" not in [f["type"] for f in frames]
+
+    def test_not_done_entry_sends_subagents_frame(self, acp_store):
+        """Subscribing to a session with any done=False crew entry delivers the
+        subagents frame."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.crews[sid] = {
+            "sub-active": {
+                "done": False, "role": "worker", "task": "active work",
+                "sessionName": "", "status": "working", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": None,
+            },
+        }
+        acp_mod._supervisor.subagent_sessions["sub-active"] = {"parent": sid}
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        assert "subagents" in [f["type"] for f in frames]
+        subagents_frame = next(f for f in frames if f["type"] == "subagents")
+        assert any(e["sessionId"] == "sub-active"
+                   for e in subagents_frame["payload"]["subagents"])
+
+    def test_inflight_session_with_all_done_crew_sends_subagents_frame(
+            self, acp_store):
+        """If the session is currently inflight (a new fan-out just started and
+        the force-mark hasn't run yet), the snapshot is delivered even if all
+        existing entries are done — SC5 inflight gate."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        # Seed all-done crew but mark session as inflight
+        acp_mod._supervisor.crews[sid] = {
+            "sub-inflight-done": {
+                "done": True, "role": "worker", "task": "inflight work",
+                "sessionName": "", "status": "done", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": 2.0,
+            },
+        }
+        acp_mod._supervisor.inflight.add(sid)
+
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        assert "subagents" in [f["type"] for f in frames]

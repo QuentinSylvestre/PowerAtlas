@@ -3638,7 +3638,8 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
              ", truncated" if history.truncated else "",
              ", turn in flight" if session_id in _supervisor.inflight else "")
     crew = _supervisor.crews.get(session_id)
-    if crew:
+    if crew and (session_id in _supervisor.inflight or
+                 any(not e["done"] for e in crew.values())):
         # A fresh snapshot, not a replay: `subagents` frames are deliberately
         # not recorded into `history` (see `_emit_subagents_frame`), so a
         # reload's only source for "which sub-agents does this session have"
@@ -4232,6 +4233,20 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
                     _crew_changed = True
             if _crew_changed:
                 _emit_subagents_frame(session_id)
+        # Clean up done entries now so a subscribe snapshot never sees stale crew.
+        # `subagent_history` is intentionally NOT cleaned here — it holds the replay
+        # buffer for the sub-agent click-to-view feature and must survive until
+        # close_session.
+        _finishing_crew = _supervisor.crews.get(session_id)
+        if _finishing_crew:
+            for _done_id in [cid for cid, e in _finishing_crew.items() if e["done"]]:
+                _finishing_crew.pop(_done_id, None)
+                _supervisor.subagent_sessions.pop(_done_id, None)
+                # NOTE: subagent_history NOT popped here — preserved for click-to-view replay.
+                _bubbles.pop(_done_id, None)
+            if not _finishing_crew:
+                _supervisor.crews.pop(session_id, None)
+                # Phase 2 adds: _supervisor.crew_spawn_toolcallids.pop(session_id, None)
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         # In the `finally` and above the end marker, so the markdown of a turn
         # that was cancelled or that errored is still rendered — `stop_reason`
