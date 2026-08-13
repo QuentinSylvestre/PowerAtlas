@@ -2977,8 +2977,6 @@ class _Supervisor:
                     sid = next(iter(inflight))
                 elif len(inflight) == 0 and len(self.sessions) == 1:
                     sid = next(iter(self.sessions))
-                elif len(inflight) == 0 and len(self.sessions) == 1:
-                    sid = next(iter(self.sessions))
             if sid is not None:
                 meta = self.sessions.get(sid)
                 if meta is not None:
