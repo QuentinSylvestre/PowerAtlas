@@ -344,21 +344,18 @@
 /* ---- slash command palette --------------------------------------------- */
 #acpCmdDropdown {
   position: absolute;
-  /* Sit above the whole composer (acp-composer is the containing block). The
-     bottom value accounts for the composer-row height (~2.5rem textarea +
-     border) plus the tray-to-row gap (8px). Using bottom:0 + transform keeps
-     it flush against the top edge of the composer-row without hard-coding
-     pixel values that would drift when the textarea auto-grows. */
+  /* Sits above the composer row. bottom:0 + translateY keeps it flush against
+     the top edge of the composer without hard-coding pixel values. */
   bottom: 0;
   left: 0;
   right: 0;
   transform: translateY(calc(-100% - 6px));
-  background: var(--surface, #1e2030);
-  border: 1px solid var(--border, #2d3150);
-  border-radius: 8px;
-  box-shadow: 0 -4px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.04);
+  background: var(--surface, #1a1d27);
+  border: 1px solid var(--border, #2d3244);
+  border-radius: 10px;
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04);
   z-index: 200;
-  max-height: 320px;
+  max-height: 360px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -367,75 +364,76 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 7px 12px 6px;
-  border-bottom: 1px solid var(--border, #2d3150);
+  padding: 8px 12px 7px;
+  border-bottom: 1px solid var(--border, #2d3244);
   flex-shrink: 0;
   gap: 8px;
 }
 .acp-cmd-header-label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
   text-transform: uppercase;
-  color: var(--text-dim, #8b95b0);
+  color: var(--text-dim, #5c6070);
 }
 .acp-cmd-header-hint {
   font-size: 10px;
-  color: var(--text-dim, #8b95b0);
+  color: var(--text-dim, #5c6070);
   background: none;
   border: none;
   font-family: inherit;
-  opacity: 0.7;
   white-space: nowrap;
 }
 #acpCmdDropdown ul {
   list-style: none;
   margin: 0;
-  padding: 4px 0;
+  padding: 3px 0;
   overflow-y: auto;
   flex: 1;
   min-height: 0;
-  /* Thin custom scrollbar so it doesn't widen the dropdown unexpectedly. */
   scrollbar-width: thin;
-  scrollbar-color: var(--border, #2d3150) transparent;
+  scrollbar-color: var(--border, #2d3244) transparent;
 }
-#acpCmdDropdown ul::-webkit-scrollbar { width: 4px; }
-#acpCmdDropdown ul::-webkit-scrollbar-thumb { background: var(--border, #2d3150); border-radius: 2px; }
+#acpCmdDropdown ul::-webkit-scrollbar { width: 3px; }
+#acpCmdDropdown ul::-webkit-scrollbar-thumb { background: var(--border, #2d3244); border-radius: 2px; }
 #acpCmdDropdown ul::-webkit-scrollbar-track { background: transparent; }
 #acpCmdDropdown li {
   display: flex;
-  gap: 6px;
-  padding: 6px 12px;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1.4;
   align-items: center;
-  transition: background 0.08s;
-  white-space: nowrap;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.07s;
   overflow: hidden;
+  min-width: 0;
 }
 #acpCmdDropdown li:hover,
 #acpCmdDropdown li[aria-selected="true"] {
-  background: var(--accent-dim, rgba(99,102,241,0.18));
+  background: var(--accent-dim, rgba(108,140,255,0.12));
 }
+/* Command name — monospace, accent colour, never wraps */
 #acpCmdDropdown li .acp-cmd-name {
-  color: var(--accent, #818cf8);
+  color: var(--accent, #6c8cff);
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  font-size: 13px;
-  flex-shrink: 0;
+  font-size: 12.5px;
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
+/* Description — muted, truncated, fills remaining width */
 #acpCmdDropdown li .acp-cmd-desc {
-  color: var(--text-dim, #8b95b0);
-  font-size: 12px;
+  color: var(--text-muted, #8b90a0);
+  font-size: 11.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+  opacity: 0.8;
 }
 #acpCmdDropdown li.acp-cmd-placeholder {
-  color: var(--text-dim, #8b95b0);
+  color: var(--text-dim, #5c6070);
   font-size: 12px;
   font-style: italic;
   cursor: default;
@@ -445,20 +443,21 @@
 #acpCmdDropdown li.acp-cmd-placeholder:hover {
   background: none;
 }
-/* skill badge — displayed inline after the command name in the palette */
+/* Skill badge — subtle chip after the command name */
 .acp-cmd-skill-badge {
   flex-shrink: 0;
-  padding: 1px 5px;
-  font-size: 10px;
-  font-weight: 600;
+  padding: 1px 5px 1px 4px;
+  font-size: 9px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  border-radius: 3px;
-  background: var(--badge-bg, rgba(148, 163, 184, 0.15));
-  color: var(--badge-fg, #64748b);
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  background: rgba(108, 140, 255, 0.12);
+  color: var(--accent, #6c8cff);
+  opacity: 0.7;
   user-select: none;
-  line-height: 1.6;
   white-space: nowrap;
+  line-height: 1.7;
 }
 /* ---- compaction / system message --------------------------------------- */
 .acp-system-msg {
