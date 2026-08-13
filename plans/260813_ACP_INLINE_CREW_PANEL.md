@@ -272,6 +272,9 @@ Phase 1 extracted `_evict_crew_children(session_id, *, keep_history, broadcast_e
 Implementation (2026-08-13)
 Added `_supervisor.crew_spawn_toolcallids: dict[str, str]` to `_Supervisor.__init__` and `_detach`. `_on_subagent_list` records the spawner toolCallId on first call via both the anchor-consumption path (stores `_tcid` before popping the anchor) and the single-inflight path (stores `""`); subsequent calls are guarded with `if parent_id not in self.crew_spawn_toolcallids`. Cleanup added unconditionally at turn-end (replacing Phase 1 placeholder comment), at turn-start (after `_evict_crew_children`), and in `close_session`. `_emit_subagents_frame` now looks up `crew_spawn_toolcallids.get(parent_id, "")` and emits `{"subagents": [...], "toolCallId": toolcall_id}`. `_handle_subscribe` snapshot updated to include the same `toolCallId` field. `_subagents_payload` signature unchanged. Tests: `TestAcpCrewSpawnerToolCallId` (5 tests) + updated `TestAcpSubagentsFrameDelivery.test_a_subagents_frame_is_broadcast_but_not_recorded_into_history` to assert `toolCallId` at frame level and absence in per-entry payload. 1693 non-pre-existing tests pass (1 pre-existing failure confirmed unrelated to Phase 2).
 
+Implementation (2026-08-13, code: babd14c, fix: 64d167b, fix: a72db35)
+Phase 2 added `_supervisor.crew_spawn_toolcallids: dict[str, str]` as a parallel dict to `crews`. `_on_subagent_list` records the spawner toolCallId on first call (anchor-consumption path stores the consumed `_tcid`; single-inflight path stores `_NO_ANCHOR_TOOLCALLID = ""`); a `parent_id not in crew_spawn_toolcallids` guard prevents overwrites on subsequent list_updates. Cleanup pops run unconditionally at turn-start and turn-end (replacing the Phase 1 placeholder comment), and in `close_session` and `_detach`. `_emit_subagents_frame` and `_handle_subscribe` now emit `{"subagents": [...], "toolCallId": toolcall_id}` at frame level (not per-entry) via a shared `_crew_toolcallid(parent_id)` helper. `_subagents_payload` signature is unchanged. Tests: `TestAcpCrewSpawnerToolCallId` (6 tests with discriminating pop-site coverage using `patch.object` coroutine injection), updated `TestAcpSubagentsFrameDelivery` asserting frame-level `toolCallId`. Divergence: compaction dual-shape fix bundled into babd14c.
+
 ---
 
 ### Phase 3: Client — per-toolCallId inline crew panel [QA]
@@ -530,6 +533,31 @@ Do not restart PowerAtlas for `acp.html` changes. Hard reload (`Ctrl+Shift+R`) s
 - **Phase 2 bundled fix**: `session/update` dual-shape support for `kind: "compaction_status"` was discovered and fixed during Phase 2 implementation. The fix (handling both `sessionUpdate: str` and `sessionUpdate: {kind, ...}` shapes) was bundled into the Phase 2 commit (babd14c) rather than a separate commit. Not in Phase 2's plan scope but was a related acp.py change encountered during the session.
 
 ## Review Log
+
+### 2026-08-13 — Implementation Review (after Phase 2, persona: Senior engineer, Reliability engineer, Maintainability reviewer, Architect)
+
+Implementation health: Green (all findings resolved).
+15 findings across 2 review cycles + post-cap fixes (0 High, 8 Medium, 7 Low).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `test_second_list_update` not mutation-detecting — both calls used `""`, guard removal wouldn't be caught | Fixed — rewrote to anchor-then-single-inflight scenario |
+| 2 | Medium | Unplanned compaction dual-shape bundled in Phase 2 commit | Fixed — added divergence note in §9 |
+| 3 | Medium | `__init__` docstring says "turn-start empty-crew branch" but pop is unconditional | Fixed — updated to "turn-start (unconditional)" |
+| 4 | Medium | `test_turn_end_cleanup_pops_toolcallid` vacuous — key never set during turn | Fixed — uses `patch.object` coroutine injection to seed mid-turn |
+| 5 | Medium | `test_turn_start_clears_stale_toolcallid` non-discriminating — turn-end pop would also satisfy | Fixed — in-prompt assertion confirms turn-start pop fired before prompt ran |
+| 6 | Medium | No turn-start pop test | Fixed — added (merged with #5) |
+| 7 | Medium | EC says "four sub-cases" but 6 tests exist | Fixed — updated to "six sub-cases" |
+| 8 | Medium | `close_session` orphan-sweep (Phase 1 fix) — `crew_spawn_toolcallids` also needs cleanup on orphan sweep | Fixed — verified present in close_session already |
+| 9 | Low | Comment "Only record on first call" not mirrored at anchor-consumption guard | Fixed — added mirroring comment |
+| 10 | Low | `_NO_ANCHOR_TOOLCALLID = ""` ambiguous sentinel with no named constant | Fixed — added `_NO_ANCHOR_TOOLCALLID: Final[str] = ""` |
+| 11 | Low | Duplicated `crew_spawn_toolcallids.get` lookup in two functions | Fixed — extracted `_crew_toolcallid` helper |
+| 12 | Low | `_NO_ANCHOR_TOOLCALLID` defined after `_Supervisor` class (conventional layout) | Fixed — moved before `class _Supervisor` |
+| 13 | Low | EC line and `__init__` docstring inconsistency (same as #3) | Fixed — same fix |
+| 14 | Low | Comment on turn-start pop needed | Fixed — added "Unconditional" comment |
+| 15 | Low | Test comment inaccuracy in `test_turn_end_cleanup_pops_toolcallid` | Fixed — accurate comment in place |
+
+QA: PASS (6 claims verified, 1694 tests pass, pre-existing failure confirmed unrelated).
 
 ### 2026-08-13 — Implementation Review (after Phase 1, persona: Reliability engineer, Senior engineer, Maintainability reviewer, Architect)
 
