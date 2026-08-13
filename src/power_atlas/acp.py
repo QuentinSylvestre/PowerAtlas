@@ -1734,6 +1734,12 @@ class _Supervisor:
         # is used; cleaned up on turn end (`_handle_prompt` finally), terminal
         # `tool_call_update`, `close_session`, and `_detach`.
         self.crew_spawn_anchors: dict[str, str] = {}
+        # Sessions with a compaction currently in progress. Set when a
+        # `compaction/status started` notification arrives, cleared on
+        # `completed` or `failed`. Used for attribution when `inflight` is
+        # empty (e.g. compaction triggered by `/compact` command, whose inflight
+        # entry is already removed before the kiro-cli notification fires).
+        self._compacting: set[str] = set()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2011,6 +2017,7 @@ class _Supervisor:
         self.subagent_sessions.clear()
         self.subagent_history.clear()
         self.crew_spawn_anchors.clear()
+        self._compacting.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -2897,14 +2904,42 @@ class _Supervisor:
             sid = None
             if len(inflight) == 1:
                 sid = next(iter(inflight))
-            elif len(inflight) == 0 and len(self.sessions) == 1:
-                sid = next(iter(self.sessions))
+            elif len(self._compacting) == 1:
+                # Terminal notification (completed/failed): inflight was already
+                # cleared when the prompt turn ended, but _compacting still
+                # holds the session we tagged on `started`.
+                sid = next(iter(self._compacting))
+            elif len(inflight) == 0:
+                # `started` notification arriving after turn end (kiro-cli emits
+                # compaction status asynchronously, well after `end_turn`).
+                # _compacting is empty here because we haven't seen `started`
+                # yet. Use the session that was used most recently — whichever
+                # session sent the `/compact` prompt will have the freshest
+                # `last_used` timestamp.
+                best = max(
+                    ((s, m.get("last_used", 0)) for s, m in self.sessions.items()),
+                    key=lambda x: x[1],
+                    default=None,
+                )
+                if best is not None:
+                    sid = best[0]
+            # Maintain _compacting: add on `started`, remove on terminal status.
+            if stype == "started" and sid is not None:
+                self._compacting.add(sid)
+            elif stype in ("completed", "failed") and sid is not None:
+                self._compacting.discard(sid)
             if sid is not None:
                 if stype == "completed":
                     # Reset context meter
                     _note_context(sid, None)
-                _registry.broadcast(sid, envelope(
-                    "compaction", {"status": stype, "error": error, "summary": summary}, sid))
+                payload: dict = {"status": stype, "error": error, "summary": summary}
+                if stype == "completed" and summary and _markdown is not None:
+                    try:
+                        payload["summary_tokens"] = _markdown(summary)
+                    except Exception:
+                        log.debug("ACP compaction: markdown tokenise failed; "
+                                  "client will fall back to plain text")
+                _registry.broadcast(sid, envelope("compaction", payload, sid))
             else:
                 log.debug("ACP compaction_status: %d session(s) inflight, %d known — "
                           "cannot attribute; dropped (status=%r)",
@@ -3638,6 +3673,9 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
              ", truncated" if history.truncated else "",
              ", turn in flight" if session_id in _supervisor.inflight else "")
     crew = _supervisor.crews.get(session_id)
+    # SC5: inflight gate delivers snapshot to a subscribe during an active fan-out.
+    # Defence-in-depth: any(not-done) handles the rare case where turn-end cleanup
+    # did not run (e.g. agent death before _handle_prompt finally).
     if crew and (session_id in _supervisor.inflight or
                  any(not e["done"] for e in crew.values())):
         # A fresh snapshot, not a replay: `subagents` frames are deliberately
@@ -4069,6 +4107,49 @@ async def _handle_new(conn: _Connection, payload: dict) -> None:
     }, session_id))
 
 
+def _evict_crew_children(session_id: str, *, keep_history: bool,
+                         broadcast_empty: bool) -> None:
+    """Pop done crew entries for *session_id* from all relevant stores.
+
+    Called from two sites that share the same loop structure:
+
+    - **Turn-start stale-crew eviction** (``keep_history=False``,
+      ``broadcast_empty=True``): history is discarded because a new turn means
+      a new fan-out; broadcasting an empty panel clears the UI; if some entries
+      are still running the trimmed snapshot is emitted instead.
+    - **Turn-end cleanup** (``keep_history=True``, ``broadcast_empty=False``):
+      ``subagent_history`` must survive for the click-to-view replay feature
+      until ``close_session`` removes it; the prior
+      ``_emit_subagents_frame`` call already broadcast the final state, so no
+      further broadcast is needed regardless of crew state.
+
+    ``subagent_sessions`` is popped only when ``keep_history=False`` (turn-start
+    path), so the routing key stays alive on the turn-end path — clicking a
+    sub-agent after the turn ends still routes to ``_handle_subagent_subscribe``
+    rather than returning ``unknown_session``.
+    """
+    crew = _supervisor.crews.get(session_id)
+    if not crew:
+        return
+    for _child_id in [cid for cid, e in crew.items() if e["done"]]:
+        crew.pop(_child_id, None)
+        if not keep_history:
+            _supervisor.subagent_sessions.pop(_child_id, None)
+            _supervisor.subagent_history.pop(_child_id, None)
+        # _bubbles[child_id] is never populated by the current production path
+        # — defensive cleanup for future proofing
+        _bubbles.pop(_child_id, None)
+    if not crew:
+        _supervisor.crews.pop(session_id, None)
+        if broadcast_empty:
+            # Nothing left — tell attached sockets to clear the old panel.
+            _registry.broadcast(session_id, envelope(
+                "subagents", {"subagents": []}, session_id))
+    elif broadcast_empty:
+        # Some entries still running; emit the trimmed snapshot.
+        _emit_subagents_frame(session_id)
+
+
 async def _handle_prompt(conn: _Connection, session_id: str | None,
                          payload: dict) -> None:
     """Run one turn, reporting every failure as a typed ``error`` frame.
@@ -4155,21 +4236,7 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     # finished entry so the next fan-out starts from a clean slate instead of
     # stacking on top of earlier fan-outs' cards.  Running entries (shouldn't
     # exist at turn start, but guard defensively) are left alone.
-    _stale_crew = _supervisor.crews.get(session_id)
-    if _stale_crew:
-        for _stale_id in [cid for cid, e in _stale_crew.items() if e["done"]]:
-            _stale_crew.pop(_stale_id, None)
-            _supervisor.subagent_sessions.pop(_stale_id, None)
-            _supervisor.subagent_history.pop(_stale_id, None)
-            _bubbles.pop(_stale_id, None)
-        if not _stale_crew:
-            _supervisor.crews.pop(session_id, None)
-            # Nothing left — tell attached sockets to clear the old panel.
-            _registry.broadcast(session_id, envelope(
-                "subagents", {"subagents": []}, session_id))
-        else:
-            # Some entries still running; emit the trimmed snapshot.
-            _emit_subagents_frame(session_id)
+    _evict_crew_children(session_id, keep_history=False, broadcast_empty=True)
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
     # What stands for this prompt everywhere it is not the raw bytes: the
@@ -4236,17 +4303,13 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # Clean up done entries now so a subscribe snapshot never sees stale crew.
         # `subagent_history` is intentionally NOT cleaned here — it holds the replay
         # buffer for the sub-agent click-to-view feature and must survive until
-        # close_session.
-        _finishing_crew = _supervisor.crews.get(session_id)
-        if _finishing_crew:
-            for _done_id in [cid for cid, e in _finishing_crew.items() if e["done"]]:
-                _finishing_crew.pop(_done_id, None)
-                _supervisor.subagent_sessions.pop(_done_id, None)
-                # NOTE: subagent_history NOT popped here — preserved for click-to-view replay.
-                _bubbles.pop(_done_id, None)
-            if not _finishing_crew:
-                _supervisor.crews.pop(session_id, None)
-                # Phase 2 adds: _supervisor.crew_spawn_toolcallids.pop(session_id, None)
+        # close_session.  `subagent_sessions` is also intentionally kept — it is the
+        # routing key that lets a click-to-view subscribe after the turn ends reach
+        # _handle_subagent_subscribe rather than the unknown_session error path.
+        # _finishing_crew is the same dict object as above — force-mark only mutated
+        # values, never removed keys.
+        _evict_crew_children(session_id, keep_history=True, broadcast_empty=False)
+        # Phase 2 adds unconditionally after the if-block: _supervisor.crew_spawn_toolcallids.pop(session_id, None)
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         # In the `finally` and above the end marker, so the markdown of a turn
         # that was cancelled or that errored is still rendered — `stop_reason`
@@ -4549,6 +4612,8 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
     # parent cancel (verified by live probe 2026-08-12: 11 post-cancel
     # list_update frames, all children still "working"). Mark every non-done
     # crew entry done locally and broadcast so the page clears its crew bar.
+    # Do NOT pop from crews/subagent_sessions here — _handle_prompt's finally
+    # cleanup block owns crew teardown.
     crew = _supervisor.crews.get(session_id)
     if crew:
         now = time.time()

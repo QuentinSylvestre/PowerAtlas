@@ -4330,6 +4330,7 @@ def acp_store(tmp_path, monkeypatch):
         acp_mod._supervisor.subagent_sessions.clear()
         acp_mod._supervisor.subagent_history.clear()
         acp_mod._supervisor.crew_spawn_anchors.clear()
+        acp_mod._bubbles.clear()
         for conn in tuple(acp_mod._registry.connections):
             acp_mod._registry.detach(conn)
         acp_mod._registry.connections.clear()
@@ -10590,8 +10591,8 @@ class TestAcpSubagentListAttribution:
     def test_turn_end_clears_spawner_entries_via_production_code(self, acp_store):
         """Anchors are cleared by _handle_prompt's finally block when the turn
         ends, driving the real production code path.  Phase 1 extends this:
-        done crew entries, subagent_sessions for those entries, and any
-        _bubbles entries are also cleared at turn-end.
+        done crew entries and any _bubbles entries are also cleared at turn-end;
+        subagent_sessions is intentionally preserved for click-to-view routing.
         """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
@@ -10623,8 +10624,10 @@ class TestAcpSubagentListAttribution:
         assert sid not in acp_mod._supervisor.inflight
         # Phase 1: done crew entries are removed at turn-end
         assert acp_mod._supervisor.crews.get(sid) is None
-        # Phase 1: subagent_sessions for done children are removed
-        assert "sub-prod" not in acp_mod._supervisor.subagent_sessions
+        # Phase 1: subagent_sessions is PRESERVED at turn-end — routing key for
+        # click-to-view must survive until close_session or the next turn-start
+        # eviction.
+        assert "sub-prod" in acp_mod._supervisor.subagent_sessions
         # Phase 1: subagent_history is preserved at turn-end (not cleaned here)
         assert "sub-prod" in acp_mod._supervisor.subagent_history
 
@@ -10873,20 +10876,14 @@ class TestAcpSubagentsFrameDelivery:
         assert [f["type"] for f in frames] == ["session", "history", "subagents"]
 
         # --- Case 2: turn ended with all-done crew → no snapshot on subscribe. ---
-        # Simulate what _handle_prompt finally does: mark all entries done,
-        # then run the turn-end cleanup block.
-        acp_mod._supervisor.inflight.discard(sid)
-        crew = acp_mod._supervisor.crews.get(sid)
-        if crew:
-            for entry in crew.values():
-                entry["done"] = True
-            for _done_id in [cid for cid, e in crew.items() if e["done"]]:
-                crew.pop(_done_id, None)
-                acp_mod._supervisor.subagent_sessions.pop(_done_id, None)
-            if not crew:
-                acp_mod._supervisor.crews.pop(sid, None)
+        # Drive production _handle_prompt so the cleanup path is exercised by
+        # real code rather than hand-rolled logic; this also tracks future
+        # cleanup changes automatically.
+        sid2 = _live_session(acp_mod, sid="lifecycle-02")
+        TestAcpCrewCleanupOnTurnEnd()._run_turn_with_crew(acp_mod, sid2)
+        # After the turn: all crew is cleaned up, session is not inflight.
         conn2 = _acp_conn(acp_mod)
-        acp_mod._handle_subscribe(conn2, sid)
+        acp_mod._handle_subscribe(conn2, sid2)
         frames2 = _queued(conn2)
         assert "subagents" not in [f["type"] for f in frames2]
 
@@ -17150,19 +17147,53 @@ class TestAcpCrewCleanupOnTurnEnd:
                 patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
             asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hi"}))
 
-    def test_done_crew_entries_removed_from_crews(self, acp_store):
+    def test_turn_end_cleanup_removes_done_entries_from_crews(self, acp_store):
         """After a turn with an all-done crew, crews.get(sid) is None/empty."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         self._run_turn_with_crew(acp_mod, sid)
         assert acp_mod._supervisor.crews.get(sid) is None
 
-    def test_done_crew_entries_removed_from_subagent_sessions(self, acp_store):
-        """subagent_sessions has no entry for the done child after turn-end."""
+    def test_subagent_sessions_preserved_at_turn_end(self, acp_store):
+        """subagent_sessions entry for the done child is PRESERVED at turn-end
+        — the routing key must survive so that click-to-view (subscribe to the
+        sub-agent's own session id) routes to _handle_subagent_subscribe rather
+        than returning unknown_session.  Only close_session or the next
+        turn-start eviction removes it.
+        """
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         self._run_turn_with_crew(acp_mod, sid)
-        assert "sub-cleanup" not in acp_mod._supervisor.subagent_sessions
+        assert "sub-cleanup" in acp_mod._supervisor.subagent_sessions
+
+    def test_subagent_click_to_view_works_after_turn_ends(self, acp_store):
+        """SC6 integration: clicking a sub-agent after the turn ends should route
+        to _handle_subagent_subscribe (a subagent_session response), NOT return
+        unknown_session.  This verifies that subagent_sessions is NOT cleaned at
+        turn-end so the routing key survives for click-to-view.
+        """
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        child_id = "sub-cleanup"
+        self._run_turn_with_crew(acp_mod, sid, child_id=child_id)
+        # Turn is over; child_id must still be in subagent_sessions for routing.
+        assert child_id in acp_mod._supervisor.subagent_sessions
+        # Now simulate a click-to-view subscribe: subscribe to the child's id.
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, child_id)
+        frames = _queued(conn)
+        # Must get a session frame (not an error) — subagent_session response.
+        assert len(frames) >= 1, "expected at least one frame from the subscribe"
+        first = frames[0]
+        assert first["type"] != "error", (
+            f"subscribe returned error instead of subagent_session: {first!r}"
+        )
+        assert first["type"] == "session", (
+            f"expected session frame, got: {first['type']!r}"
+        )
+        # The session payload marks this as a read-only sub-agent view.
+        payload = first["payload"]
+        assert payload.get("readOnly") is True
 
     def test_subagent_history_preserved_at_turn_end(self, acp_store):
         """subagent_history for done children is NOT cleaned at turn-end —
@@ -17173,7 +17204,7 @@ class TestAcpCrewCleanupOnTurnEnd:
         self._run_turn_with_crew(acp_mod, sid)
         assert "sub-cleanup" in acp_mod._supervisor.subagent_history
 
-    def test_done_crew_entries_removed_from_bubbles(self, acp_store):
+    def test_turn_end_cleanup_removes_done_entries_from_bubbles(self, acp_store):
         """_bubbles entries for done children are popped at turn-end."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
@@ -17205,7 +17236,8 @@ class TestAcpCrewCleanupOnTurnEnd:
 
         assert acp_mod._supervisor.crews.get(sid) is None
         for child in ("sub-a", "sub-b", "sub-c"):
-            assert child not in acp_mod._supervisor.subagent_sessions
+            # subagent_sessions is preserved at turn-end for click-to-view routing
+            assert child in acp_mod._supervisor.subagent_sessions
             assert child in acp_mod._supervisor.subagent_history
             assert child not in acp_mod._bubbles
 
