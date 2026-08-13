@@ -6132,6 +6132,26 @@ check("setCrew with empty toolCallId creates no-anchor panel appended to transcr
               "no-anchor panel should be appended as last child of transcript");
 });
 
+check("setCrew with empty entries and no active no-anchor slot does not ghost _noAnchorKey", (tpl) => {
+  // Each check() call gets a fresh page via loadPage(), so _noAnchorSeq and
+  // _noAnchorKey both start at their initial values (0 / null) here.
+  const { page, live } = connected(tpl);
+  // Spurious server dismissal with no active no-anchor slot: this must NOT
+  // advance _noAnchorSeq or set _noAnchorKey to a ghost key.
+  page.deliver(subagentsFrame(live, [], ''));
+  // Now create a real no-anchor slot — should get _na_1, not _na_2.
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub1", role: "worker", task: "", sessionName: "Agent 1",
+      status: "working", action: "", done: false, error: "",
+      startedAt: Date.now() / 1000 },
+  ], ''));
+  const crewsMap = page.sandbox._testCrews();
+  const keys = Object.keys(crewsMap);
+  assertEqual(keys.length, 1, "should have exactly one slot (_na_1 not _na_2)");
+  assertEqual(keys[0], "_na_1",
+              "_noAnchorSeq should not have been advanced by the spurious empty call");
+});
+
 check("two subagents frames with different toolCallIds produce two independent panels", (tpl) => {
   const { page, live } = connected(tpl);
   // Deliver two tool_call frames

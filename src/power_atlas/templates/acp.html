@@ -2911,6 +2911,20 @@
   function setCrew(entries, toolCallId) {
     var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
 
+    // Early-return for empty entries BEFORE computing useKey.
+    // This must run first to avoid advancing _noAnchorSeq and ghosting
+    // _noAnchorKey when there is no active no-anchor slot to remove.
+    if (!entries.length) {
+      if (key && crews[key]) {
+        removeSingleCrewPanel(key);
+      } else if (!key && _noAnchorKey && crews[_noAnchorKey]) {
+        // Server signaling no-anchor crew is done: remove it
+        removeSingleCrewPanel(_noAnchorKey);
+      }
+      return;
+    }
+
+    // Non-empty entries: compute useKey.
     // For no-anchor fan-outs (key === null), reuse the current slot if one
     // exists; only create a new _na_ key if there's no active no-anchor slot.
     var useKey;
@@ -2924,16 +2938,6 @@
         useKey = '_na_' + (++_noAnchorSeq);
         _noAnchorKey = useKey;
       }
-    }
-
-    if (!entries.length) {
-      if (key && crews[key]) {
-        removeSingleCrewPanel(key);
-      } else if (!key && _noAnchorKey && crews[_noAnchorKey]) {
-        // Server signaling no-anchor crew is done: remove it
-        removeSingleCrewPanel(_noAnchorKey);
-      }
-      return;
     }
 
     if (!crews[useKey]) {
