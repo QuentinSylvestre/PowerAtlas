@@ -5876,6 +5876,19 @@ check("crew panel header shows 'Done (2 agents)' when crewAllDone is true", (tpl
               "header should say 'Done (2 agents)' when all done");
 });
 
+check("crew panel header shows 'Done (1 agent)' (singular) when crewAllDone is true with 1 entry", (tpl) => {
+  const { page, live } = connected(tpl);
+  const now = Date.now() / 1000;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "kiro_default", task: "", sessionName: "stage-a",
+      status: "terminated", action: "", done: true, error: "", startedAt: now - 5 },
+  ]));
+  const hdr = page.one("acpTranscript", ".acp-crew-header");
+  assert(hdr !== null, "crew panel should have a header element");
+  assertEqual(hdr.textContent, "Done (1 agent)",
+              "header should say 'Done (1 agent)' (singular) when all done with 1 entry");
+});
+
 check("crew row has status-thinking dot for working entry", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver(subagentsFrame(live, [
@@ -5958,6 +5971,20 @@ check("acp-crew-label falls back to 'agent' when both sessionName and task are e
   assert(label !== null, "row should have a .acp-crew-label element");
   assertEqual(label.textContent, "agent",
               "label should be 'agent' when sessionName and task are both empty");
+});
+
+check("acp-crew-action shows 'working\u2026' fallback when action is empty and state is working", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "kiro_default", task: "do something", sessionName: "stage-1",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const row = page.one("acpTranscript", ".acp-crew-row");
+  assert(row !== null, "crew panel should have a row");
+  const actionSpan = row.querySelector(".acp-crew-action");
+  assert(actionSpan !== null, "row should have a .acp-crew-action element");
+  assertEqual(actionSpan.textContent, "working\u2026",
+              "action should show 'working\u2026' fallback when action is empty and state is working");
 });
 
 check("renderSubHead subRoleEl shows sessionName when present", (tpl) => {

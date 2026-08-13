@@ -562,7 +562,7 @@
   // ---- sub-agents (the crew panel in-transcript + the read-only sub-agent panel) ---------
   //
   // The current session's crew, as last sent on a `subagents` frame — an
-  // array of `{sessionId, role, task, status, action, done, error, startedAt, stoppedAt}`,
+  // array of `{sessionId, role, task, status, action, done, error, startedAt, stoppedAt, sessionName}`,
   // arrival-ordered by the server. `[]` for every session that has never run a
   // fan-out.
   var crew = [];
@@ -2715,12 +2715,12 @@
         elapsedSpan.className = 'acp-crew-elapsed';
         var start = entry.startedAt;
         var stop = entry.stoppedAt;
-        elapsedSpan.textContent = (typeof stop === 'number' && stop)
+        elapsedSpan.textContent = stop > 0
           ? elapsedText(start, stop) : elapsedText(start);
 
         row.appendChild(dot);
         row.appendChild(nameSpan);
-        row.appendChild(roleSpan);
+        if (entry.role) row.appendChild(roleSpan);
         row.appendChild(actionSpan);
         row.appendChild(elapsedSpan);
         row.addEventListener('click', function() { openSubagent(entry.sessionId); });
@@ -2814,7 +2814,7 @@
 
   function renderSubHead() {
     var entry = crewEntry(subViewSid);
-    subRoleEl.textContent = crewLabel(entry) || subViewSid;
+    subRoleEl.textContent = crewLabel(entry) || subViewSid;  // crewLabel always returns non-empty
     if (!entry) {
       subStatusEl.className = 'acp-subpanel-status';
       subStatusEl.textContent = '';

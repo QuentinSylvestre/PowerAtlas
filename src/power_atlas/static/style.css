@@ -210,7 +210,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .ws-status.status-waiting { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22); }
 .ws-status.status-errored { background: #ef4444; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.22); }
 @keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-@media (prefers-reduced-motion: reduce) { .session-status.status-working, .session-status.status-thinking, .session-status.status-unread, .ws-status.status-working, .acp-agentbar-dot.status-working { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .session-status.status-working, .session-status.status-thinking, .ws-status.status-working, .acp-agentbar-dot.status-working { animation: none; } }
 .session-preview { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-workspace { font-size: 11px; color: var(--accent); opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .session-preview .label { color: var(--text-dim); font-size: 10px; text-transform: uppercase; margin-right: 3px; }
