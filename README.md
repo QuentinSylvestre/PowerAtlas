@@ -270,11 +270,13 @@ rebuilt, and a build log or a large file read would push the conversation out of
 never treated as markdown — it is bytes a command printed, not prose the agent wrote, and it is
 shown verbatim.
 
-An edit row collapses all of that into one control: the name, kind, and status are all a collapsed
-row shows, and one click on the row's single arrow reveals the full path, the `+n −m` stat, and the
-diff itself — coloured by line and numbered the way kiro-cli's own TUI numbers a file, seeded from
-the location the edit reported rather than always starting at 1. There is no separate hover for the
-path here and no second toggle for the summary; both live behind the one control an edit row has.
+An edit row collapses all of that into one control. Collapsed, it shows the name, kind, status, and
+a short filename-plus-stat one-liner — enough to tell what a call touched without opening it. One
+click on the row's single arrow swaps that one-liner for the full path, the `+n −m` stat again, and
+the diff itself — coloured by line and numbered the way kiro-cli's own TUI numbers a file, seeded
+from the location the edit reported rather than always starting at 1 — so the same fact is never
+shown twice at once. There is no separate hover for the path here and no second toggle for the
+summary; both live behind the one control an edit row has.
 
 **A successful edit's diff survives even a session PowerAtlas's own memory has lost.** Loading a
 session kiro-cli still has but this process does not — after a restart, or one simply never opened
