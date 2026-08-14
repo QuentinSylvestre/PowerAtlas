@@ -30,8 +30,6 @@
 - **Bulk session deletion** — single-row delete shipped; workspace-level "delete all N" is the useful shape for the store-size problem
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
 - **Tell the operator a turn ended** — push notification when a long task finishes; cheapest version uses the existing WebSocket but fails when the phone sleeps the tab
-- ~~**Tool output in the transcript**~~ — *delivered 2026-08-14* as a recorded digest plus a broadcast-only body; **one probe outstanding**, see the entry below
-- ~~**Tool display improvements**~~ — *delivered 2026-08-14*: status badges (with the status-vocabulary defect they depended on), tool-type icons, and the file a call touched
 - **Auto-mode for `/acp` permissions** — drop `-a` and decide each request automatically; latency is measured and fine, accuracy against adversarial inputs is the open question
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured)
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
