@@ -78,6 +78,7 @@ from typing import Final
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from . import data_kiro
 from .config import CONFIG_DIR
 from .launcher import _SESSION_ID_RE
 
@@ -1267,7 +1268,7 @@ def _tool_output_text(update: dict) -> str:
     return "".join(parts)
 
 
-def _tool_diff(update: dict) -> dict | None:
+def _tool_diff(update: dict, backfill: dict | None = None) -> dict | None:
     """The first ``{"type": "diff"}`` entry in ``content``, normalised.
 
     ``oldText`` is nullable and null is meant to mean "this file did not
@@ -1281,6 +1282,17 @@ def _tool_diff(update: dict) -> dict | None:
     arrives on the same update as the diff `content`, so `command` is the
     reliable signal here and is used instead of trusting the wire's
     `oldText` on a create.
+
+    ``backfill`` is `data_kiro.get_tool_diffs()`'s output for the session
+    this update belongs to — kiro-cli's own on-disk transcript, keyed by
+    `toolCallId`. Consulted only when this frame itself carries no diff
+    `content`: a `session/load` replay's `tool_call_update`s never do
+    (measured 2026-08-14 — that reload does not resend rawOutput at all), so
+    without this every edit row in a reloaded session would render as a
+    generic confirmation with no diff, unlike kiro-cli's own TUI reading the
+    same on-disk file. A live frame with real content is never overridden by
+    a backfill entry, so a stale on-disk read can only ever fill a gap, not
+    contest what the wire just said.
     """
     for block in _content_blocks(update):
         if not isinstance(block, dict) or block.get("type") != "diff":
@@ -1297,6 +1309,17 @@ def _tool_diff(update: dict) -> dict | None:
             "oldText": None if is_create else (old if isinstance(old, str) else None),
             "newText": new_text,
         }
+    if backfill:
+        entry = backfill.get(_as_text(update.get("toolCallId")))
+        if isinstance(entry, dict):
+            new_text = entry.get("newText")
+            old_text = entry.get("oldText")
+            if isinstance(new_text, str):
+                return {
+                    "path": _as_text(entry.get("path")),
+                    "oldText": old_text if isinstance(old_text, str) else None,
+                    "newText": new_text,
+                }
     return None
 
 
@@ -1338,7 +1361,7 @@ def _parse_exit_status(value: object) -> int | None:
     return None
 
 
-def _tool_output_digest(update: dict) -> dict | None:
+def _tool_output_digest(update: dict, backfill: dict | None = None) -> dict | None:
     """A small, bounded account of what one tool call produced.
 
     This is the half that goes into the replay buffer, so every field here is
@@ -1351,8 +1374,11 @@ def _tool_output_digest(update: dict) -> dict | None:
     is a closed set: ``exec``, ``diff``, ``text``. An output this function
     cannot classify still gets a digest — the byte count is true whatever the
     shape turned out to be — and logs its keys so a probe can name it.
+
+    ``backfill`` is passed straight through to `_tool_diff` — see its
+    docstring.
     """
-    diff = _tool_diff(update)
+    diff = _tool_diff(update, backfill)
     if diff is not None:
         added, removed = _diff_stat(diff["oldText"], diff["newText"])
         return {"form": "diff", "path": diff["path"],
@@ -1429,7 +1455,7 @@ def _tool_output_digest(update: dict) -> dict | None:
             "lines": text.count("\n") + (1 if not text.endswith("\n") else 0)}
 
 
-def _tool_output_body(update: dict) -> dict | None:
+def _tool_output_body(update: dict, backfill: dict | None = None) -> dict | None:
     """The broadcast-only half: what the operator reads, capped and never recorded.
 
     Returns the frame payload for a ``tool_output``, or ``None`` when there is
@@ -1438,8 +1464,11 @@ def _tool_output_body(update: dict) -> dict | None:
     expensive-looking output is actually the cheap one — but still capped,
     because "bounded by the edit" is a description of normal behaviour and not
     a guarantee about an agent running unattended.
+
+    ``backfill`` is passed straight through to `_tool_diff` — see its
+    docstring.
     """
-    diff = _tool_diff(update)
+    diff = _tool_diff(update, backfill)
     if diff is not None:
         new_text = diff["newText"][:MAX_TOOL_OUTPUT_CHARS]
         old_text = diff["oldText"]
@@ -1466,7 +1495,7 @@ def _tool_output_body(update: dict) -> dict | None:
             "length": len(text)}
 
 
-def _tool_payload(update: dict) -> dict:
+def _tool_payload(update: dict, backfill: dict | None = None) -> dict:
     """What a tool-call notification carries to the page.
 
     Carries the tool's *output* only as a bounded digest — never the bytes.
@@ -1474,6 +1503,9 @@ def _tool_payload(update: dict) -> dict:
     ``MAX_TOOL_OUTPUT_CHARS``: everything in this payload is recorded in the
     replay buffer, and a file read or a build log is unbounded by nature, so
     putting it here would evict the conversation it is meant to annotate.
+
+    ``backfill`` is passed straight through to `_tool_output_digest` — see
+    `_tool_diff`'s docstring for what it is and why it exists.
     """
     payload = {
         "toolCallId": _as_text(update.get("toolCallId")),
@@ -1490,10 +1522,50 @@ def _tool_payload(update: dict) -> dict:
     locations = _tool_locations(update)
     if locations:
         payload["locations"] = locations
-    digest = _tool_output_digest(update)
+    digest = _tool_output_digest(update, backfill)
     if digest is not None:
         payload["output"] = digest
     return payload
+
+
+def _with_backfilled_bodies(events: list[dict], session_id: str,
+                             backfill: dict | None) -> list[dict]:
+    """Insert a synthetic ``tool_output`` event before each recorded
+    ``tool_call``/``tool_update`` whose digest is a diff backed by
+    ``backfill`` — the one gap the recorded digest alone cannot close.
+
+    The body half of an edit is broadcast-only by design (see the budget
+    note above ``MAX_TOOL_OUTPUT_CHARS``), and a `session/load` replay's own
+    broadcasts reach no socket at all: `_handle_load`'s own docstring notes
+    every socket that asks for the session while it is loading is parked,
+    not attached. Without this, a freshly-loaded session's edit rows show an
+    accurate diff *stat* — the recorded digest, thanks to the same
+    ``backfill`` — but never the diff itself behind "Show diff", unlike
+    kiro-cli's own TUI reading the same on-disk transcript.
+
+    Costs nothing against the replay buffer's own budget: this list is
+    built fresh on every subscribe and never itself recorded, so a session
+    with many backfillable edits pays this once per reconnect, not once
+    forever. Reuses `_tool_output_body`'s own shaping/truncation rather than
+    duplicating it — the only new thing here is *where* the result goes.
+    """
+    if not backfill:
+        return events
+    enriched = []
+    for event in events:
+        if event.get("type") in ("tool_call", "tool_update"):
+            payload = event.get("payload") or {}
+            output = payload.get("output")
+            tool_call_id = payload.get("toolCallId")
+            if (isinstance(output, dict) and output.get("form") == "diff"
+                    and isinstance(tool_call_id, str)
+                    and tool_call_id in backfill):
+                body = _tool_output_body({"toolCallId": tool_call_id}, backfill)
+                if body is not None:
+                    body["toolCallId"] = tool_call_id
+                    enriched.append(envelope("tool_output", body, session_id))
+        enriched.append(event)
+    return enriched
 
 
 def _context_percent(params: dict) -> float | None:
@@ -2259,6 +2331,15 @@ class _Supervisor:
         # "a metadata frame arrived" is not enough, and why elapsed time
         # rather than a `contextPercent` drop is the gate.
         self._compaction_started_at: dict[str, float] = {}
+        # One session's worth of `data_kiro.get_tool_diffs()`, populated by
+        # `load_session` right before the `session/load` round trip so it is
+        # ready the moment the replay's `tool_call_update` notifications
+        # start arriving. See `_tool_diff`'s own docstring for why ACP's own
+        # replay cannot supply this itself. Popped in `close_session` — unlike
+        # the compaction dicts above, an entry here can hold a whole file's
+        # worth of text per edit, so it is worth reclaiming per session
+        # rather than only at a full reset.
+        self._diff_backfill: dict[str, dict[str, dict]] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2540,6 +2621,7 @@ class _Supervisor:
         self._compacting.clear()
         self._compaction_buf.clear()
         self._compaction_started_at.clear()
+        self._diff_backfill.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -3430,7 +3512,9 @@ class _Supervisor:
                         self._compaction_buf.setdefault(session_id, []).append(text)
             return
         if kind in ("tool_call", "tool_call_update"):
-            payload = _tool_payload(update)
+            _backfill = (self._diff_backfill.get(session_id)
+                         if isinstance(session_id, str) else None)
+            payload = _tool_payload(update, _backfill)
             log.info("ACP tool %s: session=%s id=%s status=%s title=%r kind=%s "
                      "input=%.200r", kind, session_id, payload["toolCallId"],
                      payload["status"], payload["title"], payload["kind"],
@@ -3500,7 +3584,7 @@ class _Supervisor:
                 # body has not arrived yet. `_registry.broadcast` rather than
                 # `_emit` is the whole budget decision in one line — see the
                 # note above MAX_TOOL_OUTPUT_CHARS.
-                body = _tool_output_body(update)
+                body = _tool_output_body(update, _backfill)
                 if body is not None:
                     body["toolCallId"] = payload["toolCallId"]
                     _registry.broadcast(
@@ -3835,6 +3919,13 @@ class _Supervisor:
             self.sessions[session_id] = _new_session_record(cwd)
             self._publish_live()
             self.history[session_id] = _History()
+            # Populated before the round trip, same reasoning as the history
+            # buffer above it: the replay's `tool_call_update` notifications
+            # start arriving while `session/load` is still outstanding, and
+            # they carry no diff content of their own for `_tool_diff` to
+            # read — see its docstring. A miss here (file missing, unrecognised
+            # shape) is `{}`, never raised, so a load never fails on this.
+            self._diff_backfill[session_id] = data_kiro.get_tool_diffs(session_id)
             # Recorded, so the slot it reserved is now counted by `sessions`.
             # Released without suspending in between, which is what makes the
             # handover atomic against another `new_session`'s check.
@@ -3848,6 +3939,7 @@ class _Supervisor:
                 self.sessions.pop(session_id, None)
                 self._publish_live()
                 self.history.pop(session_id, None)
+                self._diff_backfill.pop(session_id, None)
                 raise
         finally:
             if reserved:
@@ -3998,6 +4090,7 @@ class _Supervisor:
         # could ever read or evict it.
         self.history.pop(session_id, None)
         self.inflight.discard(session_id)
+        self._diff_backfill.pop(session_id, None)
         # Remove pending spawner anchors for this session — a session that
         # closes before its list_update arrives would otherwise leave stale
         # entries until _detach or turn end.
@@ -4440,7 +4533,9 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
             "message": "Earlier events fell out of the replay buffer; what "
                        "follows is the tail of the conversation.",
         }, session_id))
-    conn.send(envelope("history", {"events": history.events()}, session_id))
+    events = _with_backfilled_bodies(
+        history.events(), session_id, _supervisor._diff_backfill.get(session_id))
+    conn.send(envelope("history", {"events": events}, session_id))
     log.info("ACP subscribe: session=%s, %d event(s) replayed%s%s",
              session_id, len(history),
              ", truncated" if history.truncated else "",

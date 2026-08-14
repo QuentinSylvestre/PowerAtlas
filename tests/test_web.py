@@ -3237,6 +3237,75 @@ class TestAcpToolCallVisibility:
         body = next(f for f in frames if f["type"] == "tool_output")["payload"]
         assert body["text"] == "No match found for the requested replacement."
 
+    def test_a_replayed_edit_backfills_its_diff_from_the_local_transcript(
+            self, acp_session):
+        """A `session/load` reply's replayed `tool_call_update`s carry no
+        diff content of their own (measured 2026-08-14: title/kind/command
+        all blank, only toolCallId/status survive) — the one case
+        `_diff_backfill` exists to cover. `data_kiro.get_tool_diffs` reads
+        kiro-cli's own on-disk transcript, the same file its native TUI
+        reads to redraw the diff on reload."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor._diff_backfill[sid] = {
+            "t1": {"path": "/repo/new.py", "oldText": None, "newText": "x = 1\ny = 2\n"}}
+        try:
+            self._notify(acp_mod, sid, {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "status": "completed"})
+            frames = _queued(conn)
+            digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+            assert digest == {"form": "diff", "path": "/repo/new.py",
+                               "added": 2, "removed": 0, "isNew": True}
+            body = next(f for f in frames if f["type"] == "tool_output")["payload"]
+            assert body["form"] == "diff"
+            assert body["oldText"] is None
+            assert body["newText"] == "x = 1\ny = 2\n"
+        finally:
+            acp_mod._supervisor._diff_backfill.pop(sid, None)
+
+    def test_a_live_diff_is_never_overridden_by_a_backfill_entry(self, acp_session):
+        """A live frame's own diff content always wins — backfill only ever
+        fills a gap, never contests what the wire just said."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor._diff_backfill[sid] = {
+            "t1": {"path": "/repo/stale.py", "oldText": None, "newText": "stale\n"}}
+        try:
+            self._notify(acp_mod, sid, {
+                "sessionUpdate": "tool_call", "toolCallId": "t1",
+                "kind": "edit",
+                "content": [{"type": "diff", "path": "/repo/live.py",
+                             "oldText": "one\n", "newText": "one\ntwo\n"}],
+                "rawInput": {"command": "strReplace"}})
+            frames = _queued(conn)
+            digest = next(f for f in frames if f["type"] == "tool_call")["payload"]["output"]
+            assert digest["path"] == "/repo/live.py"
+            assert digest["added"] == 1
+        finally:
+            acp_mod._supervisor._diff_backfill.pop(sid, None)
+
+    def test_no_backfill_entry_for_this_toolcallid_falls_through_to_suppression(
+            self, acp_session):
+        """A backfill dict that exists but has nothing for this specific
+        toolCallId behaves exactly like no backfill at all — the completed-
+        edit clobber guard still applies."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor._diff_backfill[sid] = {
+            "some-other-call": {"path": "/repo/x.py", "oldText": None, "newText": "x\n"}}
+        try:
+            self._notify(acp_mod, sid, {
+                "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+                "kind": "edit", "status": "completed",
+                "rawOutput": {"items": [{
+                    "Text": "Successfully created /repo/new.py (1 lines)."}]}})
+            frames = _queued(conn)
+            tool_update = next(f for f in frames if f["type"] == "tool_update")
+            assert "output" not in tool_update["payload"]
+        finally:
+            acp_mod._supervisor._diff_backfill.pop(sid, None)
+
     def test_the_output_body_is_the_tail_and_says_it_was_clipped(self, acp_session):
         """A build log's last lines are the ones that say what happened."""
         acp_mod, sid = acp_session
@@ -4890,6 +4959,106 @@ class TestAcpSessionLoad:
         events = _queued(conn)[2]["payload"]["events"]
         assert [e["type"] for e in events] == ["tool_call"]
         assert events[0]["payload"]["command"] == "git status"
+
+    def test_load_populates_the_diff_backfill_before_the_round_trip(
+            self, acp_store, monkeypatch):
+        """`load_session` reads kiro-cli's own on-disk .jsonl transcript
+        before the `session/load` round trip, so the backfill is ready the
+        moment the replay's `tool_call_update` notifications start arriving
+        — see `_tool_diff`'s docstring for why the ACP reply alone cannot
+        supply this (a `session/load` reply's replayed updates carry no
+        diff content of their own)."""
+        from power_atlas import data_kiro
+        acp_mod, store = acp_store
+        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
+        sid = "load-backfill-01"
+        self._stored(store, sid, store)
+        (store / f"{sid}.jsonl").write_text(json.dumps({
+            "version": "v1", "kind": "AssistantMessage",
+            "data": {"content": [{"kind": "toolUse", "data": {
+                "toolUseId": "tc-1", "name": "write",
+                "input": {"command": "create", "path": "new.py",
+                          "content": "x = 1\n"}}}]}}), encoding="utf-8")
+
+        async def fake_request(self, method, params, timeout=None):
+            return {}
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+
+        assert acp_mod._supervisor._diff_backfill[sid] == {
+            "tc-1": {"path": "new.py", "oldText": None, "newText": "x = 1\n"}}
+
+    def test_close_session_releases_the_diff_backfill(self, acp_store, monkeypatch):
+        """An entry here can hold a whole file's worth of text per edit —
+        worth reclaiming per session rather than only at a full reset."""
+        from power_atlas import data_kiro
+        acp_mod, store = acp_store
+        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
+        sid = "load-backfill-02"
+        self._stored(store, sid, store)
+
+        async def fake_request(self, method, params, timeout=None):
+            return {}
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+        assert sid in acp_mod._supervisor._diff_backfill
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+            asyncio.run(acp_mod._supervisor.close_session(sid))
+        assert sid not in acp_mod._supervisor._diff_backfill
+
+    def test_a_replayed_edits_full_diff_reaches_the_history_frame(
+            self, acp_store, monkeypatch):
+        """The digest alone (backfilled by `_tool_diff`) only gets a session
+        an accurate `+n -m` stat on reload. The diff *body* behind "Show
+        diff" is broadcast-only and a `session/load` replay's own broadcasts
+        reach no socket (`_handle_load`'s own docstring: every socket asking
+        for the session while it loads is parked, not attached) — so
+        `_handle_subscribe` must inject it into the one-time `history` frame
+        instead. Mirrors the real shape measured 2026-08-14: kiro-cli's own
+        replayed `tool_call_update` carries no content/rawOutput at all,
+        only `toolCallId`/`status`."""
+        from power_atlas import data_kiro
+        acp_mod, store = acp_store
+        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
+        sid = "load-backfill-03"
+        self._stored(store, sid, store)
+        (store / f"{sid}.jsonl").write_text(json.dumps({
+            "version": "v1", "kind": "AssistantMessage",
+            "data": {"content": [{"kind": "toolUse", "data": {
+                "toolUseId": "tc-1", "name": "write",
+                "input": {"command": "create", "path": "new.py",
+                          "content": "x = 1\ny = 2\n"}}}]}}), encoding="utf-8")
+
+        async def fake_request(self, method, params, timeout=None):
+            self._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "tc-1",
+                    "status": "completed"}},
+            })
+            return {}
+        conn = _acp_conn(acp_mod)
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._handle_load(conn, sid))
+
+        events = _queued(conn)[2]["payload"]["events"]
+        types = [e["type"] for e in events]
+        assert "tool_output" in types
+        body = next(e for e in events if e["type"] == "tool_output")["payload"]
+        assert body["form"] == "diff"
+        assert body["oldText"] is None
+        assert body["newText"] == "x = 1\ny = 2\n"
+        # Ordering matches the live convention noted where the body is
+        # broadcast: sent before the digest frame, so a viewer never sees
+        # the stat on a row whose body has not arrived yet.
+        assert types.index("tool_output") < types.index("tool_update")
 
     def test_the_replay_is_not_fanned_out_while_it_is_being_built(
             self, acp_store):

@@ -410,6 +410,108 @@ def get_session_tail(session_id: str, cwd: str = "", max_lines: int = 15) -> lis
     return list(messages)
 
 
+_diff_cache: dict[str, tuple[float, int, dict[str, dict]]] = {}  # sid -> (mtime, size, diffs)
+
+
+def get_tool_diffs(session_id: str) -> dict[str, dict]:
+    """Reconstruct each `write` tool call's diff from a session's .jsonl.
+
+    kiro-cli's own local transcript stores each tool call's full `input`
+    permanently on disk (`command`, `path`, `content` for a `create`,
+    `oldStr`/`newStr` for a `strReplace`) — unlike an ACP `session/load`
+    reply, whose replayed `tool_call_update`s carry no `rawOutput`/`content`
+    at all (measured 2026-08-14 against kiro-cli 2.18.0: a reloaded session's
+    edit rows show no diff even though the live turn did, because the ACP
+    replay never resends it). This is the same on-disk transcript kiro-cli's
+    own TUI reads to redraw a diff after `/chat resume` — confirmed by a
+    side-by-side: the TUI shows the diff on a session ACP's `session/load`
+    just replayed with no diff at all. Keyed by `toolUseId`, which is the
+    same id ACP calls `toolCallId`.
+
+    **Not part of the ACP protocol.** This is kiro-cli's own internal file
+    format, undocumented and free to change across versions without notice —
+    unlike the protocol surface the rest of this module's ACP-facing caller
+    is built against. A shape this does not recognise is silently skipped,
+    never raised; the caller falls back to no diff, the same as before this
+    existed.
+
+    **Only a call whose own `ToolResults` entry says `status: "success"` is
+    kept.** An `AssistantMessage`'s `toolUse` is the model's *proposed* call
+    — logged whether or not it ever ran — and a rejected or user-cancelled
+    write never touched the file (confirmed live: a session with two
+    cancelled writes carries a `toolUse` for each, `status: "error"`,
+    `result: "Cancelled"` in the same line). Backfilling a diff for one of
+    those would show content for a file kiro-cli never actually wrote.
+    """
+    jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return {}
+    try:
+        st = jsonl_path.stat()
+    except OSError:
+        return {}
+    cached = _diff_cache.get(session_id)
+    if cached is not None and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2]
+
+    candidates: dict[str, dict] = {}
+    unsuccessful: set[str] = set()
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                kind = obj.get("kind")
+                if kind == "AssistantMessage":
+                    content = (obj.get("data") or {}).get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for item in content:
+                        if not isinstance(item, dict) or item.get("kind") != "toolUse":
+                            continue
+                        tool = item.get("data")
+                        if not isinstance(tool, dict) or tool.get("name") != "write":
+                            continue
+                        tool_use_id = tool.get("toolUseId")
+                        tool_input = tool.get("input")
+                        if not isinstance(tool_use_id, str) or not isinstance(tool_input, dict):
+                            continue
+                        path = tool_input.get("path")
+                        if not isinstance(path, str):
+                            continue
+                        command = tool_input.get("command")
+                        if command == "create":
+                            new_text = tool_input.get("content")
+                            if isinstance(new_text, str):
+                                candidates[tool_use_id] = {
+                                    "path": path, "oldText": None, "newText": new_text}
+                        elif command == "strReplace":
+                            old_text = tool_input.get("oldStr")
+                            new_text = tool_input.get("newStr")
+                            if isinstance(old_text, str) and isinstance(new_text, str):
+                                candidates[tool_use_id] = {
+                                    "path": path, "oldText": old_text, "newText": new_text}
+                elif kind == "ToolResults":
+                    content = (obj.get("data") or {}).get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for item in content:
+                        result = item.get("data") if isinstance(item, dict) else None
+                        if not isinstance(result, dict):
+                            continue
+                        if result.get("status") != "success":
+                            tool_use_id = result.get("toolUseId")
+                            if isinstance(tool_use_id, str):
+                                unsuccessful.add(tool_use_id)
+    except OSError:
+        return {}
+    diffs = {k: v for k, v in candidates.items() if k not in unsuccessful}
+    _diff_cache[session_id] = (st.st_mtime, st.st_size, diffs)
+    return diffs
+
+
 _first_prompt_cache: dict[str, tuple[float, float, str]] = {}  # sid -> (time, mtime, prompt)
 _FIRST_PROMPT_TTL = 60  # seconds
 

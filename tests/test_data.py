@@ -1959,6 +1959,152 @@ class TestKiroPromptsCache:
         assert sessions[0].first_prompt == ""
 
 
+class TestKiroToolDiffs:
+    """`get_tool_diffs` reconstructs a diff from kiro-cli's own on-disk
+    transcript — the same file its native TUI reads to redraw a diff on
+    reload, which ACP's own `session/load` reply cannot supply (measured
+    2026-08-14: its replayed `tool_call_update`s carry no rawOutput/content
+    at all)."""
+
+    def _toolUse_line(self, tool_use_id, input_):
+        return json.dumps({
+            "version": "v1", "kind": "AssistantMessage",
+            "data": {"content": [
+                {"kind": "text", "data": ""},
+                {"kind": "toolUse", "data": {
+                    "toolUseId": tool_use_id, "name": "write", "input": input_}},
+            ]},
+        })
+
+    def _result_line(self, tool_use_id, status):
+        return json.dumps({
+            "version": "v1", "kind": "ToolResults",
+            "data": {"content": [{"kind": "toolResult", "data": {
+                "toolUseId": tool_use_id, "status": status}}]},
+        })
+
+    def test_a_create_yields_a_null_oldtext_diff(self, mock_sessions):
+        _write_session(mock_sessions, "d1", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_a", {
+                "command": "create", "path": "new.py", "content": "x = 1\n"}),
+        ])
+        diffs = data_kiro.get_tool_diffs("d1")
+        assert diffs == {"tooluse_a": {
+            "path": "new.py", "oldText": None, "newText": "x = 1\n"}}
+
+    def test_a_strreplace_yields_both_texts(self, mock_sessions):
+        _write_session(mock_sessions, "d2", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_b", {
+                "command": "strReplace", "path": "a.py",
+                "oldStr": "one\n", "newStr": "one\ntwo\n"}),
+        ])
+        diffs = data_kiro.get_tool_diffs("d2")
+        assert diffs == {"tooluse_b": {
+            "path": "a.py", "oldText": "one\n", "newText": "one\ntwo\n"}}
+
+    def test_a_non_write_tooluse_is_ignored(self, mock_sessions):
+        _write_session(mock_sessions, "d3", "C:\\Work", jsonl_lines=[
+            json.dumps({
+                "version": "v1", "kind": "AssistantMessage",
+                "data": {"content": [{"kind": "toolUse", "data": {
+                    "toolUseId": "tooluse_c", "name": "shell",
+                    "input": {"command": "echo hi"}}}]},
+            }),
+        ])
+        assert data_kiro.get_tool_diffs("d3") == {}
+
+    def test_an_unrecognised_write_command_is_ignored(self, mock_sessions):
+        """A future/unknown write command (neither create nor strReplace)
+        degrades to no entry rather than a guessed shape."""
+        _write_session(mock_sessions, "d4", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_d", {
+                "command": "insert", "path": "a.py", "text": "new line\n"}),
+        ])
+        assert data_kiro.get_tool_diffs("d4") == {}
+
+    def test_missing_jsonl_returns_empty_dict(self, mock_sessions):
+        assert data_kiro.get_tool_diffs("does-not-exist") == {}
+
+    def test_malformed_jsonl_line_is_skipped(self, mock_sessions):
+        _write_session(mock_sessions, "d5", "C:\\Work", jsonl_lines=[
+            "not valid json",
+            self._toolUse_line("tooluse_e", {
+                "command": "create", "path": "ok.py", "content": "y = 2\n"}),
+        ])
+        diffs = data_kiro.get_tool_diffs("d5")
+        assert diffs == {"tooluse_e": {
+            "path": "ok.py", "oldText": None, "newText": "y = 2\n"}}
+
+    def test_unchanged_jsonl_not_reparsed(self, mock_sessions):
+        _write_session(mock_sessions, "d6", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_f", {
+                "command": "create", "path": "z.py", "content": "z = 3\n"}),
+        ])
+        data_kiro._diff_cache.clear()
+        first = data_kiro.get_tool_diffs("d6")
+        assert first["tooluse_f"]["newText"] == "z = 3\n"
+        with patch("builtins.open", side_effect=AssertionError("should not re-parse")):
+            second = data_kiro.get_tool_diffs("d6")
+        assert second == first
+
+    def test_changed_jsonl_is_reparsed(self, mock_sessions):
+        _write_session(mock_sessions, "d7", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_g", {
+                "command": "create", "path": "z.py", "content": "z = 3\n"}),
+        ])
+        data_kiro._diff_cache.clear()
+        first = data_kiro.get_tool_diffs("d7")
+        assert first["tooluse_g"]["newText"] == "z = 3\n"
+
+        jsonl = mock_sessions / "d7.jsonl"
+        jsonl.write_text(self._toolUse_line("tooluse_h", {
+            "command": "create", "path": "z.py", "content": "z = 4\n"}), encoding="utf-8")
+        _bump_mtime(jsonl)
+
+        second = data_kiro.get_tool_diffs("d7")
+        assert "tooluse_g" not in second
+        assert second["tooluse_h"]["newText"] == "z = 4\n"
+
+    def test_a_successful_write_is_kept(self, mock_sessions):
+        _write_session(mock_sessions, "d8", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_i", {
+                "command": "create", "path": "ok.py", "content": "a = 1\n"}),
+            self._result_line("tooluse_i", "success"),
+        ])
+        diffs = data_kiro.get_tool_diffs("d8")
+        assert diffs == {"tooluse_i": {
+            "path": "ok.py", "oldText": None, "newText": "a = 1\n"}}
+
+    def test_a_cancelled_write_is_dropped(self, mock_sessions):
+        """The model's *proposed* call is logged whether or not it ever ran
+        — a rejected or user-cancelled write never touched the file.
+        Measured live: a session with two cancelled writes carried a
+        `toolUse` for each with a matching `status: "error"` ToolResults
+        line, `result: "Cancelled"`."""
+        _write_session(mock_sessions, "d9", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_j", {
+                "command": "create", "path": "never.py", "content": "b = 2\n"}),
+            self._result_line("tooluse_j", "error"),
+        ])
+        assert data_kiro.get_tool_diffs("d9") == {}
+
+    def test_a_cancelled_write_does_not_shadow_a_later_success(self, mock_sessions):
+        """The exact shape measured live: the same toolUseId is proposed,
+        cancelled, then re-proposed and applied — the filter must key on the
+        *outcome* for each attempt, not blanket-reject a path or id family."""
+        _write_session(mock_sessions, "d10", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tooluse_k", {
+                "command": "create", "path": "retry.py", "content": "c = 3\n"}),
+            self._result_line("tooluse_k", "error"),
+            self._toolUse_line("tooluse_l", {
+                "command": "create", "path": "retry.py", "content": "c = 4\n"}),
+            self._result_line("tooluse_l", "success"),
+        ])
+        diffs = data_kiro.get_tool_diffs("d10")
+        assert "tooluse_k" not in diffs
+        assert diffs["tooluse_l"]["newText"] == "c = 4\n"
+
+
 # --- Sidecar-derived session identity (presence.py) ---
 #
 # Neither CLI puts its session id on argv, so these files are the only way a
