@@ -6095,7 +6095,7 @@ check("setCrew with toolCallId anchors panel after tool call row", (tpl) => {
   // First deliver a tool_call frame so toolRows has the entry
   page.deliver({ type: "tool_call", sessionId: live,
     payload: { toolCallId: "tcid-1", title: "orchestrate", kind: "execute",
-               status: "started" } });
+               status: "in_progress" } });
   const toolRow = page.one("acpTranscript", ".acp-msg-tool");
   assert(toolRow !== null, "tool call row should exist in the transcript");
   // Now deliver the subagents frame with the same toolCallId
@@ -6160,9 +6160,9 @@ check("two subagents frames with different toolCallIds produce two independent p
   const { page, live } = connected(tpl);
   // Deliver two tool_call frames
   page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "a", title: "orchestrate-a", kind: "execute", status: "started" } });
+    payload: { toolCallId: "a", title: "orchestrate-a", kind: "execute", status: "in_progress" } });
   page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "b", title: "orchestrate-b", kind: "execute", status: "started" } });
+    payload: { toolCallId: "b", title: "orchestrate-b", kind: "execute", status: "in_progress" } });
   // Deliver two subagents frames with different toolCallIds
   page.deliver(subagentsFrame(live, [
     { sessionId: "sub-a1", role: "worker", task: "", sessionName: "agent-a",
@@ -6264,10 +6264,10 @@ check("anchor panel is a direct transcriptEl child even after flushToolGroups", 
   // Deliver two tool_call frames to trigger grouping at turn:end
   page.deliver({ type: "tool_call", sessionId: live,
     payload: { toolCallId: "tcid-group", name: "subagent_call", title: "orchestrate",
-               kind: "execute", status: "started" } });
+               kind: "execute", status: "in_progress" } });
   page.deliver({ type: "tool_call", sessionId: live,
     payload: { toolCallId: "tcid-other", name: "read_file", title: "read",
-               kind: "read", status: "started" } });
+               kind: "read", status: "in_progress" } });
   // Turn:end triggers flushToolGroups — moves tool rows into a hidden group body
   page.deliver({ type: "meta", sessionId: live,
                  payload: { turn: "end", stopReason: "end_turn" } });
@@ -6620,7 +6620,7 @@ check("tool_call with command renders .acp-tool-toggle in head; cmdWrap starts h
   page.deliver({
     type: "tool_call", sessionId: live,
     payload: { toolCallId: "tc-col-1", title: "shell", kind: "execute",
-               status: "started", command: "ls -la" },
+               status: "in_progress", command: "ls -la" },
   });
   const transcript = page.el("acpTranscript");
   const toggle = transcript.querySelector(".acp-tool-toggle");
@@ -6643,7 +6643,7 @@ check("clicking toggle reveals command body and sets aria-expanded=true", (tpl) 
   page.deliver({
     type: "tool_call", sessionId: live,
     payload: { toolCallId: "tc-col-2", title: "shell", kind: "execute",
-               status: "started", command: "git status" },
+               status: "in_progress", command: "git status" },
   });
   const transcript = page.el("acpTranscript");
   const toggle = transcript.querySelector(".acp-tool-toggle");
@@ -6661,7 +6661,7 @@ check("second click on toggle collapses command body again", (tpl) => {
   page.deliver({
     type: "tool_call", sessionId: live,
     payload: { toolCallId: "tc-col-3", title: "shell", kind: "execute",
-               status: "started", command: "echo hi" },
+               status: "in_progress", command: "echo hi" },
   });
   const transcript = page.el("acpTranscript");
   const toggle = transcript.querySelector(".acp-tool-toggle");
@@ -6680,7 +6680,7 @@ check("tool_call without command has no .acp-tool-toggle; head unchanged", (tpl)
   page.deliver({
     type: "tool_call", sessionId: live,
     payload: { toolCallId: "tc-col-4", title: "read_file", kind: "read",
-               status: "started" },
+               status: "in_progress" },
   });
   const transcript = page.el("acpTranscript");
   const toggle = transcript.querySelector(".acp-tool-toggle");
@@ -6692,7 +6692,7 @@ check("tool_call without command has no .acp-tool-toggle; head unchanged", (tpl)
 check("tool_update adding command to existing row appends toggle and starts collapsed", (tpl) => {
   const { page, live } = connected(tpl);
   // First deliver the initial call with no command
-  const call = { toolCallId: "tc-col-5", title: "shell", kind: "execute", status: "started" };
+  const call = { toolCallId: "tc-col-5", title: "shell", kind: "execute", status: "in_progress" };
   page.deliver({ type: "tool_call", sessionId: live, payload: call });
   const transcript = page.el("acpTranscript");
   assert(transcript.querySelector(".acp-tool-toggle") === null,
@@ -6714,11 +6714,11 @@ check("tool_update adding command to existing row appends toggle and starts coll
 check("tool_update status mutation works when row is collapsed", (tpl) => {
   const { page, live } = connected(tpl);
   const call = { toolCallId: "tc-col-6", title: "shell", kind: "execute",
-                 status: "started", command: "npm test" };
+                 status: "in_progress", command: "npm test" };
   page.deliver({ type: "tool_call", sessionId: live, payload: call });
   const transcript = page.el("acpTranscript");
   const statusEl = transcript.querySelector(".acp-tool-status");
-  assertEqual(statusEl.textContent, "started", "fixture: initial status");
+  assertEqual(statusEl.textContent, "in progress", "fixture: initial status");
   // Row is collapsed (default). Deliver a status-only update.
   page.deliver({
     type: "tool_update", sessionId: live,
@@ -6740,7 +6740,7 @@ check("aria-label on toggle contains tool name", (tpl) => {
   page.deliver({
     type: "tool_call", sessionId: live,
     payload: { toolCallId: "tc-col-7", title: "shell", kind: "execute",
-               status: "started", command: "make build" },
+               status: "in_progress", command: "make build" },
   });
   const toggle = page.el("acpTranscript").querySelector(".acp-tool-toggle");
   assert(toggle !== null, "fixture: toggle should be present");
@@ -6765,7 +6765,7 @@ check("toggle aria-label falls back to kind when title is empty", (tpl) => {
   page.deliver({
     type: "tool_call", sessionId: live,
     payload: { toolCallId: "tc-m1-kind", title: "", kind: "execute",
-               status: "started", command: "grep -r foo ." },
+               status: "in_progress", command: "grep -r foo ." },
   });
   const transcript = page.el("acpTranscript");
   const toggle = transcript.querySelector(".acp-tool-toggle");
@@ -6782,7 +6782,7 @@ check("exactly one toggle is created when command is updated multiple times", (t
   const { page, live } = connected(tpl);
   // Step 1: initial call with no command (status only)
   const call = { toolCallId: "tc-m2-idem", title: "shell", kind: "execute",
-                 status: "started" };
+                 status: "in_progress" };
   page.deliver({ type: "tool_call", sessionId: live, payload: call });
   // Step 2: first tool_update adding a command
   page.deliver({
@@ -7002,10 +7002,10 @@ check("P3: toolRows reference valid after grouping; tool_update status mutation 
   page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
   page.deliver({ type: "tool_call", sessionId: live,
     payload: { toolCallId: "g8a", title: "shell", kind: "execute",
-               status: "started", command: "ls" } });
+               status: "in_progress", command: "ls" } });
   page.deliver({ type: "tool_call", sessionId: live,
     payload: { toolCallId: "g8b", title: "shell", kind: "execute",
-               status: "started", command: "pwd" } });
+               status: "in_progress", command: "pwd" } });
   page.deliver({ type: "meta", sessionId: live,
     payload: { turn: "end", stopReason: "end_turn" } });
   await page.settle();
@@ -7050,22 +7050,99 @@ check("P3: replay safety — turn:end in history produces group", async (tpl) =>
 });
 
 check("P3: TOOL_STATUS_LABEL — unknown status is omitted from tally, no separator", async (tpl) => {
-  // `in_progress` is not in TOOL_STATUS_LABEL, so the status tally should be
-  // empty and the · separator should not appear in the toggle's text.
+  // A status outside the ACP `ToolCallStatus` enum is narrowed out entirely,
+  // so the tally is empty and the · separator does not appear. `cancelled` is
+  // the fixture because acp.py carries it in `_TERMINAL_TOOL_STATUSES`
+  // defensively while the protocol's own enum does not list it — exactly the
+  // "value this build does not know" case.
   const { page, live } = connected(tpl);
   await deliverTurn(page, live, [
-    { toolCallId: "m3a", title: "shell", kind: "execute", status: "in_progress", command: "x" },
-    { toolCallId: "m3b", title: "shell", kind: "execute", status: "in_progress", command: "y" },
+    { toolCallId: "m3a", title: "shell", kind: "execute", status: "cancelled", command: "x" },
+    { toolCallId: "m3b", title: "shell", kind: "execute", status: "cancelled", command: "y" },
   ]);
   const transcript = page.el("acpTranscript");
   const groups = transcript.querySelectorAll(".acp-tool-group");
-  assertEqual(groups.length, 1, "two in_progress tool calls should still form a group");
+  assertEqual(groups.length, 1, "two unknown-status tool calls should still form a group");
   const toggle = groups[0].querySelector(".acp-tool-group-toggle");
   assert(toggle, "group has no toggle button");
-  assert(!toggle.textContent.includes("in_progress"),
-    "raw wire status 'in_progress' reached the toggle textContent — must be narrowed out");
+  assert(!toggle.textContent.includes("cancelled"),
+    "raw wire status 'cancelled' reached the toggle textContent — must be narrowed out");
   assert(!toggle.textContent.includes('\xb7'),
     "· separator appears even though the status tally is empty (all statuses unknown)");
+  // And the badge itself stays off the row rather than showing the raw value.
+  const badge = transcript.querySelector(".acp-tool-status");
+  assert(badge.hidden === true, "an unknown status left the badge visible");
+  assertEqual(badge.getAttribute("data-status"), null,
+    "an unknown status reached data-status");
+});
+
+check("P3: in_progress is counted in the tally, rendered as its label", async (tpl) => {
+  // Regression guard. `in_progress` and `pending` — the two statuses an
+  // initial tool_call actually carries — were both absent from
+  // TOOL_STATUS_LABEL, so an unfinished call was dropped from the tally: a
+  // turn with three finished of five rendered "5 tool calls · completed ×3"
+  // and silently lost the other two.
+  const { page, live } = connected(tpl);
+  await deliverTurn(page, live, [
+    { toolCallId: "ip1", title: "shell", kind: "execute", status: "completed", command: "a" },
+    { toolCallId: "ip2", title: "shell", kind: "execute", status: "in_progress", command: "b" },
+    { toolCallId: "ip3", title: "shell", kind: "execute", status: "pending", command: "c" },
+  ]);
+  const transcript = page.el("acpTranscript");
+  const toggle = transcript.querySelector(".acp-tool-group-toggle");
+  assert(toggle, "group has no toggle button");
+  // A count of 1 renders as the bare label; only 2+ carries a ×n suffix.
+  const text = toggle.textContent;
+  assert(text.includes("completed"), "completed missing from tally: " + text);
+  assert(text.includes("in progress"), "in_progress missing from tally: " + text);
+  assert(text.includes("pending"), "pending missing from tally: " + text);
+  // The label is displayed; the wire key never is.
+  assert(!text.includes("in_progress"),
+    "raw wire status 'in_progress' reached the toggle textContent");
+});
+
+check("a tool row badge carries data-status for its wire value", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ds1", title: "shell", kind: "execute",
+               status: "in_progress", command: "sleep 1" } });
+  const badge = page.el("acpTranscript").querySelector(".acp-tool-status");
+  assertEqual(badge.getAttribute("data-status"), "in_progress",
+    "data-status should carry the wire value the closed set vouched for");
+  assertEqual(badge.textContent, "in progress", "badge should show the label, not the key");
+  assert(badge.hidden === false, "a known status left the badge hidden");
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "ds1", status: "failed" } });
+  assertEqual(badge.getAttribute("data-status"), "failed",
+    "data-status should follow the row's status");
+});
+
+check("a tool_call with no status leaves the badge off the row", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ns1", title: "shell", kind: "execute", command: "ls" } });
+  const badge = page.el("acpTranscript").querySelector(".acp-tool-status");
+  assert(badge.hidden === true, "an unreported status rendered a visible badge");
+  assertEqual(badge.textContent, "", "an unreported status invented badge text");
+});
+
+check("a tool_update carrying no status does not clobber the row's status", (tpl) => {
+  // The tool_call_update merge rule: a field the update omits means "no
+  // change". This page used to write the literal 'update' here, so an update
+  // carrying only content replaced a real status with a word the protocol
+  // never sends.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "mg1", title: "shell", kind: "execute",
+               status: "completed", command: "ls" } });
+  const badge = page.el("acpTranscript").querySelector(".acp-tool-status");
+  assertEqual(badge.textContent, "completed", "fixture: initial status");
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "mg1", title: "shell" } });
+  assertEqual(badge.textContent, "completed",
+    "a status-less tool_update overwrote the row's status");
+  assertEqual(badge.getAttribute("data-status"), "completed",
+    "a status-less tool_update overwrote data-status");
 });
 
 check("P3: sequential turns each produce their own .acp-tool-group", async (tpl) => {
@@ -7092,7 +7169,7 @@ check("P3: toolGroup is null after clearTranscript", async (tpl) => {
   page.deliver({ type: "meta", sessionId: live, payload: { turn: "start" } });
   page.deliver({ type: "tool_call", sessionId: live,
     payload: { toolCallId: "g10a", title: "shell", kind: "execute",
-               status: "started", command: "ls" } });
+               status: "in_progress", command: "ls" } });
   // Switch session (triggers clearTranscript)
   const newSid = "sess-post-clear";
   page.deliver({ type: "session", sessionId: newSid,

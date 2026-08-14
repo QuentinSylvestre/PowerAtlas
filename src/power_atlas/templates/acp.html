@@ -861,17 +861,39 @@
   RAIL_STATUS_LABEL.idle = 'open in this PowerAtlas — idle';
   RAIL_STATUS_LABEL.unread = 'open in this PowerAtlas — unread messages';
   // 'working' was never assigned to this map; delete is not needed but the plan spec mentioned it.
-  // Closed-set map for tool-call status strings used in the group header tally
-  // (Phase 3). Wire values absent from this map are silently omitted from the
-  // tally — no raw wire string reaches visible UI (no-raw-wire-value rule).
+  // Closed-set map for tool-call status strings — the row badge and the group
+  // header tally both read it. Wire values absent from this map are silently
+  // omitted from both: no raw wire string reaches visible UI
+  // (no-raw-wire-value rule).
+  //
+  // **These four keys are the whole ACP `ToolCallStatus` enum** and nothing
+  // else belongs here. The map used to carry six, and the difference was a
+  // live defect rather than harmless over-coverage:
+  //
+  //   - `pending` and `in_progress` — the two statuses an initial `tool_call`
+  //     actually carries — were both MISSING, so an unfinished call was
+  //     omitted from the tally entirely. A cancelled turn with five calls,
+  //     three of them finished, rendered "5 tool calls · completed ×3" and
+  //     silently lost the other two; a turn where nothing had finished yet
+  //     rendered a count and no status at all.
+  //   - `started`, `denied` and `approved` were never wire values. `started`
+  //     came from this page's own `payload.status || 'started'` default (now
+  //     gone); `denied`/`approved` read as permission outcomes, but a denied
+  //     permission surfaces on the wire as `tool_call_update: failed` —
+  //     docs/KNOWLEDGE.md records the measurement — so neither could ever fire.
+  //   - `update` was this page's other invented default, likewise gone.
+  //
+  // A status kiro-cli adds later renders as no badge rather than as a raw
+  // string, which is the same trade the tally has always made. Add the key
+  // here — and a colour beside `.acp-tool-status[data-status=…]` in style.css
+  // — to bring it back into view.
+  //
   // First used in flushToolGroups() — declared here near RAIL_STATUS for co-location.
   var TOOL_STATUS_LABEL = Object.create(null);
-  TOOL_STATUS_LABEL.started   = 'started';
-  TOOL_STATUS_LABEL.completed = 'completed';
-  TOOL_STATUS_LABEL.failed    = 'failed';
-  TOOL_STATUS_LABEL.denied    = 'denied';
-  TOOL_STATUS_LABEL.approved  = 'approved';
-  TOOL_STATUS_LABEL.update    = 'update'; // synthetic fallback (payload.status || 'update' in known branch); not a real kiro-cli wire status
+  TOOL_STATUS_LABEL.pending     = 'pending';
+  TOOL_STATUS_LABEL.in_progress = 'in progress';
+  TOOL_STATUS_LABEL.completed   = 'completed';
+  TOOL_STATUS_LABEL.failed      = 'failed';
   // Status bucket order: priority order, highest urgency first.
   // Array (not a map) — ordering defines bucket display priority.
   // 'working', 'waiting', 'errored' mirror the RAIL_STATUS keys; keep in sync.
@@ -2041,6 +2063,31 @@
     return toggle;
   }
 
+  // Write a wire status onto a row's status badge.
+  //
+  // One function for both the new-row and the update path, because the rule
+  // they have to share is the merge rule and it is easy to get wrong in one of
+  // two places: `tool_call_update` omits every field it is not changing, so an
+  // absent status means "no change" and must never overwrite a status the row
+  // already shows. This page used to write `'started'` on a new row and
+  // `'update'` on an update, so an update that carried only `content` — which
+  // is most of them — replaced a real status with a word the protocol never
+  // sends.
+  //
+  // The badge is hidden rather than blanked while there is nothing to say: an
+  // empty pill is a visible claim that the status is empty, which is a
+  // different (and false) statement from "not reported yet".
+  function _setToolStatus(el, wireStatus) {
+    if (!el || !wireStatus) return;             // absent = no change
+    var label = TOOL_STATUS_LABEL[wireStatus];  // closed set; see the map
+    if (!label) return;                         // unknown value: leave as-is
+    el.textContent = label;
+    // `wireStatus` reaches an attribute only after the map has vouched for it,
+    // so the value in the DOM is one of four literals rather than agent text.
+    el.setAttribute('data-status', wireStatus);
+    el.hidden = false;
+  }
+
   function addToolCall(payload) {
     // Every class name below is a literal. `status`, `kind` and `title` are
     // agent-authored and reach the page only through textContent — under -a
@@ -2049,7 +2096,7 @@
     var id = payload.toolCallId;
     var known = id ? toolRows['t:' + id] : null;
     if (known) {
-      known.status.textContent = payload.status || 'update';
+      _setToolStatus(known.status, payload.status);
       if (payload.command && !known.body.querySelector('.acp-tool-cmd')) {
         var cmdWrap = commandBlock(payload);
         cmdWrap.hidden = true;
@@ -2096,7 +2143,11 @@
     }
     var status = document.createElement('span');
     status.className = 'acp-tool-status';
-    status.textContent = payload.status || 'started';
+    // Built hidden and filled by `_setToolStatus`, which is also what a later
+    // `tool_update` calls. A `tool_call` carrying no status leaves the badge
+    // off the row until one arrives, rather than inventing a word for it.
+    status.hidden = true;
+    _setToolStatus(status, payload.status);
     head.appendChild(status);
     body.appendChild(head);
 
@@ -2195,16 +2246,25 @@
         nameCounts[nm]++;
       }
 
-      // Build status tally using TOOL_STATUS_LABEL narrowing.
-      // Unknown wire status values are silently omitted (no-raw-wire-value rule).
+      // Build the status tally from each row's `data-status`, which
+      // `_setToolStatus` sets only for a value TOOL_STATUS_LABEL vouched for.
+      // Reading the attribute rather than the badge's text is what keeps this
+      // honest now that the two differ — the badge renders `in_progress` as
+      // "in progress", and re-deriving the key from the rendered label would
+      // put display wording on the lookup path.
+      //
+      // A row with no attribute contributes nothing: either its status was
+      // never reported, or it was a value this build does not know. Both are
+      // "no claim", which is the right thing for a count to make.
+      //
       // Snapshot at turn:end; tool_update mutations after this point are not
       // reflected in the header tally (static snapshot by design).
       var stCounts = Object.create(null);
       var stOrder = [];
       for (var s = 0; s < rows.length; s++) {
         var stEl = rows[s].querySelector('.acp-tool-status');
-        var stRaw = stEl ? stEl.textContent : '';
-        var st = TOOL_STATUS_LABEL[stRaw]; // undefined for unknown values
+        var stRaw = stEl ? (stEl.getAttribute('data-status') || '') : '';
+        var st = TOOL_STATUS_LABEL[stRaw]; // undefined for unknown/absent
         if (st) {
           if (!stCounts[st]) { stCounts[st] = 0; stOrder.push(st); }
           stCounts[st]++;

@@ -758,6 +758,24 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-tool-name { font-size: 12px; font-weight: 600; color: #e9d5ff; }
 .acp-tool-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
 .acp-tool-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+/* Tool-call status badge, one rule per value of the ACP `ToolCallStatus` enum
+   — and only those four; the JS closed set (`TOOL_STATUS_LABEL` in acp.html)
+   is what decides whether `data-status` is written at all, so a value with no
+   rule here renders as an unstyled pill rather than as nothing, and a value
+   the map rejects never reaches this selector.
+
+   The hues are the session-status dot scheme above rather than a second
+   palette: `in_progress` borrows the rail's thinking blue and its pulse,
+   `completed` the shared success green, `failed` the errored red. One
+   vocabulary of colour across the rail and the transcript means a glance
+   costs the reader one mapping, not two. `pending` is deliberately the dim
+   neutral — queued is the absence of activity, and giving it a hue would put
+   three competing colours in a row of eight-point text. */
+.acp-tool-status[data-status="pending"] { color: var(--text-dim); }
+.acp-tool-status[data-status="in_progress"] { color: #3b82f6; border-color: rgba(59, 130, 246, 0.45); animation: status-pulse 2s ease-in-out infinite; }
+.acp-tool-status[data-status="completed"] { color: var(--success); border-color: rgba(74, 222, 128, 0.4); }
+.acp-tool-status[data-status="failed"] { color: #ef4444; border-color: rgba(239, 68, 68, 0.45); }
+@media (prefers-reduced-motion: reduce) { .acp-tool-status[data-status="in_progress"] { animation: none; } }
 .acp-tool-toggle {
   background: none;
   border: none;
