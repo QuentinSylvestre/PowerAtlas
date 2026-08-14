@@ -3021,23 +3021,200 @@ class TestAcpToolCallVisibility:
         assert frames[0]["payload"]["status"] == "completed"
         assert frames[0]["payload"]["toolCallId"] == "t1"
 
-    def test_a_content_only_update_is_not_forwarded(self, acp_session):
+    def test_a_content_only_update_carries_its_output_but_records_no_body(
+            self, acp_session):
         """Measured 2026-08-11 against a real kiro-cli 2.16.2 subprocess:
         every toolCallId gets exactly one intermediate `tool_call_update`
         shaped like this — only `content`, none of title/kind/status/
-        rawInput — before the terminal one with `status: "completed"`
-        arrives. `_tool_payload` does not read `content` at all, so
-        forwarding this one would send an all-blank `tool_update` that could
-        flash an already-populated row empty right before the real state
-        lands a moment later."""
+        rawInput — before the terminal one with `status: "completed"`.
+
+        This used to be dropped, because `_tool_payload` did not read
+        `content` and an all-blank `tool_update` could flash an
+        already-populated row empty. Now the frame carries the tool's output,
+        so it is forwarded in the two halves the budget note above
+        `MAX_TOOL_OUTPUT_CHARS` describes: the body broadcast and never
+        recorded, the digest recorded like any other frame."""
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
         self._notify(acp_mod, sid, {
             "sessionUpdate": "tool_call_update", "toolCallId": "t1",
             "content": [{"type": "content",
                          "content": {"type": "text", "text": "24\n"}}]})
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["tool_output", "tool_update"]
+        # The body reaches a live viewer...
+        assert frames[0]["payload"]["text"] == "24\n"
+        assert frames[0]["payload"]["toolCallId"] == "t1"
+        # ...and the digest describes it without repeating it.
+        digest = frames[1]["payload"]["output"]
+        assert digest["form"] == "text"
+        assert digest["bytes"] == 3
+        assert digest["lines"] == 1
+        # The invariant the whole split exists for: nothing recorded in the
+        # replay buffer carries the output bytes.
+        recorded = acp_mod._supervisor.history[sid].events()
+        assert [f["type"] for f in recorded] == ["tool_update"]
+        assert "24" not in json.dumps(recorded)
+
+    def test_a_wholly_blank_update_is_still_not_forwarded(self, acp_session):
+        """The guard the content branch above relaxed is still load-bearing:
+        an update with no title/kind/status/command *and* no output would
+        reach the page as an all-blank `tool_update`."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1"})
         assert _queued(conn) == []
         assert acp_mod._supervisor.history[sid].events() == []
+
+    def test_shell_output_digests_to_exit_status_and_stderr_head(self, acp_session):
+        """A shell result reaches the page as an exit status and the head of
+        stderr — the audit answer, small enough to record."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "failed",
+            "rawOutput": {"items": [{"Json": {
+                "stdout": "compiling\n", "stderr": "error: unresolved import\n",
+                "exit_status": 101}}]}})
+        frames = _queued(conn)
+        digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["form"] == "exec"
+        assert digest["exitStatus"] == 101
+        assert digest["stderrHead"] == "error: unresolved import"
+        assert digest["stderrTruncated"] is False
+
+    def test_an_oversize_stderr_head_says_it_was_clipped(self, acp_session):
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "failed",
+            "rawOutput": {"items": [{"Json": {
+                "stderr": "E" * 900, "exit_status": 1}}]}})
+        digest = next(f for f in _queued(conn)
+                      if f["type"] == "tool_update")["payload"]["output"]
+        assert len(digest["stderrHead"]) == acp_mod.MAX_STDERR_HEAD_CHARS
+        assert digest["stderrTruncated"] is True
+
+    def test_an_edit_digests_to_a_diff_stat_and_carries_the_diff_body(
+            self, acp_session):
+        """The one case where the expensive-looking output is the cheap one:
+        a diff is bounded by the edit, not by the file."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "diff", "path": "/repo/a.py",
+                         "oldText": "one\ntwo\n", "newText": "one\ntwo\nthree\n"}]})
+        frames = _queued(conn)
+        body = next(f for f in frames if f["type"] == "tool_output")["payload"]
+        assert body["form"] == "diff"
+        assert body["path"] == "/repo/a.py"
+        assert body["newText"] == "one\ntwo\nthree\n"
+        digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+        assert digest == {"form": "diff", "path": "/repo/a.py",
+                          "added": 1, "removed": 0, "isNew": False}
+
+    def test_a_new_file_diff_is_marked_new_rather_than_empty(self, acp_session):
+        """`oldText: null` means the file did not exist, which is a different
+        statement from a file that was empty — only one is an addition."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "diff", "path": "/repo/new.py",
+                         "oldText": None, "newText": "a\nb\n"}]})
+        frames = _queued(conn)
+        digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["isNew"] is True
+        assert digest["added"] == 2
+        body = next(f for f in frames if f["type"] == "tool_output")["payload"]
+        assert body["oldText"] is None
+
+    def test_the_output_body_is_the_tail_and_says_it_was_clipped(self, acp_session):
+        """A build log's last lines are the ones that say what happened."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        long_text = "x" * 5000 + "THE-END"
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "rawOutput": {"items": [{"Text": long_text}]}})
+        body = next(f for f in _queued(conn)
+                    if f["type"] == "tool_output")["payload"]
+        assert len(body["text"]) == acp_mod.MAX_TOOL_OUTPUT_CHARS
+        assert body["text"].endswith("THE-END")
+        assert body["truncated"] is True
+        assert body["length"] == len(long_text)
+
+    def test_locations_are_forwarded_and_bounded(self, acp_session):
+        """ACP's own answer to "which file did this touch", replacing
+        `_tool_input_text`'s key-sniffing guess where both are present."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "read", "kind": "read", "status": "in_progress",
+            "locations": [{"path": "/repo/a.py", "line": 42},
+                          {"path": "/repo/b.py"},
+                          {"path": ""},           # dropped: no path
+                          {"line": 3},            # dropped: no path
+                          "not-a-dict"] +          # dropped: not an object
+                         [{"path": f"/repo/{i}.py"} for i in range(20)]})
+        payload = next(f for f in _queued(conn)
+                       if f["type"] == "tool_call")["payload"]
+        locs = payload["locations"]
+        assert len(locs) <= acp_mod.MAX_TOOL_LOCATIONS
+        assert locs[0] == {"path": "/repo/a.py", "line": 42}
+        # `line` absent means "the whole file" and must not become line 0.
+        assert locs[1] == {"path": "/repo/b.py"}
+
+    def test_a_call_with_no_output_carries_no_output_key(self, acp_session):
+        """The many calls that return nothing keep the frame the size it has
+        always been."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "true"}})
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["tool_call"]
+        assert "output" not in frames[0]["payload"]
+        assert "locations" not in frames[0]["payload"]
+
+    def test_an_unrecognised_rawoutput_shape_still_digests_to_a_byte_count(
+            self, acp_session):
+        """The hypothesis in `_raw_output_items` is cyril's disassembly, not a
+        measurement against this build. When it misses, the digest degrades to
+        something true of any shape rather than to nothing."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "content",
+                         "content": {"type": "text", "text": "hello\nthere\n"}}],
+            "rawOutput": {"somethingElse": {"unknown": "shape"}}})
+        digest = next(f for f in _queued(conn)
+                      if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["form"] == "text"
+        assert digest["bytes"] == 12
+        assert digest["lines"] == 2
+
+    def test_the_terminal_content_variant_is_not_rendered(self, acp_session):
+        """A `terminal` ToolCallContent references a terminal the agent owns;
+        a client without the handle has nothing to draw."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "content": [{"type": "terminal", "terminalId": "term-1"}]})
+        assert _queued(conn) == []
 
     def test_the_command_is_logged_as_well_as_forwarded(self, acp_session, caplog):
         """The log line is the trace that outlives the tab. The test it

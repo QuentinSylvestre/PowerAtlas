@@ -167,6 +167,10 @@ SERVER_TYPES = frozenset({
     "subagents", "steer_ack", "steer_sent",
     "commands", "skills",  # "skills" carries the list of kiro-cli skill entries
     "compaction", "commands_options_result", "commands_execute_result",
+    # A tool call's output body. Broadcast-only — never recorded, so it is
+    # absent after a reload by design and the row says so; the digest that
+    # survives rides on `tool_update`. See the note above MAX_TOOL_OUTPUT_CHARS.
+    "tool_output",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -328,6 +332,51 @@ LOAD_MIN_INTERVAL_SECONDS = 1.0
 # replay buffer, and is rendered into the DOM. A clipped command says so on
 # the page rather than looking complete.
 MAX_TOOL_INPUT_CHARS = 4000
+
+# ---------------------------------------------------------------------------
+# Tool *output*, and the split that lets it exist at all.
+#
+# The long-standing objection to rendering it is in `_tool_payload`'s docstring
+# and it is arithmetic, not taste: a file read or a build log is unbounded, and
+# `_emit` records every byte into a 2 MiB replay buffer that evicts oldest —
+# so output would evict the conversation it is meant to annotate. Measured
+# against this module's own figures (a 2,251-char answer produced a 2,548-byte
+# token frame plus 23,018 bytes of chunks, so ~25 KB for a prose-heavy turn),
+# 2 MiB is ~84 turns of history. Recording a 4,000-char output for 20 calls a
+# turn would take that to ~20.
+#
+# What resolves it is that the two things wanted from tool output are not one
+# thing, and they separate along exactly the record-versus-broadcast seam:
+#
+#   the DIGEST — an exit status, a byte count, a diff stat, the head of
+#   stderr. This is the audit answer, the one `-a` makes necessary, and it
+#   MUST survive a reload. It is ~150 bytes, so it goes through `_emit` and
+#   into the buffer like every other frame. ~3 KB a turn, ~75 turns retained.
+#
+#   the BODY — the diff, the stdout tail. This is the comprehension aid. It is
+#   large, and it only matters to someone watching. It is broadcast and never
+#   recorded, so it costs the buffer nothing and is honestly absent after a
+#   reload rather than silently half-there.
+#
+# If the digest turns out not to carry enough in practice, the way in is a
+# priority-aware eviction in `_History` — not a bigger cap here.
+# ---------------------------------------------------------------------------
+
+# The body cap, per tool call. Deliberately under `MAX_TOOL_INPUT_CHARS`: a
+# command is one line an operator reads in full, while output is a tail they
+# skim, and this one is not paid for by the replay buffer only because it is
+# never recorded. The clip is stated on the page, as the command's is.
+MAX_TOOL_OUTPUT_CHARS = 2000
+
+# How much of stderr rides along in the recorded digest. Small on purpose —
+# this one IS in the replay buffer. A failing command's first line is almost
+# always the line that explains it; the rest is in the broadcast body.
+MAX_STDERR_HEAD_CHARS = 300
+
+# `locations` entries forwarded per tool call. The wire sends one per file a
+# call touches, which for a bulk edit could be many; the page shows the first
+# and counts the rest, so a handful is all that is ever read.
+MAX_TOOL_LOCATIONS = 8
 
 # The most agent prose one bubble may accumulate before this module stops
 # offering to render it. Past the cap the bubble stays exactly the plain text
@@ -1059,13 +1108,255 @@ def _tool_input_text(update: dict) -> str:
         return ""
 
 
+def _tool_locations(update: dict) -> list:
+    """Which files a tool call says it touched.
+
+    ``locations`` is ACP proper — ``[{"path": …, "line": …}]``, sent on
+    file-touching calls — and it is the protocol's own answer to the question
+    ``_tool_input_text`` above has to guess at by sniffing ``rawInput`` for
+    whichever of five key names a given tool happens to use. Where both are
+    present this one is right by construction.
+
+    ``line`` is carried through only when it is a real integer: it is optional
+    on the wire and means "the whole file" when absent, which is a different
+    statement from line 0.
+    """
+    raw = update.get("locations")
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw[:MAX_TOOL_LOCATIONS]:
+        if not isinstance(entry, dict):
+            continue
+        path = _as_text(entry.get("path"))
+        if not path:
+            continue
+        item = {"path": path[:MAX_TOOL_INPUT_CHARS]}
+        line = entry.get("line")
+        if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+            item["line"] = line
+        out.append(item)
+    return out
+
+
+def _raw_output_items(update: dict) -> list:
+    """``rawOutput``'s payload list, or ``[]``.
+
+    **This shape is a hypothesis and is deliberately the only place that
+    assumes it.** ACP declares ``rawOutput`` as an opaque
+    ``Record<string, unknown>``; the ``{"items": [{"Text": …} | {"Json": …}]}``
+    tagged-union reading comes from dwalleck/cyril's disassembly of the
+    kiro-cli TUI bundle, whose version numbering does not line up with the
+    2.16.x this module talks to. Everything downstream degrades to a byte count
+    when the match fails, and `_tool_output_digest` logs the unrecognised keys
+    at debug so one probe session settles it.
+    """
+    raw = update.get("rawOutput")
+    if not isinstance(raw, dict):
+        return []
+    items = raw.get("items")
+    return items if isinstance(items, list) else []
+
+
+def _content_blocks(update: dict) -> list:
+    """``content``'s entries, or ``[]``.
+
+    Unlike ``rawOutput`` this one is schema'd: a ``ToolCallContent`` is
+    ``{"type": "content", "content": <ContentBlock>}``, ``{"type": "diff",
+    "path", "oldText", "newText"}`` or ``{"type": "terminal", "terminalId"}``.
+    The third is not read anywhere here — it references a terminal the agent
+    owns and a client without the handle cannot render it.
+    """
+    raw = update.get("content")
+    return raw if isinstance(raw, list) else []
+
+
+def _text_of_content_block(block: dict) -> str:
+    """The text inside one ``{"type": "content"}`` entry, or ``""``."""
+    inner = block.get("content")
+    if isinstance(inner, str):
+        return inner
+    if isinstance(inner, dict) and inner.get("type") == "text":
+        return _as_text(inner.get("text"))
+    return ""
+
+
+def _tool_output_text(update: dict) -> str:
+    """Everything a tool call printed, as one string, uncapped.
+
+    The caller caps. Two sources because the wire uses two: streamed output
+    arrives as ``content`` on intermediate updates, and the settled result as
+    ``rawOutput`` on the terminal one.
+    """
+    parts = []
+    for block in _content_blocks(update):
+        if isinstance(block, dict) and block.get("type") == "content":
+            text = _text_of_content_block(block)
+            if text:
+                parts.append(text)
+    for item in _raw_output_items(update):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("Text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+            continue
+        blob = item.get("Json")
+        if isinstance(blob, dict):
+            for key in ("stdout", "stderr"):
+                value = blob.get(key)
+                if isinstance(value, str) and value:
+                    parts.append(value)
+    return "".join(parts)
+
+
+def _tool_diff(update: dict) -> dict | None:
+    """The first ``{"type": "diff"}`` entry in ``content``, normalised.
+
+    ``oldText`` is nullable and null means "this file did not exist" — a
+    distinction worth keeping, since a new file and a file whose previous
+    contents happened to be empty render differently and only one of them is
+    an addition.
+    """
+    for block in _content_blocks(update):
+        if not isinstance(block, dict) or block.get("type") != "diff":
+            continue
+        new_text = block.get("newText")
+        if not isinstance(new_text, str):
+            continue
+        old = block.get("oldText")
+        return {
+            "path": _as_text(block.get("path")),
+            "oldText": old if isinstance(old, str) else None,
+            "newText": new_text,
+        }
+    return None
+
+
+def _diff_stat(old: str | None, new: str) -> tuple:
+    """``(added, removed)`` line counts for one diff.
+
+    A line-count difference, not a real diff: the page renders the two texts
+    and this only sizes the header. Computing an LCS here would spend event-loop
+    time on a number that is a header ornament, and on a new file (``old`` is
+    ``None``) the answer is every line added either way.
+    """
+    new_lines = new.splitlines()
+    if old is None:
+        return (len(new_lines), 0)
+    old_lines = old.splitlines()
+    common = 0
+    for a, b in zip(old_lines, new_lines):
+        if a != b:
+            break
+        common += 1
+    return (len(new_lines) - common, len(old_lines) - common)
+
+
+def _tool_output_digest(update: dict) -> dict | None:
+    """A small, bounded account of what one tool call produced.
+
+    This is the half that goes into the replay buffer, so every field here is
+    a number or a hard-capped string — see the budget note above
+    ``MAX_TOOL_OUTPUT_CHARS``. ``None`` when the call produced nothing worth
+    describing, which keeps the frame the size it has always been for the many
+    calls that return nothing.
+
+    ``form`` names the renderer the page should use, and is the one field that
+    is a closed set: ``exec``, ``diff``, ``text``. An output this function
+    cannot classify still gets a digest — the byte count is true whatever the
+    shape turned out to be — and logs its keys so a probe can name it.
+    """
+    diff = _tool_diff(update)
+    if diff is not None:
+        added, removed = _diff_stat(diff["oldText"], diff["newText"])
+        return {"form": "diff", "path": diff["path"],
+                "added": added, "removed": removed,
+                "isNew": diff["oldText"] is None}
+
+    exit_status = None
+    stderr = ""
+    unclassified = []
+    for item in _raw_output_items(update):
+        if not isinstance(item, dict):
+            continue
+        blob = item.get("Json")
+        if isinstance(blob, dict):
+            value = blob.get("exit_status", blob.get("exitStatus"))
+            if isinstance(value, int) and not isinstance(value, bool):
+                exit_status = value
+            err = blob.get("stderr")
+            if isinstance(err, str) and err.strip():
+                stderr = err
+            if "exit_status" not in blob and "exitStatus" not in blob:
+                unclassified.extend(k for k in blob if k not in ("stdout", "stderr"))
+        elif "Text" not in item:
+            unclassified.extend(item.keys())
+
+    text = _tool_output_text(update)
+    if unclassified and log.isEnabledFor(logging.DEBUG):
+        # The one signal that the shape hypothesis in `_raw_output_items` has
+        # drifted. Keys only — the values are unbounded tool output.
+        log.debug("ACP tool output: unrecognised rawOutput keys %r (id=%s)",
+                  sorted(set(unclassified))[:12], _as_text(update.get("toolCallId")))
+
+    if exit_status is not None or stderr:
+        digest = {"form": "exec", "bytes": len(text.encode("utf-8", "replace")),
+                  "lines": text.count("\n") + (1 if text and not text.endswith("\n") else 0)}
+        if exit_status is not None:
+            digest["exitStatus"] = exit_status
+        if stderr:
+            head = stderr.strip()
+            digest["stderrTruncated"] = len(head) > MAX_STDERR_HEAD_CHARS
+            digest["stderrHead"] = head[:MAX_STDERR_HEAD_CHARS]
+        return digest
+
+    if not text:
+        return None
+    return {"form": "text",
+            "bytes": len(text.encode("utf-8", "replace")),
+            "lines": text.count("\n") + (1 if not text.endswith("\n") else 0)}
+
+
+def _tool_output_body(update: dict) -> dict | None:
+    """The broadcast-only half: what the operator reads, capped and never recorded.
+
+    Returns the frame payload for a ``tool_output``, or ``None`` when there is
+    nothing to send. A diff is carried whole rather than as a tail — it is
+    bounded by the size of the *edit*, which is the one case where the
+    expensive-looking output is actually the cheap one — but still capped,
+    because "bounded by the edit" is a description of normal behaviour and not
+    a guarantee about an agent running unattended.
+    """
+    diff = _tool_diff(update)
+    if diff is not None:
+        new_text = diff["newText"][:MAX_TOOL_OUTPUT_CHARS]
+        old_text = diff["oldText"]
+        return {"form": "diff", "path": diff["path"],
+                "oldText": None if old_text is None else old_text[:MAX_TOOL_OUTPUT_CHARS],
+                "newText": new_text,
+                "truncated": (len(diff["newText"]) > MAX_TOOL_OUTPUT_CHARS
+                              or (old_text is not None
+                                  and len(old_text) > MAX_TOOL_OUTPUT_CHARS))}
+    text = _tool_output_text(update)
+    if not text.strip():
+        return None
+    # The *tail*, not the head: a build log's last lines are the ones that say
+    # what happened, and a stack trace's useful end is its bottom.
+    clipped = text[-MAX_TOOL_OUTPUT_CHARS:]
+    return {"form": "text", "text": clipped,
+            "truncated": len(clipped) < len(text),
+            "length": len(text)}
+
+
 def _tool_payload(update: dict) -> dict:
     """What a tool-call notification carries to the page.
 
-    Deliberately not the tool's *output*: a file read or a build log is
-    unbounded by nature and every byte of it would be recorded in the replay
-    buffer, evicting the conversation it is meant to annotate. What ran, under
-    what name, and how it ended is the operator's question here.
+    Carries the tool's *output* only as a bounded digest — never the bytes.
+    The reasoning, and where the bytes go instead, is the budget note above
+    ``MAX_TOOL_OUTPUT_CHARS``: everything in this payload is recorded in the
+    replay buffer, and a file read or a build log is unbounded by nature, so
+    putting it here would evict the conversation it is meant to annotate.
     """
     payload = {
         "toolCallId": _as_text(update.get("toolCallId")),
@@ -1079,6 +1370,12 @@ def _tool_payload(update: dict) -> dict:
         payload["commandTruncated"] = True
         command = command[:MAX_TOOL_INPUT_CHARS]
     payload["command"] = command
+    locations = _tool_locations(update)
+    if locations:
+        payload["locations"] = locations
+    digest = _tool_output_digest(update)
+    if digest is not None:
+        payload["output"] = digest
     return payload
 
 
@@ -3008,19 +3305,35 @@ class _Supervisor:
                                   " on inflight session=%s — spawner anchor not recorded",
                                   _spawner_tool_name, session_id)
                 elif not (payload["title"] or payload["kind"] or
-                          payload["status"] or payload["command"]):
-                    # `tool_call_update` can arrive in two shapes for the same
+                          payload["status"] or payload["command"]
+                          or "output" in payload):
+                    # `tool_call_update` arrives in two shapes for the same
                     # `toolCallId`: measured 2026-08-11 against a real kiro-cli
                     # 2.16.2 subprocess, every call got an optional
                     # intermediate update carrying only `content` (the tool's
-                    # streamed output) — a shape `_tool_payload` does not read
-                    # at all — followed by a terminal one with
-                    # `status`/`rawOutput`. Forwarding the intermediate one
-                    # would emit a `tool_update` with every field blank, which
-                    # could flash an already-populated row empty a moment
-                    # before the real state lands. Skipped rather than sent:
-                    # nothing informative would have reached the page anyway.
+                    # streamed output), followed by a terminal one with
+                    # `status`/`rawOutput`.
+                    #
+                    # The guard stays and the reason it exists is unchanged: a
+                    # `tool_update` with every field blank could flash an
+                    # already-populated row empty a moment before the real
+                    # state lands. What changed is that `content` is no longer
+                    # a shape this file cannot read, so an intermediate frame
+                    # is only *blank* when it carries no output either — the
+                    # `"output" in payload` term is what stops this branch from
+                    # dropping the streaming half on the floor, which is what
+                    # it did for as long as `_tool_payload` ignored `content`.
                     return
+                # The body: broadcast, never recorded. Sent before the digest
+                # frame so a live viewer never sees "12 lines" on a row whose
+                # body has not arrived yet. `_registry.broadcast` rather than
+                # `_emit` is the whole budget decision in one line — see the
+                # note above MAX_TOOL_OUTPUT_CHARS.
+                body = _tool_output_body(update)
+                if body is not None:
+                    body["toolCallId"] = payload["toolCallId"]
+                    _registry.broadcast(
+                        session_id, envelope("tool_output", body, session_id))
                 # For tool_call_update terminal frames, clean up stale spawner
                 # anchors. Blank-intermediate updates have already returned
                 # above — only terminal (status non-empty) frames reach here.
