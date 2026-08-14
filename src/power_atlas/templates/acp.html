@@ -2418,13 +2418,15 @@
     return null;
   }
 
-  /** The always-visible one-liner beside an edit row's name: a short
-   *  filename and the +/- stat, so a reader can tell what an edit touched
-   *  without opening the row. The panel behind the toggle still carries the
-   *  full path — this is a glance, not a replacement for it. */
+  /** The one-liner beside an edit row's name: a short filename and the +/-
+   *  stat, so a reader can tell what an edit touched without opening the
+   *  row. Hidden while the panel is open — the panel repeats the same
+   *  filename and stat, larger and with the full path, so showing both at
+   *  once is the same fact twice rather than two facts. */
   function _renderEditQuickInfo(known) {
     var el = known.quickInfo;
     el.textContent = '';
+    if (known.panel && known.panel.hidden === false) { el.hidden = true; return; }
     var path = _editRowPath(known);
     if (!path) { el.hidden = true; return; }
     el.hidden = false;
@@ -2679,6 +2681,12 @@
       panel.hidden = true;
       var editToggle = _makeToolToggle(panel, payload.title || payload.kind, 'diff');
       head.appendChild(editToggle);
+      // Runs after `_makeToolToggle`'s own listener above, so `panel.hidden`
+      // already reflects the click when this reads it.
+      editToggle.addEventListener('click', function () {
+        var k = id ? toolRows['t:' + id] : null;
+        if (k) _renderEditQuickInfo(k);
+      });
       name.style.cursor = 'pointer';
       name.addEventListener('click', function () { editToggle.click(); });
       body.appendChild(panel);

@@ -7346,6 +7346,26 @@ check("a collapsed edit row still shows a filename+stat one-liner in the head", 
   assertEqual(quick.querySelector(".acp-tool-diffstat-del").textContent, "−0");
 });
 
+check("the quick-info one-liner hides while the panel is open, to avoid showing the stat twice", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "qi3", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/fixverify.py" }],
+               output: { form: "diff", path: "/repo/fixverify.py", added: 3,
+                         removed: 0, isNew: true } } });
+  const row = page.el("acpTranscript");
+  const quick = row.querySelector(".acp-tool-quick");
+  const toggle = row.querySelector(".acp-tool-toggle");
+  assert(quick.hidden === false, "fixture: visible while collapsed");
+  toggle.dispatch("click");
+  assert(quick.hidden === true,
+    "the one-liner should hide once the panel (same filename, same stat) is open");
+  toggle.dispatch("click");
+  assert(quick.hidden === false,
+    "the one-liner should return once the panel is collapsed again");
+  assertEqual(quick.querySelector(".acp-tool-quick-path").textContent, "fixverify.py");
+});
+
 check("the quick-info one-liner stays empty until a location is known", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,
