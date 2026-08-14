@@ -8667,6 +8667,45 @@ check("compactionCompletedWithSummaryAddsRecapDetails", (tpl) => {
   assert(noDetails === null, "no <details> should appear when summary is empty");
 });
 
+// paletteCompactAckDoesNotDuplicateSystemMessage
+// Measured 2026-08-14 against kiro-cli 2.18.0: a palette-triggered /compact
+// sends a 'compaction' started frame and, moments later, a
+// 'commands_execute_result' ack whose own result.message is also
+// "Compacting conversation...". Before the fix, both were rendered as
+// separate .acp-system-msg rows, so a palette compaction showed two
+// "Compacting..." rows instead of one.
+check("paletteCompactAckDoesNotDuplicateSystemMessage", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "compaction", sessionId: live,
+    payload: { status: "started", summary: "" },
+  });
+  page.deliver({
+    type: "commands_execute_result", sessionId: live,
+    payload: { name: "compact", status: "accepted",
+               result: { success: true, message: "Compacting conversation..." } },
+  });
+  const msgs = page.el("acpTranscript").querySelectorAll(".acp-system-msg");
+  assert(msgs.length === 1,
+    "a palette /compact should add exactly one system message row, not one per frame; got "
+    + msgs.length);
+});
+
+// nonCompactCommandsExecuteResultStillRendersItsMessage
+// The compact-only exclusion must not silence every other command's ack.
+check("nonCompactCommandsExecuteResultStillRendersItsMessage", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "commands_execute_result", sessionId: live,
+    payload: { name: "clear", status: "accepted",
+               result: { success: true, message: "Conversation cleared." } },
+  });
+  const msgs = page.el("acpTranscript").querySelectorAll(".acp-system-msg");
+  assert(msgs.length === 1, "a non-compact command's ack message should still render");
+  assert(msgs[0].textContent === "Conversation cleared.",
+    "got: " + msgs[0].textContent);
+});
+
 // slashKeyOpensDropdown
 // Pressing '/' on an empty prompt opens the command palette (even with no
 // commands loaded — renders an empty list and hides).

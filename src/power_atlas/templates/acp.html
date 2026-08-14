@@ -6150,7 +6150,14 @@
       // output for most built-in commands. Render it as a system message.
       hideCommandDropdown();
       var res = payload && payload.result;
-      if (res && res.message) {
+      // `compact` is excluded: verified 2026-08-14 against kiro-cli 2.18.0
+      // that its ack's own res.message is "Compacting conversation..." —
+      // the *same* moment the dedicated 'compaction' handler above already
+      // rendered "Compacting conversation context...". Rendering both gave
+      // a palette-triggered compaction two "Compacting..." rows instead of
+      // one; the typed `/compact` prompt does not go through this path at
+      // all, so it never had the duplicate.
+      if (res && res.message && payload.name !== 'compact') {
         addSystemMessage(res.message);
       } else if (res && !res.success) {
         addSystemMessage('Command failed.');
