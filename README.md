@@ -270,6 +270,16 @@ each session's transcript so a reconnecting page can be rebuilt, and a build log
 read would push the conversation out of it. Tool output is never treated as markdown — it is bytes
 a command printed, not prose the agent wrote, and it is shown verbatim.
 
+**A successful edit's diff survives even a session PowerAtlas's own memory has lost.** Loading a
+session kiro-cli still has but this process does not — after a restart, or one simply never opened
+here before — replays the conversation over the agent protocol, and that replay does not resend a
+tool call's raw output. For every other kind of call this is the same *output not retained* gap
+above. For a `write` call specifically, PowerAtlas separately reads kiro-cli's own on-disk session
+transcript — the same file its own interface reads to redraw a diff after resuming a session — and
+uses it to show the real diff again, not just the `+n −m` stat. Only a write kiro-cli actually
+completed is shown this way; one that was rejected or cancelled never touched the file and still
+shows nothing, correctly.
+
 Three things are worth knowing before leaving a long task running:
 
 - **A turn is bounded by silence, not by duration.** A turn that keeps streaming runs as long as it
