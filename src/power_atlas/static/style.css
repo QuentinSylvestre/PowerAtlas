@@ -755,6 +755,16 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-msg-tool .acp-msg-role { color: #c084fc; }
 .acp-msg-tool .acp-msg-body { border-left: 2px solid #c084fc; padding-left: 10px; white-space: normal; }
 .acp-tool-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+/* Tool-kind icon. `currentColor` on the stroke and no fill, so it inherits
+   the head's colour and needs no second palette; `align-self: center` because
+   the head is baseline-aligned and a square has no baseline to align to. */
+.acp-tool-icon { width: 13px; height: 13px; flex-shrink: 0; align-self: center; fill: none; stroke: #c084fc; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; opacity: 0.85; }
+/* The file a call touched, from ACP's own `locations`. A subtitle rather than
+   another chip in the head: the head is already four items wide at its
+   busiest, and a path is the one field that legitimately runs long. */
+.acp-tool-loc { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin-top: 3px; font-size: 11px; }
+.acp-tool-loc-path { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; color: var(--text-muted); overflow-wrap: anywhere; }
+.acp-tool-loc-more { color: var(--text-dim); font-size: 10px; }
 .acp-tool-name { font-size: 12px; font-weight: 600; color: #e9d5ff; }
 .acp-tool-kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); }
 .acp-tool-status { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }

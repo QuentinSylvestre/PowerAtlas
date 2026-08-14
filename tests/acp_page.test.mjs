@@ -214,7 +214,16 @@ class El {
   // The attribute API. Only get/set: the page has no reason to read an
   // attribute back, and a removeAttribute nothing calls is a capability this
   // harness would be claiming rather than having.
-  setAttribute(name, value) { this._attrs[String(name)] = String(value); }
+  setAttribute(name, value) {
+    this._attrs[String(name)] = String(value);
+    // `class` and `className` are one thing in a real DOM, and the page has a
+    // reason to use the attribute form: an SVG element's `className` is a
+    // read-only SVGAnimatedString, so `setAttribute` is the only way to class
+    // one. Without this link `matches()` — which reads `className` — could not
+    // see an SVG the page had classed correctly, and a check for it would fail
+    // against a page that was right.
+    if (String(name) === "class") this.className = String(value);
+  }
   getAttribute(name) {
     const got = this._attrs[String(name)];
     return got === undefined ? null : got;
@@ -7124,6 +7133,92 @@ check("a tool_call with no status leaves the badge off the row", (tpl) => {
   const badge = page.el("acpTranscript").querySelector(".acp-tool-status");
   assert(badge.hidden === true, "an unreported status rendered a visible badge");
   assertEqual(badge.textContent, "", "an unreported status invented badge text");
+});
+
+check("a tool row draws an icon for its kind", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ic1", title: "shell", kind: "execute", command: "ls" } });
+  const svg = page.el("acpTranscript").querySelector(".acp-tool-icon");
+  assert(svg, "no icon drawn for kind=execute");
+  assertEqual(svg.tagName, "SVG", "icon should be an svg element");
+  assertEqual(svg.getAttribute("aria-hidden"), "true",
+    "the icon duplicates the kind chip and must not be announced twice");
+  const path = svg.querySelector("path");
+  assert(path && path.getAttribute("d"), "icon has no path data");
+});
+
+check("an unknown tool kind draws no icon rather than a wrong one", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ic2", title: "shell", kind: "teleport", command: "ls" } });
+  assert(!page.el("acpTranscript").querySelector(".acp-tool-icon"),
+    "an off-enum kind drew an icon");
+});
+
+check("every ToolKind value has an icon path", (tpl) => {
+  // The enum is closed and small; a value added to the page without a path
+  // silently loses its icon, which is the kind of gap only a sweep catches.
+  const { page, live } = connected(tpl);
+  const KINDS = ["read", "edit", "delete", "move", "search",
+                 "execute", "think", "fetch", "switch_mode", "other"];
+  KINDS.forEach((k, i) => {
+    page.deliver({ type: "tool_call", sessionId: live,
+      payload: { toolCallId: "k" + i, title: "t", kind: k, command: "c" } });
+  });
+  const icons = page.el("acpTranscript").querySelectorAll(".acp-tool-icon");
+  assertEqual(icons.length, KINDS.length,
+    "one or more ToolKind values have no icon path");
+});
+
+check("a tool row shows the file from locations, basename with full path on hover", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "lc1", title: "read", kind: "read",
+               locations: [{ path: "/home/q/PowerAtlas/src/power_atlas/acp.py", line: 42 }] } });
+  const el = page.el("acpTranscript").querySelector(".acp-tool-loc-path");
+  assert(el, "no location subtitle rendered");
+  assertEqual(el.textContent, "acp.py:42", "should show basename and line");
+  assertEqual(el.getAttribute("title"),
+    "/home/q/PowerAtlas/src/power_atlas/acp.py", "full path should be the title");
+});
+
+check("a location with no line shows no line number", (tpl) => {
+  // Absent `line` means "the whole file" on the wire, which is a different
+  // statement from line 0.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "lc2", title: "read", kind: "read",
+               locations: [{ path: "C:\\repo\\main.rs" }] } });
+  const el = page.el("acpTranscript").querySelector(".acp-tool-loc-path");
+  assertEqual(el.textContent, "main.rs", "a backslash path should also resolve");
+});
+
+check("several locations name the first and count the rest", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "lc3", title: "edit", kind: "edit",
+               locations: [{ path: "/a/one.py" }, { path: "/a/two.py" },
+                           { path: "/a/three.py" }] } });
+  const row = page.el("acpTranscript");
+  assertEqual(row.querySelector(".acp-tool-loc-path").textContent, "one.py");
+  assertEqual(row.querySelector(".acp-tool-loc-more").textContent, "+2 more");
+});
+
+check("locations arriving on a later update are added once", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "lc4", title: "edit", kind: "edit" } });
+  const row = page.el("acpTranscript");
+  assert(!row.querySelector(".acp-tool-loc"), "fixture: no subtitle yet");
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "lc4", locations: [{ path: "/a/late.py" }] } });
+  assertEqual(row.querySelector(".acp-tool-loc-path").textContent, "late.py",
+    "a location on an update should reach the row");
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "lc4", locations: [{ path: "/a/late.py" }] } });
+  assertEqual(row.querySelectorAll(".acp-tool-loc").length, 1,
+    "a repeated location stacked a second subtitle onto the row");
 });
 
 check("a tool_update carrying no status does not clobber the row's status", (tpl) => {

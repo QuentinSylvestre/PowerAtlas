@@ -2063,6 +2063,87 @@
     return toggle;
   }
 
+  // One 16x16 stroke path per value of the ACP `ToolKind` enum. A closed set:
+  // a kind absent from here draws no icon at all, which is the same trade
+  // TOOL_STATUS_LABEL makes and for the same reason — nothing agent-authored
+  // reaches the DOM as markup or as a path.
+  //
+  // SVG built with createElementNS rather than a glyph or a font character.
+  // A glyph would be cheaper, but the coverage is not there: the obvious
+  // choices for `search` and `move` (U+2315, U+21C4) are missing from enough
+  // desktop fonts that the row would show a tofu box on the machines that
+  // lack them, and a missing icon that looks like a rendering fault is worse
+  // than no icon. These are drawn.
+  var TOOL_KIND_ICON = Object.create(null);
+  TOOL_KIND_ICON.read        = 'M4 2h5l3 3v9H4zM9 2v3h3';
+  TOOL_KIND_ICON.edit        = 'M3 13l.7-2.7 6.6-6.6 2 2-6.6 6.6zM10 3l1.5-1.5 2 2L12 5';
+  TOOL_KIND_ICON['delete']   = 'M3.5 4.5h9M6.5 4.5V2.5h3v2M5 4.5l.7 9h4.6l.7-9';
+  TOOL_KIND_ICON.move        = 'M2.5 6h9l-2.5-2.5M13.5 10h-9l2.5 2.5';
+  TOOL_KIND_ICON.search      = 'M7 2.5a4.2 4.2 0 100 8.4 4.2 4.2 0 000-8.4zM10.2 10.2l3.3 3.3';
+  TOOL_KIND_ICON.execute     = 'M3 3.5L7 8l-4 4.5M8.5 12.5h5';
+  TOOL_KIND_ICON.think       = 'M8 1.8a6.2 6.2 0 100 12.4 6.2 6.2 0 000-12.4M5.5 8h.01M8 8h.01M10.5 8h.01';
+  TOOL_KIND_ICON.fetch       = 'M8 2.5v7M5 6.5l3 3 3-3M2.5 13h11';
+  TOOL_KIND_ICON.switch_mode = 'M2.5 5.5h9M9 3l2.5 2.5L9 8M13.5 10.5h-9M7 8l-2.5 2.5L7 13';
+  // `other` is the enum's catch-all and also marks planning steps kiro-cli
+  // filters from its own display, so it gets the quietest mark there is
+  // rather than a picture of anything.
+  TOOL_KIND_ICON.other       = 'M8 6.6a1.4 1.4 0 100 2.8 1.4 1.4 0 000-2.8';
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+
+  /** The icon element for a wire `kind`, or null when this build has no path
+   *  for it. `aria-hidden`: the kind is already on the row as text, so a
+   *  screen reader announcing it twice would be noise, not access. */
+  function _toolKindIcon(wireKind) {
+    var d = wireKind ? TOOL_KIND_ICON[wireKind] : null;
+    if (!d) return null;
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('class', 'acp-tool-icon');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    var p = document.createElementNS(SVG_NS, 'path');
+    p.setAttribute('d', d);   // from the closed map above, never from the wire
+    svg.appendChild(p);
+    return svg;
+  }
+
+  /** The trailing segment of a path, for either separator. Falls back to the
+   *  whole string, so a path shape this does not expect still reads. */
+  function _basename(p) {
+    var s = String(p || '');
+    var cut = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    return (cut >= 0 && cut < s.length - 1) ? s.slice(cut + 1) : s;
+  }
+
+  /** The row's file subtitle, built from ACP's own `locations`.
+   *
+   *  The basename is what a reader scans for and the full path is what they
+   *  occasionally need, so the first is rendered and the second is the
+   *  `title`. A call touching several files names the first and counts the
+   *  rest — listing twenty paths in a transcript row helps nobody. */
+  function _toolLocations(locations) {
+    if (!locations || !locations.length) return null;
+    var first = locations[0];
+    if (!first || !first.path) return null;
+    var el = document.createElement('div');
+    el.className = 'acp-tool-loc';
+    var name = document.createElement('span');
+    name.className = 'acp-tool-loc-path';
+    name.textContent = _basename(first.path) +
+      (typeof first.line === 'number' ? ':' + first.line : '');
+    // Agent-authored, so `title` is set as an attribute value and never parsed.
+    name.setAttribute('title', String(first.path));
+    el.appendChild(name);
+    if (locations.length > 1) {
+      var more = document.createElement('span');
+      more.className = 'acp-tool-loc-more';
+      more.textContent = '+' + (locations.length - 1) + ' more';
+      el.appendChild(more);
+    }
+    return el;
+  }
+
   // Write a wire status onto a row's status badge.
   //
   // One function for both the new-row and the update path, because the rule
@@ -2097,6 +2178,22 @@
     var known = id ? toolRows['t:' + id] : null;
     if (known) {
       _setToolStatus(known.status, payload.status);
+      // `locations` can arrive on the update rather than the opening call —
+      // every field on a `tool_call_update` is optional, so which frame
+      // carries it is the agent's choice. Added once; a second update naming
+      // the same files must not stack a second subtitle onto the row.
+      if (payload.locations && !known.body.querySelector('.acp-tool-loc')) {
+        var lateLoc = _toolLocations(payload.locations);
+        // After the head, before the command block, wherever that ended up.
+        if (lateLoc) {
+          var afterHead = known.body.querySelector('.acp-tool-head');
+          if (afterHead && afterHead.nextSibling) {
+            known.body.insertBefore(lateLoc, afterHead.nextSibling);
+          } else {
+            known.body.appendChild(lateLoc);
+          }
+        }
+      }
       if (payload.command && !known.body.querySelector('.acp-tool-cmd')) {
         var cmdWrap = commandBlock(payload);
         cmdWrap.hidden = true;
@@ -2131,10 +2228,16 @@
 
     var head = document.createElement('div');
     head.className = 'acp-tool-head';
+    // Icon first, so a column of rows can be read down the left edge without
+    // parsing any of the text beside it.
+    var icon = _toolKindIcon(payload.kind);
+    if (icon) head.appendChild(icon);
     var name = document.createElement('span');
     name.className = 'acp-tool-name';
     name.textContent = payload.title || payload.kind || 'tool call';
     head.appendChild(name);
+    // Only when a title is also present: without one the *name* is already
+    // the kind, and a chip repeating it would say the same word twice.
     if (payload.kind && payload.title) {
       var kind = document.createElement('span');
       kind.className = 'acp-tool-kind';
@@ -2150,6 +2253,9 @@
     _setToolStatus(status, payload.status);
     head.appendChild(status);
     body.appendChild(head);
+
+    var loc = _toolLocations(payload.locations);
+    if (loc) body.appendChild(loc);
 
     if (payload.command) {
       var cmdWrap = commandBlock(payload);
