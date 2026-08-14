@@ -1,7 +1,8 @@
 # ACP Skill and Command Discovery Before First Turn
 
 > **Date**: 2026-08-13
-> **Status**: In Progress — implementation complete; SC1 manual check pending (hard-reload `/acp`, press `/` on fresh session before `/qclose`)
+> **Status**: Complete
+> **Last Updated**: 2026-08-14 18:43
 > **Scope**: Parse and display kiro-cli skills in the /acp slash-command palette before the first user prompt
 > **Estimated effort**: 1 day
 
@@ -515,7 +516,7 @@ function renderCommandDropdown(items, catalogueEmpty) {
 - [x] `renderCommandDropdown` accepts `catalogueEmpty`, renders "Loading catalogue…" when both lists empty, "No matching commands or skills" when data is loaded but nothing matched
 - [x] `renderCommandDropdown` adds `.acp-cmd-skill-badge` span (as `<li>` child sibling after nameSpan) on skill entries only; command entries have no badge
 - [x] CSS for `.acp-cmd-skill-badge` added
-- [ ] Hard-reload (`Ctrl+Shift+R`) on running PowerAtlas — press `/` on a fresh session — skills appear with badge before any prompt (SC1 manual check)
+- [x] Hard-reload (`Ctrl+Shift+R`) on running PowerAtlas — press `/` on a fresh session — skills appear with badge before any prompt (SC1 manual check)
 
 #### Implementation (2026-08-13, code: 082e330, fix: 037feea, fix: 7071728)
 
@@ -691,6 +692,12 @@ node tests/acp_page.test.mjs
 | 11 | Low | `_pending_commands` slot replacement silent (no log). | Fixed — `log.debug` added when non-None slot is replaced. |
 | 12 | Low | Python 3.10+ union syntax concern. | N/A — project requires Python 3.11+ (`pyproject.toml:8`); syntax is valid. |
 | 13 | Low | No observability for flush. | Fixed — `log.debug` added after successful flush reporting counts. |
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- `Skipped (harness opportunity): user chose Skip` — The probe step (running a live kiro-cli subprocess) was not covered by the trio's "decidable-by-probe" list; the `/qexplore` decidable-by-probe gate could benefit from a note clarifying that a local subprocess launch counts as a read-only probe.
 
 ## Harness Improvement Opportunities
 
