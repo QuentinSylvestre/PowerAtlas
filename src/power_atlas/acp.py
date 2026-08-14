@@ -440,12 +440,15 @@ SUBAGENT_LIST_METHOD = "_kiro.dev/subagent/list_update"
 # Shape (cross-checked 2026-08-14 against three independent ACP clients:
 # kirodotdev/KiroCrew ``acp/session_handle.py`` + ``acp/client.py``,
 # dwalleck/cyril's ``docs/kiro-acp-protocol.md`` disassembly of the kiro-cli
-# TUI bundle, and ryancormack/kiro-kantoku's ``docs/acp-methods.md``):
+# TUI bundle, and ryancormack/kiro-kantoku's ``docs/acp-methods.md`` — and
+# **verified live the same day against a real kiro-cli 2.18.0 subprocess**,
+# both the typed-`/compact` and the palette route):
 #
 #     {"sessionId": "...",                       # may be absent
 #      "status": {"type": "started" | "completed" | "failed",
 #                 "error": "..."},               # populated on `failed` only
-#      "summary": "..."}                         # the recap, on `completed`
+#      "summary": "..."}                         # the recap, on `completed`;
+#                                                 # `null` on `started`
 #
 # Two shapes to tolerate, not one: `status` is an object in every capture, but
 # KiroCrew's reader still accepts a bare string for it, so this file does too.
@@ -2141,6 +2144,11 @@ class _Supervisor:
         # It has never actually carried one: kiro-cli puts the recap in the
         # `summary` field of COMPACTION_STATUS_METHOD, not in the transcript.
         self._compaction_buf: dict[str, list[str]] = {}
+        # The session's last-known `contextPercent` at the moment `_compacting`
+        # was set, one entry per session in `_compacting`. What the METADATA
+        # backstop below compares a new reading against — see its own comment
+        # for why a bare "a metadata frame arrived" is not enough.
+        self._compaction_start_percent: dict[str, float | None] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2421,6 +2429,7 @@ class _Supervisor:
         self.crew_spawn_toolcallids.clear()
         self._compacting.clear()
         self._compaction_buf.clear()
+        self._compaction_start_percent.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -3143,9 +3152,13 @@ class _Supervisor:
                 # A second `started` row would just be noise.
                 return
             self._compacting.add(session_id)
+            meta = self.sessions.get(session_id)
+            self._compaction_start_percent[session_id] = (
+                meta.get("contextPercent") if meta else None)
             summary = ""
         else:
             self._compacting.discard(session_id)
+            self._compaction_start_percent.pop(session_id, None)
             summary = _as_text(params.get("summary"))
             # Fall back to whatever the transcript scraper collected. Empty on
             # every kiro-cli measured so far — the recap does not arrive as
@@ -3171,24 +3184,47 @@ class _Supervisor:
         if method == METADATA_METHOD:
             percent = _context_percent(params)
             if percent is not None and isinstance(session_id, str):
-                _note_context(session_id, percent)
                 # Compaction completion *backstop*. The authoritative signal is
                 # COMPACTION_STATUS_METHOD, which also carries the recap; it
-                # lands ~1s before this notification and discards the session
-                # from `_compacting`, so on a kiro-cli that emits it this branch
-                # never fires. It stays for the one that does not: the
-                # context_usage drop is then the only evidence on the wire that
-                # compaction finished, and a recap-less "Context compacted." is
-                # better than a spinner that never resolves.
+                # was assumed to land ~1s before this notification and discard
+                # the session from `_compacting`, so on a kiro-cli that emits
+                # it this branch was assumed to never fire.
+                #
+                # **Measured wrong 2026-08-14 against kiro-cli 2.18.0**: on the
+                # `commands_execute`-triggered path, the ack response's own
+                # metadata push (a routine per-request frame, unrelated to
+                # compaction) arrived 1ms *before* kiro-cli's real
+                # `compaction/status: started` — with `_compacting` already
+                # populated by this file's own pre-emptive `started` broadcast.
+                # "a metadata frame arrived while compacting" fired on that
+                # unrelated frame, discarding `_compacting` early and
+                # broadcasting a spurious, empty-recap "completed" — which then
+                # let the real `started`/`completed` pair through undeduped
+                # too, so the page showed the row twice.
+                #
+                # The docstring's own reasoning already named the correct
+                # signal: "the context_usage drop is ... evidence compaction
+                # finished" — a drop, not mere arrival. So this now requires
+                # one: `percent` must be strictly below what was last known
+                # when `_compacting` was set. The captured race's metadata
+                # carried the *same* percent all three times (unchanged
+                # 7.8605), which this rejects. A session with no percent on
+                # record yet (a session's first-ever compaction) falls back to
+                # the old unconditional fire, since there is nothing to
+                # compare against.
                 if session_id in self._compacting:
-                    self._compacting.discard(session_id)
-                    _registry.broadcast(
-                        session_id,
-                        envelope("compaction",
-                                 {"status": "completed", "error": "",
-                                  "summary": "".join(
-                                      self._compaction_buf.pop(session_id, []))},
-                                 session_id))
+                    start_percent = self._compaction_start_percent.get(session_id)
+                    if start_percent is None or percent < start_percent:
+                        self._compacting.discard(session_id)
+                        self._compaction_start_percent.pop(session_id, None)
+                        _registry.broadcast(
+                            session_id,
+                            envelope("compaction",
+                                     {"status": "completed", "error": "",
+                                      "summary": "".join(
+                                          self._compaction_buf.pop(session_id, []))},
+                                     session_id))
+                _note_context(session_id, percent)
             return
         if method == COMPACTION_STATUS_METHOD:
             self._on_compaction_status(params)
@@ -4872,6 +4908,9 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     # Completion (and the recap) come back on that same notification.
     if text.strip() == "/compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
+        _meta = _supervisor.sessions.get(session_id)
+        _supervisor._compaction_start_percent[session_id] = (
+            _meta.get("contextPercent") if _meta else None)
         _registry.broadcast(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},
@@ -5157,11 +5196,19 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
     #
     # NOTE (KiroCrew, live-probed on kiro-cli 2.14.0): the *string* form of
     # `_kiro.dev/commands/execute` exits rc=0 with no response for /compact,
-    # which is why they route /compact through `session/prompt` instead. If a
-    # /compact from the palette ever stops producing a compaction here while
-    # the typed `/compact` prompt still works, that is the bug to check first.
+    # which is why they route /compact through `session/prompt` instead. This
+    # file never sent that form — `commands_execute` below always used the
+    # TuiCommand object form (`{"command": {"command": name, "args": {}}}`) —
+    # and a live palette `/compact` **verified working end-to-end on kiro-cli
+    # 2.18.0, 2026-08-14**: the round trip acks, `compaction/status: started`
+    # and `completed` both arrive, and the recap is populated. If a /compact
+    # from the palette ever stops producing a compaction here while the typed
+    # `/compact` prompt still works, that is still the first thing to check.
     if name == "compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
+        _meta = _supervisor.sessions.get(session_id)
+        _supervisor._compaction_start_percent[session_id] = (
+            _meta.get("contextPercent") if _meta else None)
         _registry.broadcast(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},

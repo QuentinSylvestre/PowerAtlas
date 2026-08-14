@@ -17063,6 +17063,22 @@ class TestAcpCompactionStatus:
         finally:
             acp_mod._supervisor._compacting.discard(sid)
 
+    def test_compact_prompt_snapshots_the_percent_in_force_at_start(
+            self, acp_session):
+        """The snapshot the backstop drop-check compares against — taken from
+        whatever `contextPercent` this session last recorded, `None` if it
+        never has."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor.sessions[sid]["contextPercent"] = 33.0
+        _queued(conn)
+        try:
+            self._run_compact_prompt(acp_mod, sid, conn)
+            assert acp_mod._supervisor._compaction_start_percent[sid] == 33.0
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+            acp_mod._supervisor._compaction_start_percent.pop(sid, None)
+
     def test_non_compact_prompt_does_not_trigger_compaction(self, acp_session):
         """A regular prompt does not fire a compaction frame."""
         acp_mod, sid = acp_session
@@ -17105,6 +17121,46 @@ class TestAcpCompactionStatus:
         self._send_context_usage(acp_mod, sid, percent=50.0)
         frames = _queued(conn)
         assert not any(f["type"] == "compaction" for f in frames)
+
+    def test_an_unchanged_context_usage_does_not_backstop_complete(
+            self, acp_session):
+        """Measured 2026-08-14 against kiro-cli 2.18.0: on the palette
+        (`commands_execute`) path, the round-trip's own ack triggers a
+        METADATA_METHOD push carrying the *same* `contextUsagePercentage* as
+        before compaction started, 1ms before kiro-cli's real
+        `compaction/status: started`. Firing the backstop on that unrelated,
+        unchanged reading broadcast a spurious empty-recap "completed" and let
+        the real started/completed pair through undeduped too — a duplicated
+        row. A snapshot taken when `_compacting` was set is what lets the
+        backstop tell "compaction actually finished" from "a metadata frame
+        merely arrived"."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor._compacting.add(sid)
+        acp_mod._supervisor._compaction_start_percent[sid] = 7.8605
+        _queued(conn)
+        self._send_context_usage(acp_mod, sid, percent=7.8605)
+        frames = _queued(conn)
+        assert not any(f["type"] == "compaction" for f in frames)
+        assert sid in acp_mod._supervisor._compacting
+
+    def test_a_genuine_context_usage_drop_still_backstops_complete(
+            self, acp_session):
+        """The fix requires a drop, not that it forbid completion outright —
+        a real drop below the snapshot taken at compaction start must still
+        fire, since that is the backstop's one legitimate job."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        acp_mod._supervisor._compacting.add(sid)
+        acp_mod._supervisor._compaction_start_percent[sid] = 40.0
+        _queued(conn)
+        self._send_context_usage(acp_mod, sid, percent=8.0)
+        frames = _queued(conn)
+        compaction_frames = [f for f in frames if f["type"] == "compaction"]
+        assert len(compaction_frames) == 1
+        assert compaction_frames[0]["payload"]["status"] == "completed"
+        assert sid not in acp_mod._supervisor._compacting
+        assert sid not in acp_mod._supervisor._compaction_start_percent
 
     def test_full_cycle_compact_then_context_usage(self, acp_session):
         """End-to-end: /compact prompt → started; context_usage drop → completed."""
