@@ -2041,21 +2041,22 @@
 
   // Creates a collapse toggle button for a tool call command wrapper.
   // toolTitle is the human-readable tool name used in the accessible label.
-  function _makeToolToggle(cmdWrap, toolTitle) {
+  function _makeToolToggle(cmdWrap, toolTitle, detail) {
     // Cap toolTitle at 80 chars to prevent an agent-authored string from producing
     // a thousands-character aria-label attribute (no XSS risk via setAttribute,
     // but unbounded wire data in an attribute is a hygiene violation).
     var safeTitle = (toolTitle || 'tool').slice(0, 80);
+    var safeDetail = detail || 'command detail';
     var toggle = document.createElement('button');
     toggle.className = 'acp-tool-toggle';
     toggle.type = 'button';
     toggle.setAttribute('aria-expanded', 'false');
-    toggle.setAttribute('aria-label', 'Show command detail \u2014 ' + safeTitle);
+    toggle.setAttribute('aria-label', 'Show ' + safeDetail + ' \u2014 ' + safeTitle);
     toggle.addEventListener('click', function () {
       var open = toggle.getAttribute('aria-expanded') === 'true';
       toggle.setAttribute('aria-expanded', open ? 'false' : 'true');
       toggle.setAttribute('aria-label',
-        (open ? 'Show' : 'Hide') + ' command detail \u2014 ' + safeTitle);
+        (open ? 'Show' : 'Hide') + ' ' + safeDetail + ' \u2014 ' + safeTitle);
       // cmdWrap.hidden is an attribute mutation, not a DOM addition, so aria-live
       // re-announcement is not expected per spec (role="log" tracks additions only).
       cmdWrap.hidden = open;
@@ -2404,6 +2405,49 @@
     box.appendChild(line);
   }
 
+  /** The path an edit row's quick-info line and panel path line both use:
+   *  the wire's own `locations`, falling back to the diff digest's `path`
+   *  when `locations` is empty. Defensive layering — in practice the server
+   *  attaches `locations` (live or backfilled) whenever a diff digest exists
+   *  — kept as a fallback rather than an assumption. */
+  function _editRowPath(known) {
+    var locations = known.locations;
+    if (locations && locations[0] && locations[0].path) return locations;
+    var digest = known.digest;
+    if (digest && digest.form === 'diff' && digest.path) return [{ path: digest.path }];
+    return null;
+  }
+
+  /** The always-visible one-liner beside an edit row's name: a short
+   *  filename and the +/- stat, so a reader can tell what an edit touched
+   *  without opening the row. The panel behind the toggle still carries the
+   *  full path — this is a glance, not a replacement for it. */
+  function _renderEditQuickInfo(known) {
+    var el = known.quickInfo;
+    el.textContent = '';
+    var path = _editRowPath(known);
+    if (!path) { el.hidden = true; return; }
+    el.hidden = false;
+    var name = document.createElement('span');
+    name.className = 'acp-tool-quick-path';
+    name.textContent = _basename(path[0].path);
+    el.appendChild(name);
+    var digest = known.digest;
+    if (digest && digest.form === 'diff') {
+      var stat = document.createElement('span');
+      stat.className = 'acp-tool-diffstat';
+      var plus = document.createElement('span');
+      plus.className = 'acp-tool-diffstat-add';
+      plus.textContent = '+' + (digest.added || 0);
+      stat.appendChild(plus);
+      var minus = document.createElement('span');
+      minus.className = 'acp-tool-diffstat-del';
+      minus.textContent = '−' + (digest.removed || 0);
+      stat.appendChild(minus);
+      el.appendChild(stat);
+    }
+  }
+
   /** The edit row's single collapsible: full path, then the diffstat, then
    *  whatever body arrived — a diff, a failure's text, or (after a reload
    *  with no backfill) the "not retained" notice. Rebuilt from scratch on
@@ -2412,20 +2456,19 @@
    *  independent frames (locations and the digest on `tool_call`/
    *  `tool_call_update`, the body on a separate `tool_output` broadcast, in
    *  no guaranteed order — see `pendingToolOutput`), and rebuilding is cheap
-   *  next to tracking three insertion points by hand.
+   *  next to tracking three insertion points by hand. Also refreshes the
+   *  row's quick-info one-liner, which is driven by the same three fields.
    *
    *  Line numbers seed from `locations[0].line` — the fragment offset for a
    *  `strReplace`, absent (so seeded at 1) for a whole-file `create`, which
    *  matches kiro-cli's own TUI numbering a new file from line 1. */
   function _renderEditPanel(known) {
+    _renderEditQuickInfo(known);
     var panel = known.panel;
     panel.textContent = '';
     var digest = known.digest;
     var locations = known.locations;
-    var path = locations && locations[0] && locations[0].path
-      ? locations
-      : (digest && digest.form === 'diff' && digest.path
-          ? [{ path: digest.path }] : null);
+    var path = _editRowPath(known);
     var pathEl = _toolLocations(path, true);
     if (pathEl) panel.appendChild(pathEl);
     var digestEl = digest ? _renderToolDigest(digest) : null;
@@ -2617,17 +2660,24 @@
 
     var isEdit = payload.kind === 'edit';
     var panel = null;
+    var quickInfo = null;
     if (isEdit) {
-      // One toggle, one panel: collapsed shows only the head (name, kind
-      // chip, status); expanded reveals the full path, the diffstat, and the
-      // diff or failure text — see `_renderEditPanel`. Built unconditionally,
-      // unlike the command toggle below — an edit row always has something
-      // worth expanding to once its output lands, and there is exactly one
-      // control for it, not one per field that happens to arrive.
+      // One toggle, one panel: collapsed shows the head (name, kind chip,
+      // status) plus a short filename+stat one-liner (`_renderEditQuickInfo`,
+      // outside the panel so it survives collapse); expanded reveals the
+      // full path, the diffstat, and the diff or failure text — see
+      // `_renderEditPanel`. Built unconditionally, unlike the command toggle
+      // below — an edit row always has something worth expanding to once its
+      // output lands, and there is exactly one control for it, not one per
+      // field that happens to arrive.
+      quickInfo = document.createElement('span');
+      quickInfo.className = 'acp-tool-quick';
+      quickInfo.hidden = true;
+      head.appendChild(quickInfo);
       panel = document.createElement('div');
       panel.className = 'acp-tool-edit-panel';
       panel.hidden = true;
-      var editToggle = _makeToolToggle(panel, payload.title || payload.kind);
+      var editToggle = _makeToolToggle(panel, payload.title || payload.kind, 'diff');
       head.appendChild(editToggle);
       name.style.cursor = 'pointer';
       name.addEventListener('click', function () { editToggle.click(); });
@@ -2653,7 +2703,7 @@
     transcriptEl.appendChild(row);
     if (id) {
       toolRows['t:' + id] = { status: status, body: body, kind: payload.kind,
-        panel: panel, locations: payload.locations || null,
+        panel: panel, quickInfo: quickInfo, locations: payload.locations || null,
         digest: null, outputPayload: null };
     }
     // Drain a body that arrived before this row existed, then the digest —

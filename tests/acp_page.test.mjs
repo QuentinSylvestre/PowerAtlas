@@ -7328,6 +7328,36 @@ check("an edit row has exactly one toggle, and it gates the whole panel", (tpl) 
   assertEqual(toggles[0].getAttribute("aria-expanded"), "true");
 });
 
+check("a collapsed edit row still shows a filename+stat one-liner in the head", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "qi1", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/fixverify.py" }],
+               output: { form: "diff", path: "/repo/fixverify.py", added: 3,
+                         removed: 0, isNew: true } } });
+  const row = page.el("acpTranscript");
+  const panel = row.querySelector(".acp-tool-edit-panel");
+  assert(panel.hidden === true, "fixture: the panel stays collapsed");
+  const quick = row.querySelector(".acp-tool-quick");
+  assert(quick.hidden === false, "the quick-info one-liner should be visible while collapsed");
+  assertEqual(quick.querySelector(".acp-tool-quick-path").textContent, "fixverify.py",
+    "the quick-info line should show the short filename, not the full path");
+  assertEqual(quick.querySelector(".acp-tool-diffstat-add").textContent, "+3");
+  assertEqual(quick.querySelector(".acp-tool-diffstat-del").textContent, "−0");
+});
+
+check("the quick-info one-liner stays empty until a location is known", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "qi2", title: "edit", kind: "edit", status: "in_progress" } });
+  const quick = page.el("acpTranscript").querySelector(".acp-tool-quick");
+  assert(quick.hidden === true, "no location yet, so the one-liner has nothing to show");
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "qi2", locations: [{ path: "/repo/late.py" }] } });
+  assert(quick.hidden === false, "a location arriving later should reveal the one-liner");
+  assertEqual(quick.querySelector(".acp-tool-quick-path").textContent, "late.py");
+});
+
 check("an edit panel shows the full path, not just the basename", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,
