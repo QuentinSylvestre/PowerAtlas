@@ -468,6 +468,15 @@ COMPACTION_STATUS_METHOD = "_kiro.dev/compaction/status"
 # of a full context window is prose, not a transcript.
 MAX_COMPACTION_SUMMARY_CHARS = 32 * 1024
 
+# How long the METADATA backstop waits, from `_compacting` being set, before
+# it will treat a metadata push as evidence that compaction finished. See the
+# backstop's own comment in `_on_notification` for the two measurements this
+# threshold sits between: a spurious, request-correlated push arrives in
+# 1-15 ms; a genuine `_kiro.dev/compaction/status` pair — even on a session
+# with nothing to compact — was measured arriving in 2.5-5 s. 30 s leaves
+# roughly 6-12x margin over the slowest genuine case measured.
+COMPACTION_BACKSTOP_SECONDS = 30.0
+
 # The kiro-private notification carrying a *pre-announcement* tool-call chunk
 # — a method distinct from plain ``session/update`` (see ``_stamp_activity``'s
 # P0-3 note). **Not sub-agent-exclusive**: measured 2026-08-11 against a real
@@ -1145,14 +1154,17 @@ def _tool_locations(update: dict) -> list:
 def _raw_output_items(update: dict) -> list:
     """``rawOutput``'s payload list, or ``[]``.
 
-    **This shape is a hypothesis and is deliberately the only place that
-    assumes it.** ACP declares ``rawOutput`` as an opaque
-    ``Record<string, unknown>``; the ``{"items": [{"Text": …} | {"Json": …}]}``
-    tagged-union reading comes from dwalleck/cyril's disassembly of the
-    kiro-cli TUI bundle, whose version numbering does not line up with the
-    2.16.x this module talks to. Everything downstream degrades to a byte count
-    when the match fails, and `_tool_output_digest` logs the unrecognised keys
-    at debug so one probe session settles it.
+    **Verified 2026-08-14 against a live kiro-cli 2.18.0 subprocess** (a
+    `shell` success and failure, a `read`, a `search`, and two `write`
+    creates/edits, captured on the wire between PowerAtlas and the agent).
+    The ``{"items": [{"Text": …} | {"Json": …}]}`` tagged-union reading —
+    first taken from dwalleck/cyril's disassembly of the kiro-cli TUI bundle —
+    is confirmed correct at this level: every item captured was one or the
+    other. What the disassembly got wrong is one layer down, inside a
+    ``Json`` blob's own fields; see `_parse_exit_status` and
+    `_search_result_text` for the two that needed correcting. Everything
+    downstream still degrades to a byte count when a shape genuinely does not
+    match, and `_tool_output_digest` logs the unrecognised keys at debug.
     """
     raw = update.get("rawOutput")
     if not isinstance(raw, dict):
@@ -1184,6 +1196,42 @@ def _text_of_content_block(block: dict) -> str:
     return ""
 
 
+def _search_result_text(blob: dict) -> str:
+    """A ``search`` tool's ``Json`` blob, rendered as text.
+
+    Verified 2026-08-14 against kiro-cli 2.18.0: a `grep`-kind call's
+    ``Json`` carries ``numMatches``/``numFiles``/``truncated``/``results``
+    (each result a ``{"file", "count", "matches": [str, ...]}``) — nothing
+    named ``stdout``/``stderr``. Left unhandled, that shape fed nothing into
+    `_tool_output_text`, so a real 83-match search degraded not to a byte
+    count but to no digest at all — the one case `_tool_output_digest`'s own
+    "true of any shape" promise did not hold. Formatting it as text is what
+    lets that promise (and a genuine "Show output" body) hold for this shape
+    too.
+    """
+    results = blob.get("results")
+    if not isinstance(results, list):
+        return ""
+    lines = []
+    num_matches = blob.get("numMatches")
+    num_files = blob.get("numFiles")
+    if isinstance(num_matches, int) and isinstance(num_files, int):
+        summary = f"{num_matches} match(es) in {num_files} file(s)"
+        if blob.get("truncated"):
+            summary += " (truncated)"
+        lines.append(summary + "\n")
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        lines.append(_as_text(result.get("file")) + "\n")
+        matches = result.get("matches")
+        if isinstance(matches, list):
+            for match in matches:
+                if isinstance(match, str):
+                    lines.append(match + "\n")
+    return "".join(lines)
+
+
 def _tool_output_text(update: dict) -> str:
     """Everything a tool call printed, as one string, uncapped.
 
@@ -1206,20 +1254,33 @@ def _tool_output_text(update: dict) -> str:
             continue
         blob = item.get("Json")
         if isinstance(blob, dict):
+            found_std = False
             for key in ("stdout", "stderr"):
                 value = blob.get(key)
                 if isinstance(value, str) and value:
                     parts.append(value)
+                    found_std = True
+            if not found_std:
+                search_text = _search_result_text(blob)
+                if search_text:
+                    parts.append(search_text)
     return "".join(parts)
 
 
 def _tool_diff(update: dict) -> dict | None:
     """The first ``{"type": "diff"}`` entry in ``content``, normalised.
 
-    ``oldText`` is nullable and null means "this file did not exist" — a
-    distinction worth keeping, since a new file and a file whose previous
-    contents happened to be empty render differently and only one of them is
-    an addition.
+    ``oldText`` is nullable and null is meant to mean "this file did not
+    exist" — a distinction worth keeping, since a new file and a file whose
+    previous contents happened to be empty render differently and only one
+    of them is an addition. **Verified 2026-08-14 against kiro-cli 2.18.0
+    that the wire itself does not carry that null for a genuine create**: a
+    `write` tool call with `rawInput.command == "create"`, confirmed via a
+    `Test-Path` immediately beforehand to be a file that did not exist,
+    still sent `oldText` equal to `newText` rather than `null`. `rawInput`
+    arrives on the same update as the diff `content`, so `command` is the
+    reliable signal here and is used instead of trusting the wire's
+    `oldText` on a create.
     """
     for block in _content_blocks(update):
         if not isinstance(block, dict) or block.get("type") != "diff":
@@ -1227,10 +1288,13 @@ def _tool_diff(update: dict) -> dict | None:
         new_text = block.get("newText")
         if not isinstance(new_text, str):
             continue
+        raw_input = update.get("rawInput")
+        is_create = (isinstance(raw_input, dict)
+                     and raw_input.get("command") == "create")
         old = block.get("oldText")
         return {
             "path": _as_text(block.get("path")),
-            "oldText": old if isinstance(old, str) else None,
+            "oldText": None if is_create else (old if isinstance(old, str) else None),
             "newText": new_text,
         }
     return None
@@ -1256,6 +1320,24 @@ def _diff_stat(old: str | None, new: str) -> tuple:
     return (len(new_lines) - common, len(old_lines) - common)
 
 
+def _parse_exit_status(value: object) -> int | None:
+    """An ``exit_status``/``exitStatus`` field's int value, or ``None``.
+
+    Verified 2026-08-14 against kiro-cli 2.18.0: every `execute` call's
+    `Json` blob carries this as the string ``"exit code: N"``, never the
+    bare int the disassembly this module's shape hypothesis was built from
+    assumed. A bare int is still accepted, in case a build or a different
+    tool sends one.
+    """
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        match = re.search(r"-?\d+", value)
+        if match:
+            return int(match.group())
+    return None
+
+
 def _tool_output_digest(update: dict) -> dict | None:
     """A small, bounded account of what one tool call produced.
 
@@ -1276,6 +1358,21 @@ def _tool_output_digest(update: dict) -> dict | None:
         return {"form": "diff", "path": diff["path"],
                 "added": added, "removed": removed,
                 "isNew": diff["oldText"] is None}
+    if update.get("kind") == "edit" and update.get("status") == "completed":
+        # Verified 2026-08-14 against kiro-cli 2.18.0: a successful edit's
+        # diff `content` arrives only on the *first* `tool_call` frame; the
+        # terminal `tool_call_update` that follows carries no `content` at
+        # all, just a generic confirmation string ("Successfully created
+        # ... (40 lines)." / "Successfully replaced 1 occurrence(s) in
+        # ...") in `rawOutput`. Falling through to the generic text path
+        # below would compute a `form: text` digest from that confirmation
+        # and — because the client always shows whichever digest arrived
+        # most recently — silently replace the richer `form: diff` digest
+        # the first frame already produced. Confirmed live: "Show output"
+        # on a completed edit showed the confirmation sentence instead of
+        # the colored diff. A failed edit is not covered by this check —
+        # its terminal frame is the only place the failure reason appears.
+        return None
 
     exit_status = None
     stderr = ""
@@ -1286,12 +1383,18 @@ def _tool_output_digest(update: dict) -> dict | None:
         blob = item.get("Json")
         if isinstance(blob, dict):
             value = blob.get("exit_status", blob.get("exitStatus"))
-            if isinstance(value, int) and not isinstance(value, bool):
-                exit_status = value
+            parsed = _parse_exit_status(value)
+            if parsed is not None:
+                exit_status = parsed
             err = blob.get("stderr")
             if isinstance(err, str) and err.strip():
                 stderr = err
-            if "exit_status" not in blob and "exitStatus" not in blob:
+            # `search`'s Json blob (`numMatches`/`numFiles`/`results`) is a
+            # second known shape, verified 2026-08-14 — not exec-shaped, but
+            # not unrecognised either, so it must not trip the tripwire below.
+            known_shape = ("exit_status" in blob or "exitStatus" in blob
+                           or "results" in blob or "numMatches" in blob)
+            if not known_shape:
                 unclassified.extend(k for k in blob if k not in ("stdout", "stderr"))
         elif "Text" not in item:
             unclassified.extend(item.keys())
@@ -1346,6 +1449,12 @@ def _tool_output_body(update: dict) -> dict | None:
                 "truncated": (len(diff["newText"]) > MAX_TOOL_OUTPUT_CHARS
                               or (old_text is not None
                                   and len(old_text) > MAX_TOOL_OUTPUT_CHARS))}
+    if update.get("kind") == "edit" and update.get("status") == "completed":
+        # Same reasoning as the matching check in `_tool_output_digest`: a
+        # successful edit's diff body was already broadcast on the first
+        # frame, and this terminal frame's confirmation-only text is never
+        # the better body to show behind "Show output".
+        return None
     text = _tool_output_text(update)
     if not text.strip():
         return None
@@ -2144,11 +2253,12 @@ class _Supervisor:
         # It has never actually carried one: kiro-cli puts the recap in the
         # `summary` field of COMPACTION_STATUS_METHOD, not in the transcript.
         self._compaction_buf: dict[str, list[str]] = {}
-        # The session's last-known `contextPercent` at the moment `_compacting`
-        # was set, one entry per session in `_compacting`. What the METADATA
-        # backstop below compares a new reading against — see its own comment
-        # for why a bare "a metadata frame arrived" is not enough.
-        self._compaction_start_percent: dict[str, float | None] = {}
+        # `time.monotonic()` at the moment `_compacting` was set, one entry
+        # per session in `_compacting`. What the METADATA backstop below
+        # measures elapsed time against — see its own comment for why a bare
+        # "a metadata frame arrived" is not enough, and why elapsed time
+        # rather than a `contextPercent` drop is the gate.
+        self._compaction_started_at: dict[str, float] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2429,7 +2539,7 @@ class _Supervisor:
         self.crew_spawn_toolcallids.clear()
         self._compacting.clear()
         self._compaction_buf.clear()
-        self._compaction_start_percent.clear()
+        self._compaction_started_at.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -3152,13 +3262,11 @@ class _Supervisor:
                 # A second `started` row would just be noise.
                 return
             self._compacting.add(session_id)
-            meta = self.sessions.get(session_id)
-            self._compaction_start_percent[session_id] = (
-                meta.get("contextPercent") if meta else None)
+            self._compaction_started_at[session_id] = time.monotonic()
             summary = ""
         else:
             self._compacting.discard(session_id)
-            self._compaction_start_percent.pop(session_id, None)
+            self._compaction_started_at.pop(session_id, None)
             summary = _as_text(params.get("summary"))
             # Fall back to whatever the transcript scraper collected. Empty on
             # every kiro-cli measured so far — the recap does not arrive as
@@ -3190,33 +3298,55 @@ class _Supervisor:
                 # the session from `_compacting`, so on a kiro-cli that emits
                 # it this branch was assumed to never fire.
                 #
-                # **Measured wrong 2026-08-14 against kiro-cli 2.18.0**: on the
-                # `commands_execute`-triggered path, the ack response's own
-                # metadata push (a routine per-request frame, unrelated to
-                # compaction) arrived 1ms *before* kiro-cli's real
-                # `compaction/status: started` — with `_compacting` already
-                # populated by this file's own pre-emptive `started` broadcast.
-                # "a metadata frame arrived while compacting" fired on that
-                # unrelated frame, discarding `_compacting` early and
-                # broadcasting a spurious, empty-recap "completed" — which then
-                # let the real `started`/`completed` pair through undeduped
-                # too, so the page showed the row twice.
+                # **Measured wrong twice against kiro-cli 2.18.0, 2026-08-14**,
+                # in opposite directions:
                 #
-                # The docstring's own reasoning already named the correct
-                # signal: "the context_usage drop is ... evidence compaction
-                # finished" — a drop, not mere arrival. So this now requires
-                # one: `percent` must be strictly below what was last known
-                # when `_compacting` was set. The captured race's metadata
-                # carried the *same* percent all three times (unchanged
-                # 7.8605), which this rejects. A session with no percent on
-                # record yet (a session's first-ever compaction) falls back to
-                # the old unconditional fire, since there is nothing to
-                # compare against.
+                # (1) A false positive. On the `commands_execute`-triggered
+                # path, the ack response's own metadata push (a routine
+                # per-request frame, unrelated to compaction) arrived 1ms
+                # *before* kiro-cli's real `compaction/status: started` — with
+                # `_compacting` already populated by this file's own
+                # pre-emptive `started` broadcast. "a metadata frame arrived
+                # while compacting" fired on that unrelated frame, discarding
+                # `_compacting` early and broadcasting a spurious, empty-recap
+                # "completed" — which then let the real `started`/`completed`
+                # pair through undeduped too, so the page showed the row twice.
+                #
+                # (2) The fix for (1) — requiring `contextUsagePercentage` to
+                # have dropped since `_compacting` was set — was drafted, then
+                # refuted by the same capture before it shipped: the *genuine*
+                # `compaction/status: completed` immediately after the false
+                # positive above carried the identical percentage as before
+                # compaction started (7.8605, unchanged) — a real completion
+                # produces no measurable drop when there is little to compact.
+                # A percent-drop gate would never fire on that case, or on any
+                # session like it, and — separately measured the same day — a
+                # palette compact can be acked and then never followed by any
+                # `compaction/status` at all (a session recompacted moments
+                # after a first compaction; 135s of subsequent wire traffic
+                # carried zero more compaction frames). Combine those two and
+                # a percent-drop backstop leaves `_compacting` set forever:
+                # "Compacting conversation context…" never resolves.
+                #
+                # What actually separates the two measured cases is elapsed
+                # time, not percent: the false positive arrived in 1-15ms: a
+                # genuine `compaction/status` pair, in every capture, took
+                # 2.5-5s. `COMPACTION_BACKSTOP_SECONDS` sits with wide margin
+                # above the slower and wide margin below "the user got bored
+                # and tried something else" — see its own comment. This still
+                # needs *some* METADATA push after the threshold to fire at
+                # all (metadata is activity-driven here, not periodic), so the
+                # residual case — kiro-cli never emits `compaction/status` at
+                # all *and* the session goes quiet — resolves on the session's
+                # next real activity rather than instantly. Accepted for now;
+                # closing it fully would mean adding a timer, which nothing
+                # measured yet demands.
                 if session_id in self._compacting:
-                    start_percent = self._compaction_start_percent.get(session_id)
-                    if start_percent is None or percent < start_percent:
+                    started_at = self._compaction_started_at.get(session_id)
+                    if (started_at is not None
+                            and time.monotonic() - started_at > COMPACTION_BACKSTOP_SECONDS):
                         self._compacting.discard(session_id)
-                        self._compaction_start_percent.pop(session_id, None)
+                        self._compaction_started_at.pop(session_id, None)
                         _registry.broadcast(
                             session_id,
                             envelope("compaction",
@@ -4908,9 +5038,7 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     # Completion (and the recap) come back on that same notification.
     if text.strip() == "/compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
-        _meta = _supervisor.sessions.get(session_id)
-        _supervisor._compaction_start_percent[session_id] = (
-            _meta.get("contextPercent") if _meta else None)
+        _supervisor._compaction_started_at[session_id] = time.monotonic()
         _registry.broadcast(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},
@@ -5201,14 +5329,17 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
     # TuiCommand object form (`{"command": {"command": name, "args": {}}}`) —
     # and a live palette `/compact` **verified working end-to-end on kiro-cli
     # 2.18.0, 2026-08-14**: the round trip acks, `compaction/status: started`
-    # and `completed` both arrive, and the recap is populated. If a /compact
-    # from the palette ever stops producing a compaction here while the typed
+    # and `completed` both arrive, and the recap is populated. **Also
+    # measured, same day, same build**: a second palette `/compact` on an
+    # already-recently-compacted session acked identically but was never
+    # followed by any `compaction/status` at all (135s of subsequent traffic
+    # carried none) — this is why `_compaction_started_at` below feeds a
+    # time-based backstop rather than assuming the pair always arrives. If a
+    # /compact from the palette ever stops acking here while the typed
     # `/compact` prompt still works, that is still the first thing to check.
     if name == "compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
-        _meta = _supervisor.sessions.get(session_id)
-        _supervisor._compaction_start_percent[session_id] = (
-            _meta.get("contextPercent") if _meta else None)
+        _supervisor._compaction_started_at[session_id] = time.monotonic()
         _registry.broadcast(
             session_id,
             envelope("compaction", {"status": "started", "error": "", "summary": ""},

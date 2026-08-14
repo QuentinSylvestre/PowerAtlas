@@ -3085,6 +3085,22 @@ class TestAcpToolCallVisibility:
         assert digest["stderrHead"] == "error: unresolved import"
         assert digest["stderrTruncated"] is False
 
+    def test_a_string_exit_status_is_parsed_rather_than_dropped(self, acp_session):
+        """Measured 2026-08-14 against a real kiro-cli 2.18.0 subprocess:
+        every `execute` call's `exit_status` is the string ``"exit code: N"``,
+        never the bare int the shape hypothesis assumed. Dropping it silently
+        removed the exit-status badge from every failing shell row."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "failed",
+            "rawOutput": {"items": [{"Json": {
+                "stdout": "", "stderr": "boom\n", "exit_status": "exit code: 1"}}]}})
+        digest = next(f for f in _queued(conn)
+                      if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["exitStatus"] == 1
+
     def test_an_oversize_stderr_head_says_it_was_clipped(self, acp_session):
         acp_mod, sid = acp_session
         conn = self._attached(acp_mod, sid)
@@ -3134,6 +3150,92 @@ class TestAcpToolCallVisibility:
         assert digest["added"] == 2
         body = next(f for f in frames if f["type"] == "tool_output")["payload"]
         assert body["oldText"] is None
+
+    def test_a_create_is_marked_new_even_though_the_wire_oldtext_equals_newtext(
+            self, acp_session):
+        """Measured 2026-08-14 against kiro-cli 2.18.0: a `write` tool call
+        with `rawInput.command == "create"`, confirmed beforehand via
+        `Test-Path` to be a genuinely new file, still sent `oldText` equal to
+        `newText` rather than `null`. `rawInput.command` is the reliable
+        signal here, not the wire's own `oldText`."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "diff", "path": "/repo/new.py",
+                         "oldText": "a\nb\n", "newText": "a\nb\n"}],
+            "rawInput": {"command": "create", "path": "/repo/new.py",
+                         "content": "a\nb\n"}})
+        frames = _queued(conn)
+        digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["isNew"] is True
+        assert digest["added"] == 2
+        assert digest["removed"] == 0
+        body = next(f for f in frames if f["type"] == "tool_output")["payload"]
+        assert body["oldText"] is None
+
+    def test_a_strreplace_edit_keeps_its_genuine_oldtext(self, acp_session):
+        """The create-only override must not blunt a real edit's diff."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "content": [{"type": "diff", "path": "/repo/a.py",
+                         "oldText": "one\n", "newText": "one\ntwo\n"}],
+            "rawInput": {"command": "strReplace", "path": "/repo/a.py"}})
+        digest = next(f for f in _queued(conn)
+                      if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["isNew"] is False
+        assert digest["added"] == 1
+
+    def test_a_completed_edits_confirmation_frame_does_not_clobber_the_diff(
+            self, acp_session):
+        """Measured 2026-08-14 against kiro-cli 2.18.0: a successful edit's
+        diff `content` arrives only on the first `tool_call` frame. The
+        terminal `tool_call_update` that follows carries no `content` at
+        all — just a generic confirmation string ("Successfully created
+        ... (40 lines).") in `rawOutput`. `_tool_output_digest` and
+        `_tool_output_body` are stateless per-notification, so without this
+        check that confirmation would digest to `form: text` and, because
+        the client always shows whichever digest arrived most recently,
+        silently replace the richer `form: diff` digest/body the first
+        frame already produced. Confirmed live: "Show output" on a
+        completed edit showed the confirmation sentence instead of the
+        colored diff. The fix is to carry no `output` key at all on this
+        frame, so the client's `if (payload.output)` guard leaves the
+        earlier diff alone."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "kind": "edit", "status": "completed",
+            "rawOutput": {"items": [{
+                "Text": "Successfully created /repo/new.py (3 lines)."}]}})
+        frames = _queued(conn)
+        tool_update = next(f for f in frames if f["type"] == "tool_update")
+        assert "output" not in tool_update["payload"]
+        assert not any(f["type"] == "tool_output" for f in frames)
+
+    def test_a_failed_edits_terminal_frame_still_surfaces_its_output(
+            self, acp_session):
+        """The clobber guard is scoped to `status == "completed"` on
+        purpose: a failed edit's terminal frame is the only place its
+        failure reason ever appears, since a failed call never got a
+        content-bearing `tool_call` frame first."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "kind": "edit", "status": "failed",
+            "rawOutput": {"items": [{
+                "Text": "No match found for the requested replacement."}]}})
+        frames = _queued(conn)
+        digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["form"] == "text"
+        body = next(f for f in frames if f["type"] == "tool_output")["payload"]
+        assert body["text"] == "No match found for the requested replacement."
 
     def test_the_output_body_is_the_tail_and_says_it_was_clipped(self, acp_session):
         """A build log's last lines are the ones that say what happened."""
@@ -3205,6 +3307,30 @@ class TestAcpToolCallVisibility:
         assert digest["form"] == "text"
         assert digest["bytes"] == 12
         assert digest["lines"] == 2
+
+    def test_a_search_result_digests_and_carries_its_matches_as_text(
+            self, acp_session):
+        """Measured 2026-08-14 against kiro-cli 2.18.0: a `search` (grep-kind)
+        call's `Json` blob carries `numMatches`/`numFiles`/`results` — no
+        `stdout`/`stderr` at all. Before this shape was recognised, a search
+        with real matches degraded to no digest and no body whatsoever,
+        because `_tool_output_text` had nothing to extract from it."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "rawOutput": {"items": [{"Json": {
+                "numMatches": 2, "numFiles": 1, "truncated": False,
+                "results": [{"file": "/repo/calc.py", "count": 2,
+                             "matches": ["1:def add(a, b):", "2:    return a + b"]}]}}]}})
+        frames = _queued(conn)
+        digest = next(f for f in frames if f["type"] == "tool_update")["payload"]["output"]
+        assert digest["form"] == "text"
+        assert digest["bytes"] > 0
+        body = next(f for f in frames if f["type"] == "tool_output")["payload"]
+        assert "/repo/calc.py" in body["text"]
+        assert "1:def add(a, b):" in body["text"]
 
     def test_the_terminal_content_variant_is_not_rendered(self, acp_session):
         """A `terminal` ToolCallContent references a terminal the agent owns;
@@ -17063,21 +17189,26 @@ class TestAcpCompactionStatus:
         finally:
             acp_mod._supervisor._compacting.discard(sid)
 
-    def test_compact_prompt_snapshots_the_percent_in_force_at_start(
+    def test_compact_prompt_stamps_the_backstop_clock_at_start(
             self, acp_session):
-        """The snapshot the backstop drop-check compares against — taken from
-        whatever `contextPercent` this session last recorded, `None` if it
-        never has."""
+        """The timestamp the time-based backstop measures elapsed time
+        against — stamped with `time.monotonic()` the moment `_compacting`
+        is set, not derived from `contextPercent` (a percent-drop gate was
+        drafted and then refuted: a genuine `compaction/status: completed`,
+        captured live, carried the identical percentage as before compaction
+        started — see the backstop's own comment in `_on_notification`)."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
-        acp_mod._supervisor.sessions[sid]["contextPercent"] = 33.0
         _queued(conn)
+        before = time.monotonic()
         try:
             self._run_compact_prompt(acp_mod, sid, conn)
-            assert acp_mod._supervisor._compaction_start_percent[sid] == 33.0
+            after = time.monotonic()
+            stamped = acp_mod._supervisor._compaction_started_at[sid]
+            assert before <= stamped <= after
         finally:
             acp_mod._supervisor._compacting.discard(sid)
-            acp_mod._supervisor._compaction_start_percent.pop(sid, None)
+            acp_mod._supervisor._compaction_started_at.pop(sid, None)
 
     def test_non_compact_prompt_does_not_trigger_compaction(self, acp_session):
         """A regular prompt does not fire a compaction frame."""
@@ -17098,11 +17229,14 @@ class TestAcpCompactionStatus:
 
     def test_completed_detected_on_context_usage_for_compacting_session(
             self, acp_session):
-        """context_usage notification for a _compacting session broadcasts
-        completed and removes the session from _compacting."""
+        """A context_usage notification past the backstop threshold, for a
+        _compacting session, broadcasts completed and removes the session
+        from _compacting."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor._compacting.add(sid)
+        acp_mod._supervisor._compaction_started_at[sid] = (
+            time.monotonic() - acp_mod.COMPACTION_BACKSTOP_SECONDS - 1)
         _queued(conn)
         self._send_context_usage(acp_mod, sid, percent=10.0)
         frames = _queued(conn)
@@ -17122,48 +17256,59 @@ class TestAcpCompactionStatus:
         frames = _queued(conn)
         assert not any(f["type"] == "compaction" for f in frames)
 
-    def test_an_unchanged_context_usage_does_not_backstop_complete(
+    def test_a_metadata_push_soon_after_starting_does_not_backstop_complete(
             self, acp_session):
         """Measured 2026-08-14 against kiro-cli 2.18.0: on the palette
         (`commands_execute`) path, the round-trip's own ack triggers a
-        METADATA_METHOD push carrying the *same* `contextUsagePercentage* as
-        before compaction started, 1ms before kiro-cli's real
-        `compaction/status: started`. Firing the backstop on that unrelated,
-        unchanged reading broadcast a spurious empty-recap "completed" and let
-        the real started/completed pair through undeduped too — a duplicated
-        row. A snapshot taken when `_compacting` was set is what lets the
-        backstop tell "compaction actually finished" from "a metadata frame
-        merely arrived"."""
+        METADATA_METHOD push 1ms before kiro-cli's real
+        `compaction/status: started`. Firing the backstop on that unrelated
+        frame broadcast a spurious empty-recap "completed" and let the real
+        started/completed pair through undeduped too — a duplicated row. A
+        percent-drop gate was drafted to fix this and then refuted by the
+        same capture: the genuine `completed` that followed carried the
+        identical percentage as before compaction started. Elapsed time is
+        what actually separates the two — the false positive arrived in
+        1-15ms, every genuine `compaction/status` pair measured took 2.5-5s —
+        so a push this soon after `_compacting` was set must not backstop,
+        whatever percentage it carries."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor._compacting.add(sid)
-        acp_mod._supervisor._compaction_start_percent[sid] = 7.8605
+        acp_mod._supervisor._compaction_started_at[sid] = time.monotonic()
         _queued(conn)
         self._send_context_usage(acp_mod, sid, percent=7.8605)
         frames = _queued(conn)
         assert not any(f["type"] == "compaction" for f in frames)
         assert sid in acp_mod._supervisor._compacting
 
-    def test_a_genuine_context_usage_drop_still_backstops_complete(
+    def test_a_metadata_push_past_the_threshold_backstops_complete(
             self, acp_session):
-        """The fix requires a drop, not that it forbid completion outright —
-        a real drop below the snapshot taken at compaction start must still
-        fire, since that is the backstop's one legitimate job."""
+        """The other side of the same measurement: a palette `/compact` can
+        be acked and never followed by any `compaction/status` at all
+        (measured 2026-08-14, a session recompacted moments after a first
+        compaction — 135s of subsequent wire traffic carried zero more
+        compaction frames). Once `_compacting` has been set longer than
+        `COMPACTION_BACKSTOP_SECONDS`, the next metadata push must resolve it
+        — regardless of whether the percentage moved — or "Compacting
+        conversation context…" never clears."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         acp_mod._supervisor._compacting.add(sid)
-        acp_mod._supervisor._compaction_start_percent[sid] = 40.0
+        acp_mod._supervisor._compaction_started_at[sid] = (
+            time.monotonic() - acp_mod.COMPACTION_BACKSTOP_SECONDS - 1)
         _queued(conn)
-        self._send_context_usage(acp_mod, sid, percent=8.0)
+        self._send_context_usage(acp_mod, sid, percent=7.8605)
         frames = _queued(conn)
         compaction_frames = [f for f in frames if f["type"] == "compaction"]
         assert len(compaction_frames) == 1
         assert compaction_frames[0]["payload"]["status"] == "completed"
         assert sid not in acp_mod._supervisor._compacting
-        assert sid not in acp_mod._supervisor._compaction_start_percent
+        assert sid not in acp_mod._supervisor._compaction_started_at
 
     def test_full_cycle_compact_then_context_usage(self, acp_session):
-        """End-to-end: /compact prompt → started; context_usage drop → completed."""
+        """End-to-end: /compact prompt → started; a metadata push once past
+        the backstop threshold (kiro-cli's own `compaction/status` never
+        arrived in this run) → completed."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         _queued(conn)
@@ -17172,6 +17317,8 @@ class TestAcpCompactionStatus:
         assert len(started_frames) == 1
         assert started_frames[0]["payload"]["status"] == "started"
         assert sid in acp_mod._supervisor._compacting
+        acp_mod._supervisor._compaction_started_at[sid] -= (
+            acp_mod.COMPACTION_BACKSTOP_SECONDS + 1)
         self._send_context_usage(acp_mod, sid, percent=10.0)
         completed_frames = [f for f in _queued(conn) if f["type"] == "compaction"]
         assert len(completed_frames) == 1
@@ -17186,8 +17333,11 @@ class TestAcpCompactionStatus:
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         _queued(conn)
-        # Simulate: /compact fired started, session is now _compacting.
+        # Simulate: /compact fired started, session is now _compacting, and
+        # enough time has passed that a metadata push will backstop-complete.
         acp_mod._supervisor._compacting.add(sid)
+        acp_mod._supervisor._compaction_started_at[sid] = (
+            time.monotonic() - acp_mod.COMPACTION_BACKSTOP_SECONDS - 1)
         try:
             # Simulate two summary chunks arriving from kiro-cli.
             for chunk_text in ("Summary part 1. ", "Summary part 2."):
@@ -17200,7 +17350,7 @@ class TestAcpCompactionStatus:
             # Both chunks render as normal agent chunks too.
             chunk_frames = [f for f in _queued(conn) if f["type"] == "chunk"]
             assert len(chunk_frames) == 2
-            # Now fire completed via context_usage drop.
+            # Now fire completed via the time-based backstop.
             self._send_context_usage(acp_mod, sid, percent=9.0)
             completed_frames = [f for f in _queued(conn) if f["type"] == "compaction"]
             assert len(completed_frames) == 1
