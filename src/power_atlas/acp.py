@@ -1121,7 +1121,7 @@ def _tool_input_text(update: dict) -> str:
         return ""
 
 
-def _tool_locations(update: dict) -> list:
+def _tool_locations(update: dict, backfill: dict | None = None) -> list:
     """Which files a tool call says it touched.
 
     ``locations`` is ACP proper — ``[{"path": …, "line": …}]``, sent on
@@ -1133,22 +1133,38 @@ def _tool_locations(update: dict) -> list:
     ``line`` is carried through only when it is a real integer: it is optional
     on the wire and means "the whole file" when absent, which is a different
     statement from line 0.
+
+    ``backfill`` is the same `data_kiro.get_tool_diffs()` map `_tool_diff`
+    reads — see its docstring. Consulted only when this frame carries no
+    `locations` of its own: a `session/load` replay's `tool_call` frame
+    reconstructs `title`/`kind` from kiro-cli's own stored tool name but not
+    `locations` (measured 2026-08-14: a reloaded edit's diff came back
+    correctly once backfilled, with no filename/line subtitle above it at
+    all). The backfill entry carries a path but never a line — kiro-cli's
+    on-disk `input` has no such field, and finding one from `oldStr` alone
+    would need the file's full original content, which is not kept either —
+    so a backfilled location is always "the whole file", the same as a live
+    one whose own `line` was absent.
     """
-    raw = update.get("locations")
-    if not isinstance(raw, list):
-        return []
     out = []
-    for entry in raw[:MAX_TOOL_LOCATIONS]:
-        if not isinstance(entry, dict):
-            continue
-        path = _as_text(entry.get("path"))
-        if not path:
-            continue
-        item = {"path": path[:MAX_TOOL_INPUT_CHARS]}
-        line = entry.get("line")
-        if isinstance(line, int) and not isinstance(line, bool) and line > 0:
-            item["line"] = line
-        out.append(item)
+    raw = update.get("locations")
+    if isinstance(raw, list):
+        for entry in raw[:MAX_TOOL_LOCATIONS]:
+            if not isinstance(entry, dict):
+                continue
+            path = _as_text(entry.get("path"))
+            if not path:
+                continue
+            item = {"path": path[:MAX_TOOL_INPUT_CHARS]}
+            line = entry.get("line")
+            if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+                item["line"] = line
+            out.append(item)
+    if not out and backfill:
+        entry = backfill.get(_as_text(update.get("toolCallId")))
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(path, str) and path:
+            out.append({"path": path[:MAX_TOOL_INPUT_CHARS]})
     return out
 
 
@@ -1519,7 +1535,7 @@ def _tool_payload(update: dict, backfill: dict | None = None) -> dict:
         payload["commandTruncated"] = True
         command = command[:MAX_TOOL_INPUT_CHARS]
     payload["command"] = command
-    locations = _tool_locations(update)
+    locations = _tool_locations(update, backfill)
     if locations:
         payload["locations"] = locations
     digest = _tool_output_digest(update, backfill)

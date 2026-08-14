@@ -3264,6 +3264,48 @@ class TestAcpToolCallVisibility:
         finally:
             acp_mod._supervisor._diff_backfill.pop(sid, None)
 
+    def test_a_replayed_tool_call_backfills_its_location_too(self, acp_session):
+        """A replayed `tool_call` reconstructs `title`/`kind` from kiro-cli's
+        own stored tool name but not `locations` — measured live: a
+        reloaded edit's diff came back correctly once backfilled, with no
+        filename/line subtitle above it at all, because `_tool_locations`
+        only ever read the live wire field. The backfilled location never
+        carries a line — kiro-cli's on-disk input has none — so it always
+        means "the whole file", same as a live location whose own line was
+        absent."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor._diff_backfill[sid] = {
+            "t1": {"path": "/repo/new.py", "oldText": None, "newText": "x = 1\n"}}
+        try:
+            self._notify(acp_mod, sid, {
+                "sessionUpdate": "tool_call", "toolCallId": "t1",
+                "title": "write", "kind": "edit"})
+            frames = _queued(conn)
+            payload = next(f for f in frames if f["type"] == "tool_call")["payload"]
+            assert payload["locations"] == [{"path": "/repo/new.py"}]
+        finally:
+            acp_mod._supervisor._diff_backfill.pop(sid, None)
+
+    def test_a_live_location_is_never_overridden_by_a_backfill_entry(
+            self, acp_session):
+        """Same rule as the diff itself: a live frame's own data always
+        wins, backfill only ever fills a gap."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        acp_mod._supervisor._diff_backfill[sid] = {
+            "t1": {"path": "/repo/stale.py", "oldText": None, "newText": "stale\n"}}
+        try:
+            self._notify(acp_mod, sid, {
+                "sessionUpdate": "tool_call", "toolCallId": "t1",
+                "title": "write", "kind": "edit",
+                "locations": [{"path": "/repo/live.py", "line": 3}]})
+            frames = _queued(conn)
+            payload = next(f for f in frames if f["type"] == "tool_call")["payload"]
+            assert payload["locations"] == [{"path": "/repo/live.py", "line": 3}]
+        finally:
+            acp_mod._supervisor._diff_backfill.pop(sid, None)
+
     def test_a_live_diff_is_never_overridden_by_a_backfill_entry(self, acp_session):
         """A live frame's own diff content always wins — backfill only ever
         fills a gap, never contests what the wire just said."""
