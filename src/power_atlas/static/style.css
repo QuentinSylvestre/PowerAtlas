@@ -841,6 +841,41 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-tool-group-toggle:hover { background: var(--surface-hover); }
 .acp-tool-cmd, .acp-msg-md pre { margin-top: 6px; max-height: 220px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; }
 .acp-tool-more { margin-top: 4px; font-size: 11px; font-style: italic; color: #fbbf24; }
+/* ---- tool output ---------------------------------------------------------
+   Two surfaces, because the server sends the output in two halves for a
+   reason (see the budget note above MAX_TOOL_OUTPUT_CHARS in acp.py): the
+   DIGEST is recorded and survives a reload, the BODY is broadcast and does
+   not. `.acp-tool-lost` is what keeps that honest on the page. */
+.acp-tool-digest { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-top: 3px; font-size: 11px; }
+.acp-tool-digest-note { color: var(--text-dim); }
+/* The exit status is the one number an operator under -a most needs, so it
+   takes the status palette rather than the dim summary colour beside it. */
+.acp-tool-exit { font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 10px; letter-spacing: 0.4px; border-radius: 10px; padding: 1px 8px; border: 1px solid var(--border); color: var(--text-muted); }
+.acp-tool-exit[data-ok="true"] { color: var(--success); border-color: rgba(74, 222, 128, 0.4); }
+.acp-tool-exit[data-ok="false"] { color: #ef4444; border-color: rgba(239, 68, 68, 0.45); }
+/* stderr rides in the recorded digest, so it is short by construction. Shown
+   without opening anything: a failing command's first line is usually the
+   line that explains it, and burying it behind a toggle costs a click on
+   exactly the rows that most need reading. */
+.acp-tool-stderr { flex-basis: 100%; margin-top: 2px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 11px; line-height: 1.45; color: #fca5a5; white-space: pre-wrap; word-break: break-word; }
+.acp-tool-diffstat { display: inline-flex; gap: 6px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 11px; font-variant-numeric: tabular-nums; }
+.acp-tool-diffstat-add { color: #4ade80; }
+.acp-tool-diffstat-del { color: #f87171; }
+.acp-tool-lost { margin-top: 3px; font-size: 10.5px; font-style: italic; color: var(--text-dim); }
+.acp-tool-output-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.acp-tool-output-label { font-size: 11px; color: var(--text-dim); user-select: none; }
+.acp-tool-output-label:hover { color: var(--text-muted); }
+.acp-tool-diff { margin-top: 6px; max-height: 320px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 0; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; }
+.acp-tool-diff-line { display: flex; gap: 8px; padding: 0 8px; white-space: pre-wrap; word-break: break-word; }
+.acp-tool-diff-gutter { flex-shrink: 0; width: 1ch; text-align: center; opacity: 0.75; user-select: none; }
+.acp-tool-diff-text { flex: 1; }
+/* Tinted rather than only marked: a +/- in the gutter is easy to lose in a
+   long hunk, and the two colours are the diffstat's, so one vocabulary covers
+   the summary and the body. */
+.acp-tool-diff-line[data-d="add"] { background: rgba(74, 222, 128, 0.10); color: #bbf7d0; }
+.acp-tool-diff-line[data-d="del"] { background: rgba(248, 113, 113, 0.10); color: #fecaca; }
+.acp-tool-diff-line[data-d="ctx"] { color: var(--text-muted); }
+.acp-tool-diff-line[data-d="gap"] { color: var(--text-dim); font-style: italic; }
 /* The agent's answer once its markdown has been rendered, which happens at the
    end of a bubble and not while it streams. `.acp-msg-body` carries
    `white-space: pre-wrap` because until then the bubble is plain text holding

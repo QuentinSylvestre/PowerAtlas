@@ -257,6 +257,19 @@ anything else stays as plain text. The page builds every one of those elements i
 never parses markup, which is what stops an agent running with every tool pre-approved from putting
 something executable on a page you have open.
 
+**Tool calls say what happened, not only what ran.** Each row carries an icon for the kind of tool,
+a coloured status — pending, in progress, completed, failed — and, for a call that touched a file,
+that file's name with the full path on hover. What the call *returned* is shown in two parts,
+because the two halves are worth different things. A short summary is kept: a shell call's exit
+status and the first lines of its standard error, an edit's `+n −m`, a read's line and byte count.
+Below it, *Show output* opens the rest — the tail of what a command printed, or a real diff for an
+edit, coloured by line. The summary survives a reload of the page and the body does not, so a row
+whose output is no longer held says *output not retained after reload* rather than looking as
+though the command printed nothing. That split is deliberate: PowerAtlas keeps a rolling buffer of
+each session's transcript so a reconnecting page can be rebuilt, and a build log or a large file
+read would push the conversation out of it. Tool output is never treated as markdown — it is bytes
+a command printed, not prose the agent wrote, and it is shown verbatim.
+
 Three things are worth knowing before leaving a long task running:
 
 - **A turn is bounded by silence, not by duration.** A turn that keeps streaming runs as long as it

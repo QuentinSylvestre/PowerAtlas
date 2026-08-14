@@ -7135,6 +7135,186 @@ check("a tool_call with no status leaves the badge off the row", (tpl) => {
   assertEqual(badge.textContent, "", "an unreported status invented badge text");
 });
 
+check("a shell digest shows exit status, size and the stderr head", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d1", title: "cargo build", kind: "execute",
+               status: "failed", command: "cargo build",
+               output: { form: "exec", exitStatus: 101, bytes: 4200, lines: 38,
+                         stderrHead: "error[E0432]: unresolved import",
+                         stderrTruncated: false } } });
+  const row = page.el("acpTranscript");
+  const exit = row.querySelector(".acp-tool-exit");
+  assertEqual(exit.textContent, "exit 101");
+  assertEqual(exit.getAttribute("data-ok"), "false", "a non-zero exit should read as not-ok");
+  assert(row.querySelector(".acp-tool-digest").textContent.includes("38 lines"),
+    "the digest should state the size");
+  assertEqual(row.querySelector(".acp-tool-stderr").textContent,
+    "error[E0432]: unresolved import",
+    "stderr rides in the digest and is shown without opening anything");
+});
+
+check("exit 0 reads as ok", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d2", title: "true", kind: "execute", status: "completed",
+               output: { form: "exec", exitStatus: 0, bytes: 0, lines: 0 } } });
+  assertEqual(page.el("acpTranscript").querySelector(".acp-tool-exit")
+                  .getAttribute("data-ok"), "true");
+});
+
+check("a diff digest shows the stat below the path it describes", (tpl) => {
+  // Order matters: the path says which file, the stat says what happened to
+  // it, and a "+3 −0" above the filename reads backwards.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d3", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/acp.py" }],
+               output: { form: "diff", path: "/repo/acp.py", added: 3,
+                         removed: 1, isNew: false } } });
+  const body = page.el("acpTranscript").querySelector(".acp-msg-body");
+  const classes = body.childNodes.map((c) => c.className);
+  assert(classes.indexOf("acp-tool-loc") < classes.indexOf("acp-tool-digest"),
+    "the diffstat should follow the path, not precede it: " + classes.join(","));
+  assertEqual(body.querySelector(".acp-tool-diffstat-add").textContent, "+3");
+  assertEqual(body.querySelector(".acp-tool-diffstat-del").textContent, "−1");
+});
+
+check("a digest with no body says the output was not retained", (tpl) => {
+  // The honest half of the record/broadcast split: the digest replays after a
+  // reload, the body does not. A row claiming "38 lines" with no way to see
+  // them and no explanation would read as a bug.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d4", title: "cargo build", kind: "execute",
+               status: "failed",
+               output: { form: "exec", exitStatus: 1, bytes: 4200, lines: 38 } } });
+  assert(page.el("acpTranscript").querySelector(".acp-tool-lost"),
+    "a digest replayed without its body should say so");
+});
+
+check("a digest describing no output claims nothing was lost", (tpl) => {
+  // `exit 0` with an empty stdout must not accuse the page of losing anything.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d5", title: "true", kind: "execute", status: "completed",
+               output: { form: "exec", exitStatus: 0, bytes: 0, lines: 0 } } });
+  assert(!page.el("acpTranscript").querySelector(".acp-tool-lost"),
+    "a silent command was reported as having lost its output");
+});
+
+check("a body that arrives with its digest retracts the not-retained notice", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d6", title: "ls", kind: "execute", status: "in_progress" } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "d6", form: "text", text: "a\nb\n", truncated: false, length: 4 } });
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "d6",
+               output: { form: "text", bytes: 4, lines: 2 } } });
+  const row = page.el("acpTranscript");
+  assert(!row.querySelector(".acp-tool-lost"), "the body is right there");
+  assert(row.querySelector(".acp-tool-output-wrap"), "no body attached");
+});
+
+check("an output body arriving before its row is held and then attached", (tpl) => {
+  // A call whose first frame is a content-only update: the body is broadcast
+  // just before the update that creates the row.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "d7", form: "text", text: "early\n",
+               truncated: false, length: 6 } });
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "d7", title: "ls", kind: "execute", status: "completed",
+               output: { form: "text", bytes: 6, lines: 1 } } });
+  const row = page.el("acpTranscript");
+  assert(row.querySelector(".acp-tool-output-wrap"), "the held body never attached");
+  assert(!row.querySelector(".acp-tool-lost"),
+    "a held body should count as present");
+});
+
+check("the output body is collapsed until asked for", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d8", title: "ls", kind: "execute", status: "completed" } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "d8", form: "text", text: "x\n", truncated: false, length: 2 } });
+  const row = page.el("acpTranscript");
+  const wrap = row.querySelector(".acp-tool-output");
+  assert(wrap.hidden === true, "output should start collapsed, as the command does");
+  const toggle = row.querySelector(".acp-tool-output-toggle");
+  assertEqual(toggle.getAttribute("aria-expanded"), "false");
+  toggle.dispatch("click");
+  assert(wrap.hidden === false, "the toggle did not open the output");
+  assertEqual(toggle.getAttribute("aria-expanded"), "true");
+});
+
+check("tool output is never rendered as markdown", (tpl) => {
+  // Output is bytes a command printed, not prose the agent wrote. The
+  // markdown path exists for the latter, and pointing it at the former would
+  // put a parser on untrusted bytes.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "d9", title: "cat", kind: "execute", status: "completed" } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "d9", form: "text", truncated: false, length: 40,
+               text: "# heading\n<script>alert(1)</script>\n" } });
+  const box = page.el("acpTranscript").querySelector(".acp-tool-cmd");
+  assert(box.textContent.includes("<script>alert(1)</script>"),
+    "output should survive verbatim as text");
+  assert(!page.el("acpTranscript").querySelector(".acp-msg-md"),
+    "output reached the markdown renderer");
+  assert(!page.el("acpTranscript").querySelector("script"),
+    "a script element was constructed from tool output");
+});
+
+check("a diff body marks added and removed lines and keeps context", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "df1", title: "edit", kind: "edit", status: "completed" } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "df1", form: "diff", path: "/repo/a.py", truncated: false,
+               oldText: "one\ntwo\nfour\n", newText: "one\ntwo\nthree\nfour\n" } });
+  const lines = page.el("acpTranscript").querySelectorAll(".acp-tool-diff-line");
+  const marks = lines.map((l) => l.getAttribute("data-d"));
+  assertEqual(marks.filter((m) => m === "add").length, 1, "expected one addition");
+  assertEqual(marks.filter((m) => m === "del").length, 0, "expected no deletions");
+  const added = lines.filter((l) => l.getAttribute("data-d") === "add")[0];
+  assert(added.textContent.includes("three"), "the added line should be 'three'");
+  // A trailing newline is how a text file ends; it is not a blank final line.
+  assert(!marks.some((m, i) => i === marks.length - 1 &&
+                     lines[i].querySelector(".acp-tool-diff-text").textContent === ""),
+    "the diff ended on a blank line produced by the trailing newline");
+});
+
+check("a new-file diff shows every line as an addition", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "df2", title: "create", kind: "edit", status: "completed" } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "df2", form: "diff", path: "/repo/new.py",
+               truncated: false, oldText: null, newText: "a\nb\n" } });
+  const marks = page.el("acpTranscript").querySelectorAll(".acp-tool-diff-line")
+    .map((l) => l.getAttribute("data-d"));
+  assertEqual(marks.join(","), "add,add", "a new file is all additions");
+});
+
+check("a second output body replaces the first rather than stacking", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "df3", title: "ls", kind: "execute", status: "in_progress" } });
+  for (const text of ["first\n", "first\nsecond\n"]) {
+    page.deliver({ type: "tool_output", sessionId: live,
+      payload: { toolCallId: "df3", form: "text", text, truncated: false,
+                 length: text.length } });
+  }
+  const row = page.el("acpTranscript");
+  assertEqual(row.querySelectorAll(".acp-tool-output-wrap").length, 1,
+    "a streaming call stacked one collapsible per chunk");
+  assert(row.querySelector(".acp-tool-cmd").textContent.includes("second"),
+    "the later body should win");
+});
+
 check("a tool row draws an icon for its kind", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,

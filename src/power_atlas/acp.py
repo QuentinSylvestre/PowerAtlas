@@ -1311,7 +1311,12 @@ def _tool_output_digest(update: dict) -> dict | None:
             digest["stderrHead"] = head[:MAX_STDERR_HEAD_CHARS]
         return digest
 
-    if not text:
+    # `.strip()` and not `text`, so this agrees with `_tool_output_body`'s own
+    # emptiness test. The page decides whether to say "output not retained
+    # after reload" by whether a digest arrived without a body, so a call whose
+    # output is one newline must produce either both or neither — never a
+    # digest alone, which would read on the page as a body that got lost.
+    if not text.strip():
         return None
     return {"form": "text",
             "bytes": len(text.encode("utf-8", "replace")),

@@ -2169,6 +2169,275 @@
     el.hidden = false;
   }
 
+  // A `tool_output` body whose row has not been built yet, keyed by
+  // toolCallId. The server broadcasts the body immediately *before* the
+  // `tool_update` carrying the digest, and for a call whose first frame is a
+  // content-only update that update is also what creates the row — so the
+  // body can genuinely arrive first. Drained by `addToolCall`.
+  var pendingToolOutput = Object.create(null);
+
+  /** "3.4 KB" / "812 B" — output sizes only, so no need for anything above MB. */
+  function _humanBytes(n) {
+    if (typeof n !== 'number' || !isFinite(n) || n < 0) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  /** Whether a digest describes a call that should also have sent a body.
+   *
+   *  This is what separates "there was nothing to show" from "there was
+   *  something and this page no longer has it": the body is broadcast and
+   *  never recorded, so after a reload the digest replays alone. A `exit 0`
+   *  with no output must not claim anything was lost. */
+  function _expectsBody(d) {
+    return !!d && (d.form === 'diff' || (typeof d.bytes === 'number' && d.bytes > 0));
+  }
+
+  /** The one-line summary that survives a reload, rendered into the row.
+   *
+   *  Every branch here reads a number or a hard-capped string — this is the
+   *  half the server records, and the reason it is a summary rather than the
+   *  output is the replay-buffer budget noted above MAX_TOOL_OUTPUT_CHARS in
+   *  acp.py. All text via textContent, as everywhere else on this page. */
+  function _renderToolDigest(d) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-tool-digest';
+    if (d.form === 'exec') {
+      if (typeof d.exitStatus === 'number') {
+        var code = document.createElement('span');
+        // The one number an operator under -a most needs, so it gets the
+        // status palette rather than the dim summary colour.
+        code.className = 'acp-tool-exit';
+        code.setAttribute('data-ok', d.exitStatus === 0 ? 'true' : 'false');
+        code.textContent = 'exit ' + d.exitStatus;
+        wrap.appendChild(code);
+      }
+      if (typeof d.bytes === 'number' && d.bytes > 0) {
+        wrap.appendChild(_digestNote(
+          d.lines + (d.lines === 1 ? ' line' : ' lines') + ', ' + _humanBytes(d.bytes)));
+      }
+      if (d.stderrHead) {
+        var err = document.createElement('div');
+        err.className = 'acp-tool-stderr';
+        err.textContent = d.stderrHead + (d.stderrTruncated ? '…' : '');
+        wrap.appendChild(err);
+      }
+    } else if (d.form === 'diff') {
+      var stat = document.createElement('span');
+      stat.className = 'acp-tool-diffstat';
+      var plus = document.createElement('span');
+      plus.className = 'acp-tool-diffstat-add';
+      plus.textContent = '+' + (d.added || 0);
+      stat.appendChild(plus);
+      var minus = document.createElement('span');
+      minus.className = 'acp-tool-diffstat-del';
+      minus.textContent = '−' + (d.removed || 0);
+      stat.appendChild(minus);
+      wrap.appendChild(stat);
+      if (d.isNew) wrap.appendChild(_digestNote('new file'));
+    } else {
+      wrap.appendChild(_digestNote(
+        d.lines + (d.lines === 1 ? ' line' : ' lines') + ', ' + _humanBytes(d.bytes)));
+    }
+    return wrap.childNodes.length ? wrap : null;
+  }
+
+  function _digestNote(text) {
+    var el = document.createElement('span');
+    el.className = 'acp-tool-digest-note';
+    el.textContent = text;
+    return el;
+  }
+
+  /** The body: a collapsible beside the command's, never recorded server-side.
+   *
+   *  Reuses `_makeToolToggle` rather than inventing a second toggle idiom, so
+   *  the two collapsibles on a tool row open the same way and read the same
+   *  way to a screen reader. */
+  function _renderToolBody(payload) {
+    var inner = (payload.form === 'diff')
+      ? _renderDiff(payload) : _renderOutputText(payload);
+    if (!inner) return null;
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-tool-output';
+    wrap.hidden = true;
+    wrap.appendChild(inner);
+    var row = document.createElement('div');
+    row.className = 'acp-tool-output-row';
+    var toggle = _makeToolToggle(
+      wrap, payload.form === 'diff' ? 'diff' : 'output');
+    // `className +=` rather than `classList.add`: the toggle keeps the shared
+    // `.acp-tool-toggle` styling and gains a hook for addressing the output
+    // one specifically.
+    toggle.className += ' acp-tool-output-toggle';
+    var label = document.createElement('span');
+    label.className = 'acp-tool-output-label';
+    label.textContent = payload.form === 'diff' ? 'Show diff' : 'Show output';
+    label.style.cursor = 'pointer';
+    label.addEventListener('click', function () { toggle.click(); });
+    row.appendChild(toggle);
+    row.appendChild(label);
+    var holder = document.createElement('div');
+    holder.appendChild(row);
+    holder.appendChild(wrap);
+    return holder;
+  }
+
+  function _renderOutputText(payload) {
+    var text = String(payload.text || '');
+    if (!text) return null;
+    var box = document.createElement('div');
+    // Same box as the command block: monospace, scrollable, pre-wrap. Output
+    // is bytes a command printed, NOT prose the agent wrote, so it never goes
+    // near mdBuild — the markdown path exists for the agent's own writing and
+    // pointing it at tool output would put a parser on untrusted bytes.
+    box.className = 'acp-tool-cmd';
+    box.textContent = text;
+    var out = document.createElement('div');
+    out.appendChild(box);
+    if (payload.truncated) {
+      var more = document.createElement('div');
+      more.className = 'acp-tool-more';
+      more.textContent = 'showing the last ' + text.length +
+                         ' of ' + payload.length + ' characters';
+      out.appendChild(more);
+    }
+    return out;
+  }
+
+  /** A line-level diff of the two texts the wire supplied.
+   *
+   *  Common prefix and suffix are matched and everything between is shown as
+   *  removed-then-added. Not an LCS: the inner diff would be a nicer read on a
+   *  scattered edit, and it is also an O(n*m) table computed on the UI thread
+   *  for a collapsible most readers never open. The cheap version is exact at
+   *  the two ends, which is where an edit's context actually is. */
+  function _renderDiff(payload) {
+    // A trailing newline is how a well-formed text file ends, and splitting on
+    // it yields a final empty element that is not a line of the file. Dropping
+    // it here keeps the diff from ending on a blank row that looks like a
+    // deletion nobody made.
+    var newLines = _splitLines(payload.newText);
+    var oldLines = payload.oldText === null || payload.oldText === undefined
+      ? null : _splitLines(payload.oldText);
+    var box = document.createElement('div');
+    box.className = 'acp-tool-diff';
+    if (oldLines === null) {
+      // A new file: every line is an addition and there is no old side.
+      for (var n = 0; n < newLines.length; n++) _diffLine(box, '+', newLines[n]);
+      return box;
+    }
+    var head = 0;
+    while (head < oldLines.length && head < newLines.length
+           && oldLines[head] === newLines[head]) head++;
+    var tail = 0;
+    while (tail < oldLines.length - head && tail < newLines.length - head
+           && oldLines[oldLines.length - 1 - tail] === newLines[newLines.length - 1 - tail]) tail++;
+    // Up to three lines of leading context, so a change never appears
+    // unanchored at the top of the box.
+    var ctx = Math.max(0, head - 3);
+    if (ctx > 0) _diffLine(box, '@', '… ' + ctx + ' unchanged');
+    for (var c = ctx; c < head; c++) _diffLine(box, ' ', oldLines[c]);
+    for (var o = head; o < oldLines.length - tail; o++) _diffLine(box, '-', oldLines[o]);
+    for (var a = head; a < newLines.length - tail; a++) _diffLine(box, '+', newLines[a]);
+    for (var t = 0; t < Math.min(tail, 3); t++) {
+      _diffLine(box, ' ', newLines[newLines.length - tail + t]);
+    }
+    if (tail > 3) _diffLine(box, '@', '… ' + (tail - 3) + ' unchanged');
+    if (payload.truncated) {
+      var more = document.createElement('div');
+      more.className = 'acp-tool-more';
+      more.textContent = 'the diff was clipped before rendering';
+      box.appendChild(more);
+    }
+    return box;
+  }
+
+  function _splitLines(text) {
+    var lines = String(text || '').split('\n');
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    return lines;
+  }
+
+  // `marker` is one of four literals chosen by the caller, never wire data.
+  function _diffLine(box, marker, text) {
+    var line = document.createElement('div');
+    line.className = 'acp-tool-diff-line';
+    line.setAttribute('data-d', marker === ' ' ? 'ctx' :
+                      marker === '@' ? 'gap' : marker === '+' ? 'add' : 'del');
+    var g = document.createElement('span');
+    g.className = 'acp-tool-diff-gutter';
+    g.textContent = marker === '@' ? '⋯' : marker;
+    line.appendChild(g);
+    var t = document.createElement('span');
+    t.className = 'acp-tool-diff-text';
+    t.textContent = String(text);
+    line.appendChild(t);
+    box.appendChild(line);
+  }
+
+  /** Put a digest on a row, replacing any earlier one, and say so when the
+   *  body it describes is not on this page.
+   *
+   *  The "not retained" line is the honest half of the record/broadcast split:
+   *  the digest is recorded and replays after a reload, the body is not. A row
+   *  that showed "142 lines" with no way to see them and no explanation would
+   *  read as a bug. */
+  function _applyToolDigest(known, digest) {
+    var prev = known.body.querySelector('.acp-tool-digest');
+    var built = _renderToolDigest(digest);
+    if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
+    if (!built) return;
+    // After the path subtitle when there is one, not merely after the head:
+    // the path says *which file*, the digest says *what happened to it*, and
+    // a "+3 −0" floating above the filename it describes reads backwards.
+    var anchor = known.body.querySelector('.acp-tool-loc')
+              || known.body.querySelector('.acp-tool-head');
+    if (anchor && anchor.nextSibling) known.body.insertBefore(built, anchor.nextSibling);
+    else known.body.appendChild(built);
+    var hasBody = !!known.body.querySelector('.acp-tool-output-wrap');
+    var lost = known.body.querySelector('.acp-tool-lost');
+    if (_expectsBody(digest) && !hasBody) {
+      if (!lost) {
+        var note = document.createElement('div');
+        note.className = 'acp-tool-lost';
+        note.textContent = 'output not retained after reload';
+        known.body.appendChild(note);
+      }
+    } else if (lost && lost.parentNode === known.body) {
+      known.body.removeChild(lost);
+    }
+  }
+
+  /** Attach an output body to its row, or hold it until the row exists. */
+  function addToolOutput(payload) {
+    var id = payload && payload.toolCallId;
+    if (!id) return;
+    var known = toolRows['t:' + id];
+    if (!known) { pendingToolOutput[id] = payload; return; }
+    _attachToolOutput(known, payload);
+  }
+
+  function _attachToolOutput(known, payload) {
+    // One body per row: a call that streams several content updates would
+    // otherwise stack a collapsible per chunk. The later body wins, which is
+    // the one carrying the most output.
+    var existing = known.body.querySelector('.acp-tool-output-wrap');
+    var built = _renderToolBody(payload);
+    if (!built) return;
+    built.className = 'acp-tool-output-wrap';
+    if (existing && existing.parentNode === known.body) {
+      known.body.removeChild(existing);
+    }
+    known.body.appendChild(built);
+    // A body means nothing was lost, so retract any reload notice the digest
+    // put there. Ordering normally makes this moot — the body precedes the
+    // digest — but a late body must not leave the row contradicting itself.
+    var lost = known.body.querySelector('.acp-tool-lost');
+    if (lost && lost.parentNode === known.body) known.body.removeChild(lost);
+  }
+
   function addToolCall(payload) {
     // Every class name below is a literal. `status`, `kind` and `title` are
     // agent-authored and reach the page only through textContent — under -a
@@ -2194,6 +2463,7 @@
           }
         }
       }
+      if (payload.output) _applyToolDigest(known, payload.output);
       if (payload.command && !known.body.querySelector('.acp-tool-cmd')) {
         var cmdWrap = commandBlock(payload);
         cmdWrap.hidden = true;
@@ -2272,6 +2542,14 @@
     row.appendChild(body);
     transcriptEl.appendChild(row);
     if (id) toolRows['t:' + id] = { status: status, body: body };
+    // Drain a body that arrived before this row existed, then the digest —
+    // in that order, so `_applyToolDigest` sees the body and does not post a
+    // "not retained" notice about output that is right there.
+    if (id && pendingToolOutput[id]) {
+      _attachToolOutput(toolRows['t:' + id], pendingToolOutput[id]);
+      delete pendingToolOutput[id];
+    }
+    if (id && payload.output) _applyToolDigest(toolRows['t:' + id], payload.output);
     // Accumulate this row for turn-end grouping. The flush at meta turn:end
     // will wrap consecutive sub-runs of >=2 rows into collapsible group containers.
     if (!toolGroup) toolGroup = [];
@@ -3069,6 +3347,10 @@
     promptNavEl.hidden = true;
     agentBody = null;
     toolRows = Object.create(null);
+    // Held bodies belong to rows that no longer exist. Kept in step with
+    // `toolRows`, or a body stashed under an id the next session happened to
+    // reuse would attach itself to a stranger's tool call.
+    pendingToolOutput = Object.create(null);
     toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
     // The row emptying just detached, if one was showing — nothing left to
     // remove a second time, and `showThinking` would otherwise believe one
@@ -5633,6 +5915,14 @@
       // document 85% of the time. Text streams exactly as it did before and
       // reflows once when there is a whole document to parse.
       renderMarkdown(payload.tokens);
+      return;
+    }
+    if (type === 'tool_output') {
+      // Broadcast-only and never in the replay buffer, so this frame reaches
+      // live viewers and nobody else — which is the whole point of it. It
+      // arrives just before the `tool_update` carrying its digest.
+      hideThinking();
+      addToolOutput(payload);
       return;
     }
     if (type === 'tool_call' || type === 'tool_update') {
