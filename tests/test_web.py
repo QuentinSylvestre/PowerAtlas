@@ -16831,16 +16831,20 @@ class TestAcpCommandsAvailable:
 class TestAcpCompactionStatus:
     """Compaction detection via the /compact prompt and context_usage drop.
 
-    The TUI does not forward summarization_* events to ACP clients over the
-    session/update path. PowerAtlas therefore detects compaction from two
-    signals:
+    These are the two *locally inferred* signals, both predating the
+    ``_kiro.dev/compaction/status`` handling in
+    ``TestAcpCompactionStatusNotification``:
 
     - ``started``: _handle_prompt receives a prompt whose text is ``/compact``;
-      the frame is broadcast immediately before the round-trip to kiro-cli.
+      the frame is broadcast immediately before the round-trip to kiro-cli, so
+      the page reacts without waiting on kiro-cli's own announcement.
     - ``completed``: a METADATA_METHOD context_usage notification arrives for
-      a session that is in ``_compacting`` (fires right after compaction ends).
+      a session still in ``_compacting``. A *backstop* — the notification
+      normally lands first and clears the set — that keeps a kiro-cli which
+      does not emit the notification from leaving the page spinning.
 
-    Both broadcast a ``compaction`` frame to subscribers.
+    Both broadcast a ``compaction`` frame to subscribers. Only the backstop
+    path produces a recap-less frame; the recap lives on the notification.
     """
 
     def _conn(self, acp_mod, sid):
@@ -16973,6 +16977,195 @@ class TestAcpCompactionStatus:
             # Buffer must be cleared.
             assert sid not in acp_mod._supervisor._compaction_buf
             assert sid not in acp_mod._supervisor._compacting
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+            acp_mod._supervisor._compaction_buf.pop(sid, None)
+
+
+class TestAcpCompactionStatusNotification:
+    """``_kiro.dev/compaction/status`` — the authoritative compaction signal.
+
+    kiro-cli emits this notification with ``status.type`` and, on success, the
+    recap in a sibling ``summary`` field. It is the *only* source of the recap:
+    the summary text never arrives as ``agent_message_chunk``, which is why the
+    context_usage-drop backstop can only ever produce a recap-less frame.
+
+    Wire shape cross-checked against kirodotdev/KiroCrew, dwalleck/cyril's
+    disassembly of the kiro-cli TUI bundle, and ryancormack/kiro-kantoku.
+    """
+
+    def _conn(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _notify(self, acp_mod, sid, s_type, summary=None, error=None,
+                with_session_id=True):
+        status = {"type": s_type}
+        if error is not None:
+            status["error"] = error
+        params = {"status": status}
+        if with_session_id:
+            params["sessionId"] = sid
+        if summary is not None:
+            params["summary"] = summary
+        acp_mod._supervisor._on_notification({
+            "method": acp_mod.COMPACTION_STATUS_METHOD, "params": params})
+
+    def test_completed_carries_summary_from_notification(self, acp_session):
+        """The recap reaches the page from the notification's summary field."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            self._notify(acp_mod, sid, "completed", summary="The recap text.")
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames) == 1
+            assert frames[0]["payload"]["status"] == "completed"
+            assert frames[0]["payload"]["summary"] == "The recap text."
+            assert sid not in acp_mod._supervisor._compacting
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_completed_without_session_id_attributes_to_compacting(
+            self, acp_session):
+        """A session-less frame lands on the one session known to be compacting."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            self._notify(acp_mod, sid, "completed", summary="Recap.",
+                         with_session_id=False)
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames) == 1
+            assert frames[0]["payload"]["summary"] == "Recap."
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_completed_suppresses_the_context_usage_backstop(self, acp_session):
+        """The later context_usage drop does not fire a second completed frame."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            self._notify(acp_mod, sid, "completed", summary="Recap.")
+            acp_mod._supervisor._on_notification({
+                "method": acp_mod.METADATA_METHOD,
+                "params": {"sessionId": sid, acp_mod.CONTEXT_PERCENT_KEY: 9.0},
+            })
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames) == 1
+            assert frames[0]["payload"]["summary"] == "Recap."
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_started_is_suppressed_when_already_announced(self, acp_session):
+        """kiro-cli's `started` is a duplicate of the one /compact already sent."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            self._notify(acp_mod, sid, "started")
+            assert [f for f in _queued(conn) if f["type"] == "compaction"] == []
+            assert sid in acp_mod._supervisor._compacting
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_started_for_auto_compaction_announces_and_marks_compacting(
+            self, acp_session):
+        """kiro-cli's own auto-compaction is announced even with no /compact."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        try:
+            self._notify(acp_mod, sid, "started")
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames) == 1
+            assert frames[0]["payload"]["status"] == "started"
+            assert sid in acp_mod._supervisor._compacting
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_failed_carries_error_and_clears_compacting(self, acp_session):
+        """`failed` forwards status.error and releases the session."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            self._notify(acp_mod, sid, "failed", error="model unavailable")
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames) == 1
+            assert frames[0]["payload"]["status"] == "failed"
+            assert frames[0]["payload"]["error"] == "model unavailable"
+            assert frames[0]["payload"]["summary"] == ""
+            assert sid not in acp_mod._supervisor._compacting
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_bare_string_status_is_accepted(self, acp_session):
+        """`status` as a plain string, not an object, still resolves."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            acp_mod._supervisor._on_notification({
+                "method": acp_mod.COMPACTION_STATUS_METHOD,
+                "params": {"sessionId": sid, "status": "completed",
+                           "summary": "Recap."},
+            })
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames) == 1
+            assert frames[0]["payload"]["status"] == "completed"
+            assert frames[0]["payload"]["summary"] == "Recap."
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_missing_status_is_a_no_op(self, acp_session):
+        """A frame with no `status` produces nothing — the TUI ignores it too."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._on_notification({
+            "method": acp_mod.COMPACTION_STATUS_METHOD,
+            "params": {"sessionId": sid, "summary": "orphan recap"},
+        })
+        assert _queued(conn) == []
+        assert sid not in acp_mod._supervisor._compacting
+
+    def test_summary_is_capped(self, acp_session):
+        """An unbounded agent-authored recap is truncated before broadcast."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        try:
+            oversize = "x" * (acp_mod.MAX_COMPACTION_SUMMARY_CHARS + 500)
+            self._notify(acp_mod, sid, "completed", summary=oversize)
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert len(frames[0]["payload"]["summary"]) == \
+                acp_mod.MAX_COMPACTION_SUMMARY_CHARS
+        finally:
+            acp_mod._supervisor._compacting.discard(sid)
+
+    def test_chunk_buffer_is_the_fallback_when_summary_absent(self, acp_session):
+        """With no `summary` on the wire, buffered agent text still fills the recap."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+        acp_mod._supervisor._compacting.add(sid)
+        acp_mod._supervisor._compaction_buf[sid] = ["Buffered ", "recap."]
+        try:
+            self._notify(acp_mod, sid, "completed")
+            frames = [f for f in _queued(conn) if f["type"] == "compaction"]
+            assert frames[0]["payload"]["summary"] == "Buffered recap."
+            assert sid not in acp_mod._supervisor._compaction_buf
         finally:
             acp_mod._supervisor._compacting.discard(sid)
             acp_mod._supervisor._compaction_buf.pop(sid, None)

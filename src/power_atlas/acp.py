@@ -383,6 +383,39 @@ CLOSE_METHOD = "_kiro.dev/session/terminate"
 # rather than guessed at.
 SUBAGENT_LIST_METHOD = "_kiro.dev/subagent/list_update"
 
+# The kiro-private notification carrying compaction progress — and, on success,
+# the *recap text itself*. This is the authoritative signal; the
+# ``METADATA_METHOD`` context-drop heuristic below it is only a backstop for a
+# kiro-cli that does not emit this.
+#
+# Shape (cross-checked 2026-08-14 against three independent ACP clients:
+# kirodotdev/KiroCrew ``acp/session_handle.py`` + ``acp/client.py``,
+# dwalleck/cyril's ``docs/kiro-acp-protocol.md`` disassembly of the kiro-cli
+# TUI bundle, and ryancormack/kiro-kantoku's ``docs/acp-methods.md``):
+#
+#     {"sessionId": "...",                       # may be absent
+#      "status": {"type": "started" | "completed" | "failed",
+#                 "error": "..."},               # populated on `failed` only
+#      "summary": "..."}                         # the recap, on `completed`
+#
+# Two shapes to tolerate, not one: `status` is an object in every capture, but
+# KiroCrew's reader still accepts a bare string for it, so this file does too.
+# The recap is a *sibling of* `status`, never streamed as `agent_message_chunk`
+# — which is why scraping the transcript for it (the prior approach here) came
+# back empty while the completed frame still fired.
+#
+# The TUI itself reads only `status.type` and `status.error` and passes
+# `summary` through untouched — the reason an earlier comment in this file
+# concluded the summary "is never forwarded over ACP". It is; the TUI just has
+# no use for it.
+COMPACTION_STATUS_METHOD = "_kiro.dev/compaction/status"
+
+# Cap on the recap carried in a `compaction` frame. Agent-authored text bound
+# for the browser, so it is bounded server-side like every other such string
+# here (``MAX_BUBBLE_CHARS``, ``MAX_SUBAGENT_TASK_CHARS``). Generous: a recap
+# of a full context window is prose, not a transcript.
+MAX_COMPACTION_SUMMARY_CHARS = 32 * 1024
+
 # The kiro-private notification carrying a *pre-announcement* tool-call chunk
 # — a method distinct from plain ``session/update`` (see ``_stamp_activity``'s
 # P0-3 note). **Not sub-agent-exclusive**: measured 2026-08-11 against a real
@@ -1793,16 +1826,18 @@ class _Supervisor:
         # consumed or the single-inflight path fires. Cleared at turn-end, turn-start
         # (unconditional), close_session, and _detach.
         self.crew_spawn_toolcallids: dict[str, str] = {}
-        # Sessions with a compaction currently in progress. Set when a
-        # `compaction/status started` notification arrives, cleared on
-        # `completed` or `failed`. Used for attribution when `inflight` is
-        # empty (e.g. compaction triggered by `/compact` command, whose inflight
-        # entry is already removed before the kiro-cli notification fires).
+        # Sessions with a compaction currently in progress. Set by whichever
+        # comes first — the `/compact` prompt, the `/compact` slash command, or
+        # a `started` on COMPACTION_STATUS_METHOD — and cleared on `completed`
+        # or `failed`. Two jobs: suppressing a duplicate `started` row when
+        # kiro-cli announces a compaction this file already announced, and
+        # attribution when `inflight` is empty (a `/compact` command's inflight
+        # entry is gone before the kiro-cli notification fires).
         self._compacting: set[str] = set()
-        # Per-session buffer for compaction summary text. kiro-cli streams the
-        # summary as agent_message_chunk notifications while _compacting is set.
-        # Accumulated here and flushed into the `completed` frame's `summary`
-        # field so the ACP page can render the recap.
+        # Per-session buffer of agent text seen while `_compacting` is set —
+        # a fallback source for the recap, kept only because it is free.
+        # It has never actually carried one: kiro-cli puts the recap in the
+        # `summary` field of COMPACTION_STATUS_METHOD, not in the transcript.
         self._compaction_buf: dict[str, list[str]] = {}
 
     # -- lifecycle ---------------------------------------------------------
@@ -2749,6 +2784,80 @@ class _Supervisor:
                 target.send(frame)
                 _registry.detach(target)
 
+    def _compaction_session(self, session_id: object) -> str | None:
+        """Which session a compaction notification is about.
+
+        ``sessionId`` is present on most `_kiro.dev/*` frames but not
+        guaranteed on this one, and a compaction that was never announced
+        through ``/compact`` (kiro-cli's own auto-compaction) has no inflight
+        entry to borrow either. Same ladder the other session-less
+        notifications in this file walk, most specific rung first, and a
+        deliberate ``None`` rather than a guess when more than one candidate
+        could own the frame.
+        """
+        if isinstance(session_id, str) and session_id in self.sessions:
+            return session_id
+        # `_compacting` beats `inflight`: a compaction in progress is a much
+        # narrower claim on the frame than "this session is mid-turn".
+        for pool in (self._compacting, self.inflight, self.sessions):
+            if len(pool) == 1:
+                return next(iter(pool))
+        return None
+
+    def _on_compaction_status(self, params: dict) -> None:
+        """Turn one ``COMPACTION_STATUS_METHOD`` frame into a page frame.
+
+        The recap the ACP page shows behind *Show recap* comes from here and
+        nowhere else on a kiro-cli that emits this notification: `summary` is a
+        sibling of `status` on this frame, not text streamed into the
+        transcript. See ``COMPACTION_STATUS_METHOD`` for the wire shape.
+        """
+        status = params.get("status")
+        if isinstance(status, dict):
+            s_type = _as_text(status.get("type"))
+            error = _as_text(status.get("error"))
+        else:
+            # Bare-string `status` — never captured, but KiroCrew's reader
+            # tolerates it, and a one-line `isinstance` is cheaper than the
+            # bug report from the release that starts sending it.
+            s_type = _as_text(status)
+            error = ""
+        if s_type not in ("started", "completed", "failed"):
+            # Includes the no-op the TUI applies to a frame with no `status` at
+            # all. Logged rather than dropped silently: an unknown status value
+            # is how a protocol change first shows up here.
+            log.debug("ACP compaction/status: ignoring status %r", status)
+            return
+        session_id = self._compaction_session(params.get("sessionId"))
+        if session_id is None:
+            log.debug("ACP compaction/status: cannot attribute %r; dropped "
+                      "(%d compacting, %d inflight, %d session(s))", s_type,
+                      len(self._compacting), len(self.inflight), len(self.sessions))
+            return
+        if s_type == "started":
+            if session_id in self._compacting:
+                # `/compact` dispatch already announced this one — the frame
+                # went out before the round-trip so the page reacts instantly.
+                # A second `started` row would just be noise.
+                return
+            self._compacting.add(session_id)
+            summary = ""
+        else:
+            self._compacting.discard(session_id)
+            summary = _as_text(params.get("summary"))
+            # Fall back to whatever the transcript scraper collected. Empty on
+            # every kiro-cli measured so far — the recap does not arrive as
+            # `agent_message_chunk` — but it costs one `pop` that has to happen
+            # anyway, and it is the only source left if a build streams it.
+            buffered = "".join(self._compaction_buf.pop(session_id, []))
+            summary = summary or buffered
+        _registry.broadcast(
+            session_id,
+            envelope("compaction",
+                     {"status": s_type, "error": error,
+                      "summary": summary[:MAX_COMPACTION_SUMMARY_CHARS]},
+                     session_id))
+
     def _on_notification(self, msg: dict) -> None:
         method = msg.get("method")
         params = msg.get("params") or {}
@@ -2761,11 +2870,14 @@ class _Supervisor:
             percent = _context_percent(params)
             if percent is not None and isinstance(session_id, str):
                 _note_context(session_id, percent)
-                # Compaction completion signal: the context_usage notification
-                # fires immediately after the compaction turn ends, with the
-                # new (lower) usage. Since the TUI never forwards the
-                # summarization_completed event over ACP, this is the only
-                # reliable wire signal that compaction has finished.
+                # Compaction completion *backstop*. The authoritative signal is
+                # COMPACTION_STATUS_METHOD, which also carries the recap; it
+                # lands ~1s before this notification and discards the session
+                # from `_compacting`, so on a kiro-cli that emits it this branch
+                # never fires. It stays for the one that does not: the
+                # context_usage drop is then the only evidence on the wire that
+                # compaction finished, and a recap-less "Context compacted." is
+                # better than a spinner that never resolves.
                 if session_id in self._compacting:
                     self._compacting.discard(session_id)
                     _registry.broadcast(
@@ -2775,6 +2887,9 @@ class _Supervisor:
                                   "summary": "".join(
                                       self._compaction_buf.pop(session_id, []))},
                                  session_id))
+            return
+        if method == COMPACTION_STATUS_METHOD:
+            self._on_compaction_status(params)
             return
         if method == SUBAGENT_LIST_METHOD:
             self._on_subagent_list(params)
@@ -3053,8 +3168,12 @@ class _Supervisor:
                 log.debug("ACP commands_available: %d session(s) inflight, %d known — "
                           "cannot attribute; dropped", len(inflight), len(self.sessions))
             return
-        if method == "kiro.dev/clear/status":
-            return  # silent consume; TUI logs debug only, nothing to display
+        if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
+            # Silent consume; the TUI logs this at debug and displays nothing.
+            # Both spellings: the wire method is underscore-prefixed like every
+            # other kiro extension, and the un-prefixed form this branch used to
+            # match alone therefore matched nothing.
+            return
         if log.isEnabledFor(logging.DEBUG):
             # Params and not only the method name. This module talks to an
             # undocumented protocol: `_kiro.dev/*` is not in the ACP spec at
@@ -4428,9 +4547,11 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
     log.info("ACP turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
     # Compaction started detection: when the user sends /compact, fire the
-    # started frame immediately. The TUI never forwards summarization_started
-    # over ACP, so we detect it from the prompt text. The completed signal
-    # arrives later via METADATA_METHOD when the context percent drops.
+    # started frame immediately — before the round-trip, so the page reacts on
+    # the keystroke rather than after kiro-cli gets around to announcing it.
+    # kiro-cli's own `started` on COMPACTION_STATUS_METHOD arrives later and is
+    # suppressed as a duplicate by the `_compacting` membership this sets.
+    # Completion (and the recap) come back on that same notification.
     if text.strip() == "/compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
         _registry.broadcast(
@@ -4712,8 +4833,15 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
     # Compaction started detection: the /compact slash command is the canonical
     # way to invoke compaction from the ACP UI. Fire started here (before the
     # inflight guard and before the round-trip) so the frame reaches the
-    # browser immediately. The completed signal arrives ~40s later via
-    # METADATA_METHOD when the context percentage drops.
+    # browser immediately; kiro-cli's own `started` is suppressed as a
+    # duplicate by the `_compacting` membership this sets. Completion and the
+    # recap arrive ~40s later on COMPACTION_STATUS_METHOD.
+    #
+    # NOTE (KiroCrew, live-probed on kiro-cli 2.14.0): the *string* form of
+    # `_kiro.dev/commands/execute` exits rc=0 with no response for /compact,
+    # which is why they route /compact through `session/prompt` instead. If a
+    # /compact from the palette ever stops producing a compaction here while
+    # the typed `/compact` prompt still works, that is the bug to check first.
     if name == "compact" and session_id not in _supervisor._compacting:
         _supervisor._compacting.add(session_id)
         _registry.broadcast(
