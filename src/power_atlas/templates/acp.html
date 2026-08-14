@@ -2119,10 +2119,16 @@
   /** The row's file subtitle, built from ACP's own `locations`.
    *
    *  The basename is what a reader scans for and the full path is what they
-   *  occasionally need, so the first is rendered and the second is the
-   *  `title`. A call touching several files names the first and counts the
-   *  rest — listing twenty paths in a transcript row helps nobody. */
-  function _toolLocations(locations) {
+   *  occasionally need, so by default the first is rendered and the second is
+   *  the `title`. A call touching several files names the first and counts
+   *  the rest — listing twenty paths in a transcript row helps nobody.
+   *
+   *  `fullPath`: the edit panel (see `_renderEditPanel`) shows this line only
+   *  once the reader has already asked to expand the row, so there is no
+   *  reason left to hide the path behind a hover — the full string is shown
+   *  inline instead, wrapping via `.acp-tool-loc-path`'s existing
+   *  `overflow-wrap`. */
+  function _toolLocations(locations, fullPath) {
     if (!locations || !locations.length) return null;
     var first = locations[0];
     if (!first || !first.path) return null;
@@ -2130,10 +2136,12 @@
     el.className = 'acp-tool-loc';
     var name = document.createElement('span');
     name.className = 'acp-tool-loc-path';
-    name.textContent = _basename(first.path) +
+    name.textContent = (fullPath ? String(first.path) : _basename(first.path)) +
       (typeof first.line === 'number' ? ':' + first.line : '');
-    // Agent-authored, so `title` is set as an attribute value and never parsed.
-    name.setAttribute('title', String(first.path));
+    if (!fullPath) {
+      // Agent-authored, so `title` is set as an attribute value and never parsed.
+      name.setAttribute('title', String(first.path));
+    }
     el.appendChild(name);
     if (locations.length > 1) {
       var more = document.createElement('span');
@@ -2313,7 +2321,10 @@
    *  scattered edit, and it is also an O(n*m) table computed on the UI thread
    *  for a collapsible most readers never open. The cheap version is exact at
    *  the two ends, which is where an edit's context actually is. */
-  function _renderDiff(payload) {
+  /** `startLine` seeds the number gutter: 1 for a whole-file create, or
+   *  `locations[0].line` for a fragment (`strReplace` sends only the changed
+   *  region, not the whole file, so numbering from 1 would be wrong there). */
+  function _renderDiff(payload, startLine) {
     // A trailing newline is how a well-formed text file ends, and splitting on
     // it yields a final empty element that is not a line of the file. Dropping
     // it here keeps the diff from ending on a blank row that looks like a
@@ -2321,11 +2332,12 @@
     var newLines = _splitLines(payload.newText);
     var oldLines = payload.oldText === null || payload.oldText === undefined
       ? null : _splitLines(payload.oldText);
+    var base = typeof startLine === 'number' ? startLine : 1;
     var box = document.createElement('div');
     box.className = 'acp-tool-diff';
     if (oldLines === null) {
       // A new file: every line is an addition and there is no old side.
-      for (var n = 0; n < newLines.length; n++) _diffLine(box, '+', newLines[n]);
+      for (var n = 0; n < newLines.length; n++) _diffLine(box, '+', newLines[n], base + n);
       return box;
     }
     var head = 0;
@@ -2337,12 +2349,20 @@
     // Up to three lines of leading context, so a change never appears
     // unanchored at the top of the box.
     var ctx = Math.max(0, head - 3);
+    // Two counters: old and new agree through the common prefix/suffix, but
+    // diverge across the changed region whenever the edit adds or removes
+    // lines, so a single counter would mislabel one side of that region.
+    var oldNum = base + ctx, newNum = base + ctx;
     if (ctx > 0) _diffLine(box, '@', '… ' + ctx + ' unchanged');
-    for (var c = ctx; c < head; c++) _diffLine(box, ' ', oldLines[c]);
-    for (var o = head; o < oldLines.length - tail; o++) _diffLine(box, '-', oldLines[o]);
-    for (var a = head; a < newLines.length - tail; a++) _diffLine(box, '+', newLines[a]);
+    for (var c = ctx; c < head; c++) {
+      _diffLine(box, ' ', oldLines[c], newNum);
+      oldNum++; newNum++;
+    }
+    for (var o = head; o < oldLines.length - tail; o++) _diffLine(box, '-', oldLines[o], oldNum++);
+    for (var a = head; a < newLines.length - tail; a++) _diffLine(box, '+', newLines[a], newNum++);
     for (var t = 0; t < Math.min(tail, 3); t++) {
-      _diffLine(box, ' ', newLines[newLines.length - tail + t]);
+      _diffLine(box, ' ', newLines[newLines.length - tail + t], newNum);
+      oldNum++; newNum++;
     }
     if (tail > 3) _diffLine(box, '@', '… ' + (tail - 3) + ' unchanged');
     if (payload.truncated) {
@@ -2361,11 +2381,18 @@
   }
 
   // `marker` is one of four literals chosen by the caller, never wire data.
-  function _diffLine(box, marker, text) {
+  // `lineNum` is omitted for the '@' gap marker, which names no single line.
+  function _diffLine(box, marker, text, lineNum) {
     var line = document.createElement('div');
     line.className = 'acp-tool-diff-line';
     line.setAttribute('data-d', marker === ' ' ? 'ctx' :
                       marker === '@' ? 'gap' : marker === '+' ? 'add' : 'del');
+    if (typeof lineNum === 'number') {
+      var num = document.createElement('span');
+      num.className = 'acp-tool-diff-num';
+      num.textContent = String(lineNum);
+      line.appendChild(num);
+    }
     var g = document.createElement('span');
     g.className = 'acp-tool-diff-gutter';
     g.textContent = marker === '@' ? '⋯' : marker;
@@ -2377,6 +2404,48 @@
     box.appendChild(line);
   }
 
+  /** The edit row's single collapsible: full path, then the diffstat, then
+   *  whatever body arrived — a diff, a failure's text, or (after a reload
+   *  with no backfill) the "not retained" notice. Rebuilt from scratch on
+   *  every call from `known.locations`/`known.digest`/`known.outputPayload`,
+   *  whichever of the three most recently changed — the three arrive on
+   *  independent frames (locations and the digest on `tool_call`/
+   *  `tool_call_update`, the body on a separate `tool_output` broadcast, in
+   *  no guaranteed order — see `pendingToolOutput`), and rebuilding is cheap
+   *  next to tracking three insertion points by hand.
+   *
+   *  Line numbers seed from `locations[0].line` — the fragment offset for a
+   *  `strReplace`, absent (so seeded at 1) for a whole-file `create`, which
+   *  matches kiro-cli's own TUI numbering a new file from line 1. */
+  function _renderEditPanel(known) {
+    var panel = known.panel;
+    panel.textContent = '';
+    var digest = known.digest;
+    var locations = known.locations;
+    var path = locations && locations[0] && locations[0].path
+      ? locations
+      : (digest && digest.form === 'diff' && digest.path
+          ? [{ path: digest.path }] : null);
+    var pathEl = _toolLocations(path, true);
+    if (pathEl) panel.appendChild(pathEl);
+    var digestEl = digest ? _renderToolDigest(digest) : null;
+    if (digestEl) panel.appendChild(digestEl);
+    var out = known.outputPayload;
+    if (out && out.form === 'diff') {
+      var startLine = locations && locations[0] && typeof locations[0].line === 'number'
+        ? locations[0].line : 1;
+      panel.appendChild(_renderDiff(out, startLine));
+    } else if (out) {
+      var text = _renderOutputText(out);
+      if (text) panel.appendChild(text);
+    } else if (_expectsBody(digest)) {
+      var note = document.createElement('div');
+      note.className = 'acp-tool-lost';
+      note.textContent = 'output not retained after reload';
+      panel.appendChild(note);
+    }
+  }
+
   /** Put a digest on a row, replacing any earlier one, and say so when the
    *  body it describes is not on this page.
    *
@@ -2385,6 +2454,11 @@
    *  that showed "142 lines" with no way to see them and no explanation would
    *  read as a bug. */
   function _applyToolDigest(known, digest) {
+    if (known.kind === 'edit') {
+      known.digest = digest;
+      _renderEditPanel(known);
+      return;
+    }
     var prev = known.body.querySelector('.acp-tool-digest');
     var built = _renderToolDigest(digest);
     if (prev && prev.parentNode) prev.parentNode.removeChild(prev);
@@ -2420,6 +2494,11 @@
   }
 
   function _attachToolOutput(known, payload) {
+    if (known.kind === 'edit') {
+      known.outputPayload = payload;
+      _renderEditPanel(known);
+      return;
+    }
     // One body per row: a call that streams several content updates would
     // otherwise stack a collapsible per chunk. The later body wins, which is
     // the one carrying the most output.
@@ -2447,6 +2526,18 @@
     var known = id ? toolRows['t:' + id] : null;
     if (known) {
       _setToolStatus(known.status, payload.status);
+      if (known.kind === 'edit') {
+        // Everything an edit row shows lives in the one panel behind the
+        // one toggle — see `_renderEditPanel`. `_applyToolDigest` already
+        // branches on `known.kind` to store the digest and rebuild the
+        // panel; `locations` has no equivalent setter, so it is handled here.
+        if (payload.locations) {
+          known.locations = payload.locations;
+          _renderEditPanel(known);
+        }
+        if (payload.output) _applyToolDigest(known, payload.output);
+        return;
+      }
       // `locations` can arrive on the update rather than the opening call —
       // every field on a `tool_call_update` is optional, so which frame
       // carries it is the agent's choice. Added once; a second update naming
@@ -2524,32 +2615,62 @@
     head.appendChild(status);
     body.appendChild(head);
 
-    var loc = _toolLocations(payload.locations);
-    if (loc) body.appendChild(loc);
-
-    if (payload.command) {
-      var cmdWrap = commandBlock(payload);
-      cmdWrap.hidden = true;
-      var toggle = _makeToolToggle(cmdWrap, payload.title || payload.kind);
-      head.appendChild(toggle);
-      // Clicking the name (pink text) is equivalent to clicking the toggle arrow.
+    var isEdit = payload.kind === 'edit';
+    var panel = null;
+    if (isEdit) {
+      // One toggle, one panel: collapsed shows only the head (name, kind
+      // chip, status); expanded reveals the full path, the diffstat, and the
+      // diff or failure text — see `_renderEditPanel`. Built unconditionally,
+      // unlike the command toggle below — an edit row always has something
+      // worth expanding to once its output lands, and there is exactly one
+      // control for it, not one per field that happens to arrive.
+      panel = document.createElement('div');
+      panel.className = 'acp-tool-edit-panel';
+      panel.hidden = true;
+      var editToggle = _makeToolToggle(panel, payload.title || payload.kind);
+      head.appendChild(editToggle);
       name.style.cursor = 'pointer';
-      name.addEventListener('click', function () { toggle.click(); });
-      body.appendChild(cmdWrap);
+      name.addEventListener('click', function () { editToggle.click(); });
+      body.appendChild(panel);
+    } else {
+      var loc = _toolLocations(payload.locations);
+      if (loc) body.appendChild(loc);
+
+      if (payload.command) {
+        var cmdWrap = commandBlock(payload);
+        cmdWrap.hidden = true;
+        var toggle = _makeToolToggle(cmdWrap, payload.title || payload.kind);
+        head.appendChild(toggle);
+        // Clicking the name (pink text) is equivalent to clicking the toggle arrow.
+        name.style.cursor = 'pointer';
+        name.addEventListener('click', function () { toggle.click(); });
+        body.appendChild(cmdWrap);
+      }
     }
 
     row.appendChild(who);
     row.appendChild(body);
     transcriptEl.appendChild(row);
-    if (id) toolRows['t:' + id] = { status: status, body: body };
+    if (id) {
+      toolRows['t:' + id] = { status: status, body: body, kind: payload.kind,
+        panel: panel, locations: payload.locations || null,
+        digest: null, outputPayload: null };
+    }
     // Drain a body that arrived before this row existed, then the digest —
     // in that order, so `_applyToolDigest` sees the body and does not post a
     // "not retained" notice about output that is right there.
-    if (id && pendingToolOutput[id]) {
+    var hadPendingOutput = id && !!pendingToolOutput[id];
+    if (hadPendingOutput) {
       _attachToolOutput(toolRows['t:' + id], pendingToolOutput[id]);
       delete pendingToolOutput[id];
     }
     if (id && payload.output) _applyToolDigest(toolRows['t:' + id], payload.output);
+    // An edit row's panel reflects `locations` too, and a call opening with
+    // only a path (no output yet) would otherwise render nothing — the two
+    // branches above only render on an output/digest arrival.
+    if (id && isEdit && !payload.output && !hadPendingOutput) {
+      _renderEditPanel(toolRows['t:' + id]);
+    }
     // Accumulate this row for turn-end grouping. The flush at meta turn:end
     // will wrap consecutive sub-runs of >=2 rows into collapsible group containers.
     if (!toolGroup) toolGroup = [];

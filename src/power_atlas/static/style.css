@@ -867,6 +867,7 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-tool-output-label:hover { color: var(--text-muted); }
 .acp-tool-diff { margin-top: 6px; max-height: 320px; overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 0; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; }
 .acp-tool-diff-line { display: flex; gap: 8px; padding: 0 8px; white-space: pre-wrap; word-break: break-word; }
+.acp-tool-diff-num { flex-shrink: 0; width: 3.5ch; text-align: right; color: var(--text-dim); opacity: 0.75; user-select: none; }
 .acp-tool-diff-gutter { flex-shrink: 0; width: 1ch; text-align: center; opacity: 0.75; user-select: none; }
 .acp-tool-diff-text { flex: 1; }
 /* Tinted rather than only marked: a +/- in the gutter is easy to lose in a

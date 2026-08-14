@@ -7172,12 +7172,14 @@ check("a diff digest shows the stat below the path it describes", (tpl) => {
                locations: [{ path: "/repo/acp.py" }],
                output: { form: "diff", path: "/repo/acp.py", added: 3,
                          removed: 1, isNew: false } } });
-  const body = page.el("acpTranscript").querySelector(".acp-msg-body");
-  const classes = body.childNodes.map((c) => c.className);
+  const row = page.el("acpTranscript");
+  row.querySelector(".acp-tool-toggle").dispatch("click");
+  const panel = row.querySelector(".acp-tool-edit-panel");
+  const classes = panel.childNodes.map((c) => c.className);
   assert(classes.indexOf("acp-tool-loc") < classes.indexOf("acp-tool-digest"),
     "the diffstat should follow the path, not precede it: " + classes.join(","));
-  assertEqual(body.querySelector(".acp-tool-diffstat-add").textContent, "+3");
-  assertEqual(body.querySelector(".acp-tool-diffstat-del").textContent, "−1");
+  assertEqual(panel.querySelector(".acp-tool-diffstat-add").textContent, "+3");
+  assertEqual(panel.querySelector(".acp-tool-diffstat-del").textContent, "−1");
 });
 
 check("a digest with no body says the output was not retained", (tpl) => {
@@ -7299,6 +7301,127 @@ check("a new-file diff shows every line as an addition", (tpl) => {
   assertEqual(marks.join(","), "add,add", "a new file is all additions");
 });
 
+// ---- Edit row consolidation: one toggle, full path, numbered diff --------
+
+check("an edit row has exactly one toggle, and it gates the whole panel", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ep1", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/fixverify.py" }],
+               output: { form: "diff", path: "/repo/fixverify.py", added: 3,
+                         removed: 0, isNew: true } } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "ep1", form: "diff", path: "/repo/fixverify.py",
+               truncated: false, oldText: null, newText: "a\nb\nc\n" } });
+  const row = page.el("acpTranscript");
+  const toggles = row.querySelectorAll(".acp-tool-toggle");
+  assertEqual(toggles.length, 1, "an edit row should have exactly one toggle");
+  const panel = row.querySelector(".acp-tool-edit-panel");
+  assert(panel.hidden === true, "the panel should start collapsed");
+  assert(row.querySelector(".acp-tool-loc"), "the path lives inside the panel");
+  assert(row.querySelector(".acp-tool-digest"), "the digest lives inside the panel");
+  assert(row.querySelector(".acp-tool-diff"), "the diff lives inside the panel");
+  assert(!row.querySelector(".acp-tool-cmd"),
+    "an edit row should not also render the raw rawInput command echo");
+  toggles[0].dispatch("click");
+  assert(panel.hidden === false, "clicking the toggle should open the panel");
+  assertEqual(toggles[0].getAttribute("aria-expanded"), "true");
+});
+
+check("an edit panel shows the full path, not just the basename", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ep2", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/home/q/PowerAtlas/src/power_atlas/fixverify.py" }] } });
+  const pathEl = page.el("acpTranscript").querySelector(".acp-tool-loc-path");
+  assertEqual(pathEl.textContent, "/home/q/PowerAtlas/src/power_atlas/fixverify.py",
+    "the edit panel should show the whole path, not the basename");
+  assertEqual(pathEl.getAttribute("title"), null,
+    "the full path is already visible, so no hover-only title is needed");
+});
+
+check("a new-file diff numbers lines starting at 1, TUI-style", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ln1", title: "create", kind: "edit", status: "completed" } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "ln1", form: "diff", path: "/repo/new.py",
+               truncated: false, oldText: null, newText: "a\nb\nc\n" } });
+  const nums = page.el("acpTranscript").querySelectorAll(".acp-tool-diff-num")
+    .map((n) => n.textContent);
+  assertEqual(nums.join(","), "1,2,3", "a new file should number from line 1");
+});
+
+check("a strReplace diff seeds its line numbers from locations[0].line", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ln2", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/calc.py", line: 9 }] } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "ln2", form: "diff", path: "/repo/calc.py", truncated: false,
+               oldText: "one\ntwo\nfour\n", newText: "one\ntwo\nthree\nfour\n" } });
+  const nums = page.el("acpTranscript").querySelectorAll(".acp-tool-diff-num")
+    .map((n) => n.textContent);
+  assertEqual(nums.join(","), "9,10,11,12",
+    "line numbers should start from the location's line, not from 1");
+});
+
+check("a failed edit's panel shows its failure text, not a blank diff", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ep3", title: "edit", kind: "edit", status: "failed",
+               locations: [{ path: "/repo/rejected.py" }] } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "ep3", form: "text", text: "Tool use was rejected by the user.",
+               truncated: false, length: 35 } });
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(panel.textContent.includes("Tool use was rejected by the user."),
+    "a failed edit should show its failure reason inside the panel");
+  assert(!panel.querySelector(".acp-tool-diff"), "a failed edit has no diff to render");
+});
+
+check("an edit digest with no body says the output was not retained", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ep4", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/x.py" }],
+               output: { form: "diff", path: "/repo/x.py", added: 2,
+                         removed: 0, isNew: false } } });
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(panel.querySelector(".acp-tool-lost"),
+    "a diff digest replayed without its body should say so, inside the panel");
+});
+
+check("an edit row with a body attached does not show the not-retained notice", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_call", sessionId: live,
+    payload: { toolCallId: "ep5", title: "edit", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/y.py" }],
+               output: { form: "diff", path: "/repo/y.py", added: 1,
+                         removed: 0, isNew: false } } });
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "ep5", form: "diff", path: "/repo/y.py", truncated: false,
+               oldText: "a\n", newText: "a\nb\n" } });
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(!panel.querySelector(".acp-tool-lost"), "the body is right there");
+  assert(panel.querySelector(".acp-tool-diff"), "the diff should render");
+});
+
+check("an edit row's output arriving before the row is held and reaches the panel", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "tool_output", sessionId: live,
+    payload: { toolCallId: "ep6", form: "diff", path: "/repo/z.py", truncated: false,
+               oldText: null, newText: "x\n" } });
+  page.deliver({ type: "tool_update", sessionId: live,
+    payload: { toolCallId: "ep6", title: "create", kind: "edit", status: "completed",
+               locations: [{ path: "/repo/z.py" }],
+               output: { form: "diff", path: "/repo/z.py", added: 1,
+                         removed: 0, isNew: true } } });
+  const panel = page.el("acpTranscript").querySelector(".acp-tool-edit-panel");
+  assert(panel.querySelector(".acp-tool-diff"), "the held body never reached the panel");
+  assert(!panel.querySelector(".acp-tool-lost"), "a held body should count as present");
+});
+
 check("a second output body replaces the first rather than stacking", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,
@@ -7377,7 +7500,7 @@ check("a location with no line shows no line number", (tpl) => {
 check("several locations name the first and count the rest", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "lc3", title: "edit", kind: "edit",
+    payload: { toolCallId: "lc3", title: "search", kind: "search",
                locations: [{ path: "/a/one.py" }, { path: "/a/two.py" },
                            { path: "/a/three.py" }] } });
   const row = page.el("acpTranscript");
@@ -7388,7 +7511,7 @@ check("several locations name the first and count the rest", (tpl) => {
 check("locations arriving on a later update are added once", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "tool_call", sessionId: live,
-    payload: { toolCallId: "lc4", title: "edit", kind: "edit" } });
+    payload: { toolCallId: "lc4", title: "search", kind: "search" } });
   const row = page.el("acpTranscript");
   assert(!row.querySelector(".acp-tool-loc"), "fixture: no subtitle yet");
   page.deliver({ type: "tool_update", sessionId: live,
