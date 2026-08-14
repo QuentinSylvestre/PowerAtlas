@@ -261,14 +261,20 @@ something executable on a page you have open.
 a coloured status — pending, in progress, completed, failed — and, for a call that touched a file,
 that file's name with the full path on hover. What the call *returned* is shown in two parts,
 because the two halves are worth different things. A short summary is kept: a shell call's exit
-status and the first lines of its standard error, an edit's `+n −m`, a read's line and byte count.
-Below it, *Show output* opens the rest — the tail of what a command printed, or a real diff for an
-edit, coloured by line. The summary survives a reload of the page and the body does not, so a row
-whose output is no longer held says *output not retained after reload* rather than looking as
-though the command printed nothing. That split is deliberate: PowerAtlas keeps a rolling buffer of
-each session's transcript so a reconnecting page can be rebuilt, and a build log or a large file
-read would push the conversation out of it. Tool output is never treated as markdown — it is bytes
-a command printed, not prose the agent wrote, and it is shown verbatim.
+status and the first lines of its standard error, a read's line and byte count. Below it, *Show
+output* opens the rest — the tail of what a command printed. The summary survives a reload of the
+page and the body does not, so a row whose output is no longer held says *output not retained
+after reload* rather than looking as though the command printed nothing. That split is deliberate:
+PowerAtlas keeps a rolling buffer of each session's transcript so a reconnecting page can be
+rebuilt, and a build log or a large file read would push the conversation out of it. Tool output is
+never treated as markdown — it is bytes a command printed, not prose the agent wrote, and it is
+shown verbatim.
+
+An edit row collapses all of that into one control: the name, kind, and status are all a collapsed
+row shows, and one click on the row's single arrow reveals the full path, the `+n −m` stat, and the
+diff itself — coloured by line and numbered the way kiro-cli's own TUI numbers a file, seeded from
+the location the edit reported rather than always starting at 1. There is no separate hover for the
+path here and no second toggle for the summary; both live behind the one control an edit row has.
 
 **A successful edit's diff survives even a session PowerAtlas's own memory has lost.** Loading a
 session kiro-cli still has but this process does not — after a restart, or one simply never opened
