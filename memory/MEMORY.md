@@ -248,3 +248,5 @@
 ## Declined
 
 <!-- Declination records: the user's Skip of an agent-initiated memory proposal. A live row here suppresses re-proposal of that subject for 60 days (window owned by shared/skills/qdream/memory-rules.md § Memory File Format → Declined records). NOT a fourth type and rows are NOT entries (no Type/Usage/Outcome; excluded from the Size advisory and the prune order). Sessions append rows only; the /qdream sweep prunes expired rows and rows whose subject is now a live entry. This heading is guarded by verify-citations — never remove it, even with zero rows. Row format: - "<proposed heading>" — declined <YYYY-MM-DD> (<reason, if given>) -->
+- "`commands_execute` must whitelist every item type the palette can dispatch" — declined 2026-08-14
+- "A new `acp.py` frame type must be added to `SERVER_TYPES` atomically with its `_emit` call" — declined 2026-08-14
