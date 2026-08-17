@@ -716,7 +716,7 @@ node tests/acp_page.test.mjs
 Overall implementation health: Green.
 Personas: Senior engineer, Security auditor, Reliability engineer, Architect.
 8 findings (0 High, 2 Medium, 6 Low). All fixed.
-QA verification: BLOCKED on PowerAtlas restart (Phases 1+2) and hard reload (Phase 3). Browser verification deferred to user action. Unit/integration test coverage: 1389 pytest pass, 398 .mjs pass.
+QA verification: PASS — 21/21 checks via Playwright at `http://127.0.0.1:4915` (2026-08-17). Phase 1: provider-filtered counts correct in both `/partials/workspaces` and `/search`. Phase 2: `total_found` field present, 400 on empty cwd, path safety checks fire correctly for shallow/UNC paths, session_ids backward compat confirmed. Phase 3: × button present in workspace mode, absent in date/status modes, modal structure correct, typed-name gate works, Cancel and Escape close modal.
 
 #### Test execution summary
 
