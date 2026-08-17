@@ -322,7 +322,8 @@ class El {
   dispatch(type, ev) {
     const fns = this._listeners[type] || [];
     if (fns.length === 0) throw new Error(`nothing listens for '${type}' here`);
-    for (const fn of fns) fn.call(this, ev || {});
+    const defaultEv = { stopPropagation: () => {} };
+    for (const fn of fns) fn.call(this, ev !== undefined ? ev : defaultEv);
   }
   // Single simple selectors — `.class` or `tag` — and nothing else. The rail
   // builds its rows at runtime, so `byId`'s regex over the *static* markup
@@ -9799,6 +9800,55 @@ check("partial failure shows rail status message and group is not evicted", asyn
   const status = page.el("acpRailStatus").textContent;
   assert(/could not be deleted/i.test(status) || /Deleted/i.test(status),
     "rail status does not report the delete result: " + status);
+});
+
+check("confirmed delete with folder checkbox posts delete_folder=true", async (tpl) => {
+  const page = await railed(tpl, { store: wsDeleteStore("my-project") });
+  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+  assert(deleteBtn !== null, "no delete button");
+  deleteBtn.dispatch("click");
+
+  const input = page.focused();
+  assert(input !== null, "no focused input");
+  input.value = "my-project";
+  input.dispatch("input");
+
+  // Find the modal via the input's parent chain.
+  let container = input;
+  while (container && !container.querySelector(".acp-ws-delete-confirm")) {
+    container = container.parentNode;
+  }
+  assert(container !== null, "could not find modal container");
+
+  // Check the folder checkbox.
+  const folderCb = container.querySelector(".acp-ws-delete-folder-cb");
+  assert(folderCb !== null, "no folder checkbox in modal");
+  folderCb.checked = true;
+
+  const confirmBtn = container.querySelector(".acp-ws-delete-confirm");
+  assert(confirmBtn !== null, "no confirm button");
+  assert(!confirmBtn.disabled, "confirm button is disabled — cannot proceed");
+  confirmBtn.dispatch("click");
+  await page.settle();
+
+  const calls = page.deleteCalls();
+  assert(calls.length > 0, "no delete request was sent");
+  const sent = JSON.parse(calls[0].init.body);
+  assert(sent.delete_folder === true,
+    "delete_folder was not set to true when folder checkbox was checked; got: "
+    + JSON.stringify(sent.delete_folder));
+});
+
+check("delete button absent when canDelete=false", async (tpl) => {
+  const page = await railed(tpl, {
+    store: wsDeleteStore("my-project"),
+    local: false,
+    canDelete: false,
+  });
+  const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
+  assertEqual(deleteBtns.length, 0,
+    "delete button is shown when canDelete=false; it must be hidden for "
+    + "non-desktop or non-authenticated remote viewers");
 });
 
 
