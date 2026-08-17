@@ -1,7 +1,7 @@
 # PowerAtlas: Status Fallback Review, Bulk Workspace Delete, Pipeline Unification
 
 > **Date**: 2026-08-17
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Close None→working fallback (no-op), add workspace-level bulk session delete with optional folder+config deletion, unify /search and partials_workspaces render pipelines
 > **Estimated effort**: 2–3 days
@@ -205,15 +205,20 @@ def test_partials_workspaces_and_search_same_count_with_provider_filter(client, 
 ```
 
 **Exit criteria**:
-- [ ] `_render_workspace_groups` function exists in `web.py`
-- [ ] No direct `workspace_card.html` render calls remain in `partials_workspaces` body (only in `_render_workspace_groups`)
-- [ ] No direct `workspace_card.html` render calls remain in `search` body (only via `_render_workspace_groups`)
-- [ ] `_render_workspace_groups` derives `prov_names` internally from `provider` (not a parameter)
-- [ ] `session_count` uses provider-aware logic in both loops inside `_render_workspace_groups`
-- [ ] Zero-session pinned folder injection is absent from `_render_workspace_groups`
-- [ ] Multi-branch empty-state cascade unchanged in `partials_workspaces`
-- [ ] New provider-aware session_count tests pass
-- [ ] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py` green
+- [x] `_render_workspace_groups` function exists in `web.py`
+- [x] No direct `workspace_card.html` render calls remain in `partials_workspaces` body (only in `_render_workspace_groups`)
+- [x] No direct `workspace_card.html` render calls remain in `search` body (only via `_render_workspace_groups`)
+- [x] `_render_workspace_groups` derives `prov_names` internally from `provider` (not a parameter)
+- [x] `session_count` uses provider-aware logic in both loops inside `_render_workspace_groups`
+- [x] Zero-session pinned folder injection is absent from `_render_workspace_groups`
+- [x] Multi-branch empty-state cascade unchanged in `partials_workspaces`
+- [x] New provider-aware session_count tests pass
+- [x] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py` green
+
+**Implementation (2026-08-17, code: 2695ed4 + autofix: 22595a6)**
+Extracted `_render_workspace_groups` helper with `_session_count_for_group` extracted from the duplicated ternary. Both `partials_workspaces` and `search` now delegate to the helper after their own filter chains. `search` session_count bug fixed (was always `total_count`; now provider-aware). Three new tests added: `test_search_session_count_is_provider_aware`, `test_partials_workspaces_and_search_produce_same_session_count_for_provider_filter`, and `test_partials_workspaces_pinned_session_count_is_provider_aware` (pinned path). Auto-fix pass removed dead `hover_launchers` assignment from `search`, removed dead `cards_html = ""` initializers, fixed type annotations to `list[dict]`, extracted `_session_count_for_group` helper. 1374 tests pass; 1 pre-existing failure unrelated to Phase 1.
+
+QA (Step 5b): BLOCKED — Python change requires PowerAtlas restart (AGENTS.md: "Never restart PowerAtlas autonomously"). Will be re-verified at Step 9b after all phases complete and user restarts.
 
 ---
 
@@ -676,7 +681,8 @@ node tests/acp_page.test.mjs
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved — filled during implementation>
+- **Type annotation downgrade**: plan specified `list[dict]` for `pinned_grouped` and `other_grouped` parameters of `_render_workspace_groups`; implemented as bare `list`. Rationale: oversight; fixed in auto-fix pass.
+- **Dead `hover_launchers` in `search`**: `_all_hover_launchers(config)` call was not removed from `search` body during initial implementation. Rationale: oversight; fixed in auto-fix pass.
 
 ## Follow-up Work (Deferred)
 
@@ -715,3 +721,17 @@ node tests/acp_page.test.mjs
 - Step 1.5 trio dispatched smoothly. No friction observed in the dispatch or return path.
 - Doc-impact sub-agent ran in parallel with plan writing without issue.
 - 4-persona review at max effort caught 7 High findings before implementation — the extra personas (Security auditor, Reliability engineer) found findings the Architect+Senior alone would likely have missed (D9 violation, UNC path, symlink attack surface, `session_ids` guard blocker). Max effort justified for filesystem-destructive changes.
+
+### 2026-08-17 — Implementation Review (after Phase 1, personas: Senior engineer, Maintainability reviewer, Reliability engineer, Security auditor)
+
+Implementation health: Green (after auto-fix cycle).
+6 findings (0 High, 2 Medium, 4 Low). All auto-fixed in one cycle. Cycle-2 review: no findings.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Dead `hover_launchers = _all_hover_launchers(config)` in `search` body — computed and never consumed; pays real config-read cost per request. | Fixed — removed from `search`; helper owns it internally |
+| 2 | Medium | Dead `cards_html = ""` initializers in `search` and `partials_workspaces` — immediately overwritten. | Fixed — removed both initializers |
+| 3 | Medium | Test blind spot: pinned-path `session_count` not covered — both initial tests use `pinned_folders=[]`. | Fixed — added `test_partials_workspaces_pinned_session_count_is_provider_aware` |
+| 4 | Low | Duplicated `session_count` ternary in both loops of `_render_workspace_groups` — could silently diverge. | Fixed — extracted `_session_count_for_group` helper |
+| 5 | Low | Type annotations `list` not `list[dict]` on `_render_workspace_groups` parameters. | Fixed — changed to `list[dict]` |
+| 6 | Low | Section 9 Implementation Divergences not filled. | Fixed — filled with two documented divergences |
