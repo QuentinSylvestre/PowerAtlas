@@ -205,6 +205,72 @@ def test_search_no_results(mock_discover, mock_config, client, tmp_path):
     assert "No results" in resp.text
 
 
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_search_session_count_is_provider_aware(mock_discover, client, tmp_path):
+    """When provider filter is active, search returns provider-filtered session count.
+
+    The workspace has 2 kiro-cli sessions and 1 claude-code session (3 total).
+    With provider=kiro-cli, the card must show 2, not 3.
+    """
+    workspace = str(tmp_path)
+    # Simulate two provider rows for the same workspace: 2 kiro-cli, 1 claude-code
+    mock_discover.return_value = [
+        (workspace, 2, "2026-01-01T12:00:00Z", "kiro-cli"),
+        (workspace, 1, "2026-01-01T11:00:00Z", "claude-code"),
+    ]
+    folder_name = tmp_path.name
+
+    resp = client.get(f"/search?q={folder_name}&provider=kiro-cli")
+    assert resp.status_code == 200
+    html = resp.text
+    assert folder_name in html
+    # The session count shown must be 2 (kiro-cli only), not 3 (total).
+    # workspace_card.html renders session_count in a span with class "card-count".
+    # We look for "2" appearing and verify "3" does NOT appear as a count.
+    # Use a pattern that matches the count span value.
+    counts = re.findall(r'card-count[^>]*>\s*(\d+)', html)
+    assert counts, "Expected at least one card-count span in the response"
+    assert all(int(c) == 2 for c in counts), (
+        f"Expected all counts to be 2 (kiro-cli only), got: {counts}"
+    )
+
+
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_partials_workspaces_and_search_produce_same_session_count_for_provider_filter(
+    mock_discover, client, tmp_path
+):
+    """Both /partials/workspaces and /search return identical session_count when provider filter active.
+
+    Before the unification, search always used total_count while partials used a
+    provider-aware sum. This test pins that both now agree.
+    """
+    workspace = str(tmp_path)
+    mock_discover.return_value = [
+        (workspace, 3, "2026-01-01T12:00:00Z", "kiro-cli"),
+        (workspace, 2, "2026-01-01T11:00:00Z", "claude-code"),
+    ]
+    folder_name = tmp_path.name
+
+    r1 = client.get("/partials/workspaces?provider=kiro-cli")
+    r2 = client.get(f"/search?q={folder_name}&provider=kiro-cli")
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+
+    counts_partials = re.findall(r'card-count[^>]*>\s*(\d+)', r1.text)
+    counts_search = re.findall(r'card-count[^>]*>\s*(\d+)', r2.text)
+
+    assert counts_partials, "Expected at least one count in /partials/workspaces response"
+    assert counts_search, "Expected at least one count in /search response"
+    # Both should show 3 (kiro-cli count), not 5 (total).
+    assert counts_partials == counts_search, (
+        f"Route counts differ: partials={counts_partials}, search={counts_search}"
+    )
+    assert all(int(c) == 3 for c in counts_search), (
+        f"Expected count 3 (kiro-cli sessions), got: {counts_search}"
+    )
+
+
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_save_provider_settings(mock_load, mock_save, client):
