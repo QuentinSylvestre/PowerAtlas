@@ -2967,9 +2967,15 @@ async def api_session_status(request: Request):
     })
 
 
+def _session_count_for_group(group: dict, provider: str) -> int:
+    if provider == "all":
+        return group["total_count"]
+    return sum(p["count"] for p in group["providers"] if p["name"] == provider)
+
+
 def _render_workspace_groups(
-    pinned_grouped: list,
-    other_grouped: list,
+    pinned_grouped: list[dict],
+    other_grouped: list[dict],
     provider: str,
     snap,
     config,
@@ -2989,10 +2995,7 @@ def _render_workspace_groups(
 
     for group in pinned_grouped:
         cwd = group["cwd"]
-        session_count = (
-            sum(p["count"] for p in group["providers"] if p["name"] == provider)
-            if provider != "all" else group["total_count"]
-        )
+        session_count = _session_count_for_group(group, provider)
         cards_html += templates.get_template("partials/workspace_card.html").render(
             request=request, cwd=cwd, sessions=[], stale=not Path(cwd).exists(),
             pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
@@ -3019,10 +3022,7 @@ def _render_workspace_groups(
         cards_html += f'<div class="group-heading">{label}</div>'
         for group in time_groups[key]:
             cwd = group["cwd"]
-            session_count = (
-                sum(p["count"] for p in group["providers"] if p["name"] == provider)
-                if provider != "all" else group["total_count"]
-            )
+            session_count = _session_count_for_group(group, provider)
             cards_html += templates.get_template("partials/workspace_card.html").render(
                 request=request, cwd=cwd, sessions=[], stale=not Path(cwd).exists(),
                 pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
@@ -3071,7 +3071,6 @@ async def partials_workspaces(
     from .config import get_workspace_settings
     workspace_data = list(workspace_data)
 
-    cards_html = ""
     # Build pinned set by normalized path only (workspace-level)
     pinned_norm_paths: set[str] = set()
     for folder in config.pinned_folders:
@@ -3355,10 +3354,6 @@ async def search(request: Request, q: str = "", provider: str = "all",
     if grouped and status and status != "all":
         grouped = [g for g in grouped if _status_matches(
             status, _workspace_status(snap, g["cwd"], prov_names))]
-
-    cards_html = ""
-
-    hover_launchers = _all_hover_launchers(config)
 
     # Separate pinned from non-pinned results
     pinned_results = [g for g in grouped if _normalize_path(g["cwd"]) in pinned_norm_paths]

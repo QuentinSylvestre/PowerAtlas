@@ -271,6 +271,38 @@ def test_partials_workspaces_and_search_produce_same_session_count_for_provider_
     )
 
 
+@patch("power_atlas.web.load_config")
+@patch("power_atlas.web.data.available_providers")
+@patch("power_atlas.web.data.discover_workspaces_with_counts")
+def test_partials_workspaces_pinned_session_count_is_provider_aware(
+    mock_discover, mock_providers, mock_config, client, tmp_path
+):
+    """Pinned workspace code path in _render_workspace_groups respects provider filter.
+
+    The workspace has 2 kiro-cli sessions and 1 claude-code session (3 total).
+    It is pinned. With provider=kiro-cli, the card must show 2, not 3.
+    """
+    from power_atlas.config import Config
+    workspace = str(tmp_path)
+    folder_name = tmp_path.name
+    mock_config.return_value = Config(pinned_folders=[workspace])
+    mock_providers.return_value = ["kiro-cli", "claude-code"]
+    mock_discover.return_value = [
+        (workspace, 2, "2026-01-01T12:00:00Z", "kiro-cli"),
+        (workspace, 1, "2026-01-01T11:00:00Z", "claude-code"),
+    ]
+
+    resp = client.get("/partials/workspaces?provider=kiro-cli")
+    assert resp.status_code == 200
+    html = resp.text
+    assert folder_name in html
+    counts = re.findall(r'card-count[^>]*>\s*(\d+)', html)
+    assert counts, "Expected at least one card-count span in the response"
+    assert all(int(c) == 2 for c in counts), (
+        f"Expected count 2 (kiro-cli only, pinned path), got: {counts}"
+    )
+
+
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_save_provider_settings(mock_load, mock_save, client):
