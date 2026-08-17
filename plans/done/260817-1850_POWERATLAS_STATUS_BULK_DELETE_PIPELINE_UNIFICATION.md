@@ -1,7 +1,29 @@
 # PowerAtlas: Status Fallback Review, Bulk Workspace Delete, Pipeline Unification
 
 > **Date**: 2026-08-17
-> **Status**: In Progress
+> **Status**: Complete
+> **Last Updated**: 2026-08-17T18:47
+
+## Completion Summary
+
+All three phases shipped and verified via Playwright (21/21 QA checks PASS, 2026-08-17).
+
+- **SC-1**: None→"working" fallback confirmed correct; no code change.
+- **SC-2/SC-3/SC-4**: Workspace-level bulk session delete live in `/acp` workspace grouping mode. × button on each group header; modal with typed-name confirmation; folder delete option (loopback-only, path safety: resolve + symlink + UNC + depth + home); config cleanup; 21 server + 11 UI tests.
+- **SC-5/SC-6**: `_render_workspace_groups` extracts the shared pipeline; `session_count` bug fixed in `/search`; 3 regression tests.
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): "Step 1.5 trio dispatched smoothly" — positive outcome note, no friction signal, no suggested change.
+- Skipped (harness opportunity): "Doc-impact sub-agent ran in parallel" — positive outcome note, no friction signal.
+- Skipped (harness opportunity): "4-persona review at max effort caught 7 High findings" — validation of the approach, no actionable governance change.
+
+### Follow-up work (deferred)
+
+1. Trash-tier reassessment — `plans/CLOSED_INVESTIGATIONS.md` reopen condition now met (noted); send2trash remains an option.
+2. Bulk delete in date/status grouping modes — intentionally out of scope; different UX concerns.
+3. v3 session coverage — `_acp_sessions_for_workspace` only covers v2 flat store.
+4. WSL min-depth check — `platform.system()` returns `'Linux'` inside WSL while paths may be Windows-style.
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Close None→working fallback (no-op), add workspace-level bulk session delete with optional folder+config deletion, unify /search and partials_workspaces render pipelines
 > **Estimated effort**: 2–3 days

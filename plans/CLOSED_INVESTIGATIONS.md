@@ -127,7 +127,10 @@ Considered and declined 2026-08-03 while single-session delete was built; moved 
 
 **Would reopen if**: bulk deletion ships. One mistaken click costing 200 sessions is a different
 proposition from one costing a single row, and the roadmap's bulk-deletion item is the trigger — not
-this entry on its own.
+this entry on its own. **Reopen condition met 2026-08-17** — workspace-level bulk session delete
+shipped in `260817_POWERATLAS_STATUS_BULK_DELETE_PIPELINE_UNIFICATION`; the modal requires typing the
+folder name to confirm, which addresses the "different row" concern at the group level. Trash-tier
+(send2trash/recycle-bin) remains on the follow-up list as a lower-stakes complement.
 
 ---
 
