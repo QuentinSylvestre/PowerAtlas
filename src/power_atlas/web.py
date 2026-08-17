@@ -2569,16 +2569,22 @@ def _acp_delete_workspace_folder(cwd: str) -> tuple[bool, str]:
     # --- Path safety checks (ordered, fail-fast) ---
     if not p.is_absolute():
         return False, "Path is not absolute."
-    if str(p).startswith("\\\\") or str(p).startswith("//"):
-        return False, "Refusing UNC path."
+    # Symlink check must run before resolve() — resolve() follows symlinks and
+    # returns the real target, so is_symlink() on the resolved path is always False.
     if p.is_symlink():
         return False, "Refusing to delete a symbolic link."
+    try:
+        p = p.resolve()
+    except OSError:
+        return False, "Could not resolve path."
+    if str(p).startswith("\\\\") or str(p).startswith("//"):
+        return False, "Refusing UNC path."
     min_depth = 4 if platform.system() == "Windows" else 3
     if len(p.parts) < min_depth:
         return False, (
             f"Path too shallow to be a workspace (need >= {min_depth} parts)."
         )
-    home = Path.home()
+    home = Path.home().resolve()
     if p == home or p == home.parent:
         return False, "Refusing to delete home directory or its parent."
     # --- Load, mutate, save config (all in this worker thread) ---
@@ -2588,6 +2594,7 @@ def _acp_delete_workspace_folder(cwd: str) -> tuple[bool, str]:
         save_config(config)  # still clean config even if folder is gone
         return False, "folder_already_gone"
     if not p.is_dir():
+        save_config(config)  # H3: still persist config cleanup for non-directory paths
         return False, "Path is not a directory."
     try:
         import shutil as _shutil
@@ -2654,16 +2661,23 @@ async def api_acp_delete_sessions(request: Request):
         }
         # Folder delete: loopback-only guard — irreversible local filesystem
         # operation must not be triggerable from a remote device.
+        # D26: use scope["client"] (transport-level peer IP) not the Host header,
+        # which is attacker-controlled and would let a remote peer spoof loopback.
         if delete_folder:
-            if not _request_host_allowed(request):
+            peer_ip = (request.scope.get("client") or (None,))[0]
+            if _is_remote_peer(peer_ip):
                 response["folder_deleted"] = False
                 response["folder_error"] = (
                     "Folder deletion is not available from remote access."
                 )
             else:
-                folder_deleted, folder_error = await asyncio.to_thread(
-                    _acp_delete_workspace_folder, cwd
-                )
+                try:
+                    folder_deleted, folder_error = await asyncio.to_thread(
+                        _acp_delete_workspace_folder, cwd
+                    )
+                except Exception as exc:
+                    folder_deleted = False
+                    folder_error = f"Folder delete failed unexpectedly: {exc}"
                 response["folder_deleted"] = folder_deleted
                 response["folder_error"] = folder_error
         return JSONResponse(response)

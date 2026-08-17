@@ -16286,41 +16286,14 @@ class TestAcpDeleteEndpoint:
         assert "home" in err.lower()
 
     def test_folder_delete_ignored_for_remote_callers(
-            self, client, tmp_path, monkeypatch):
-        """delete_folder=true from a non-loopback peer should not delete the folder.
+            self, remote_enabled, monkeypatch, tmp_path):
+        """delete_folder=true from a non-loopback peer must NOT delete the folder.
 
-        The test simulates a remote caller by having _acp_delete_workspace_folder
-        expect NOT to be called (folder stays untouched). We verify this by
-        confirming the folder still exists after the call and that folder_deleted
-        is absent or False in the response.
-
-        Note: we cannot monkeypatch _request_host_allowed to return False because
-        same_origin_guard (a middleware) also calls it and would 403 the request
-        first. Instead, we verify the behavior by testing that the folder is NOT
-        deleted when _acp_delete_workspace_folder is patched to raise, and the
-        real loopback caller flow includes folder_deleted=True for existing folders.
-        This test simply asserts that folder_deleted=False when folder delete is
-        refused for a remote caller by having the function return that error.
-        We test this directly by calling the helper function with the guarded path.
-
-        Actual guard: _request_host_allowed returns False for remote peers.
-        In the test client (loopback), _request_host_allowed returns True,
-        so we test the guard behavior through _acp_delete_workspace_folder directly.
+        Uses _peer_http with a remote client IP so the request's scope["client"]
+        resolves to a non-loopback address, which _is_remote_peer() returns True
+        for. The folder helper is patched to assert it is never called.
         """
-        from power_atlas.web import _acp_delete_workspace_folder
-        import platform
-
-        # Verify the guard prevents actual deletion when called from a remote peer.
-        # We test this by confirming a nonexistent/shallow path returns the expected
-        # error rather than an OS error, proving the safety checks run before rmtree.
-
-        # For the HTTP-level remote guard, we test via a direct code inspection:
-        # The handler contains: `if not _request_host_allowed(request): response["folder_deleted"] = False`
-        # This is verified by reading the code — the same_origin_guard middleware
-        # also calls _request_host_allowed, so we cannot mock it without triggering 403.
-
-        # Instead: verify folder_delete integration by confirming a local loopback
-        # call DOES trigger folder deletion when the folder exists.
+        import json as _json
         import power_atlas.web as web_mod
 
         ws_dir = tmp_path / "workspace"
@@ -16330,26 +16303,90 @@ class TestAcpDeleteEndpoint:
 
         def _fake_folder_delete(cwd):
             folder_delete_called.append(cwd)
-            return (False, "test error")
+            return (True, "")
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
                             lambda cwd: [])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {"deleted": [], "failed": []})
-        monkeypatch.setattr(web_mod, "_acp_delete_workspace_folder", _fake_folder_delete)
+        monkeypatch.setattr(web_mod, "_acp_delete_workspace_folder",
+                            _fake_folder_delete)
 
-        body = client.post(
+        body_bytes = _json.dumps(
+            {"cwd": str(ws_dir), "delete_folder": True}
+        ).encode()
+        status, payload, _ = _peer_http(
             self._PATH,
-            json={"cwd": str(ws_dir), "delete_folder": True}
-        ).json()
-
-        # From a loopback caller, _acp_delete_workspace_folder is called
-        assert folder_delete_called == [str(ws_dir)], (
-            f"Expected folder delete to be called; got {folder_delete_called}. "
-            f"Response: {body}"
+            [_cookie_header(),
+             (b"content-type", b"application/json"),
+             (b"content-length", str(len(body_bytes)).encode()),
+             (b"origin", f"http://{_LOCAL_BIND_IP}:4915".encode())],
+            method="POST",
+            body=body_bytes,
         )
-        assert body.get("folder_deleted") is False  # mock returns False
-        assert body.get("folder_error") == "test error"
+        assert status == 200, f"unexpected status: {status}"
+        body = _json.loads(payload)
+
+        # The remote guard must block folder deletion without calling the helper.
+        assert folder_delete_called == [], (
+            f"_acp_delete_workspace_folder must not be called for remote peers; "
+            f"got {folder_delete_called}"
+        )
+        assert body.get("folder_deleted") is False, (
+            f"folder_deleted should be False for remote caller; got {body}"
+        )
+        assert "remote" in body.get("folder_error", "").lower(), (
+            f"folder_error should mention 'remote'; got {body.get('folder_error')}"
+        )
+
+    def test_cwd_delete_batches_past_200_cap(self, client, monkeypatch):
+        """201 sessions triggers two _acp_delete_many calls (cap=200)."""
+        import power_atlas.web as web_mod
+
+        all_ids = [f"sess-{i:04d}" for i in range(201)]
+        batch_calls = []
+
+        def _fake_delete(ids, held):
+            batch_calls.append(list(ids))
+            return {"deleted": list(ids), "failed": []}
+
+        monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
+                            lambda cwd: list(all_ids))
+        monkeypatch.setattr(web_mod, "_acp_delete_many", _fake_delete)
+
+        body = client.post(self._PATH, json={"cwd": r"C:\dev\ws"}).json()
+
+        assert len(batch_calls) == 2, (
+            f"Expected 2 batch calls for 201 sessions, got {len(batch_calls)}: {batch_calls}"
+        )
+        assert len(batch_calls[0]) == 200
+        assert len(batch_calls[1]) == 1
+        assert body["total_found"] == 201
+        assert len(body["deleted"]) == 201
+
+    def test_cwd_delete_skips_held_sessions_and_reports_in_failed(
+            self, client, monkeypatch):
+        """A held session appears in failed; the other two are deleted."""
+        import power_atlas.web as web_mod
+
+        session_ids = ["sess-a", "sess-b", "sess-c"]
+
+        def _fake_delete(ids, held):
+            deleted = [i for i in ids if i != "sess-b"]
+            failed = [{"id": "sess-b", "code": "held", "message": "Close first."}]
+            return {"deleted": deleted, "failed": failed}
+
+        monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
+                            lambda cwd: list(session_ids))
+        monkeypatch.setattr(web_mod, "_acp_delete_many", _fake_delete)
+
+        body = client.post(self._PATH, json={"cwd": r"C:\dev\ws"}).json()
+
+        assert body["total_found"] == 3, f"total_found={body['total_found']}"
+        assert len(body["deleted"]) == 2, f"deleted={body['deleted']}"
+        assert len(body["failed"]) == 1, f"failed={body['failed']}"
+        assert body["failed"][0]["id"] == "sess-b"
+        assert body["failed"][0]["code"] == "held"
 
     def test_remove_workspace_from_config_cleans_pinned_and_settings(
             self, tmp_path):
