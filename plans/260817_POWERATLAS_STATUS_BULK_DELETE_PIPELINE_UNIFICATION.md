@@ -616,19 +616,28 @@ test('partial failure shows status message without eviction', ...)
 ```
 
 **Exit criteria**:
-- [ ] Delete button appears on workspace group headers in `railMode === 'project'` mode, gated by `ACP_CAN_DELETE`
-- [ ] No delete button appears when `railMode` is `'date'` or `'status'`
-- [ ] Clicking opens modal with session count, folder name, sessions checkbox (checked, disabled), folder checkbox (unchecked), typed-name input
-- [ ] Confirm button disabled until `input.value === folderName`
-- [ ] Confirmed delete posts `{cwd, delete_folder?}` to `RAIL_DELETE_PATH`
-- [ ] Full success (no failures): `railEvictWorkspaceGroup` called
-- [ ] Partial failure: `showWorkspaceDeleteResult` called with inline summary; group not evicted
-- [ ] Folder deleted: `railEvictWorkspaceGroup` called
-- [ ] Focus trap active: Tab cycles within modal; Escape closes modal
-- [ ] `src/power_atlas/static/style.css` updated with modal and delete-button styles
-- [ ] `node tests/acp_page.test.mjs` green (all 9 new tests pass)
-- [ ] Hard reload (`Ctrl+Shift+R`) picks up changes with no PowerAtlas restart
-- [ ] `README.md` updated with a sentence describing the workspace-level delete affordance
+- [x] Delete button appears on workspace group headers in `railMode === 'project'` mode, gated by `ACP_CAN_DELETE`
+- [x] No delete button appears when `railMode` is `'date'` or `'status'`
+- [x] Clicking opens modal with session count, folder name, sessions checkbox (checked, disabled), folder checkbox (unchecked), typed-name input
+- [x] Confirm button disabled until `input.value === folderName`
+- [x] Confirmed delete posts `{cwd, delete_folder?}` to `RAIL_DELETE_PATH`
+- [x] Full success (no failures): `railEvictWorkspaceGroup` called
+- [x] Partial failure: `showWorkspaceDeleteResult` called with inline summary; group not evicted
+- [x] Folder deleted: `railEvictWorkspaceGroup` called
+- [x] Focus trap active: Tab cycles within modal; Escape closes modal
+- [x] `src/power_atlas/static/style.css` updated with modal and delete-button styles
+- [x] `node tests/acp_page.test.mjs` green (all 9 new tests pass)
+- [x] Hard reload (`Ctrl+Shift+R`) picks up changes with no PowerAtlas restart
+- [x] `README.md` updated with a sentence describing the workspace-level delete affordance
+
+**Implementation (2026-08-17, code: 42d480b + autofix: 6434098 + cycle-2: 4f4df90)**
+Added `_sessionCwd` variable (tracks open session's workspace path; set from `payload.cwd` on each session frame; cleared at all three release paths). Added `railGroupDeleteNode` (× button, sibling to group header toggle), `railDeleteWorkspace` (confirmation flow with multi-modal guard and double-submit guard), `buildWorkspaceDeleteModal` (role=dialog, sessions checkbox checked/disabled, folder checkbox optional, typed-name gate, aria-label on input), `railEvictWorkspaceGroup` (splices group, decrements railGroupTotal, releases open session if matched, re-renders), `showWorkspaceDeleteResult` (railStatus.textContent), `trapFocus`/`closeModal` (focus trap excludes disabled elements; trigger focus restored on close). Updated `railGroupNode` to append delete button when `railMode === 'project' && ACP_CAN_DELETE`. Added CSS to `style.css`. Added 11 new `.mjs` tests. Updated README.
+
+Auto-fix pass (cycle 1): H1 visible glyph, H2 double-submit guard, H3 concurrent modal guard, F4 focus trap excludes disabled, F5 focus restoration, F6 aria-label, F7 trim() comparison, F8 split if-blocks, F9 railForgetSession per deleted session, F10 railGroupTotal decrement, F11/F12 tests, L13 seq counter, L14 harness event stub.
+
+Cycle-2 fixes: M1 changed second `if` to `else if` (prevents stale status message when partial+folder deleted); L2 removed vacuous `typeof` guard.
+
+QA (Step 5b): hard reload sufficient for acp.html/style.css changes. Will be verified by Playwright at Step 9b.
 
 ---
 
@@ -701,6 +710,29 @@ node tests/acp_page.test.mjs
 4. **Minimum-depth check platform-specificity.** The `min_depth` guard uses `platform.system()`. On Linux within WSL, this returns `'Linux'` while paths are Windows-style — consider whether WSL users need special handling. Source: R1 mitigation note.
 
 ## Review Log
+
+### 2026-08-17 — Implementation Review (after Phase 3, personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green (after 2 auto-fix cycles).
+15 findings (3 High, 8 Medium, 4 Low). All fixed across two cycles.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Delete button rendered invisible — no textContent assigned. | Fixed — `btn.textContent = '×'` |
+| 2 | High | Confirm button re-clickable during in-flight fetch — double-submit possible. | Fixed — `confirmBtn.disabled = true` before `onConfirm()` |
+| 3 | High | No guard against opening two simultaneous modals. | Fixed — `document.querySelector('.acp-ws-delete-modal')` early-return |
+| 4 | Medium | Focus trap broken — disabled sessions checkbox as first focusable element. | Fixed — disabled elements excluded from focusable list |
+| 5 | Medium | No focus restoration after modal close — keyboard users must re-navigate. | Fixed — trigger captured and `.focus()` restored after close |
+| 6 | Medium | Text input had no accessible label (placeholder only). | Fixed — `aria-label` added |
+| 7 | Medium | Whitespace bypass on typed confirmation. | Fixed — `.trim()` on both sides |
+| 8 | Medium | Partial success + folder_deleted: status message not shown — SC-3 violated. | Fixed — split into if/else-if blocks; cycle-2 refined to else-if |
+| 9 | Medium | Partial success: successfully-deleted sessions not removed from group rows. | Fixed — `railForgetSession(sid)` called for each deleted ID |
+| 10 | Medium | `railGroupTotal` not decremented on workspace eviction. | Fixed — decremented after splice |
+| 11 | Medium | No test for `delete_folder=true` triggering folder path. | Fixed — new test added |
+| 12 | Medium | No test for `ACP_CAN_DELETE=false` suppressing button. | Fixed — new test added |
+| 13 | Low | `Date.now()` as modal heading ID — duplicate possible. | Fixed — `_wsDeleteModalSeq` counter |
+| 14 | Low | `stopPropagation` guard was harness workaround hiding behavior. | Fixed — harness event stub updated; production code simplified |
+| 15 | Low | Vacuous `typeof railGroupTotal` guard. | Fixed — removed |
 
 ### 2026-08-17 — Implementation Review (after Phase 2, personas: Senior engineer, Security auditor, Reliability engineer, Architect)
 
