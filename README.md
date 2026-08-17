@@ -205,7 +205,7 @@ lock and its task files — after a confirmation. This is not the same as *Close
 the memory and leaves the conversation resumable. It cannot be undone, there is no trash, and it is
 refused for a session PowerAtlas has open (close it first) or one another process is using. The menu is
 not shown to mobile browsers; authenticated desktop browsers at the remote address can use it. It is
-never shown to a remote viewer who has not authenticated with the device secret.
+never shown to a remote viewer who has not authenticated with the device secret. In workspace grouping mode, each workspace group header carries a delete affordance (×) that deletes all of that workspace's sessions at once; a confirmation modal shows the session count, requires typing the folder name to confirm, and offers a separate "Delete folder from filesystem" checkbox (unchecked by default, irreversible) that also removes the directory from disk and cleans up the workspace's `config.toml` entries.
 
 **Images go in with Ctrl+V.** Paste a screenshot into the prompt box, or drag an image file onto it, and
 it is staged as a thumbnail above the box before anything is sent — each one labelled *Image 1*, *Image 2*

@@ -1506,3 +1506,26 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-rail-search { font-size: 12px; }
 }
 
+
+/* ---- workspace bulk-delete affordance (Phase 3) ---- */
+.acp-rail-group-delete {
+  color: var(--color-error, #ef4444);
+  opacity: 0.6;
+  font-size: 0.75rem;
+  padding: 0 4px;
+  margin-left: 4px;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.acp-rail-group-delete:hover { opacity: 1; }
+.acp-ws-delete-modal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+.acp-ws-delete-modal-body {
+  background: var(--bg-2, #1e1e2e);
+  border-radius: 8px; padding: 1.5rem; max-width: 420px; width: 100%;
+}

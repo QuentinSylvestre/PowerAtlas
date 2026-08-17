@@ -671,6 +671,10 @@
   // ever learns it. "" until that frame lands, which is why `renderSidLabel`
   // falls back to the raw id rather than drawing an empty header.
   var sidWorkspace = '';
+  // The full path of the current session's workspace — set from `payload.cwd`
+  // on each `session` frame, used by `railEvictWorkspaceGroup` to release the
+  // session when its workspace is deleted. "" until the session frame lands.
+  var _sessionCwd = '';
   // Whether the header is showing the session id instead of the workspace
   // name. Reset to false on every session change: the id was one tap away
   // for whichever conversation asked for it, not a standing preference.
@@ -1281,6 +1285,7 @@
     clearAttachments();
     releasePendingAttachments();
     sidWorkspace = '';
+    _sessionCwd = '';
     sidRevealed = false;
     renderSidLabel();
     // The id leaves the URL with the session. Left in place, a reload would
@@ -5238,6 +5243,215 @@
     return add;
   }
 
+  // ---- workspace bulk-delete affordance (Phase 3) ----
+
+  /** Create the × delete button appended as a sibling to the group header toggle.
+   *
+   *  Only rendered in workspace-grouping mode (`railMode === 'project'`) and only
+   *  when `ACP_CAN_DELETE` is true (same gate as per-session delete menus). Not
+   *  nested inside the toggle button — a button inside a button is refused by the
+   *  HTML parser at the inner start tag.
+   */
+  function railGroupDeleteNode(group) {
+    var btn = document.createElement('button');
+    btn.className = 'acp-btn acp-rail-group-delete';
+    btn.type = 'button';
+    btn.title = 'Delete all sessions in this workspace';
+    btn.setAttribute('aria-label',
+      'Delete all sessions \u2014 ' + (group.name || group.cwd));
+    btn.addEventListener('click', function (e) {
+      if (e && e.stopPropagation) e.stopPropagation();
+      railDeleteWorkspace(group);
+    });
+    return btn;
+  }
+
+  /** Open the confirmation modal and, on confirm, POST the workspace-delete request. */
+  function railDeleteWorkspace(group) {
+    var modal = buildWorkspaceDeleteModal(
+      group.cwd, group.name || group.cwd, group.total,
+      function onConfirm(deleteFolder) {
+        var body = { cwd: group.cwd };
+        if (deleteFolder) body.delete_folder = true;
+        fetch(RAIL_DELETE_PATH, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          body: JSON.stringify(body),
+        })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (data) {
+          closeModal(modal);
+          var failed = (data.failed || []).length;
+          if (failed === 0 || data.folder_deleted) {
+            railEvictWorkspaceGroup(group.cwd);
+          } else {
+            showWorkspaceDeleteResult(group, data);
+          }
+        })
+        .catch(function (err) {
+          closeModal(modal);
+          railFailed('could not delete the workspace sessions', err);
+        });
+      }
+    );
+    if (document.body) document.body.appendChild(modal);
+    trapFocus(modal);
+    var input = modal.querySelector('.acp-ws-delete-name-input');
+    if (input) input.focus();
+  }
+
+  /** Build and return the confirmation modal DOM element. */
+  function buildWorkspaceDeleteModal(cwd, folderName, sessionCount, onConfirm) {
+    var headingId = 'acp-ws-delete-heading-' + Date.now();
+    var modal = document.createElement('div');
+    modal.className = 'acp-ws-delete-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', headingId);
+
+    var body = document.createElement('div');
+    body.className = 'acp-ws-delete-modal-body';
+
+    var heading = document.createElement('h2');
+    heading.id = headingId;
+    heading.textContent = 'Delete workspace sessions';
+    body.appendChild(heading);
+
+    var info = document.createElement('p');
+    info.textContent = 'Workspace: ' + folderName
+      + ' \u2014 ' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '')
+      + ' in kiro-cli\u2019s store';
+    body.appendChild(info);
+
+    // Sessions checkbox — informational-only: server always deletes sessions
+    // when `cwd` is provided, so this communicates the action rather than
+    // offering a choice.
+    var sessRow = document.createElement('label');
+    var sessCb = document.createElement('input');
+    sessCb.type = 'checkbox';
+    sessCb.checked = true;
+    sessCb.disabled = true;
+    var sessLabel = document.createElement('span');
+    sessLabel.textContent = ' Delete ' + sessionCount + ' session'
+      + (sessionCount !== 1 ? 's' : '') + ' (always performed)';
+    sessRow.appendChild(sessCb);
+    sessRow.appendChild(sessLabel);
+    body.appendChild(sessRow);
+
+    // Folder checkbox — unchecked by default; irreversible.
+    var folderRow = document.createElement('label');
+    var folderCb = document.createElement('input');
+    folderCb.type = 'checkbox';
+    folderCb.className = 'acp-ws-delete-folder-cb';
+    var folderLabel = document.createElement('span');
+    folderLabel.textContent = ' Delete folder from filesystem \u26a0 Irreversible \u2014 deletes '
+      + folderName + ' from disk';
+    folderRow.appendChild(folderCb);
+    folderRow.appendChild(folderLabel);
+    body.appendChild(folderRow);
+
+    // Typed-name input for confirmation.
+    var inputRow = document.createElement('p');
+    var input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'acp-ws-delete-name-input';
+    input.setAttribute('placeholder', 'Type folder name to confirm');
+    input.setAttribute('autocomplete', 'off');
+    inputRow.appendChild(input);
+    body.appendChild(inputRow);
+
+    var btnRow = document.createElement('div');
+    var confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.textContent = 'Delete';
+    confirmBtn.disabled = true;
+    confirmBtn.className = 'acp-btn acp-ws-delete-confirm';
+
+    input.addEventListener('input', function () {
+      confirmBtn.disabled = input.value !== folderName;
+    });
+
+    confirmBtn.addEventListener('click', function () {
+      if (confirmBtn.disabled) return;
+      onConfirm(folderCb.checked);
+    });
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.className = 'acp-btn acp-ws-delete-cancel';
+    cancelBtn.addEventListener('click', function () {
+      closeModal(modal);
+    });
+
+    btnRow.appendChild(confirmBtn);
+    btnRow.appendChild(cancelBtn);
+    body.appendChild(btnRow);
+    modal.appendChild(body);
+    return modal;
+  }
+
+  /** Remove the workspace group from in-memory data structures and re-render. */
+  function railEvictWorkspaceGroup(cwd) {
+    var idx = railGroups.findIndex(function (g) { return g.cwd === cwd; });
+    if (idx !== -1) railGroups.splice(idx, 1);
+    delete railGroupsByCwd['c:' + cwd];
+    // Release the open session if it belongs to the evicted workspace.
+    if (sessionId && _sessionCwd && _sessionCwd === cwd) releaseSession();
+    renderRail();
+  }
+
+  /** Show a summary of the delete result in the rail status bar. */
+  function showWorkspaceDeleteResult(group, data) {
+    var nDeleted = (data.deleted || []).length;
+    var nFailed = (data.failed || []).length;
+    var msg = 'Deleted ' + nDeleted + ' session'
+              + (nDeleted !== 1 ? 's' : '') + '.';
+    if (nFailed > 0) {
+      msg += ' ' + nFailed + ' could not be deleted (held or locked).';
+    }
+    if (data.folder_error && data.folder_error !== 'folder_already_gone') {
+      msg += ' Folder: ' + data.folder_error;
+    }
+    railStatus.textContent = msg;
+  }
+
+  /** Trap focus within a modal; close on Escape. */
+  function trapFocus(modal) {
+    // Gather focusable elements. Split into two calls rather than using a
+    // comma selector — the test harness only implements single class or tag
+    // selectors, and a comma inside querySelectorAll throws there.
+    var btns = modal.querySelectorAll('button');
+    var inputs = modal.querySelectorAll('input');
+    var focusable = [];
+    for (var i = 0; i < inputs.length; i++) focusable.push(inputs[i]);
+    for (var j = 0; j < btns.length; j++) focusable.push(btns[j]);
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    modal.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { closeModal(modal); return; }
+      if (e.key !== 'Tab') return;
+      var active = (typeof document !== 'undefined' && document.activeElement) || null;
+      if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        if (first) first.focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        if (last) last.focus();
+      }
+    });
+  }
+
+  /** Remove a modal from the DOM. */
+  function closeModal(modal) {
+    if (modal.parentNode) modal.parentNode.removeChild(modal);
+  }
+
   /**
    * The header both shapes share.
    *
@@ -5348,6 +5562,9 @@
       // thing that tells two workspaces with the same one apart.
       { title: group.cwd, badge: badge });
     head.appendChild(railGroupAddNode(group));
+    if (railMode === 'project' && ACP_CAN_DELETE) {
+      head.appendChild(railGroupDeleteNode(group));
+    }
     wrap.appendChild(head);
 
     // Collapsed draws the header and stops. The rows are not hidden with CSS
@@ -5596,6 +5813,7 @@
     // id as a placeholder until that answers, the same gap `renderSidLabel`
     // documents for a page opened straight at `?sid=`.
     sidWorkspace = '';
+    _sessionCwd = '';
     sidRevealed = false;
     renderSidLabel();
     history.replaceState(null, '',
@@ -6181,6 +6399,7 @@
       // re-subscribes into the same session should not carry over whatever
       // the user had tapped open before the drop.
       sidWorkspace = shortName(payload.cwd || '');
+      _sessionCwd = payload.cwd || '';
       sidRevealed = false;
       renderSidLabel();
       logLine('in', '← session ' + payload.sessionId +
@@ -6394,6 +6613,7 @@
       setContext(null);
       setState('closed', 'agent gone');
       sidWorkspace = '';
+      _sessionCwd = '';
       sidRevealed = false;
       renderSidLabel();
       // Every sub-agent process went with the agent, the same as every

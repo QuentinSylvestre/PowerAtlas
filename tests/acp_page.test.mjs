@@ -9591,6 +9591,217 @@ check("copyButtonNotPresentInNonCodeBlocks", (tpl) => {
     "found " + copyBtns.length);
 });
 
+// ---- workspace bulk-delete UI (Phase 3) ----
+
+/** A store with a single workspace holding two sessions. */
+function wsDeleteStore(name = "my-project", cwd = "C:\\work\\my-project") {
+  return [{
+    cwd,
+    name,
+    exists: true,
+    sessions: [
+      { id: "sess-a", title: "session a",
+        updated_at: "2026-08-01T10:00:00.000000000Z", availability: "available" },
+      { id: "sess-b", title: "session b",
+        updated_at: "2026-08-01T09:00:00.000000000Z", availability: "available" },
+    ],
+  }];
+}
+
+check("delete button appears on workspace group headers in project mode with canDelete=true",
+  async (tpl) => {
+    const page = await railed(tpl, { store: wsDeleteStore() });
+    // Default mode is project; canDelete defaults to true in railed().
+    const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
+    assert(deleteBtns.length > 0,
+      "no delete button on workspace group header in project mode; "
+      + "railGroupDeleteNode must be called from railGroupNode when "
+      + "railMode === 'project' && ACP_CAN_DELETE");
+  });
+
+check("delete button absent when railMode is 'date'", async (tpl) => {
+  const page = await railed(tpl, {
+    store: wsDeleteStore(),
+    stored: { pa_acp_group: "date" },
+  });
+  const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
+  assertEqual(deleteBtns.length, 0,
+    "delete button is shown in date grouping mode; it should only appear in project mode");
+});
+
+check("delete button absent when railMode is 'status'", async (tpl) => {
+  const page = await railed(tpl, {
+    store: wsDeleteStore(),
+    stored: { pa_acp_group: "status" },
+  });
+  const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
+  assertEqual(deleteBtns.length, 0,
+    "delete button is shown in status grouping mode; it should only appear in project mode");
+});
+
+check("modal opens with correct session count and folder name", async (tpl) => {
+  const page = await railed(tpl, { store: wsDeleteStore("my-project") });
+  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+  assert(deleteBtn !== null, "no delete button — cannot open modal");
+  deleteBtn.dispatch("click");
+  // Modal is appended to document.body (real browser) or returned standalone.
+  // In the harness, railDeleteWorkspace builds the modal and calls focus on the
+  // input; the modal lives in memory even without document.body.
+  // We verify by checking that buildWorkspaceDeleteModal was invoked by looking
+  // for the input element. Since the modal isn't in a byId-indexed container,
+  // we use the fact that the input received focus via ACTIVE.
+  const focused = page.focused();
+  assert(focused !== null, "nothing received focus after modal open");
+  assert(focused.matches(".acp-ws-delete-name-input"),
+    "the focused element after modal open is not the name input; "
+    + "got: " + (focused ? focused.className : "null"));
+});
+
+check("confirm button disabled when name input is empty", async (tpl) => {
+  const page = await railed(tpl, { store: wsDeleteStore("my-project") });
+  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+  assert(deleteBtn !== null, "no delete button");
+  deleteBtn.dispatch("click");
+  // The input is focused. Find the confirm button. We need to find the modal
+  // content — since it isn't in the rail container, we use the focused element's
+  // parent chain to find the modal body.
+  const input = page.focused();
+  assert(input !== null, "no focused input");
+  // Walk up to the modal body, then find the confirm button.
+  let container = input;
+  while (container && !container.querySelector(".acp-ws-delete-confirm")) {
+    container = container.parentNode;
+  }
+  assert(container !== null, "could not find modal container from focused input");
+  const confirmBtn = container.querySelector(".acp-ws-delete-confirm");
+  assert(confirmBtn !== null, "no confirm button in modal");
+  assert(confirmBtn.disabled, "confirm button is not disabled when input is empty");
+});
+
+check("confirm button disabled when input does not match folder name", async (tpl) => {
+  const page = await railed(tpl, { store: wsDeleteStore("my-project") });
+  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+  assert(deleteBtn !== null, "no delete button");
+  deleteBtn.dispatch("click");
+  const input = page.focused();
+  assert(input !== null, "no focused input");
+  // Type a wrong name.
+  input.value = "wrong-name";
+  input.dispatch("input");
+  let container = input;
+  while (container && !container.querySelector(".acp-ws-delete-confirm")) {
+    container = container.parentNode;
+  }
+  const confirmBtn = container.querySelector(".acp-ws-delete-confirm");
+  assert(confirmBtn !== null, "no confirm button");
+  assert(confirmBtn.disabled,
+    "confirm button is enabled when input doesn't match folder name");
+});
+
+check("confirm button enabled when input matches folder name", async (tpl) => {
+  const page = await railed(tpl, { store: wsDeleteStore("my-project") });
+  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+  assert(deleteBtn !== null, "no delete button");
+  deleteBtn.dispatch("click");
+  const input = page.focused();
+  assert(input !== null, "no focused input");
+  input.value = "my-project";
+  input.dispatch("input");
+  let container = input;
+  while (container && !container.querySelector(".acp-ws-delete-confirm")) {
+    container = container.parentNode;
+  }
+  const confirmBtn = container.querySelector(".acp-ws-delete-confirm");
+  assert(confirmBtn !== null, "no confirm button");
+  assert(!confirmBtn.disabled,
+    "confirm button is still disabled when input matches the folder name");
+});
+
+check("confirmed delete (no folder delete) posts cwd to delete endpoint and evicts group",
+  async (tpl) => {
+    const page = await railed(tpl, { store: wsDeleteStore("my-project") });
+    // Verify the group is present before delete.
+    const groupsBefore = page.railGroups();
+    assertEqual(groupsBefore.length, 1, "fixture: should have one workspace group");
+
+    const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+    assert(deleteBtn !== null, "no delete button");
+    deleteBtn.dispatch("click");
+
+    const input = page.focused();
+    assert(input !== null, "no focused input");
+    input.value = "my-project";
+    input.dispatch("input");
+
+    // Find the modal and confirm button.
+    let container = input;
+    while (container && !container.querySelector(".acp-ws-delete-confirm")) {
+      container = container.parentNode;
+    }
+    const confirmBtn = container.querySelector(".acp-ws-delete-confirm");
+    assert(confirmBtn !== null, "no confirm button");
+    assert(!confirmBtn.disabled, "confirm button is disabled — cannot proceed");
+    confirmBtn.dispatch("click");
+    await page.settle();
+
+    // Verify POST was sent with cwd.
+    const calls = page.deleteCalls();
+    assert(calls.length > 0, "no delete request was sent");
+    const sent = JSON.parse(calls[0].init.body);
+    assertEqual(sent.cwd, "C:\\work\\my-project",
+      "delete request did not carry the workspace cwd");
+    assert(!sent.delete_folder,
+      "delete_folder was set when folder checkbox was not checked");
+
+    // Full success (serveDelete returns {deleted: [], failed: []}) → group evicted.
+    const groupsAfter = page.railGroups();
+    assertEqual(groupsAfter.length, 0,
+      "workspace group was not evicted after successful delete");
+  });
+
+check("partial failure shows rail status message and group is not evicted", async (tpl) => {
+  const page = await railed(tpl, {
+    store: wsDeleteStore("my-project"),
+    answer: (url) => url === DELETE_URL ? {
+      body: {
+        deleted: ["sess-a"],
+        failed: [{ id: "sess-b", code: "locked",
+                   message: "Another process is using this session." }],
+        total_found: 2,
+      },
+    } : null,
+  });
+
+  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
+  assert(deleteBtn !== null, "no delete button");
+  deleteBtn.dispatch("click");
+
+  const input = page.focused();
+  assert(input !== null, "no focused input");
+  input.value = "my-project";
+  input.dispatch("input");
+
+  let container = input;
+  while (container && !container.querySelector(".acp-ws-delete-confirm")) {
+    container = container.parentNode;
+  }
+  const confirmBtn = container.querySelector(".acp-ws-delete-confirm");
+  assert(confirmBtn !== null, "no confirm button");
+  confirmBtn.dispatch("click");
+  await page.settle();
+
+  // Group should still be present (partial failure).
+  const groups = page.railGroups();
+  assert(groups.length > 0,
+    "workspace group was evicted on partial failure — it should stay");
+
+  // Rail status should show a message.
+  const status = page.el("acpRailStatus").textContent;
+  assert(/could not be deleted/i.test(status) || /Deleted/i.test(status),
+    "rail status does not report the delete result: " + status);
+});
+
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
