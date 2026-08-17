@@ -5293,8 +5293,7 @@
           if (trigger && trigger.focus) trigger.focus();
           if ((data.failed || []).length === 0 || data.folder_deleted) {
             railEvictWorkspaceGroup(group.cwd);
-          }
-          if ((data.failed || []).length > 0) {
+          } else if ((data.failed || []).length > 0) {
             if ((data.deleted || []).length > 0) {
               (data.deleted || []).forEach(function (sid) {
                 railForgetSession(sid);
@@ -5414,7 +5413,7 @@
     var idx = railGroups.findIndex(function (g) { return g.cwd === cwd; });
     if (idx !== -1) {
       railGroups.splice(idx, 1);
-      if (typeof railGroupTotal !== 'undefined' && railGroupTotal > 0) railGroupTotal--;
+      if (railGroupTotal > 0) railGroupTotal--;
     }
     delete railGroupsByCwd['c:' + cwd];
     // Release the open session if it belongs to the evicted workspace.
