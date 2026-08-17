@@ -2887,6 +2887,16 @@
           gt.setAttribute('aria-expanded', open ? 'false' : 'true');
           gt.setAttribute('aria-label', open ? 'Expand tool call group' : 'Collapse tool call group');
           gb.hidden = open;
+          // When opening the group, expand all child tool-call detail panels
+          // that are still collapsed (aria-expanded === 'false').
+          if (!open) {
+            var childToggles = gb.querySelectorAll('.acp-tool-toggle');
+            for (var ci = 0; ci < childToggles.length; ci++) {
+              if (childToggles[ci].getAttribute('aria-expanded') === 'false') {
+                childToggles[ci].click();
+              }
+            }
+          }
         });
       }(groupToggle, groupBody));
 
