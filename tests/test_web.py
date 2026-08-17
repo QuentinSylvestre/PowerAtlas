@@ -15852,7 +15852,7 @@ class TestAcpDeleteEndpoint:
 
         body = self._post(client, ["sess-1"]).json()
 
-        assert body == {"deleted": ["sess-1"], "failed": []}
+        assert body == {"deleted": ["sess-1"], "failed": [], "total_found": 1}
         assert [p for p in paths if p.exists()] == []
 
     def test_a_held_session_is_refused_and_nothing_is_removed(self, client,
@@ -16387,6 +16387,46 @@ class TestAcpDeleteEndpoint:
         assert len(body["failed"]) == 1, f"failed={body['failed']}"
         assert body["failed"][0]["id"] == "sess-b"
         assert body["failed"][0]["code"] == "held"
+
+    def test_acp_sessions_for_workspace_returns_matching_ids(
+            self, tmp_path, monkeypatch):
+        """Direct unit test for _acp_sessions_for_workspace.
+
+        Creates a synthetic KIRO_SESSION_DIR with two fake .json session files,
+        one matching the target cwd and one not. Verifies only the matching
+        session ID is returned.
+        """
+        from power_atlas.web import _acp_sessions_for_workspace
+        from power_atlas import acp as acp_mod
+
+        # Two UUID-format session IDs
+        sid_match = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        sid_other = "11111111-2222-3333-4444-555555555555"
+        target_cwd = r"C:\dev\myproject"
+        other_cwd = r"C:\dev\other"
+
+        # Create fake .json files in tmp_path (just need to exist as files)
+        (tmp_path / f"{sid_match}.json").write_text("{}", encoding="utf-8")
+        (tmp_path / f"{sid_other}.json").write_text("{}", encoding="utf-8")
+
+        # Redirect KIRO_SESSION_DIR to tmp_path
+        monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", tmp_path)
+
+        # _valid_session_id: accept UUIDs matching our format
+        def _fake_valid(sid):
+            return sid in (sid_match, sid_other)
+        monkeypatch.setattr(acp_mod, "_valid_session_id", _fake_valid)
+
+        # _stored_session_cwd: return different cwds per session
+        def _fake_cwd(sid):
+            return target_cwd if sid == sid_match else other_cwd
+        monkeypatch.setattr(acp_mod, "_stored_session_cwd", _fake_cwd)
+
+        result = _acp_sessions_for_workspace(target_cwd)
+
+        assert result == [sid_match], (
+            f"Expected only matching session; got {result}"
+        )
 
     def test_remove_workspace_from_config_cleans_pinned_and_settings(
             self, tmp_path):

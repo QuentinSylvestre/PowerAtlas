@@ -2698,7 +2698,12 @@ async def api_acp_delete_sessions(request: Request):
     # *creation*, and a session still being created holds no store files a
     # delete could reach.
     held = frozenset(acp._supervisor.sessions)
-    return await asyncio.to_thread(_acp_delete_many, session_ids, held)
+    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
+    return JSONResponse({
+        "deleted": result["deleted"],
+        "failed": result["failed"],
+        "total_found": len(session_ids),
+    })
 
 
 # --- The secret exchange -------------------------------------------------
@@ -3268,6 +3273,7 @@ async def partials_workspaces(
 
     # --- Live-status filter (cwd-level; shows cards containing matching activity) ---
     snap = await asyncio.to_thread(presence.get_snapshot)
+    # local copy for the status filter; _render_workspace_groups derives its own from the same formula
     prov_names = None if provider == "all" else {provider}
 
     if status and status != "all":
@@ -3498,6 +3504,7 @@ async def search(request: Request, q: str = "", provider: str = "all",
         grouped = [g for g in grouped if _time_bucket(g["latest_updated"]) == time_filter]
 
     snap = await asyncio.to_thread(presence.get_snapshot)
+    # local copy for the status filter; _render_workspace_groups derives its own from the same formula
     prov_names = None if provider == "all" else {provider}
 
     # Apply live-status filter (skipped when nothing survived the earlier

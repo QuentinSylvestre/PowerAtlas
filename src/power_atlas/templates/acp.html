@@ -5291,6 +5291,8 @@
         .then(function (data) {
           closeModal(modal);
           if (trigger && trigger.focus) trigger.focus();
+          // folder deleted → evict (folder gone is the definitive outcome; suppress
+          // partial-session status since the workspace is already gone from the rail)
           if ((data.failed || []).length === 0 || data.folder_deleted) {
             railEvictWorkspaceGroup(group.cwd);
           } else if ((data.failed || []).length > 0) {
@@ -5307,16 +5309,19 @@
           if (trigger && trigger.focus) trigger.focus();
           railFailed('could not delete the workspace sessions', err);
         });
+      },
+      function onCancel() {
+        if (trigger && trigger.focus) trigger.focus();
       }
     );
     if (document.body) document.body.appendChild(modal);
-    trapFocus(modal);
+    trapFocus(modal, function () { if (trigger && trigger.focus) trigger.focus(); });
     var input = modal.querySelector('.acp-ws-delete-name-input');
     if (input) input.focus();
   }
 
   /** Build and return the confirmation modal DOM element. */
-  function buildWorkspaceDeleteModal(cwd, folderName, sessionCount, onConfirm) {
+  function buildWorkspaceDeleteModal(cwd, folderName, sessionCount, onConfirm, onCancel) {
     var headingId = 'acp-ws-delete-heading-' + (++_wsDeleteModalSeq);
     var modal = document.createElement('div');
     modal.className = 'acp-ws-delete-modal';
@@ -5399,6 +5404,7 @@
     cancelBtn.className = 'acp-btn acp-ws-delete-cancel';
     cancelBtn.addEventListener('click', function () {
       closeModal(modal);
+      if (onCancel) onCancel();
     });
 
     btnRow.appendChild(confirmBtn);
@@ -5437,7 +5443,7 @@
   }
 
   /** Trap focus within a modal; close on Escape. */
-  function trapFocus(modal) {
+  function trapFocus(modal, onClose) {
     // Gather focusable elements. Split into two calls rather than using a
     // comma selector — the test harness only implements single class or tag
     // selectors, and a comma inside querySelectorAll throws there.
@@ -5453,7 +5459,7 @@
     var first = focusable[0];
     var last = focusable[focusable.length - 1];
     modal.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') { closeModal(modal); return; }
+      if (e.key === 'Escape') { closeModal(modal); if (onClose) onClose(); return; }
       if (e.key !== 'Tab') return;
       var active = (typeof document !== 'undefined' && document.activeElement) || null;
       if (!e.shiftKey && active === last) {
