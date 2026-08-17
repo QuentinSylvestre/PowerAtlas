@@ -416,17 +416,26 @@ def test_cwd_requires_non_empty_string(...)   # 400 on empty cwd
 ```
 
 **Exit criteria**:
-- [ ] `_acp_sessions_for_workspace` exists; calls `acp._valid_session_id` before `_stored_session_cwd` (I/O guard order)
-- [ ] `api_acp_delete_sessions` handles `cwd` and `session_ids` as separate branches; `cwd` branch does not hit the `session_ids` non-empty guard
-- [ ] Batch loop re-snapshots `held` on the event loop before each `asyncio.to_thread` call (D9)
-- [ ] Response includes `total_found` field
-- [ ] `_acp_delete_workspace_folder` validates: absolute, non-UNC, non-symlink, min-depth (4 Windows / 3 Linux), not home or home-parent
-- [ ] Folder delete loads, mutates, and saves config within the same worker-thread call (no pre-loaded Config passed in)
-- [ ] `delete_folder=true` returns `folder_deleted: false, folder_error: "…"` for remote callers
-- [ ] `folder_already_gone` response when folder missing but config cleaned
-- [ ] All new tests pass; existing `TestAcpDeleteEndpoint` tests pass
-- [ ] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py` green
-- [ ] `plans/tests/260701_POWERATLAS.md` updated with probes for (a) workspace deletion removes cwd from `pinned_folders`; (b) workspace deletion removes cwd key from `workspace_settings`
+- [x] `_acp_sessions_for_workspace` exists; calls `acp._valid_session_id` before `_stored_session_cwd` (I/O guard order)
+- [x] `api_acp_delete_sessions` handles `cwd` and `session_ids` as separate branches; `cwd` branch does not hit the `session_ids` non-empty guard
+- [x] Batch loop re-snapshots `held` on the event loop before each `asyncio.to_thread` call (D9)
+- [x] Response includes `total_found` field
+- [x] `_acp_delete_workspace_folder` validates: absolute, non-UNC, non-symlink, min-depth (4 Windows / 3 Linux), not home or home-parent
+- [x] Folder delete loads, mutates, and saves config within the same worker-thread call (no pre-loaded Config passed in)
+- [x] `delete_folder=true` returns `folder_deleted: false, folder_error: "…"` for remote callers
+- [x] `folder_already_gone` response when folder missing but config cleaned
+- [x] All new tests pass; existing `TestAcpDeleteEndpoint` tests pass
+- [x] `.venv-PowerAtlas\Scripts\pytest tests/test_web.py` green
+- [x] `plans/tests/260701_POWERATLAS.md` updated with probes for (a) workspace deletion removes cwd from `pinned_folders`; (b) workspace deletion removes cwd key from `workspace_settings`
+
+**Implementation (2026-08-17, code: 50c968a + autofix: ff8b37e)**
+Added `_acp_sessions_for_workspace` (v2-store scan, `_valid_session_id` before I/O, `_normalize_path` comparison), `_remove_workspace_from_config` (in-place Config mutation), and `_acp_delete_workspace_folder` (seven ordered safety checks: absolute, non-UNC, non-symlink-before-resolve, min-depth, home/home-parent; then load-mutate-save config; then rmtree). Extended `api_acp_delete_sessions` with a `cwd` branch that runs before the existing `session_ids` guard, uses async batch loop with per-iteration D9-correct `held` re-snapshot, and blocks `delete_folder=true` for remote callers via `_is_remote_peer`. Updated `plans/tests/260701_POWERATLAS.md` with §2.26 probes.
+
+Pre-implementation divergence: `save_config` takes a `Config` argument (plan assumed no-arg based on singleton pattern). All calls correctly pass the config object.
+
+Auto-fix pass addressed: H1 (wrong remote guard predicate — changed to `_is_remote_peer`), H2 (`.resolve()` after symlink check to prevent `..` traversal), H3 (config save on "not a directory" branch), F1 (try/except around folder-delete thread hop to prevent HTTP 500), added `test_cwd_delete_batches_past_200_cap`, `test_cwd_delete_skips_held_sessions_and_reports_in_failed`, and rewrote `test_folder_delete_ignored_for_remote_callers` to actually test the HTTP-level guard.
+
+QA (Step 5b): BLOCKED — Python change requires PowerAtlas restart (AGENTS.md: "Never restart PowerAtlas autonomously"). Will re-verify at Step 9b.
 
 ---
 
@@ -693,7 +702,23 @@ node tests/acp_page.test.mjs
 
 ## Review Log
 
-### 2026-08-17 — Plan Creation Review (via /qplan, max effort, 4 personas)
+### 2026-08-17 — Implementation Review (after Phase 2, personas: Senior engineer, Security auditor, Reliability engineer, Architect)
+
+Implementation health: Green (after auto-fix cycle).
+8 findings (3 High, 3 Medium, 2 Low). All auto-fixed in one cycle. Cycle-2 review: no findings.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Wrong remote guard predicate: `_request_host_allowed` checks Host header (attacker-controlled), not TCP peer — remote callers could trigger rmtree when remote_bind enabled. | Fixed — changed to `_is_remote_peer` (transport-level IP) |
+| 2 | High | `..` path traversal bypass — `Path("C:\\dir\\project\\..")` has 6 parts, passes min_depth, but resolves to an ancestor; home check also bypassable. | Fixed — `p = p.resolve()` after symlink check; `home.resolve()` for home comparison |
+| 3 | High | Config not saved on "Path is not a directory" branch — `_remove_workspace_from_config` mutated in-memory but mutation discarded. | Fixed — `save_config(config)` added before that return |
+| 4 | Medium | `save_config` after `rmtree` raising produces HTTP 500 with no body; folder gone, response unreachable. | Fixed — try/except wraps thread hop; returns JSON with `folder_deleted=False` on exception |
+| 5 | Medium | Remote guard test only tested the loopback path, not the blocked-remote path; guard bug would not have been caught. | Fixed — test rewritten using actual non-loopback client scope |
+| 6 | Medium | Two planned tests missing: batch loop (>200 sessions) and held-session interaction; D9 path untested. | Fixed — `test_cwd_delete_batches_past_200_cap` and `test_cwd_delete_skips_held_sessions_and_reports_in_failed` added |
+| 7 | Low | Linux min_depth=3 branch untested; normalization edge cases test absent. | Orchestrator: proposed-accept — pending user decision |
+| 8 | Low | Symlink check must precede `resolve()` since `resolve()` follows symlinks (spec error corrected during implementation). | Fixed — symlink check moved before `resolve()` call |
+
+*Finding #7 (Low): the Low-severity normalization/Linux-branch tests were not auto-fixed. Proposing user accept — the existing tests cover the core paths; Linux depth behavior differs from Windows by a single constant that is directly tested via the Windows path. User can accept or request a fix.*
 
 16 findings (7 High, 5 Medium, 4 Low). 15 auto-resolved; 1 Low left for user review.
 
