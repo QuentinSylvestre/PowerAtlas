@@ -347,6 +347,13 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `{ok:true}`; relies on `__main__` honoring `restart_requested()`.
 - **risks**: direct global mutation; unauthenticated restart.
 
+### 2.26 Workspace-level session delete (Phase 2)
+- **what**: `POST /api/acp/sessions/delete` with `{cwd: "..."}` enumerates and deletes all v2 sessions for that workspace; `delete_folder: true` also removes the workspace directory and cleans config.
+- **how-to-reach**: `POST /api/acp/sessions/delete` with JSON body containing `cwd`.
+- **probes**: POST /api/acp/sessions/delete {cwd: ...} removes cwd from config.pinned_folders; POST /api/acp/sessions/delete {cwd: ..., delete_folder:true} removes cwd key from workspace_settings.
+- **oracle**: `{deleted: [...], failed: [...], total_found: N}`; with folder delete: `{folder_deleted: bool, folder_error: str}`.
+- **risks**: path safety checks on cwd; remote-only guard for folder delete; config lost-update race on concurrent settings mutations.
+
 ---
 
 ## 3. Launcher (`launcher.py`)

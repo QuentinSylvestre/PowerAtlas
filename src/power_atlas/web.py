@@ -2505,6 +2505,99 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
     return {"deleted": deleted, "failed": failed}
 
 
+def _acp_sessions_for_workspace(cwd: str) -> list[str]:
+    """Return all v2 session IDs in KIRO_SESSION_DIR that belong to *cwd*.
+
+    Scans the store directly (not the paged listing). A session belongs to
+    this workspace when its stored cwd matches after normalization.
+
+    Performance note: reads up to 16 KB per .json file (via _stored_session_cwd).
+    At ~6,000 sessions this is 1–3 s on a warm cache; may be slower on cold
+    cache or network-backed paths. Called off the event loop via
+    asyncio.to_thread.
+
+    Limitation: covers only v2 sessions in KIRO_SESSION_DIR. v3 sessions in
+    ~/.kiro/sessions/<hash>/sess_*/ are not enumerated.
+    """
+    from .data import _normalize_path
+    norm = _normalize_path(cwd)
+    result = []
+    for meta_path in acp.KIRO_SESSION_DIR.glob("*.json"):
+        if not meta_path.is_file():
+            continue
+        sid = meta_path.stem
+        if not acp._valid_session_id(sid):  # check before I/O to skip non-session files
+            continue
+        stored = acp._stored_session_cwd(sid)
+        if stored and _normalize_path(stored) == norm:
+            result.append(sid)
+    return result
+
+
+def _remove_workspace_from_config(cwd: str, config) -> None:
+    """Remove *cwd* from pinned_folders and workspace_settings (in-place mutation)."""
+    from .data import _normalize_path
+    norm = _normalize_path(cwd)
+    config.pinned_folders = [
+        f for f in config.pinned_folders
+        if _normalize_path(f) != norm
+    ]
+    for k in [k for k in config.workspace_settings if _normalize_path(k) == norm]:
+        del config.workspace_settings[k]
+
+
+def _acp_delete_workspace_folder(cwd: str) -> tuple[bool, str]:
+    """Delete the workspace directory and clean its config entries.
+
+    Validates the path, removes the directory with shutil.rmtree, then removes
+    *cwd* from config.pinned_folders and config.workspace_settings. All three
+    steps run here in a single worker-thread call so no pre-loaded Config needs
+    to be passed in (passing one would create a lost-update race window with
+    concurrent settings mutations).
+
+    Returns ``(deleted: bool, error: str)``. *error* is ``""`` on full success
+    and ``"folder_already_gone"`` when the folder was missing but config was
+    cleaned. A non-empty *error* with *deleted=False* signals a validation or
+    OS failure.
+
+    TOCTOU note: the is_dir() check and rmtree are not atomic; a symlink swapped
+    in during that window could be followed. The is_symlink() guard at entry
+    mitigates the common case. Accepted on a single-user desktop.
+    """
+    import platform
+    p = Path(cwd)
+    # --- Path safety checks (ordered, fail-fast) ---
+    if not p.is_absolute():
+        return False, "Path is not absolute."
+    if str(p).startswith("\\\\") or str(p).startswith("//"):
+        return False, "Refusing UNC path."
+    if p.is_symlink():
+        return False, "Refusing to delete a symbolic link."
+    min_depth = 4 if platform.system() == "Windows" else 3
+    if len(p.parts) < min_depth:
+        return False, (
+            f"Path too shallow to be a workspace (need >= {min_depth} parts)."
+        )
+    home = Path.home()
+    if p == home or p == home.parent:
+        return False, "Refusing to delete home directory or its parent."
+    # --- Load, mutate, save config (all in this worker thread) ---
+    config = load_config()
+    _remove_workspace_from_config(cwd, config)
+    if not p.exists():
+        save_config(config)  # still clean config even if folder is gone
+        return False, "folder_already_gone"
+    if not p.is_dir():
+        return False, "Path is not a directory."
+    try:
+        import shutil as _shutil
+        _shutil.rmtree(p)
+    except OSError as exc:
+        return False, f"Could not delete folder: {exc}"
+    save_config(config)
+    return True, ""
+
+
 @app.post(_ACP_DELETE_PATH)
 async def api_acp_delete_sessions(request: Request):
     """Delete sessions from kiro-cli's store. Irreversible.
@@ -2531,6 +2624,51 @@ async def api_acp_delete_sessions(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
+
+    # --- Workspace-level delete path ---
+    # Handled first so the existing `session_ids` guard never sees a `cwd` request.
+    cwd: str | None = body.get("cwd") if isinstance(body, dict) else None
+    delete_folder: bool = (
+        bool(body.get("delete_folder", False)) if isinstance(body, dict) else False
+    )
+    if cwd is not None:
+        if not isinstance(cwd, str) or not cwd.strip():
+            return JSONResponse(
+                {"error": "'cwd' must be a non-empty string."}, status_code=400)
+        # Enumerate all session IDs for this workspace (off the event loop).
+        all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
+        # Batch delete, D9: re-snapshot `held` on the event loop before each
+        # thread hop, because `_supervisor.sessions` is loop-owned and unlocked.
+        deleted_total: list[str] = []
+        failed_total: list[dict] = []
+        while all_ids:
+            batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
+            held = frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
+            result = await asyncio.to_thread(_acp_delete_many, batch, held)
+            deleted_total.extend(result["deleted"])
+            failed_total.extend(result["failed"])
+        response: dict = {
+            "deleted": deleted_total,
+            "failed": failed_total,
+            "total_found": len(deleted_total) + len(failed_total),
+        }
+        # Folder delete: loopback-only guard — irreversible local filesystem
+        # operation must not be triggerable from a remote device.
+        if delete_folder:
+            if not _request_host_allowed(request):
+                response["folder_deleted"] = False
+                response["folder_error"] = (
+                    "Folder deletion is not available from remote access."
+                )
+            else:
+                folder_deleted, folder_error = await asyncio.to_thread(
+                    _acp_delete_workspace_folder, cwd
+                )
+                response["folder_deleted"] = folder_deleted
+                response["folder_error"] = folder_error
+        return JSONResponse(response)
+
+    # --- Per-session delete path (existing, unchanged) ---
     raw = body.get("session_ids") if isinstance(body, dict) else None
     if not isinstance(raw, list) or not raw:
         return JSONResponse(
