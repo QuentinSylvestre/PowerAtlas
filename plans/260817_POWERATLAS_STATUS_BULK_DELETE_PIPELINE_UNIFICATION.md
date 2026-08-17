@@ -711,6 +711,32 @@ node tests/acp_page.test.mjs
 
 ## Review Log
 
+### 2026-08-17 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Security auditor, Reliability engineer, Architect.
+8 findings (0 High, 2 Medium, 6 Low). All fixed.
+QA verification: BLOCKED on PowerAtlas restart (Phases 1+2) and hard reload (Phase 3). Browser verification deferred to user action. Unit/integration test coverage: 1389 pytest pass, 398 .mjs pass.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Pipeline unification | pass (1374 → 1389 post all phases) | BLOCKED | Python route changes require restart |
+| 2: Bulk delete server | pass (1388 pass, 28 new endpoint tests) | BLOCKED | Python endpoint changes require restart |
+| 3: Bulk delete UI | pass (398 .mjs pass, 11 new tests) | BLOCKED | acp.html/CSS changes need hard reload |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | Cancel/Escape don't restore keyboard focus to trigger element — `buildWorkspaceDeleteModal` lacked access to trigger. | Fixed — `onCancel` callback added to `buildWorkspaceDeleteModal` and `trapFocus`; trigger focus restored on Cancel, Escape |
+| 2 | Medium | `memory/MEMORY.md` hover_launchers entry has stale call-site line numbers (was 3015, 3048, 3300, 3329; now 2 sites inside `_render_workspace_groups`). | Orchestrator: proposed-accept — governance-gated (Apply / Skip?); pending user decision at /qclose |
+| 3 | Low | Partial+folder_deleted combination: sessions not reported via showWorkspaceDeleteResult — intentional design choice (folder gone is definitive). | Fixed — comment added explaining the deliberate suppression |
+| 4 | Low | `total_found` field only in `cwd` path response; `session_ids` path lacked it. | Fixed — `total_found: len(session_ids)` added to session_ids path response |
+| 5 | Low | `prov_names` dual-derivation (callers + helper) without documentation. | Fixed — inline comments added at both caller sites |
+| 6 | Low | No direct unit test for `_acp_sessions_for_workspace`. | Fixed — `test_acp_sessions_for_workspace_returns_matching_ids` added |
+| 7 | Low | Response shape asymmetry between cwd and session_ids paths. | Fixed via finding #4 |
+| 8 | Low | `rmtree` partial failure leaves config uncleaned (OSError path). | User: accepted — in-memory mutation discarded on OSError; folder still exists so config entry remains valid; consistent with plan R7 |
+
 ### 2026-08-17 — Implementation Review (after Phase 3, personas: Senior engineer, End-user advocate, Reliability engineer, Maintainability reviewer)
 
 Implementation health: Green (after 2 auto-fix cycles).
