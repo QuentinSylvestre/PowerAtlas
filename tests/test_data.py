@@ -163,6 +163,14 @@ def _reset_kiro_caches():
     data_kiro._prompts_cache.clear()
     data_kiro._tail_cache.clear()
     data_kiro._first_prompt_cache.clear()
+    try:
+        import power_atlas.data_kiro_v3 as data_kiro_v3
+        data_kiro_v3._root_mtime = None
+        data_kiro_v3._hash_dir_mtimes = {}
+        data_kiro_v3._cwd_index = {}
+        data_kiro_v3._norm_cwd_to_hash = {}
+    except (ImportError, AttributeError):
+        pass
 
 
 @pytest.fixture(autouse=True)

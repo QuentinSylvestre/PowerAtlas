@@ -209,6 +209,7 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
             first_prompt=first_prompt,
             last_prompt=last_prompt,
             last_reply_tail=last_reply_tail,
+            extra_fields={},
         ))
 
     sessions.sort(key=lambda s: s.created_at, reverse=True)
