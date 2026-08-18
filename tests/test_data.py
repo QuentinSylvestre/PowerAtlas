@@ -169,6 +169,7 @@ def _reset_kiro_caches():
         data_kiro_v3._session_json_mtimes = {}
         data_kiro_v3._cwd_index = {}
         data_kiro_v3._norm_cwd_to_hash = {}
+        data_kiro_v3._cwd_display = {}
         if hasattr(data_kiro_v3, '_prompts_cache') and hasattr(data_kiro_v3._prompts_cache, 'clear'):
             data_kiro_v3._prompts_cache.clear()
         if hasattr(data_kiro_v3, '_tail_cache') and hasattr(data_kiro_v3._tail_cache, 'clear'):

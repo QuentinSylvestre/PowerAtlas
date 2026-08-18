@@ -103,6 +103,7 @@ def _clear_v3_caches():
         dv3._session_json_mtimes = {}
         dv3._cwd_index = {}
         dv3._norm_cwd_to_hash = {}
+        dv3._cwd_display = {}
         dv3._prompts_cache.clear()
         dv3._tail_cache.clear()
         dv3._first_prompt_cache.clear()
@@ -586,6 +587,32 @@ class TestKiroV3GetFirstPrompt:
         assert cached is not None
         _ts, _mtime, result = cached
         assert result == ""
+
+    def test_negative_cache_invalidated_when_file_updated(self, tmp_path, monkeypatch):
+        """Negative cache entry is discarded after the messages.jsonl mtime changes."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        # Start with a tool-only session — no user messages
+        msgs_path = root / "h1" / "sess_neg" / "messages.jsonl"
+        _make_session(root, "h1", "sess_neg", "C:\\W", messages=[
+            json.dumps({"id": "t1", "timestamp": "t", "payload": {"type": "tool_call", "content": "x"}}),
+        ])
+
+        r1 = dv3.get_first_prompt("sess_neg")
+        assert r1 == ""  # negative cache written
+
+        # Add a user message and bump the mtime
+        msgs_path.write_text(
+            json.dumps({"id": "t1", "timestamp": "t", "payload": {"type": "tool_call", "content": "x"}}) + "\n"
+            + json.dumps({"id": "u1", "timestamp": "t", "payload": {"type": "user", "content": "Hello now"}}) + "\n",
+            encoding="utf-8",
+        )
+        _bump_mtime(msgs_path)
+
+        r2 = dv3.get_first_prompt("sess_neg")
+        assert r2 == "Hello now"  # negative cache was invalidated by mtime change
 
 
 # ---------------------------------------------------------------------------

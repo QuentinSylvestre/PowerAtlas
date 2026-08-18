@@ -64,16 +64,26 @@ _root_mtime: float | None = None
 _session_json_mtimes: dict[str, float] = {}   # "hash_name/sess_uuid" -> session.json mtime
 _cwd_index: dict[str, list[tuple[str, str]]] = {}   # norm_cwd -> [(hash_name, sess_dir_name)]
 _norm_cwd_to_hash: dict[str, str] = {}    # norm_cwd -> hash_dir_name (for refresh lookup)
+# One cwd maps to exactly one hash dir by kiro-cli's workspace-hash design.
+# _norm_cwd_to_hash records the LAST hash dir seen for a cwd (last-write-wins).
+# Multi-hash-dir scenarios are not expected; if they occur, only the last hash
+# dir is used for refresh checks — a conservative safe degradation.
+_cwd_display: dict[str, tuple[str, str]] = {}  # norm_cwd -> (display_cwd, max_updated_at)
 
 
 def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
     """Return cached cwd index, rebuilding if any session.json mtime has changed.
 
-    All filesystem I/O is performed outside _index_lock (single pass building
-    both mtime map and index simultaneously).  The lock is held only for the
-    comparison-and-swap at the end, so it is never held across slow I/O.
+    Two-phase design:
+    Phase 1 (fast): collect session.json mtimes only — O(n) stat() calls, no
+        JSON reads.  Compare against cached mtimes under _index_lock.  Return
+        cached index immediately if nothing changed (common case).
+    Phase 2 (rebuild): only on cache miss — read session.json files to parse
+        cwd and display metadata.  All I/O outside _index_lock; swap atomically.
+
+    The lock is NEVER held across filesystem I/O.
     """
-    global _root_mtime, _session_json_mtimes, _cwd_index, _norm_cwd_to_hash
+    global _root_mtime, _session_json_mtimes, _cwd_index, _norm_cwd_to_hash, _cwd_display
 
     if not V3_SESSIONS_ROOT.is_dir():
         return {}
@@ -82,11 +92,9 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
     except OSError:
         return {}
 
-    # Build new state outside the lock (I/O is the expensive part).
-    # Single pass: collect mtime AND parse session.json simultaneously.
+    # Phase 1: fast mtime-only scan (no JSON reads)
     new_json_mtimes: dict[str, float] = {}
-    new_index: dict[str, list[tuple[str, str]]] = {}
-    new_norm_cwd_to_hash: dict[str, str] = {}
+    scan_error = False
     try:
         for hash_dir in V3_SESSIONS_ROOT.iterdir():
             if not hash_dir.is_dir() or hash_dir.name in _V3_EXCLUDED_NAMES:
@@ -97,9 +105,41 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
                         continue
                     session_json = sess_dir / "session.json"
                     try:
-                        st_mtime = session_json.stat().st_mtime
-                        key = f"{hash_dir.name}/{sess_dir.name}"
-                        new_json_mtimes[key] = st_mtime
+                        new_json_mtimes[f"{hash_dir.name}/{sess_dir.name}"] = \
+                            session_json.stat().st_mtime
+                    except OSError:
+                        pass
+            except OSError:
+                continue
+    except OSError:
+        scan_error = True
+
+    if scan_error:
+        # Partial walk — return cached state rather than swapping in a truncated index
+        with _index_lock:
+            return _cwd_index.copy()
+
+    # Check under lock whether rebuild is needed
+    with _index_lock:
+        if (current_root_mtime == _root_mtime
+                and new_json_mtimes == _session_json_mtimes):
+            return _cwd_index.copy()
+
+    # Phase 2: rebuild — parse session.json (outside lock)
+    new_index: dict[str, list[tuple[str, str]]] = {}
+    new_norm_cwd_to_hash: dict[str, str] = {}
+    new_cwd_display: dict[str, tuple[str, str]] = {}  # norm_cwd -> (display_cwd, max_updated_at)
+    rebuild_error = False
+    try:
+        for hash_dir in V3_SESSIONS_ROOT.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name in _V3_EXCLUDED_NAMES:
+                continue
+            try:
+                for sess_dir in hash_dir.iterdir():
+                    if not sess_dir.is_dir():
+                        continue
+                    session_json = sess_dir / "session.json"
+                    try:
                         with session_json.open(encoding="utf-8", errors="replace") as f:
                             data = json.loads(f.read())
                         if not isinstance(data, dict):
@@ -112,22 +152,31 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
                             (hash_dir.name, sess_dir.name)
                         )
                         new_norm_cwd_to_hash[norm] = hash_dir.name
+                        # Track original cwd and max lastModifiedAt for discover_workspaces
+                        updated = data.get("lastModifiedAt", "")
+                        prev_display, prev_updated = new_cwd_display.get(norm, (cwd, ""))
+                        new_cwd_display[norm] = (
+                            cwd,
+                            updated if updated > prev_updated else prev_updated,
+                        )
                     except (OSError, json.JSONDecodeError, ValueError):
                         continue
             except OSError:
                 continue
     except OSError:
-        pass
+        rebuild_error = True
 
-    # Under lock: check if rebuild is needed, swap atomically if so.
-    with _index_lock:
-        if (current_root_mtime == _root_mtime
-                and new_json_mtimes == _session_json_mtimes):
+    if rebuild_error:
+        with _index_lock:
             return _cwd_index.copy()
+
+    # Atomic swap under lock
+    with _index_lock:
         _root_mtime = current_root_mtime
         _session_json_mtimes = new_json_mtimes
         _cwd_index = new_index
         _norm_cwd_to_hash = new_norm_cwd_to_hash
+        _cwd_display = new_cwd_display
         return new_index.copy()
 
 
@@ -282,43 +331,22 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
 
     Returns list of (cwd, session_count, updated_at) tuples sorted by recency.
 
-    Uses _cwd_to_sessions() for workspace enumeration (avoids walking
-    V3_SESSIONS_ROOT independently).  A second light pass over session.json
-    files is still required to fetch lastModifiedAt and the original
-    (non-normalized) cwd string, but this is O(n) single-key reads rather than
-    a duplicate full-discovery walk.
+    Uses _cwd_to_sessions() for enumeration and _cwd_display for display
+    metadata (original cwd string and max lastModifiedAt).  No independent
+    walk of V3_SESSIONS_ROOT and no second read of session.json files.
     """
-    index = _cwd_to_sessions()
+    index = _cwd_to_sessions()  # also populates _cwd_display as a side effect
     if not index:
         return []
 
-    # norm_cwd -> (count, max_updated_at, display_cwd)
-    workspace_info: dict[str, tuple[int, str, str]] = {}
+    with _index_lock:
+        display_snapshot = _cwd_display.copy()
 
+    results = []
     for norm_cwd, entries in index.items():
-        max_updated = ""
-        display_cwd = norm_cwd  # fallback if no session.json readable
-        for hash_name, sess_name in entries:
-            session_json = V3_SESSIONS_ROOT / hash_name / sess_name / "session.json"
-            try:
-                with session_json.open(encoding="utf-8", errors="replace") as f:
-                    data = json.loads(f.read())
-                if not isinstance(data, dict):
-                    continue
-                orig_cwd = (data.get("workspacePaths") or [""])[0]
-                if orig_cwd:
-                    display_cwd = orig_cwd  # use the original (non-normalized) cwd
-                updated = data.get("lastModifiedAt", "")
-                if updated > max_updated:
-                    max_updated = updated
-            except (OSError, json.JSONDecodeError, ValueError):
-                continue
-        workspace_info[norm_cwd] = (len(entries), max_updated, display_cwd)
+        display_cwd, max_updated = display_snapshot.get(norm_cwd, (norm_cwd, ""))
+        results.append((display_cwd, len(entries), max_updated))
 
-    results = [
-        (info[2], info[0], info[1])
-        for info in workspace_info.values()
-    ]
     results.sort(key=lambda x: x[2], reverse=True)
     return results
 
@@ -418,7 +446,8 @@ def refresh_stale_entries_for_cwd(
     # norm_cwd by extracting parent directory names from old_stats paths.
     # old_stats only contains paths for sessions loaded under norm_cwd, so
     # sibling-cwd sessions never appear in tracked_sess_dirs.
-    hash_name = _norm_cwd_to_hash.get(norm_cwd)
+    with _index_lock:
+        hash_name = _norm_cwd_to_hash.get(norm_cwd)
     if hash_name is None:
         # Index not yet built or cwd not in any session -- force reload
         return True
