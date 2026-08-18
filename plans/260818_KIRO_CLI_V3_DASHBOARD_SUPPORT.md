@@ -1,7 +1,7 @@
 # kiro-cli v3 Dashboard Support
 
 > **Date**: 2026-08-18
-> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Add `kiro-cli-v3` as a built-in provider to the main dashboard — session discovery, display, new/resume launches, and live status dots.
 > **Estimated effort**: 1-2 days
@@ -647,6 +647,45 @@ Select-String -Pattern 'currently 23 dormant' plans\ROADMAP.md
 4. **Config migration: `default_args="-a"` for v3.** Consider adding a Settings panel warning or config migration that detects `-a` / `--trust-all-tools` in `kiro-cli-v3` `default_args` and flags it as incompatible. Source: Review finding #14 (Senior engineer).
 
 ## Review Log
+
+### 2026-08-18 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, Architect, Performance engineer.
+17 findings (4 High, 9 Medium, 4 Low) in cycle 1; 3 findings (0 High, 1 Medium, 2 Low) in cycle 2. All resolved.
+QA verification: PASS (3 surface types verified: Library, API via TestClient, live v3 store; 9+ probes including 3 state-dependent).
+
+Note: Invoked on fully-executed plan (all 4 phases complete); performed standalone holistic review.
+Sub-agent regression detected (test_data.py wiped in final autofix commit); recovered by restore commit 39cde12.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Session.extra_fields | pass (282) | SKIP | No runtime surface; hashability tests added |
+| 2: data_kiro_v3.py adapter | pass (1844) | N/A — no QA annotation | 50 v3 adapter tests |
+| 3: Provider registration + web | pass (1847) | SKIP | Docs/registration only; TestClient used in Step 9b |
+| 4: Presence + status classifier | pass (1853) | SKIP | No QA annotation; library surface |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `_cwd_to_sessions` O(n) stat scan on every call — no root-mtime fast path. | Fixed — O(1) early return when root mtime unchanged and index non-empty. |
+| 2 | High | `_find_v3_session_path` uncached O(n) walk on every tail/first-prompt miss. | Fixed — `_session_path_cache` dict; positive results cached, None not cached. |
+| 3 | High | `discover_workspaces` and `_cwd_display` read in separate lock acquisitions — race. | Fixed — `_cwd_to_sessions` returns `(index, display)` tuple atomically. |
+| 4 | High | `_classify_from_path` v3 sessions hit `_is_v3_format` auto-detection — tool-result-only tails could mis-classify. | Fixed — `kiro-cli-v3` always calls `classify_kiro_v3` directly. |
+| 5 | Medium | `_cwd_to_sessions` Phase 1 and Phase 2 both walk V3_SESSIONS_ROOT (double I/O on miss). | Orchestrator: proposed-accept — Phase 2 only fires on cache miss; overhead bounded and acceptable. |
+| 6 | Medium | `discover_workspaces` + `load_sessions` each call `_cwd_to_sessions` independently. | Orchestrator: proposed-accept — second call is a fast cache-hit (O(1)); negligible overhead. |
+| 7 | Medium | `get_session_tail` docstring claimed empty results NOT cached, but code caches them. | Fixed — docstring corrected; empty tails are cached with mtime guard. |
+| 8 | Medium | `refresh_stale_entries_for_cwd` string comparison for path parents — case/separator issues on Windows. | Fixed — uses `Path` equality instead. |
+| 9 | Medium | `workspacePaths` as a plain string (not list) raises subtle wrong result. | Fixed — `isinstance(wp, list)` guard on all `workspacePaths` accesses. |
+| 10 | Medium | `_V3_SESSIONS_ROOT` defined in two modules — two sources of truth. | Fixed — `status_classifier.py` now imports from `data_kiro_v3`. |
+| 11 | Medium | `_session_path_cache` cached `None` results permanently, blocking new ACP sessions. | Fixed — only positive results cached; None never cached. |
+| 12 | Medium | `discover_workspaces` + `_cwd_display` snapshot race between two lock acquisitions. | Fixed — see #3 above. |
+| 13 | Medium | `_cwd_to_sessions` partial-walk scan_error returned empty on cold cache permanently. | Orchestrator: proposed-accept — next call re-retries fresh; not permanent. |
+| 14 | Low | ROADMAP `[P2b]` investigation section still said v3 sessions were invisible. | Fixed — updated to note `kiro-cli-v3` ships 2026-08-18. |
+| 15 | Low | No test for O(1) fast path (root mtime unchanged, skip Phase 1). | Fixed — `TestKiroV3CwtoCacheHit` class added. |
+| 16 | Low | No test for `get_session_tail` empty cache invalidated on first assistant message. | Fixed — `test_empty_tail_cached_and_invalidated_on_new_message`. |
+| 17 | Low | Binary collision: `_match_provider` returns `kiro-cli` for v3 sessions (first dict hit). | Orchestrator: proposed-accept — plan-documented accepted limitation (Risk Assessment + Follow-up Work #2). |
 
 ### 2026-08-18 — Implementation Review (after Phases 3+4, personas: Senior engineer + Maintainability reviewer [Phase 3], Reliability engineer + Architect [Phase 4])
 
