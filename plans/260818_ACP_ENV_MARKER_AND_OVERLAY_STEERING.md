@@ -1,7 +1,7 @@
 # ACP Env Marker and Overlay Steering
 
 > **Date**: 2026-08-18
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Inject PowerAtlas identity markers into all spawned kiro-cli processes, scrub inherited CLAUDE_CODE_* markers, and deliver per-session overlay steering via `_meta.kiro.steering`
 > **Estimated effort**: 2–4 hours
@@ -272,17 +272,20 @@ class TestSpawnEnv:
 ```
 
 **Exit criteria**:
-- [ ] `import os` present in `acp.py` stdlib imports block (`grep "^import os" src/power_atlas/acp.py` passes)
-- [ ] `_build_child_env` defined as a module-level function in `acp.py` with `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, and the cross-copy comment
-- [ ] `_OVERLAY_STEERING` defined as a `tuple[dict, ...]` with the `ClientSteeringDescriptorSchema` comment
-- [ ] `_build_kas_session_params()` defined with the KAS schema citation in its docstring
-- [ ] `_Supervisor._spawn` Popen call includes `env=_build_child_env({"KIRO_CLI_ACP_CLIENT_NAME": "poweratlas"})`
-- [ ] `new_session` params include `**_build_kas_session_params()`
-- [ ] `load_session` params include `**_build_kas_session_params()`
-- [ ] `test_web.py` `session/load` assertion updated to include `_meta` via `_build_kas_session_params()`
-- [ ] `test_web.py` `session/new` assertion added for `_meta`
-- [ ] `TestSpawnEnv` decorated with `@pytest.mark.skipif(sys.platform != "win32", ...)` and tests pass on Windows: `pytest tests/test_web.py -k TestSpawnEnv -x`
-- [ ] Full `test_web.py` suite passes: `pytest tests/test_web.py -x`
+- [x] `import os` present in `acp.py` stdlib imports block (`grep "^import os" src/power_atlas/acp.py` passes)
+- [x] `_build_child_env` defined as a module-level function in `acp.py` with `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, and the cross-copy comment
+- [x] `_OVERLAY_STEERING` defined as a `tuple[dict, ...]` with the `ClientSteeringDescriptorSchema` comment
+- [x] `_build_kas_session_params()` defined with the KAS schema citation in its docstring
+- [x] `_Supervisor._spawn` Popen call includes `env=_build_child_env({"KIRO_CLI_ACP_CLIENT_NAME": "poweratlas"})`
+- [x] `new_session` params include `**_build_kas_session_params()`
+- [x] `load_session` params include `**_build_kas_session_params()`
+- [x] `test_web.py` `session/load` assertion updated to include `_meta` via `_build_kas_session_params()`
+- [x] `test_web.py` `session/new` assertion added for `_meta`
+- [x] `TestSpawnEnv` decorated with `@pytest.mark.skipif(sys.platform != "win32", ...)` and tests pass on Windows: `pytest tests/test_web.py -k TestSpawnEnv -x`
+- [x] Full `test_web.py` suite passes: `pytest tests/test_web.py -x`
+
+Implementation (2026-08-18, code: e1460c4 / fix: 25e2b50)
+Added `import os` to the stdlib imports block (alphabetically after `itertools`); updated `from typing import Final` to include `Any`. Inserted `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, `_build_child_env`, `_OVERLAY_STEERING` (as `tuple[dict[str, str], ...]`), and `_build_kas_session_params` after `ACP_ARGS`. The `_spawn` Popen call now passes `env=_build_child_env({"KIRO_CLI_ACP_CLIENT_NAME": "poweratlas"})`. Both `new_session` and `load_session` `_request` calls now include `**_build_kas_session_params()`. In `tests/test_web.py`: the `session/load` exact-params assertion was updated; a new `TestAcpNewSessionParams` class with `test_new_session_params_include_meta` hard-codes the full expected `_meta` structure including `cwd` and steering content; `TestSpawnEnv` (Windows-only, `skipif` guarded) was added with two tests covering marker injection and CLAUDE scrub, including all five measured CLAUDE markers. Fix commit (25e2b50) resolved a tautological `session/new` assertion, removed a dead import, tightened the type annotation, improved cross-copy comment placement, and added `CLAUDE_CODE_CHILD_SESSION`/`CLAUDE_CODE_BRIDGE_SESSION_ID` to the scrub test. Cycle-2 fix (c98473c) removed a duplicate sync comment and added `CLAUDE_PID` assertion to `test_launch_session_kiro_ide_non_terminal`. All 1527 tests pass.
 
 ---
 
@@ -377,16 +380,19 @@ def test_launch_session_scrubs_claude_markers(self, monkeypatch, tmp_path):
 **Step 7 — `plans/tests/260701_POWERATLAS.md`**: Review Sections 1.6 and 1.12 for any description of `launch_session`'s Popen kwargs surface. Update any description of the kwargs dict to reflect the added `env=` key.
 
 **Exit criteria**:
-- [ ] `_build_child_env` defined in `launcher.py` with `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, cross-copy comment, and `extra: ... | None = None` optional signature
-- [ ] Non-terminal path Popen (`launcher.py:~166`) includes `env=_build_child_env()` added after the platform block
-- [ ] Terminal path Popen (`launcher.py:~192`) includes `env=_build_child_env()` added after the platform block
-- [ ] `launch_custom` unchanged — confirmed by `git diff src/power_atlas/launcher.py | grep -A5 "launch_custom"`
-- [ ] Patch target in `test_launch_session_scrubs_claude_markers` is `power_atlas.launcher.subprocess.Popen`
-- [ ] `test_launch_session_kiro_builds_correct_args` and `test_launch_session_kiro_ide_non_terminal` assert `env["POWER_ATLAS_SESSION"] == "1"` and `"CLAUDECODE" not in env`
-- [ ] `test_launch_session_scrubs_claude_markers` added and passes: `pytest tests/test_launcher.py -k "test_launch_session_scrubs_claude_markers" -x`
-- [ ] `plans/ROADMAP.md` CLAUDE_CODE bullet removed and `launch_custom` exclusion noted
-- [ ] `plans/tests/260701_POWERATLAS.md` Sections 1.6/1.12 reviewed; updated if they describe the Popen kwargs surface
-- [ ] Full `test_launcher.py` suite passes: `pytest tests/test_launcher.py -x`
+- [x] `_build_child_env` defined in `launcher.py` with `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, cross-copy comment, and `extra: ... | None = None` optional signature
+- [x] Non-terminal path Popen (`launcher.py:~166`) includes `env=_build_child_env()` added after the platform block
+- [x] Terminal path Popen (`launcher.py:~192`) includes `env=_build_child_env()` added after the platform block
+- [x] `launch_custom` unchanged — confirmed by `git diff src/power_atlas/launcher.py | grep -A5 "launch_custom"`
+- [x] Patch target in `test_launch_session_scrubs_claude_markers` is `power_atlas.launcher.subprocess.Popen`
+- [x] `test_launch_session_kiro_builds_correct_args` and `test_launch_session_kiro_ide_non_terminal` assert `env["POWER_ATLAS_SESSION"] == "1"` and `"CLAUDECODE" not in env`
+- [x] `test_launch_session_scrubs_claude_markers` added and passes: `pytest tests/test_launcher.py -k "test_launch_session_scrubs_claude_markers" -x`
+- [x] `plans/ROADMAP.md` CLAUDE_CODE bullet removed and `launch_custom` exclusion noted
+- [x] `plans/tests/260701_POWERATLAS.md` Sections 1.6/1.12 reviewed; updated if they describe the Popen kwargs surface
+- [x] Full `test_launcher.py` suite passes: `pytest tests/test_launcher.py -x`
+
+Implementation (2026-08-18, code: 89049b7 / fix: fd2409f / c98473c)
+Added `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, and `_build_child_env` (optional `extra`, `**(extra or {})`) after `_SESSION_ID_RE` in `launcher.py`. Both `subprocess.Popen` call sites in `launch_session` — non-terminal (kiro-ide / detached) and terminal (kiro-cli / claude-code via wt/pwsh) — now pass `kwargs["env"] = _build_child_env()` inserted after the full `if sys.platform == "win32": … else: …` block and before each Popen call. `launch_custom` was left untouched per the plan. In `tests/test_launcher.py`: `test_launch_session_kiro_builds_correct_args` and `test_launch_session_kiro_ide_non_terminal` were updated with `monkeypatch.setenv("CLAUDECODE", "1")` and `monkeypatch.setenv("CLAUDE_PID", "999")` to make scrub assertions discriminating; both were also updated to use module-local patch targets (`power_atlas.launcher.subprocess.Popen`, `power_atlas.launcher.shutil.which`). `test_launch_session_scrubs_claude_markers` added to `TestLaunchSession`. ROADMAP.md: "Launched sessions inherit…" bullet removed from Platform section and priority table; `launch_custom` exclusion note added as a named bold item. `plans/tests/260701_POWERATLAS.md` Sections 1.6 and 1.12 were reviewed — Section 1.6 covers stale-entry cache refresh and Section 1.12 covers Claude session parse; neither describes `launch_session`'s Popen kwargs surface, so no text update was required. All 120 `test_launcher.py` tests pass.
 
 ---
 
@@ -432,17 +438,71 @@ def test_launch_session_scrubs_claude_markers(self, monkeypatch, tmp_path):
 | `plans/tests/260701_POWERATLAS.md` | Review Sections 1.6 and 1.12 for Popen kwargs surface descriptions; update to reflect `env=` addition | 2 |
 
 ## 9) Implementation Divergences from Plan
-<Reserved — filled during implementation>
+
+1. **`_OVERLAY_STEERING` inner dict copy upgraded to `{**d}`**: The plan specified `list(_OVERLAY_STEERING)` as the shallow copy strategy in `_build_kas_session_params`. During implementation review, it was found that `list()` copies the list but not the inner dicts, leaving shared mutable state. Fixed to `[{**d} for d in _OVERLAY_STEERING]` — each call now returns fresh dict objects. No behavior change observable at runtime (inner dicts are only read, never mutated in practice), but the protection is structural.
+
+2. **`session/new` test uses hard-coded expected structure**: The plan described adding a `session/new` exact-params assertion using `acp_mod._build_kas_session_params()`. During review, this was flagged as tautological (comparing live function output against itself). The test was changed to hard-code the expected `_meta` structure including the literal `"PowerAtlas context — content TBD"` string. The `session/load` test retains the `**acp_mod._build_kas_session_params()` form — an intentional asymmetry: the `session/new` test pins content, the `session/load` test pins structure.
+
+3. **`plans/tests/260701_POWERATLAS.md` — no update required**: Sections 1.6 and 1.12 cover stale-entry cache refresh and Claude session parse respectively. Neither describes `launch_session`'s Popen kwargs surface. Exit criterion 9 verified as complete (review done, no edit warranted).
 
 ## Follow-up Work (Deferred)
 
 1. **PowerAtlas overlay steering content.** The `_OVERLAY_STEERING` constant ships with a placeholder. Define and populate the actual steering content (behavioral guidance for the agent in PowerAtlas context). Source: Q4 resolution during `/qexplore`.
 2. **`launch_custom` CLAUDE marker scrub.** Custom launchers are not scrubbed — user-defined scripts may rely on inherited environment. If this becomes a problem, extend `_build_child_env` to `launch_custom`. Source: Phase 2 design decision (deliberately out of scope). Noted in ROADMAP.md.
 3. **Shared `_build_child_env` if drift occurs.** If the two copies diverge meaningfully in a future session, extract to `config.py` (adding it as the second name `acp.py` imports from `config`, since `CONFIG_DIR` is already one). Source: R5.
+4. **Scrub `POWER_ATLAS_VENV_REEXEC` from child env.** The re-exec sentinel set by `interpreter.py` leaks to kiro-cli children. kiro-cli ignores unknown env vars, so this is benign; add to `_SCRUB_EXACT` in both copies when cleaning up. Source: review finding F17 (2026-08-18).
+5. **`launch_terminal` CLAUDE scrub.** `launch_terminal` (~line 595) opens a bare terminal shell without `env=` and thus inherits CLAUDE_CODE_* markers. This is out of scope for the current plan (user manually starts a process inside the terminal), but worth tracking. Source: review finding F19 (2026-08-18).
 
 ## Review Log
 
 ### 2026-08-18 — Plan Creation (via /qplan)
+
+16 findings (3 High, 9 Medium, 4 Low). All 16 auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F1 | High | `import os` missing from `acp.py` — `_build_child_env` would NameError at spawn | Fixed — `import os` added to plan's acp.py Step 1; exit criterion adds grep check |
+| F2 | High | `TestSpawnEnv` crashes (not skips) on Linux — `win32api.OpenProcess` AttributeError | Fixed — `@pytest.mark.skipif(sys.platform != "win32", ...)` added to class; exit criterion added |
+| F3 | High | `session/new` exact-params assertion missing — SC-3 only half-verified | Fixed — SC-5 extended; Phase 1 Step 7 adds `session/new` params assertion; SC-3 updated to require both |
+| F4 | Medium | `_OVERLAY_STEERING` is a mutable list — shared reference returned by helper | Fixed — changed to `tuple[dict, ...]`; `_build_kas_session_params` returns `list(_OVERLAY_STEERING)` (shallow copy) |
+| F5 | Medium | Phase 2 Popen patch target was `subprocess.Popen` (global) — should be `power_atlas.launcher.subprocess.Popen` | Fixed — patch target corrected in Phase 2 test code and exit criteria |
+| F6 | Medium | `env=` insertion point in `launch_session` ambiguous — could land inside the platform block | Fixed — explicitly stated "after the entire if/else platform block" in Phase 2 Steps 2 and 3 |
+| F7 | Medium | `plans/tests/260701_POWERATLAS.md` missing from Documentation Updates | Fixed — added to §8 table with Phase 2 assignment; added to Phase 2 file scope and exit criteria |
+| F8 | Medium | `_build_child_env` signature mismatch undocumented; no cross-copy sync comment | Fixed — Design Decisions table row added explaining intentional difference; cross-copy comment added to both code blocks |
+| F9 | Medium | `_build_session_meta()` name misleads — looks like PA internal, is a KAS protocol key | Fixed — renamed to `_build_kas_session_params()` throughout; KAS origin documented in docstring |
+| F10 | Medium | `_OVERLAY_STEERING` has no comment citing `ClientSteeringDescriptorSchema` | Fixed — schema comment added to constant definition |
+| F11 | Medium | Phase 2 names only one test — non-terminal path test not cited; `call_args[1]` idiom outdated | Fixed — `test_launch_session_kiro_ide_non_terminal` and `test_launch_session_kiro_builds_correct_args` explicitly named; `call_args.kwargs` used throughout |
+| F12 | Medium | `launch_custom` CLAUDE scrub omission not noted in ROADMAP.md | Fixed — Phase 2 Step 6 adds the `launch_custom` exclusion note to ROADMAP.md |
+| F13 | Low | `call_args[1]` should be `call_args.kwargs` | Fixed — all test code blocks use `call_args.kwargs` |
+| F14 | Low | `_build_session_meta` return type `-> dict` should be `-> dict[str, Any]` | Fixed — return type is `-> dict[str, Any]` in the renamed `_build_kas_session_params` |
+| F15 | Low | Positive test should assert `PATH` in env to prove `os.environ` keys survive | Fixed — `assert "PATH" in env` added to `test_spawn_env_has_poweratlas_markers` |
+| F16 | Low | Isolation boundary description overstated — `data_kiro` is a third import | Fixed — §1 Current State now correctly states three intra-package imports |
+
+### 2026-08-18 — Implementation Review (after Phases 1+2, parallel, effort: high)
+
+Personas: Senior engineer, Reliability engineer, Security auditor, Maintainability reviewer (Phase 1); Senior engineer, Reliability engineer, Maintainability reviewer, Architect (Phase 2). Cycle 1: 2 High, 9 Medium, 8 Low. After auto-fix cycle 1 (commits 25e2b50, fd2409f) and cycle 2 (c98473c): 0 unresolved High, 0 unresolved Medium. Remaining Low findings: F11 (TestSpawnEnv placement — accepted as-is), F15 (extra overrides POWER_ATLAS_SESSION — by design), F17 (POWER_ATLAS_VENV_REEXEC leaks — deferred to Follow-up), F19 (launch_terminal not scrubbed — out of scope). Implementation health: **Green**.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `test_new_session_params_include_meta` was tautological — `_meta` assertion compared live function output against itself | Fixed — 25e2b50 hard-codes expected `_meta` structure with steering content and `cwd`; fully discriminating |
+| 2 | High | `test_launch_session_kiro_builds_correct_args` and `test_launch_session_kiro_ide_non_terminal` asserted `"CLAUDECODE" not in env` without setting it — vacuously true | Fixed — fd2409f adds `monkeypatch.setenv("CLAUDECODE", "1")` to both tests; c98473c adds `CLAUDE_PID` to `kiro_ide_non_terminal` |
+| 3 | Medium | Exit criteria unchecked in plan file | Fixed — ticked by orchestrator in this plan update |
+| 4 | Medium | `session/new` test missing `cwd` assertion | Fixed — 25e2b50 adds `cwd` to exact-match assertion |
+| 5 | Medium | `_OVERLAY_STEERING` inner dicts mutable; `list()` provides only shallow copy | Fixed — 25e2b50 changes to `[{**d} for d in _OVERLAY_STEERING]`; fresh dict objects per call |
+| 6 | Medium | `plans/tests/260701_POWERATLAS.md` review outcome not recorded | Fixed — §9 documents review; Sections 1.6/1.12 contain no Popen kwargs descriptions; no edit required |
+| 7 | Medium | Patch targets inconsistent — amended tests used global `subprocess.Popen` | Fixed — fd2409f standardizes to `power_atlas.launcher.subprocess.Popen` on all three tests |
+| 8 | Medium | Cross-copy sync comment in `acp.py` misattributed to constants block only | Fixed — 25e2b50 adds note to `_build_child_env` docstring; c98473c removes duplicate outer comment |
+| 9 | Medium | `tmp_path` fixture unused in `test_new_session_params_include_meta` | Fixed — 25e2b50 removes parameter |
+| 10 | Medium | `CLAUDE_PID` not tested in `test_launch_session_scrubs_claude_markers` | Fixed — fd2409f adds `monkeypatch.setenv("CLAUDE_PID", "999")` and assertion |
+| 11 | Medium | `TestSpawnEnv` positioned at end of test_web.py (line ~19653), far from ACP session tests | Orchestrator: proposed-accept — Windows-only skip class naturally grouped at file end; moving would be high-churn splice across 20K-line file with no behavioral benefit |
+| 12 | Medium | ROADMAP.md `launch_custom` note was bare bullet, not discoverable | Fixed — fd2409f reformats as named bold heading |
+| 13 | Low | Dead `from power_atlas import acp as acp_mod` import in test | Fixed — 25e2b50 removes it |
+| 14 | Low | `_OVERLAY_STEERING` type annotation imprecise | Fixed — 25e2b50 tightens to `tuple[dict[str, str], ...]` |
+| 15 | Low | `extra` dict can override `POWER_ATLAS_SESSION` if caller passes it | Orchestrator: proposed-accept — design intent: `extra` takes precedence; no ACP call site passes that key; documented in `_build_child_env` docstring |
+| 16 | Low | `test_spawn_env_scrubs_claude_markers` missing two of five measured CLAUDE markers | Fixed — 25e2b50 adds `CLAUDE_CODE_CHILD_SESSION` and `CLAUDE_CODE_BRIDGE_SESSION_ID` |
+| 17 | Low | `POWER_ATLAS_VENV_REEXEC` leaks to kiro-cli children | Orchestrator: proposed-accept — kiro-cli ignores unknown env vars; added to Follow-up #4 |
+| 18 | Low | `launcher.py` cross-copy comment didn't name the exact two-constant group | Fixed — fd2409f improves comment to mention both constants and function |
+| 19 | Low | `launch_terminal` (line ~595) has no env= scrub | Orchestrator: proposed-accept — `launch_terminal` opens a shell where user manually starts a process; explicitly out of scope per plan. Added to Follow-up #5 |
 
 16 findings (3 High, 9 Medium, 4 Low). All 16 auto-resolved.
 
