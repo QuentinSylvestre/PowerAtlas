@@ -19133,6 +19133,67 @@ class TestAcpCrewCleanupOnTurnEnd:
             assert child in acp_mod._supervisor.subagent_history
             assert child not in acp_mod._bubbles
 
+    def test_turn_end_broadcasts_empty_subagents_when_all_crew_done(self, acp_store):
+        """BUG-1 fix: turn-end must broadcast an empty subagents frame so the
+        JS crew panel ('Done (N agents)') is removed from the transcript
+        immediately — not left until the next turn-start.
+
+        Before the fix, _evict_crew_children(broadcast_empty=False) suppressed
+        the broadcast, leaving the panel in the DOM indefinitely.
+        """
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        conn = _acp_conn(acp_mod)
+        acp_mod._registry.attach(conn, sid)
+
+        toolcall_id = "tooluse_TESTBUG1FIX"
+
+        for child in ("sub-x", "sub-y"):
+            acp_mod._supervisor.crews.setdefault(sid, {})[child] = {
+                "done": False, "role": "worker", "task": "do work",
+                "sessionName": "", "status": "working", "action": "",
+                "error": "", "order": 0, "startedAt": 1.0, "stoppedAt": None,
+            }
+            acp_mod._supervisor.subagent_sessions[child] = {"parent": sid}
+            acp_mod._supervisor.subagent_history[child] = acp_mod._History()
+
+        async def fake_request(self_, method, params, timeout=None):
+            # Simulate _on_subagent_list setting the toolCallId mid-turn (after
+            # turn-start's unconditional pop has already run).
+            acp_mod._supervisor.crew_spawn_toolcallids[sid] = toolcall_id
+            # Mark both children done (simulates list_update arriving before turn-end)
+            if sid in acp_mod._supervisor.crews:
+                for entry in acp_mod._supervisor.crews[sid].values():
+                    entry["done"] = True
+                    entry["stoppedAt"] = 2.0
+            return {"stopReason": "end_turn"}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "alive", lambda self_: True):
+            asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "go"}))
+
+        # The crew must have been fully removed (all done → evicted)
+        assert acp_mod._supervisor.crews.get(sid) is None
+
+        # The empty subagents frame must have been broadcast so the JS panel clears
+        frames = _queued(conn)
+        subagents_frames = [f for f in frames if f["type"] == "subagents"]
+        assert subagents_frames, (
+            "Expected an empty 'subagents' broadcast at turn-end to clear the JS crew panel; "
+            "got no subagents frame at all."
+        )
+        # Find the empty one (the turn-end eviction frame, not a mid-turn snapshot)
+        empty_frames = [f for f in subagents_frames if f["payload"]["subagents"] == []]
+        assert empty_frames, (
+            f"Expected at least one empty subagents frame at turn-end; frames: {subagents_frames}"
+        )
+        # It must carry the spawner toolCallId so the JS removes the anchored panel
+        assert empty_frames[-1]["payload"].get("toolCallId") == toolcall_id, (
+            f"Empty subagents frame must carry toolCallId={toolcall_id!r} "
+            f"to allow JS to remove the anchored crew panel; "
+            f"got toolCallId={empty_frames[-1]['payload'].get('toolCallId')!r}"
+        )
+
 
 class TestAcpSubscribeSnapshotGate:
     """Phase 1: _handle_subscribe sends a subagents snapshot only when the

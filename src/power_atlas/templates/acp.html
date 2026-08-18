@@ -7521,6 +7521,8 @@
     // Test-only exports for acp_page.test.mjs Phase 4 crew panel checks.
     window._testCrews = function() { return crews; };
     window._testCrewEntry = function(sid) { return crewEntry(sid); };
+    // Exposed for BUG-1 verification: simulate the turn-end empty broadcast.
+    window._testSetCrew = function(entries, toolCallId) { setCrew(entries, toolCallId); };
   }
 })();
 </script>

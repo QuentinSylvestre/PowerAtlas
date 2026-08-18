@@ -5263,9 +5263,27 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # _finishing_crew is the same dict object as above — force-mark only mutated
         # values, never removed keys.
         _evict_crew_children(session_id, keep_history=True, broadcast_empty=False)
+        # BUG-1 fix: when all crew entries finished, the JS crew panel stays in
+        # the transcript indefinitely because _evict_crew_children suppresses its
+        # broadcast (broadcast_empty=False, turn-end path).  The panel only disappears
+        # at the *next* turn-start's broadcast_empty=True eviction — one full
+        # user-visible turn too late.  Emit an explicit empty broadcast now so the
+        # "Done (N agents)" panel is removed immediately when the turn ends.
+        # Guard: only if the crew was just fully removed (all entries were done); a
+        # crew that still has running entries is genuinely not done.
+        # Capture the toolCallId BEFORE popping it — the JS setCrew([], key) removes
+        # the anchored panel only when key matches the slot key it created (which was
+        # the spawner toolCallId). An absent/empty toolCallId only removes a no-anchor
+        # panel, so we must pass the real one to clear an anchored panel too.
+        _finished_crew_toolcallid = _crew_toolcallid(session_id)
         # Unconditionally clear the spawner toolCallId at turn-end so a
         # subscribe snapshot after the turn never sees a stale value.
         _supervisor.crew_spawn_toolcallids.pop(session_id, None)
+        if session_id not in _supervisor.crews:
+            _registry.broadcast(session_id, envelope(
+                "subagents",
+                {"subagents": [], "toolCallId": _finished_crew_toolcallid},
+                session_id))
         log.info("ACP turn end: session=%s stopReason=%s", session_id, stop_reason)
         # In the `finally` and above the end marker, so the markdown of a turn
         # that was cancelled or that errored is still rendered — `stop_reason`
