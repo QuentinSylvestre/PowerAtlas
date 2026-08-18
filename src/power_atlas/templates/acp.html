@@ -1953,9 +1953,16 @@
     }
   }
 
-  /** Send `commands_execute` for the currently selected command, then hide
-   *  the dropdown and clear the textarea. No-op when no command is selected
-   *  or the socket is not open. */
+  /** Confirm the currently selected dropdown item.
+   *
+   *  Skills: insert "/<name> " into the prompt and focus it so the user can
+   *  type arguments — kiro-cli dispatches skills via prompt text, not via the
+   *  commands/execute wire method.
+   *
+   *  Commands: send `commands_execute` and clear the textarea, matching the
+   *  TUI behaviour for built-in slash commands.
+   *
+   *  No-op when no item is selected or the dropdown is not visible. */
   function confirmCommandSelection() {
     if (!isCommandDropdownVisible()) return;
     var ul = cmdDropdownEl.querySelector('ul');
@@ -1966,7 +1973,20 @@
     var nameEl = items[idx].querySelector('.acp-cmd-name');
     if (!nameEl) { hideCommandDropdown(); return; }
     var name = nameEl.textContent.replace(/^\//, '');
+    var isSkill = !!items[idx].querySelector('.acp-cmd-skill-badge');
     hideCommandDropdown();
+    if (isSkill) {
+      // Insert "/<name> " at the cursor (or replace the leading "/" the user
+      // already typed) so the user can append arguments before sending.
+      promptInput.value = '/' + name + ' ';
+      autoGrowPrompt();
+      refreshComposerControls();
+      promptInput.focus();
+      // Place the caret at the end.
+      var len = promptInput.value.length;
+      promptInput.setSelectionRange(len, len);
+      return;
+    }
     promptInput.value = '';
     autoGrowPrompt();
     refreshComposerControls();

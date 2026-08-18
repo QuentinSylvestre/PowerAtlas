@@ -189,7 +189,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-time { font-size: 11px; color: #d4a054; white-space: nowrap; margin-left: auto; }
 .pinned-indicator { font-size: 11px; margin-right: 4px; opacity: 0.8; flex-shrink: 0; }
 .session-status { width: 8px; height: 8px; min-width: 8px; min-height: 8px; border-radius: 50%; flex-shrink: 0; display: inline-block; vertical-align: middle; }
-.session-status.status-working { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22); animation: status-pulse 2s ease-in-out infinite; }
+.session-status.status-working { background: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.22); animation: status-pulse 2s ease-in-out infinite; }
 .session-status.status-waiting { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22); }
 .session-status.status-errored { background: #ef4444; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.22); }
 /* /acp rail 5-state dot scheme (idle/unread/thinking/waiting/errored).
@@ -206,7 +206,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    come from the per-process sidecar. */
 .session-origin { flex-shrink: 0; margin-right: 5px; padding: 1px 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--surface); color: var(--text-dim); font-size: 9px; line-height: 1.4; letter-spacing: 0.04em; text-transform: uppercase; }
 .ws-status { width: 7px; height: 7px; min-width: 7px; min-height: 7px; border-radius: 50%; flex-shrink: 0; display: inline-block; margin-left: 4px; vertical-align: middle; }
-.ws-status.status-working { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.22); animation: status-pulse 2s ease-in-out infinite; }
+.ws-status.status-working { background: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.22); animation: status-pulse 2s ease-in-out infinite; }
 .ws-status.status-waiting { background: #f59e0b; box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22); }
 .ws-status.status-errored { background: #ef4444; box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.22); }
 @keyframes status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
@@ -1042,8 +1042,8 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-crew-label  { font-weight:600; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:45%; }
 .acp-crew-role   { color:var(--text-dim); white-space:nowrap; flex-shrink:0; font-size:11px; }
 .acp-crew-action { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.acp-crew-row-working .acp-crew-action { color:#4ade80; }  /* green action text (pre-existing convention for in-progress crew actions) */
-.acp-crew-row-error   .acp-crew-action { color:#f87171; }  /* matches rail's error red */
+.acp-crew-row-working .acp-crew-action { color:#3b82f6; }  /* matches status-thinking dot */
+.acp-crew-row-error   .acp-crew-action { color:#ef4444; }  /* matches status-errored dot */
 .acp-crew-elapsed { font-variant-numeric:tabular-nums; color:var(--text-dim); white-space:nowrap; flex-shrink:0; }
 
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
