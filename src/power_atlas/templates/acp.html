@@ -2020,13 +2020,28 @@
     var isSkill = !!items[idx].querySelector('.acp-cmd-skill-badge');
     hideCommandDropdown();
     if (isSkill) {
-      // Insert "/<name> " at the cursor (or replace the leading "/" the user
-      // already typed) so the user can append arguments before sending.
-      promptInput.value = '/' + name + ' ';
+      // Replace the /token the user is currently typing with "/<name> ",
+      // preserving any text that precedes it in the prompt. This lets skills
+      // be called from the middle of a sentence, e.g.:
+      //   "look at this /qp" → "look at this /qplan "
+      // The same regex the input handler uses to detect the command token:
+      // match /word at start OR after whitespace at the end of the value.
+      var current = promptInput.value;
+      var tokenMatch = current.match(/(?:^|\s)(\/\S*)$/);
+      var completed = '/' + name + ' ';
+      if (tokenMatch) {
+        // Keep everything up to (but not including) the /token, then append
+        // the completed skill name. tokenMatch.index points at the start of
+        // the full match (which may include a leading space); the /token
+        // starts one character later when there is a space, or at index 0.
+        var tokenStart = tokenMatch.index + (tokenMatch[0].charAt(0) === '/' ? 0 : 1);
+        promptInput.value = current.slice(0, tokenStart) + completed;
+      } else {
+        promptInput.value = completed;
+      }
       autoGrowPrompt();
       refreshComposerControls();
       promptInput.focus();
-      // Place the caret at the end.
       var len = promptInput.value.length;
       promptInput.setSelectionRange(len, len);
       return;
