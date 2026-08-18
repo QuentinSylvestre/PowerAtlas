@@ -266,24 +266,44 @@
                 aria-label="Prompt"
                 aria-haspopup="listbox" aria-controls="acpCmdDropdown"
                 aria-expanded="false"></textarea>
-      <button class="acp-btn acp-send" id="acpSend" type="button" disabled>Send</button>
+      <button class="acp-btn acp-send acp-icon-btn" id="acpSend" type="button" disabled
+              aria-label="Send">
+        <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
       <!-- Only during a turn. A stop control that is present and inert for the
            whole idle time is indistinguishable from one that has stopped
            working, and a turn under -a can run tools for minutes. -->
-      <button class="acp-btn acp-danger acp-send" id="acpStop" type="button" hidden>Stop</button>
-      <!-- Queue and Steer: single action button + native mode selector visible
+      <button class="acp-btn acp-danger acp-send acp-icon-btn" id="acpStop" type="button" hidden
+              aria-label="Stop">
+        <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor"/>
+        </svg>
+      </button>
+      <!-- Queue and Steer: single action button + custom mode picker visible
            during a turn only when the textarea has text. They replace Stop in
            that state — the single button matches Stop's height so the composer
            row stays stable. Queue holds the text until the turn ends then
            sends it normally. Steer injects the text mid-turn via _session/steer.
            The mode selector persists the chosen mode across reloads. -->
       <div class="acp-queue-steer" id="acpQueueSteer" hidden>
-        <button class="acp-btn acp-send-mode" id="acpSendMode" type="button"
-                aria-label="Inject this text into the current agent turn">Steer</button>
-        <select class="acp-mode-select" id="acpModeSelect" aria-label="Send mode" aria-controls="acpSendMode">
-          <option value="steer">Steer</option>
-          <option value="queue">Queue</option>
-        </select>
+        <button class="acp-btn acp-send-mode acp-icon-btn" id="acpSendMode" type="button"
+                aria-label="Inject this text into the current agent turn">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="sr-only">Steer</span>
+        </button>
+        <!-- Custom mode picker — replaces the native <select> so the popover
+             opens just above the button on mobile rather than centre-screen. -->
+        <button class="acp-mode-toggle" id="acpModeToggle" type="button"
+                aria-haspopup="true" aria-expanded="false" aria-label="Change send mode"
+                data-mode="steer">▾</button>
+        <div class="acp-mode-menu" id="acpModeMenu" hidden role="menu" aria-label="Send mode">
+          <button class="acp-mode-option" id="acpModeOptSteer" data-value="steer" role="menuitem">Steer</button>
+          <button class="acp-mode-option" id="acpModeOptQueue" data-value="queue" role="menuitem">Queue</button>
+        </div>
       </div>
       <span id="acpModeLiveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></span>
     </div>
@@ -529,14 +549,18 @@
 /* Queue/Steer row: single full-height action button + inline mode selector.
    Replaces the two half-height buttons; wrapper #acpQueueSteer visibility is
    unchanged — refreshComposerControls() still toggles it. */
-.acp-queue-steer { display: flex; flex-direction: row; gap: 0; align-items: stretch; }
+.acp-queue-steer { display: flex; flex-direction: row; gap: 0; align-items: stretch; position: relative; }
 .acp-queue-steer[hidden] { display: none; }
 .acp-send-mode {
   flex: 1;
+  width: auto;
+  min-width: 0;
   border-radius: var(--radius-sm, 6px) 0 0 var(--radius-sm, 6px);
 }
-.acp-mode-select {
-  padding: 0 4px;
+/* Custom mode picker — replaces native <select> so the popover opens just
+   above the button on all devices rather than centre-screen on mobile. */
+.acp-mode-toggle {
+  padding: 0 6px;
   height: 100%;
   background: var(--surface, #1e2030);
   border: 1px solid var(--border, #2d3150);
@@ -546,14 +570,45 @@
   font-size: 11px;
   cursor: pointer;
   min-width: 0;
+  line-height: 1;
 }
-.acp-mode-select:focus-visible {
+.acp-mode-toggle:focus-visible {
   outline: 2px solid var(--accent, #6c8cff);
   outline-offset: -2px;
 }
-/* Prevent iOS Safari auto-zoom on focus: font-size must be >= 16px on touch devices. */
-@media (hover: none) and (pointer: coarse) {
-  .acp-mode-select { font-size: 16px; }
+.acp-mode-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  background: var(--surface, #1e2030);
+  border: 1px solid var(--border, #2d3150);
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+  min-width: 80px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.acp-mode-menu[hidden] { display: none; }
+.acp-mode-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--text, #c8d0e7);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.acp-mode-option:hover,
+.acp-mode-option[aria-current="true"] {
+  background: var(--surface-hover, #252840);
+  color: var(--text, #c8d0e7);
+}
+.acp-mode-option:focus-visible {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: -2px;
 }
 /* Screen-reader-only visually hidden utility — used for aria-live regions */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
@@ -628,17 +683,35 @@
   var stopBtn = document.getElementById('acpStop');
   var queueSteerEl = document.getElementById('acpQueueSteer');
   var sendModeBtn = document.getElementById('acpSendMode');
-  var modeSelect = document.getElementById('acpModeSelect');
+  var modeToggle = document.getElementById('acpModeToggle');
+  var modeMenu = document.getElementById('acpModeMenu');
+  var modeOptSteer = document.getElementById('acpModeOptSteer');
+  var modeOptQueue = document.getElementById('acpModeOptQueue');
+  var modeOptions = modeOptSteer && modeOptQueue ? [modeOptSteer, modeOptQueue] : [];
   var SEND_MODE_KEY = 'pa_acp_send_mode';
   // Validate stored value; default to 'steer' for any missing/invalid value.
   var _sendMode = railStored(SEND_MODE_KEY);
   if (_sendMode !== 'steer' && _sendMode !== 'queue') _sendMode = 'steer';
-  modeSelect.value = _sendMode;
-  sendModeBtn.textContent = _sendMode === 'queue' ? 'Queue' : 'Steer';
-  sendModeBtn.setAttribute('aria-label',
-    _sendMode === 'queue'
-      ? 'Queue this prompt \u2014 it will send when the agent finishes'
-      : 'Inject this text into the current agent turn');
+  // Apply mode: updates sr-only label, aria-label, toggle data-mode, option highlights.
+  function _applySendMode(mode) {
+    _sendMode = mode;
+    railStore(SEND_MODE_KEY, mode);
+    var label = mode === 'queue' ? 'Queue' : 'Steer';
+    var srSpan = sendModeBtn.querySelector ? sendModeBtn.querySelector('.sr-only') : null;
+    if (srSpan) { srSpan.textContent = label; } else { sendModeBtn.textContent = label; }
+    sendModeBtn.setAttribute('aria-label',
+      mode === 'queue'
+        ? 'Queue this prompt \u2014 it will send when the agent finishes'
+        : 'Inject this text into the current agent turn');
+    if (modeToggle) modeToggle.setAttribute('data-mode', mode);
+    modeOptions.forEach(function (opt) {
+      var optMode = opt === modeOptQueue ? 'queue' : 'steer';
+      opt.setAttribute('aria-current', optMode === mode ? 'true' : 'false');
+    });
+    var liveRegion = document.getElementById('acpModeLiveRegion');
+    if (liveRegion) liveRegion.textContent = 'Send mode: ' + label;
+  }
+  _applySendMode(_sendMode);
   var promptNavEl = document.getElementById('acpPromptNav');
   var promptUpBtn = document.getElementById('acpPromptUp');
   var promptDownBtn = document.getElementById('acpPromptDown');
@@ -1286,7 +1359,7 @@
     if (_steerPending) {
       promptInput.disabled = false;
       sendModeBtn.disabled = false;
-      modeSelect.disabled = false;
+      modeToggle.disabled = false;
       addMessage('note', 'Steer could not complete \u2014 session was closed.');
     }
     _steerPending = null;
@@ -5396,26 +5469,58 @@
 
   // ---- workspace bulk-delete affordance (Phase 3) ----
 
-  /** Create the × delete button appended as a sibling to the group header toggle.
+  /** Create the ⋯ actions menu for a workspace group header.
    *
    *  Only rendered in workspace-grouping mode (`railMode === 'project'`) and only
-   *  when `ACP_CAN_DELETE` is true (same gate as per-session delete menus). Not
-   *  nested inside the toggle button — a button inside a button is refused by the
-   *  HTML parser at the inner start tag.
+   *  when `ACP_CAN_DELETE` is true (same gate as per-session delete menus). Follows
+   *  the same open/close/guard pattern as `railMenuNode` for session rows, with
+   *  `'ws:' + group.cwd` as the `railMenuOpen` key so both kinds of menu share the
+   *  single close path in `railCloseMenus()`.
    */
-  function railGroupDeleteNode(group) {
-    var btn = document.createElement('button');
-    btn.className = 'acp-btn acp-rail-group-delete';
-    btn.type = 'button';
-    btn.textContent = '\u00d7';
-    btn.title = 'Delete all sessions in this workspace';
-    btn.setAttribute('aria-label',
-      'Delete all sessions \u2014 ' + (group.name || group.cwd));
-    btn.addEventListener('click', function (e) {
-      e.stopPropagation();
+  function railGroupMenuNode(group) {
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-rail-group-menu-wrap';
+
+    var button = document.createElement('button');
+    button.className = 'acp-btn acp-rail-group-menu-btn';
+    button.type = 'button';
+    button.setAttribute('aria-label',
+      'Actions for workspace \u2014 ' + (group.name || group.cwd));
+    button.setAttribute('aria-haspopup', 'menu');
+    button.setAttribute('aria-expanded', 'false');
+    button.textContent = '\u22ef';
+
+    var menu = document.createElement('div');
+    menu.className = 'acp-rail-menu';
+    menu.hidden = true;
+    menu.setAttribute('role', 'menu');
+
+    var del = document.createElement('button');
+    del.className = 'acp-rail-group-menu-del';
+    del.type = 'button';
+    del.setAttribute('role', 'menuitem');
+    del.textContent = 'Delete all sessions';
+    del.addEventListener('click', function () {
+      railCloseMenus();
       railDeleteWorkspace(group);
     });
-    return btn;
+    menu.appendChild(del);
+
+    button.addEventListener('click', function () {
+      var key = 'ws:' + group.cwd;
+      var wasOpen = railMenuOpen === key && !menu.hidden;
+      railCloseMenus();
+      if (!wasOpen) {
+        menu.hidden = false;
+        button.setAttribute('aria-expanded', 'true');
+        railMenuOpen = key;
+      }
+      railMenuGuard = true;
+    });
+
+    wrap.appendChild(button);
+    wrap.appendChild(menu);
+    return wrap;
   }
 
   /** Open the confirmation modal and, on confirm, POST the workspace-delete request. */
@@ -5488,7 +5593,8 @@
     body.appendChild(heading);
 
     var info = document.createElement('p');
-    info.textContent = 'Workspace: ' + folderName
+    info.className = 'acp-ws-delete-info';
+    info.textContent = folderName
       + ' \u2014 ' + sessionCount + ' session' + (sessionCount !== 1 ? 's' : '')
       + ' in kiro-cli\u2019s store';
     body.appendChild(info);
@@ -5497,12 +5603,13 @@
     // when `cwd` is provided, so this communicates the action rather than
     // offering a choice.
     var sessRow = document.createElement('label');
+    sessRow.className = 'acp-ws-delete-check-row';
     var sessCb = document.createElement('input');
     sessCb.type = 'checkbox';
     sessCb.checked = true;
     sessCb.disabled = true;
     var sessLabel = document.createElement('span');
-    sessLabel.textContent = ' Delete ' + sessionCount + ' session'
+    sessLabel.textContent = 'Delete ' + sessionCount + ' session'
       + (sessionCount !== 1 ? 's' : '') + ' (always performed)';
     sessRow.appendChild(sessCb);
     sessRow.appendChild(sessLabel);
@@ -5510,28 +5617,33 @@
 
     // Folder checkbox — unchecked by default; irreversible.
     var folderRow = document.createElement('label');
+    folderRow.className = 'acp-ws-delete-check-row';
     var folderCb = document.createElement('input');
     folderCb.type = 'checkbox';
     folderCb.className = 'acp-ws-delete-folder-cb';
-    var folderLabel = document.createElement('span');
-    folderLabel.textContent = ' Delete folder from filesystem \u26a0 Irreversible \u2014 deletes '
-      + folderName + ' from disk';
+    var folderLabelWrap = document.createElement('span');
+    var folderLabelText = document.createElement('span');
+    folderLabelText.textContent = 'Delete folder from filesystem';
+    var folderWarn = document.createElement('span');
+    folderWarn.className = 'acp-ws-delete-warn';
+    folderWarn.textContent = '\u26a0\ufe0f Irreversible \u2014 permanently removes ' + folderName + ' from disk';
+    folderLabelWrap.appendChild(folderLabelText);
+    folderLabelWrap.appendChild(folderWarn);
     folderRow.appendChild(folderCb);
-    folderRow.appendChild(folderLabel);
+    folderRow.appendChild(folderLabelWrap);
     body.appendChild(folderRow);
 
     // Typed-name input for confirmation.
-    var inputRow = document.createElement('p');
     var input = document.createElement('input');
     input.type = 'text';
     input.className = 'acp-ws-delete-name-input';
     input.setAttribute('placeholder', 'Type folder name to confirm');
     input.setAttribute('autocomplete', 'off');
     input.setAttribute('aria-label', 'Type folder name to confirm: ' + folderName);
-    inputRow.appendChild(input);
-    body.appendChild(inputRow);
+    body.appendChild(input);
 
     var btnRow = document.createElement('div');
+    btnRow.className = 'acp-ws-delete-btns';
     var confirmBtn = document.createElement('button');
     confirmBtn.type = 'button';
     confirmBtn.textContent = 'Delete';
@@ -5738,7 +5850,7 @@
       { title: group.cwd, badge: badge });
     head.appendChild(railGroupAddNode(group));
     if (railMode === 'project' && ACP_CAN_DELETE) {
-      head.appendChild(railGroupDeleteNode(group));
+      head.appendChild(railGroupMenuNode(group));
     }
     wrap.appendChild(head);
 
@@ -6663,7 +6775,7 @@
         promptInput.value = _steerPending;
         promptInput.disabled = false;
         sendModeBtn.disabled = false;
-        modeSelect.disabled = false;
+        modeToggle.disabled = false;
         _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();
@@ -6673,7 +6785,7 @@
       // queued===true (or absent — default success path)
       promptInput.disabled = false;
       sendModeBtn.disabled = false;
-      modeSelect.disabled = false;
+      modeToggle.disabled = false;
       _steerPending = null;
       refreshComposerControls();
       return;
@@ -6690,7 +6802,7 @@
           promptInput.value = '';
           promptInput.disabled = false;
           sendModeBtn.disabled = false;
-          modeSelect.disabled = false;
+          modeToggle.disabled = false;
           _steerPending = null;
           autoGrowPrompt();
           refreshComposerControls();
@@ -6821,7 +6933,7 @@
         promptInput.value = _steerPending;
         promptInput.disabled = false;
         sendModeBtn.disabled = false;
-        modeSelect.disabled = false;
+        modeToggle.disabled = false;
         _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();
@@ -6873,7 +6985,7 @@
         promptInput.value = _steerPending;
         promptInput.disabled = false;
         sendModeBtn.disabled = false;
-        modeSelect.disabled = false;
+        modeToggle.disabled = false;
         _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();
@@ -7054,7 +7166,7 @@
         _steerPending = null;
         promptInput.disabled = false;
         sendModeBtn.disabled = false;
-        modeSelect.disabled = false;
+        modeToggle.disabled = false;
         autoGrowPrompt();
         refreshComposerControls();
       }
@@ -7131,16 +7243,32 @@
     stopBtn.disabled = true;
     stopBtn.textContent = 'Stopping…';
   });
-  modeSelect.addEventListener('change', function () {
-    _sendMode = modeSelect.value;
-    railStore(SEND_MODE_KEY, _sendMode);
-    sendModeBtn.textContent = _sendMode === 'queue' ? 'Queue' : 'Steer';
-    sendModeBtn.setAttribute('aria-label',
-      _sendMode === 'queue'
-        ? 'Queue this prompt \u2014 it will send when the agent finishes'
-        : 'Inject this text into the current agent turn');
-    var liveRegion = document.getElementById('acpModeLiveRegion');
-    if (liveRegion) liveRegion.textContent = 'Send mode: ' + (_sendMode === 'queue' ? 'Queue' : 'Steer');
+  // Custom mode picker: toggle button opens/closes the menu.
+  function _closeModeMenu() {
+    if (!modeMenu) return;
+    modeMenu.hidden = true;
+    if (modeToggle) modeToggle.setAttribute('aria-expanded', 'false');
+  }
+  if (modeToggle) {
+    modeToggle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var open = !modeMenu.hidden;
+      if (open) { _closeModeMenu(); } else {
+        modeMenu.hidden = false;
+        modeToggle.setAttribute('aria-expanded', 'true');
+      }
+    });
+  }
+  modeOptions.forEach(function (opt) {
+    opt.addEventListener('click', function () {
+      _applySendMode(opt === modeOptQueue ? 'queue' : 'steer');
+      _closeModeMenu();
+    });
+  });
+  // Close the menu on outside click or Esc.
+  document.addEventListener('click', function () { _closeModeMenu(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') _closeModeMenu();
   });
   sendModeBtn.addEventListener('click', function () {
     var text = promptInput.value.trim();
@@ -7181,7 +7309,7 @@
       // restoration on error or ack-false.
       promptInput.disabled = true;
       sendModeBtn.disabled = true;
-      modeSelect.disabled = true;
+      modeToggle.disabled = true;
       promptInput.value = '';
       autoGrowPrompt();
       refreshComposerControls();
@@ -7190,7 +7318,7 @@
       if (!send('steer', {message: text}, sessionId)) {
         promptInput.disabled = false;
         sendModeBtn.disabled = false;
-        modeSelect.disabled = false;
+        modeToggle.disabled = false;
         _steerPending = null;
         autoGrowPrompt();
         refreshComposerControls();

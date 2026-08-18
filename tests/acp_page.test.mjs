@@ -1,4 +1,4 @@
-﻿// Behavioural coverage for the browser-side code this repo has no other way to
+// Behavioural coverage for the browser-side code this repo has no other way to
 // test: src/power_atlas/templates/acp.html, the remote-access panel in
 // templates/index.html, and the two rules in static/style.css that decide what
 // the /acp topbar shows whom.
@@ -7872,8 +7872,7 @@ check("queue button stores text and clears textarea", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("hello agent");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   assertEqual(page.el("acpPrompt").value, "",
     "textarea should be cleared after Queue");
@@ -7887,8 +7886,7 @@ check("queue cancel link restores text to textarea", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("queued text");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   assertEqual(page.el("acpPrompt").value, "", "fixture: textarea cleared after queue");
   // Find the cancel button inside the transcript note
@@ -7903,8 +7901,7 @@ check("queued prompt auto-sends on meta turn:end when WS open and textarea empty
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("queued message");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   // Turn ends
   page.deliver({ type: "meta", sessionId: live, payload: { turn: "end", stopReason: "end_turn" } });
@@ -7921,8 +7918,7 @@ check("queued prompt discarded when session changed", (tpl) => {
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("to discard");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   // Simulate session change: release current session
   page.deliver({
@@ -7967,7 +7963,7 @@ check("steer_ack re-enables controls", (tpl) => {
     "textarea should be re-enabled after steer_ack");
   assert(page.el("acpSendMode").disabled === false,
     "send mode button should be re-enabled after steer_ack");
-  assert(page.el("acpModeSelect").disabled === false,
+  assert(page.el("acpModeToggle").disabled === false,
     "mode select should be re-enabled after steer_ack");
   assert(!page.el("acpTranscript").textContent.includes("Steer sent"),
     "transcript should NOT contain 'Steer sent' note (removed in Phase 1)");
@@ -7986,7 +7982,7 @@ check("steer_ack queued:false shows error note", (tpl) => {
     "steer_ack queued:false should restore the textarea text");
   assertEqual(page.el("acpPrompt").disabled, false, "promptInput re-enabled");
   assertEqual(page.el("acpSendMode").disabled, false, "sendModeBtn re-enabled");
-  assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled");
+  assertEqual(page.el("acpModeToggle").disabled, false, "modeSelect re-enabled");
 });
 
 check("steer_sent frame adds dimmed steer band", (tpl) => {
@@ -8044,7 +8040,7 @@ check("error frame during steer restores textarea text", (tpl) => {
     "error frame should restore steer text to textarea");
   assert(page.el("acpPrompt").disabled === false,
     "textarea should be re-enabled after error frame");
-  assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled after error frame");
+  assertEqual(page.el("acpModeToggle").disabled, false, "modeSelect re-enabled after error frame");
 });
 
 check("queuedPrompt and _steerPending cleared on releaseSession", (tpl) => {
@@ -8052,8 +8048,7 @@ check("queuedPrompt and _steerPending cleared on releaseSession", (tpl) => {
   // Queue a prompt
   page.type("queue me");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   // Release session
   page.deliver({
@@ -8133,7 +8128,7 @@ check("steer textarea re-enabled on ws close during pending steer", (tpl) => {
     "textarea should be re-enabled when WS closes during a pending steer");
   assertEqual(page.el("acpSendMode").disabled, false,
     "send mode button should be re-enabled when WS closes during a pending steer");
-  assertEqual(page.el("acpModeSelect").disabled, false,
+  assertEqual(page.el("acpModeToggle").disabled, false,
     "mode select should be re-enabled when WS closes during a pending steer");
   // Textarea text should be restored from _steerPending
   assertEqual(page.el("acpPrompt").value, "steer text",
@@ -8156,7 +8151,7 @@ check("steer controls re-enabled on session release during pending steer", (tpl)
   assertEqual(page.el("acpPrompt").disabled, false,
     "textarea should be re-enabled after session release with steer pending");
   assertEqual(page.el("acpSendMode").disabled, false, "sendModeBtn re-enabled after release");
-  assertEqual(page.el("acpModeSelect").disabled, false, "modeSelect re-enabled after release");
+  assertEqual(page.el("acpModeToggle").disabled, false, "modeSelect re-enabled after release");
 });
 
 check("steer textarea re-enabled on agent_died", (tpl) => {
@@ -8176,7 +8171,7 @@ check("steer textarea re-enabled on agent_died", (tpl) => {
     "promptInput should be re-enabled after agent_died with steer pending");
   assertEqual(page.el("acpSendMode").disabled, false,
     "sendModeBtn should be re-enabled after agent_died with steer pending");
-  assertEqual(page.el("acpModeSelect").disabled, false,
+  assertEqual(page.el("acpModeToggle").disabled, false,
     "modeSelect should be re-enabled after agent_died with steer pending");
 });
 
@@ -8185,8 +8180,7 @@ check("queued prompt not sent when sessionId changed before turn end", (tpl) => 
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("queue this");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   // Verify the prompt was queued (sent no prompt yet)
   const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
@@ -8211,8 +8205,7 @@ check("queued prompt not sent and note shown when turn ends with stopReason=canc
   const { page, live } = connected(tpl, { turnActive: true });
   page.type("important followup");
   page.el("acpPrompt").dispatch("input");
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   page.click("acpSendMode");
   // Confirm it was queued (no prompt sent yet)
   const promptsBefore = page.socket().sent.filter((f) => f.type === "prompt").length;
@@ -8230,7 +8223,7 @@ check("queued prompt not sent and note shown when turn ends with stopReason=canc
 
 check("mode select defaults to steer", (tpl) => {
   const { page } = connected(tpl);
-  assertEqual(page.el("acpModeSelect").value, "steer",
+  assertEqual(page.el("acpModeToggle").getAttribute("data-mode"), "steer",
     "mode select should default to 'steer' when no stored value");
   assertEqual(page.el("acpSendMode").textContent, "Steer",
     "send mode button text should be 'Steer' by default");
@@ -8238,8 +8231,7 @@ check("mode select defaults to steer", (tpl) => {
 
 check("mode select change updates button label and persists", (tpl) => {
   const { page } = connected(tpl);
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   assertEqual(page.el("acpSendMode").textContent, "Queue",
     "send mode button text should update to 'Queue' after mode change");
   assertEqual(page.stored["pa_acp_send_mode"], "queue",
@@ -8255,7 +8247,7 @@ check("mode select with invalid stored value defaults to steer", (tpl) => {
     type: "session", sessionId: live,
     payload: { sessionId: live, cwd: "C:\\work\\repo", created: true, turnActive: false },
   });
-  assertEqual(page.el("acpModeSelect").value, "steer",
+  assertEqual(page.el("acpModeToggle").getAttribute("data-mode"), "steer",
     "invalid stored value should fall back to 'steer'");
   assertEqual(page.el("acpSendMode").textContent, "Steer",
     "button text should be 'Steer' when invalid stored value falls back to default");
@@ -8281,8 +8273,7 @@ check("Enter during turn in queue mode stores queued prompt", (tpl) => {
   page.type("queue via enter");
   page.el("acpPrompt").dispatch("input");
   // Switch to queue mode
-  page.el("acpModeSelect").value = "queue";
-  page.el("acpModeSelect").dispatch("change");
+  page.click("acpModeOptQueue");
   // Fire Enter keydown
   page.el("acpPrompt").dispatch("keydown", {
     key: "Enter", shiftKey: false, ctrlKey: false, altKey: false,
@@ -9756,10 +9747,10 @@ check("delete button appears on workspace group headers in project mode with can
   async (tpl) => {
     const page = await railed(tpl, { store: wsDeleteStore() });
     // Default mode is project; canDelete defaults to true in railed().
-    const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
-    assert(deleteBtns.length > 0,
-      "no delete button on workspace group header in project mode; "
-      + "railGroupDeleteNode must be called from railGroupNode when "
+    const menuBtns = page.all("acpRailGroups", ".acp-rail-group-menu-btn");
+    assert(menuBtns.length > 0,
+      "no ⋯ menu button on workspace group header in project mode; "
+      + "railGroupMenuNode must be called from railGroupNode when "
       + "railMode === 'project' && ACP_CAN_DELETE");
   });
 
@@ -9768,9 +9759,9 @@ check("delete button absent when railMode is 'date'", async (tpl) => {
     store: wsDeleteStore(),
     stored: { pa_acp_group: "date" },
   });
-  const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
-  assertEqual(deleteBtns.length, 0,
-    "delete button is shown in date grouping mode; it should only appear in project mode");
+  const menuBtns = page.all("acpRailGroups", ".acp-rail-group-menu-btn");
+  assertEqual(menuBtns.length, 0,
+    "workspace ⋯ menu button is shown in date grouping mode; it should only appear in project mode");
 });
 
 check("delete button absent when railMode is 'status'", async (tpl) => {
@@ -9778,9 +9769,9 @@ check("delete button absent when railMode is 'status'", async (tpl) => {
     store: wsDeleteStore(),
     stored: { pa_acp_group: "status" },
   });
-  const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
-  assertEqual(deleteBtns.length, 0,
-    "delete button is shown in status grouping mode; it should only appear in project mode");
+  const menuBtns = page.all("acpRailGroups", ".acp-rail-group-menu-btn");
+  assertEqual(menuBtns.length, 0,
+    "workspace ⋯ menu button is shown in status grouping mode; it should only appear in project mode");
 });
 
 // ---- pinned section (all three grouping modes) ---------------------------
@@ -9895,9 +9886,13 @@ check("Pinned session row is selectable (click does not throw)", async (tpl) => 
 
 check("modal opens with correct session count and folder name", async (tpl) => {
   const page = await railed(tpl, { store: wsDeleteStore("my-project") });
-  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-  assert(deleteBtn !== null, "no delete button — cannot open modal");
-  deleteBtn.dispatch("click");
+  const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+  assert(menuBtn !== null, "no ⋯ menu button — cannot open modal");
+  menuBtn.dispatch("click");
+  // Click the "Delete all sessions" item in the now-open dropdown.
+  const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+  assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+  delItem.dispatch("click");
   // Modal is appended to document.body (real browser) or returned standalone.
   // In the harness, railDeleteWorkspace builds the modal and calls focus on the
   // input; the modal lives in memory even without document.body.
@@ -9913,9 +9908,12 @@ check("modal opens with correct session count and folder name", async (tpl) => {
 
 check("confirm button disabled when name input is empty", async (tpl) => {
   const page = await railed(tpl, { store: wsDeleteStore("my-project") });
-  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-  assert(deleteBtn !== null, "no delete button");
-  deleteBtn.dispatch("click");
+  const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+  assert(menuBtn !== null, "no ⋯ menu button");
+  menuBtn.dispatch("click");
+  const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+  assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+  delItem.dispatch("click");
   // The input is focused. Find the confirm button. We need to find the modal
   // content — since it isn't in the rail container, we use the focused element's
   // parent chain to find the modal body.
@@ -9934,9 +9932,12 @@ check("confirm button disabled when name input is empty", async (tpl) => {
 
 check("confirm button disabled when input does not match folder name", async (tpl) => {
   const page = await railed(tpl, { store: wsDeleteStore("my-project") });
-  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-  assert(deleteBtn !== null, "no delete button");
-  deleteBtn.dispatch("click");
+  const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+  assert(menuBtn !== null, "no ⋯ menu button");
+  menuBtn.dispatch("click");
+  const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+  assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+  delItem.dispatch("click");
   const input = page.focused();
   assert(input !== null, "no focused input");
   // Type a wrong name.
@@ -9954,9 +9955,12 @@ check("confirm button disabled when input does not match folder name", async (tp
 
 check("confirm button enabled when input matches folder name", async (tpl) => {
   const page = await railed(tpl, { store: wsDeleteStore("my-project") });
-  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-  assert(deleteBtn !== null, "no delete button");
-  deleteBtn.dispatch("click");
+  const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+  assert(menuBtn !== null, "no ⋯ menu button");
+  menuBtn.dispatch("click");
+  const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+  assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+  delItem.dispatch("click");
   const input = page.focused();
   assert(input !== null, "no focused input");
   input.value = "my-project";
@@ -9978,9 +9982,12 @@ check("confirmed delete (no folder delete) posts cwd to delete endpoint and evic
     const groupsBefore = page.railGroups();
     assertEqual(groupsBefore.length, 1, "fixture: should have one workspace group");
 
-    const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-    assert(deleteBtn !== null, "no delete button");
-    deleteBtn.dispatch("click");
+    const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+    assert(menuBtn !== null, "no ⋯ menu button");
+    menuBtn.dispatch("click");
+    const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+    assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+    delItem.dispatch("click");
 
     const input = page.focused();
     assert(input !== null, "no focused input");
@@ -10026,9 +10033,12 @@ check("partial failure shows rail status message and group is not evicted", asyn
     } : null,
   });
 
-  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-  assert(deleteBtn !== null, "no delete button");
-  deleteBtn.dispatch("click");
+  const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+  assert(menuBtn !== null, "no ⋯ menu button");
+  menuBtn.dispatch("click");
+  const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+  assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+  delItem.dispatch("click");
 
   const input = page.focused();
   assert(input !== null, "no focused input");
@@ -10057,9 +10067,12 @@ check("partial failure shows rail status message and group is not evicted", asyn
 
 check("confirmed delete with folder checkbox posts delete_folder=true", async (tpl) => {
   const page = await railed(tpl, { store: wsDeleteStore("my-project") });
-  const deleteBtn = page.one("acpRailGroups", ".acp-rail-group-delete");
-  assert(deleteBtn !== null, "no delete button");
-  deleteBtn.dispatch("click");
+  const menuBtn = page.one("acpRailGroups", ".acp-rail-group-menu-btn");
+  assert(menuBtn !== null, "no ⋯ menu button");
+  menuBtn.dispatch("click");
+  const delItem = page.one("acpRailGroups", ".acp-rail-group-menu-del");
+  assert(delItem !== null, "no 'Delete all sessions' item (.acp-rail-group-menu-del) in workspace menu");
+  delItem.dispatch("click");
 
   const input = page.focused();
   assert(input !== null, "no focused input");
@@ -10098,9 +10111,9 @@ check("delete button absent when canDelete=false", async (tpl) => {
     local: false,
     canDelete: false,
   });
-  const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
-  assertEqual(deleteBtns.length, 0,
-    "delete button is shown when canDelete=false; it must be hidden for "
+  const menuBtns = page.all("acpRailGroups", ".acp-rail-group-menu-btn");
+  assertEqual(menuBtns.length, 0,
+    "workspace ⋯ menu button is shown when canDelete=false; it must be hidden for "
     + "non-desktop or non-authenticated remote viewers");
 });
 
@@ -10120,3 +10133,5 @@ for (const { name, fn } of checks) {
 }
 console.log(`\n${checks.length - failed} passed, ${failed} failed of ${checks.length}`);
 process.exit(failed ? 1 : 0);
+
+

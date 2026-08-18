@@ -1141,6 +1141,40 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-prompt { flex: 1; min-height: 44px; max-height: 258px; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-family: inherit; font-size: 16px; line-height: 1.5; padding: 8px 10px; }
 .acp-prompt:focus { outline: none; border-color: var(--accent); }
 .acp-send { padding: 6px 20px; }
+/* Icon-only send/stop/steer buttons — square, icon centered, no text visible.
+   The SVG inherits currentColor and is sized to feel balanced at 20px button. */
+.acp-icon-btn {
+  padding: 0;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+.acp-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex-shrink: 0;
+}
+/* Send: accent fill circle when enabled; clean and distinct from other buttons. */
+#acpSend:not(:disabled).acp-icon-btn {
+  background: var(--accent, #6c8cff);
+  border-color: var(--accent, #6c8cff);
+  color: #fff;
+}
+#acpSend:not(:disabled).acp-icon-btn:hover {
+  background: #8aa5ff;
+  border-color: #8aa5ff;
+  color: #fff;
+}
+/* Stop: red fills on hover, matching the destructive pattern. */
+#acpStop.acp-icon-btn:hover {
+  background: rgba(248,113,113,0.12);
+}
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone
    is a sixth of the screen taken from the conversation — so it starts
    collapsed (`hidden` in the markup; acp.html toggles it and remembers the
@@ -1567,24 +1601,103 @@ body:has(> .acp-shell) { height: 100dvh; }
 
 
 /* ---- workspace bulk-delete affordance (Phase 3) ---- */
-.acp-rail-group-delete {
-  color: var(--color-error, #ef4444);
-  opacity: 0.6;
-  font-size: 0.75rem;
-  padding: 0 4px;
-  margin-left: 4px;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-.acp-rail-group-delete:hover { opacity: 1; }
+/* Wraps the ⋯ button and its dropdown, same containment pattern as
+   .acp-rail-menu-wrap on session rows. */
+.acp-rail-group-menu-wrap { flex-shrink: 0; position: relative; }
+/* Sized to match .acp-rail-group-add (24×24) so the header row stays the same
+   height it already was. */
+.acp-rail-group-menu-btn { width: 24px; height: 24px; padding: 0; line-height: 1; background: transparent; border-color: transparent; color: var(--text-dim); }
+.acp-rail-group-menu-btn:hover { background: var(--surface-hover); color: var(--text); }
+.acp-rail-group-menu-btn[aria-expanded="true"] { background: var(--surface-hover); color: var(--text); border-color: var(--border); }
+/* The sole item in the workspace group menu. Uses its own class to avoid
+   polluting .acp-rail-menu-item (shared with session row menus), while
+   matching the same visual language: danger color, same padding and radius. */
+.acp-rail-group-menu-del { width: 100%; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: #f87171; font-family: inherit; font-size: 12px; padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+.acp-rail-group-menu-del:hover { background: rgba(248, 113, 113, 0.12); }
 .acp-ws-delete-modal {
   position: fixed; inset: 0;
-  background: rgba(0,0,0,0.5);
+  background: rgba(0, 0, 0, 0.6);
   display: flex; align-items: center; justify-content: center;
   z-index: 1000;
+  padding: 16px;
 }
 .acp-ws-delete-modal-body {
-  background: var(--bg-2, #1e1e2e);
-  border-radius: 8px; padding: 1.5rem; max-width: 420px; width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  padding: 24px;
+  max-width: 400px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.acp-ws-delete-modal-body h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+.acp-ws-delete-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.5;
+}
+/* Checkbox rows — each row is a flex label so the checkbox and text stay aligned */
+.acp-ws-delete-check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: default;
+}
+.acp-ws-delete-check-row input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.acp-ws-delete-check-row input[type="checkbox"]:disabled { cursor: default; opacity: 0.6; }
+/* The irreversible warning badge on the folder row */
+.acp-ws-delete-warn {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: #fbbf24;
+}
+/* Confirmation input */
+.acp-ws-delete-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.acp-ws-delete-name-input::placeholder { color: var(--text-dim); }
+.acp-ws-delete-name-input:focus { border-color: var(--accent); }
+/* Button row */
+.acp-ws-delete-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+/* Delete button — danger variant */
+.acp-ws-delete-confirm {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.5);
+  color: #f87171;
+}
+.acp-ws-delete-confirm:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #f87171;
+  color: #fca5a5;
 }
