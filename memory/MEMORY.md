@@ -15,6 +15,20 @@
 **Source**: `plans/done/260618-1901_SESSION_PRELOAD_CACHE.md` — Post-Implementation Review finding #1 | **Verified**: 2026-06-18
 
 
+### Renaming a kiro-cli session requires an atomic write — WriteAllText causes a cache-poisoning race
+
+**Why**: PowerAtlas's `_meta_cache` in `data_kiro.py` is keyed by `(mtime, size)`. `[System.IO.File]::WriteAllText` truncates before writing. If the PowerAtlas process calls `os.scandir` between truncate and write completion, it reads a zero-length or partial file, fails to parse JSON, and caches `(new_mtime, new_size, None)`. Subsequent `load_sessions` calls see the same mtime/size and return the cached `None` — the session silently disappears from listings until the next `SESSION_DIR` mtime change (a new session create/delete). The atomic rename (write to temp + `Move-Item`) is always fully-formed when the scanner sees it.
+**How to apply**: When writing a new title to `~/.kiro/sessions/cli/<session-id>.json`, always use the atomic pattern:
+```powershell
+$tmp = "$jsonFile.pa-renaming"
+$updated = (Get-Content $jsonFile -Raw -Encoding UTF8) -replace '"title":\s*"(?:[^"\\]|\\.)*"', "`"title`": `"$newTitle`""
+[System.IO.File]::WriteAllText($tmp, $updated, [System.Text.UTF8Encoding]::new($false))
+Move-Item $tmp $jsonFile -Force
+```
+After the rename, PowerAtlas picks up the new title on the next Refresh or page load (the `_meta_cache` invalidates on mtime/size change). Note: kiro-cli does NOT overwrite the `title` field for ACP sessions — a written title is stable.
+**Source**: Session 2026-08-18 (ACP session rename goal) — file-watch confirmed zero kiro-cli rewrites; atomic vs non-atomic write difference confirmed via PowerAtlas API | **Verified**: 2026-08-18
+
+
 ### pywebview main-thread + pynput Ctrl-code quirks on Windows
 
 **Why**: Two non-obvious platform behaviors caused runtime bugs despite passing unit tests: (1) pywebview enforces main-thread execution on Windows too (not just Linux/GTK) — `webview.start()` raises `WebViewException` from any non-main thread, and (2) pynput reports ASCII control codes (0x01–0x1a) instead of letter chars when Ctrl is held on Windows (e.g. Ctrl+Z → `\x1a`, not `'z'`).
@@ -125,11 +139,11 @@
 **Source**: kiro-cli sessions 848ea02d (introduced, `dde7de5`) and ff0b8d69 (reported and fixed, `e4fced3`), 2026-07-29/31; call-site census updated 2026-08-17 after 260817 pipeline unification | **Verified**: 2026-08-17 (grep confirmed 2 call sites inside `_render_workspace_groups` at ~3151, ~3178)
 **Evidence-quote**: "When searching for workspaces, quick provider actions do not show on hover, why?"
 
-### `launcher.py` passes no `env=`, so launched sessions inherit the parent's `CLAUDE_CODE_*` markers
+### All three spawn paths now inject `POWER_ATLAS_SESSION=1` and scrub `CLAUDE_CODE_*` markers — closed by 260818-1432
 
-**Why**: Measured on the live tray process 2026-08-03: the PowerAtlas process carries `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID` and `CLAUDE_PID`, inherited from whichever Claude Code session started it. `launcher.py:191-192` calls `subprocess.Popen(cmd, **kwargs)` with no `env=` (verified 2026-08-05: no `env=` on any Popen in the file), so every session launched from the quick-access button receives that whole block — which is why a launched Claude reports transcript saving off. It leaks more than a nested flag: `CLAUDE_CODE_SESSION_ID` hands the child a *specific other session's* identity.
-**How to apply**: When debugging launched-session identity or transcript-persistence problems, check `launcher.py`'s `Popen` call for an `env=` argument first — as of 2026-08-05 there is none. A fix must scrub the `CLAUDE_CODE_*` / `CLAUDECODE` / `CLAUDE_PID` keys from the child environment rather than relying on the child to ignore them. Before trusting a recollection that something was fixed, run `git log -- <the file the fix would touch>`: commit `a4f8c72` (2026-07-28) is a `docs(roadmap)` commit touching only `plans/ROADMAP.md` — it recorded the problem without implementing anything, which reads like a fix in `git log`.
-**Source**: session 361b50c5 (2026-08-03), PEB measurement of the live tray process | **Verified**: 2026-08-05 (sweep, cross-validated — code and commit both re-checked)
+**Why**: Measured on the live tray process 2026-08-03: the PowerAtlas process carried `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID` and `CLAUDE_PID`, inherited from whichever Claude Code session started it. `launcher.py` and `acp.py` both called `subprocess.Popen` with no `env=`, so every launched session received that whole block. Plan `260818-1432_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` (Complete 2026-08-18) closed this: `_build_child_env` was added to both `acp.py` and `launcher.py`; all three Popen call sites now pass `env=_build_child_env(...)`. Runtime-verified: PID 19420 (`kiro-cli acp`, parent=pythonw, spawned post-restart 2026-08-18): `POWER_ATLAS_SESSION=1` ✓, `KIRO_CLI_ACP_CLIENT_NAME=poweratlas` ✓, zero CLAUDE markers ✓. **Current known gaps**: `launch_custom` is deliberately excluded — user-defined scripts may rely on inherited environment (Follow-up #2 in the plan). `launch_terminal` (~line 595) also remains un-scrubbed — it opens a bare shell, the user manually starts a process inside it (Follow-up #5 in the plan). Before trusting a recollection that something was fixed, run `git log -- <the file the fix would touch>`: commit `a4f8c72` (2026-07-28) was a `docs(roadmap)` commit touching only `plans/ROADMAP.md` — it recorded the problem without implementing anything.
+**How to apply**: `_SCRUB_PREFIXES = ("CLAUDE_CODE_",)` and `_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})` live in both modules. If a new `CLAUDE_*` var appears that lacks the prefix, add it to `_SCRUB_EXACT` in both copies. The two copies' signatures differ intentionally — see the isolation boundary decision entry above. ACP sessions also carry `KIRO_CLI_ACP_CLIENT_NAME=poweratlas` (ACP path only) and deliver `_meta.kiro.steering` with a placeholder overlay doc on `session/new` and `session/load`.
+**Source**: session 361b50c5 (2026-08-03) — PEB measurement; `plans/done/260818-1432_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` — implementation + runtime verification | **Verified**: 2026-08-18 (runtime, PID 19420 post-restart)
 
 ### kiro-cli subagent nesting is capped at depth 2 — scale with `stages`, not recursion
 
@@ -185,6 +199,12 @@
 **Source**: Session 2ec9143d (2026-07-15) — user correction | **Verified**: 2026-07-16
 
 ## Decision
+
+### `acp.py`'s isolation boundary forces `_build_child_env` duplication — do not extract without adjusting the invariant
+
+**Why**: `acp.py` declares a documented import invariant: it imports exactly two *guarded* names from the rest of the `power_atlas` package (`config.CONFIG_DIR` and `launcher._SESSION_ID_RE`; `data_kiro` is a third import but predates the boundary description). A plan exit criterion greps the file for these module names to keep the guarded set honest. Adding `_build_child_env` as a shared import from `launcher` would add a third guarded name and violate the stated invariant. The helper (~8 lines) is therefore intentionally duplicated in both `acp.py` and `launcher.py`, each carrying a cross-copy comment noting the sync requirement. The two copies have intentionally different signatures: `acp.py` requires `extra: dict[str, str]` (mandatory, because every ACP spawn always passes at least `KIRO_CLI_ACP_CLIENT_NAME`); `launcher.py` uses `extra: dict[str, str] | None = None` (optional). If the copies diverge significantly in a future session, extraction into `config.py` (already an existing import) is the documented path — it would become the second name imported from `config`, not a new import from `launcher`.
+**How to apply**: Before adding any intra-package import to `acp.py`, check whether the module-level import invariant is still in force (grep for `# imports exactly` in `acp.py`'s header). If it is, do not share helpers by import — either duplicate or extract to `config.py`. After any `acp.py` change, confirm the guarded set has not grown beyond `config` and `launcher`.
+**Source**: `plans/done/260818-1432_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` § 3 Design Decisions + Phase 1 current state | **Verified**: 2026-08-18 (session)
 
 ### `acp.py` and `presence.py` may not import each other — wiring goes through `web.py`
 
