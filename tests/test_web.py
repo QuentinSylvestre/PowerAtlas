@@ -15158,8 +15158,10 @@ class TestAcpListingEndpoint:
         # describes this PowerAtlas rather than the store, and it is deliberate:
         # the rail could reach MAX_SESSIONS in eight taps while showing neither
         # the count nor a way to free a slot. It carries no session content.
+        # `pinned` joined in 2026-08-18: pinned sessions appear in their own
+        # top-level section rather than inside their workspace group.
         assert set(body) == {"groups", "group_page", "group_total", "has_more",
-                             "capacity"}
+                             "capacity", "pinned"}
         assert set(body["capacity"]) == {"held", "max"}
         group = body["groups"][0]
         # `exists` joined the group in Phase 5b. It is the one thing in this
@@ -15787,7 +15789,7 @@ class TestAcpListingEndpoint:
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
         body = client.get(self._PATH, params={"cwd": "C:\\dev\\gone"}).json()
         assert body == {"groups": [], "group_page": 1, "group_total": 0,
-                        "has_more": False,
+                        "has_more": False, "pinned": [],
                         "capacity": {"held": 0, "max": acp_mod.MAX_SESSIONS}}
         assert acp_listing_store["lock_calls"] == []
 

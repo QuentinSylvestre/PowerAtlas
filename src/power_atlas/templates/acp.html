@@ -4221,9 +4221,14 @@
       if (page === 1) {
         railGroups = [];
         railGroupsByCwd = Object.create(null);
+        railPinned = [];
       }
       var groups = (data && data.groups) || [];
       for (var i = 0; i < groups.length; i++) railMergeGroup(groups[i]);
+      // Pinned sessions: always replaced on page 1 (reset above), no dedup
+      // needed because the server always returns the full pinned list.
+      var pinnedRows = (data && data.pinned) || [];
+      for (var pi = 0; pi < pinnedRows.length; pi++) railPinned.push(pinnedRows[pi]);
       railGroupPage = page;
       railHasMore = !!(data && data.has_more);
       railGroupTotal = (data && data.group_total) || railGroups.length;
@@ -4251,6 +4256,7 @@
         railBusy = false;
         if (page === 1) {
           railFlat = [];
+          railPinned = [];
           // Reveals belong to the list that was on screen. Carried across a
           // reload they would expand a day on behalf of rows that are no
           // longer in it.
@@ -4268,6 +4274,10 @@
           seen['s:' + rows[i].id] = true;
           railFlat.push(rows[i]);
         }
+        // Pinned sessions: always replaced on page 1 (reset above), no dedup
+        // needed because the server always returns the full pinned list.
+        var pinnedRows = (data && data.pinned) || [];
+        for (var pi = 0; pi < pinnedRows.length; pi++) railPinned.push(pinnedRows[pi]);
         railFlatPage = page;
         railFlatHasMore = !!(data && data.has_more);
         railSetCapacity(data);
@@ -4298,6 +4308,7 @@
     railFlat = [];
     railFlatPage = 0;
     railFlatHasMore = false;
+    railPinned = [];
     railRevealed = Object.create(null);
     // Drawn empty first so the rail visibly changes shape on the press rather
     // than holding the old one until the request answers.
@@ -4322,6 +4333,8 @@
   var railFlat = [];
   var railFlatPage = 0;
   var railFlatHasMore = false;
+  /** Pinned sessions from the server, shown at the top of every grouping mode. */
+  var railPinned = [];
   /** Day or status-bucket keys the user pressed "Show N more" on. Reset when the list reloads. */
   var railRevealed = Object.create(null);
   // Collapsed groups, keyed `g:<cwd>` or `d:<day>` or `s:<status>`. Absent means expanded,
@@ -4412,6 +4425,14 @@
     for (var k = 0; k < railFlat.length; k++) {
       byId['s:' + railFlat[k].id] = {
         session: railFlat[k], group: null, list: railFlat, at: k
+      };
+    }
+    // The pinned store, whose rows also belong to no group and appear at the
+    // top of every mode. Registered here so the poll and delete paths reach
+    // pinned rows without any mode-specific code.
+    for (var p = 0; p < railPinned.length; p++) {
+      byId['s:' + railPinned[p].id] = {
+        session: railPinned[p], group: null, list: railPinned, at: p
       };
     }
     return byId;
@@ -4559,6 +4580,9 @@
       for (var i = 0; i < groups.length; i++) {
         if (railRefreshStates(groups[i])) changed = true;
       }
+      // Refresh pinned rows the same way — wrap as a synthetic group so the
+      // same function handles the state writes.
+      if (railRefreshStates({ sessions: (data && data.pinned) || [] })) changed = true;
       // The counter moves with the dots or it contradicts them. Every other
       // loader already ends in `railSetCapacity`; this one did not, so the
       // sweeper reclaiming a session turned its row green on the next tick
@@ -5781,7 +5805,13 @@
       if (railMatchesFlat(railFlat[i])) rows.push(railFlat[i]);
     }
     var buckets = railBuckets(rows);
-    var shown = 0;
+    var shown = renderPinnedSection();
+    if (shown > 0 && buckets.length > 0) {
+      var sep = document.createElement('div');
+      sep.className = 'pinned-separator';
+      sep.setAttribute('aria-hidden', 'true');
+      railGroupsEl.appendChild(sep);
+    }
     for (i = 0; i < buckets.length; i++) {
       railGroupsEl.appendChild(railBucketNode(buckets[i]));
       shown += buckets[i].sessions.length;
@@ -5797,11 +5827,20 @@
       if (!byBucket[bk]) byBucket[bk] = [];
       byBucket[bk].push(railFlat[i]);
     }
-    var shown = 0;
+    var shown = renderPinnedSection();
+    var addedSeparator = false;
     for (var b = 0; b < STATUS_BUCKET_ORDER.length; b++) {
       var key = STATUS_BUCKET_ORDER[b];
       var sessions = byBucket[key];
       if (!sessions || !sessions.length) continue;
+      // One separator between the Pinned group and the first status bucket.
+      if (shown > 0 && !addedSeparator) {
+        var sep = document.createElement('div');
+        sep.className = 'pinned-separator';
+        sep.setAttribute('aria-hidden', 'true');
+        railGroupsEl.appendChild(sep);
+        addedSeparator = true;
+      }
       var wrap = document.createElement('div');
       wrap.className = 'acp-rail-group';
       wrap.dataset.head = 's:' + key;
@@ -5878,8 +5917,36 @@
     return wrap;
   }
 
+  function renderPinnedSection() {
+    // Builds and appends the Pinned group to railGroupsEl. Returns the number
+    // of rows shown so the caller can accumulate into `shown` and so the empty-
+    // state logic in renderRail() counts them. Returns 0 when there is nothing
+    // to show (empty railPinned or everything filtered out).
+    var rows = [];
+    for (var i = 0; i < railPinned.length; i++) {
+      // railMatchesFlat reads session.name and session.cwd, both present on
+      // pinned rows because the backend sends them.
+      if (railMatchesFlat(railPinned[i])) rows.push(railPinned[i]);
+    }
+    if (!rows.length) return 0;
+    var wrap = document.createElement('div');
+    wrap.className = 'acp-rail-group';
+    wrap.dataset.head = 'p:pinned';
+    wrap.appendChild(railHeadNode('p:pinned', 'Pinned', String(rows.length), null));
+    if (!railCollapsed['p:pinned']) {
+      for (var j = 0; j < rows.length; j++) {
+        // Pass the row itself as the workspace arg: it carries .name and .cwd
+        // so railRowHoverText can show "[workspace]: title - timestamp".
+        wrap.appendChild(railRowNode(rows[j], true, rows[j]));
+      }
+    }
+    railGroupsEl.appendChild(wrap);
+    return rows.length;
+  }
+
   function renderRailProject() {
-    var shown = 0;
+    var shown = renderPinnedSection();
+    var addedSeparator = false;
     for (var i = 0; i < railGroups.length; i++) {
       var group = railGroups[i];
       var sessions = [];
@@ -5897,6 +5964,14 @@
       // per-group "More in …". So a workspace the server still says has
       // sessions keeps its header even when the rail is holding none of them.
       if (sessions.length === 0 && (railFilter || !group.total)) continue;
+      // One separator between the Pinned group and the first workspace group.
+      if (shown > 0 && !addedSeparator) {
+        var sep = document.createElement('div');
+        sep.className = 'pinned-separator';
+        sep.setAttribute('aria-hidden', 'true');
+        railGroupsEl.appendChild(sep);
+        addedSeparator = true;
+      }
       railGroupsEl.appendChild(railGroupNode(group, sessions));
       shown += sessions.length;
     }

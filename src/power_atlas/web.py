@@ -1977,8 +1977,14 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         page_groups = workspaces[start:start + group_size]
         groups_has_more = start + group_size < group_total
 
+    pinned_set: set[str] = set(config.pinned_sessions)
+
     rows: list[tuple[dict, list]] = []
     sids: list[str] = []
+    # Pinned sessions collected across all workspaces on this page. Carried
+    # alongside the workspace rows so a single availability/status lookup covers
+    # both, keeping the "one call per response" discipline.
+    pinned_sessions_found: list[tuple[str, str, object]] = []  # (cwd, name, session)
     # Hoisted out of the row loop so one budget covers the whole page rather
     # than each group getting its own — see `_acp_exists_flags`.
     exists_flags = _acp_exists_flags([w[0] for w in page_groups])
@@ -1988,26 +1994,39 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         except Exception:
             log.exception("ACP listing: could not read sessions for %s", ws_cwd)
             sessions = []
+        ws_name = Path(ws_cwd).name or ws_cwd
+        # Pull out pinned sessions before paginating so `total` and `has_more`
+        # reflect only the non-pinned count (pinned appear in the Pinned section
+        # rather than in their workspace group).
+        if pinned_set:
+            for s in sessions:
+                if s.session_id in pinned_set:
+                    pinned_sessions_found.append((ws_cwd, ws_name, s))
+            sessions = [s for s in sessions if s.session_id not in pinned_set]
         total = len(sessions)
         s_start = (session_page - 1) * session_size
         page_sessions = sessions[s_start:s_start + session_size]
         sids.extend(s.session_id for s in page_sessions)
         rows.append(({
             "cwd": ws_cwd,
-            "name": Path(ws_cwd).name or ws_cwd,
+            "name": ws_name,
             "total": total,
             "session_page": session_page,
             "has_more": s_start + session_size < total,
             "exists": exists_flags[index],
         }, page_sessions))
 
+    # Pinned session ids join the availability/status lookup so the Pinned
+    # section's dots are as fresh as the workspace rows'.
+    pinned_sids = [s.session_id for _cwd, _name, s in pinned_sessions_found]
     # One call for the whole response, over exactly the ids the response
     # contains — ~30 by default, not the store's 1,207.
-    availability = _acp_availability(sids, held)
+    availability = _acp_availability(sids + pinned_sids, held)
     # Bounded by the session cap rather than by the page: only a held row
     # carries a dot, so only a held row needs a verdict behind it.
+    all_page_sessions = [s for _meta, page_sessions in rows for s in page_sessions]
     statuses = _acp_status_for_held([
-        s for _meta, page_sessions in rows for s in page_sessions
+        s for s in all_page_sessions + [s for _c, _n, s in pinned_sessions_found]
         if availability.get(s.session_id) == "held"])
 
     groups = []
@@ -2023,11 +2042,30 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         } for s in page_sessions]
         groups.append(meta)
 
+    # Pinned section — same per-session shape as grouped rows, plus cwd/name so
+    # the rail can show workspace context in the hover text. exists_flags only
+    # covers the page_groups workspaces; check pinned workspaces separately.
+    pinned_cwds = list(dict.fromkeys(cwd for cwd, _n, _s in pinned_sessions_found))
+    pinned_exists = dict(zip(pinned_cwds, _acp_exists_flags(pinned_cwds)))
+    pinned: list[dict] = [{
+        "id": s.session_id,
+        "title": _acp_row_title(s),
+        "updated_at": s.updated_at,
+        "availability": availability.get(s.session_id, "available"),
+        "status": statuses.get(s.session_id, ""),
+        "cwd": cwd,
+        "name": name,
+        "exists": pinned_exists.get(cwd, True),
+    } for cwd, name, s in pinned_sessions_found]
+
     return {
         "groups": groups,
         "group_page": group_page,
         "group_total": group_total,
         "has_more": groups_has_more,
+        # Always present so the client has no conditional — empty list when
+        # nothing is pinned.
+        "pinned": pinned,
         # How full the session cap is. The rail can reach `MAX_SESSIONS` in
         # eight taps and had no way to say so: the ninth was refused by the
         # server *after* `selectSession` had already cleared the transcript and
@@ -2074,11 +2112,13 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
 
     config = load_config()
     if not _enabled(config, _ACP_LISTING_PROVIDER):
-        return {"sessions": [], "page": page, "has_more": False,
+        return {"sessions": [], "pinned": [], "page": page, "has_more": False,
                 "capacity": capacity}
 
+    pinned_set = set(config.pinned_sessions)
+    workspaces_list = data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
     hidden = {
-        w[0] for w in data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
+        w[0] for w in workspaces_list
         if "hidden" in get_workspace_settings(config, w[0])["tags"]
     }
     try:
@@ -2086,41 +2126,73 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
             page=page, page_size=size,
             provider=_ACP_LISTING_PROVIDER,
             enabled_providers={_ACP_LISTING_PROVIDER},
-            exclude_cwds=hidden)
+            exclude_cwds=hidden,
+            pinned_sessions=config.pinned_sessions if pinned_set else None)
     except Exception:
         log.exception("ACP flat listing: could not collect sessions")
         rows, has_more = [], False
 
-    sessions = [s for s, _prov in rows]
-    # Same one-call-per-response discipline as the grouped path, over exactly
-    # the ids being returned.
-    availability = _acp_availability([s.session_id for s in sessions], held)
+    # Separate the pinned sessions (returned first by get_all_sessions_paginated)
+    # from the paginated non-pinned rows.
+    pinned_raw = [(s, prov) for s, prov in rows if s.session_id in pinned_set]
+    flat_rows  = [(s, prov) for s, prov in rows if s.session_id not in pinned_set]
+
+    # For pinned sessions not already in `rows` (workspace not yet loaded into
+    # cache, e.g. workspace was not among the most recently active), scan the
+    # workspace list directly. Skip hidden workspaces.
+    if pinned_set:
+        found_ids = {s.session_id for s, _ in pinned_raw}
+        remaining = pinned_set - found_ids
+        if remaining:
+            for ws_cwd, _count, _updated, _prov in workspaces_list:
+                if not remaining:
+                    break
+                if ws_cwd in hidden:
+                    continue
+                try:
+                    ws_sessions = data.get_sessions(ws_cwd, _ACP_LISTING_PROVIDER)
+                except Exception:
+                    continue
+                for s in ws_sessions:
+                    if s.session_id in remaining:
+                        pinned_raw.append((s, _ACP_LISTING_PROVIDER))
+                        remaining.discard(s.session_id)
+
+    sessions = [s for s, _prov in flat_rows]
+    pinned_sessions_list = [s for s, _prov in pinned_raw]
+
+    # One call per response covers both pinned and flat rows.
+    all_sids = [s.session_id for s in sessions] + [s.session_id for s in pinned_sessions_list]
+    availability = _acp_availability(all_sids, held)
     statuses = _acp_status_for_held(
-        [s for s in sessions if availability.get(s.session_id) == "held"])
+        [s for s in sessions + pinned_sessions_list
+         if availability.get(s.session_id) == "held"])
 
     # One stat per distinct workspace rather than one per row, which is a much
     # bigger saving here than the grouped path ever needed: measured against
     # this store, the 100 most recent sessions live in 5 workspaces. Ordered
     # dedupe rather than a set, so the budget inside `_acp_exists_flags` is
     # spent newest-workspace-first if it runs out.
-    order = list(dict.fromkeys(s.cwd for s in sessions))
+    order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
     flags = dict(zip(order, _acp_exists_flags(order)))
 
-    return {
-        "sessions": [{
+    def _session_dict(s: object) -> dict:
+        return {
             "id": s.session_id,
             "title": _acp_row_title(s),
             "updated_at": s.updated_at,
             "availability": availability.get(s.session_id, "available"),
             "status": statuses.get(s.session_id, ""),
-            # The workspace behind the row. Grouped by day the rail draws no
-            # workspace header, so this is the only thing that can say which
-            # project a session belongs to and the only thing a missing-folder
-            # warning has left to hang off.
             "cwd": s.cwd,
             "name": Path(s.cwd).name or s.cwd,
             "exists": flags.get(s.cwd, True),
-        } for s in sessions],
+        }
+
+    return {
+        "sessions": [_session_dict(s) for s in sessions],
+        # Always present — empty list when nothing is pinned. Same per-session
+        # shape as the flat rows so the rail can render them identically.
+        "pinned": [_session_dict(s) for s in pinned_sessions_list],
         "page": page,
         "has_more": has_more,
         "capacity": capacity,

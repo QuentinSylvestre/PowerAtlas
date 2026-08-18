@@ -528,6 +528,12 @@ function serveFlat(store, params) {
     page,
     has_more: start + size < rows.length,
     capacity: { held: 0, max: 8 },
+    // Pinned sessions: always the full list, passed through from the store
+    // fixture. Keyed on presence, defaulting to [] (same pattern as `capacity`
+    // and `missing`): the real route always sends this key, and the rail reads
+    // it, so a stub that omitted it would silently exercise the `|| []` fallback
+    // rather than the normal path.
+    pinned: "pinned" in store ? store.pinned : [],
   };
 }
 
@@ -581,6 +587,9 @@ function serveListing(store, params) {
     // `||` would quietly hand it a healthy default instead — testing the stub's
     // fallback rather than the page's.
     capacity: "capacity" in store ? store.capacity : { held: 0, max: 8 },
+    // Pinned sessions: always the full list, passed through from the store
+    // fixture. Same keyed-on-presence pattern as `capacity`.
+    pinned: "pinned" in store ? store.pinned : [],
   };
 }
 
@@ -9772,6 +9781,116 @@ check("delete button absent when railMode is 'status'", async (tpl) => {
   const deleteBtns = page.all("acpRailGroups", ".acp-rail-group-delete");
   assertEqual(deleteBtns.length, 0,
     "delete button is shown in status grouping mode; it should only appear in project mode");
+});
+
+// ---- pinned section (all three grouping modes) ---------------------------
+
+/** A single pinned session row, shaped like the backend sends it. */
+function pinnedRow(id) {
+  return {
+    id,
+    title: `pinned session ${id}`,
+    updated_at: "2026-08-18T10:00:00.000000000Z",
+    availability: "available",
+    status: "",
+    cwd: "C:\\work\\pinned-ws",
+    name: "pinned-ws",
+    exists: true,
+  };
+}
+
+check("Pinned section appears first in project mode", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store.pinned = [pinnedRow("p-1")];
+  const page = await railed(tpl, { store });
+  const groups = page.railGroups();
+  assert(groups.length > 0, "rail rendered no groups");
+  assertEqual(groups[0].dataset.head, "p:pinned",
+              "first group is not the Pinned section in project mode");
+  const headings = page.railHeadings();
+  assert(headings[0] === "Pinned",
+         "first heading is not 'Pinned' in project mode; got: " + headings[0]);
+  const rows = groups[0].querySelectorAll(".acp-rail-row");
+  assertEqual(rows.length, 1, "Pinned group has wrong number of rows in project mode");
+  assertEqual(rows[0].querySelector(".acp-rail-row-title").textContent,
+              "pinned session p-1",
+              "Pinned row title is wrong in project mode");
+});
+
+check("Pinned section appears first in date mode", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store.pinned = [pinnedRow("p-2")];
+  const page = await railed(tpl, { store, stored: { pa_acp_group: "date" } });
+  const groups = page.railGroups();
+  assert(groups.length > 0, "rail rendered no groups in date mode");
+  assertEqual(groups[0].dataset.head, "p:pinned",
+              "first group is not the Pinned section in date mode");
+});
+
+check("Pinned section appears first in status mode", async (tpl) => {
+  const store = [{
+    cwd: "C:\\work\\ws", name: "ws", exists: true,
+    sessions: [{ id: "s-avail", title: "available", updated_at: "2026-08-18T09:00:00.000000000Z",
+                 availability: "available", status: "" }],
+    pinned: [pinnedRow("p-3")],
+  }];
+  // store.pinned must be at the top level (the flat listing reads store.pinned)
+  store.pinned = [pinnedRow("p-3")];
+  const page = await railed(tpl, { store, stored: { pa_acp_group: "status" } });
+  const groups = page.railGroups();
+  assert(groups.length > 0, "rail rendered no groups in status mode");
+  assertEqual(groups[0].dataset.head, "p:pinned",
+              "first group is not the Pinned section in status mode");
+});
+
+check("Pinned section absent when server returns empty pinned list", async (tpl) => {
+  // No store.pinned — serveFlat and serveListing default to [].
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  const pinnedGroups = [...page.railGroups()].filter(
+    (g) => g.dataset.head === "p:pinned");
+  assertEqual(pinnedGroups.length, 0,
+              "a Pinned group was rendered when server sent no pinned sessions");
+});
+
+check("Pinned separator rendered between Pinned group and workspace groups in project mode",
+  async (tpl) => {
+    const store = fakeStore({ workspaces: 1, sessions: 1 });
+    store.pinned = [pinnedRow("p-sep")];
+    const page = await railed(tpl, { store });
+    const separator = page.one("acpRailGroups", ".pinned-separator");
+    assert(separator !== null,
+           "no .pinned-separator in project mode when Pinned and workspace groups are both present");
+  });
+
+check("Pinned separator absent when pinned list is empty", async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  const separator = page.one("acpRailGroups", ".pinned-separator");
+  assert(separator === null,
+         ".pinned-separator appeared in rail with no pinned sessions");
+});
+
+check("Pinned separator rendered between Pinned group and date buckets in date mode",
+  async (tpl) => {
+    const store = fakeStore({ workspaces: 1, sessions: 1 });
+    store.pinned = [pinnedRow("p-sep-date")];
+    const page = await railed(tpl, { store, stored: { pa_acp_group: "date" } });
+    const separator = page.one("acpRailGroups", ".pinned-separator");
+    assert(separator !== null,
+           "no .pinned-separator in date mode when Pinned and date buckets are both present");
+  });
+
+check("Pinned session row is selectable (click does not throw)", async (tpl) => {
+  const store = fakeStore({ workspaces: 1, sessions: 1 });
+  store.pinned = [pinnedRow("p-click")];
+  const page = await railed(tpl, { store });
+  const pinnedGroupEl = [...page.railGroups()].find((g) => g.dataset.head === "p:pinned");
+  assert(pinnedGroupEl !== undefined, "Pinned group not found");
+  const row = pinnedGroupEl.querySelector(".acp-rail-row");
+  assert(row !== null, "no row found inside Pinned group");
+  // Must not throw — railRowNode's click handler calls selectSession.
+  let threw = false;
+  try { row.dispatch("click"); } catch (e) { threw = true; }
+  assert(!threw, "clicking a pinned row threw");
 });
 
 check("modal opens with correct session count and folder name", async (tpl) => {
