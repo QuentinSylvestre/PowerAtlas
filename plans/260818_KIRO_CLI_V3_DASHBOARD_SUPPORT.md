@@ -445,15 +445,19 @@ empty_msgs = {
 **`plans/ROADMAP.md`** — remove the v3 parked item (the line reading `kiro-cli v3 session support — scan the sess_*/` and its references). Update the Parked items list to remove v3. The session count reference (`currently 23 dormant historical sessions`) should be removed entirely since the feature is now implemented.
 
 **Exit criteria**:
-- [ ] `data.PROVIDERS` contains `"kiro-cli-v3"` mapping to `data_kiro_v3`
-- [ ] `_build_provider_args("kiro-cli-v3", "kiro-cli", None)` returns `["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*"]`
-- [ ] `_build_provider_args("kiro-cli-v3", "kiro-cli", "sess_abc")` returns `["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*", "--resume-id", "sess_abc"]`
-- [ ] All 3 occurrences of `{"kiro-cli", "claude-code"}` in `web.py` expanded to include `"kiro-cli-v3"` (verify with `Select-String '"kiro-cli-v3"' src\power_atlas\web.py | Measure-Object | Select-Object -Expand Count` showing **≥7** matches: 3 in expanded sets + 2 in display dicts + 1 in `empty_msgs` + 1 in `_PROVIDER_BINARY_DISPLAY`)
-- [ ] `empty_msgs` dict in `partials_workspaces` handler contains `"kiro-cli-v3"` key
-- [ ] `plans/ROADMAP.md` v3 parked item removed; [P2b] entry updated to note v3 is now visible
-- [ ] `README.md` has a kiro-cli v3 sub-bullet under "Auto-discovers workspaces"
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py -x -q` passes
-- [ ] PowerAtlas starts without import errors: `.venv-PowerAtlas\Scripts\python -c "from power_atlas import web; print('ok')"`
+- [x] `data.PROVIDERS` contains `"kiro-cli-v3"` mapping to `data_kiro_v3`
+- [x] `_build_provider_args("kiro-cli-v3", "kiro-cli", None)` returns `["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*"]`
+- [x] `_build_provider_args("kiro-cli-v3", "kiro-cli", "sess_abc")` returns `["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*", "--resume-id", "sess_abc"]`
+- [x] All 3 occurrences of `{"kiro-cli", "claude-code"}` in `web.py` expanded to include `"kiro-cli-v3"` (verify with `Select-String '"kiro-cli-v3"' src\power_atlas\web.py | Measure-Object | Select-Object -Expand Count` showing **≥7** matches: 3 in expanded sets + 2 in display dicts + 1 in `empty_msgs` + 1 in `_PROVIDER_BINARY_DISPLAY`)
+- [x] `empty_msgs` dict in `partials_workspaces` handler contains `"kiro-cli-v3"` key
+- [x] `plans/ROADMAP.md` v3 parked item removed; [P2b] entry updated to note v3 is now visible
+- [x] `README.md` has a kiro-cli v3 sub-bullet under "Auto-discovers workspaces"
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py -x -q` passes
+- [x] PowerAtlas starts without import errors: `.venv-PowerAtlas\Scripts\python -c "from power_atlas import web; print('ok')"`
+
+#### Implementation (2026-08-18, code: e400931)
+
+Registered `kiro-cli-v3` as a fourth provider across all surfaces. `data.py`: added `data_kiro_v3` import and PROVIDERS entry. `launcher.py`: added `kiro-cli-v3` to all 3 display/binary/terminal dicts; added dedicated `elif provider == "kiro-cli-v3":` branch producing `[binary, "chat", "--agent-engine", "v3", "--trust-tools", "*"]` with optional `--resume-id`, with comment explaining why `-a` is excluded. `web.py`: added 4 dict entries (COLORS, DISPLAY_NAMES, BINARY_DISPLAY, BADGES) and expanded all 3 `{"kiro-cli","claude-code"}` sets to include `kiro-cli-v3`; added `empty_msgs` entry. Added 4 `test_launcher.py` tests. Docs: ROADMAP removed v3 parked item, README added v3 sub-bullet, CLOSED_INVESTIGATIONS updated session count, HARNESS added `kiro-v3-session-data` resource row.
 
 ---
 
@@ -551,13 +555,17 @@ def _resolve_jsonl_path(session_id: str, provider: str, cwd: str) -> Optional[Pa
 **Note**: The cache key changes from 3-tuple to 4-tuple. Any test that inspects `_path_cache` internals by key structure must be updated. Tests that only check whether a path is returned correctly are unaffected.
 
 **Exit criteria**:
-- [ ] `presence._PROVIDER_SPECS` contains `"kiro-cli-v3"` with same binary/flag tuple as `"kiro-cli"`
-- [ ] Code comment in `presence.py` near `_PROVIDER_SPECS` notes the binary-collision caveat and points to the Follow-up Work section for the `sess_`-prefix disambiguation fix
-- [ ] `status_classifier._resolve_jsonl_path_uncached("sess_abc", "kiro-cli-v3", "")` scans `_V3_SESSIONS_ROOT` directly (no `SESSION_DIR` check), wrapped in `try/except OSError`
-- [ ] `status_classifier._classify_from_path(path, "kiro-cli-v3", ...)` dispatches to `classify_kiro_v3()` for v3-format lines; `else` branch has comment noting it is intentional
-- [ ] `_resolve_jsonl_path` guard changed to `provider not in ("kiro-cli", "kiro-cli-v3")` and cache key is 4-tuple `(session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))`
-- [ ] Any test checking `_path_cache` key structure updated for 4-tuple format
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py tests/test_data.py -x -q` passes
+- [x] `presence._PROVIDER_SPECS` contains `"kiro-cli-v3"` with same binary/flag tuple as `"kiro-cli"`
+- [x] Code comment in `presence.py` near `_PROVIDER_SPECS` notes the binary-collision caveat and points to the Follow-up Work section for the `sess_`-prefix disambiguation fix
+- [x] `status_classifier._resolve_jsonl_path_uncached("sess_abc", "kiro-cli-v3", "")` scans `_V3_SESSIONS_ROOT` directly (no `SESSION_DIR` check), wrapped in `try/except OSError`
+- [x] `status_classifier._classify_from_path(path, "kiro-cli-v3", ...)` dispatches to `classify_kiro_v3()` for v3-format lines; `else` branch has comment noting it is intentional
+- [x] `_resolve_jsonl_path` guard changed to `provider not in ("kiro-cli", "kiro-cli-v3")` and cache key is 4-tuple `(session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))`
+- [x] Any test checking `_path_cache` key structure updated for 4-tuple format
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py tests/test_data.py -x -q` passes
+
+#### Implementation (2026-08-18, code: da6dfd8)
+
+`presence.py`: Added `"kiro-cli-v3"` to `_PROVIDER_SPECS` with same binary tuple/resume flag as `"kiro-cli"`; added comment documenting the binary-collision accepted limitation and Follow-up Work #2. `status_classifier.py`: Added `elif provider == "kiro-cli-v3":` branch in `_resolve_jsonl_path_uncached` that scans `_V3_SESSIONS_ROOT` directly (no v2 store check), wrapped in try/except OSError; also added OSError guard to the existing `kiro-cli` v3 fallback. Changed `if provider == "kiro-cli":` to `if provider in ("kiro-cli", "kiro-cli-v3"):` in `_classify_from_path`. Changed `_resolve_jsonl_path` guard to `provider not in ("kiro-cli", "kiro-cli-v3")` and updated cache key from 3-tuple to 4-tuple `(session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))`. Added 6 new tests to `TestResolveJsonlPath` and 1 to `TestClassifyKiroV3`.
 
 ---
 
@@ -639,6 +647,25 @@ Select-String -Pattern 'currently 23 dormant' plans\ROADMAP.md
 4. **Config migration: `default_args="-a"` for v3.** Consider adding a Settings panel warning or config migration that detects `-a` / `--trust-all-tools` in `kiro-cli-v3` `default_args` and flags it as incompatible. Source: Review finding #14 (Senior engineer).
 
 ## Review Log
+
+### 2026-08-18 — Implementation Review (after Phases 3+4, personas: Senior engineer + Maintainability reviewer [Phase 3], Reliability engineer + Architect [Phase 4])
+
+Implementation health: Green (after post-cap user-directed fixes).
+Phase 3: 5 findings (0 High, 2 Medium, 3 Low). All resolved.
+Phase 4: 5 findings (1 High accepted, 2 Medium, 2 Low). All resolved.
+
+| # | Severity | Finding (one line) | Resolution |
+|---|---|---|---|
+| P3-1 | Medium | ROADMAP "Parked items" Platform bullet still listed "v3 support" after Phase 3. | Fixed — removed "v3 support ·" from Platform parked-items summary line. |
+| P3-2 | Medium | Missing test "default args appended after v3 args" — plan listed 4 test cases, only 3 added. | Fixed — `test_kiro_v3_default_args_appended_after_trust_tools` added. |
+| P3-3 | Low | `HARNESS.md` missing `kiro-v3-session-data` resource row per Documentation Updates table. | Fixed — added resource row with path and `last_verified: 2026-08-18`. |
+| P3-4 | Low | `PROVIDER_BADGES` dict missing `"kiro-cli-v3"` entry while all other 3 providers have one. | Fixed — added `"kiro-cli-v3": "V"` with comment noting unused but consistent. |
+| P3-5 | Low | `TestResolveJsonlPath` in `test_web.py` had no coverage for `kiro-cli-v3` cache path. | Fixed — 6 new tests: path found, not found, OSError, 4-tuple cache isolation (Phase 4 files). |
+| P4-1 | High | `_match_provider` always returns `kiro-cli` (first dict hit); `kiro-cli-v3` live dots land on v2 row. | Orchestrator: proposed-accept — plan-documented accepted limitation (Risk Assessment + Follow-up Work #2). |
+| P4-2 | Medium | No test for `_resolve_jsonl_path("sess_x", "kiro-cli-v3", ...)` new branch. | Fixed — added `test_kiro_v3_provider_returns_path_directly`, `_returns_none_when_absent`, `_returns_none_on_oserror`. |
+| P4-3 | Medium | No test for `_classify_from_path(..., "kiro-cli-v3", ...)` dispatching to `classify_kiro_v3`. | Fixed — `test_classify_from_path_routes_v3_provider_to_v3_classifier` added. |
+| P4-4 | Medium | 4-tuple cache key not tested — v2 and v3 same session_id could collide. | Fixed — `test_kiro_v3_cache_key_isolated_from_v2` added to `TestResolveJsonlPath`. |
+| P4-5 | Low | `else` branch in `_classify_from_path` dispatch comment misleading for unknown providers. | Orchestrator: proposed-accept — out of scope for this phase; no behavioral change needed. |
 
 ### 2026-08-18 — Implementation Review (after Phase 2, personas: Senior engineer, Reliability engineer, Performance engineer, Maintainability reviewer)
 
