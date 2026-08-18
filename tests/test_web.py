@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -5186,7 +5187,7 @@ class TestAcpSessionLoad:
         assert calls == [(
             "session/load",
             {"sessionId": sid, "cwd": str(Path(store).resolve()),
-             "mcpServers": []},
+             "mcpServers": [], **acp_mod._build_kas_session_params()},
         )]
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["meta", "session", "history"]
@@ -5651,6 +5652,31 @@ class TestAcpSessionLoad:
             asyncio.run(drive())
         assert seen == ["abc"]
         assert not asyncio.iscoroutinefunction(acp_mod._handle_subscribe)
+
+
+class TestAcpNewSessionParams:
+    """``session/new`` request params include the KAS steering overlay."""
+
+    def test_new_session_params_include_meta(self, acp_store, tmp_path):
+        """session/new carries _meta.kiro.steering so the ACP session receives
+        the PowerAtlas overlay steering document."""
+        from power_atlas import acp as acp_mod
+        acp_mod, store = acp_store
+        calls = []
+
+        async def fake_request(self, method, params, timeout=None):
+            calls.append((method, params))
+            return {"sessionId": "new-params-0001"}
+
+        with patch.object(acp_mod._Supervisor, "_request", fake_request), \
+                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+            asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        acp_mod._supervisor.sessions.pop("new-params-0001", None)
+        acp_mod._supervisor.history.pop("new-params-0001", None)
+
+        assert calls[0][0] == "session/new"
+        assert calls[0][1]["mcpServers"] == []
+        assert calls[0][1].get("_meta") == acp_mod._build_kas_session_params()["_meta"]
 
 
 def _stored_session(store, sid):
@@ -19607,3 +19633,51 @@ class TestAcpCrewSpawnerToolCallId:
             asyncio.run(acp_mod._supervisor.close_session(sid))
 
         assert sid not in acp_mod._supervisor.crew_spawn_toolcallids
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="win32api/win32job spawn path")
+class TestSpawnEnv:
+    """Verify _spawn passes the correct environment to the child process."""
+
+    def test_spawn_env_has_poweratlas_markers(self, tmp_path):
+        """POWER_ATLAS_SESSION and KIRO_CLI_ACP_CLIENT_NAME are injected; PATH survives."""
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+        sup = acp_mod._Supervisor()
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        with patch("power_atlas.acp.shutil.which", return_value=str(tmp_path / "kiro-cli.exe")), \
+             patch("power_atlas.acp.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch.object(acp_mod._Supervisor, "_create_job", return_value=None), \
+             patch("power_atlas.acp.win32api.OpenProcess", return_value=None), \
+             patch("power_atlas.acp.win32job.AssignProcessToJobObject"), \
+             patch("power_atlas.acp.win32api.CloseHandle"), \
+             patch("power_atlas.acp.threading.Thread"):
+            sup._spawn()
+        env = mock_popen.call_args.kwargs["env"]
+        assert env.get("POWER_ATLAS_SESSION") == "1"
+        assert env.get("KIRO_CLI_ACP_CLIENT_NAME") == "poweratlas"
+        assert "PATH" in env  # base os.environ keys survive the filter
+
+    def test_spawn_env_scrubs_claude_markers(self, tmp_path, monkeypatch):
+        """CLAUDECODE, CLAUDE_PID, and CLAUDE_CODE_* keys are absent."""
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_PID", "999")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+        sup = acp_mod._Supervisor()
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        with patch("power_atlas.acp.shutil.which", return_value=str(tmp_path / "kiro-cli.exe")), \
+             patch("power_atlas.acp.subprocess.Popen", return_value=mock_proc) as mock_popen, \
+             patch.object(acp_mod._Supervisor, "_create_job", return_value=None), \
+             patch("power_atlas.acp.win32api.OpenProcess", return_value=None), \
+             patch("power_atlas.acp.win32job.AssignProcessToJobObject"), \
+             patch("power_atlas.acp.win32api.CloseHandle"), \
+             patch("power_atlas.acp.threading.Thread"):
+            sup._spawn()
+        env = mock_popen.call_args.kwargs["env"]
+        assert "CLAUDECODE" not in env
+        assert "CLAUDE_PID" not in env
+        assert "CLAUDE_CODE_SESSION_ID" not in env

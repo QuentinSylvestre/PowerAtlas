@@ -67,6 +67,7 @@ import contextlib
 import itertools
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -74,7 +75,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -599,6 +600,55 @@ DRAIN_TIMEOUT_SECONDS = 2.0
 # knowing prototype-scoped choice (plan §3), to be re-decided before a rebuild.
 KIRO_BINARY = "kiro-cli"
 ACP_ARGS = ("acp", "-a")
+
+# Keys stripped from the child env to prevent marker leakage from the PowerAtlas
+# tray process into spawned kiro-cli ACP sessions.
+# CLAUDE_CODE_* covers CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_SESSION_ID, etc.
+# CLAUDECODE and CLAUDE_PID are separate names without the CLAUDE_CODE_ prefix.
+# NOTE: A copy of this function lives in launcher.py (isolation boundary prevents
+# shared import). Keep _SCRUB_PREFIXES and _SCRUB_EXACT in sync with that copy.
+_SCRUB_PREFIXES = ("CLAUDE_CODE_",)
+_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})
+
+
+def _build_child_env(extra: dict[str, str]) -> dict[str, str]:
+    """Build the environment dict for the spawned kiro-cli ACP child process.
+
+    Strips CLAUDE_CODE_* / CLAUDECODE / CLAUDE_PID markers inherited from the
+    PowerAtlas tray process, and injects PowerAtlas identity vars. ``extra``
+    is merged last so call-site additions override same-named keys from os.environ.
+    ``extra`` is required (not optional) because every ACP spawn always passes
+    at least KIRO_CLI_ACP_CLIENT_NAME.
+    """
+    base = {
+        k: v for k, v in os.environ.items()
+        if not any(k.startswith(p) for p in _SCRUB_PREFIXES)
+        and k not in _SCRUB_EXACT
+    }
+    return {**base, "POWER_ATLAS_SESSION": "1", **extra}
+
+
+# Overlay steering delivered to every ACP session via _meta.kiro.steering.
+# Must conform to ClientSteeringDescriptorSchema in acp-server.js (kiro-cli 2.16.x+).
+# Required keys: name (str, non-empty), inclusion (enum: always|fileMatch|manual),
+# content (str, max 1 MB). Content is a placeholder; body defined as a follow-on task.
+_OVERLAY_STEERING: tuple[dict, ...] = (
+    {
+        "name": "poweratlas-context",
+        "inclusion": "always",
+        "content": "PowerAtlas context — content TBD",
+    },
+)
+
+
+def _build_kas_session_params() -> dict[str, Any]:
+    """Build the _meta.kiro fragment for session/new and session/load requests.
+
+    The _meta.kiro key is a KAS protocol field accepted by KiroSessionMetaSchema
+    in acp-server.js. The steering list is delivered as clientSteeringDocs via
+    createSessionState(..., kiroMeta?.steering ...).
+    """
+    return {"_meta": {"kiro": {"steering": list(_OVERLAY_STEERING)}}}
 
 # ACP protocol version. Re-confirmed against kiro-cli 2.16.0 on 2026-08-01
 # (it was first measured on 2.14.1): `initialize` still answers
@@ -2510,6 +2560,7 @@ class _Supervisor:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                env=_build_child_env({"KIRO_CLI_ACP_CLIENT_NAME": "poweratlas"}),
                 creationflags=_CREATE_NO_WINDOW,
             )
         except OSError as exc:
@@ -3933,7 +3984,7 @@ class _Supervisor:
         self._reserved += 1
         try:
             await self.ensure_started()
-            result = await self._request("session/new", {"cwd": cwd, "mcpServers": []})
+            result = await self._request("session/new", {"cwd": cwd, "mcpServers": [], **_build_kas_session_params()})
             result = result or {}
             session_id = result.get("sessionId")
             if not _valid_session_id(session_id):
@@ -4064,7 +4115,8 @@ class _Supervisor:
             try:
                 await self._request(
                     "session/load",
-                    {"sessionId": session_id, "cwd": cwd, "mcpServers": []})
+                    {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
+                     **_build_kas_session_params()})
             except BaseException:
                 self.sessions.pop(session_id, None)
                 self._publish_live()
