@@ -1,8 +1,10 @@
 # kiro-cli v3 Dashboard Support
 
 > **Date**: 2026-08-18
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: <set by /qclose at archival>
 > **Scope**: Add `kiro-cli-v3` as a built-in provider to the main dashboard — session discovery, display, new/resume launches, and live status dots.
+> **Estimated effort**: 1-2 days
 
 ---
 
@@ -16,14 +18,14 @@ The desired outcome is a `kiro-cli v3` provider in the main dashboard — same w
 
 ### Success criteria
 
-1. v3 workspaces (derived from `workspacePaths[0]` in each session's `session.json`) appear in the Workspaces panel alongside v2 and other providers.
-2. v3 sessions are listed per workspace with title, timestamps, first/last prompt extracted from `messages.jsonl`.
-3. "New session" launches `kiro-cli chat --agent-engine v3 --trust-tools *` in a terminal at the selected workspace.
-4. "Resume" launches `kiro-cli chat --agent-engine v3 --trust-tools * --resume-id sess_<uuid>` in a terminal.
-5. Live status dots appear for v3 sessions resumed via PowerAtlas (argv-match detection; no lock-file sidecar — same limitation as v2 fresh sessions, documented).
-6. v2 sessions, ACP, and all other providers are unaffected.
-7. New `tests/test_data_kiro_v3.py` passes; existing test suite passes.
-8. ROADMAP.md v3 entry removed (the feature is now shipped).
+- SC-1: v3 workspaces (derived from `workspacePaths[0]` in each session's `session.json`) appear in the Workspaces panel alongside v2 and other providers.
+- SC-2: v3 sessions are listed per workspace with title, timestamps, and first/last prompt extracted from `messages.jsonl`.
+- SC-3: "New session" launches `kiro-cli chat --agent-engine v3 --trust-tools *` in a terminal at the selected workspace.
+- SC-4: "Resume" launches `kiro-cli chat --agent-engine v3 --trust-tools * --resume-id sess_<uuid>` in a terminal.
+- SC-5: Live status dots appear for v3 sessions resumed via PowerAtlas (argv-match detection; no lock-file sidecar — same limitation as v2 fresh sessions).
+- SC-6: v2 sessions, ACP, and all other providers are unaffected.
+- SC-7: New `tests/test_data_kiro_v3.py` passes; existing test suite passes.
+- SC-8: ROADMAP.md v3 parked item removed.
 
 ### Scope boundaries & non-goals
 
@@ -32,109 +34,628 @@ The desired outcome is a `kiro-cli v3` provider in the main dashboard — same w
 - `Session` dataclass gains `extra_fields: dict` field; all construction sites updated; v3 populates `agentMode` there
 - `data.py` PROVIDERS dict gains `"kiro-cli-v3": data_kiro_v3`
 - `launcher.py` gains `kiro-cli-v3` in `_PROVIDER_BINARY`, `_PROVIDER_DISPLAY`, `_PROVIDER_TERMINAL`, and a dedicated `_build_provider_args` branch (`--agent-engine v3 --trust-tools *`, `--resume-id` for resume)
-- `web.py` gains `kiro-cli-v3` in `PROVIDER_COLORS` (`#7138cc`), `PROVIDER_DISPLAY_NAMES` (`"kiro-cli v3"`), `_PROVIDER_BINARY_DISPLAY`; hardcoded `{"kiro-cli","claude-code"}` sets at lines 459, 476, 3216 expanded to include `"kiro-cli-v3"`
+- `web.py` gains `kiro-cli-v3` in `PROVIDER_COLORS` (`#7138cc`), `PROVIDER_DISPLAY_NAMES` (`"kiro-cli v3"`), `_PROVIDER_BINARY_DISPLAY`; hardcoded `{"kiro-cli","claude-code"}` sets expanded to include `"kiro-cli-v3"`
 - `presence.py` `_PROVIDER_SPECS` gains `"kiro-cli-v3"` entry (same binary/flag as `"kiro-cli"`)
 - `status_classifier.py` `_resolve_jsonl_path_uncached` gains a dedicated `kiro-cli-v3` branch (goes directly to workspace-hash scan, skips `SESSION_DIR`)
 - `tests/test_data_kiro_v3.py` — new test file for the adapter
 - `test_data.py`, `test_launcher.py` — updated for `Session.extra_fields` and new provider args
-- ROADMAP.md — remove the v3 parked item
+- ROADMAP.md — remove the v3 parked item and update the stale session count
 
 **Not in scope:**
 - `/acp` v3 support (ACP stays v2-only; `ACP_ARGS = ("acp", "-a")` unchanged)
 - `--mode` selection UI (users can add `--mode vibe` via `default_args` in config)
 - `agentMode` rendering in session rows (stored in `extra_fields`, not displayed)
-- Liveness refinement beyond argv-matching (spike deferred post-implementation)
-- Multi-workspace sessions (0/85 observed; `workspacePaths[0]` is the cwd)
+- Liveness refinement beyond argv-matching (follow-up spike post-implementation)
+- Multi-workspace sessions (`workspacePaths[0]` is always populated per probe)
 
 ---
 
-## Exploration Discovery
+## 1) Current State
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+**v3 store**: `~/.kiro/sessions/<workspace-hash>/sess_<uuid>/` containing `session.json` + `messages.jsonl`. The `cli/` subdirectory holds v2 sessions and is excluded when scanning for hash dirs. As of 2026-08-18 (probed live): 23 workspace-hash dirs, 85 total sessions, 62 created in the last 7 days.
 
-### 4. Existing patterns & constraints
+**Provider registration** (`data.py:101`): `PROVIDERS = {"kiro-cli": data_kiro, "claude-code": data_claude, "kiro-ide": data_kiro_ide}`. Adding a new provider requires a module implementing 7 functions (`is_available`, `discover_workspaces`, `load_sessions`, `refresh_stale_entries_for_cwd`, `find_session_workspace`, `get_session_tail`, `get_first_prompt`) and an import + dict entry in `data.py`.
 
-- **Provider adapter interface** (7 functions, all required): `is_available()`, `discover_workspaces() -> list[tuple[str,int,str]]`, `load_sessions(cwd) -> tuple[list[Session], dict[str,_FileInfo]]`, `refresh_stale_entries_for_cwd(norm_cwd, old_stats) -> bool`, `find_session_workspace(session_id) -> str|None`, `get_session_tail(session_id, cwd, max_lines) -> list[str]`, `get_first_prompt(session_id, cwd) -> str`. Source: `data.py:103-308`.
-- **Session dataclass** (`data.py:31`): frozen, shared by all providers. Adding `extra_fields: dict = field(default_factory=dict)` — mutable field on frozen dataclass is valid Python; `Session` is never used as a dict key in the codebase (confirmed by search).
-- **v3 session.json keys** are camelCase and do not map to Session fields without explicit translation: `id` → `session_id`, `workspacePaths[0]` → `cwd`, `createdAt` → `created_at`, `lastModifiedAt` → `updated_at`, `title` → `title` (same), `agentMode` → `extra_fields["agentMode"]`.
-- **v3 messages.jsonl envelope**: `{"id","timestamp","payload":{"type":"user"|"assistant"|"tool_call"|...}}`. Content at `payload.content`. Entirely different from v2's `{"version":"v1","kind":"Prompt"|"AssistantMessage","data":{}}`.
-- **`status_classifier.classify_kiro_v3()`** (`status_classifier.py:257`) already handles v3 JSONL classification — no changes to the classifier functions themselves.
-- **`_is_v3_format()`** (`status_classifier.py:435`) already detects v3 format by checking `payload.type`.
-- **`_build_provider_args()` else-branch** (`launcher.py:84`) currently handles any unknown provider as if it were kiro-cli — a `kiro-cli-v3` provider without an explicit branch would silently build wrong args (no `--agent-engine v3`, no `--trust-tools *`).
-- **`PROVIDER_BADGES`** (`web.py:95`) is defined but never consumed anywhere — no entry needed for new provider.
-- **`Session` construction sites**: `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py`, all three test files — all need `extra_fields={}` added (can be keyword-defaulted on the dataclass so existing construction sites without the arg still work).
-- **Cache patterns** from `data_kiro.py`: `_meta_cache` (path→(mtime,size,dict)), `BoundedCache` for prompts (2048 entries), `_tail_cache` TTL 5s, `_first_prompt_cache` TTL 60s. v3 adapter should follow same patterns.
-- **Cache invalidation**: v3 uses root mtime (`~/.kiro/sessions/`) + per-hash-dir mtime. Root catches new workspace-hash dirs; hash-dir catches new sessions within existing workspaces. Stat cost is negligible.
-- **`_cwd_to_files()` in `data_kiro.py`** is keyed on `SESSION_DIR` (v2 dir) mtime — entirely inapplicable to v3. v3 adapter needs its own index.
-- **`_extract_content()` in `data_kiro.py`** matches `obj.get("kind")` — returns `""` for every v3 line. v3 adapter needs a separate extraction function matching `payload.type`.
-- **No `.history` file in v3** — first prompt must come from `messages.jsonl` head scan only.
-- **Sub-agent filtering**: v3 has no `parent_session_id`. Every `sess_*/session.json` is a user-initiated session — no filtering needed (sub-agents live in `sub-executions/*.jsonl` inside the parent dir, never as top-level `sess_*` dirs).
-- **`publish.cursor` and `publish-sub.cursor`** appear alongside `session.json` + `messages.jsonl` in some sessions — telemetry cursors, should be ignored by the adapter.
-- **Test patterns**: monkeypatch on module-level `SESSIONS_DIR` / `SESSION_DIR` constant, `_clear_cache` autouse fixture, `_bump_mtime()` helper for mtime-keyed cache tests, `_reset_kiro_caches()` function to clear all module-level caches. `test_data_kiro_v3.py` must follow the same discipline.
-- **Mtime-race flaky family**: known in `test_data.py` — `_bump_mtime()` calls are mandatory when writing then immediately reading the same file. New tests must use this helper.
+**Session dataclass** (`data.py:31`): frozen, 8 fields: `session_id, title, cwd, created_at, updated_at, first_prompt, last_prompt, last_reply_tail`. Construction sites: `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py`, and mirrored in test files.
 
-### 5. Risks & mitigations
+**v3 session.json key names** differ from the Session field names: `id` (not `session_id`), `workspacePaths[0]` (not `cwd`), `createdAt` (not `created_at`), `lastModifiedAt` (not `updated_at`), `title` (same). Probed: `id` field matches directory name in 100% of 85 sessions. `workspacePaths` is always a non-empty, single-entry array.
 
-- **`--trust-tools *` wildcard semantics**: probed — `--trust-tools "*"` launches KAS without a flag-rejection error. Risk of a future kiro-cli version changing wildcard behavior: low, mitigated by the config-driven `default_args` escape hatch (users can override in `config.toml`).
-- **`_SESSION_ID_RE` and `sess_` prefix**: probed — `\w` in the regex matches underscore, so `sess_<uuid>` passes validation. Confirmed.
-- **False-positive live dots from shared binary**: `kiro-cli --resume-id <bare-uuid>` (v2) won't match a `kiro-cli-v3` session because v2 session IDs are bare UUIDs and v3 IDs are `sess_<uuid>` — the format mismatch is the natural disambiguator.
-- **`extra_fields` on frozen dataclass**: Python allows mutable fields on frozen dataclasses (only the field reference is frozen, not the contained object). `Session` is never hashed in production code — no runtime risk.
-- **v3 store growth**: 23 workspace-hash dirs, 85 sessions today. Scan at `discover_workspaces()` must walk all hash dirs; caching with root + per-hash mtime prevents re-scanning on every call.
-- **`web.py` hardcoded sets**: if any of the three `{"kiro-cli","claude-code"}` sets are missed, `kiro-cli-v3` status polling is silently absent. All three must be updated in one commit.
+**v3 messages.jsonl format**: `{"id","timestamp","payload":{"type":"user"|"assistant"|"tool_call"|...}}`. Content at `payload.content`. Entirely different from v2's `{"version":"v1","kind":"Prompt"|"AssistantMessage","data":{}}`. `status_classifier.classify_kiro_v3()` already handles this format correctly.
 
-### 6. Resolved decisions
+**Launcher** (`launcher.py:81,87,93`): `_PROVIDER_DISPLAY`, `_PROVIDER_BINARY`, `_PROVIDER_TERMINAL` dicts. `_build_provider_args` (`launcher.py:100`) dispatches by provider string; the `else` branch (kiro-cli default) would produce wrong args for v3. Probed: `--trust-all-tools` (`-a`) is hard-rejected when `--agent-engine v3` is set (`"the following arguments are not supported with --agent-engine=v3: --trust-all-tools"`). `--trust-tools "*"` launches KAS successfully with v3.
 
-- Q1: What trust flag for v3 launches? — A: Hard-code `--trust-tools *` in launch args — Decision: hard-coded.
-- Q2: `--agent-engine v3` vs `--v3`? — A: `--agent-engine v3` — Decision: use `--agent-engine v3`.
-- Q3: Liveness detection approach? — A: Add `kiro-cli-v3` to `_PROVIDER_SPECS` (same binary/flag as `kiro-cli`) — Decision: add it, spike post-implementation to refine.
-- Q4: Path resolution branch in `status_classifier.py`? — A: Separate `kiro-cli-v3` branch going directly to workspace-hash scan — Decision: dedicated branch.
-- Q5: Display name and color? — A: `"kiro-cli v3"`, `#7138cc` — Decision: same purple as v2.
-- Q6: Cache invalidation strategy? — A: Root mtime + per-hash-dir mtime — Decision: Option A (root + per-hash).
-- Q7: Expand `poll_providers` hardcoded sets? — A: Yes, include in scope — Decision: expand all three sets.
-- Q8: `agentMode` handling? — A: Add `extra_fields: dict` to `Session`, populate `agentMode` for v3 — Decision: store only, no UI rendering.
-- Q9: `--mode` flag in launch args? — A: Omit — Decision: users can add via `default_args`.
-- Q11: Remove ROADMAP.md v3 entry? — A: Yes — Decision: remove when this ships.
-- Q12: New test file? — A: Yes, `tests/test_data_kiro_v3.py` — Decision: create it.
-- Q14: Render `agentMode` in session row? — A: No, store only — Decision: A.
+**web.py display dicts** (`web.py:85,90,95,100`): `PROVIDER_COLORS`, `PROVIDER_DISPLAY_NAMES`, `PROVIDER_BADGES` (unused), `_PROVIDER_BINARY_DISPLAY`. The `{"kiro-cli","claude-code"}` hardcoded sets appear at:
+- `web.py:459,476`: inside `_workspace_status()` fallback loop — `for prov in (providers or {"kiro-cli", "claude-code"})`
+- `web.py:3216` (approximately — exact line varies with edits): inside `partials_all_sessions` — `poll_providers = ({"kiro-cli","claude-code"} if provider_filter == "all" else {provider_filter})`
 
-### 7. Open items
+**presence.py** (`presence.py:66`): `_PROVIDER_SPECS = {"claude-code": ..., "kiro-cli": ...}`. v3 has no lock files (`~/.kiro/sessions/cli/*.lock` is v2-only). `Snapshot.is_live()` returns `False` for any provider key not in `_PROVIDER_SPECS`.
 
-- **Liveness spike**: after implementation, run a live v3 session and verify the status dot appears and transitions correctly. No code changes expected; this is an observational check.
-- **`empty_msgs` entry in `web.py`**: `web.py:3399` has a per-provider empty-state message dict. Adding `"kiro-cli-v3"` there is cosmetic (falls back to a generic message) but worth doing for completeness. Execution-contingent: confirm the dict still exists at that line when implementing.
+**status_classifier.py** (`status_classifier.py:98`): `_resolve_jsonl_path_uncached` handles `provider == "kiro-cli"` with a v3 fallback scan (walks `_V3_SESSIONS_ROOT`). For `provider == "kiro-cli-v3"`, the `else: return None` branch fires — status classification always returns `None`, rendering as "working" in the UI.
 
-### 8. Recommended approach
+**`empty_msgs` dict** (`web.py`): inside `partials_workspaces` handler, maps provider keys to user-facing empty-state messages. Falls back to `f"No {provider} sessions found."` for unknown providers — acceptable degradation but worth filling.
 
-**Phase 1 — Data layer**: Create `data_kiro_v3.py` implementing all 7 provider interface functions. Key implementation notes:
-- `V3_SESSIONS_ROOT = Path.home() / ".kiro" / "sessions"` (excludes `cli/`)
-- `discover_workspaces()`: walk hash dirs, read `sess_*/session.json`, group by `workspacePaths[0]`, sort by `lastModifiedAt`
-- `load_sessions(cwd)`: find matching hash dir via `workspacePaths[0]` normalization; read each session's `session.json` + head/tail of `messages.jsonl`; use root mtime + hash-dir mtime for index invalidation
-- `_extract_v3_content(payload)`: check `payload["type"] == "user"|"assistant"`, extract from `payload["content"]` (string or `[{"type":"text","text":"..."}]` blocks)
-- No `.history` file; first prompt from `messages.jsonl` head scan (first `user` payload)
-- Sub-agent sessions (`sub-executions/`) are inside parent dirs, not top-level — no filtering needed
-- Ignore `publish.cursor` and `publish-sub.cursor`
-- Add `extra_fields={"agentMode": data.get("agentMode","")}`
+## 2) Goal
 
-**Phase 2 — Session dataclass**: Add `extra_fields: dict = field(default_factory=dict)` to `Session` in `data.py`. Update all construction sites in `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py` to pass `extra_fields={}` explicitly (or rely on default).
+Add a `kiro-cli-v3` provider that scans `~/.kiro/sessions/<hash>/sess_<uuid>/`, exposes v3 workspaces and sessions in the main dashboard with correct display, launches new sessions with `--agent-engine v3 --trust-tools *`, resumes existing sessions with `--resume-id sess_<uuid>`, and shows live status dots for resumed sessions.
 
-**Phase 3 — Provider registration**: Add `from . import data_kiro_v3` and `"kiro-cli-v3": data_kiro_v3` to `data.py`.
+## 3) Design Decisions
 
-**Phase 4 — Launcher**: Add `kiro-cli-v3` to `_PROVIDER_BINARY`, `_PROVIDER_DISPLAY`, `_PROVIDER_TERMINAL` in `launcher.py`. Add explicit `kiro-cli-v3` case to `_build_provider_args()`: `[binary, "chat", "--agent-engine", "v3", "--trust-tools", "*"]` + `["--resume-id", session_id]` if resuming.
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Provider key | `"kiro-cli-v3"` (separate key) | Single `"kiro-cli"` key with dual-store adapter | Keeps stores isolated; avoids dual-store mtime invalidation complexity; user can enable/disable independently; consistent with v2 vs kiro-ide separation |
+| Trust flag | Hard-code `--trust-tools *` in launch args | Config-driven `default_args` (like v2's `-a`) | Exploration Q1: user chose A; `--trust-all-tools` is hard-rejected by v3 engine |
+| Engine flag | `--agent-engine v3` | `--v3` shorthand | Canonical enum form per CLI help; less likely to conflict with future flags |
+| `agentMode` handling | Store in `extra_fields: dict` on `Session`; do not render | Ignore entirely; render as badge | Schema hook for future use; `Session` construction-site cost already paid in this change |
+| Cache invalidation | Root mtime + per-hash-dir mtime | Per-hash-dir only | Root catches new workspace-hash dirs immediately; stat cost negligible (~23 dirs); zero miss cases |
+| Status classifier branch | Dedicated `kiro-cli-v3` branch in `_resolve_jsonl_path_uncached` going directly to workspace-hash scan | Extend `kiro-cli` branch to handle both names | Cleaner; avoids redundant `SESSION_DIR` stat for v3 sessions; mirrors data module separation |
+| Liveness detection | Add `kiro-cli-v3` to `_PROVIDER_SPECS` (same binary/flag as `kiro-cli`) | Skip liveness for v3 | Minimal cost; without it `is_live()` hard-returns `False` for all v3 sessions |
+| `extra_fields` default | `field(default_factory=dict)` on frozen `Session` | Positional field with no default | Allows existing construction sites to omit the arg; dict is mutable on a frozen dataclass — valid Python, no hashability risk since `Session` is never used as a dict key |
 
-**Phase 5 — Web layer**: Add `kiro-cli-v3` entries to `PROVIDER_COLORS`, `PROVIDER_DISPLAY_NAMES`, `_PROVIDER_BINARY_DISPLAY` in `web.py`. Expand the three hardcoded `{"kiro-cli","claude-code"}` sets to include `"kiro-cli-v3"`. Add `"kiro-cli-v3"` to `empty_msgs` dict.
+## 4) External Dependencies & Costs
 
-**Phase 6 — Presence + status classifier**: Add `"kiro-cli-v3"` to `_PROVIDER_SPECS` in `presence.py`. Add `kiro-cli-v3` branch in `_resolve_jsonl_path_uncached()` in `status_classifier.py` (go directly to `_V3_SESSIONS_ROOT` walk, skip `SESSION_DIR`).
+### Required external changes
 
-**Phase 7 — Tests**: Create `tests/test_data_kiro_v3.py` with `TestKiroV3IsAvailable`, `TestKiroV3DiscoverWorkspaces`, `TestKiroV3LoadSessions`, `TestKiroV3GetSessionTail`, `TestKiroV3GetFirstPrompt`, `TestKiroV3RefreshStale`, `TestKiroV3FindSessionWorkspace`. Update `test_data.py` for `Session.extra_fields`. Update `test_launcher.py` for `kiro-cli-v3` args. Update `test_web.py`/`test_data.py` for status classifier branch. Follow `_bump_mtime()` discipline.
+None. This is a local-filesystem-read, code-only change. No CI/CD, IAM, cloud resources, data migration, or third-party services involved.
 
-**Phase 8 — ROADMAP cleanup**: Remove the v3 parked item from `plans/ROADMAP.md`.
+### Cost impact
 
-### 9. QA environment
+None. All operations are local filesystem reads.
 
-- **Runtime verification**: start PowerAtlas (`.venv-PowerAtlas\Scripts\power-atlas`), open dashboard at `http://127.0.0.1:<port>`. v3 workspaces should appear in the Workspaces panel. Click a workspace to see its v3 sessions. Click "Resume" on a v3 session to verify the terminal opens with `--agent-engine v3 --trust-tools * --resume-id sess_<uuid>`. Click "New session" on a v3 workspace to verify terminal opens with `--agent-engine v3 --trust-tools *` only.
-- **Test suite**: `.venv-PowerAtlas\Scripts\python -m pytest tests/` (full suite). `node tests/acp_page.test.mjs` for template-inline-script coverage (run when `web.py` template changes are made).
-- **Live status dot**: resume a v3 session via PowerAtlas, observe the status dot on the session row. Requires a running kiro-cli v3 process.
-- **V3 session data on this machine**: `~/.kiro/sessions/` — 23 workspace-hash dirs, 85 sessions, 62 created in the last 7 days. Realistic test data without mocking.
+## 5) Implementation Phases
+
+### Phase 1: `Session` dataclass — add `extra_fields` [QA]
+
+**Goal**: Add `extra_fields: dict = field(default_factory=dict)` to the `Session` frozen dataclass, update all construction sites to be explicit about the new field, and verify no tests break.
+
+**Why horizontal**: This change to the shared `Session` dataclass is a prerequisite for Phase 2 (the v3 adapter must populate `extra_fields`). Merging it into Phase 2 would mean Phase 2 both introduces and uses the field, making review harder and rollback more complex.
+
+**Covers**: SC-2 (partial — field storage), SC-7
+
+**File scope**: `src/power_atlas/data.py`, `src/power_atlas/data_kiro.py`, `src/power_atlas/data_claude.py`, `src/power_atlas/data_kiro_ide.py`, `tests/test_data.py`, `tests/test_launcher.py` (only if Session appears there), `tests/test_web.py` (confirm all Session constructions are keyword-arg safe — no changes needed if they are)
+
+**Changes**:
+
+In `data.py` (around line 31), change the `Session` dataclass:
+```python
+# Before:
+@dataclass(frozen=True)
+class Session:
+    session_id: str
+    title: str
+    cwd: str
+    created_at: str
+    updated_at: str
+    first_prompt: str
+    last_prompt: str
+    last_reply_tail: str
+
+# After:
+@dataclass(frozen=True)
+class Session:
+    session_id: str
+    title: str
+    cwd: str
+    created_at: str
+    updated_at: str
+    first_prompt: str
+    last_prompt: str
+    last_reply_tail: str
+    extra_fields: dict = field(default_factory=dict)
+```
+
+Add `field` to the `from dataclasses import dataclass` import line.
+
+In `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py`: each `Session(...)` construction call should pass `extra_fields={}` explicitly. This is optional (the default is `{}`) but keeps the code self-documenting. Find each construction call by searching for `Session(` in each file.
+
+In `tests/test_data.py`: any `Session(...)` construction in test helpers or fixtures should add `extra_fields={}` (or rely on the default). Run the test suite after the change to catch any position-sensitive construction calls. The known mtime-race flaky family (`TestKiroPromptsCache::test_changed_jsonl_is_reparsed`, etc.) is pre-existing and unrelated to this change.
+
+**Exit criteria**:
+- [ ] `@dataclass(frozen=True) class Session` in `data.py` has `extra_fields: dict = field(default_factory=dict)` as the last field, with a code comment `# extra_fields must remain the last field — positional Session(...) calls in tests depend on this`
+- [ ] `from dataclasses import dataclass, field` import updated in `data.py`
+- [ ] All `Session(...)` construction sites in `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py` compile without error
+- [ ] `_reset_kiro_caches()` in `tests/test_data.py` extended to also reset `data_kiro_v3` module-level globals (`_root_mtime`, `_hash_dir_mtimes`, `_cwd_index`, `_prompts_cache`, `_tail_cache`, `_first_prompt_cache`) — import `data_kiro_v3` inside the function so the import is deferred until Phase 2 creates the module
+- [ ] `tests/test_web.py` checked for `Session(...)` constructions — confirm all use keyword args and will accept an extra defaulted field without changes
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data.py tests/test_launcher.py -x -q` passes (excluding known flaky tests — run with `-p no:randomly` if test order matters)
+
+---
+
+### Phase 2: `data_kiro_v3.py` — v3 session adapter [QA]
+
+**Goal**: Create the new `data_kiro_v3.py` adapter implementing all 7 provider interface functions, with correct v3 key mapping, v3 JSONL content extraction, and root+per-hash mtime cache invalidation.
+
+**Covers**: SC-1, SC-2, SC-7
+
+**File scope**: `src/power_atlas/data_kiro_v3.py` (new), `tests/test_data_kiro_v3.py` (new)
+
+**Constants**:
+```python
+V3_SESSIONS_ROOT = Path.home() / ".kiro" / "sessions"
+# Subdirs of V3_SESSIONS_ROOT that are not workspace-hash dirs
+_V3_EXCLUDED_NAMES = frozenset({"cli"})
+```
+
+**Thread safety**: All module-level cache dicts (`_root_mtime`, `_hash_dir_mtimes`, `_cwd_index`, `_prompts_cache`, `_tail_cache`, `_first_prompt_cache`) are mutated from `asyncio.to_thread` calls and from the background refresh thread concurrently. Protect the index rebuild with a `threading.Lock()` at module level:
+```python
+import threading
+_index_lock = threading.Lock()
+```
+Acquire `_index_lock` inside `_cwd_to_sessions()` around the rebuild block. The BoundedCache class already has its own internal lock — no extra locking needed for `_prompts_cache`.
+
+**`sess_` prefix helper** — extract once, used in `_find_v3_session_path`, `_resolve_jsonl_path_uncached` (Phase 4), and `find_session_workspace`:
+```python
+def _ensure_sess_prefix(session_id: str) -> str:
+    """Normalize a session ID to the sess_<uuid> form."""
+    return session_id if session_id.startswith("sess_") else f"sess_{session_id}"
+```
+
+**`is_available()`**:
+```python
+def is_available() -> bool:
+    """Return True if any workspace-hash dir exists under V3_SESSIONS_ROOT."""
+    if not V3_SESSIONS_ROOT.is_dir():
+        return False
+    try:
+        return any(
+            e.is_dir() and e.name not in _V3_EXCLUDED_NAMES
+            for e in V3_SESSIONS_ROOT.iterdir()
+        )
+    except OSError:
+        return False
+```
+
+**v3 key mapping** (session.json camelCase → Session fields):
+- `data.get("id", dir_stem)` → `session_id` (dir_stem = `sess_<uuid>` directory name as fallback)
+- `(data.get("workspacePaths") or [""])[0]` → `cwd` (guard: handles null, empty list, and missing key)
+- `data.get("createdAt", "")` → `created_at`
+- `data.get("lastModifiedAt", "")` → `updated_at`
+- `data.get("title", "<untitled>")` → `title`
+- `{"agentMode": data.get("agentMode", "")}` → `extra_fields`
+
+**v3 JSONL content extraction** — `_extract_v3_content(line: str, msg_type: str) -> str`:
+```python
+def _extract_v3_content(line: str, msg_type: str) -> str:
+    """Extract text from a v3 JSONL line of a given payload type.
+    Returns "" for image-only messages (no text blocks) — intentional."""
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return ""
+    payload = obj.get("payload")
+    if not isinstance(payload, dict):
+        return ""
+    if payload.get("type") != msg_type:
+        return ""
+    content = payload.get("content")
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                parts.append(item.get("text", ""))
+        return " ".join(parts)
+    return ""
+```
+
+**Cache invalidation strategy** — two-level mtime index, keyed on `session.json` mtime (not hash-dir mtime):
+
+> **Why session.json, not hash-dir mtime**: On NTFS and most Linux filesystems, appending to `messages.jsonl` bumps the containing directory's mtime. Since `messages.jsonl` is written on every assistant turn, gating the cwd-index rebuild on hash-dir mtime would trigger a full `session.json` re-scan on every agent response — O(sessions_in_workspace × hash_dirs) reads per active turn. `session.json` changes only when session metadata changes (creation, title update, status update) — the correct signal for workspace membership. Message content freshness is handled separately by per-session `file_stats` in `load_sessions`.
+
+```python
+import threading
+
+_index_lock = threading.Lock()
+_root_mtime: float | None = None            # V3_SESSIONS_ROOT mtime
+_session_json_mtimes: dict[str, float] = {}  # "hash/sess_uuid" -> session.json mtime
+_cwd_index: dict[str, list[tuple[str, str]]] = {}  # norm_cwd -> [(hash_name, sess_dir_name), ...]
+_norm_cwd_to_hash: dict[str, str] = {}       # norm_cwd -> hash_dir_name (for refresh lookup)
+```
+
+`_cwd_to_sessions()` rebuilds when either `V3_SESSIONS_ROOT.stat().st_mtime` changes (new hash dir) or any `session.json` mtime changes (new/modified session). On rebuild: walk hash dirs, read each `sess_*/session.json`, populate `_cwd_index`, `_session_json_mtimes`, `_norm_cwd_to_hash`.
+
+**Error handling throughout** — all functions must follow the v2 adapter's fail-open pattern:
+- Wrap `V3_SESSIONS_ROOT.iterdir()` in `try/except OSError: return {}` (or appropriate empty return)
+- After `json.loads`, check `if not isinstance(data, dict): continue` — handles partial writes and non-dict JSON values
+- After extracting `cwd = (data.get("workspacePaths") or [""])[0]`, check `if not cwd: continue` — prevents empty-string key in `_cwd_index`
+- All OSError paths return early with empty/None rather than propagating
+
+**`discover_workspaces()`**: iterate the cwd index; for each cwd compute `updated_at = max(lastModifiedAt)` across sessions; return `[(cwd, count, updated_at)]` sorted descending by `updated_at`.
+
+**`load_sessions(cwd)`**: call `_cwd_to_sessions()`, filter by `_normalize_path(cwd)`, read `session.json` + `messages.jsonl` for each session; call `_extract_prompts_v3_cached(messages_path, st)` for prompt data; return `(sessions, file_stats)`. File stats track both `session.json` and `messages.jsonl` per session; ignore `publish.cursor` and `publish-sub.cursor`.
+
+**`_extract_prompts_v3(messages_path: Path) -> tuple[str, str, str]`**: reads first 50 lines for `first_prompt` (first `payload.type == "user"`), tails last 100 lines via deque for `last_prompt` (last `"user"`) and `last_reply_tail` (last `"assistant"`). Uses `_extract_v3_content`. No `.history` file — first prompt from `messages.jsonl` only.
+
+**`_extract_prompts_v3_cached(messages_path, st)`**: `BoundedCache(2048)` (import from `data`) keyed on `str(messages_path)`, invalidated by `(mtime, size)`. Same pattern as `data_kiro._extract_prompts_cached`.
+
+**Bounded caches for tail and first-prompt** (use `BoundedCache`, not plain dicts — avoids unbounded growth):
+```python
+from .data import BoundedCache, Session, _FileInfo, _normalize_path, _cap_text
+_prompts_cache: BoundedCache = BoundedCache(2048)
+_tail_cache: BoundedCache = BoundedCache(512)    # (time, mtime, lines)
+_first_prompt_cache: BoundedCache = BoundedCache(512)  # (time, mtime, result)
+```
+
+**`refresh_stale_entries_for_cwd(norm_cwd, old_stats)`**:
+- If `V3_SESSIONS_ROOT` is missing: return `True` (root gone = all cached stats invalid; `load_sessions` will return empty and clear the cache)
+- Stat each tracked file in `old_stats`; return `True` if any has changed
+- For new-session detection: look up the hash dir from `_norm_cwd_to_hash` (the cached reverse mapping from `_cwd_to_sessions()`) — do NOT call `_cwd_to_sessions()` here, which would trigger a full rebuild on every refresh tick. If `_norm_cwd_to_hash` doesn't have the key (index not yet built), return `True` to force a `load_sessions` rebuild.
+
+**`find_session_workspace(session_id)`**: scan `V3_SESSIONS_ROOT` hash dirs for `_ensure_sess_prefix(session_id)/session.json`; wrap in `try/except OSError: return None`; read `workspacePaths[0]`.
+
+**`get_session_tail(session_id, cwd, max_lines)`**: locate path via `_find_v3_session_path(session_id)`; tail `messages.jsonl` (last 131072 bytes), extract `payload.type == "assistant"` lines. Use `BoundedCache` `_tail_cache` keyed on `session_id`, TTL 5s + mtime guard.
+
+**`get_first_prompt(session_id, cwd)`**: read first 50 lines of `messages.jsonl`, find first `payload.type == "user"`. Use `BoundedCache` `_first_prompt_cache` keyed on `session_id`, TTL 60s + mtime guard.
+
+**`_find_v3_session_path(session_id) -> Path | None`**: scans hash dirs for `_ensure_sess_prefix(session_id)/messages.jsonl`. Wrap in `try/except OSError: return None`. No separate cache needed here — callers (`get_session_tail`, `get_first_prompt`) use their own BoundedCache with mtime guard, so this function is called at most once per mtime change per session.
+
+**Test file `tests/test_data_kiro_v3.py`**: Follow the `data_kiro_ide` test pattern from `test_data.py` (lines 663+). Monkeypatch `power_atlas.data_kiro_v3.V3_SESSIONS_ROOT`. Include autouse `_clear_v3_caches` fixture that resets all module-level caches. Use `_bump_mtime()` for any test that writes and immediately reads the same file. Test classes:
+- `TestKiroV3IsAvailable` — empty root, missing root, root with hash dirs, root with only `cli/`
+- `TestKiroV3DiscoverWorkspaces` — single session, multiple sessions, multiple workspaces, malformed session.json, missing workspacePaths
+- `TestKiroV3LoadSessions` — basic load, missing messages.jsonl, empty messages.jsonl, prompt extraction from v3 format
+- `TestKiroV3GetSessionTail` — basic tail, TTL cache, mtime invalidation
+- `TestKiroV3GetFirstPrompt` — basic, fallback when no user message in first 50 lines
+- `TestKiroV3RefreshStale` — unchanged files, changed mtime, new session added
+- `TestKiroV3FindSessionWorkspace` — found, not found, sess_ prefix handling
+
+**Exit criteria**:
+- [ ] `src/power_atlas/data_kiro_v3.py` exists with all 7 interface functions
+- [ ] `V3_SESSIONS_ROOT` excludes `cli/` dir in all scanning
+- [ ] `publish.cursor` and `publish-sub.cursor` files are not tracked in `file_stats`
+- [ ] `extra_fields={"agentMode": ...}` populated from `session.json`
+- [ ] All `iterdir()` and `session.json` reads are wrapped in `try/except OSError`
+- [ ] `isinstance(data, dict)` check after every `json.loads` call (handles partial writes, `null`, `[]`)
+- [ ] `if not cwd: continue` guard after `workspacePaths` extraction
+- [ ] Cache invalidation keys on `session.json` mtimes, not hash-dir mtimes
+- [ ] `_index_lock = threading.Lock()` guards the index rebuild in `_cwd_to_sessions()`
+- [ ] `_tail_cache` and `_first_prompt_cache` use `BoundedCache`, not plain dicts
+- [ ] `refresh_stale_entries_for_cwd` returns `True` when `V3_SESSIONS_ROOT` is absent
+- [ ] `refresh_stale_entries_for_cwd` uses `_norm_cwd_to_hash` cached mapping, does NOT call `_cwd_to_sessions()` internally
+- [ ] `_ensure_sess_prefix` helper extracted and used in all 3 call sites
+- [ ] `BoundedCache` imported from `.data` in the import block
+- [ ] `tests/test_data_kiro_v3.py` created with all 7 test classes listed above
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data_kiro_v3.py -x -q` passes
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data.py -x -q` passes (no regressions)
+
+---
+
+### Phase 3: Provider registration + launcher + web display [QA] [P:4]
+
+**Goal**: Register `kiro-cli-v3` in the PROVIDERS dict, add launcher entries with correct v3 CLI args, and update all web.py display dicts and hardcoded provider sets.
+
+**Covers**: SC-1, SC-3, SC-4, SC-6, SC-7, SC-8
+
+**File scope**: `src/power_atlas/data.py`, `src/power_atlas/launcher.py`, `src/power_atlas/web.py`, `tests/test_launcher.py`, `plans/ROADMAP.md`, `README.md`
+
+**`data.py`** — add import and PROVIDERS entry (after `data_kiro_ide` import):
+```python
+from . import data_kiro, data_claude, data_kiro_ide, data_kiro_v3  # noqa: E402
+
+PROVIDERS: dict[str, object] = {
+    "kiro-cli": data_kiro,
+    "claude-code": data_claude,
+    "kiro-ide": data_kiro_ide,
+    "kiro-cli-v3": data_kiro_v3,
+}
+```
+
+**`launcher.py`** — add to each dict (`_PROVIDER_DISPLAY:81`, `_PROVIDER_BINARY:87`, `_PROVIDER_TERMINAL:93`):
+```python
+_PROVIDER_DISPLAY = {
+    "kiro-cli": "kiro-cli",
+    "claude-code": "Claude Code",
+    "kiro-ide": "Kiro IDE",
+    "kiro-cli-v3": "kiro-cli v3",
+}
+_PROVIDER_BINARY = {
+    "kiro-cli": "kiro-cli",
+    "claude-code": "claude",
+    "kiro-ide": "kiro",
+    "kiro-cli-v3": "kiro-cli",
+}
+_PROVIDER_TERMINAL = {
+    "kiro-cli": True,
+    "claude-code": True,
+    "kiro-ide": False,
+    "kiro-cli-v3": True,
+}
+```
+
+**`_build_provider_args`** (`launcher.py:100`) — add `kiro-cli-v3` case **before** the `else` clause:
+```python
+def _build_provider_args(provider: str, binary: str, session_id: str | None) -> list[str]:
+    if provider == "claude-code":
+        args = [binary]
+        if session_id:
+            args += ["--resume", session_id]
+    elif provider == "kiro-ide":
+        args = [binary]
+    elif provider == "kiro-cli-v3":
+        # --trust-all-tools (-a) is hard-rejected by --agent-engine v3; use --trust-tools instead.
+        # Note: default_args is appended AFTER these args by launch_session. If a user has
+        # default_args="-a" (copied from a v2 config), the v3 launch will fail with a clear
+        # CLI error. No PowerAtlas-side guard is added — the CLI error is self-describing.
+        args = [binary, "chat", "--agent-engine", "v3", "--trust-tools", "*"]
+        if session_id:
+            args += ["--resume-id", session_id]
+    else:  # kiro-cli (v2) — catch-all; any unrecognized provider gets v2 kiro-cli args
+        args = [binary, "chat"]
+        if session_id:
+            args += ["--resume-id", session_id]
+    return args
+```
+
+**`web.py`** — add entries to display dicts (`web.py:85,90,100`):
+```python
+PROVIDER_COLORS = {
+    "kiro-cli": "#7138cc",
+    "claude-code": "#c2590f",
+    "kiro-ide": "#8b5cf6",
+    "kiro-cli-v3": "#7138cc",  # same purple family as v2
+}
+PROVIDER_DISPLAY_NAMES = {
+    "kiro-cli": "kiro-cli",
+    "claude-code": "Claude Code",
+    "kiro-ide": "Kiro IDE",
+    "kiro-cli-v3": "kiro-cli v3",
+}
+_PROVIDER_BINARY_DISPLAY = {
+    "kiro-cli": "kiro-cli chat",
+    "claude-code": "claude",
+    "kiro-ide": "kiro",
+    "kiro-cli-v3": "kiro-cli chat --agent-engine v3",
+}
+```
+
+**`web.py` hardcoded sets** — expand all three occurrences. Find by searching the literal string `{"kiro-cli", "claude-code"}` in `web.py`. Both occurrences in `_workspace_status()` (function body around line 459 and 476) and the one in `partials_all_sessions` (around line 3216):
+```python
+# Before (all 3 occurrences):
+{"kiro-cli", "claude-code"}
+# After (all 3 occurrences):
+{"kiro-cli", "claude-code", "kiro-cli-v3"}
+```
+
+**`web.py` `empty_msgs` dict** — add entry (in `partials_workspaces` handler, search for the `empty_msgs = {` literal):
+```python
+empty_msgs = {
+    "claude-code": "No Claude Code sessions found — start one with <code>claude</code> to see it here.",
+    "kiro-cli": "No Kiro CLI sessions found — start one with <code>kiro-cli</code> to see it here.",
+    "kiro-ide": "No Kiro IDE sessions found — open a folder in Kiro IDE and start a conversation to see it here.",
+    "kiro-cli-v3": "No kiro-cli v3 sessions found — start one with <code>kiro-cli chat --agent-engine v3</code> to see it here.",
+}
+```
+
+**`tests/test_launcher.py`** — add test cases for `kiro-cli-v3` launch args:
+- New session: args contain `["chat", "--agent-engine", "v3", "--trust-tools", "*"]`
+- Resume: args contain `["chat", "--agent-engine", "v3", "--trust-tools", "*", "--resume-id", "sess_<uuid>"]`
+- Provider is in terminal branch (not non-terminal)
+- Default args are appended after the v3-specific args
+
+**`plans/ROADMAP.md`** — remove the v3 parked item (the line reading `kiro-cli v3 session support — scan the sess_*/` and its references). Update the Parked items list to remove v3. The session count reference (`currently 23 dormant historical sessions`) should be removed entirely since the feature is now implemented.
+
+**Exit criteria**:
+- [ ] `data.PROVIDERS` contains `"kiro-cli-v3"` mapping to `data_kiro_v3`
+- [ ] `_build_provider_args("kiro-cli-v3", "kiro-cli", None)` returns `["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*"]`
+- [ ] `_build_provider_args("kiro-cli-v3", "kiro-cli", "sess_abc")` returns `["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*", "--resume-id", "sess_abc"]`
+- [ ] All 3 occurrences of `{"kiro-cli", "claude-code"}` in `web.py` expanded to include `"kiro-cli-v3"` (verify with `Select-String '"kiro-cli-v3"' src\power_atlas\web.py | Measure-Object | Select-Object -Expand Count` showing **≥7** matches: 3 in expanded sets + 2 in display dicts + 1 in `empty_msgs` + 1 in `_PROVIDER_BINARY_DISPLAY`)
+- [ ] `empty_msgs` dict in `partials_workspaces` handler contains `"kiro-cli-v3"` key
+- [ ] `plans/ROADMAP.md` v3 parked item removed; [P2b] entry updated to note v3 is now visible
+- [ ] `README.md` has a kiro-cli v3 sub-bullet under "Auto-discovers workspaces"
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py -x -q` passes
+- [ ] PowerAtlas starts without import errors: `.venv-PowerAtlas\Scripts\python -c "from power_atlas import web; print('ok')"`
+
+---
+
+### Phase 4: Presence + status classifier [QA] [P:3]
+
+**Goal**: Add `kiro-cli-v3` to `_PROVIDER_SPECS` in `presence.py` so live status dots work, and add a dedicated `kiro-cli-v3` branch in `_resolve_jsonl_path_uncached` in `status_classifier.py` so semantic classification reaches v3 sessions.
+
+**Covers**: SC-5, SC-6, SC-7
+
+**File scope**: `src/power_atlas/presence.py`, `src/power_atlas/status_classifier.py`, `tests/test_data.py` (if status_classifier tests live there), `tests/test_web.py`
+
+**`presence.py`** (`_PROVIDER_SPECS` at line 66):
+```python
+_PROVIDER_SPECS: dict[str, tuple[tuple[str, ...], str]] = {
+    "claude-code": (("claude", "claude.exe", "claude.cmd"), "--resume"),
+    "kiro-cli": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
+    "kiro-cli-v3": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
+}
+```
+
+**Binary collision caveat**: `kiro-cli` and `kiro-cli-v3` share the same binary names. `_match_provider()` in `presence.py` returns on first dict iteration, so a resumed v3 session (`--resume-id sess_abc`) gets attributed to `"kiro-cli"` (v2), not `"kiro-cli-v3"`, because `"kiro-cli"` appears first in `_PROVIDER_SPECS`. The live dot will appear on the v2 provider row rather than the v3 row.
+
+This is an accepted limitation for this plan: the v3 session ID format (`sess_<uuid>`) is disjoint from v2 (`<bare-uuid>`), so a proper fix would check the session ID prefix inside `_scan()` to route to the correct provider key. That disambiguation is tracked as follow-up work (see Follow-up Work section). For this plan, the live dot will appear but may be attributed to the v2 provider — acceptable since the primary value (liveness detection) is present.
+
+**`status_classifier.py`** (`_resolve_jsonl_path_uncached` at line 98) — add `kiro-cli-v3` branch:
+```python
+def _resolve_jsonl_path_uncached(session_id: str, provider: str, cwd: str) -> Path | None:
+    if provider == "kiro-cli":
+        # v2 path first
+        path = SESSION_DIR / f"{session_id}.jsonl"
+        if path.is_file():
+            return path
+        # v3 fallback scan (for kiro-cli provider that may hold v3 sessions)
+        if _V3_SESSIONS_ROOT.is_dir():
+            sid = session_id if session_id.startswith("sess_") else f"sess_{session_id}"
+            for ws_dir in _V3_SESSIONS_ROOT.iterdir():
+                if not ws_dir.is_dir() or ws_dir.name == "cli":
+                    continue
+                v3_path = ws_dir / sid / "messages.jsonl"
+                if v3_path.is_file():
+                    return v3_path
+        return None
+    elif provider == "kiro-cli-v3":
+        # Go directly to workspace-hash scan (no v2 store check)
+        if not _V3_SESSIONS_ROOT.is_dir():
+            return None
+        sid = session_id if session_id.startswith("sess_") else f"sess_{session_id}"
+        try:
+            for ws_dir in _V3_SESSIONS_ROOT.iterdir():
+                if not ws_dir.is_dir() or ws_dir.name == "cli":
+                    continue
+                v3_path = ws_dir / sid / "messages.jsonl"
+                if v3_path.is_file():
+                    return v3_path
+        except OSError:
+            return None
+        return None
+    elif provider == "claude-code":
+        ...
+```
+
+Also update `_classify_from_path`:
+```python
+def _classify_from_path(path: Path, provider: str, file_size: int | None = None) -> Optional[SemanticStatus]:
+    tail_lines = _read_tail_lines(path, file_size=file_size)
+    if not tail_lines:
+        return None
+    if provider in ("kiro-cli", "kiro-cli-v3"):
+        if _is_v3_format(tail_lines):
+            return classify_kiro_v3(tail_lines)
+        return classify_kiro_v2(tail_lines)
+    elif provider == "claude-code":
+        return classify_claude(tail_lines)
+    else:
+        # Default: v3 format (covers kiro-ide and any future providers).
+        # This else-branch is intentional — new providers default to v3 format detection.
+        return classify_kiro_v3(tail_lines)
+```
+
+**`_path_cache` key change** — extend memoization to `kiro-cli-v3`. The current `kiro-cli` cache key is a 3-tuple `(session_id, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))`. Adding `kiro-cli-v3` requires `provider` in the key to prevent v2 and v3 session IDs from colliding if they ever share a value:
+
+```python
+def _resolve_jsonl_path(session_id: str, provider: str, cwd: str) -> Optional[Path]:
+    # Cache both kiro-cli and kiro-cli-v3 (both scan _V3_SESSIONS_ROOT)
+    if provider not in ("kiro-cli", "kiro-cli-v3"):
+        return _resolve_jsonl_path_uncached(session_id, provider, cwd)
+
+    # Key is now a 4-tuple (was 3-tuple for kiro-cli only).
+    # Any in-memory cached entries from a prior kiro-cli-only key shape are naturally
+    # invalidated by the key mismatch — no explicit flush needed.
+    cache_key = (session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))
+    # ... rest of cache logic unchanged (lock, hit/miss, TTL) ...
+```
+
+**Note**: The cache key changes from 3-tuple to 4-tuple. Any test that inspects `_path_cache` internals by key structure must be updated. Tests that only check whether a path is returned correctly are unaffected.
+
+**Exit criteria**:
+- [ ] `presence._PROVIDER_SPECS` contains `"kiro-cli-v3"` with same binary/flag tuple as `"kiro-cli"`
+- [ ] Code comment in `presence.py` near `_PROVIDER_SPECS` notes the binary-collision caveat and points to the Follow-up Work section for the `sess_`-prefix disambiguation fix
+- [ ] `status_classifier._resolve_jsonl_path_uncached("sess_abc", "kiro-cli-v3", "")` scans `_V3_SESSIONS_ROOT` directly (no `SESSION_DIR` check), wrapped in `try/except OSError`
+- [ ] `status_classifier._classify_from_path(path, "kiro-cli-v3", ...)` dispatches to `classify_kiro_v3()` for v3-format lines; `else` branch has comment noting it is intentional
+- [ ] `_resolve_jsonl_path` guard changed to `provider not in ("kiro-cli", "kiro-cli-v3")` and cache key is 4-tuple `(session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))`
+- [ ] Any test checking `_path_cache` key structure updated for 4-tuple format
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py tests/test_data.py -x -q` passes
+
+---
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| `--trust-tools *` wildcard semantics change in future kiro-cli version | High — every v3 launch from PowerAtlas silently fails or prompts for each action | Probed on 2026-08-18: `--trust-tools "*"` launches KAS without rejection; config `default_args` field on `kiro-cli-v3` provider can override; monitored on kiro-cli upgrades |
+| User sets `default_args = "-a"` for v3 provider (copied from v2 config) | Medium — kiro-cli CLI hard-rejects with a clear error message; no PowerAtlas-side guard | CLI error is self-describing; tracked in Follow-up Work as a potential config migration or settings warning |
+| Binary-collision in presence detection | Medium — `_match_provider` returns on first `_PROVIDER_SPECS` match; resumed v3 sessions attributed to `kiro-cli` (v2) provider row, not `kiro-cli-v3` row | Accepted for this plan; live dot still appears (wrong row); deferred `sess_`-prefix disambiguation tracked in Follow-up Work |
+| `extra_fields: dict` on frozen `Session` — mutable field | Low — `Session` is never hashed (confirmed by codebase search); `frozen=True` does not deep-freeze dict contents but no mutating consumers exist | Confirmed by codebase search; `extra_fields` must remain last field (code comment added in Phase 1); risk is latent not current |
+| v3 store growth causing slow `discover_workspaces()` | Low-Medium — with 23 hash dirs and 85 sessions today, full re-scan on cache miss is bounded; `session.json` mtime gating (not hash-dir mtime) prevents spurious rebuilds on message writes | Session.json mtime strategy chosen specifically to avoid per-message-write rebuilds; acceptable at current scale |
+| Liveness detection not exercised on real v3 sessions | Medium — spike deferred; argv-based detection may miss edge cases | Filed as follow-up work; argv matching is the same mechanism used for v2 PowerAtlas-launched sessions and is known to work there |
+| Three `{"kiro-cli","claude-code"}` hardcoded sets — if one is missed | High — v3 status dots are silently absent or workspace status aggregation is incomplete | Exit criterion explicitly verifies all three via count (≥7); Phase 3 is a single commit covering all three |
+
+A risk whose Mitigation is anything other than "addressed within this plan":
+- `--trust-tools *` wildcard stability: accepted; future kiro-cli upgrade check recommended
+- `default_args="-a"` for v3: accepted; tracked in Follow-up Work
+- Binary-collision in presence: accepted; deferred `sess_`-prefix disambiguation tracked in Follow-up Work
+- Liveness spike: deferred (see Follow-up Work)
+
+## 7) Verification
+
+**Automated (after all phases):**
+```powershell
+# Full test suite
+.venv-PowerAtlas\Scripts\python -m pytest tests/ -x -q
+
+# Verify all hardcoded sets were expanded (should show ≥ 5 matches for kiro-cli-v3 in web.py)
+Select-String -Pattern '"kiro-cli-v3"' src\power_atlas\web.py | Measure-Object | Select-Object -Expand Count
+
+# Verify new provider module is importable and registered
+.venv-PowerAtlas\Scripts\python -c "from power_atlas.data import PROVIDERS; assert 'kiro-cli-v3' in PROVIDERS; print('ok')"
+
+# Verify launch args
+.venv-PowerAtlas\Scripts\python -c "
+from power_atlas.launcher import _build_provider_args
+args = _build_provider_args('kiro-cli-v3', 'kiro-cli', None)
+assert args == ['kiro-cli', 'chat', '--agent-engine', 'v3', '--trust-tools', '*'], args
+args_resume = _build_provider_args('kiro-cli-v3', 'kiro-cli', 'sess_abc')
+assert '--resume-id' in args_resume and 'sess_abc' in args_resume, args_resume
+print('ok')
+"
+
+# Verify ROADMAP.md no longer contains the old v3 parked entry
+Select-String -Pattern 'currently 23 dormant' plans\ROADMAP.md
+# (should return nothing)
+```
+
+**Manual (requires PowerAtlas running):**
+1. Start PowerAtlas: `.venv-PowerAtlas\Scripts\power-atlas`
+2. Open dashboard — verify `kiro-cli v3` provider button appears in the provider filter
+3. Confirm v3 workspaces appear in the Workspaces panel (expected: `~`, agent-playbook, PowerAtlas, others)
+4. Open a v3 workspace — confirm sessions list with titles, timestamps, prompts
+5. Click "New session" on a v3 workspace — verify terminal opens with `--agent-engine v3 --trust-tools *` in the window title / process args
+6. Click "Resume" on an existing v3 session — verify terminal opens with `--agent-engine v3 --trust-tools * --resume-id sess_<uuid>`
+7. After resuming a v3 session via PowerAtlas, verify a live status dot appears on the session row
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `plans/ROADMAP.md` | Remove v3 parked item (Platform section + parked short list + ranking table footer + lines ~153-159 main bullet); update [P2b] "Session stores PowerAtlas cannot see" entry to note v3 is now visible (only sqlite classic sessions remain); remove stale "23 dormant sessions" reference | Phase 3 |
+| `README.md` | Add sub-bullet under "Auto-discovers workspaces" for kiro-cli v3 sessions (`~/.kiro/sessions/<workspace-hash>/sess_*/`) mirroring the Kiro IDE sub-bullet format | Phase 3 |
+| `plans/CLOSED_INVESTIGATIONS.md` | Update the `kiro-cli serve` "Would reopen if" paragraph (v3 inventory section, ~line 56): the store count is now 85 (62 in 7 days), not dormant. Note dashboard discovery was added by this plan; the serve path itself remains closed. Also update the dead sub-question remark (~line 62) that called the store "dormant" | Phase 3 (doc-table-only) |
+| `plans/tests/HARNESS.md` | Add `kiro-v3-session-data` resource row for `~/.kiro/sessions/<hash>/sess_*/`; update provider count from "two" to "three" in Execution Notes | Phase 3 (doc-table-only) |
+
+## 9) Implementation Divergences from Plan
+<Reserved — filled during implementation>
+
+## Follow-up Work (Deferred)
+
+1. **Liveness detection spike.** After Phase 4 ships, resume a v3 session via PowerAtlas and verify the live status dot appears and transitions correctly (working → waiting → closed). No code changes expected; this is an observational check. Source: Risk Assessment row "Liveness detection not exercised on real v3 sessions."
+
+2. **`_match_provider` binary-collision disambiguation.** `presence.py`'s `_scan()` attributes any `--resume-id sess_<uuid>` process to `"kiro-cli"` (first match) instead of `"kiro-cli-v3"`. Fix: inside `_scan()`, after extracting the session ID via `_extract_session_id`, check whether it starts with `"sess_"` and route to `"kiro-cli-v3"` instead of `"kiro-cli"`. Source: Review finding #2 (Architect).
+
+3. **`--trust-tools *` wildcard stability.** On each kiro-cli upgrade, verify `--trust-tools "*"` still launches KAS without error when combined with `--agent-engine v3`. Source: Risk Assessment row "`--trust-tools *` wildcard semantics change."
+
+4. **Config migration: `default_args="-a"` for v3.** Consider adding a Settings panel warning or config migration that detects `-a` / `--trust-all-tools` in `kiro-cli-v3` `default_args` and flags it as incompatible. Source: Review finding #14 (Senior engineer).
+
+## Review Log
+
+### 2026-08-18 — Initial plan review (4 personas: Architect, Senior engineer, Performance engineer, Reliability engineer)
+
+19 findings (8 High, 7 Medium, 4 Low). 16 auto-resolved. 3 deferred to Follow-up Work.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `_path_cache` key change description was self-contradictory ("unchanged" but gains `provider` field). | Fixed — Phase 4 explicitly states key changes from 3-tuple to 4-tuple; test update requirement added. |
+| 2 | High | Binary collision: `kiro-cli` and `kiro-cli-v3` share binary; presence first-match attributes v3 to `kiro-cli`. | Fixed — accepted limitation documented in Phase 4 and Risk Assessment; `sess_`-prefix disambiguation deferred to Follow-up Work. |
+| 3 | High | No OSError guards in `_cwd_to_sessions()` and `find_session_workspace`; `load_sessions` could propagate unhandled. | Fixed — Phase 2 now requires `try/except OSError` on all `iterdir()` and scan paths. |
+| 4 | High | Missing `isinstance(data, dict)` guard after `json.loads` in adapter — partial writes produce AttributeError. | Fixed — Phase 2 exit criterion requires this guard mirroring `data_kiro._load_meta`. |
+| 5 | High | `_clear_cache` autouse fixture resets only `data_kiro.*` globals; v3 globals leak between tests causing non-deterministic failures. | Fixed — Phase 1 exit criterion requires extending `_reset_kiro_caches()` for v3 module globals. |
+| 6 | High | Hash-dir mtime strategy: appending to `messages.jsonl` bumps hash-dir mtime on NTFS/ext4, triggering full index rebuild on every agent turn. | Fixed — Phase 2 now gates on `session.json` mtime (membership signal), not hash-dir mtime. |
+| 7 | High | `_find_v3_session_path` uncached O(n) walk called per-session in hot paths; `_workspace_status` fallback always fires for v3 (no lock files). | Fixed — callers (`get_session_tail`, `get_first_prompt`) use `BoundedCache` with mtime guard; `_find_v3_session_path` is called at most once per mtime change per session. Phase 4 caches `kiro-cli-v3` in `_path_cache`. |
+| 8 | High | `test_web.py` constructs `Session(...)` but was missing from Phase 1 file scope. | Fixed — added to Phase 1 file scope as read-only confirmation. |
+| 9 | Medium | Empty `workspacePaths` produces `cwd = ""` polluting `_cwd_index`. | Fixed — Phase 2 requires `if not cwd: continue` guard. |
+| 10 | Medium | `refresh_stale_entries_for_cwd` returned `False` when root gone (wrong). | Fixed — Phase 2 requires returning `True` when `V3_SESSIONS_ROOT` absent. |
+| 11 | Medium | `_tail_cache` and `_first_prompt_cache` as plain dicts — unbounded. | Fixed — Phase 2 now uses `BoundedCache` for both. |
+| 12 | Medium | `refresh_stale_entries_for_cwd` called `_cwd_to_sessions()` internally, triggering full rebuild every tick. | Fixed — Phase 2 uses `_norm_cwd_to_hash` cached mapping instead. |
+| 13 | Medium | `BoundedCache` missing from Phase 2 import list. | Fixed — Phase 2 import block now explicit. |
+| 14 | Medium | `default_args="-a"` appended after `--trust-tools *` causes v3 launch to fail with no PowerAtlas guard. | Fixed — code comment added in `_build_provider_args` snippet; Risk Assessment entry added; deferred config-migration to Follow-up Work. |
+| 15 | Medium | Phase 3 grep count "≥5" too low — expected ≥7. | Fixed — exit criterion updated to ≥7 with explicit breakdown. |
+| 16 | Medium | Module-level v3 cache dicts not thread-safe under concurrent `asyncio.to_thread`. | Fixed — Phase 2 requires `threading.Lock()` around index rebuild. |
+| 17 | Low | `_build_provider_args` else branch comment misleading. | Fixed — comment updated to "catch-all". |
+| 18 | Low | `sess_` prefix normalization duplicated across 3 call sites. | Fixed — Phase 2 requires `_ensure_sess_prefix` helper. |
+| 19 | Low | README, CLOSED_INVESTIGATIONS.md, HARNESS.md stale; ROADMAP [P2b] needs splitting. | Fixed — Documentation Updates table expanded; Phase 3 file scope and exit criteria updated. |
 
 ## Harness Improvement Opportunities
 
-- The probe gate instruction says "run every probe that is read-only and available" but the `kiro-cli` interactive probes hung (no `--no-interactive` equivalent for v3 resume). Cost: one tool-use cancellation. Suggested change: add a note to the probe gate that interactive CLIs cannot be probed non-interactively; skip those probes and record as open items.
+- Interactive CLI probes (kiro-cli resume, kiro-cli v3 launch) cannot be run non-interactively during `/qexplore` — the `--no-interactive` flag requires input, and without it the CLI hangs. Cost: one tool-use cancellation during probe gate. Suggested change: add a note to the probe gate in `/qexplore` that interactive CLIs with no headless mode should be recorded as open items rather than attempted non-interactively.
