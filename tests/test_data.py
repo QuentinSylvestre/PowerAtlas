@@ -1118,6 +1118,19 @@ class TestFrozenSession:
         s2 = Session("id2", "title", "cwd", "", "", "", "", "")
         assert s1.extra_fields is not s2.extra_fields
 
+    def test_session_is_hashable(self):
+        """Session objects must remain hashable after extra_fields addition (hash=False excludes the dict)."""
+        s = Session("id1", "title", "cwd", "", "", "", "", "")
+        assert hash(s) == hash(s)
+        assert {s, s} == {s}  # usable in sets
+
+    def test_session_compare_ignores_extra_fields(self):
+        """Sessions differing only in extra_fields compare equal (compare=False on extra_fields)."""
+        s1 = Session("id1", "title", "cwd", "", "", "", "", "", {"key": "v1"})
+        s2 = Session("id1", "title", "cwd", "", "", "", "", "", {"key": "v2"})
+        assert s1 == s2
+
+
 class TestClaudeTailCached:
     def test_claude_tail_cached(self, tmp_path, monkeypatch):
         """get_session_tail from Claude adapter returns cached result on second call (no re-read)."""
