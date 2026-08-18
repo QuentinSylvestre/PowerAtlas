@@ -554,16 +554,14 @@
    unchanged — refreshComposerControls() still toggles it. */
 .acp-queue-steer { display: flex; flex-direction: row; gap: 4px; align-items: stretch; position: relative; }
 .acp-queue-steer[hidden] { display: none; }
-.acp-send-mode {
-  border-radius: var(--radius-sm, 6px);
-}
 /* Custom mode picker — standalone square matching the rail settings button
    pattern; [aria-expanded="true"] highlights with accent color. */
 .acp-mode-toggle {
   border-radius: var(--radius-sm, 6px);
   color: var(--text-muted, #8b95b0);
 }
-.acp-mode-toggle[aria-expanded="true"] {
+.acp-mode-toggle[aria-expanded="true"],
+.acp-mode-toggle.acp-icon-btn[aria-expanded="true"] {
   border-color: var(--accent, #6c8cff);
   color: var(--accent, #6c8cff);
 }

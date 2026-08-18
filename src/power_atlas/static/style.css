@@ -1174,6 +1174,10 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 #acpStop.acp-icon-btn:hover {
   background: rgba(248,113,113,0.12);
 }
+/* Prevent .acp-icon-btn's `display: inline-flex` from overriding the UA
+   `display: none` that [hidden] sets — author rules always beat UA rules.
+   The same escape is applied to other [hidden] flex/grid elements in this file. */
+#acpSend[hidden], #acpStop[hidden] { display: none; }
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone
    is a sixth of the screen taken from the conversation — so it starts
    collapsed (`hidden` in the markup; acp.html toggles it and remembers the
