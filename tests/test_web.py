@@ -17574,8 +17574,8 @@ class TestAcpCommandsAvailable:
             acp_mod._supervisor.sessions.update(saved)
             acp_mod._registry.connections.discard(conn)
 
-    def test_two_inflight_drops_notification(self, acp_session):
-        """Two sessions inflight: cannot attribute; dropped."""
+    def test_two_inflight_broadcasts_to_both_sessions(self, acp_session):
+        """Two sessions inflight: catalogue is shared, broadcast to all known sessions."""
         acp_mod, sid = acp_session
         other_sid = "sess-other-cmds"
         acp_mod._supervisor.sessions[other_sid] = {
@@ -17586,8 +17586,11 @@ class TestAcpCommandsAvailable:
         _queued(conn)
         try:
             self._notify(acp_mod, [{"name": "tools", "description": "x"}])
-            assert "commands" not in acp_mod._supervisor.sessions[sid]
-            assert _queued(conn) == []
+            # Commands are broadcast to ALL sessions, not dropped
+            assert acp_mod._supervisor.sessions[sid].get("commands") == [{"name": "tools", "description": "x"}]
+            assert acp_mod._supervisor.sessions[other_sid].get("commands") == [{"name": "tools", "description": "x"}]
+            frames = _queued(conn)
+            assert any(f["type"] == "commands" for f in frames), "commands frame must be sent"
         finally:
             acp_mod._supervisor.inflight.discard(sid)
             acp_mod._supervisor.inflight.discard(other_sid)
@@ -17981,6 +17984,71 @@ class TestAcpCommandsAvailable:
             acp_mod._registry.detach(conn)
             acp_mod._registry.connections.discard(conn)
 
+
+    def test_load_session_seeds_commands_from_sibling_via_subscribe(self, acp_store):
+        # load_session copies commands/skills from any sibling session so the
+        # slash-command palette is populated on the first subscribe.
+        acp_mod, _ = acp_store
+        # Create a session with known commands already stored
+        source_sid = _live_session(acp_mod, sid="src-cmds")
+        acp_mod._supervisor.sessions[source_sid]["commands"] = [
+            {"name": "tools", "description": "list tools"}]
+        acp_mod._supervisor.sessions[source_sid]["skills"] = [
+            {"name": "qtest", "description": "testing skill"}]
+
+        # Simulate what load_session does for the seeding step
+        new_sid = "new-loaded-sid"
+        acp_mod._supervisor.sessions[new_sid] = acp_mod._new_session_record(
+            r"C:\workspace")
+        for sib_id, sib_meta in acp_mod._supervisor.sessions.items():
+            if sib_id != new_sid and sib_meta.get("commands") is not None:
+                acp_mod._supervisor.sessions[new_sid]["commands"] = sib_meta["commands"]
+                acp_mod._supervisor.sessions[new_sid]["skills"] = (
+                    sib_meta.get("skills") or [])
+                break
+        acp_mod._supervisor.history[new_sid] = acp_mod._History()
+
+        assert acp_mod._supervisor.sessions[new_sid].get("commands") == [
+            {"name": "tools", "description": "list tools"}]
+
+        # subscribe must replay the seeded commands
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, new_sid)
+        frames = _queued(conn)
+        types = [f["type"] for f in frames]
+        assert "commands" in types, "subscribe must replay commands when seeded from sibling"
+        assert "skills" in types, "subscribe must replay skills when seeded from sibling"
+        acp_mod._supervisor.sessions.pop(new_sid, None)
+        acp_mod._supervisor.history.pop(new_sid, None)
+
+    def test_commands_available_broadcasts_to_all_sessions(self, acp_session):
+        # commands_available with 2+ sessions broadcasts to every session, not
+        # just the inflight one.
+        acp_mod, sid = acp_session
+        other_sid = "sess-other-broadcast"
+        acp_mod._supervisor.sessions[other_sid] = {
+            "cwd": r"C:\other", "created": 0.0, "models": {}, "modes": {}}
+        conn_main = self._attached(acp_mod, sid)
+        conn_other = _acp_conn(acp_mod)
+        acp_mod._registry.connections.add(conn_other)
+        acp_mod._registry.attach(conn_other, other_sid)
+        _queued(conn_main)
+        _queued(conn_other)
+        try:
+            # No session inflight - both should receive the update
+            self._notify(acp_mod, [{"name": "compact", "description": "compact ctx"}])
+            frames_main = _queued(conn_main)
+            frames_other = _queued(conn_other)
+            assert any(f["type"] == "commands" for f in frames_main), \
+                "primary session must receive commands"
+            assert any(f["type"] == "commands" for f in frames_other), \
+                "secondary session must also receive commands"
+            assert acp_mod._supervisor.sessions[sid].get("commands") is not None
+            assert acp_mod._supervisor.sessions[other_sid].get("commands") is not None
+        finally:
+            acp_mod._supervisor.sessions.pop(other_sid, None)
+            acp_mod._registry.detach(conn_other)
+            acp_mod._registry.connections.discard(conn_other)
 
 class TestAcpCompactionStatus:
     """Compaction detection via the /compact prompt and context_usage drop.

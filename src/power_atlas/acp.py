@@ -3831,24 +3831,23 @@ class _Supervisor:
                 if isinstance(c, dict) and _as_text(c.get("name"))
             ][:MAX_COMMANDS_COUNT]
             skills = _parse_skills(params.get("prompts") or [])
-            # Attribute to the single inflight session if one exists; otherwise
-            # fall back to the single known session (commands/available fires
-            # after each turn ends, so inflight is typically 0 at delivery time).
+            # The commands catalogue is shared across all sessions on this
+            # agent process - every session gets the same set.  Broadcast to
+            # every known session so the slash-command palette works regardless
+            # of how many sessions are open.  When exactly one session is
+            # inflight that session is prioritised (commands/available typically
+            # fires when its turn ends), but the rest still receive the update.
             inflight = self.inflight
-            sid = None
-            if len(inflight) == 1:
-                sid = next(iter(inflight))
-            elif len(inflight) == 0 and len(self.sessions) == 1:
-                sid = next(iter(self.sessions))
-            if sid is not None:
-                meta = self.sessions.get(sid)
-                if meta is not None:
-                    meta["commands"] = commands
-                    meta["skills"] = skills
-                    _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
-                    _registry.broadcast(sid, envelope("skills", {"skills": skills}, sid))
-            elif len(inflight) == 0 and len(self.sessions) == 0 and self._reserved > 0:
-                # session/new is in flight — buffer for flush in new_session().
+            if len(self.sessions) > 0:
+                for _sid, _meta in self.sessions.items():
+                    _meta["commands"] = commands
+                    _meta["skills"] = skills
+                    _registry.broadcast(_sid, envelope("commands", {"commands": commands}, _sid))
+                    _registry.broadcast(_sid, envelope("skills", {"skills": skills}, _sid))
+                log.debug("ACP commands_available: broadcast to %d session(s) (%d inflight)",
+                          len(self.sessions), len(inflight))
+            elif len(self.sessions) == 0 and self._reserved > 0:
+                # session/new is in flight - buffer for flush in new_session().
                 # Single-slot: last-writer wins. All probe-observed notifications
                 # carry identical content, so earlier discards are safe.
                 if self._pending_commands is not None:
@@ -3856,8 +3855,7 @@ class _Supervisor:
                               "(last-writer wins, concurrent new_session window)")
                 self._pending_commands = (commands, skills)
             else:
-                log.debug("ACP commands_available: %d session(s) inflight, %d known — "
-                          "cannot attribute; dropped", len(inflight), len(self.sessions))
+                log.debug("ACP commands_available: no sessions known and none reserved - dropped")
             return
         if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
             # Silent consume; the TUI logs this at debug and displays nothing.
@@ -4041,6 +4039,15 @@ class _Supervisor:
                 return {"sessionId": session_id, "cwd": live.get("cwd", cwd)}
             self.sessions[session_id] = _new_session_record(cwd)
             self._publish_live()
+            # Seed commands/skills from any sibling session that already has
+            # them (same agent process = same catalogue). This ensures the
+            # slash-command palette is available immediately on subscribe, even
+            # when the next commands_available notification has not arrived yet.
+            for _sib_id, _existing_meta in self.sessions.items():
+                if _sib_id != session_id and _existing_meta.get("commands") is not None:
+                    self.sessions[session_id]["commands"] = _existing_meta["commands"]
+                    self.sessions[session_id]["skills"] = _existing_meta.get("skills") or []
+                    break
             self.history[session_id] = _History()
             # Populated before the round trip, same reasoning as the history
             # buffer above it: the replay's `tool_call_update` notifications
