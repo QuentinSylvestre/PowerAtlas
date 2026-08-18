@@ -266,8 +266,8 @@
                 aria-label="Prompt"
                 aria-haspopup="listbox" aria-controls="acpCmdDropdown"
                 aria-expanded="false"></textarea>
-      <button class="acp-btn acp-send acp-icon-btn" id="acpSend" type="button" disabled
-              aria-label="Send">
+      <button class="acp-btn acp-icon-btn" id="acpSend" type="button" disabled
+              aria-label="Start">
         <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
@@ -275,18 +275,17 @@
       <!-- Only during a turn. A stop control that is present and inert for the
            whole idle time is indistinguishable from one that has stopped
            working, and a turn under -a can run tools for minutes. -->
-      <button class="acp-btn acp-danger acp-send acp-icon-btn" id="acpStop" type="button" hidden
+      <button class="acp-btn acp-danger acp-icon-btn" id="acpStop" type="button" hidden
               aria-label="Stop">
         <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor"/>
         </svg>
       </button>
-      <!-- Queue and Steer: single action button + custom mode picker visible
-           during a turn only when the textarea has text. They replace Stop in
-           that state — the single button matches Stop's height so the composer
-           row stays stable. Queue holds the text until the turn ends then
-           sends it normally. Steer injects the text mid-turn via _session/steer.
-           The mode selector persists the chosen mode across reloads. -->
+      <!-- Queue and Steer: action button + mode-picker button, both standalone
+           34×34 squares. Visible during a turn only when the textarea has text.
+           They replace Stop in that state. Queue holds the text until the turn
+           ends then sends it normally. Steer injects the text mid-turn via
+           _session/steer. The mode selector persists the chosen mode across reloads. -->
       <div class="acp-queue-steer" id="acpQueueSteer" hidden>
         <button class="acp-btn acp-send-mode acp-icon-btn" id="acpSendMode" type="button"
                 aria-label="Inject this text into the current agent turn">
@@ -297,9 +296,13 @@
         </button>
         <!-- Custom mode picker — replaces the native <select> so the popover
              opens just above the button on mobile rather than centre-screen. -->
-        <button class="acp-mode-toggle" id="acpModeToggle" type="button"
-                aria-haspopup="true" aria-expanded="false" aria-label="Change send mode"
-                data-mode="steer">▾</button>
+        <button class="acp-btn acp-mode-toggle acp-icon-btn" id="acpModeToggle" type="button"
+                aria-haspopup="menu" aria-expanded="false" aria-label="Change send mode"
+                data-mode="steer">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
         <div class="acp-mode-menu" id="acpModeMenu" hidden role="menu" aria-label="Send mode">
           <button class="acp-mode-option" id="acpModeOptSteer" data-value="steer" role="menuitem">Steer</button>
           <button class="acp-mode-option" id="acpModeOptQueue" data-value="queue" role="menuitem">Queue</button>
@@ -545,32 +548,24 @@
   max-height: 400px;
   overflow-y: auto;
 }
-/* ---- single-button + mode-select composer row ----------------------------- */
-/* Queue/Steer row: single full-height action button + inline mode selector.
-   Replaces the two half-height buttons; wrapper #acpQueueSteer visibility is
+/* ---- two-button + mode-select composer row -------------------------------- */
+/* Queue/Steer row: action button + mode-picker button, both 34×34 standalone
+   squares separated by a 4px gap. Wrapper #acpQueueSteer visibility is
    unchanged — refreshComposerControls() still toggles it. */
-.acp-queue-steer { display: flex; flex-direction: row; gap: 0; align-items: stretch; position: relative; }
+.acp-queue-steer { display: flex; flex-direction: row; gap: 4px; align-items: stretch; position: relative; }
 .acp-queue-steer[hidden] { display: none; }
 .acp-send-mode {
-  flex: 1;
-  width: auto;
-  min-width: 0;
-  border-radius: var(--radius-sm, 6px) 0 0 var(--radius-sm, 6px);
+  border-radius: var(--radius-sm, 6px);
 }
-/* Custom mode picker — replaces native <select> so the popover opens just
-   above the button on all devices rather than centre-screen on mobile. */
+/* Custom mode picker — standalone square matching the rail settings button
+   pattern; [aria-expanded="true"] highlights with accent color. */
 .acp-mode-toggle {
-  padding: 0 6px;
-  height: 100%;
-  background: var(--surface, #1e2030);
-  border: 1px solid var(--border, #2d3150);
-  border-left: none;
-  border-radius: 0 var(--radius-sm, 6px) var(--radius-sm, 6px) 0;
+  border-radius: var(--radius-sm, 6px);
   color: var(--text-muted, #8b95b0);
-  font-size: 11px;
-  cursor: pointer;
-  min-width: 0;
-  line-height: 1;
+}
+.acp-mode-toggle[aria-expanded="true"] {
+  border-color: var(--accent, #6c8cff);
+  color: var(--accent, #6c8cff);
 }
 .acp-mode-toggle:focus-visible {
   outline: 2px solid var(--accent, #6c8cff);
@@ -1288,14 +1283,12 @@
 
   function setTurn(active) {
     turnActive = active;
-    sendBtn.textContent = active ? 'Working…' : 'Send';
     // Fix 5: dead `stopBtn.disabled = false` removed — refreshComposerControls owns this field.
     // Fix 4: clear _stopInProgress so the Stop button is re-enabled when the turn ends.
     if (!active) _stopInProgress = false;
     // If a turn starts while the command dropdown is open, close it — a mid-turn
     // dropdown cannot be acted on and would just be confusing.
     if (active) hideCommandDropdown();
-    stopBtn.textContent = 'Stop';
     refreshComposerControls();
     // Closing under a live turn is refused by the server — the outstanding
     // session/prompt would sit on a session the agent no longer has for the
@@ -7241,7 +7234,6 @@
     // If refreshComposerControls() were called after _stopInProgress = true, this line
     // would be redundant (refreshComposerControls() sets stopBtn.disabled via _stopInProgress).
     stopBtn.disabled = true;
-    stopBtn.textContent = 'Stopping…';
   });
   // Custom mode picker: toggle button opens/closes the menu.
   function _closeModeMenu() {
