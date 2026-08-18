@@ -1691,6 +1691,65 @@ check("a later tool_update rewrites the same row", (tpl) => {
   assert(page.transcript().includes("completed"), "the new status never rendered");
 });
 
+// ---- tool call elapsed time ------------------------------------------
+
+check("a tool_call with startedAt and stoppedAt shows elapsed time in the head", (tpl) => {
+  const { page, live } = connected(tpl);
+  // startedAt and stoppedAt are POSIX seconds (time.time() on the server).
+  // Use values far enough apart that elapsedText produces a non-empty string.
+  const startedAt = 1000;
+  const stoppedAt = 1003;
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "t-tm1", title: "shell", kind: "execute",
+               status: "completed", command: "echo hi",
+               startedAt, stoppedAt },
+  });
+  assert(page.transcript().includes("3s"),
+         "a tool call with a 3-second elapsed time did not show '3s' in the transcript — " +
+         "startedAt/stoppedAt are not being picked up by the time span");
+});
+
+check("a tool_update with stoppedAt freezes the elapsed time", (tpl) => {
+  const { page, live } = connected(tpl);
+  const startedAt = 2000;
+  const stoppedAt = 2065;
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "t-tm2", title: "shell", kind: "execute",
+               status: "in_progress", command: "make",
+               startedAt },
+  });
+  page.deliver({
+    type: "tool_update", sessionId: live,
+    payload: { toolCallId: "t-tm2", status: "completed",
+               startedAt, stoppedAt },
+  });
+  // 65s = 1m 5s
+  assert(page.transcript().includes("1m 5s"),
+         "after a tool_update carrying stoppedAt, the elapsed time was not frozen at " +
+         "the correct value — expected '1m 5s' for a 65-second call");
+});
+
+check("a tool_call with no startedAt shows no elapsed time span", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "tool_call", sessionId: live,
+    payload: { toolCallId: "t-tm3", title: "shell", kind: "execute",
+               status: "in_progress", command: "ls" },
+  });
+  // No startedAt — time span should be hidden (empty text content).
+  const transcript = page.el("acpTranscript");
+  const timeSpans = Array.from(transcript.querySelectorAll
+    ? transcript.querySelectorAll(".acp-tool-time")
+    : []);
+  const anyVisible = timeSpans.some(function(s) {
+    return !s.hidden && s.textContent.trim() !== "";
+  });
+  assert(!anyVisible,
+         "a tool_call with no startedAt rendered a non-empty elapsed time span");
+});
+
 // ------------------------------------------------- the agent's markdown --
 //
 // The server parses a finished bubble with mistune and sends the **token

@@ -715,6 +715,9 @@
   // toolCallId -> the elements a later `tool_update` rewrites in place, so a
   // call that runs then completes is one row rather than three.
   var toolRows = Object.create(null);
+  // toolCallId -> setInterval id for in-progress tool calls whose elapsed time
+  // is ticking live. Cleared by clearTranscript() and when stoppedAt arrives.
+  var _toolTimers = Object.create(null);
   // Accumulates acp-msg-tool rows added during the current turn; flushed into
   // collapsible group containers at meta turn:end by flushToolGroups().
   // Null between turns (reset at turn:start and after each flush).
@@ -1335,6 +1338,47 @@
     var m = Math.floor(secs / 60);
     var s = secs % 60;
     return m > 0 ? m + 'm ' + s + 's' : s + 's';
+  }
+
+  // Update a tool call row's elapsed-time span, and manage its live ticker.
+  //
+  // `row`  — the toolRows entry (`{timeSpan, startedAt, stoppedAt, ...}`).
+  // `id`   — the toolCallId string used to key `_toolTimers`, or null/empty
+  //          for rows with no id (no timer is started in that case).
+  //
+  // When `stoppedAt` is present the display is frozen and any running timer
+  // is cleared. When the call is still in progress (`!stoppedAt`) and an `id`
+  // is available, a 1-second ticker is started if one is not already running.
+  // Called for both the new-row path and the update path so one code path
+  // handles all cases.
+  function _updateToolTime(row, id) {
+    var span = row.timeSpan;
+    if (!span || !row.startedAt) {
+      if (span) span.hidden = true;
+      return;
+    }
+    var text = elapsedText(row.startedAt, row.stoppedAt || undefined);
+    if (!text) { span.hidden = true; return; }
+    span.textContent = text;
+    span.hidden = false;
+    if (row.stoppedAt) {
+      // Call is done — clear any running ticker.
+      if (id && _toolTimers[id]) {
+        clearInterval(_toolTimers[id]);
+        delete _toolTimers[id];
+      }
+    } else if (id && !_toolTimers[id]) {
+      // Call is in progress — start a 1-second ticker.
+      _toolTimers[id] = setInterval(function() {
+        if (!row.timeSpan) {
+          clearInterval(_toolTimers[id]);
+          delete _toolTimers[id];
+          return;
+        }
+        row.timeSpan.textContent = elapsedText(row.startedAt);
+        row.timeSpan.hidden = false;
+      }, 1000);
+    }
   }
 
   // The 1 px top and bottom border `.acp-prompt` carries. `scrollHeight`
@@ -2607,6 +2651,9 @@
           _renderEditPanel(known);
         }
         if (payload.output) _applyToolDigest(known, payload.output);
+        if (typeof payload.startedAt === 'number') known.startedAt = payload.startedAt;
+        if (typeof payload.stoppedAt === 'number') known.stoppedAt = payload.stoppedAt;
+        _updateToolTime(known, id);
         return;
       }
       // `locations` can arrive on the update rather than the opening call —
@@ -2642,6 +2689,11 @@
         }
         known.body.appendChild(cmdWrap);
       }
+      // Update elapsed time — picks up startedAt/stoppedAt from this update
+      // frame (carried forward from the opening tool_call by the server).
+      if (typeof payload.startedAt === 'number') known.startedAt = payload.startedAt;
+      if (typeof payload.stoppedAt === 'number') known.stoppedAt = payload.stoppedAt;
+      _updateToolTime(known, id);
       return;
     }
 
@@ -2684,6 +2736,10 @@
     status.hidden = true;
     _setToolStatus(status, payload.status);
     head.appendChild(status);
+    var timeSpan = document.createElement('span');
+    timeSpan.className = 'acp-tool-time';
+    timeSpan.hidden = true;
+    head.appendChild(timeSpan);
     body.appendChild(head);
 
     var isEdit = payload.kind === 'edit';
@@ -2738,7 +2794,10 @@
     if (id) {
       toolRows['t:' + id] = { status: status, body: body, kind: payload.kind,
         panel: panel, quickInfo: quickInfo, locations: payload.locations || null,
-        digest: null, outputPayload: null };
+        digest: null, outputPayload: null,
+        timeSpan: timeSpan,
+        startedAt: (typeof payload.startedAt === 'number') ? payload.startedAt : null,
+        stoppedAt: (typeof payload.stoppedAt === 'number') ? payload.stoppedAt : null };
     }
     // Drain a body that arrived before this row existed, then the digest —
     // in that order, so `_applyToolDigest` sees the body and does not post a
@@ -2755,6 +2814,8 @@
     if (id && isEdit && !payload.output && !hadPendingOutput) {
       _renderEditPanel(toolRows['t:' + id]);
     }
+    // Render initial elapsed time (or start a live ticker for in-progress calls).
+    if (id) _updateToolTime(toolRows['t:' + id], id);
     // Accumulate this row for turn-end grouping. The flush at meta turn:end
     // will wrap consecutive sub-runs of >=2 rows into collapsible group containers.
     if (!toolGroup) toolGroup = [];
@@ -3562,6 +3623,12 @@
     promptNavEl.hidden = true;
     agentBody = null;
     toolRows = Object.create(null);
+    // Clear any live elapsed-time timers — the rows they were ticking against
+    // were just removed and the intervals would otherwise run forever.
+    Object.keys(_toolTimers).forEach(function(k) {
+      clearInterval(_toolTimers[k]);
+    });
+    _toolTimers = Object.create(null);
     // Held bodies belong to rows that no longer exist. Kept in step with
     // `toolRows`, or a body stashed under an id the next session happened to
     // reuse would attach itself to a stranger's tool call.

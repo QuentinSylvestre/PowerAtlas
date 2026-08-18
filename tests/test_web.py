@@ -3098,10 +3098,16 @@ class TestAcpToolCallVisibility:
 
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["tool_call"]
-        assert frames[0]["payload"] == {
-            "toolCallId": "t1", "title": "Set the tab title",
-            "kind": "execute", "status": "pending",
-            "command": "Get-Content ~/.kiro/sessions/cli/x.json"}
+        p = frames[0]["payload"]
+        assert p["toolCallId"] == "t1"
+        assert p["title"] == "Set the tab title"
+        assert p["kind"] == "execute"
+        assert p["status"] == "pending"
+        assert p["command"] == "Get-Content ~/.kiro/sessions/cli/x.json"
+        # startedAt is injected server-side (no timestamp on the wire)
+        assert isinstance(p.get("startedAt"), float)
+        # No stoppedAt yet — the call is still pending
+        assert "stoppedAt" not in p
         # Recorded too, or a reload would show a conversation with no sign
         # that anything ran during it.
         assert acp_mod._supervisor.history[sid].events() == frames
@@ -3621,6 +3627,153 @@ class TestAcpToolCallVisibility:
             "sessionUpdate": "tool_call", "toolCallId": "t5", "title": "shell"})
         assert _queued(conn) == []
         assert acp_mod._supervisor.history[sid].events() == []
+
+
+class TestAcpToolCallTiming:
+    """startedAt/stoppedAt are stamped server-side (the wire carries none)
+    and survive in the replay buffer so a reload can show elapsed time."""
+
+    def _attached(self, acp_mod, sid):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _notify(self, acp_mod, sid, update):
+        acp_mod._supervisor._on_notification({
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": update},
+        })
+
+    def test_tool_call_payload_carries_started_at(self, acp_session):
+        """The opening frame gets a server-stamped startedAt; the wire has none."""
+        import time as _time
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        before = _time.time()
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "echo hi"}})
+        after = _time.time()
+        frames = _queued(conn)
+        payload = next(f for f in frames if f["type"] == "tool_call")["payload"]
+        assert isinstance(payload.get("startedAt"), float)
+        assert before <= payload["startedAt"] <= after
+        assert "stoppedAt" not in payload
+
+    def test_tool_update_carries_started_at_from_opening_frame(self, acp_session):
+        """The terminal update echoes the startedAt stamped on the opening frame —
+        not a new timestamp — so elapsed is measured from the actual call start."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "sleep 1"}})
+        open_frames = _queued(conn)
+        started_at = next(
+            f for f in open_frames if f["type"] == "tool_call")["payload"]["startedAt"]
+
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "rawOutput": {"items": [{"Text": "done"}]}})
+        update_frames = _queued(conn)
+        update_payload = next(
+            f for f in update_frames if f["type"] == "tool_update")["payload"]
+        # Must be the same value — not a fresh time.time() — so the elapsed
+        # display on the page is stable across replay.
+        assert update_payload.get("startedAt") == started_at
+
+    def test_tool_update_carries_stopped_at_on_terminal_status(self, acp_session):
+        """Terminal update (completed/failed/cancelled) gets a stoppedAt."""
+        import time as _time
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "pwd"}})
+        _queued(conn)  # drain opening frame
+
+        before = _time.time()
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "rawOutput": {"items": [{"Text": "ok"}]}})
+        after = _time.time()
+        update_frames = _queued(conn)
+        update_payload = next(
+            f for f in update_frames if f["type"] == "tool_update")["payload"]
+        assert isinstance(update_payload.get("stoppedAt"), float)
+        assert before <= update_payload["stoppedAt"] <= after
+
+    def test_non_terminal_tool_update_does_not_carry_stopped_at(self, acp_session):
+        """Intermediate updates (still in_progress) must not freeze the timer."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "long_cmd"}})
+        _queued(conn)
+
+        # An intermediate update (non-terminal status, with streamed content)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "in_progress",
+            "content": [{"type": "text", "text": "line 1\n"}]})
+        update_frames = _queued(conn)
+        # Intermediate content-only updates are filtered out as blank; if one
+        # somehow passes through it should not carry stoppedAt.
+        for f in update_frames:
+            if f["type"] == "tool_update":
+                assert "stoppedAt" not in f["payload"]
+
+    def test_tool_call_without_id_carries_no_timing(self, acp_session):
+        """A frame with no toolCallId produces no startedAt — no key to track it."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "echo"}})
+        frames = _queued(conn)
+        for f in frames:
+            if f["type"] == "tool_call":
+                assert "startedAt" not in f["payload"]
+
+    def test_started_at_survives_reload(self, acp_session):
+        """startedAt and stoppedAt are in the replay buffer, so a reload shows
+        the elapsed time without a live process."""
+        acp_mod, sid = acp_session
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call", "toolCallId": "t1",
+            "title": "shell", "kind": "execute", "status": "in_progress",
+            "rawInput": {"command": "make test"}})
+        self._notify(acp_mod, sid, {
+            "sessionUpdate": "tool_call_update", "toolCallId": "t1",
+            "status": "completed",
+            "rawOutput": {"items": [{"Text": "pass"}]}})
+
+        # Simulate a page reload: fresh connection going through _handle_subscribe
+        # so the history frame is emitted, matching the real reconnect path.
+        fresh_conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(fresh_conn)
+        acp_mod._handle_subscribe(fresh_conn, sid)
+        replayed = _queued(fresh_conn)
+        # The history frame carries all buffered events.
+        history_frame = next(f for f in replayed if f["type"] == "history")
+        events = history_frame["payload"]["events"]
+        tool_call_event = next(e for e in events if e["type"] == "tool_call")
+        tool_update_event = next(e for e in events if e["type"] == "tool_update")
+        assert isinstance(tool_call_event["payload"].get("startedAt"), float)
+        assert isinstance(tool_update_event["payload"].get("startedAt"), float)
+        assert isinstance(tool_update_event["payload"].get("stoppedAt"), float)
+        # The update carries the same startedAt as the opening frame.
+        assert (tool_call_event["payload"]["startedAt"]
+                == tool_update_event["payload"]["startedAt"])
 
 
 class TestAcpPromptDispatch:

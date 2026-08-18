@@ -2356,6 +2356,13 @@ class _Supervisor:
         # worth of text per edit, so it is worth reclaiming per session
         # rather than only at a full reset.
         self._diff_backfill: dict[str, dict[str, dict]] = {}
+        # Per-tool-call wall-clock start time, keyed by (session_id, toolCallId).
+        # Stamped when the opening `tool_call` frame arrives (the wire carries no
+        # timestamp itself) and carried forward into every subsequent
+        # `tool_call_update` payload so elapsed time is available on reload.
+        # Entries are removed when the terminal `tool_call_update` is processed,
+        # and swept in bulk on close_session / _detach.
+        self._tool_start_times: dict[tuple[str, str], float] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -2638,6 +2645,7 @@ class _Supervisor:
         self._compaction_buf.clear()
         self._compaction_started_at.clear()
         self._diff_backfill.clear()
+        self._tool_start_times.clear()
         # Same reason the buffers go: nothing can ever read a bubble whose
         # session no longer exists, and the text in it is agent-authored and
         # unbounded until the cap.
@@ -3613,6 +3621,32 @@ class _Supervisor:
                 # until turn end.
                 if kind == "tool_call_update" and payload.get("status") in _TERMINAL_TOOL_STATUSES:
                     self.crew_spawn_anchors.pop(payload["toolCallId"], None)
+                # Stamp wall-clock timing onto the recorded payload. The wire
+                # carries no timestamp, so PowerAtlas measures it here. Both
+                # fields are POSIX seconds (same unit as `time.time()`), matching
+                # the JS `elapsedText(startedAt, endAt)` helper that uses
+                # `Date.now() / 1000` as its reference clock.
+                #
+                # `startedAt` — recorded on the opening `tool_call` frame and
+                # carried forward verbatim on every subsequent `tool_call_update`
+                # so the elapsed value is stable across replay.
+                # `stoppedAt` — recorded only on the terminal `tool_call_update`.
+                # In-progress calls replayed after a reload show the frozen
+                # elapsed-at-last-observation rather than a ticking timer,
+                # which is honest (there is no live process to anchor to).
+                tc_id = payload.get("toolCallId")
+                if tc_id:
+                    if kind == "tool_call":
+                        _t = time.time()
+                        self._tool_start_times[(session_id, tc_id)] = _t
+                        payload["startedAt"] = _t
+                    elif kind == "tool_call_update":
+                        _started = self._tool_start_times.get((session_id, tc_id))
+                        if _started is not None:
+                            payload["startedAt"] = _started
+                        if payload.get("status") in _TERMINAL_TOOL_STATUSES:
+                            payload["stoppedAt"] = time.time()
+                            self._tool_start_times.pop((session_id, tc_id), None)
                 # Rendered, not only logged. `-a` removes the permission gate
                 # and the justification for removing it was a human watching
                 # the run; a tool call that reaches nothing but a log file the
@@ -4107,6 +4141,11 @@ class _Supervisor:
         self.history.pop(session_id, None)
         self.inflight.discard(session_id)
         self._diff_backfill.pop(session_id, None)
+        # Per-tool start times for this session. Swept by (session_id, toolCallId)
+        # key prefix — any call that was still in flight when the session closed.
+        self._tool_start_times = {
+            k: v for k, v in self._tool_start_times.items() if k[0] != session_id
+        }
         # Remove pending spawner anchors for this session — a session that
         # closes before its list_update arrives would otherwise leave stale
         # entries until _detach or turn end.
