@@ -233,6 +233,24 @@
 **How to apply**: In `_evict_crew_children` (or any equivalent cleanup helper), always use `keep_history=True` at turn-end — preserving both `subagent_sessions` and `subagent_history` for click-to-view. Only the turn-start full-evict path (`keep_history=False`, before a new fan-out begins) clears them. Add a comment at the `subagent_sessions` field declaration noting it is the routing key for click-to-view, not just a fan-out membership cache.
 **Source**: `260813-1559_ACP_INLINE_CREW_PANEL` — Phase 1, H1 finding | **Verified**: 2026-08-13
 
+### acp.py crew lifecycle requires three distinct eviction paths — turn-start, turn-end, and close
+
+**Why**: The crew panel exhibited stacking: crew cards from previous subagent spawns accumulated in the conversation stack every time subagents were called. Two eviction paths are required in `acp.py`: at turn-start, evict all done crew entries from previous turns; at turn-end, force-mark any remaining non-done crew entries as done. A third path handles close/disconnect. Missing any one path causes visual stacking (stale cards) or state leaks (non-done entries surviving turn boundaries).
+**How to apply**: When modifying crew-entry lifecycle in `acp.py`, preserve all three eviction sites: (1) turn-start eviction of prior-turn done entries, (2) turn-end force-mark of non-done entries, (3) close-time cleanup. The `keep_history` semantics differ per path — do not consolidate into a single eviction point.
+**Source**: Sessions 0815bf0a + 20326e6d (2026-08-13) — crew panel stacking diagnosis and fix | **Verified**: 2026-08-18 (sweep, verifier-confirmed plausible from session content)
+
+### Copy-button DOM insertion requires updating co-located test fixtures for HTML structure
+
+**Why**: Adding a copy-to-clipboard button for code blocks in `/acp` changed the DOM structure of code block elements. This caused 10 test failures in the existing HTML-sink and label tests that asserted on the prior DOM shape. The button is a sibling element wrapping the original `<code>` tag, so any test using CSS selectors or `.textContent` expectations on code block structure must be updated.
+**How to apply**: When adding any DOM element to a component that existing tests snapshot, immediately grep the test suite for selectors or assertions that reference that component's structure. Update fixtures in the same commit as the DOM change, not after the test run fails.
+**Source**: Sessions 030c5721 + 06e42fe1 (2026-08-11) — copy button feature, 10 test failures from DOM change | **Verified**: 2026-08-18 (sweep, verifier-confirmed plausible)
+
+### ACP button label shows stale value on first load when refreshSettings() queries by class instead of id
+
+**Why**: The ACP toggle button displayed "Default" on first load because `refreshSettings()` used `document.querySelector('.topbar-profile-btn')` which grabbed the first element with that class — the `<a>` link — instead of the specific ACP button. The class-selector matched an unrelated element, returning wrong initial state.
+**How to apply**: When adding buttons to the ACP topbar that need to reflect state, use `getElementById` with a unique id, not a class selector that may match sibling elements. The same class appearing on multiple topbar elements is the failure mode.
+**Source**: Session 7d5f24f2 (2026-08-13) — "ACP button shows 'Default' on first load... class-selector collision fixed" | **Verified**: 2026-08-18 (sweep, verifier-confirmed from session content)
+
 ### No-anchor fan-out JS slot: assign a sentinel key on first creation, reuse on updates
 
 **Why**: The initial Phase 3 design computed a fresh `_na_N` sequence key on every `setCrew` call when `toolCallId` was empty. Each status update to the same no-anchor fan-out created a new slot, a new orphaned panel, and a new running `setInterval` timer. A single fan-out with 5 updates produced 5 invisible panels and 5 live timers (High finding, Phase 3+4 review). The fix: a module-level `_noAnchorKey` sentinel stores the key assigned on first creation; subsequent updates reuse it. The sequence counter still advances for genuinely new fan-outs (SC3), but not for updates.
