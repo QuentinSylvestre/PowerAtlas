@@ -156,6 +156,37 @@ class TestKiroV3IsAvailable:
 # TestKiroV3DiscoverWorkspaces
 # ---------------------------------------------------------------------------
 
+
+class TestKiroV3CwtoCacheHit:
+    """Verify the O(1) fast path in _cwd_to_sessions is taken on cache hit."""
+
+    def test_fast_path_returns_same_index_without_stat_calls(self, tmp_path, monkeypatch):
+        """When root mtime is unchanged and index is non-empty, second call returns same index."""
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        _make_session(tmp_path, "h1", "sess_fp", "C:\\W",
+                      messages=[_user_line("Q1")])
+
+        # First call populates the cache
+        index1, display1 = dv3._cwd_to_sessions()
+        assert index1  # populated
+        # Record the cached root mtime
+        root_mtime_after_first = dv3._root_mtime
+
+        # Second call should take the fast path (root mtime unchanged)
+        index2, display2 = dv3._cwd_to_sessions()
+        assert index2 == index1  # same result
+        assert dv3._root_mtime == root_mtime_after_first  # mtime unchanged, fast path taken
+
+        # Add a new session — this should bump the root mtime and trigger Phase 1
+        _make_session(tmp_path, "h1", "sess_fp2", "C:\\W",
+                      messages=[_user_line("Q2")])
+        _bump_mtime(tmp_path / "h1")
+        _bump_mtime(tmp_path)  # root mtime changes
+
+        index3, _ = dv3._cwd_to_sessions()
+        assert len(index3.get(dv3._normalize_path("C:\\W"), [])) == 2  # new session discovered
+
+
 class TestKiroV3DiscoverWorkspaces:
     def test_single_session(self, tmp_path, monkeypatch):
         root = tmp_path / "sessions"
@@ -557,6 +588,31 @@ class TestKiroV3GetSessionTail:
 
         r2 = dv3.get_session_tail("sess_inv", "C:\\W")
         assert "Updated answer" in r2
+
+    def test_empty_tail_cached_and_invalidated_on_new_message(self, tmp_path, monkeypatch):
+        """Empty tail (no assistant messages yet) is cached; discarded when assistant message arrives."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        msgs_path = root / "h1" / "sess_empty" / "messages.jsonl"
+        _make_session(root, "h1", "sess_empty", "C:\\W", messages=[
+            json.dumps({"id": "t1", "timestamp": "t", "payload": {"type": "tool_call", "content": "x"}}),
+        ])
+
+        r1 = dv3.get_session_tail("sess_empty")
+        assert r1 == []  # no assistant messages
+
+        # Add an assistant message and bump mtime
+        msgs_path.write_text(
+            json.dumps({"id": "t1", "timestamp": "t", "payload": {"type": "tool_call", "content": "x"}}) + "\n"
+            + json.dumps({"id": "a1", "timestamp": "t", "payload": {"type": "assistant", "content": "Hello"}}) + "\n",
+            encoding="utf-8",
+        )
+        _bump_mtime(msgs_path)
+
+        r2 = dv3.get_session_tail("sess_empty")
+        assert "Hello" in r2  # mtime guard invalidated the empty-tail cache
 
 
 # ---------------------------------------------------------------------------

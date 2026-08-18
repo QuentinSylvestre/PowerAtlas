@@ -341,7 +341,11 @@ def _find_v3_session_path(session_id: str) -> Path | None:
     except OSError:
         pass
 
-    _session_path_cache[session_id] = found_path
+    # Only cache positive (found) results — None is not cached to allow brand-new
+    # ACP sessions to be discovered on the next call without waiting for a full
+    # index rebuild.  Miss cost is bounded by the number of hash dirs (~23).
+    if found_path is not None:
+        _session_path_cache[session_id] = found_path
     return found_path
 
 
