@@ -21,8 +21,7 @@
 
 ### Platform
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
-- **kiro-cli v3 session support** — scan the `sess_*/` store; currently 23 dormant historical sessions are invisible, store is not actively growing
-- **Parked items** — v3 support · invisible sqlite sessions · usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
+- **Parked items** — invisible sqlite sessions · usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
 - **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
 
 ### Session Control & Integration
@@ -31,7 +30,7 @@
 - **Auto-mode for `/acp` permissions** — drop `-a` and decide each request automatically; latency is measured and fine, accuracy against adversarial inputs is the open question
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured)
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
-- **[P2b] Session stores PowerAtlas cannot see** — 23 v3 sessions and 11 classic sqlite sessions are invisible; v3 store is dormant, sqlite sessions have no files on disk
+- **[P2b] Session stores PowerAtlas cannot see** — 11 classic sqlite sessions have no file on disk and are invisible; v3 sessions are now covered by the kiro-cli-v3 provider (shipped 2026-08-18)
 
 ### Misc
 - **[SECURITY] Loopback API token** — any local process can create sessions and run shell commands via `/api/*`; proposed fix is a startup-generated secret injected into the page
@@ -79,7 +78,7 @@
 | 4 | *Tell the operator a turn ended* | week | Cheap version fails when the phone sleeps the tab; the real one reopens the declined-TLS decision |
 | 5 | *An auto-mode for `/acp` permissions* | **keystone** | Gates all six `## Automation & Workflows` items. Latency settled; **accuracy entirely unmeasured**, and that is the real gate |
 
-**Parked, deliberately**: v3 session support · `[P2b]` invisible stores · usage stats · plan-progress
+**Parked, deliberately**: [P2b] invisible stores · usage stats · plan-progress
 overlay · creating a session in a workspace that has none · the accepted `[SECURITY]` item (carries its
 own reopen condition).
 
@@ -150,9 +149,6 @@ own reopen condition).
   - *Shapes worth considering — still none chosen for this item, and one was deliberately declined next door.* (a) reference-by-name indirection — store `AUTH_TOKEN_PRODUCTION = "@keyring:poweratlas/prod"` and resolve at launch from Windows Credential Manager / libsecret. **`260731_ACP_REMOTE_CLIENT_PRODUCTIZATION` (D4) put exactly this question to the user for the remote-access surface and the answer was to change nothing**: redaction was recommended and declined so the values stay readable in the WebUI, the loopback split being the sole protection, on the measured ground that PyCharm already stores run-config env vars in plaintext in `.idea/workspace.xml`. That decision is scoped to *that* plan's remote surface — it keeps `/api/launchers` off the remote allowlist rather than fixing the local exposure — so it does not close this item, but it does mean a proposal here must argue against a standing user decision rather than into a vacuum.
   - *Adjacent, same root cause*: the `GET`-side gap is general. The Origin/Referer half protecting only POST means every read endpoint is open to any local process supplying a loopback `Host`. Worth deciding whether that is acceptable independently of this item — the remote guard added 2026-08-01 bounds it to loopback but does not authenticate it.
 
-- **kiro-cli v3 session support** — scan `~/.kiro/sessions/<workspace-hash>/sess_*/` alongside v2 `cli/` directory; handle new message format, subagent detection via `sub-executions/` dir
-  - *Sized 2026-07-24*: **23 v3 sessions currently invisible** across 3 workspace-hash dirs. A read path already exists (the v3 branch of `_resolve_jsonl_path_uncached` in `status_classifier.py`); what is missing is discovery — `data_kiro.py` globs only `sessions\cli\*.json`. `kiro-cli chat --list-sessions -f json` confirms them as `"source":"v3"`. A further **11 "classic" sqlite conversations** have no file on disk at all. See `## Session Control & Integration` → [P2b].
-  - **Priority downgraded 2026-07-24 — the v3 store is dormant, not live.** All 23 sessions fall between **2026-06-18 and 2026-07-16**, nothing in the 8 days since, and the window opens exactly at the `260618_KIRO_CLI_V3_PLAYBOOK_MIGRATION` work. Current kiro-cli 2.14.x writes `kiro-cli chat` sessions to the **v2** `sessions\cli\` layout even under `--v3`. So this item surfaces 23 historical sessions from a closed four-week experiment, not ongoing work — worth doing for completeness, not for coverage of live activity. Re-raise if the store starts growing again.
 
 ## Session Control & Integration
 

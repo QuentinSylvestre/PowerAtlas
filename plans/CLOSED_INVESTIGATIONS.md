@@ -39,6 +39,7 @@
 **Verdict: closed for status purposes on 2.14.1.** Two independent structural walls, the deeper one documented design intent rather than a bug.
 
 *Re-checked 2026-07-25: nothing has moved. Still 2.14.1; `sess_*` still 23 with the newest at 2026-07-16, while `cli/` grew to 5,654; `serve --help` still offers only `--port`, `-v`, `-h`.*
+*Updated 2026-08-18: v3 store now has 85 sessions across 23 workspace-hash dirs (62 created in the last 7 days); v3 session support shipped as the kiro-cli-v3 provider in the dashboard. Wall 1 (serve reads the wrong store) remains. Wall 2 (cross-process liveness suppression) remains.*
 
 - *Verified — it is genuine ACP over WebSocket*, not a Kiro-specific protocol. `serve` is a thin wrapper launching `@kiro/agent/dist/server/acp-server.js --transport=ws --auth=acp-callback` under Node; the whole 20 MB implementation is readable on disk under a content-hashed per-release path. Flag surface is only `--port` (default 8082), `-v`, `-h`. **v3-only structurally** — a different binary, not a mode switch.
 - *Verified — it is a multiplexer.* Multiple simultaneous clients attach with `role=observer`; only the first `initialize` reaches the agent and later clients get a cached result, so a second observer is cheap and does not restart the agent. Good shape for a dashboard. (It also leaks its connection count.)

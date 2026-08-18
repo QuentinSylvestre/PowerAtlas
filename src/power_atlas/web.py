@@ -86,21 +86,25 @@ PROVIDER_COLORS = {
     "kiro-cli": "#7138cc",
     "claude-code": "#c2590f",
     "kiro-ide": "#8b5cf6",
+    "kiro-cli-v3": "#7138cc",
 }
 PROVIDER_DISPLAY_NAMES = {
     "kiro-cli": "kiro-cli",
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
+    "kiro-cli-v3": "kiro-cli v3",
 }
 PROVIDER_BADGES = {
     "kiro-cli": "K",
     "claude-code": "C",
     "kiro-ide": "I",
+    "kiro-cli-v3": "V",  # V for v3; unused today but kept for consistency
 }
 _PROVIDER_BINARY_DISPLAY = {
     "kiro-cli": "kiro-cli chat",
     "claude-code": "claude",
     "kiro-ide": "kiro",
+    "kiro-cli-v3": "kiro-cli chat --agent-engine v3",
 }
 
 
@@ -456,7 +460,7 @@ def _workspace_status(snapshot, cwd: str,
     best = "working"  # at minimum, a process is running
     found_any = False
     # Try to get semantic classification for sessions in this cwd
-    for prov in (providers or {"kiro-cli", "claude-code"}):
+    for prov in (providers or {"kiro-cli", "claude-code", "kiro-cli-v3"}):
         sids = snapshot.live_session_ids_for_cwd(prov, cwd)
         for sid in sids:
             semantic = get_semantic_status(sid, prov, cwd)
@@ -473,7 +477,7 @@ def _workspace_status(snapshot, cwd: str,
         from . import data
         from .status_classifier import _resolve_jsonl_path
         import os, time as _time
-        for prov in (providers or {"kiro-cli", "claude-code"}):
+        for prov in (providers or {"kiro-cli", "claude-code", "kiro-cli-v3"}):
             sessions = data.get_sessions(cwd=cwd, provider=prov)
             checked = 0
             for recent in sessions:
@@ -3208,7 +3212,7 @@ async def api_session_status(request: Request):
     # kiro-ide process — again the dot the render draws.
     if not isinstance(provider_filter, str) or not provider_filter:
         provider_filter = "all"
-    poll_providers = ({"kiro-cli", "claude-code"} if provider_filter == "all"
+    poll_providers = ({"kiro-cli", "claude-code", "kiro-cli-v3"} if provider_filter == "all"
                       else {provider_filter})
 
     # Get cached presence snapshot (3s TTL — very fast)
@@ -3400,6 +3404,7 @@ async def partials_workspaces(
                 "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
                 "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
                 "kiro-ide": "No Kiro IDE sessions found \u2014 open a folder in Kiro IDE and start a conversation to see it here.",
+                "kiro-cli-v3": "No kiro-cli v3 sessions found \u2014 start one with <code>kiro-cli chat --agent-engine v3</code> to see it here.",
             }
             msg = empty_msgs.get(provider, f"No {provider} sessions found.")
             cards_html += f'<div class="empty-state">{msg}</div>'

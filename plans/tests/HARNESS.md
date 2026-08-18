@@ -16,6 +16,7 @@ last_run: 2026-07-01
 | pytest-suite | tool | always | 254 tests in tests/ (test_data, test_web, test_launcher, test_config, test_peek, test_tray, test_autostart) | 2026-07-01 |
 | browser-mcp | tool | always | drives web UI at the dynamic server port; cannot interact with native tray/peek | 2026-07-01 |
 | kiro-session-data | data | always (read-only) | `~/.kiro/sessions/cli/` (*.json + *.jsonl + *.history) — do not modify/delete | 2026-07-01 |
+| kiro-v3-session-data | data | always (read-only) | `~/.kiro/sessions/<workspace-hash>/sess_*/` (session.json + messages.jsonl) — do not modify/delete | 2026-08-18 |
 | kiro-cli-sqlite | data | always (read-only) | `%LOCALAPPDATA%\Kiro-Cli\data.sqlite3` (conversations_v2) — read-only, mode=ro | 2026-07-01 |
 | claude-session-data | data | always (read-only) | `~/.claude/projects/` (UUID *.jsonl) + `~/.claude/history.jsonl` — do not modify/delete | 2026-07-01 |
 | config-toml | data | always | `%LOCALAPPDATA%\power-atlas\config.toml` — read/write; snapshot+restore | 2026-07-01 |
@@ -29,7 +30,7 @@ last_run: 2026-07-01
 
 - **Platform**: this machine is Windows 11. Linux code paths (5 Linux terminals, `.desktop` autostart,
   X11/Wayland display probe, `/proc` PID fallback, flock) are code-inspection-only.
-- **Providers**: two — kiro-cli and claude-code. Both have real data on disk. Test cross-provider behavior
+- **Providers**: four — kiro-cli, claude-code, kiro-ide, and kiro-cli-v3. All have real data on disk. Test cross-provider behavior
   (discovery merge, tab filtering, cache asymmetry) explicitly, not just one provider.
 - **Parallelism**: Data, Config, Launcher, Icons, Autostart are independent (isolate + snapshot/restore).
   Web depends on Data + Config (shared server + browser). Lifecycle is process-level (isolate).

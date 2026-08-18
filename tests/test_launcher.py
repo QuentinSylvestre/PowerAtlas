@@ -86,6 +86,30 @@ class TestPowerShellInvocation:
         assert _build_powershell_invocation(args) == "& 'kiro-cli' 'chat' '--label' 'can''t stop' 'C:\\my project'"
 
 
+    def test_kiro_v3_new_session_args(self):
+        args = _build_provider_args("kiro-cli-v3", "kiro-cli", None)
+        assert args == ["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*"]
+
+    def test_kiro_v3_resume_args(self):
+        args = _build_provider_args("kiro-cli-v3", "kiro-cli", "sess_abc")
+        assert args == ["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*", "--resume-id", "sess_abc"]
+
+    def test_kiro_v3_is_terminal_provider(self):
+        from power_atlas.launcher import _PROVIDER_TERMINAL
+        assert _PROVIDER_TERMINAL.get("kiro-cli-v3") is True
+
+    def test_kiro_v3_default_args_appended_after_trust_tools(self):
+        """default_args come after --trust-tools * in the argv, not before."""
+        # _build_provider_args produces the base; launch_session appends default_args.
+        # Verify the base ends with ["--trust-tools", "*"] so any appended arg follows.
+        base = _build_provider_args("kiro-cli-v3", "kiro-cli", None)
+        assert base[-2:] == ["--trust-tools", "*"]
+        # Verify resume form also ends correctly (--resume-id is the tail, not in the middle)
+        resumed = _build_provider_args("kiro-cli-v3", "kiro-cli", "sess_xyz")
+        assert "--trust-tools" in resumed
+        assert resumed.index("--trust-tools") < resumed.index("--resume-id")
+
+
 class TestLaunchSession:
     @patch("subprocess.Popen")
     @patch("shutil.which")

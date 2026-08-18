@@ -95,7 +95,7 @@ class BoundedCache:
 
 
 # Import provider modules AFTER defining shared types to avoid circular import
-from . import data_kiro, data_claude, data_kiro_ide  # noqa: E402
+from . import data_kiro, data_claude, data_kiro_ide, data_kiro_v3  # noqa: E402
 
 
 # Provider registry: name -> module
@@ -103,6 +103,7 @@ PROVIDERS: dict[str, object] = {
     "kiro-cli": data_kiro,
     "claude-code": data_claude,
     "kiro-ide": data_kiro_ide,
+    "kiro-cli-v3": data_kiro_v3,
 }
 
 

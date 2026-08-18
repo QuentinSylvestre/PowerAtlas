@@ -82,18 +82,21 @@ _PROVIDER_DISPLAY = {
     "kiro-cli": "kiro-cli",
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
+    "kiro-cli-v3": "kiro-cli v3",
 }
 
 _PROVIDER_BINARY = {
     "kiro-cli": "kiro-cli",
     "claude-code": "claude",
     "kiro-ide": "kiro",
+    "kiro-cli-v3": "kiro-cli",
 }
 
 _PROVIDER_TERMINAL = {
     "kiro-cli": True,
     "claude-code": True,
     "kiro-ide": False,
+    "kiro-cli-v3": True,
 }
 
 
@@ -105,6 +108,14 @@ def _build_provider_args(provider: str, binary: str, session_id: str | None) -> 
             args += ["--resume", session_id]
     elif provider == "kiro-ide":
         args = [binary]  # No session resume support
+    elif provider == "kiro-cli-v3":
+        # --trust-all-tools (-a) is hard-rejected by --agent-engine v3; use --trust-tools instead.
+        # Note: default_args is appended AFTER these args by launch_session. If a user has
+        # default_args="-a" (copied from a v2 config), the v3 launch will fail with a clear
+        # CLI error. No PowerAtlas-side guard is added -- the CLI error is self-describing.
+        args = [binary, "chat", "--agent-engine", "v3", "--trust-tools", "*"]
+        if session_id:
+            args += ["--resume-id", session_id]
     else:  # kiro-cli
         args = [binary, "chat"]
         if session_id:

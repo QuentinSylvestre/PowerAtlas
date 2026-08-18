@@ -58,6 +58,7 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 
 - Auto-discovers workspaces from kiro-cli, Claude Code, and Kiro IDE session data
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
+  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/` (scanned separately from v2)
 - Unified provider-launcher system with extracted icons and configurable colors
 - Inline provider filter next to search bar — filters workspaces and sessions panels simultaneously
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
