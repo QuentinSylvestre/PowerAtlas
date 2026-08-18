@@ -619,6 +619,9 @@ def _build_child_env(extra: dict[str, str]) -> dict[str, str]:
     is merged last so call-site additions override same-named keys from os.environ.
     ``extra`` is required (not optional) because every ACP spawn always passes
     at least KIRO_CLI_ACP_CLIENT_NAME.
+
+    NOTE: A copy of this function AND the _SCRUB_PREFIXES/_SCRUB_EXACT constants
+    lives in launcher.py. Keep both the function body and the constants in sync.
     """
     base = {
         k: v for k, v in os.environ.items()
@@ -632,7 +635,7 @@ def _build_child_env(extra: dict[str, str]) -> dict[str, str]:
 # Must conform to ClientSteeringDescriptorSchema in acp-server.js (kiro-cli 2.16.x+).
 # Required keys: name (str, non-empty), inclusion (enum: always|fileMatch|manual),
 # content (str, max 1 MB). Content is a placeholder; body defined as a follow-on task.
-_OVERLAY_STEERING: tuple[dict, ...] = (
+_OVERLAY_STEERING: tuple[dict[str, str], ...] = (
     {
         "name": "poweratlas-context",
         "inclusion": "always",
@@ -648,7 +651,7 @@ def _build_kas_session_params() -> dict[str, Any]:
     in acp-server.js. The steering list is delivered as clientSteeringDocs via
     createSessionState(..., kiroMeta?.steering ...).
     """
-    return {"_meta": {"kiro": {"steering": list(_OVERLAY_STEERING)}}}
+    return {"_meta": {"kiro": {"steering": [{**d} for d in _OVERLAY_STEERING]}}}
 
 # ACP protocol version. Re-confirmed against kiro-cli 2.16.0 on 2026-08-01
 # (it was first measured on 2.14.1): `initialize` still answers

@@ -5657,10 +5657,9 @@ class TestAcpSessionLoad:
 class TestAcpNewSessionParams:
     """``session/new`` request params include the KAS steering overlay."""
 
-    def test_new_session_params_include_meta(self, acp_store, tmp_path):
+    def test_new_session_params_include_meta(self, acp_store):
         """session/new carries _meta.kiro.steering so the ACP session receives
         the PowerAtlas overlay steering document."""
-        from power_atlas import acp as acp_mod
         acp_mod, store = acp_store
         calls = []
 
@@ -5674,9 +5673,24 @@ class TestAcpNewSessionParams:
         acp_mod._supervisor.sessions.pop("new-params-0001", None)
         acp_mod._supervisor.history.pop("new-params-0001", None)
 
-        assert calls[0][0] == "session/new"
-        assert calls[0][1]["mcpServers"] == []
-        assert calls[0][1].get("_meta") == acp_mod._build_kas_session_params()["_meta"]
+        assert calls[0] == (
+            "session/new",
+            {
+                "cwd": str(store),
+                "mcpServers": [],
+                "_meta": {
+                    "kiro": {
+                        "steering": [
+                            {
+                                "name": "poweratlas-context",
+                                "inclusion": "always",
+                                "content": "PowerAtlas context \u2014 content TBD",
+                            }
+                        ]
+                    }
+                },
+            }
+        )
 
 
 def _stored_session(store, sid):
@@ -19666,6 +19680,8 @@ class TestSpawnEnv:
         monkeypatch.setenv("CLAUDECODE", "1")
         monkeypatch.setenv("CLAUDE_PID", "999")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+        monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "def")
+        monkeypatch.setenv("CLAUDE_CODE_BRIDGE_SESSION_ID", "ghi")
         sup = acp_mod._Supervisor()
         mock_proc = MagicMock()
         mock_proc.pid = 12345
@@ -19681,3 +19697,5 @@ class TestSpawnEnv:
         assert "CLAUDECODE" not in env
         assert "CLAUDE_PID" not in env
         assert "CLAUDE_CODE_SESSION_ID" not in env
+        assert "CLAUDE_CODE_CHILD_SESSION" not in env
+        assert "CLAUDE_CODE_BRIDGE_SESSION_ID" not in env
