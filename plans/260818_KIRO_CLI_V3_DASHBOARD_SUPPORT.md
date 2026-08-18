@@ -1,7 +1,7 @@
 # kiro-cli v3 Dashboard Support
 
 > **Date**: 2026-08-18
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Add `kiro-cli-v3` as a built-in provider to the main dashboard — session discovery, display, new/resume launches, and live status dots.
 > **Estimated effort**: 1-2 days
@@ -150,12 +150,16 @@ In `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py`: each `Session(...)` con
 In `tests/test_data.py`: any `Session(...)` construction in test helpers or fixtures should add `extra_fields={}` (or rely on the default). Run the test suite after the change to catch any position-sensitive construction calls. The known mtime-race flaky family (`TestKiroPromptsCache::test_changed_jsonl_is_reparsed`, etc.) is pre-existing and unrelated to this change.
 
 **Exit criteria**:
-- [ ] `@dataclass(frozen=True) class Session` in `data.py` has `extra_fields: dict = field(default_factory=dict)` as the last field, with a code comment `# extra_fields must remain the last field — positional Session(...) calls in tests depend on this`
-- [ ] `from dataclasses import dataclass, field` import updated in `data.py`
-- [ ] All `Session(...)` construction sites in `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py` compile without error
-- [ ] `_reset_kiro_caches()` in `tests/test_data.py` extended to also reset `data_kiro_v3` module-level globals (`_root_mtime`, `_hash_dir_mtimes`, `_cwd_index`, `_prompts_cache`, `_tail_cache`, `_first_prompt_cache`) — import `data_kiro_v3` inside the function so the import is deferred until Phase 2 creates the module
-- [ ] `tests/test_web.py` checked for `Session(...)` constructions — confirm all use keyword args and will accept an extra defaulted field without changes
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data.py tests/test_launcher.py -x -q` passes (excluding known flaky tests — run with `-p no:randomly` if test order matters)
+- [x] `@dataclass(frozen=True) class Session` in `data.py` has `extra_fields: dict = field(default_factory=dict)` as the last field, with a code comment `# extra_fields must remain the last field — positional Session(...) calls in tests depend on this`
+- [x] `from dataclasses import dataclass, field` import updated in `data.py`
+- [x] All `Session(...)` construction sites in `data_kiro.py`, `data_claude.py`, `data_kiro_ide.py` compile without error
+- [x] `_reset_kiro_caches()` in `tests/test_data.py` extended to also reset `data_kiro_v3` module-level globals (`_root_mtime`, `_hash_dir_mtimes`, `_cwd_index`, `_prompts_cache`, `_tail_cache`, `_first_prompt_cache`) — import `data_kiro_v3` inside the function so the import is deferred until Phase 2 creates the module
+- [x] `tests/test_web.py` checked for `Session(...)` constructions — confirm all use keyword args and will accept an extra defaulted field without changes
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data.py tests/test_launcher.py -x -q` passes (excluding known flaky tests — run with `-p no:randomly` if test order matters)
+
+#### Implementation (2026-08-18, code: 9e81a29 + a9cd08e + 7812d59)
+
+Phase 1 implemented the `Session.extra_fields` dataclass extension across all affected files: added `from dataclasses import dataclass, field` import; added `extra_fields: dict = field(default_factory=dict, hash=False, compare=False)` as the last field of the frozen `Session` dataclass (hash/compare excluded to preserve hashability while preventing the mutable dict from breaking hash()); added `extra_fields={}` to each provider adapter's `Session(...)` call (later simplified to rely on default_factory); extended `_reset_kiro_caches()` with a deferred import block resetting all six `data_kiro_v3` module-level globals including 3 BoundedCache clear() calls; removed dead `except AttributeError` clause; added 3 tests to `TestFrozenSession` covering default isolation, hashability, and compare=False semantics. `tests/test_web.py` `Session()` constructions all use keyword form — no changes needed. 282 tests pass.
 
 ---
 
@@ -629,6 +633,22 @@ Select-String -Pattern 'currently 23 dormant' plans\ROADMAP.md
 4. **Config migration: `default_args="-a"` for v3.** Consider adding a Settings panel warning or config migration that detects `-a` / `--trust-all-tools` in `kiro-cli-v3` `default_args` and flags it as incompatible. Source: Review finding #14 (Senior engineer).
 
 ## Review Log
+
+### 2026-08-18 — Implementation Review (after Phase 1, personas: Senior engineer, Maintainability reviewer, Architect, Reliability engineer)
+
+Implementation health: Green (after 2 auto-fix cycles + post-cap fixes).
+7 findings cycle 1 (1 High, 4 Medium, 2 Low). All resolved.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `frozen=True` + `dict` field silently broke `hash(Session)`, removing pre-existing hashability guarantee. | Fixed — added `hash=False, compare=False` to `extra_fields` field; hashability verified with test. |
+| 2 | Medium | `_reset_kiro_caches()` omitted `_prompts_cache`, `_tail_cache`, `_first_prompt_cache` resets per exit criterion. | Fixed — added three hasattr-guarded `.clear()` calls inside the deferred try block. |
+| 3 | Medium | `except (ImportError, AttributeError)` — `AttributeError` is dead code; wrong attr name silently creates new module attrs. | Fixed — removed `AttributeError` clause; kept only `except ImportError`. |
+| 4 | Medium | No regression test for `hash(Session(...))` — isolation test covered default_factory, not hashability. | Fixed — added `test_session_is_hashable` to `TestFrozenSession`. |
+| 5 | Low | Misleading comment "positional Session(...) calls in tests depend on this" underspecified. | Fixed — rewritten to name the file and line form explicitly. |
+| 6 | Low | Redundant explicit `extra_fields={}` at 3 provider construction sites (default_factory already handles it). | Fixed — removed from all 3 adapters. |
+| 7 | Low | No test for `compare=False` semantics (Sessions differing only in `extra_fields` should compare equal). | Fixed — added `test_session_compare_ignores_extra_fields`. |
+| C2-1 | Low | Double hasattr guard in `_reset_kiro_caches()` is overly defensive (inner `.clear` check adds no protection). | Orchestrator: proposed-accept — pending user decision. Defensive guard for pre-Phase-2 deferred import code; no behavioral consequence. |
 
 ### 2026-08-18 — Initial plan review (4 personas: Architect, Senior engineer, Performance engineer, Reliability engineer)
 
