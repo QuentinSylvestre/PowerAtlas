@@ -2,9 +2,19 @@
 
 > **Date**: 2026-08-18
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-18 14:30
 > **Scope**: Inject PowerAtlas identity markers into all spawned kiro-cli processes, scrub inherited CLAUDE_CODE_* markers, and deliver per-session overlay steering via `_meta.kiro.steering`
 > **Estimated effort**: 2–4 hours
+
+---
+
+## Completion Summary
+
+Both phases complete. All 6 success criteria met, 1527 tests pass, QA PASS (runtime-verified on PID 19420 post-restart: `POWER_ATLAS_SESSION=1`, `KIRO_CLI_ACP_CLIENT_NAME=poweratlas`, zero CLAUDE markers). Implementation health: Green. Follow-up items #1–#5 deferred (see `## Follow-up Work (Deferred)`).
+
+### Acknowledged at archival
+
+- **Accepted (harness opportunity)**: `acp-server.js` binary search required multiple round-trips to locate KAS method bodies — a KAS method index in `docs/KNOWLEDGE.md` would save ~3–4 tool calls per steering-related exploration. Project-local knowledge; not a governance promotion candidate. Will be re-harvested by `/qdream` from `plans/done/`.
 
 ---
 
