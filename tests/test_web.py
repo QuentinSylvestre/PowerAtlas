@@ -9837,6 +9837,58 @@ class TestResolveJsonlPath:
             assert result == messages_file
 
 
+    def test_kiro_v3_provider_returns_path_directly(self, tmp_path):
+        """kiro-cli-v3 provider goes directly to workspace-hash scan, no v2 check."""
+        ws_hash_dir = tmp_path / "hash99"
+        ws_hash_dir.mkdir()
+        sess_dir = ws_hash_dir / "sess_v3session"
+        sess_dir.mkdir()
+        messages_file = sess_dir / "messages.jsonl"
+        messages_file.write_text("")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path), \
+             _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"):
+            result = _resolve_jsonl_path("sess_v3session", "kiro-cli-v3", "C:\\proj")
+            assert result == messages_file
+
+    def test_kiro_v3_provider_returns_none_when_absent(self, tmp_path):
+        """kiro-cli-v3 provider returns None for unknown session ID."""
+        (tmp_path / "hash99").mkdir()
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            result = _resolve_jsonl_path("sess_nonexistent", "kiro-cli-v3", "C:\\proj")
+            assert result is None
+
+    def test_kiro_v3_provider_returns_none_on_oserror(self, tmp_path):
+        """kiro-cli-v3 branch returns None cleanly when _V3_SESSIONS_ROOT does not exist."""
+        non_existent = tmp_path / "does_not_exist"
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", non_existent):
+            result = _resolve_jsonl_path("sess_xyz", "kiro-cli-v3", "C:\\proj")
+            assert result is None
+
+    def test_kiro_v3_cache_key_isolated_from_v2(self, tmp_path):
+        """kiro-cli and kiro-cli-v3 with same session_id get distinct cache entries (4-tuple key)."""
+        from power_atlas import status_classifier
+        # v2 session
+        v2_file = tmp_path / "cli" / "shared-id.jsonl"
+        (tmp_path / "cli").mkdir(parents=True)
+        v2_file.write_text("")
+        # v3 session
+        hash_dir = tmp_path / "hash1"
+        sess_dir = hash_dir / "sess_shared-id"
+        sess_dir.mkdir(parents=True)
+        v3_file = sess_dir / "messages.jsonl"
+        v3_file.write_text("")
+        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
+             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            from power_atlas.status_classifier import _path_cache
+            _path_cache.clear()
+            r_v2 = _resolve_jsonl_path("shared-id", "kiro-cli", "C:\\proj")
+            r_v3 = _resolve_jsonl_path("sess_shared-id", "kiro-cli-v3", "C:\\proj")
+            # Both resolved, to different paths
+            assert r_v2 == v2_file
+            assert r_v3 == v3_file
+            assert r_v2 != r_v3
+
+
 class TestReadTailLines:
     def test_small_file_returns_all_lines(self, tmp_path):
         f = tmp_path / "small.jsonl"
@@ -10070,6 +10122,19 @@ class TestClassifyKiroV3:
         ]
         # tool_result is skipped; last meaningful is assistant → waiting
         assert classify_kiro_v3(lines) == SemanticStatus.WAITING
+
+    def test_classify_from_path_routes_v3_provider_to_v3_classifier(self, tmp_path):
+        """_classify_from_path with provider='kiro-cli-v3' dispatches to classify_kiro_v3."""
+        from power_atlas.status_classifier import _classify_from_path
+        # Write a v3-format messages.jsonl with an assistant line → expect WAITING
+        v3_line = _json.dumps({
+            "id": "a1", "timestamp": "2026-01-01T00:00:00Z",
+            "payload": {"type": "assistant", "content": "Done."}
+        })
+        f = tmp_path / "messages.jsonl"
+        f.write_text(v3_line + "\n")
+        result = _classify_from_path(f, "kiro-cli-v3")
+        assert result == SemanticStatus.WAITING
 
 
 class TestGetSemanticStatus:

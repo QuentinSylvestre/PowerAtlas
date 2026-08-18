@@ -63,9 +63,14 @@ except Exception as _e:  # pragma: no cover - import guard
 
 
 # provider -> (executable basenames that indicate the process, resume flag)
+# kiro-cli and kiro-cli-v3 share the same binary. _match_provider() returns on first
+# dict iteration, so resumed v3 sessions (--resume-id sess_<uuid>) are attributed to
+# "kiro-cli" (first match). The live dot appears but may show on the v2 row.
+# Follow-up Work item #2 tracks sess_-prefix disambiguation.
 _PROVIDER_SPECS: dict[str, tuple[tuple[str, ...], str]] = {
     "claude-code": (("claude", "claude.exe", "claude.cmd"), "--resume"),
     "kiro-cli": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
+    "kiro-cli-v3": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
 }
 
 _SNAPSHOT_TTL = 3.0  # seconds; many partials render per refresh — reuse one scan

@@ -42,10 +42,10 @@ class SemanticStatus(str, Enum):
 # ---------------------------------------------------------------------------
 
 
-# Only the kiro-cli branch is memoized: its v3 fallback walks every workspace
-# directory, and this runs per-session inside the 5s status poll, so an uncached
-# miss costs O(sessions x workspace_dirs) stat calls per tick. The claude-code
-# branch is two syscalls and not worth caching.
+# Only the kiro-cli / kiro-cli-v3 branch is memoized: its v3 fallback walks
+# every workspace directory, and this runs per-session inside the 5s status
+# poll, so an uncached miss costs O(sessions x workspace_dirs) stat calls per
+# tick. The claude-code branch is two syscalls and not worth caching.
 #
 # The key carries the directory roots the lookup reads, so rebinding them (tests
 # do; production does not) can never serve a path resolved against a different
@@ -65,10 +65,10 @@ def _resolve_jsonl_path(
 
     Returns None if the file does not exist on disk.
     """
-    if provider != "kiro-cli":
+    if provider not in ("kiro-cli", "kiro-cli-v3"):
         return _resolve_jsonl_path_uncached(session_id, provider, cwd)
 
-    cache_key = (session_id, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))
+    cache_key = (session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))
     with _path_cache_lock:
         cached = _path_cache.get(cache_key)
         if cached is not None:
@@ -108,12 +108,30 @@ def _resolve_jsonl_path_uncached(
         if _V3_SESSIONS_ROOT.is_dir():
             # session_id may or may not have sess_ prefix
             sid = session_id if session_id.startswith("sess_") else f"sess_{session_id}"
+            try:
+                for ws_dir in _V3_SESSIONS_ROOT.iterdir():
+                    if not ws_dir.is_dir() or ws_dir.name == "cli":
+                        continue
+                    v3_path = ws_dir / sid / "messages.jsonl"
+                    if v3_path.is_file():
+                        return v3_path
+            except OSError:
+                return None
+        return None
+    elif provider == "kiro-cli-v3":
+        # Go directly to workspace-hash scan (no v2 store check)
+        if not _V3_SESSIONS_ROOT.is_dir():
+            return None
+        sid = session_id if session_id.startswith("sess_") else f"sess_{session_id}"
+        try:
             for ws_dir in _V3_SESSIONS_ROOT.iterdir():
                 if not ws_dir.is_dir() or ws_dir.name == "cli":
                     continue
                 v3_path = ws_dir / sid / "messages.jsonl"
                 if v3_path.is_file():
                     return v3_path
+        except OSError:
+            return None
         return None
     elif provider == "claude-code":
         folder = _get_project_folder(cwd)
@@ -552,7 +570,7 @@ def _classify_from_path(
     if not tail_lines:
         return None
 
-    if provider == "kiro-cli":
+    if provider in ("kiro-cli", "kiro-cli-v3"):
         # Detect v3 vs v2 format
         if _is_v3_format(tail_lines):
             return classify_kiro_v3(tail_lines)
