@@ -1,7 +1,7 @@
 # ACP Toolbar Button Redesign
 
 > **Date**: 2026-08-18
-> **Status**: Exploring
+> **Status**: Complete
 > **Scope**: Redesign the send/stop/steer/queue buttons in the `/acp` composer row
 
 ---
@@ -108,3 +108,30 @@ Single phase, two files:
 - Hard reload (`Ctrl+Shift+R`) after CSS/HTML edits — no restart needed
 - Create or resume a kiro-cli session to test the working-turn states
 - Run test suite: `node tests/acp_page.test.mjs`
+
+
+---
+
+## Implementation
+
+Implementation (2026-08-18, code: ce189da / 8a5ebad / 4e74d76)
+Single-phase implementation across `acp.html` and `style.css`. Removed `acp-send` class from `#acpSend` and `#acpStop`; renamed `aria-label` on `#acpSend` from "Send" to "Start"; replaced the fused `#acpModeToggle` (▾ text, partial corners, `border-left: none`) with a standalone 34×34 square carrying `acp-btn acp-icon-btn` classes and a chevron SVG; corrected `aria-haspopup="true"` to `"menu"`; rewrote `.acp-queue-steer` gap from 0 to 4px; replaced the `.acp-send-mode` and `.acp-mode-toggle` inline CSS blocks with the standalone-square pattern and `[aria-expanded="true"]` accent state; removed three dead `textContent` assignments from `setTurn()` and the Stop click handler; removed the dead `.acp-send { padding: 6px 20px }` rule from `style.css`. Auto-fix commits resolved a `[hidden]` display-override bug (`#acpSend[hidden], #acpStop[hidden] { display: none }` added to style.css), a no-op `.acp-send-mode` CSS block (removed), a specificity gap on the expanded-state rule (compound selector added), and an orphan `acp-send-mode` class on `#acpSendMode` (removed).
+
+Open item 7 resolved: `.acp-send { padding: 6px 20px }` had zero consumers outside `#acpSend`/`#acpStop` (confirmed by grep) — rule removed safely.
+
+### Review log
+
+### 2026-08-18 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: End-user advocate, Senior engineer, Maintainability reviewer, Security auditor (high effort, 4 personas).
+5 findings (0 High, 0 Medium, 5 Low). All resolved.
+QA verification: PASS (browser — hard reload picks up CSS changes; `[hidden]` override confirmed fixed; 408/413 tests pass, 5 pre-existing failures unrelated to this change).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `.acp-icon-btn { display: inline-flex }` overrode `[hidden]` UA rule on `#acpSend`/`#acpStop` — both rendered visible simultaneously. | Fixed — added `#acpSend[hidden], #acpStop[hidden] { display: none }` to `style.css` (8a5ebad) |
+| 2 | Low | `.acp-send-mode { border-radius }` inline rule was a no-op; `.acp-icon-btn` already covers it. | Fixed — block removed (8a5ebad) |
+| 3 | Low | `.acp-mode-toggle[aria-expanded="true"]` had same specificity (0,2,0) as `.acp-btn:hover`; hover-while-open state could lose. | Fixed — compound selector `.acp-mode-toggle.acp-icon-btn[aria-expanded="true"]` (0,3,0) added (8a5ebad) |
+| 4 | Low | `aria-label="Start"` rename has no test assertion; a future rename would be silent. | User: accepted — no test infrastructure for aria-label assertions exists today |
+| 5 | Low | `acp-send-mode` class remained on `#acpSendMode` markup after its CSS block was removed — orphan. | Fixed — class removed from markup (4e74d76) |
