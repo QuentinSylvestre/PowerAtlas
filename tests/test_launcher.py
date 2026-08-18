@@ -100,9 +100,11 @@ class TestLaunchSession:
         cmd = mock_popen.call_args[0][0]
         assert "--resume-id" in " ".join(cmd)
 
-    @patch("subprocess.Popen")
-    @patch("shutil.which")
-    def test_launch_session_kiro_builds_correct_args(self, mock_which, mock_popen, tmp_path):
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_kiro_builds_correct_args(self, mock_which, mock_popen, monkeypatch, tmp_path):
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_PID", "999")
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": "C:\\wt.exe"}.get(n)
         cwd = str(tmp_path)
         result = launch_session(cwd, session_id="sess-1", provider="kiro-cli", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
@@ -116,6 +118,7 @@ class TestLaunchSession:
         kwargs = mock_popen.call_args.kwargs
         assert kwargs["env"]["POWER_ATLAS_SESSION"] == "1"
         assert "CLAUDECODE" not in kwargs["env"]
+        assert "CLAUDE_PID" not in kwargs["env"]
 
     @patch("subprocess.Popen")
     @patch("shutil.which")
@@ -323,10 +326,11 @@ class TestLaunchSession:
         assert "metacharacters" in result.error.lower()
         mock_popen.assert_not_called()
 
-    @patch("subprocess.Popen")
-    @patch("shutil.which")
-    def test_launch_session_kiro_ide_non_terminal(self, mock_which, mock_popen, tmp_path):
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_kiro_ide_non_terminal(self, mock_which, mock_popen, monkeypatch, tmp_path):
         """Kiro IDE launches directly without a terminal."""
+        monkeypatch.setenv("CLAUDECODE", "1")
         mock_which.side_effect = lambda n: {"kiro": "C:\\kiro.exe"}.get(n)
         cwd = str(tmp_path)
         result = launch_session(cwd, session_id=None, provider="kiro-ide")
@@ -369,9 +373,10 @@ class TestLaunchSession:
     @patch("power_atlas.launcher.subprocess.Popen")
     @patch("power_atlas.launcher.shutil.which")
     def test_launch_session_scrubs_claude_markers(self, mock_which, mock_popen, monkeypatch, tmp_path):
-        """CLAUDECODE, CLAUDE_CODE_* absent from launched session env; POWER_ATLAS_SESSION present."""
+        """CLAUDECODE, CLAUDE_CODE_*, CLAUDE_PID absent from launched session env; POWER_ATLAS_SESSION present."""
         monkeypatch.setenv("CLAUDECODE", "1")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+        monkeypatch.setenv("CLAUDE_PID", "999")
         mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": str(tmp_path / "wt.exe")}.get(n)
         cwd = str(tmp_path)
         result = launch_session(cwd, session_id=None, provider="kiro-cli", launch_profile=LaunchProfile(terminal_command=str(tmp_path / "wt.exe")))
@@ -379,6 +384,7 @@ class TestLaunchSession:
         env = mock_popen.call_args.kwargs["env"]
         assert "CLAUDECODE" not in env
         assert "CLAUDE_CODE_SESSION_ID" not in env
+        assert "CLAUDE_PID" not in env
         assert env["POWER_ATLAS_SESSION"] == "1"
 
 

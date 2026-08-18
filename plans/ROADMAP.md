@@ -23,7 +23,7 @@
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
 - **kiro-cli v3 session support** — scan the `sess_*/` store; currently 23 dormant historical sessions are invisible, store is not actively growing
 - **Parked items** — v3 support · invisible sqlite sessions · usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
-- `launch_custom` env scrub deliberately excluded — see `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
+- **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
 
 ### Session Control & Integration
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described

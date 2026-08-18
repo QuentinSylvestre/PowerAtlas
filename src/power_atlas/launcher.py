@@ -26,8 +26,9 @@ _SESSION_ID_RE = re.compile(r"^[\w\-]+$")
 
 # Keys stripped from the child env to prevent marker leakage from the PowerAtlas
 # tray process into launched provider sessions.
-# NOTE: A copy of this function lives in acp.py (isolation boundary prevents
-# shared import). Keep _SCRUB_PREFIXES and _SCRUB_EXACT in sync with that copy.
+# NOTE: A copy of this function AND the _SCRUB_PREFIXES/_SCRUB_EXACT constants
+# lives in acp.py (isolation boundary prevents shared import).
+# Keep the function body and both constants in sync with that copy.
 _SCRUB_PREFIXES = ("CLAUDE_CODE_",)
 _SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})
 
