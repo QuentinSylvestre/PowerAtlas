@@ -100,7 +100,7 @@ def _clear_v3_caches():
     """Reset all module-level caches before and after each test."""
     def _reset():
         dv3._root_mtime = None
-        dv3._hash_dir_mtimes = {}
+        dv3._session_json_mtimes = {}
         dv3._cwd_index = {}
         dv3._norm_cwd_to_hash = {}
         dv3._prompts_cache.clear()
@@ -240,6 +240,33 @@ class TestKiroV3DiscoverWorkspaces:
         results = dv3.discover_workspaces()
         assert len(results) == 1
 
+    def test_discover_workspaces_null_json_skipped(self, tmp_path, monkeypatch):
+        """session.json containing JSON null should be skipped, not crash."""
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        hash_dir = tmp_path / "abc123"
+        sess_dir = hash_dir / "sess_null"
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text("null", encoding="utf-8")
+        (sess_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        result = dv3.discover_workspaces()
+        assert result == []  # null session skipped
+
+    def test_discover_workspaces_missing_last_modified(self, tmp_path, monkeypatch):
+        """Sessions with no lastModifiedAt sort stably (empty string sorts before any ISO date)."""
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        hash_dir = tmp_path / "abc123"
+        sess_dir = hash_dir / "sess_nolm"
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text(
+            '{"id":"sess_nolm","workspacePaths":["C:\\\\Work"],"title":"no lm",'
+            '"createdAt":"2026-01-01T00:00:00Z","agentMode":"kiro_default"}',
+            encoding="utf-8",
+        )
+        (sess_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        result = dv3.discover_workspaces()
+        assert len(result) == 1
+        assert "Work" in result[0][0]  # cwd present
+
 
 # ---------------------------------------------------------------------------
 # TestKiroV3LoadSessions
@@ -277,16 +304,12 @@ class TestKiroV3LoadSessions:
         root.mkdir()
         monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
 
-        _make_session(root, "h1", "sess_abc", "C:\\MyProject",
-                      messages=[_user_line("hi")])
+        sj, msgs = _make_session(root, "h1", "sess_abc", "C:\\MyProject",
+                                 messages=[_user_line("hi")])
 
         _, file_stats = dv3.load_sessions("C:\\MyProject")
-        # Should track both session.json and messages.jsonl
-        keys = list(file_stats.keys())
-        assert any("session.json" in k for k in keys)
-        assert any("messages.jsonl" in k for k in keys)
-        # publish.cursor and publish-sub.cursor must NOT be tracked
-        assert not any("publish" in k for k in keys)
+        # Exact keys: only session.json and messages.jsonl should be tracked
+        assert set(file_stats.keys()) == {str(sj), str(msgs)}
 
     def test_missing_messages_jsonl_still_loads(self, tmp_path, monkeypatch):
         root = tmp_path / "sessions"
@@ -404,6 +427,27 @@ class TestKiroV3LoadSessions:
 
         sessions, _ = dv3.load_sessions("C:\\W")
         assert sessions[0].session_id == "sess_fallback"
+
+    def test_load_sessions_cache_hit_returns_same_result(self, tmp_path, monkeypatch):
+        """Second load_sessions call without file changes returns same result from cache."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        _make_session(
+            root, "h1", "sess_cache",
+            "C:\\W",
+            messages=[_user_line("cached q"), _assistant_line("cached a")],
+        )
+
+        sessions1, stats1 = dv3.load_sessions("C:\\W")
+        sessions2, stats2 = dv3.load_sessions("C:\\W")
+
+        assert len(sessions1) == len(sessions2) == 1
+        assert sessions1[0].first_prompt == sessions2[0].first_prompt == "cached q"
+        assert sessions1[0].last_reply_tail == sessions2[0].last_reply_tail == "cached a"
+        # File stats should be identical (no extra reads)
+        assert stats1 == stats2
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +567,26 @@ class TestKiroV3GetFirstPrompt:
         r2 = dv3.get_first_prompt("sess_cached")
         assert r1 == r2 == "Cached question"
 
+    def test_negative_result_cached(self, tmp_path, monkeypatch):
+        """Empty (negative) result is also cached to avoid re-scanning on every TTL miss."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        # Session with no user messages at all
+        _make_session(root, "h1", "sess_empty", "C:\\W", messages=[
+            json.dumps({"id": "t1", "timestamp": "t", "payload": {"type": "tool_call", "content": "x"}}),
+        ])
+
+        r1 = dv3.get_first_prompt("sess_empty")
+        assert r1 == ""
+
+        # Cache should now hold a negative entry — verify it is present
+        cached = dv3._first_prompt_cache.get("sess_empty")
+        assert cached is not None
+        _ts, _mtime, result = cached
+        assert result == ""
+
 
 # ---------------------------------------------------------------------------
 # TestKiroV3RefreshStale
@@ -604,6 +668,31 @@ class TestKiroV3RefreshStale:
             dv3._normalize_path("C:\\Unknown"), {}
         )
         assert result is True
+
+    def test_sibling_cwd_session_added_does_not_trigger_stale(self, tmp_path, monkeypatch):
+        """Adding a new session for cwd B in the same hash dir does not mark cwd A as stale.
+
+        The H1 fix: refresh_stale uses cached_sess_names (cwd-filtered) rather than
+        comparing all subdirs in the hash dir.
+        """
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        # Two sessions for two different cwds in the same hash dir
+        _make_session(root, "shared_hash", "sess_cwd_a", "C:\\CwdA")
+        _make_session(root, "shared_hash", "sess_cwd_b", "C:\\CwdB")
+
+        # Load cwd A to populate the index
+        sessions_a, file_stats_a = dv3.load_sessions("C:\\CwdA")
+        norm_a = dv3._normalize_path("C:\\CwdA")
+
+        # Add a new session for cwd B in the SAME hash dir
+        _make_session(root, "shared_hash", "sess_cwd_b2", "C:\\CwdB")
+
+        # cwd A should NOT be stale — the new session belongs to cwd B
+        result = dv3.refresh_stale_entries_for_cwd(norm_a, file_stats_a)
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
