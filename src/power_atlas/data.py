@@ -33,7 +33,7 @@ class Session:
     first_prompt: str
     last_prompt: str
     last_reply_tail: str
-    extra_fields: dict = field(default_factory=dict)  # extra_fields must remain the last field -- positional Session(...) calls in tests depend on this
+    extra_fields: dict = field(default_factory=dict, hash=False, compare=False)  # extra_fields must remain the last field -- positional Session(...) calls in tests/test_data.py use 8-argument form
 
 
 @dataclass

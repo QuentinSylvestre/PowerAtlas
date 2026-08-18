@@ -169,7 +169,13 @@ def _reset_kiro_caches():
         data_kiro_v3._hash_dir_mtimes = {}
         data_kiro_v3._cwd_index = {}
         data_kiro_v3._norm_cwd_to_hash = {}
-    except (ImportError, AttributeError):
+        if hasattr(data_kiro_v3, '_prompts_cache') and hasattr(data_kiro_v3._prompts_cache, 'clear'):
+            data_kiro_v3._prompts_cache.clear()
+        if hasattr(data_kiro_v3, '_tail_cache') and hasattr(data_kiro_v3._tail_cache, 'clear'):
+            data_kiro_v3._tail_cache.clear()
+        if hasattr(data_kiro_v3, '_first_prompt_cache') and hasattr(data_kiro_v3._first_prompt_cache, 'clear'):
+            data_kiro_v3._first_prompt_cache.clear()
+    except ImportError:
         pass
 
 
@@ -1104,6 +1110,13 @@ class TestFrozenSession:
         with pytest.raises(AttributeError):
             s.title = "hacked"
 
+
+
+    def test_session_extra_fields_default_is_not_shared(self):
+        """Verify each Session gets a distinct extra_fields dict (not a shared mutable default)."""
+        s1 = Session("id1", "title", "cwd", "", "", "", "", "")
+        s2 = Session("id2", "title", "cwd", "", "", "", "", "")
+        assert s1.extra_fields is not s2.extra_fields
 
 class TestClaudeTailCached:
     def test_claude_tail_cached(self, tmp_path, monkeypatch):
