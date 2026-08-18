@@ -113,6 +113,9 @@ class TestLaunchSession:
         assert "chat" in cmd_str
         assert "--resume-id" in cmd_str
         assert "sess-1" in cmd_str
+        kwargs = mock_popen.call_args.kwargs
+        assert kwargs["env"]["POWER_ATLAS_SESSION"] == "1"
+        assert "CLAUDECODE" not in kwargs["env"]
 
     @patch("subprocess.Popen")
     @patch("shutil.which")
@@ -334,9 +337,11 @@ class TestLaunchSession:
         # No terminal detection needed
         mock_popen.assert_called_once()
         # Verify DETACHED_PROCESS flags used (Windows)
-        kwargs = mock_popen.call_args[1]
+        kwargs = mock_popen.call_args.kwargs
         import subprocess
         assert kwargs.get("creationflags") == (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+        assert kwargs["env"]["POWER_ATLAS_SESSION"] == "1"
+        assert "CLAUDECODE" not in kwargs["env"]
 
     @patch("subprocess.Popen")
     @patch("shutil.which")
@@ -360,6 +365,21 @@ class TestLaunchSession:
         assert result.success is False
         assert "'kiro' not found on PATH" in result.error
         assert "Kiro IDE" in result.error
+
+    @patch("power_atlas.launcher.subprocess.Popen")
+    @patch("power_atlas.launcher.shutil.which")
+    def test_launch_session_scrubs_claude_markers(self, mock_which, mock_popen, monkeypatch, tmp_path):
+        """CLAUDECODE, CLAUDE_CODE_* absent from launched session env; POWER_ATLAS_SESSION present."""
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc")
+        mock_which.side_effect = lambda n: {"kiro-cli": "C:\\kiro-cli.exe", "wt": str(tmp_path / "wt.exe")}.get(n)
+        cwd = str(tmp_path)
+        result = launch_session(cwd, session_id=None, provider="kiro-cli", launch_profile=LaunchProfile(terminal_command=str(tmp_path / "wt.exe")))
+        assert result.success is True
+        env = mock_popen.call_args.kwargs["env"]
+        assert "CLAUDECODE" not in env
+        assert "CLAUDE_CODE_SESSION_ID" not in env
+        assert env["POWER_ATLAS_SESSION"] == "1"
 
 
 class TestLaunchBatch:

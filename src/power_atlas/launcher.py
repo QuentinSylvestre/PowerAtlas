@@ -24,6 +24,30 @@ class LaunchResult:
 
 _SESSION_ID_RE = re.compile(r"^[\w\-]+$")
 
+# Keys stripped from the child env to prevent marker leakage from the PowerAtlas
+# tray process into launched provider sessions.
+# NOTE: A copy of this function lives in acp.py (isolation boundary prevents
+# shared import). Keep _SCRUB_PREFIXES and _SCRUB_EXACT in sync with that copy.
+_SCRUB_PREFIXES = ("CLAUDE_CODE_",)
+_SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})
+
+
+def _build_child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the environment dict for a spawned provider child process.
+
+    Strips CLAUDE_CODE_* / CLAUDECODE / CLAUDE_PID markers inherited from the
+    PowerAtlas tray process, and injects POWER_ATLAS_SESSION=1. ``extra`` is
+    optional (no per-launch extras needed for provider sessions). ``extra`` keys
+    override same-named keys from os.environ (last-write-wins).
+    """
+    base = {
+        k: v for k, v in os.environ.items()
+        if not any(k.startswith(p) for p in _SCRUB_PREFIXES)
+        and k not in _SCRUB_EXACT
+    }
+    return {**base, "POWER_ATLAS_SESSION": "1", **(extra or {})}
+
+
 # Terminal dispatch table: stem -> (title_flag, cwd_flag, exec_separator)
 _LINUX_TERMINALS: dict[str, tuple[str | None, str | None, str | None]] = {
     "kitty":          ("--title",  "--directory",          "--"),
@@ -163,6 +187,7 @@ def launch_session(
                     kwargs["shell"] = True
             else:
                 kwargs["start_new_session"] = True
+            kwargs["env"] = _build_child_env()
             subprocess.Popen(cli_args, **kwargs)
             return LaunchResult(True, session_id, cwd)
         except OSError as e:
@@ -189,6 +214,7 @@ def launch_session(
 
     try:
         kwargs: dict = {"creationflags": subprocess.CREATE_NEW_CONSOLE} if sys.platform == "win32" else {"start_new_session": True}
+        kwargs["env"] = _build_child_env()
         subprocess.Popen(cmd, **kwargs)
         return LaunchResult(True, session_id, cwd)
     except OSError as e:
