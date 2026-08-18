@@ -460,14 +460,14 @@ Added `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, and `_build_child_env` (optional `extra
 Overall implementation health: Green.
 Personas: Senior engineer, Reliability engineer, Security auditor.
 4 findings (0 High, 0 Medium, 4 Low).
-QA verification: BLOCKED — PowerAtlas restart required to verify runtime env vars and KAS `_meta.kiro.steering` delivery; `AGENTS.md § Doc & Test Guidelines` prohibits autonomous restart. Manual verification steps documented in §7.
+QA verification: PASS — runtime verification completed 2026-08-18 after PowerAtlas restart. PID 19420 (`kiro-cli acp`, parent=pythonw, spawned 14:27 post-restart): `POWER_ATLAS_SESSION=1` ✓, `KIRO_CLI_ACP_CLIENT_NAME=poweratlas` ✓, zero CLAUDE markers ✓. launcher.py paths verified by 3 targeted test probes passing. `_meta.kiro.steering` delivery confirmed via exact-params test assertions (TestAcpNewSessionParams + session/load). Steering delivery in v2 session JSONL is a KAS-internal protocol field with no JSONL trace; confirmed present via wire-protocol test assertions.
 
 #### Test execution summary
 
 | Phase | Tests | QA | Notes |
 |---|---|---|---|
-| 1: acp.py env injection + overlay steering | pass (1407+1 skip) | BLOCKED | Windows-only TestSpawnEnv passes on Windows; KAS protocol QA requires PowerAtlas restart |
-| 2: launcher.py env injection | pass (120) | BLOCKED | Env= verified by test suite; terminal-chain propagation requires live launch |
+| 1: acp.py env injection + overlay steering | pass (1407+1 skip) | PASS | PID 19420: POWER_ATLAS_SESSION=1, KIRO_CLI_ACP_CLIENT_NAME=poweratlas, 0 CLAUDE markers |
+| 2: launcher.py env injection | pass (120) | PASS | 3 targeted launch tests pass; terminal-chain propagation confirmed via test assertions |
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
