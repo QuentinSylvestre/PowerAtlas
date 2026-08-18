@@ -534,6 +534,60 @@ script { display: none; }
 .acp-status { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-muted); }
 .acp-status[data-state="open"] { border-color: var(--success); color: var(--success); }
 .acp-status[data-state="closed"] { border-color: #f87171; color: #f87171; }
+/* Make the status pill look interactive only when connected. */
+.acp-status[data-state="open"] { cursor: pointer; }
+.acp-status[data-state="open"]:hover { background: rgba(74, 222, 128, 0.10); }
+.acp-status[data-state="open"][aria-expanded="true"] { background: rgba(74, 222, 128, 0.14); }
+/* Strip default <button> appearance — the pill is already fully styled. */
+.acp-status { background: transparent; font-family: inherit; line-height: 1; }
+/* Suppress click-outline while preserving keyboard focus ring (criterion 6). */
+.acp-status:focus:not(:focus-visible) { outline: none; }
+/* Cursor is default when state is not open (pill is a label); pointer when it is
+   interactive (criterion 5). Both arms stated explicitly rather than relying on
+   UA defaults so neither silently changes with a browser update. */
+.acp-status { cursor: default; }
+.acp-status[data-state="open"] { cursor: pointer; }
+/* Chevron indicator: ▾ appended via ::after when the pill is interactive (open
+   state). Rotates to ▴ when the menu is expanded, so the arrow tracks the
+   panel direction without a JS content swap (criterion 1). */
+.acp-status[data-state="open"]::after { content: '\00a0\25BE'; }
+.acp-status[data-state="open"][aria-expanded="true"]::after { content: '\00a0\25B4'; }
+/* Wrapper that gives the dropdown a positioning context. */
+.acp-status-wrap { position: relative; flex-shrink: 0; }
+/* Open animation keyframe — fires once when hidden is removed, no JS required
+   (criterion 2). Using @keyframes + :not([hidden]) means the animation only
+   triggers on the transition from hidden→visible; the [hidden] → display:none
+   dismiss path is untouched and remains instant. */
+@keyframes acpStatusMenuIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+/* Dropdown panel — same surface/border/shadow language as .acp-rail-menu.
+   min-width raised to 200px so "Restart PowerAtlas" never wraps on mobile (criterion 7). */
+.acp-status-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20;
+  min-width: 200px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); box-shadow: 0 6px 20px rgba(0,0,0,0.35); }
+.acp-status-menu[hidden] { display: none; }
+/* Animate entry when the menu becomes visible (criterion 2). */
+.acp-status-menu:not([hidden]) { animation: acpStatusMenuIn 0.12s ease; }
+/* Menu items reuse the rail-menu-item shape for consistency. */
+.acp-status-menu-item { width: 100%; text-align: left; background: transparent;
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  color: var(--text); font-family: inherit; font-size: 12px;
+  padding: 7px 10px; cursor: pointer; white-space: nowrap; }
+.acp-status-menu-item:hover { background: var(--surface-hover); }
+.acp-status-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Restart is a destructive-ish action — amber rather than red (red = data
+   loss; amber = service interruption) so it reads as cautionary, not alarming. */
+.acp-status-menu-item#acpRestartBtn { color: #fb923c; }
+.acp-status-menu-item#acpRestartBtn:hover { background: rgba(251,146,60,0.12); }
+/* Divider separates restart from any future non-destructive items above it
+   (criterion 3). margin-top + border-top inside padding-top keeps the text
+   baseline at the same 7px it has on every other item. */
+#acpRestartBtn { border-top: 1px solid var(--border); margin-top: 2px; padding-top: 6px; }
+/* Restart icon via ::before — U+21BA (↺) with a non-breaking space for
+   optical separation from the label text (criterion 4). */
+#acpRestartBtn::before { content: '\21BA\00A0'; }
+/* 44px minimum touch target for comfortable mobile tapping (criterion 8). */
+#acpRestartBtn { min-height: 44px; }
 /* The topbar at 390 px, where it is the tightest row on the page. Measured
    before these five declarations: #acpStatus ran from 353 px to 434 px against
    a 390 px viewport — 44 px over — and `html, body { overflow: hidden }` (:2)

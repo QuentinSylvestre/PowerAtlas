@@ -109,3 +109,22 @@ def get_shutdown_event() -> threading.Event:
 
 def restart_requested() -> bool:
     return _restart_requested
+
+
+def trigger_restart() -> None:
+    """Request a restart from outside the tray thread (e.g. from web.py).
+
+    Mirrors what ``on_restart`` does: sets the restart flag, fires the shutdown
+    event, and stops the icon.  Safe to call from any thread; pystray's
+    ``Icon.stop()`` is thread-safe.
+    """
+    global _restart_requested
+    _restart_requested = True
+    if _peek_stop_callback:
+        try:
+            _peek_stop_callback()
+        except Exception:
+            pass
+    _shutdown_event.set()
+    if _icon_instance is not None:
+        _icon_instance.stop()

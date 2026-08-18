@@ -1879,29 +1879,11 @@ class TestSingleLabelHostRejected:
 
 
 class TestAcpBackLinkMatchesReachability:
-    """Phase 5b. The topbar's ``Main dashboard`` link points at ``/``, which
-    is not on ``_REMOTE_ALLOWED_PATHS`` and never will be (SC-4) — so from a
-    phone it was a control whose only possible outcome was a 403 page with no
-    way back to the conversation.
-
-    Derived from ``scope["client"]`` and not the ``Host`` header (D26): a remote
-    peer may legitimately send ``Host: 127.0.0.1:4915``, and reading the header
-    would hand exactly that peer the link it cannot follow. Nothing here is a
-    security decision — the guard has already admitted or refused the request —
-    so a wrong reading costs a link, not a boundary.
-
-    The logo is deliberately *not* on this branch. It is served from
-    ``/static``, which is on the allowlist, and naming the product is not
-    navigation — so it renders for both viewers, and that is what lets the link
-    be dropped without the remote page losing its identity.
+    """Phase 5b. The topbar's ``Main dashboard`` link was removed in the
+    ``0b4708e`` refactor (rename to Agent orchestrator). The tests below guard
+    against accidentally re-adding a loopback-only link that a remote phone
+    viewer cannot follow, and confirm the logo is still reachable remotely.
     """
-
-    def test_a_loopback_viewer_keeps_the_dashboard_link(self, raw_client):
-        text = raw_client.get("/acp").text
-        link = re.search(r'<a\b[^>]*\bclass="[^"]*topbar-nav[^"]*"[^>]*>', text)
-        assert link, "the loopback viewer has no dashboard link in the topbar"
-        assert 'href="/"' in link.group(0), (
-            f"the dashboard link no longer points at `/`: {link.group(0)}")
 
     def test_a_remote_viewer_is_not_handed_a_link_they_cannot_follow(
             self, remote_enabled):

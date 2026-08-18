@@ -25,7 +25,22 @@
       <span class="acp-context-track"><span class="acp-context-fill" id="acpContextFill"></span></span>
       <span class="acp-context-label" id="acpContextLabel"></span>
     </span>
-    <span class="acp-status" id="acpStatus" data-state="connecting">connecting…</span>
+    <!-- Status pill is a button when connected so the user can open the
+         actions dropdown (restart, etc.). Only interactive when data-state
+         is "open" — the aria-haspopup/aria-expanded reflect this. -->
+    <div class="acp-status-wrap" id="acpStatusWrap">
+      <button class="acp-status" id="acpStatus" type="button"
+              data-state="connecting"
+              aria-haspopup="menu" aria-expanded="false"
+              aria-label="Connection status — tap to open actions">connecting…</button>
+      <div class="acp-status-menu" id="acpStatusMenu" role="menu"
+           aria-label="Status actions" hidden>
+        <button class="acp-status-menu-item" id="acpRestartBtn" type="button"
+                role="menuitem">
+          Restart PowerAtlas
+        </button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -640,6 +655,8 @@
   var railStatus = document.getElementById('acpRailStatus');
   var railGroupsEl = document.getElementById('acpRailGroups');
   var railMore = document.getElementById('acpRailMore');
+  var statusMenu = document.getElementById('acpStatusMenu');
+  var restartBtn = document.getElementById('acpRestartBtn');
   var ws = null;
   // Exponential-backoff state for auto-reconnect (SC-3). Both variables are
   // reset on every successful open and advanced on every close-while-opened.
@@ -7289,6 +7306,40 @@
     railSettingsMenu.hidden = false;
     railSettingsBtn.setAttribute('aria-expanded', 'true');
   });
+
+  // --- Status pill dropdown ------------------------------------------------
+  // Only interactive when data-state is "open" (i.e. connected). Outside that
+  // state the button still renders but the click does nothing, which is the
+  // right behaviour — there is nothing actionable when disconnected.
+  var _statusMenuGuard = false;
+
+  function _statusMenuClose() {
+    statusMenu.hidden = true;
+    statusEl.setAttribute('aria-expanded', 'false');
+  }
+
+  statusEl.addEventListener('click', function () {
+    if (statusEl.dataset.state !== 'open') return;
+    if (!statusMenu.hidden) { _statusMenuClose(); return; }
+    _statusMenuGuard = true;
+    _statusMenuClose();
+    statusMenu.hidden = false;
+    statusEl.setAttribute('aria-expanded', 'true');
+  });
+
+  document.addEventListener('click', function () {
+    if (_statusMenuGuard) { _statusMenuGuard = false; return; }
+    if (!statusMenu.hidden) _statusMenuClose();
+  });
+
+  restartBtn.addEventListener('click', function () {
+    _statusMenuClose();
+    if (!window.confirm('Restart PowerAtlas?\n\nAll active ACP sessions will be terminated.')) return;
+    fetch('/api/restart', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' } })
+      .catch(function () { /* connection drop is expected */ });
+  });
+  // -------------------------------------------------------------------------
   // Dismissal for the row menus, and both listeners are on the document because
   // the gestures that should close a menu are exactly the ones that never reach
   // it. Registered unconditionally: with ACP_ERROR set there are no rows and so
@@ -7309,6 +7360,7 @@
     // Focus does not move into the menu when it opens, so the button keeps it
     // and Escape returns the keyboard user exactly where they were — which is
     // the whole reason the menu is toggled in place rather than re-rendered.
+    if (!statusMenu.hidden) { _statusMenuClose(); return; }
     if (railMenuOpen) railCloseMenus();
   });
   reconnectBtn.addEventListener('click', connect);

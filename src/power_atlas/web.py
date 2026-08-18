@@ -710,6 +710,11 @@ _ACP_WORKSPACES_PATH = "/api/acp/workspaces"
 # stays with the route and the block comment that precede it further down.
 _ACP_DELETE_PATH = "/api/acp/sessions/delete"
 
+# The restart route. Up here for the same mechanical reason as the paths above:
+# `_REMOTE_ALLOWED_PATHS` names it and that dict is built at import time. The
+# route and its rationale are further down near the other remote-access routes.
+_ACP_RESTART_PATH = "/api/restart"
+
 
 def set_remote_host(address: str) -> None:
     """Teach `_ALLOWED_HOSTS` the one non-loopback address we bind. Startup only.
@@ -955,6 +960,25 @@ def set_remote_secret(secret: str) -> None:
     _REMOTE_SECRET = value
 
 
+# --- Restart callback --------------------------------------------------------
+#
+# Wired by __main__ at startup to tray.trigger_restart().  None means no tray
+# is running (e.g. test environment); the route returns 503 in that case.
+_restart_callback: "Callable[[], None] | None" = None
+
+
+def set_restart_callback(cb: "Callable[[], None]") -> None:
+    """Register the function that triggers a PowerAtlas restart.
+
+    Called from ``__main__`` after the tray thread has been set up.  The
+    callback is ``tray.trigger_restart``, which sets ``_restart_requested``,
+    fires the shutdown event and stops the icon — the same path the tray menu's
+    own Restart item uses.
+    """
+    global _restart_callback
+    _restart_callback = cb
+
+
 def _device_cookie_sig(secret: str, device_id: str, issued_at: str) -> str:
     """HMAC-SHA256 over `(device_id, issued_at)`, keyed by the file secret."""
     return hmac.new(secret.encode("utf-8"),
@@ -1120,6 +1144,11 @@ _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     # transport-level auth boundary, identical to `_ACP_LISTING_PATH` above.
     # The stop switch (`_REMOTE_SURFACE_STOPPED`) blocks this path when stopped.
     _ACP_DELETE_PATH: "http",
+    # Restart: admitted to authenticated remote peers so the mobile user can
+    # restart PowerAtlas from /acp without walking to the machine.  The device
+    # cookie + Origin/Referer check is the transport-level auth boundary.
+    # The stop switch blocks this path when remote access is stopped.
+    _ACP_RESTART_PATH: "http",
     _REMOTE_STATIC_MOUNT: "http",
 }
 
@@ -4189,6 +4218,38 @@ async def api_remote_access_stop(request: Request, response: Response):
     }
 
 
+@app.post(_ACP_RESTART_PATH)
+async def api_restart(response: Response):
+    """Trigger a PowerAtlas restart from /acp, including from a remote device.
+
+    Calls the same restart path as the tray menu's Restart item — sets the
+    restart flag, fires the shutdown event and stops the icon — so the process
+    exits cleanly and ``__main__`` relaunches it.
+
+    Admitted to remote peers via ``_REMOTE_ALLOWED_PATHS``, authenticated by the
+    device cookie (the same boundary as ``_ACP_DELETE_PATH``).  POST so that
+    ``same_origin_guard``'s Origin/Referer check applies; the client-side button
+    shows a ``confirm()`` dialog before sending, but the transport-level check
+    is the durable boundary.
+
+    Returns ``{"ok": true}`` synchronously and then fires the shutdown; the
+    caller should expect the connection to drop rather than waiting for further
+    JSON.  Returns 503 if no restart callback is wired (no tray — test or
+    headless environment).
+    """
+    response.headers["Cache-Control"] = "no-store"
+    if _restart_callback is None:
+        return JSONResponse(
+            {"ok": False, "error": "no restart callback registered"},
+            status_code=503,
+        )
+    log.warning("restart requested via /api/restart")
+    # Fire after we have returned the response body so the caller receives the
+    # `ok` before the connection drops.
+    asyncio.get_event_loop().call_soon(_restart_callback)
+    return {"ok": True}
+
+
 @app.get("/partials/session-tail", response_class=HTMLResponse)
 async def partials_session_tail(request: Request, sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
     # Validate sid to a UUID-like pattern before passing to the data layer.
@@ -4845,16 +4906,3 @@ async def get_workspace_settings_bulk_api(request: Request):
     all_tags.update(config.tag_settings.keys())
 
     return {"workspaces": workspaces, "all_tags": sorted(all_tags)}
-
-
-@app.post("/api/restart")
-async def api_restart():
-    """Trigger restart via the tray mechanism."""
-    import power_atlas.tray as _tray
-    _tray._restart_requested = True
-    if _tray._peek_stop_callback:
-        _tray._peek_stop_callback()
-    _tray._shutdown_event.set()
-    if _tray._icon_instance:
-        _tray._icon_instance.stop()
-    return {"ok": True}

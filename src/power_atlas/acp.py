@@ -5365,16 +5365,19 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # user-visible turn too late.  Emit an explicit empty broadcast now so the
         # "Done (N agents)" panel is removed immediately when the turn ends.
         # Guard: only if the crew was just fully removed (all entries were done); a
-        # crew that still has running entries is genuinely not done.
+        # crew that still has running entries is genuinely not done.  Also guard
+        # against sessions that never had a crew at all — those must not receive a
+        # spurious empty subagents frame that shifts every other test's frame sequence.
         # Capture the toolCallId BEFORE popping it — the JS setCrew([], key) removes
         # the anchored panel only when key matches the slot key it created (which was
         # the spawner toolCallId). An absent/empty toolCallId only removes a no-anchor
         # panel, so we must pass the real one to clear an anchored panel too.
         _finished_crew_toolcallid = _crew_toolcallid(session_id)
+        _had_crew = session_id in _supervisor.crews or bool(_finished_crew_toolcallid)
         # Unconditionally clear the spawner toolCallId at turn-end so a
         # subscribe snapshot after the turn never sees a stale value.
         _supervisor.crew_spawn_toolcallids.pop(session_id, None)
-        if session_id not in _supervisor.crews:
+        if _had_crew and session_id not in _supervisor.crews:
             _registry.broadcast(session_id, envelope(
                 "subagents",
                 {"subagents": [], "toolCallId": _finished_crew_toolcallid},

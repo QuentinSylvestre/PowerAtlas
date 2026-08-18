@@ -838,8 +838,10 @@ def _run_foreground() -> None:
 
     # Warmup pinned workspaces in background (non-blocking)
     from .peek import create_peek
-    from .tray import run_tray, restart_requested, set_peek_stop_callback
+    from .tray import run_tray, restart_requested, set_peek_stop_callback, trigger_restart
     from .data import warmup_all
+    from .web import set_restart_callback
+    set_restart_callback(trigger_restart)
 
     peek = create_peek(server_url, config.peek_hotkey)
 
