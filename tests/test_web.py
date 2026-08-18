@@ -11270,10 +11270,11 @@ class TestAcpSubagentListAttribution:
         assert "sub-2" not in acp_mod._supervisor.subagent_sessions
         assert "sub-2" not in acp_mod._supervisor.subagent_history
 
-    def test_two_inflight_sessions_both_with_spawner_anchors_is_ambiguous_and_drops(
+    def test_two_inflight_sessions_both_with_spawner_anchors_broadcasts_to_both(
             self, acp_store):
-        """SC-4: two sessions both with anchors — genuinely ambiguous, drop
-        without consuming either anchor."""
+        """SC-4 mitigation: two sessions both with anchors — ambiguous attribution,
+        but instead of dropping we broadcast to all candidates so each session's
+        crew panel appears.  Both anchors are consumed and each session gets a crew."""
         acp_mod, _ = acp_store
         sid_a = _live_session(acp_mod, sid="both-a")
         sid_b = _live_session(acp_mod, sid="both-b")
@@ -11285,13 +11286,11 @@ class TestAcpSubagentListAttribution:
             {"sessionId": "sub-1", "role": "explorer",
              "status": {"type": "working"}},
         ]})
-        # No crews populated
-        assert acp_mod._supervisor.crews == {}
-        # Neither anchor consumed
-        assert acp_mod._supervisor.crew_spawn_anchors == {
-            "tc-1": sid_a, "tc-2": sid_b,
-        }
-
+        # Both sessions get the crew snapshot
+        assert "sub-1" in acp_mod._supervisor.crews.get(sid_a, {})
+        assert "sub-1" in acp_mod._supervisor.crews.get(sid_b, {})
+        # Both anchors consumed
+        assert acp_mod._supervisor.crew_spawn_anchors == {}
     def test_on_notification_tool_call_records_spawner_anchor(self, acp_store):
         """The anchor-recording path in _on_notification is exercised: a
         tool_call notification with _meta.kiro.toolName == "subagent" on an
@@ -19271,6 +19270,144 @@ class TestAcpSubscribeSnapshotGate:
         subagents_frame = next(f for f in frames if f["type"] == "subagents")
         assert "toolCallId" in subagents_frame.get("payload", {}), \
             "subscribe snapshot must include toolCallId"
+
+
+
+class TestAcpFanOutIdFiltering:
+    """BUG-3 fix: _subagents_payload filters to the current fan-out only.
+
+    Entries from prior fan-outs of the same turn are tagged with their
+    fan_out_id at creation time; _subagents_payload and the subscribe snapshot
+    exclude entries whose fan_out_id does not match the current one.
+    """
+
+    def test_entries_from_prior_fan_out_are_excluded_from_payload(self, acp_store):
+        """Entries tagged with an old fan_out_id are excluded when the current
+        fan_out_id differs."""
+        acp_mod, _ = acp_store
+        crew = {
+            "old-child": {
+                "done": True, "role": "r", "task": "t", "sessionName": "",
+                "status": "terminated", "action": "", "error": "", "order": 0,
+                "startedAt": 1.0, "stoppedAt": 2.0,
+                "fan_out_id": "old-fanout",  # prior fan-out
+            },
+            "cur-child": {
+                "done": False, "role": "r", "task": "t", "sessionName": "",
+                "status": "working", "action": "", "error": "", "order": 1,
+                "startedAt": 3.0, "stoppedAt": None,
+                "fan_out_id": "cur-fanout",  # current fan-out
+            },
+        }
+        payload = acp_mod._subagents_payload(crew, fan_out_id="cur-fanout")
+        ids = [e["sessionId"] for e in payload]
+        assert "cur-child" in ids, "current fan-out entry must be included"
+        assert "old-child" not in ids, "prior fan-out entry must be excluded"
+
+    def test_no_filter_includes_all_entries(self, acp_store):
+        """Without a fan_out_id filter, all entries are included (backward compat)."""
+        acp_mod, _ = acp_store
+        crew = {
+            "a": {"done": True, "role": "r", "task": "t", "sessionName": "",
+                  "status": "terminated", "action": "", "error": "", "order": 0,
+                  "startedAt": 1.0, "stoppedAt": 2.0, "fan_out_id": "old"},
+            "b": {"done": False, "role": "r", "task": "t", "sessionName": "",
+                  "status": "working", "action": "", "error": "", "order": 1,
+                  "startedAt": 3.0, "stoppedAt": None, "fan_out_id": "cur"},
+        }
+        payload = acp_mod._subagents_payload(crew)  # no filter
+        ids = [e["sessionId"] for e in payload]
+        assert ids == ["a", "b"]
+
+    def test_entry_without_fan_out_id_always_included(self, acp_store):
+        """Pre-fix in-memory entries that lack fan_out_id are included regardless
+        of the filter so they remain visible after an in-place upgrade."""
+        acp_mod, _ = acp_store
+        crew = {
+            "legacy": {
+                "done": False, "role": "r", "task": "t", "sessionName": "",
+                "status": "working", "action": "", "error": "", "order": 0,
+                "startedAt": 1.0, "stoppedAt": None,
+                # no "fan_out_id" key — pre-fix entry
+            },
+        }
+        payload = acp_mod._subagents_payload(crew, fan_out_id="some-fanout")
+        assert len(payload) == 1, "legacy entry without fan_out_id must always be shown"
+
+    def test_subscribe_excludes_prior_fanout_entries_mid_turn(self, acp_store):
+        """A subscribe during an active turn sends only the current fan-out's
+        entries, not stale done entries from an earlier fan-out of the same turn."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "tc-current"
+        # Seed crew with one old (different fan_out_id) and one current entry
+        acp_mod._supervisor.crews[sid] = {
+            "old-sub": {
+                "done": True, "role": "r", "task": "t", "sessionName": "",
+                "status": "terminated", "action": "", "error": "", "order": 0,
+                "startedAt": 1.0, "stoppedAt": 2.0,
+                "fan_out_id": "tc-old",
+            },
+            "cur-sub": {
+                "done": False, "role": "r", "task": "t", "sessionName": "",
+                "status": "working", "action": "", "error": "", "order": 1,
+                "startedAt": 3.0, "stoppedAt": None,
+                "fan_out_id": "tc-current",
+            },
+        }
+        conn = _acp_conn(acp_mod)
+        acp_mod._handle_subscribe(conn, sid)
+        frames = _queued(conn)
+        sub_frames = [f for f in frames if f["type"] == "subagents"]
+        assert sub_frames, "should send a subagents frame (turn is inflight)"
+        sent_ids = [e["sessionId"] for e in sub_frames[0]["payload"]["subagents"]]
+        assert "cur-sub" in sent_ids, "current fan-out entry must be in snapshot"
+        assert "old-sub" not in sent_ids, "prior fan-out entry must be excluded"
+
+    def test_fan_out_id_set_on_new_entry_creation(self, acp_store):
+        """When _on_subagent_list creates a new entry, fan_out_id is set to the
+        current crew_spawn_toolcallids value for that session."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "tc-abc"
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-x", "role": "worker", "status": {"type": "working"},
+             "initialQuery": "do work"},
+        ]})
+        entry = acp_mod._supervisor.crews.get(sid, {}).get("sub-x")
+        assert entry is not None, "entry must be created"
+        assert entry["fan_out_id"] == "tc-abc", (
+            f"fan_out_id must match crew_spawn_toolcallids; got {entry.get('fan_out_id')!r}")
+
+    def test_fan_out_id_preserved_on_existing_entry_update(self, acp_store):
+        """fan_out_id is NOT overwritten when an existing entry is updated — it
+        stays bound to the fan-out that created it."""
+        acp_mod, _ = acp_store
+        sid = _live_session(acp_mod)
+        acp_mod._supervisor.inflight.add(sid)
+        # Start with entry tagged to tc-first
+        acp_mod._supervisor.crews[sid] = {
+            "sub-y": {
+                "done": False, "role": "worker", "task": "original task",
+                "sessionName": "", "status": "working", "action": "", "error": "",
+                "order": 0, "startedAt": 1.0, "stoppedAt": None,
+                "fan_out_id": "tc-first",
+            },
+        }
+        acp_mod._supervisor.subagent_sessions["sub-y"] = {"parent": sid}
+        acp_mod._supervisor.subagent_history["sub-y"] = acp_mod._History()
+        # Now a second list_update arrives for the same child under a new toolCallId
+        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "tc-second"
+        _notify(acp_mod, acp_mod.SUBAGENT_LIST_METHOD, {"subagents": [
+            {"sessionId": "sub-y", "role": "worker", "status": {"type": "working"},
+             "initialQuery": "updated task"},
+        ]})
+        entry = acp_mod._supervisor.crews[sid]["sub-y"]
+        assert entry["fan_out_id"] == "tc-first", (
+            "fan_out_id must not be overwritten on update; "
+            f"got {entry.get('fan_out_id')!r}")
 
 
 class TestAcpCrewSpawnerToolCallId:

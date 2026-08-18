@@ -3180,13 +3180,79 @@ class _Supervisor:
                     self.crew_spawn_anchors.pop(_tcid, None)
                 log.debug("ACP subagent_list: attributed to %s via spawner anchor"
                           " (%d in-flight sessions)", parent_id, len(inflight))
+            elif len(candidates) == 0:
+                # Zero candidates: no anchor for any in-flight session — drop.
+                log.debug("ACP subagent_list: %d session(s) in flight, 0 anchor"
+                          " candidates — cannot attribute %d entries; dropped",
+                          len(inflight), len(subs))
+                return
             else:
-                # Zero candidates: no anchor for any in-flight session.
-                # 2+ candidates: two sessions both dispatched fan-outs — genuinely
-                # ambiguous (SC-4 acceptable gap). Drop in both cases.
-                log.debug("ACP subagent_list: %d session(s) in flight, %d anchor"
-                          " candidate(s) — cannot attribute %d entries; dropped",
-                          len(inflight), len(candidates), len(subs))
+                # 2+ candidates: two (or more) sessions both dispatched fan-outs
+                # simultaneously. Attribution is ambiguous, but dropping leaves
+                # neither session's crew panel visible. Mitigation (SC-4 best-effort):
+                # broadcast the same snapshot to every candidate so each shows a crew.
+                # Each candidate's oldest anchor is consumed independently.
+                log.debug("ACP subagent_list: %d anchor candidates for %d"
+                          " in-flight sessions — broadcasting to all (SC-4 mitigation)",
+                          len(candidates), len(inflight))
+                for _candidate in candidates:
+                    for _tcid in [k for k, v in self.crew_spawn_anchors.items()
+                                  if v == _candidate][:1]:
+                        if _candidate not in self.crew_spawn_toolcallids:
+                            self.crew_spawn_toolcallids[_candidate] = _tcid
+                        self.crew_spawn_anchors.pop(_tcid, None)
+                    _fan_out_id = self.crew_spawn_toolcallids.get(
+                        _candidate, _NO_ANCHOR_TOOLCALLID)
+                    _candidate_crew = self.crews.setdefault(_candidate, {})
+                    _changed = False
+                    for _entry in subs:
+                        if not isinstance(_entry, dict):
+                            continue
+                        _child_id = _as_text(_entry.get("sessionId"))
+                        if not _child_id:
+                            continue
+                        _existing = _candidate_crew.get(_child_id)
+                        if _existing is not None and _existing["done"]:
+                            continue
+                        _role = _first_text(_entry, _SUBAGENT_ROLE_KEYS)
+                        _task = _first_text(_entry, _SUBAGENT_TASK_KEYS)[:MAX_SUBAGENT_TASK_CHARS]
+                        _sname = _first_text(_entry, ("sessionName",))
+                        if not _role and not _task and _existing is None:
+                            continue
+                        _status = _entry.get("status")
+                        _stype = str(_status.get("type") or "").lower() if isinstance(_status, dict) else ""
+                        _smsg = str(_status.get("message") or "") if isinstance(_status, dict) else ""
+                        _done = bool(_stype) and _stype not in _SUBAGENT_ACTIVE_STATUSES
+                        _error = (_smsg[:MAX_ERROR_DETAIL_CHARS]
+                                  if _done and _stype in ("failed", "error") and _smsg
+                                  else (_existing["error"] if _existing else ""))
+                        _updated = {
+                            "role": _role or (_existing["role"] if _existing else ""),
+                            "task": _task or (_existing["task"] if _existing else ""),
+                            "sessionName": _sname or (_existing.get("sessionName", "") if _existing else ""),
+                            "status": _stype or (_existing["status"] if _existing else ""),
+                            "action": _existing["action"] if _existing else "",
+                            "done": _done,
+                            "error": _error,
+                            "order": _existing["order"] if _existing else len(_candidate_crew),
+                            "startedAt": _existing["startedAt"] if _existing else time.time(),
+                            "stoppedAt": (
+                                _existing["stoppedAt"]
+                                if (_existing and _existing.get("stoppedAt"))
+                                else (time.time() if _done else None)
+                            ),
+                            "fan_out_id": _fan_out_id,
+                        }
+                        if _updated != _existing:
+                            _changed = True
+                        _candidate_crew[_child_id] = _updated
+                        if _child_id not in self.subagent_sessions:
+                            self.subagent_sessions[_child_id] = {"parent": _candidate}
+                            self.subagent_history[_child_id] = _History()
+                            _changed = True
+                    if _changed:
+                        self._evict_finished_subagents(_candidate)
+                        _emit_subagents_frame(_candidate)
                 return
         crew = self.crews.setdefault(parent_id, {})
         changed = False
@@ -3250,6 +3316,13 @@ class _Supervisor:
                     if (existing and existing.get("stoppedAt"))
                     else (time.time() if done else None)
                 ),
+                # BUG-3 fix: tag each entry with the fan-out that created it so
+                # _subagents_payload can filter out stale entries from prior fan-outs
+                # within the same turn. Preserved on update so an entry stays bound
+                # to its original fan-out regardless of subsequent list_updates.
+                "fan_out_id": (existing.get("fan_out_id")
+                               if existing else
+                               self.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)),
             }
             if updated != existing:
                 changed = True
@@ -4218,8 +4291,16 @@ def _first_text(entry: dict, keys: tuple) -> str:
     return ""
 
 
-def _subagents_payload(crew: dict) -> list:
-    """A crew dict as the ``subagents`` frame's wire list, arrival-ordered."""
+def _subagents_payload(crew: dict, fan_out_id: str | None = None) -> list:
+    """A crew dict as the ``subagents`` frame's wire list, arrival-ordered.
+
+    When *fan_out_id* is given, only entries whose ``fan_out_id`` field matches
+    are included.  This is the BUG-3 fix: entries from prior fan-outs of the
+    same turn are tagged with a different id and are therefore excluded from
+    mid-turn snapshots, preventing stale panels from polluting a fresh view.
+    Entries that pre-date the field (``fan_out_id`` absent) are included
+    unconditionally so in-memory state from before the fix still renders.
+    """
     return [
         {
             "sessionId": child_id,
@@ -4234,6 +4315,7 @@ def _subagents_payload(crew: dict) -> list:
             "stoppedAt": entry.get("stoppedAt"),
         }
         for child_id, entry in sorted(crew.items(), key=lambda kv: kv[1]["order"])
+        if fan_out_id is None or entry.get("fan_out_id", fan_out_id) == fan_out_id
     ]
 
 
@@ -4252,9 +4334,11 @@ def _emit_subagents_frame(parent_id: str) -> None:
     if not crew:
         return
     toolcall_id = _crew_toolcallid(parent_id)
+    # BUG-3 fix: filter to only the current fan-out's entries.
+    fan_out_id = _supervisor.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
     _registry.broadcast(parent_id, envelope(
         "subagents",
-        {"subagents": _subagents_payload(crew), "toolCallId": toolcall_id},
+        {"subagents": _subagents_payload(crew, fan_out_id), "toolCallId": toolcall_id},
         parent_id))
 
 
@@ -4607,9 +4691,13 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         # is rebuilding it here, the same way `turnActive`/`contextPercent`
         # are rebuilt onto the `session` frame above rather than replayed.
         toolcall_id = _crew_toolcallid(session_id)
+        # BUG-3 fix: subscribe snapshot uses the same fan_out_id filter as
+        # _emit_subagents_frame so a reload mid-turn never shows done entries
+        # from earlier fan-outs of the same session.
+        fan_out_id = _supervisor.crew_spawn_toolcallids.get(session_id, _NO_ANCHOR_TOOLCALLID)
         conn.send(envelope(
             "subagents",
-            {"subagents": _subagents_payload(crew), "toolCallId": toolcall_id},
+            {"subagents": _subagents_payload(crew, fan_out_id), "toolCallId": toolcall_id},
             session_id))
     commands = meta.get("commands")
     if commands is not None:
