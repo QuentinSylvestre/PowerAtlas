@@ -304,23 +304,29 @@ _first_prompt_cache: BoundedCache = BoundedCache(512)  # (time, mtime, result)
 - `TestKiroV3FindSessionWorkspace` — found, not found, sess_ prefix handling
 
 **Exit criteria**:
-- [ ] `src/power_atlas/data_kiro_v3.py` exists with all 7 interface functions
-- [ ] `V3_SESSIONS_ROOT` excludes `cli/` dir in all scanning
-- [ ] `publish.cursor` and `publish-sub.cursor` files are not tracked in `file_stats`
-- [ ] `extra_fields={"agentMode": ...}` populated from `session.json`
-- [ ] All `iterdir()` and `session.json` reads are wrapped in `try/except OSError`
-- [ ] `isinstance(data, dict)` check after every `json.loads` call (handles partial writes, `null`, `[]`)
-- [ ] `if not cwd: continue` guard after `workspacePaths` extraction
-- [ ] Cache invalidation keys on `session.json` mtimes, not hash-dir mtimes
-- [ ] `_index_lock = threading.Lock()` guards the index rebuild in `_cwd_to_sessions()`
-- [ ] `_tail_cache` and `_first_prompt_cache` use `BoundedCache`, not plain dicts
-- [ ] `refresh_stale_entries_for_cwd` returns `True` when `V3_SESSIONS_ROOT` is absent
-- [ ] `refresh_stale_entries_for_cwd` uses `_norm_cwd_to_hash` cached mapping, does NOT call `_cwd_to_sessions()` internally
-- [ ] `_ensure_sess_prefix` helper extracted and used in all 3 call sites
-- [ ] `BoundedCache` imported from `.data` in the import block
-- [ ] `tests/test_data_kiro_v3.py` created with all 7 test classes listed above
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data_kiro_v3.py -x -q` passes
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data.py -x -q` passes (no regressions)
+- [x] `src/power_atlas/data_kiro_v3.py` exists with all 7 interface functions
+- [x] `V3_SESSIONS_ROOT` excludes `cli/` dir in all scanning
+- [x] `publish.cursor` and `publish-sub.cursor` files are not tracked in `file_stats`
+- [x] `extra_fields={"agentMode": ...}` populated from `session.json`
+- [x] All `iterdir()` and `session.json` reads are wrapped in `try/except OSError`
+- [x] `isinstance(data, dict)` check after every `json.loads` call (handles partial writes, `null`, `[]`)
+- [x] `if not cwd: continue` guard after `workspacePaths` extraction
+- [x] Cache invalidation keys on `session.json` mtimes, not hash-dir mtimes
+- [x] `_index_lock = threading.Lock()` guards the index rebuild in `_cwd_to_sessions()`
+- [x] `_tail_cache` and `_first_prompt_cache` use `BoundedCache`, not plain dicts
+- [x] `refresh_stale_entries_for_cwd` returns `True` when `V3_SESSIONS_ROOT` is absent
+- [x] `refresh_stale_entries_for_cwd` uses `_norm_cwd_to_hash` cached mapping, does NOT call `_cwd_to_sessions()` internally
+- [x] `_ensure_sess_prefix` helper extracted and used in all call sites within Phase 2 (third call site added in Phase 4)
+- [x] `BoundedCache` imported from `.data` in the import block
+- [x] `tests/test_data_kiro_v3.py` created with all 7 test classes listed above
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data_kiro_v3.py -x -q` passes
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_data.py -x -q` passes (no regressions)
+
+#### Implementation (2026-08-18, code: b6bd17a + fc04885 + 14f13e1)
+
+Created `src/power_atlas/data_kiro_v3.py` with all 7 provider interface functions. Key design: two-phase `_cwd_to_sessions()` (fast mtime-only stat pass outside lock; JSON parse only on cache miss; atomic swap under `_index_lock`); `_cwd_display` dict populated during rebuild so `discover_workspaces()` needs zero second reads of session.json; `refresh_stale_entries_for_cwd` derives tracked session dirs from `old_stats` path parents (cwd-scoped by construction) to avoid false-positive stale detection from sibling-cwd additions; `_extract_prompts_v3` reads `messages.jsonl` once (single open, `lines[:50]` for first_prompt, `lines[-100:]` for tail); negative `get_first_prompt` results are cached to avoid re-scanning tool-only sessions on every TTL miss. Cache variable renamed `_session_json_mtimes` (plain name, keys on session.json mtime per D6). Created `tests/test_data_kiro_v3.py` with 50 tests across 8 classes. Divergence: `_cwd_display` dict added (not in original plan) to eliminate `discover_workspaces` double-reads.
+
+---
 
 ---
 
@@ -633,6 +639,32 @@ Select-String -Pattern 'currently 23 dormant' plans\ROADMAP.md
 4. **Config migration: `default_args="-a"` for v3.** Consider adding a Settings panel warning or config migration that detects `-a` / `--trust-all-tools` in `kiro-cli-v3` `default_args` and flags it as incompatible. Source: Review finding #14 (Senior engineer).
 
 ## Review Log
+
+### 2026-08-18 — Implementation Review (after Phase 2, personas: Senior engineer, Reliability engineer, Performance engineer, Maintainability reviewer)
+
+Implementation health: Green (after 2 auto-fix cycles + post-cap user-directed fixes).
+17 findings cycle 1 (4 High, 5 Medium, 8 Low). All resolved.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `refresh_stale_entries_for_cwd` compared all hash_dir subdirs against cwd-filtered sessions — false-positive stale on sibling cwd additions. | Fixed — derive tracked dirs from old_stats path parents (cwd-scoped); read new dirs' session.json to confirm cwd before triggering stale. |
+| 2 | High | `_cwd_to_sessions` double-walked V3_SESSIONS_ROOT on every cache miss — O(2n) I/O, both passes inside lock. | Fixed — two-phase design: fast mtime-only scan outside lock; JSON parse only on miss; atomic swap under lock. |
+| 3 | High | `discover_workspaces` bypassed `_cwd_to_sessions` index — full independent walk on every call. | Fixed — calls `_cwd_to_sessions`; uses `_cwd_display` populated during rebuild for zero extra reads. |
+| 4 | High | `refresh_stale_entries_for_cwd` read `_norm_cwd_to_hash` without `_index_lock` — torn-read race with swap. | Fixed — added brief lock acquisition around `_norm_cwd_to_hash.get(norm_cwd)`. |
+| 5 | Medium | `_cwd_to_sessions` held `_index_lock` across full I/O scan — serialised all concurrent callers. | Fixed — all I/O outside lock in two-phase redesign. |
+| 6 | Medium | `_extract_prompts_v3` opened `messages.jsonl` twice — double I/O and head/tail race. | Fixed — single open; `lines[:50]` head, `lines[-100:]` tail. |
+| 7 | Medium | `_hash_dir_mtimes` variable name misleading — stores session.json mtimes. | Fixed — renamed to `_session_json_mtimes` throughout. |
+| 8 | Medium | `_cwd_to_sessions` outer OSError fell through to swap instead of returning cached state. | Fixed — early return `_cwd_index.copy()` on scan error. |
+| 9 | Medium | `get_first_prompt` didn't negative-cache empty results — re-scanned tool-only sessions on every TTL miss. | Fixed — empty result written to cache with mtime guard. |
+| 10 | Medium | `discover_workspaces` non-dict JSON guard had no test for null/[] session.json values. | Fixed — added `test_discover_workspaces_null_json_skipped`. |
+| 11 | Medium | `discover_workspaces` missing-`lastModifiedAt` sort behavior untested. | Fixed — added `test_discover_workspaces_missing_last_modified`. |
+| 12 | Low | No test for sibling-cwd session addition in same hash dir (H1 regression path). | Fixed — `test_sibling_cwd_session_added_does_not_trigger_stale`. |
+| 13 | Low | `test_file_stats_populated` used substring check instead of exact key assertion. | Fixed — now asserts exact `{str(sj), str(msgs)}` key set. |
+| 14 | Low | No test for `_extract_prompts_v3_cached` cache-hit path. | Fixed — `test_load_sessions_cache_hit_returns_same_result`. |
+| 15 | Low | `get_session_tail` empty result caching behavior undocumented. | Fixed — added docstring comment explaining deliberate non-caching. |
+| 16 | Low | `_norm_cwd_to_hash` one-cwd-per-hash invariant undocumented. | Fixed — added comment in module-level dict declaration. |
+| 17 | Low | No test for negative `get_first_prompt` cache invalidation on file update. | Fixed — `test_negative_cache_invalidated_when_file_updated`. |
+| C2-1 | ~~Med~~ | `_extract_prompts_v3` missing 200-char cap — reviewers were wrong; `_cap_text` defaults 2000 chars. | Orchestrator: proposed-accept — `_cap_text(2000/15)` consistent with all providers; claim was factually incorrect. |
 
 ### 2026-08-18 — Implementation Review (after Phase 1, personas: Senior engineer, Maintainability reviewer, Architect, Reliability engineer)
 
