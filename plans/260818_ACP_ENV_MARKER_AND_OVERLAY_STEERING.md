@@ -1,7 +1,7 @@
 # ACP Env Marker and Overlay Steering
 
 > **Date**: 2026-08-18
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Inject PowerAtlas identity markers into all spawned kiro-cli processes, scrub inherited CLAUDE_CODE_* markers, and deliver per-session overlay steering via `_meta.kiro.steering`
 > **Estimated effort**: 2–4 hours
@@ -454,6 +454,27 @@ Added `_SCRUB_PREFIXES`, `_SCRUB_EXACT`, and `_build_child_env` (optional `extra
 5. **`launch_terminal` CLAUDE scrub.** `launch_terminal` (~line 595) opens a bare terminal shell without `env=` and thus inherits CLAUDE_CODE_* markers. This is out of scope for the current plan (user manually starts a process inside the terminal), but worth tracking. Source: review finding F19 (2026-08-18).
 
 ## Review Log
+
+### 2026-08-18 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Reliability engineer, Security auditor.
+4 findings (0 High, 0 Medium, 4 Low).
+QA verification: BLOCKED — PowerAtlas restart required to verify runtime env vars and KAS `_meta.kiro.steering` delivery; `AGENTS.md § Doc & Test Guidelines` prohibits autonomous restart. Manual verification steps documented in §7.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: acp.py env injection + overlay steering | pass (1407+1 skip) | BLOCKED | Windows-only TestSpawnEnv passes on Windows; KAS protocol QA requires PowerAtlas restart |
+| 2: launcher.py env injection | pass (120) | BLOCKED | Env= verified by test suite; terminal-chain propagation requires live launch |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | `acp.py` module docstring (line 15) says "imports exactly two names from the rest of `power_atlas`" — predates this plan, refers to the guarded coupling constraint, not a literal count | User: accepted — pre-existing wording, intent is "exactly two *guarded* names"; no behavior impact |
+| 2 | Low | `_build_child_env` called inside `try: except OSError:` — pure function; any future I/O addition would bypass job cleanup | User: accepted — function is demonstrably pure; document in Follow-up if modified |
+| 3 | Low | `test_launch_session_claude_builds_correct_args` doesn't assert env= (claude-code uses same terminal-path code as kiro-cli) | User: accepted — `test_launch_session_scrubs_claude_markers` covers the shared code path |
+| 4 | Low | `TestSpawnEnv` has inline `MagicMock` import vs module-level | User: accepted — consistent with file's established per-method inline import pattern |
 
 ### 2026-08-18 — Plan Creation (via /qplan)
 
