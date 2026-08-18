@@ -605,8 +605,7 @@ ACP_ARGS = ("acp", "-a")
 # tray process into spawned kiro-cli ACP sessions.
 # CLAUDE_CODE_* covers CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_SESSION_ID, etc.
 # CLAUDECODE and CLAUDE_PID are separate names without the CLAUDE_CODE_ prefix.
-# NOTE: A copy of this function lives in launcher.py (isolation boundary prevents
-# shared import). Keep _SCRUB_PREFIXES and _SCRUB_EXACT in sync with that copy.
+# (Sync note: see _build_child_env docstring below.)
 _SCRUB_PREFIXES = ("CLAUDE_CODE_",)
 _SCRUB_EXACT = frozenset({"CLAUDECODE", "CLAUDE_PID"})
 

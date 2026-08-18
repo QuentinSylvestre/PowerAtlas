@@ -331,6 +331,7 @@ class TestLaunchSession:
     def test_launch_session_kiro_ide_non_terminal(self, mock_which, mock_popen, monkeypatch, tmp_path):
         """Kiro IDE launches directly without a terminal."""
         monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_PID", "999")
         mock_which.side_effect = lambda n: {"kiro": "C:\\kiro.exe"}.get(n)
         cwd = str(tmp_path)
         result = launch_session(cwd, session_id=None, provider="kiro-ide")
@@ -346,6 +347,7 @@ class TestLaunchSession:
         assert kwargs.get("creationflags") == (subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
         assert kwargs["env"]["POWER_ATLAS_SESSION"] == "1"
         assert "CLAUDECODE" not in kwargs["env"]
+        assert "CLAUDE_PID" not in kwargs["env"]
 
     @patch("subprocess.Popen")
     @patch("shutil.which")
