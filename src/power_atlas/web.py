@@ -3987,7 +3987,7 @@ _SETTING_TYPES: dict[str, type] = {
 _SETTING_BOUNDS: dict[str, tuple[int, int]] = {
     "acp_max_sessions": (1, 16),
     "acp_idle_ttl_seconds": (300, 86400),
-    "acp_prompt_silence_seconds": (60, 7200),
+    "acp_prompt_silence_seconds": (60, 86400),
 }
 
 # Keys whose value is read exactly once at startup. Returned to the settings UI

@@ -116,9 +116,9 @@ acp_max_sessions = 8  # 1-16. Concurrent kiro-cli ACP sessions. Each costs ~3 pr
 acp_idle_ttl_seconds = 1800  # 300-86400. A session with no attached tab, no running turn and no
                              # in-flight load is terminated after this long idle, on a 60 s sweep.
                              # Its transcript stays on disk, so it can be resumed later.
-acp_prompt_silence_seconds = 900  # 60-7200. A turn is cancelled after this much SILENCE from the
+acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this much SILENCE from the
                                   # agent — not this much total time — so a long turn that keeps
-                                  # streaming is never cut off. A 4-hour absolute ceiling still
+                                  # streaming is never cut off. A 24-hour absolute ceiling still
                                   # applies, so one chunk per window cannot run forever.
 
 [provider_settings.kiro-cli]
@@ -291,8 +291,8 @@ shows nothing, correctly.
 Three things are worth knowing before leaving a long task running:
 
 - **A turn is bounded by silence, not by duration.** A turn that keeps streaming runs as long as it
-  needs; one that goes quiet for `acp_prompt_silence_seconds` (default 15 minutes) is cancelled agent
-  side. A 4-hour absolute ceiling applies regardless, so a turn emitting one chunk per window cannot
+  needs; one that goes quiet for `acp_prompt_silence_seconds` (default 30 minutes) is cancelled agent
+  side. A 24-hour absolute ceiling applies regardless, so a turn emitting one chunk per window cannot
   hold a session open forever.
 - **Idle sessions are reclaimed.** A session with no tab attached, no turn running and no load in
   flight is terminated after `acp_idle_ttl_seconds` (default 30 minutes) and its lock removed. The

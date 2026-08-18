@@ -12501,7 +12501,7 @@ class TestAcpConfiguredLimits:
         assert acp_mod.MAX_SESSIONS == 8
         assert Config().acp_max_sessions == 8
         assert Config().acp_idle_ttl_seconds == 1800
-        assert Config().acp_prompt_silence_seconds == 900
+        assert Config().acp_prompt_silence_seconds == 1800
 
     def test_it_stays_a_module_attribute(self):
         """Nine sites in this file read `acp.MAX_SESSIONS`; moving it onto
@@ -12529,7 +12529,7 @@ class TestAcpConfiguredLimits:
         ("acp_idle_ttl_seconds", "ACP_IDLE_TTL_SECONDS", 299),
         ("acp_idle_ttl_seconds", "ACP_IDLE_TTL_SECONDS", 86401),
         ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 59),
-        ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 7201),
+        ("acp_prompt_silence_seconds", "PROMPT_SILENCE_SECONDS", 86401),
     ])
     def test_an_out_of_range_value_is_named_and_the_value_in_force_kept(
             self, acp_fast, caplog, field, attr, bad):
@@ -13952,7 +13952,7 @@ class TestSettingsSurface:
     @pytest.mark.parametrize("key,value", [
         ("acp_max_sessions", 0), ("acp_max_sessions", 17),
         ("acp_idle_ttl_seconds", 299), ("acp_idle_ttl_seconds", 86401),
-        ("acp_prompt_silence_seconds", 59), ("acp_prompt_silence_seconds", 7201),
+        ("acp_prompt_silence_seconds", 59), ("acp_prompt_silence_seconds", 86401),
     ])
     def test_out_of_range_values_are_refused(self, key, value, client):
         body = client.post("/api/save-setting",

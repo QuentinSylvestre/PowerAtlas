@@ -77,7 +77,7 @@ class Config:
     # never raising, and ~16 routes call it on the loop.
     acp_max_sessions: int = 8
     acp_idle_ttl_seconds: int = 1800
-    acp_prompt_silence_seconds: int = 900
+    acp_prompt_silence_seconds: int = 1800
     # The single non-loopback address PowerAtlas additionally listens on, and
     # the single non-loopback name `web._ALLOWED_HOSTS` admits. Empty means
     # loopback-only, which is the default and the state a version bump must

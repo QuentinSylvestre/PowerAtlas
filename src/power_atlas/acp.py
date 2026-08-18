@@ -656,7 +656,7 @@ REQUEST_TIMEOUT_SECONDS = 90.0
 # worst-case cancel latency is `silence + tick`. `PROMPT_SILENCE_SECONDS` is
 # the window with no notification of any kind that condemns a turn.
 PROMPT_TICK_SECONDS = 15.0
-PROMPT_SILENCE_SECONDS = 900.0
+PROMPT_SILENCE_SECONDS = 1800.0
 
 # The safety property the wall clock used to provide, kept deliberately.
 #
@@ -666,7 +666,7 @@ PROMPT_SILENCE_SECONDS = 900.0
 # condition 3), so its memory and its processes are unreclaimable for the
 # app's lifetime with no operator path short of a restart. "Long turns" means
 # generous, not unbounded.
-PROMPT_ABSOLUTE_MAX_SECONDS = 14400.0
+PROMPT_ABSOLUTE_MAX_SECONDS = 86400.0
 
 # How long the ceiling waits, after writing `session/cancel`, for the
 # outstanding `session/prompt` to answer before giving up on it.
