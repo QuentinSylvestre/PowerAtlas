@@ -70,9 +70,20 @@ _norm_cwd_to_hash: dict[str, str] = {}    # norm_cwd -> hash_dir_name (for refre
 # dir is used for refresh checks — a conservative safe degradation.
 _cwd_display: dict[str, tuple[str, str]] = {}  # norm_cwd -> (display_cwd, max_updated_at)
 
+# Path lookup cache: session_id -> messages.jsonl Path (or None).
+# Invalidated by explicit clear() on index rebuild in _cwd_to_sessions.
+# A plain dict (not BoundedCache) because: the index rebuild already bounds
+# its size to the number of known sessions, and clear() is the only
+# invalidation path needed.
+_session_path_cache: dict[str, Path | None] = {}
 
-def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
-    """Return cached cwd index, rebuilding if any session.json mtime has changed.
+
+def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tuple[str, str]]]:
+    """Return cached cwd index and display snapshot, rebuilding if stale.
+
+    Returns a tuple (index, display_snapshot) where both are shallow copies
+    taken under a single lock acquisition, ensuring they are mutually
+    consistent even if a concurrent rebuild races between calls.
 
     Two-phase design:
     Phase 1 (fast): collect session.json mtimes only — O(n) stat() calls, no
@@ -81,16 +92,28 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
     Phase 2 (rebuild): only on cache miss — read session.json files to parse
         cwd and display metadata.  All I/O outside _index_lock; swap atomically.
 
+    Fast path: if root mtime is unchanged AND the index is non-empty, skip the
+    Phase 1 stat scan entirely.  A new session.json can only appear when
+    kiro-cli creates a new session, which bumps the hash_dir mtime, which
+    bumps V3_SESSIONS_ROOT's mtime.  The existing new_json_mtimes ==
+    _session_json_mtimes check in Phase 1 handles the case where root mtime
+    changed but no session.json actually changed.
+
     The lock is NEVER held across filesystem I/O.
     """
     global _root_mtime, _session_json_mtimes, _cwd_index, _norm_cwd_to_hash, _cwd_display
 
     if not V3_SESSIONS_ROOT.is_dir():
-        return {}
+        return {}, {}
     try:
         current_root_mtime = V3_SESSIONS_ROOT.stat().st_mtime
     except OSError:
-        return {}
+        return {}, {}
+
+    # Fast path: if root mtime unchanged and we have a cached index, skip Phase 1 entirely
+    with _index_lock:
+        if current_root_mtime == _root_mtime and _cwd_index:
+            return _cwd_index.copy(), _cwd_display.copy()
 
     # Phase 1: fast mtime-only scan (no JSON reads)
     new_json_mtimes: dict[str, float] = {}
@@ -117,13 +140,13 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
     if scan_error:
         # Partial walk — return cached state rather than swapping in a truncated index
         with _index_lock:
-            return _cwd_index.copy()
+            return _cwd_index.copy(), _cwd_display.copy()
 
     # Check under lock whether rebuild is needed
     with _index_lock:
         if (current_root_mtime == _root_mtime
                 and new_json_mtimes == _session_json_mtimes):
-            return _cwd_index.copy()
+            return _cwd_index.copy(), _cwd_display.copy()
 
     # Phase 2: rebuild — parse session.json (outside lock)
     new_index: dict[str, list[tuple[str, str]]] = {}
@@ -144,7 +167,10 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
                             data = json.loads(f.read())
                         if not isinstance(data, dict):
                             continue
-                        cwd = (data.get("workspacePaths") or [""])[0]
+                        wp = data.get("workspacePaths")
+                        if not isinstance(wp, list) or not wp:
+                            continue
+                        cwd = wp[0]
                         if not cwd:
                             continue
                         norm = _normalize_path(cwd)
@@ -168,7 +194,7 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
 
     if rebuild_error:
         with _index_lock:
-            return _cwd_index.copy()
+            return _cwd_index.copy(), _cwd_display.copy()
 
     # Atomic swap under lock
     with _index_lock:
@@ -177,7 +203,8 @@ def _cwd_to_sessions() -> dict[str, list[tuple[str, str]]]:
         _cwd_index = new_index
         _norm_cwd_to_hash = new_norm_cwd_to_hash
         _cwd_display = new_cwd_display
-        return new_index.copy()
+        _session_path_cache.clear()
+        return new_index.copy(), new_cwd_display.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -289,11 +316,17 @@ def _extract_prompts_v3_cached(
 def _find_v3_session_path(session_id: str) -> Path | None:
     """Find the messages.jsonl path for a session by scanning hash dirs.
 
+    Cached in _session_path_cache (invalidated on index rebuild).
     Returns None if not found or on any OSError.
     """
+    # Check path cache (invalidated on index rebuild via _cwd_to_sessions)
+    if session_id in _session_path_cache:
+        return _session_path_cache[session_id]
+
     if not V3_SESSIONS_ROOT.is_dir():
         return None
     sess_dir_name = _ensure_sess_prefix(session_id)
+    found_path: Path | None = None
     try:
         for hash_dir in V3_SESSIONS_ROOT.iterdir():
             if not hash_dir.is_dir() or hash_dir.name in _V3_EXCLUDED_NAMES:
@@ -301,12 +334,15 @@ def _find_v3_session_path(session_id: str) -> Path | None:
             candidate = hash_dir / sess_dir_name / "messages.jsonl"
             try:
                 if candidate.is_file():
-                    return candidate
+                    found_path = candidate
+                    break
             except OSError:
                 continue
     except OSError:
-        return None
-    return None
+        pass
+
+    _session_path_cache[session_id] = found_path
+    return found_path
 
 
 # ---------------------------------------------------------------------------
@@ -331,16 +367,13 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
 
     Returns list of (cwd, session_count, updated_at) tuples sorted by recency.
 
-    Uses _cwd_to_sessions() for enumeration and _cwd_display for display
-    metadata (original cwd string and max lastModifiedAt).  No independent
-    walk of V3_SESSIONS_ROOT and no second read of session.json files.
+    Uses _cwd_to_sessions() for enumeration and the atomically returned display
+    snapshot for display metadata (original cwd string and max lastModifiedAt).
+    No independent walk of V3_SESSIONS_ROOT and no second read of session.json.
     """
-    index = _cwd_to_sessions()  # also populates _cwd_display as a side effect
+    index, display_snapshot = _cwd_to_sessions()
     if not index:
         return []
-
-    with _index_lock:
-        display_snapshot = _cwd_display.copy()
 
     results = []
     for norm_cwd, entries in index.items():
@@ -360,7 +393,7 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
         return sessions, file_stats
 
     norm_cwd = _normalize_path(cwd)
-    index = _cwd_to_sessions()
+    index, _ = _cwd_to_sessions()
 
     for hash_name, sess_dir_name in index.get(norm_cwd, []):
         sess_dir = V3_SESSIONS_ROOT / hash_name / sess_dir_name
@@ -380,7 +413,10 @@ def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
         except (OSError, json.JSONDecodeError, ValueError):
             continue
 
-        cwd_from_data = (data.get("workspacePaths") or [""])[0]
+        wp = data.get("workspacePaths")
+        if not isinstance(wp, list) or not wp:
+            continue
+        cwd_from_data = wp[0]
         if not cwd_from_data:
             continue
 
@@ -454,14 +490,13 @@ def refresh_stale_entries_for_cwd(
 
     try:
         hash_dir = V3_SESSIONS_ROOT / hash_name
-        hash_dir_str = str(hash_dir)
 
         # Session dirs we were tracking for norm_cwd (from file-stat paths)
         tracked_sess_dirs: set[str] = set()
         for path_str in old_stats:
             p = Path(path_str)
             # Path structure: .../hash_name/sess_<uuid>/session.json
-            if str(p.parent.parent) == hash_dir_str:
+            if p.parent.parent == hash_dir:
                 tracked_sess_dirs.add(p.parent.name)
 
         # Current sess_* dirs in the hash dir (all cwds combined)
@@ -485,7 +520,10 @@ def refresh_stale_entries_for_cwd(
                     data = json.loads(f.read())
                 if not isinstance(data, dict):
                     continue
-                cwd = (data.get("workspacePaths") or [""])[0]
+                wp = data.get("workspacePaths")
+                if not isinstance(wp, list) or not wp:
+                    continue
+                cwd = wp[0]
                 if cwd and _normalize_path(cwd) == norm_cwd:
                     return True  # New session belongs to THIS cwd
             except (OSError, json.JSONDecodeError, ValueError):
@@ -518,8 +556,10 @@ def find_session_workspace(session_id: str) -> str | None:
                     data = json.loads(f.read())
                 if not isinstance(data, dict):
                     continue
-                cwd = (data.get("workspacePaths") or [""])[0]
-                return cwd or None
+                wp = data.get("workspacePaths")
+                if not isinstance(wp, list) or not wp:
+                    continue
+                return wp[0] or None
             except (OSError, json.JSONDecodeError, ValueError):
                 continue
     except OSError:
@@ -541,9 +581,9 @@ _FIRST_PROMPT_TTL = 60  # seconds
 def get_session_tail(session_id: str, cwd: str = "", max_lines: int = 15) -> list[str]:
     """Extract last N assistant message texts from a v3 session.
 
-    Cached 5 s + mtime guard.  Empty tail is a valid transient state (session
-    just started) and is NOT cached to avoid persisting stale emptiness across
-    the TTL window.
+    Cached 5 s + mtime guard. An empty result (no assistant messages yet) is
+    also cached to prevent repeated I/O on brand-new sessions; the mtime guard
+    ensures the cache is discarded when a message arrives.
     """
     messages_path = _find_v3_session_path(session_id)
     if messages_path is None:

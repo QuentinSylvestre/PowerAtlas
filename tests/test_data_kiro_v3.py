@@ -104,6 +104,7 @@ def _clear_v3_caches():
         dv3._cwd_index = {}
         dv3._norm_cwd_to_hash = {}
         dv3._cwd_display = {}
+        dv3._session_path_cache = {}
         dv3._prompts_cache.clear()
         dv3._tail_cache.clear()
         dv3._first_prompt_cache.clear()
@@ -267,6 +268,20 @@ class TestKiroV3DiscoverWorkspaces:
         result = dv3.discover_workspaces()
         assert len(result) == 1
         assert "Work" in result[0][0]  # cwd present
+
+    def test_non_list_workspace_paths_skipped(self, tmp_path, monkeypatch):
+        """session.json with workspacePaths as a non-list value is skipped."""
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        hash_dir = tmp_path / "abc123"
+        sess_dir = hash_dir / "sess_badwp"
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text(
+            json.dumps({"id": "sess_badwp", "workspacePaths": "not-a-list"}),
+            encoding="utf-8",
+        )
+        (sess_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        result = dv3.discover_workspaces()
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +464,32 @@ class TestKiroV3LoadSessions:
         assert sessions1[0].last_reply_tail == sessions2[0].last_reply_tail == "cached a"
         # File stats should be identical (no extra reads)
         assert stats1 == stats2
+
+    def test_non_list_workspace_paths_skipped_in_load(self, tmp_path, monkeypatch):
+        """load_sessions skips sessions where workspacePaths is not a list."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        # Session with workspacePaths as string (invalid)
+        sess_dir = root / "h1" / "sess_badwp"
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text(
+            json.dumps({
+                "id": "sess_badwp",
+                "title": "Bad WP",
+                "workspacePaths": "not-a-list",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "lastModifiedAt": "2026-01-01T00:00:00Z",
+                "agentMode": "",
+            }),
+            encoding="utf-8",
+        )
+        (sess_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        _bump_mtime(sess_dir / "session.json", sess_dir)
+
+        sessions, _ = dv3.load_sessions("C:\\W")
+        assert sessions == []
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from .data_claude import _get_project_folder
+from .data_kiro_v3 import V3_SESSIONS_ROOT as _V3_SESSIONS_ROOT
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,6 @@ _CACHE_TTL = 5.0  # seconds
 
 # Replicate path constant (avoids circular import through data_kiro → data → data_kiro)
 SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
-
-# v3 sessions root (workspace-hash subdirs live here)
-_V3_SESSIONS_ROOT = Path.home() / ".kiro" / "sessions"
 
 
 class SemanticStatus(str, Enum):
@@ -570,8 +568,11 @@ def _classify_from_path(
     if not tail_lines:
         return None
 
-    if provider in ("kiro-cli", "kiro-cli-v3"):
-        # Detect v3 vs v2 format
+    if provider == "kiro-cli-v3":
+        # kiro-cli-v3 sessions always use the v3 format; skip auto-detection
+        return classify_kiro_v3(tail_lines)
+    if provider == "kiro-cli":
+        # kiro-cli v2 sessions may be v2 or v3 format depending on kiro-cli version
         if _is_v3_format(tail_lines):
             return classify_kiro_v3(tail_lines)
         return classify_kiro_v2(tail_lines)
