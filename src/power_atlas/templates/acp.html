@@ -551,6 +551,10 @@
   outline: 2px solid var(--accent, #6c8cff);
   outline-offset: -2px;
 }
+/* Prevent iOS Safari auto-zoom on focus: font-size must be >= 16px on touch devices. */
+@media (hover: none) and (pointer: coarse) {
+  .acp-mode-select { font-size: 16px; }
+}
 /* Screen-reader-only visually hidden utility — used for aria-live regions */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
@@ -1300,6 +1304,7 @@
     // not survive to a new session's addMessage calls.
     userMsgEls = [];
     promptNavEl.hidden = true;
+    _updateNavArrows();
     // Images were staged against the conversation this page has just let go
     // of. Carrying them to whatever is opened next would put a screenshot in
     // front of a different agent in a different directory.
@@ -1835,6 +1840,7 @@
     if (role === 'user') {
       userMsgEls.push(row);
       promptNavEl.hidden = userMsgEls.length < 2;
+      _updateNavArrows();
     }
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     return body;
@@ -3653,6 +3659,7 @@
     // userMsgEls tracking array.
     userMsgEls = [];
     promptNavEl.hidden = true;
+    _updateNavArrows();
     agentBody = null;
     toolRows = Object.create(null);
     // Clear any live elapsed-time timers — the rows they were ticking against
@@ -7118,6 +7125,17 @@
     }
   });
   // ---- prompt navigation arrows -------------------------------------------
+  //
+  // Grey out an arrow when it has nowhere to go: ↑ when scrolled to the very
+  // top, ↓ when scrolled to the very bottom. Called on scroll and whenever
+  // userMsgEls changes (content added or cleared).
+  function _updateNavArrows() {
+    var atTop    = transcriptEl.scrollTop <= 0;
+    var atBottom = transcriptEl.scrollTop + transcriptEl.clientHeight >= transcriptEl.scrollHeight - 1;
+    promptUpBtn.classList.toggle('acp-prompt-nav-btn--dim', atTop);
+    promptDownBtn.classList.toggle('acp-prompt-nav-btn--dim', atBottom);
+  }
+  transcriptEl.addEventListener('scroll', _updateNavArrows);
   //
   // Up: scroll to the user message whose top is above the current scroll
   // position (i.e., the previous one visible). Falls back to the very first

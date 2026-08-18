@@ -747,6 +747,8 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
   font-size: 0.875rem;
 }
 .acp-prompt-nav-btn:hover { opacity: 1; }
+.acp-prompt-nav-btn--dim { opacity: 0.25; cursor: default; }
+.acp-prompt-nav-btn--dim:hover { opacity: 0.25; }
 .acp-prompt-nav-btn:focus-visible {
   outline: 2px solid var(--accent, #3b82f6);
   outline-offset: 2px;

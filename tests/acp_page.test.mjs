@@ -364,6 +364,34 @@ class El {
     // parents), so parentElement and parentNode are equivalent here.
     return this.parentNode;
   }
+  // classList — wraps `className` so page code using toggle/add/remove/contains
+  // works in the harness. Only the four methods the page actually calls are
+  // implemented; anything else throws loudly rather than silently no-oping.
+  get classList() {
+    const self = this;
+    function classes() {
+      return self.className ? self.className.split(/\s+/).filter(Boolean) : [];
+    }
+    return {
+      add(name) {
+        const list = classes();
+        if (!list.includes(name)) list.push(name);
+        self.className = list.join(" ");
+      },
+      remove(name) {
+        self.className = classes().filter((c) => c !== name).join(" ");
+      },
+      toggle(name, force) {
+        const list = classes();
+        const has = list.includes(name);
+        const add = force === undefined ? !has : Boolean(force);
+        if (add && !has) list.push(name);
+        else if (!add && has) list.splice(list.indexOf(name), 1);
+        self.className = list.join(" ");
+      },
+      contains(name) { return classes().includes(name); },
+    };
+  }
 }
 
 // -------------------------------------------------- the listing endpoint --
@@ -8623,6 +8651,53 @@ check("prompt nav cleared on clearTranscript", (tpl) => {
     payload: { role: "user", text: "re-attach msg 2" } });
   assertEqual(page.el("acpPromptNav").hidden, false,
     "prompt nav should become visible again after 2 messages in the new session (re-attach worked)");
+});
+
+check("prompt nav up arrow greys when scrolled to top, clears when scrolled down", (tpl) => {
+  const { page, live } = connected(tpl);
+  // Build 2 user messages so the nav is visible
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "msg 1" } });
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "msg 2" } });
+  const transcript = page.el("acpTranscript");
+  const upBtn = page.el("acpPromptUp");
+  const downBtn = page.el("acpPromptDown");
+  // At top (scrollTop=0): up arrow should be dimmed
+  transcript.scrollTop = 0;
+  transcript.scrollHeight = 500;
+  transcript.clientHeight = 200;
+  transcript.dispatch("scroll");
+  assert(upBtn.classList.contains("acp-prompt-nav-btn--dim"),
+    "up arrow should be dimmed when scrolled to the top");
+  // Scrolled to middle: up arrow should not be dimmed
+  transcript.scrollTop = 150;
+  transcript.dispatch("scroll");
+  assert(!upBtn.classList.contains("acp-prompt-nav-btn--dim"),
+    "up arrow should not be dimmed when scrolled away from top");
+});
+
+check("prompt nav down arrow greys when scrolled to bottom, clears when scrolled up", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "msg 1" } });
+  page.deliver({ type: "chunk", sessionId: live,
+    payload: { role: "user", text: "msg 2" } });
+  const transcript = page.el("acpTranscript");
+  const downBtn = page.el("acpPromptDown");
+  const upBtn = page.el("acpPromptUp");
+  // Scrolled to bottom: down arrow dimmed
+  transcript.scrollTop = 300;
+  transcript.scrollHeight = 500;
+  transcript.clientHeight = 200;
+  transcript.dispatch("scroll");
+  assert(downBtn.classList.contains("acp-prompt-nav-btn--dim"),
+    "down arrow should be dimmed when scrolled to the bottom");
+  // Scrolled to middle: down arrow not dimmed
+  transcript.scrollTop = 100;
+  transcript.dispatch("scroll");
+  assert(!downBtn.classList.contains("acp-prompt-nav-btn--dim"),
+    "down arrow should not be dimmed when scrolled away from bottom");
 });
 
 check("crew timer stops when all crew entries are done", (tpl) => {
