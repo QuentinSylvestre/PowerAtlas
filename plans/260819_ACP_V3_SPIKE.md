@@ -1,4 +1,4 @@
-# ACP v3 Spike — `/acp-v3` Prototype
+﻿﻿# ACP v3 Spike — `/acp-v3` Prototype
 
 > **Date**: 2026-08-19
 > **Status**: Draft
@@ -354,26 +354,29 @@ workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
 
 **Exit criteria**:
 - [ ] `_SupervisorV3` class present with all overrides: `_spawn`, `_on_agent_request`, `_on_notification`, `new_session`, `load_session`, `_publish_live`
-- [ ] `_fulfill_token` present with separate `except` blocks for `json.JSONDecodeError`/`KeyError` (no token in error message), `TimeoutExpired` (subprocess killed), and general `Exception`; `_discard` called on pipe-write failure
-- [ ] `_KIRO_V3_TOKEN_BINARY = shutil.which("kiro-cli")` at module level; used in `_fulfill_token`
-- [ ] `_supervisor_v3` initialized inside `apply_config`, not at module level; construction failure logged at ERROR
-- [ ] `_sweep_once` extended to cover `_supervisor_v3.sessions`; `_sweep_loop` guard includes v3
-- [ ] `shutdown()` calls `_supervisor_v3.shutdown()` if not None
-- [ ] `_registry.attach`/`detach` route `touch_used` to the correct supervisor
-- [ ] `_publish_live` union: read actual `_Supervisor._publish_live` signature before implementing; match it
-- [ ] `_stored_session_cwd_v3` validates `session_id` via `_SESSION_ID_RE.fullmatch` before any path join
-- [ ] `_get_tool_diffs_v3` includes unconditional 200 ms retry on empty result
-- [ ] `acp.py` isolation boundary intact: `grep -E "from \.data_kiro_v3|import data_kiro_v3" src/power_atlas/acp.py` returns no hits
+- [x] `_fulfill_token` present with separate `except` blocks for `json.JSONDecodeError`/`KeyError` (no token in error message), `TimeoutExpired` (subprocess killed), and general `Exception`; `_discard` called on pipe-write failure
+- [x] `_KIRO_V3_TOKEN_BINARY = shutil.which("kiro-cli")` at module level; used in `_fulfill_token`
+- [x] `_supervisor_v3` initialized inside `apply_config`, not at module level; construction failure logged at ERROR
+- [x] `_sweep_once` extended to cover `_supervisor_v3.sessions`; `_sweep_loop` guard includes v3
+- [x] `shutdown()` calls `_supervisor_v3.shutdown()` if not None
+- [x] `_registry.attach`/`detach` route `touch_used` to the correct supervisor
+- [x] `_publish_live` union: read actual `_Supervisor._publish_live` signature before implementing; match it
+- [x] `_stored_session_cwd_v3` validates `session_id` via `_SESSION_ID_RE.fullmatch` before any path join
+- [x] `_get_tool_diffs_v3` includes unconditional 200 ms retry on empty result
+- [x] `acp.py` isolation boundary intact: `grep -E "from \.data_kiro_v3|import data_kiro_v3" src/power_atlas/acp.py` returns no hits
 - [ ] Manual smoke test: call `_supervisor_v3.ensure_started()` from a Python script, observe no exception; verify KAS subprocess starts and `_ready` is `True`
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes (all existing tests)
-- [ ] Phase 0 KAS v3 startup time: 1.70 s (measured in Phase 0) — no timeout adjustment needed
-- [ ] `new_session` override extracts session ID from `result._meta.id` (not `result.get("sessionId")`) — verified by grep
-- [ ] `close_session` override present with per-session local cleanup (does NOT call `_discard()`) — verified by reading implementation
-- [ ] `CLOSE_METHOD_V3 = None` constant added near `CLOSE_METHOD`
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes (all existing tests)
+- [x] Phase 0 KAS v3 startup time: 1.70 s (measured in Phase 0) — no timeout adjustment needed
+- [x] `new_session` override extracts session ID from `result._meta.id` (not `result.get("sessionId")`) — verified by grep
+- [x] `close_session` override present with per-session local cleanup (does NOT call `_discard()`) — verified by reading implementation
+- [x] `CLOSE_METHOD_V3 = None` constant added near `CLOSE_METHOD`
 - [ ] `session/cancel` notification (not request) verified on a live v3 turn; `stopReason: "cancelled"` confirmed or behavior noted
 - [ ] Crew panel (`_kiro.dev/subagent/list_update`) compatibility marked as open item (not probed in Phase 0 — single non-subagent turn; requires Phase 2+ with a multi-agent prompt)
 
 **Covers**: SC-1 (partial — handshake only), SC-8 (partial)
+
+### Implementation (2026-08-19, code: dda150c, fix: 95c6930)
+`_SupervisorV3(_Supervisor)` skeleton added to `acp.py` (467+6 net lines, plus 13-finding fix batch). Constants: `ACP_V3_ARGS`, `CLOSE_METHOD_V3 = None`, `_KIRO_V3_TOKEN_BINARY`. Two inline helpers: `_get_tool_diffs_v3` (hash-dir scan with `_SESSION_ID_RE` guard + asyncio.to_thread wrapping in load_session) and `_stored_session_cwd_v3` (reads `workspacePaths[0]` with session ID validation). `_SupervisorV3` overrides: `_spawn` (ACP_V3_ARGS), `_on_agent_request` (routes getAccessToken to `_fulfill_token`), `new_session` (extracts `result._meta.id`), `close_session` (per-session local cleanup, no wire call), `load_session` (no lock hint, v3 cwd/diff), `_publish_live` (union). `_fulfill_token` with separate except blocks, no token in error messages, `_discard` on pipe-write failure. `_sweepable` updated for both supervisors. `_registry.attach/detach` routes to correct supervisor. `_sweep_once` extended (v3 pass). `shutdown()` updated. Fix batch: path-traversal guard on `_get_tool_diffs_v3`; `_sweepable` covers both supervisor inflight/closing; `close_session` notifies subscribers; alive() guard removed; close_in_progress guards cover both supervisors; new_session rollback. Tests: 1859 passed, 2 skipped. `_on_notification` deferred to Phase 2 (requires `_emit_v3`).
 
 ### Phase 2: Session lifecycle + turn [QA]
 
@@ -411,6 +414,7 @@ workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
 - [ ] All 9 `_handle_*_v3` functions present in `acp.py`
 - [ ] `_dispatch_v3` and `serve_socket_v3` present
 - [ ] `_emit_v3` function present, calling `_supervisor_v3.record()` and `_registry.broadcast()`
+- [ ] `_SupervisorV3._on_notification` override present, replacing all `_emit(session_id, frame)` calls with `_emit_v3(session_id, frame)` (deferred from Phase 1 -- requires `_emit_v3` defined in this phase)
 - [ ] Manual smoke test (requires Phase 3 route to exist OR a raw WebSocket client): connect to `/ws/acp-v3`, send `{"type":"new","payload":{"cwd":"<workspace>"}}`, observe `meta.pending` frame, then session frame with a `sess_`-prefixed ID
 - [ ] `.venv-PowerAtlas\Scripts\pytest` passes
 
@@ -761,3 +765,27 @@ Health: **Green** (all High and Medium findings resolved; no unresolved findings
 
 
 
+
+
+
+### 2026-08-19 — Implementation Review (after Phase 1, personas: Security auditor, Senior engineer, Reliability engineer, Architect — 2 cycles)
+
+Implementation health: Green (all High/Medium resolved after 2 cycles; 1 proposed-accept).
+13 findings cycle 1 (3 High, 6 Medium, 4 Low). Cycle 2: 1 proposed-accept architectural note.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `_get_tool_diffs_v3` missing `_SESSION_ID_RE` validation before path join — traversal risk | Fixed — `_SESSION_ID_RE.fullmatch` guard added as first line (fix commit 95c6930) |
+| 2 | High | `_on_notification` not overridden — v3 frames write to v2 history (Risk R12); exit criterion falsely ticked | Fixed — un-ticked, deferred to Phase 2 exit criteria; plan updated |
+| 3 | High | `_sweepable` checked v2 supervisor inflight/closing only — v3 sessions swept mid-turn | Fixed — now checks both supervisors (95c6930) |
+| 4 | Medium | `close_session` missing `_session_closed_frame` broadcast to primary subscribers | Fixed — subscriber fan-out added after `_bubbles.pop` (95c6930) |
+| 5 | Medium | `alive()` guard in `close_session` prevents cleanup when KAS is dead | Fixed — removed `alive()` check from `_SupervisorV3.close_session` (95c6930) |
+| 6 | Medium | `new_session` `log.info` referenced potentially-unbound `session_id` | Fixed — `session_id = None` initialized at method top (95c6930) |
+| 7 | Medium | `_get_tool_diffs_v3` blocking `iterdir()` called in async `load_session` | Fixed — wrapped in `asyncio.to_thread` (95c6930) |
+| 8 | Medium | `close_in_progress` guards checked only `_supervisor.closing` | Fixed — 7 handler sites updated to check both supervisors (95c6930) |
+| 9 | Medium | `new_session` no rollback if `_publish_live` raises after inserting session | Fixed — try/except rollback added around post-insert operations (95c6930) |
+| 10 | Low | Redundant `_publish_live` call in `_sweep_once` v3 pass | Fixed — removed duplicate call (95c6930) |
+| 11 | Low | `_publish_live` v3 attributed combined sessions to v3 PID | Fixed — changed to pid=0 for combined union (95c6930) |
+| 12 | Low | `import time` inside `_get_tool_diffs_v3` body redundant | Fixed — removed (95c6930) |
+| 13 | Low | `apply_config` re-created `_supervisor_v3` on every call | Fixed — guarded with `if _supervisor_v3 is None` (95c6930) |
+| 14 | High (cycle 2) | `_handle_close` session-existence gate v2-only — v3 sessions would get `nothing_to_close` | Orchestrator: proposed-accept — v2 handler only; Phase 2 adds `_handle_close_v3` scoped to `_dispatch_v3` which routes to `_supervisor_v3`; unreachable by v3 session IDs in Phase 1 |
