@@ -600,6 +600,15 @@ DRAIN_TIMEOUT_SECONDS = 2.0
 # knowing prototype-scoped choice (plan §3), to be re-decided before a rebuild.
 KIRO_BINARY = "kiro-cli"
 ACP_ARGS = ("acp", "-a")
+# v3 ACP — `--agent-engine v3` spawns KAS with `--auth=acp-callback`.
+# `-a` / `--trust-all-tools` is *incompatible* with v3 (exits 2); omit it.
+ACP_V3_ARGS = ("acp", "--agent-engine", "v3")
+# v3 has no JSON-RPC session-close method (probe AS-5 2026-08-19: every
+# candidate returns -32603 or -32601). `close_session` in _SupervisorV3
+# skips the `_request` call and executes per-session local cleanup directly.
+CLOSE_METHOD_V3: "str | None" = None
+# Resolved once at module load — avoids PATH shadowing at token-fetch time.
+_KIRO_V3_TOKEN_BINARY: "str | None" = shutil.which("kiro-cli")
 
 # Keys stripped from the child env to prevent marker leakage from the PowerAtlas
 # tray process into spawned kiro-cli ACP sessions.
@@ -1967,7 +1976,10 @@ class _Registry:
         conn.session_id = session_id
         self.subscribers.setdefault(session_id, set()).add(conn)
         # A tab opening on a session is a person using it.
-        _supervisor.touch_used(session_id)
+        if _supervisor_v3 is not None and session_id in _supervisor_v3.sessions:
+            _supervisor_v3.touch_used(session_id)
+        else:
+            _supervisor.touch_used(session_id)
 
     def detach(self, conn: _Connection) -> None:
         sid = conn.session_id
@@ -1984,7 +1996,10 @@ class _Registry:
         # way out is what makes the TTL mean "unattended for this long" rather
         # than "attached this long ago": a session watched for an hour and then
         # abandoned would otherwise be swept on the very next tick.
-        _supervisor.touch_used(sid)
+        if _supervisor_v3 is not None and sid in _supervisor_v3.sessions:
+            _supervisor_v3.touch_used(sid)
+        else:
+            _supervisor.touch_used(sid)
 
     def broadcast(self, session_id: str, frame: dict) -> None:
         """Queue a frame on every socket attached to a session."""
@@ -2255,6 +2270,105 @@ def _new_session_record(cwd: str) -> dict:
 _NO_ANCHOR_TOOLCALLID: Final[str] = ""
 
 
+def _get_tool_diffs_v3(session_id: str) -> "dict[str, dict]":
+    """Extract fs_write / str_replace diffs from a v3 session's messages.jsonl.
+
+    Returns {toolCallId: {"path": ..., "oldText": ..., "newText": ...}}.
+    Inlined in acp.py per the isolation boundary constraint (acp.py imports only
+    config.CONFIG_DIR and launcher._SESSION_ID_RE from the package).
+    """
+    import time as _time
+
+    def _scan() -> "dict[str, dict]":
+        sessions_root = Path.home() / ".kiro" / "sessions"
+        jsonl_path = None
+        try:
+            for hash_dir in sessions_root.iterdir():
+                if not hash_dir.is_dir() or hash_dir.name == "cli":
+                    continue
+                candidate = hash_dir / session_id / "messages.jsonl"
+                if candidate.is_file():
+                    jsonl_path = candidate
+                    break
+        except Exception:
+            return {}
+        if jsonl_path is None:
+            return {}
+        tool_calls: "dict[str, dict]" = {}
+        successful_ids: "set[str]" = set()
+        try:
+            for raw_line in jsonl_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    msg = json.loads(raw_line)
+                except ValueError:
+                    continue
+                payload = msg.get("payload") or {}
+                ptype = payload.get("type")
+                if ptype == "tool_call":
+                    tool_name = payload.get("toolName") or ""
+                    args = payload.get("args") or {}
+                    tcid = payload.get("toolCallId") or ""
+                    if not tcid:
+                        continue
+                    if tool_name == "fs_write":
+                        tool_calls[tcid] = {
+                            "path": args.get("path", ""),
+                            "oldText": None,
+                            "newText": args.get("text", ""),
+                        }
+                    elif tool_name == "str_replace":
+                        tool_calls[tcid] = {
+                            "path": args.get("path", ""),
+                            "oldText": args.get("oldStr"),
+                            "newText": args.get("newStr"),
+                        }
+                elif ptype == "tool_result":
+                    tcid = payload.get("toolCallId") or ""
+                    if tcid and payload.get("success") is True:
+                        successful_ids.add(tcid)
+        except Exception:
+            return {}
+        return {tcid: entry for tcid, entry in tool_calls.items()
+                if tcid in successful_ids}
+
+    result = _scan()
+    if not result:
+        # Unconditional retry — R4 probe showed sessions appear immediately, but
+        # the retry costs 200 ms in the zero-results case and prevents a miss on
+        # any timing edge case.
+        _time.sleep(0.2)
+        result = _scan()
+    return result
+
+
+def _stored_session_cwd_v3(session_id: str) -> str:
+    """Return workspacePaths[0] from a v3 session.json, or '' on any error.
+
+    Validates session_id against _SESSION_ID_RE before any path construction
+    to prevent path-traversal via a crafted session id.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return ""
+    sessions_root = Path.home() / ".kiro" / "sessions"
+    try:
+        for hash_dir in sessions_root.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name == "cli":
+                continue
+            candidate = hash_dir / session_id / "session.json"
+            if candidate.is_file():
+                meta = json.loads(candidate.read_text(encoding="utf-8"))
+                paths = meta.get("workspacePaths")
+                if paths and isinstance(paths, list) and paths[0]:
+                    return str(paths[0])
+    except Exception:
+        pass
+    return ""
+
+
+
 class _Supervisor:
     """The single ``kiro-cli acp`` process, and the JSON-RPC channel to it.
 
@@ -2452,8 +2566,9 @@ class _Supervisor:
         hook = sessions_changed_hook
         if hook is None:
             return
+        v3_sessions = frozenset(_supervisor_v3.sessions) if _supervisor_v3 is not None else frozenset()
         try:
-            hook(frozenset(self.sessions), self.agent_pid())
+            hook(frozenset(self.sessions) | v3_sessions, self.agent_pid())
         except Exception:
             log.exception("ACP: publishing the live session set failed")
 
@@ -4314,6 +4429,310 @@ class _Supervisor:
 
 _supervisor = _Supervisor()
 
+def _build_kas_session_params_v3(mode_id: str = "kiro_default") -> "dict[str, Any]":
+    """Build session/new params for v3 KAS (adds modeId to _meta)."""
+    return {
+        "_meta": {
+            "kiro": {
+                "modeId": mode_id,
+                "steering": [{**d} for d in _OVERLAY_STEERING],
+            }
+        },
+    }
+
+
+class _SupervisorV3(_Supervisor):
+    """kiro-cli v3 ACP supervisor.
+
+    Subclasses `_Supervisor` for the spike. Key protocol differences:
+    - Spawns `kiro-cli acp --agent-engine v3` (no -a).
+    - Must answer `_kiro/auth/getAccessToken` inbound request with an OIDC token.
+    - Session ID is at result._meta.id (not result.sessionId).
+    - No JSON-RPC close method works (AS-5 probe); close_session does local cleanup.
+    - _on_notification deferred to Phase 2 (requires _emit_v3, defined then).
+
+    Crew panel (_kiro.dev/subagent/list_update) compatibility is an open item —
+    not probed in Phase 0 (non-subagent turn); requires Phase 2+ with a multi-agent
+    prompt.
+    """
+
+    # _on_notification override deferred to Phase 2 (requires _emit_v3 which is
+    # added then — Phase 1 does not add that helper yet).
+
+    def _spawn(self) -> None:
+        """Start the v3 agent. Uses ACP_V3_ARGS instead of ACP_ARGS."""
+        exe = shutil.which(KIRO_BINARY)
+        if not exe:
+            raise AgentUnavailable(
+                f"'{KIRO_BINARY}' is not on PATH — nothing to connect to.")
+        if Path(exe).suffix.lower() in _WRAPPER_SUFFIXES:
+            raise AgentUnavailable(
+                f"'{exe}' is a shell wrapper. Spawning it with pipes needs "
+                "shell=True, which cannot hold clean stdio for JSON-RPC.")
+        cwd = _neutral_cwd()
+        job = self._create_job()
+        try:
+            proc = subprocess.Popen(
+                [exe, *ACP_V3_ARGS],  # v3: no -a; --agent-engine v3
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=str(cwd),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=_build_child_env({"KIRO_CLI_ACP_CLIENT_NAME": "poweratlas"}),
+                creationflags=_CREATE_NO_WINDOW,
+            )
+        except OSError as exc:
+            _close_job(job)
+            raise AgentSpawnFailed(f"Could not start the v3 agent: {exc}") from exc
+        try:
+            handle = win32api.OpenProcess(
+                win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE,
+                False, proc.pid)
+            try:
+                win32job.AssignProcessToJobObject(job, handle)
+            finally:
+                win32api.CloseHandle(handle)
+        except Exception as exc:
+            log.exception("ACP v3: job assignment failed for pid %d; killing",
+                          proc.pid)
+            if proc.poll() is None:
+                self._tree_kill(proc)
+            _close_streams(proc)
+            _close_job(job)
+            raise AgentSpawnFailed(
+                "The v3 agent started but could not be placed in the Windows "
+                f"job object ({exc}). It was killed rather than left running "
+                "where nothing could reap it."
+            ) from exc
+        self._job = job
+        self._proc = proc
+        self._reader = threading.Thread(
+            target=self._reader_loop, args=(proc,),
+            name="acp-v3-reader", daemon=True)
+        self._reader.start()
+        log.info("ACP v3 agent spawned: pid %d, cwd %s, job object held",
+                 proc.pid, cwd)
+
+    def _on_agent_request(self, msg: dict) -> None:
+        """Handle `_kiro/auth/getAccessToken`; refuse everything else."""
+        if msg.get("method") == "_kiro/auth/getAccessToken":
+            _spawn_task(self._fulfill_token(msg["id"]))
+            return
+        super()._on_agent_request(msg)
+
+    async def _fulfill_token(self, request_id) -> None:
+        """Fetch a fresh OIDC token and deliver it to the agent.
+
+        Called from `_on_agent_request` when the agent sends `_kiro/auth/getAccessToken`.
+        Token value is never written to logs or error messages (R8 mitigation).
+        """
+        binary = _KIRO_V3_TOKEN_BINARY
+        if binary is None:
+            log.warning("ACP v3: kiro-cli not on PATH; cannot fulfill token request")
+            response: dict = {
+                "jsonrpc": "2.0", "id": request_id,
+                "error": {"code": -32000, "message": "kiro-cli binary not found"},
+            }
+        else:
+            proc_result = None
+            try:
+                proc_result = await asyncio.to_thread(
+                    subprocess.run,
+                    [binary, "chat", "_", "get-kas-token"],
+                    capture_output=True, text=True, timeout=15,
+                    env=_build_child_env({}),
+                    creationflags=_CREATE_NO_WINDOW,
+                )
+                if proc_result.returncode != 0:
+                    raise RuntimeError(f"get-kas-token exited {proc_result.returncode}")
+                token_data = json.loads(proc_result.stdout)["data"]
+                response = {
+                    "jsonrpc": "2.0", "id": request_id,
+                    "result": {
+                        "accessToken": token_data["accessToken"],
+                        "expiresAt": token_data["expiresAt"],
+                        "profileArn": token_data.get("profileArn", ""),
+                        "provider": token_data.get("provider", ""),
+                    },
+                }
+            except (json.JSONDecodeError, KeyError, ValueError):
+                # Do NOT include stdout/exc in the message — may contain partial
+                # token data (R8 mitigation).
+                log.warning("ACP v3: token response had unexpected format")
+                response = {
+                    "jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32000, "message": "Token response format error"},
+                }
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+                # Kill the subprocess on timeout to avoid blocking the thread pool.
+                try:
+                    if hasattr(exc, "process") and exc.process is not None:
+                        exc.process.kill()
+                except Exception:
+                    pass
+                log.warning("ACP v3: token fetch timed out or failed")
+                response = {
+                    "jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32000, "message": "Token fetch timed out"},
+                }
+            except Exception:
+                log.warning("ACP v3: token fetch failed (unexpected error)")
+                response = {
+                    "jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32000, "message": "Token fetch failed"},
+                }
+        try:
+            await asyncio.to_thread(self._write, response)
+        except AcpError as exc:
+            log.warning("ACP v3: could not deliver token response: %s — discarding", exc)
+            # Do not leave KAS waiting on an unanswered request.
+            self._discard("Token delivery failed: could not write auth response")
+
+    async def new_session(self, cwd: str) -> dict:
+        """Create one v3 session.
+
+        Critical difference from base class: v3 session/new returns the session
+        id at result._meta.id, NOT result.sessionId (Phase 0 finding, 2026-08-19).
+        """
+        if self.at_capacity():
+            raise SessionLimit(_session_limit_message())
+        self._reserved += 1
+        try:
+            await self.ensure_started()
+            params = _build_kas_session_params_v3()
+            params["cwd"] = cwd
+            params["mcpServers"] = []
+            result = await self._request("session/new", params)
+            result = result or {}
+            # CRITICAL: v3 session ID is at result._meta.id, not result.sessionId.
+            # The base class `result.get("sessionId")` returns None for v3.
+            session_id = (result.get("_meta") or {}).get("id")
+            if not _valid_session_id(session_id):
+                raise AgentRejected(
+                    "The v3 agent returned an unusable session id: "
+                    f"{session_id!r:.200}")
+            self.sessions[session_id] = _new_session_record(cwd)
+            self._flush_pending_commands(session_id)
+            self._publish_live()
+            self.history[session_id] = _History()
+        finally:
+            self._reserved -= 1
+            if self._pending_commands is not None:
+                self._pending_commands = None
+        log.info("ACP v3 session created: %s (cwd %s); %d live",
+                 session_id, cwd, len(self.sessions))
+        return {"sessionId": session_id, "cwd": cwd}
+
+    async def load_session(self, session_id: str, cwd: str) -> dict:
+        """Adopt a v3 session from the kiro-cli store.
+
+        Differences from base: no lock hint; cwd resolved via
+        _stored_session_cwd_v3; diff backfill via _get_tool_diffs_v3.
+        """
+        if self.at_capacity():
+            raise SessionLimit(_session_limit_message())
+        self._reserved += 1
+        reserved = True
+        try:
+            await self.ensure_started()
+            if session_id in self.sessions:
+                live = self.sessions[session_id]
+                return {"sessionId": session_id, "cwd": live.get("cwd", cwd)}
+            self.sessions[session_id] = _new_session_record(cwd)
+            self._publish_live()
+            for _sib_id, _existing_meta in self.sessions.items():
+                if _sib_id != session_id and _existing_meta.get("commands") is not None:
+                    self.sessions[session_id]["commands"] = _existing_meta["commands"]
+                    self.sessions[session_id]["skills"] = _existing_meta.get("skills") or []
+                    break
+            self.history[session_id] = _History()
+            # v3 diff backfill — uses inlined _get_tool_diffs_v3 (no data_kiro_v3 import).
+            self._diff_backfill[session_id] = _get_tool_diffs_v3(session_id)
+            self._reserved -= 1
+            reserved = False
+            try:
+                await self._request(
+                    "session/load",
+                    {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
+                     **_build_kas_session_params_v3()})
+            except BaseException:
+                self.sessions.pop(session_id, None)
+                self._publish_live()
+                self.history.pop(session_id, None)
+                self._diff_backfill.pop(session_id, None)
+                raise
+        finally:
+            if reserved:
+                self._reserved -= 1
+        history = self.history.get(session_id)
+        log.info("ACP v3 session loaded: %s (cwd %s, %d event(s) replayed); %d live",
+                 session_id, cwd, 0 if history is None else len(history),
+                 len(self.sessions))
+        return {"sessionId": session_id, "cwd": cwd}
+
+    async def close_session(self, session_id: str) -> None:
+        """Release one v3 session locally (no JSON-RPC close method available).
+
+        Phase 0 AS-5 finding: every close method tested returns -32603 or -32601.
+        CLOSE_METHOD_V3 = None signals no wire call. Per-session local cleanup
+        is executed directly — identical to the base class body MINUS the
+        `await self._request(CLOSE_METHOD, ...)` line.
+        """
+        if session_id not in self.sessions:
+            raise AgentRejected("That session no longer exists on this agent.")
+        if not self.alive():
+            raise AgentDied("The agent is not running.")
+        # No wire close for v3 (CLOSE_METHOD_V3 is None).
+        self.sessions.pop(session_id, None)
+        self._publish_live()
+        self.history.pop(session_id, None)
+        self.inflight.discard(session_id)
+        self._diff_backfill.pop(session_id, None)
+        self._tool_start_times = {
+            k: v for k, v in self._tool_start_times.items() if k[0] != session_id
+        }
+        for _tcid in [k for k, v in self.crew_spawn_anchors.items()
+                      if v == session_id]:
+            self.crew_spawn_anchors.pop(_tcid, None)
+        self.crew_spawn_toolcallids.pop(session_id, None)
+        _bubbles.pop(session_id, None)
+        for child_id in self.crews.pop(session_id, ()):
+            self.subagent_sessions.pop(child_id, None)
+            self.subagent_history.pop(child_id, None)
+            _bubbles.pop(child_id, None)
+            frame = _session_closed_frame(child_id)
+            for target in tuple(_registry.subscribers.get(child_id, ())):
+                target.send(frame)
+                _registry.detach(target)
+        for _orphan_id in [cid for cid, m in self.subagent_sessions.items()
+                           if m.get("parent") == session_id]:
+            self.subagent_sessions.pop(_orphan_id, None)
+            self.subagent_history.pop(_orphan_id, None)
+            _bubbles.pop(_orphan_id, None)
+        log.info("ACP v3 session closed: %s; %d live", session_id, len(self.sessions))
+
+    def _publish_live(self) -> None:
+        """Tell whoever is listening which sessions this v3 agent holds.
+
+        Emits the union of v3 + v2 sessions so the dashboard reflects both.
+        """
+        hook = sessions_changed_hook
+        if hook is None:
+            return
+        v2_sessions = frozenset(_supervisor.sessions) if _supervisor is not None else frozenset()
+        try:
+            hook(frozenset(self.sessions) | v2_sessions, self.agent_pid())
+        except Exception:
+            log.exception("ACP v3: publishing the live session set failed")
+
+
+_supervisor_v3: "_SupervisorV3 | None" = None
+
+
 
 def _crew_toolcallid(parent_id: str) -> str:
     """Return the spawner tool-call id for the current fan-out, or '' if unknown."""
@@ -4487,6 +4906,8 @@ def _note_context(session_id: str, percent: float | None) -> None:
 def shutdown() -> None:
     """Tear the agent down. Called from ``web.py``'s ``lifespan`` cleanup."""
     _supervisor.shutdown()
+    if _supervisor_v3 is not None:
+        _supervisor_v3.shutdown()
 
 
 async def serve_socket(ws: WebSocket) -> None:
@@ -5922,7 +6343,9 @@ def _sweepable(session_id: str, meta: dict, now: float) -> bool:
        path pops an already-removed session and ``_deliver_load`` replays a
        dead one to the sockets parked on it.
     """
-    if session_id not in _supervisor.sessions:
+    if session_id not in _supervisor.sessions and (
+        _supervisor_v3 is None or session_id not in _supervisor_v3.sessions
+    ):
         return False
     last_used = meta.get("last_used")
     if last_used is None or now - last_used <= ACP_IDLE_TTL_SECONDS:
@@ -5963,11 +6386,15 @@ async def _sweep_once() -> None:
     # miss self-heal within one sweep interval instead of never. Costs one
     # frozenset of a dict that is at most MAX_SESSIONS long.
     _supervisor._publish_live()
+    if _supervisor_v3 is not None:
+        _supervisor_v3._publish_live()
     # Forget the failure counts of sessions that are no longer here, whatever
     # took them — this is what keeps `_sweep_failures` bounded by the live
     # session count rather than growing for the application's lifetime.
     for gone in tuple(_sweep_failures):
-        if gone not in _supervisor.sessions:
+        if gone not in _supervisor.sessions and (
+            _supervisor_v3 is None or gone not in _supervisor_v3.sessions
+        ):
             del _sweep_failures[gone]
     # `close_session` mutates `sessions`, and a live iterator over a dict that
     # changes size raises RuntimeError.
@@ -6036,6 +6463,32 @@ async def _sweep_once() -> None:
             target.send(frame)
             _registry.detach(target)
 
+    # v3 sweep pass — mirror v2 logic for _supervisor_v3 sessions.
+    if _supervisor_v3 is not None:
+        for session_id, meta in tuple(_supervisor_v3.sessions.items()):
+            if not _sweepable(session_id, meta, now):
+                continue
+            _supervisor_v3.closing.add(session_id)
+            try:
+                idle = now - meta.get("last_used", now)
+                log.info("ACP v3 sweeper: releasing session %s, idle %.0fs",
+                         session_id, idle)
+                await _supervisor_v3.close_session(session_id)
+                _sweep_failures.pop(session_id, None)
+            except Exception:
+                failures = _sweep_failures[session_id] = (
+                    _sweep_failures.get(session_id, 0) + 1)
+                if failures == 1:
+                    log.warning("ACP v3 sweeper: releasing session %s failed",
+                                session_id, exc_info=True)
+                else:
+                    log.warning(
+                        "ACP v3 sweeper: releasing session %s failed again "
+                        "(failure #%d)", session_id, failures)
+            finally:
+                _supervisor_v3.closing.discard(session_id)
+
+
 
 async def _sweep_loop() -> None:
     """Run ``_sweep_once`` forever. Cancelled by ``lifespan`` at shutdown.
@@ -6050,7 +6503,9 @@ async def _sweep_loop() -> None:
     """
     while True:
         await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
-        if not _supervisor.sessions:
+        if not _supervisor.sessions and (
+            _supervisor_v3 is None or not _supervisor_v3.sessions
+        ):
             continue
         try:
             await _sweep_once()
@@ -6100,6 +6555,12 @@ def apply_config(config) -> None:
     log.info("ACP config applied: max_sessions=%d idle_ttl=%.0fs "
              "prompt_silence=%.0fs", MAX_SESSIONS, ACP_IDLE_TTL_SECONDS,
              PROMPT_SILENCE_SECONDS)
+    global _supervisor_v3
+    try:
+        _supervisor_v3 = _SupervisorV3()
+    except Exception:
+        log.error("ACP v3: failed to construct _SupervisorV3", exc_info=True)
+        _supervisor_v3 = None
 
 
 def _clamped(config, name: str, fallback, low: int, high: int):
