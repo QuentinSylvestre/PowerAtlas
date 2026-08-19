@@ -522,13 +522,17 @@ Phase 3 adds /acp-v3 routes and the ngine variable to cp.html. Constants _ACP_
    - Confirm the edit row expands with the diff (oldText/newText present)
 
 **Exit criteria**:
-- [ ] `_get_tool_diffs_v3` returns non-empty dict for a session with at least one `fs_write` tool call that succeeded
-- [ ] Reload of `/acp-v3` page with a session containing file edits: diff row expands with correct path and diff content
-- [ ] `str_replace` diff recovery also verified (oldText = `oldStr`, newText = `newStr`)
-- [ ] R4 probe result addressed (cache invalidation or retry documented)
+- [x] `_get_tool_diffs_v3` returns non-empty dict for a session with at least one `fs_write` tool call that succeeded
+- [ ] Reload of `/acp-v3` page with a session containing file edits: diff row expands with correct path and diff content [DEFERRED — requires PowerAtlas running with /acp-v3]
+- [x] `str_replace` diff recovery also verified (oldText = `oldStr`, newText = `newStr`)
+- [x] R4 probe result addressed (cache invalidation or retry documented)
 - [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
 
 **Covers**: SC-3
+
+
+### Implementation (2026-08-19, verification only — no code changes)
+Phase 4 is verification-only. `_get_tool_diffs_v3` confirmed correct for both `fs_write` and `str_replace` tool calls by running the inlined scanner logic against 5 real v3 sessions from `~/.kiro/sessions/`. Results: sess_5f4f1763 (4 fs_write diffs), sess_61221a97 (48 diffs: mix of str_replace and fs_write), sess_99515c03 (3 str_replace diffs), sess_aeb49d5a (21 diffs), sess_b8e8fc03 (15 diffs). `oldText=None` for `fs_write` (correct), `oldText=N chars` for `str_replace` (correct). R4: Phase 0 confirmed sessions appear immediately; unconditional 200 ms retry is documented and harmless. Browser diff-row expansion deferred to Phase 5+ when PowerAtlas is running. Tests: 1859 passed, 2 skipped. Probe script deleted; `git status` clean.
 
 ### Phase 5: Liveness detection probe + CLOSE_METHOD resolution [QA]
 
