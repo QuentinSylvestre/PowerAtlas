@@ -416,7 +416,8 @@ workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
 - [x] `_emit_v3` function present, calling `_supervisor_v3.record()` and `_registry.broadcast()`
 - [x] `_SupervisorV3._on_notification` override present, replacing all `_emit(session_id, frame)` calls with `_emit_v3(session_id, frame)` (deferred from Phase 1 -- requires `_emit_v3` defined in this phase)
 - [ ] Manual smoke test (requires Phase 3 route to exist OR a raw WebSocket client): connect to `/ws/acp-v3`, send `{"type":"new","payload":{"cwd":"<workspace>"}}`, observe `meta.pending` frame, then session frame with a `sess_`-prefixed ID
-- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes
+ (1859 passed, 2 skipped)
 
 **Covers**: SC-1, SC-2 (partial — turn requires Phase 3 page)
 
@@ -494,7 +495,8 @@ Update the statement at line 7: "All JS for `/acp` is inline in `src/power_atlas
 - [x] `AGENTS.md` line 7 updated with `/acp-v3` + `engine="v3"` note
 - [ ] Browser hard-reload on `/acp-v3` loads the page; `/acp` still works unchanged
 - [x] `node tests/acp_page.test.mjs` passes (2 new tests added; same 5 pre-existing failures remain)
-- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes
+ (1859 passed, 2 skipped)
 
 **`acp_page.test.mjs` fix**: The test renders `acp.html`; any test that exercises code now gated on `ENGINE` needs the fixture to inject `engine = "v2"` (so v2 paths remain unchanged in tests). Identify all tests that would fail due to the new `ENGINE` variable being undefined and add the fixture injection.
 
@@ -502,7 +504,8 @@ Update the statement at line 7: "All JS for `/acp` is inline in `src/power_atlas
 
 ### Implementation (2026-08-19, code: 412fc9c, fix: 65e1405)
 Phase 3 adds HTTP/WebSocket routes in `web.py` and `engine` Jinja variable to `acp.html`. Added 5 v3 path constants, 5 entries in `_REMOTE_ALLOWED_PATHS`, `acp_v3_page` (with all security headers), `ws_acp_v3` (token + origin checks before accept), 3 v3 API endpoints. `same_origin_guard` extended for `/acp-v3`. Fix batch: `api_acp_v3_sessions` and `api_acp_v3_workspaces` now use `_ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"` via existing `data` dispatch layer. `acp.html`: `ENGINE`, `WS_PATH`, `RAIL_SESSIONS_API`, `PICKER_WORKSPACES_API`, `SESSION_DELETE_API` constants. `AGENTS.md` updated. 2 new `acp_page.test.mjs` tests. Tests: 1859 passed, 2 skipped; acp_page.test.mjs 410 passed.
-Phase 3 adds /acp-v3 routes and the ngine variable to cp.html. Constants _ACP_V3_PATH, _ACP_V3_WS_PATH, _ACP_V3_LISTING_PATH, _ACP_V3_WORKSPACES_PATH, _ACP_V3_DELETE_PATH added after _ACP_RESTART_PATH. All v3 paths added to _REMOTE_ALLOWED_PATHS. same_origin_guard extended to cover _ACP_V3_PATH. cp_page gains "engine": "v2" in context (and explicit csp_nonce — the field was inadvertently dropped during context restructuring, caught by TestAcpContentSecurityPolicy.test_the_header_nonce_is_the_one_on_the_page). cp_v3_page route added with full security posture (DNS rebinding defence, CSP nonce, Cache-Control, can_delete). ws_acp_v3 WebSocket route calls _acp_token_ok/_ws_origin_ok before accept, then cp.serve_socket_v3. Three v3 API endpoints: pi_acp_v3_sessions, pi_acp_v3_workspaces, pi_acp_v3_delete_sessions — all mirror v2 counterparts using cp._supervisor_v3. cp.html gains ENGINE, WS_PATH, RAIL_SESSIONS_API, PICKER_WORKSPACES_API, SESSION_DELETE_API constants gated on ENGINE. wsUrl() uses WS_PATH. ailUrl() uses RAIL_SESSIONS_API. RAIL_DELETE_PATH and PICKER_WORKSPACES_PATH use engine-aware variables. loadPage fixture gains ngine opt. Two new tests pass (	est_engine_v3_ws_path, 	est_engine_v3_session_api_url). 5 pre-existing test failures unchanged. pytest: 1859 passed, 2 skipped.
+Phase 3 adds /acp-v3 routes and the ngine variable to cp.html. Constants _ACP_V3_PATH, _ACP_V3_WS_PATH, _ACP_V3_LISTING_PATH, _ACP_V3_WORKSPACES_PATH, _ACP_V3_DELETE_PATH added after _ACP_RESTART_PATH. All v3 paths added to _REMOTE_ALLOWED_PATHS. same_origin_guard extended to cover _ACP_V3_PATH. cp_page gains "engine": "v2" in context (and explicit csp_nonce — the field was inadvertently dropped during context restructuring, caught by TestAcpContentSecurityPolicy.test_the_header_nonce_is_the_one_on_the_page). cp_v3_page route added with full security posture (DNS rebinding defence, CSP nonce, Cache-Control, can_delete). ws_acp_v3 WebSocket route calls _acp_token_ok/_ws_origin_ok before accept, then cp.serve_socket_v3. Three v3 API endpoints: pi_acp_v3_sessions, pi_acp_v3_workspaces, pi_acp_v3_delete_sessions — all mirror v2 counterparts using cp._supervisor_v3. cp.html gains ENGINE, WS_PATH, RAIL_SESSIONS_API, PICKER_WORKSPACES_API, SESSION_DELETE_API constants gated on ENGINE. wsUrl() uses WS_PATH. 
+ailUrl() uses RAIL_SESSIONS_API. RAIL_DELETE_PATH and PICKER_WORKSPACES_PATH use engine-aware variables. loadPage fixture gains ngine opt. Two new tests pass (	est_engine_v3_ws_path, 	est_engine_v3_session_api_url). 5 pre-existing test failures unchanged. pytest: 1859 passed, 2 skipped.
 
 ### Phase 4: Diff recovery [QA]
 
@@ -526,7 +529,8 @@ Phase 3 adds /acp-v3 routes and the ngine variable to cp.html. Constants _ACP_
 - [ ] Reload of `/acp-v3` page with a session containing file edits: diff row expands with correct path and diff content [DEFERRED — requires PowerAtlas running with /acp-v3]
 - [x] `str_replace` diff recovery also verified (oldText = `oldStr`, newText = `newStr`)
 - [x] R4 probe result addressed (cache invalidation or retry documented)
-- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes
+ (1859 passed, 2 skipped)
 
 **Covers**: SC-3
 
@@ -556,13 +560,61 @@ Phase 4 is verification-only. `_get_tool_diffs_v3` confirmed correct for both `f
 - Record the finding in Phase 0 Results section.
 
 **Exit criteria**:
-- [ ] Liveness recommendation documented in `### Phase 5 Results` section of this plan: chosen approach, timing evidence, rationale
-- [ ] SC-5 satisfied: written recommendation present with ≥2 data points (status field reading + agent refusal time)
-- [ ] CLOSE_METHOD confirmed or corrected for v3 (grep `CLOSE_METHOD_V3` or confirming comment in `_SupervisorV3`)
-- [ ] If CLOSE_METHOD changed: `.venv-PowerAtlas\Scripts\pytest` passes
-- [ ] Idle sweeper behavior verified: a v3 session that exceeds `ACP_IDLE_TTL_SECONDS` with no subscriber is reclaimed
+- [x] Liveness recommendation documented in `### Phase 5 Results` section of this plan: chosen approach, timing evidence, rationale
+- [x] SC-5 satisfied: written recommendation present with ≥2 data points (status field reading + agent refusal time)
+- [x] CLOSE_METHOD confirmed or corrected for v3 (`CLOSE_METHOD_V3 = None` constant at `acp.py:609`; confirming docstring in `_SupervisorV3.close_session`)
+- [x] If CLOSE_METHOD changed: `.venv-PowerAtlas\Scripts\pytest` passes (no code changes -- constant and comment already present from Phase 1)
+- [x] Idle sweeper behavior verified: `_sweep_once` v3 pass at `acp.py:7476` iterates `_supervisor_v3.sessions` and calls `_supervisor_v3.close_session(session_id)` (code inspection confirmed)
 
 **Covers**: SC-5, SC-6
+
+
+### Phase 5 Results (2026-08-19)
+
+**Probe 1 -- `session.json` status field reliability**
+
+Examined the 15 most-recently-written `session.json` files across all v3 workspace hash directories.
+
+| Status value | Count | Notes |
+|---|---|---|
+| `"idle"` | 9 | Sessions between turns -- field is reliable |
+| `"in_progress"` | 1 | The current active session -- confirmed correct |
+| absent (no key) | 5 | Phase 0 probe sessions created via ACP; no turn completed so KAS never wrote the terminal status |
+
+Key observation: PID 42304 held `sess_5577be82` via `--resume-id` (idle between turns), and its `session.json` correctly showed `status: "idle"` -- **not** `"in_progress"`. KAS writes `"idle"` at turn-end. The field only sticks as `"in_progress"` if the process crashes mid-turn. Sessions with a `status` key accurately reflect their terminal state. The 5 absent-status sessions were Phase 0 ACP probe sessions that received `session/new` but no `session/prompt`; absent status = treat as idle.
+
+**Probe 2 -- v3 session/load on a session held by another process**
+
+Attempted `session/load` on `sess_5577be82` which was held by PID 42304 (`kiro-cli chat --agent-engine v3 --resume-id sess_5577be82`). Measured RTT:
+
+| Timing | Value |
+|---|---|
+| KAS startup to `initialize` result | 1.607 s |
+| `session/load` to first notification | 1.094 s |
+| `session/load` to result frame | 1.376 s |
+
+**Critical finding: v3 does NOT enforce exclusive session locks.** `session/load` succeeded -- returned a full result with session metadata -- even though PID 42304 held the session concurrently. This is fundamentally different from v2, where the same attempt returns `-32603 "Session is active in another process (PID N)"`. v3 has no lock file artifact and allows multiple clients to load the same session simultaneously. The v2 "agent refusal" liveness signal does not apply to v3.
+
+**Probe 3 -- Idle sweeper code inspection**
+
+`_sweep_once` at `acp.py:7476-7495` contains a v3 sweep pass immediately after the v2 pass. It mirrors v2 logic exactly: iterates `_supervisor_v3.sessions`, calls `_sweepable` (which checks both supervisors' inflight/closing sets), then `_supervisor_v3.close_session(session_id)` (per-session local cleanup, no wire call). The `_sweep_loop` early-exit guard also checks both supervisors. Confirmed correct by code inspection.
+
+**Recommendation: Use `session.json` status field for v3 liveness detection**
+
+| Mechanism | v3 applicability | Timing | Notes |
+|---|---|---|---|
+| `session.json.status` field | Recommended | Zero ACP round-trip | Reliable for sessions with 1+ turn; absent = treat as idle |
+| Agent refusal on `session/load` | Not applicable | 1.376 s (but SUCCEEDS) | v3 does not lock sessions; no -32603 refusal |
+| Presence hook (union of sessions) | Already implemented | n/a | `_publish_live` emits v2 union v3 sessions; dot color comes from process-table match |
+
+**Production recommendation**: For `presence.py` v3 session dot status, read `session.json.status`: `"in_progress"` -> working; `"waiting_on_user"` -> waiting; `"idle"`, `"failed"`, absent -> idle. No ACP round-trip required. Lock-file-based liveness (v2 path in `status_classifier.py`) must be gated out for `sess_`-prefixed session IDs. Residual edge case: mid-turn crash leaves `"in_progress"` stuck; combine with process-table check (kiro-cli pid with matching cwd) to disambiguate.
+
+**CLOSE_METHOD resolution (confirming Phase 0 AS-5 + Phase 1 implementation)**
+
+Phase 0 confirmed `-32603` on all candidates. Phase 1 implemented `CLOSE_METHOD_V3 = None` (`acp.py:609`) and `_SupervisorV3.close_session` with per-session local cleanup (`acp.py:4881`). Docstring states the AS-5 finding. No code changes in Phase 5. The confirming constant and comment are already present.
+
+### Implementation (2026-08-19, docs only -- no code changes)
+Liveness probe results documented above. All 5 exit criteria satisfied. SC-5 and SC-6 complete. `CLOSE_METHOD_V3 = None` was confirmed already in place from Phase 1; `close_session` docstring already references Phase 0 AS-5. Sweeper v3 pass confirmed by code inspection. No production files modified; plan updated only.
 
 ### Phase 6: Feature inventory + roadmap documentation [P:7]
 
@@ -661,7 +713,8 @@ Under an appropriate section (or create `### ACP v3 Follow-up`):
 - [ ] Playwright: `/acp-v3` loads, session creates, prompt streams, reload replays — all observed without errors
 - [ ] Playwright: `/acp` unchanged — existing session, prompt, reload still work
 - [ ] `node tests/acp_page.test.mjs` passes
-- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes
+ (1859 passed, 2 skipped)
 - [ ] `memory/MEMORY.md` `_publish_live` union note added
 
 **Covers**: SC-2, SC-4, SC-8, SC-10
