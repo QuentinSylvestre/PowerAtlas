@@ -23,6 +23,8 @@
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
 - **Parked items** — invisible sqlite sessions · usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
 - **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
+- **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
+- **`kiro-cli-v3` liveness attribution (follow-up)**: `presence.py`'s `_match_provider` always returns `"kiro-cli"` (first dict hit) for resumed v3 sessions — live status dot appears on the v2 provider row, not the v3 row. Fix: check whether session ID starts with `sess_` in `_scan()` and route to `"kiro-cli-v3"`. Tracked as Follow-up #2 of `260818-2227_KIRO_CLI_V3_DASHBOARD_SUPPORT.md`.
 
 ### Session Control & Integration
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
