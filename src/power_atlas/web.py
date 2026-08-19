@@ -1773,6 +1773,9 @@ _ACP_TITLE_MAX_CHARS = 120
 # boundaries), so a row this endpoint served for another provider would be a
 # session the browser cannot resume.
 _ACP_LISTING_PROVIDER = "kiro-cli"
+# kiro-cli-v3 is registered as a provider in data.PROVIDERS so the generic
+# data.discover_workspaces_with_counts and data.get_sessions calls work with it.
+_ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"
 
 
 def _acp_row_title(session) -> str:
@@ -1867,6 +1870,25 @@ def _acp_status_for_held(sessions) -> dict[str, str]:
             out[session.session_id] = "working"
     return out
 
+
+
+def _acp_status_for_held_v3(sessions) -> dict[str, str]:
+    """v3 parallel of ``_acp_status_for_held``. Uses ``_ACP_V3_LISTING_PROVIDER``."""
+    if not sessions:
+        return {}
+    snapshot = presence.get_snapshot()
+    out: dict[str, str] = {}
+    for session in sessions:
+        try:
+            semantic = get_semantic_status(
+                session.session_id, _ACP_V3_LISTING_PROVIDER, session.cwd)
+            out[session.session_id] = _resolved_session_status(
+                snapshot, _ACP_V3_LISTING_PROVIDER, session.session_id, semantic)
+        except Exception:
+            log.exception("ACP v3 listing: could not settle status for %s",
+                          session.session_id)
+            out[session.session_id] = "working"
+    return out
 
 # Error codes that mean **"there is nothing at that path"**. Everything not
 # named here — including everything Windows and POSIX have to say about a host
@@ -2148,6 +2170,111 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     }
 
 
+def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
+                    session_page: int, session_size: int, held,
+                    capacity: dict) -> dict:
+    """v3 parallel of ``_acp_listing``. Reads kiro-cli v3 sessions via ``data_kiro_v3``.
+
+    Identical logic to `_acp_listing` but uses `_ACP_V3_LISTING_PROVIDER` for
+    provider-keyed calls and routes status through `_acp_status_for_held_v3`.
+    """
+    from .config import get_workspace_settings
+    from .data import _normalize_path
+
+    config = load_config()
+    if _enabled(config, _ACP_V3_LISTING_PROVIDER):
+        workspaces = [
+            w for w in data.discover_workspaces_with_counts(_ACP_V3_LISTING_PROVIDER)
+            if "hidden" not in get_workspace_settings(config, w[0])["tags"]
+        ]
+    else:
+        workspaces = []
+
+    if cwd:
+        target = _normalize_path(cwd)
+        matched = [w for w in workspaces if _normalize_path(w[0]) == target]
+        page_groups = matched[:1]
+        group_total = len(matched)
+        group_page = 1
+        groups_has_more = False
+    else:
+        group_total = len(workspaces)
+        start = (group_page - 1) * group_size
+        page_groups = workspaces[start:start + group_size]
+        groups_has_more = start + group_size < group_total
+
+    pinned_set: set[str] = set(config.pinned_sessions)
+
+    rows: list[tuple[dict, list]] = []
+    sids: list[str] = []
+    pinned_sessions_found: list[tuple[str, str, object]] = []  # (cwd, name, session)
+    exists_flags = _acp_exists_flags([w[0] for w in page_groups])
+    for index, (ws_cwd, _count, _updated, _prov) in enumerate(page_groups):
+        try:
+            sessions = data.get_sessions(ws_cwd, _ACP_V3_LISTING_PROVIDER)
+        except Exception:
+            log.exception("ACP v3 listing: could not read sessions for %s", ws_cwd)
+            sessions = []
+        ws_name = Path(ws_cwd).name or ws_cwd
+        if pinned_set:
+            for s in sessions:
+                if s.session_id in pinned_set:
+                    pinned_sessions_found.append((ws_cwd, ws_name, s))
+            sessions = [s for s in sessions if s.session_id not in pinned_set]
+        total = len(sessions)
+        s_start = (session_page - 1) * session_size
+        page_sessions = sessions[s_start:s_start + session_size]
+        sids.extend(s.session_id for s in page_sessions)
+        rows.append(({
+            "cwd": ws_cwd,
+            "name": ws_name,
+            "total": total,
+            "session_page": session_page,
+            "has_more": s_start + session_size < total,
+            "exists": exists_flags[index],
+        }, page_sessions))
+
+    pinned_sids = [s.session_id for _cwd, _name, s in pinned_sessions_found]
+    availability = _acp_availability(sids + pinned_sids, held)
+    all_page_sessions = [s for _meta, page_sessions in rows for s in page_sessions]
+    statuses = _acp_status_for_held_v3([
+        s for s in all_page_sessions + [s for _c, _n, s in pinned_sessions_found]
+        if availability.get(s.session_id) == "held"])
+
+    groups = []
+    for meta, page_sessions in rows:
+        meta["sessions"] = [{
+            "id": s.session_id,
+            "title": _acp_row_title(s),
+            "updated_at": s.updated_at,
+            "availability": availability.get(s.session_id, "available"),
+            "status": statuses.get(s.session_id, ""),
+        } for s in page_sessions]
+        groups.append(meta)
+
+    pinned_cwds = list(dict.fromkeys(cwd for cwd, _n, _s in pinned_sessions_found))
+    pinned_exists = dict(zip(pinned_cwds, _acp_exists_flags(pinned_cwds)))
+    pinned: list[dict] = [{
+        "id": s.session_id,
+        "title": _acp_row_title(s),
+        "updated_at": s.updated_at,
+        "availability": availability.get(s.session_id, "available"),
+        "status": statuses.get(s.session_id, ""),
+        "cwd": cwd,
+        "name": name,
+        "exists": pinned_exists.get(cwd, True),
+    } for cwd, name, s in pinned_sessions_found]
+
+    return {
+        "groups": groups,
+        "group_page": group_page,
+        "group_total": group_total,
+        "has_more": groups_has_more,
+        "pinned": pinned,
+        "capacity": capacity,
+    }
+
+
 def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
     """Build the recency-ordered listing payload. Blocking; runs off the loop.
 
@@ -2263,6 +2390,90 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
         "sessions": [_session_dict(s) for s in sessions],
         # Always present — empty list when nothing is pinned. Same per-session
         # shape as the flat rows so the rail can render them identically.
+        "pinned": [_session_dict(s) for s in pinned_sessions_list],
+        "page": page,
+        "has_more": has_more,
+        "capacity": capacity,
+    }
+
+
+def _acp_flat_listing_v3(page: int, size: int, held, capacity: dict) -> dict:
+    """v3 parallel of ``_acp_flat_listing``. Reads kiro-cli v3 sessions via ``data_kiro_v3``.
+
+    Identical logic to `_acp_flat_listing` but uses `_ACP_V3_LISTING_PROVIDER`
+    for provider-keyed calls and routes status through `_acp_status_for_held_v3`.
+    """
+    from .config import get_workspace_settings
+
+    config = load_config()
+    if not _enabled(config, _ACP_V3_LISTING_PROVIDER):
+        return {"sessions": [], "pinned": [], "page": page, "has_more": False,
+                "capacity": capacity}
+
+    pinned_set = set(config.pinned_sessions)
+    workspaces_list = data.discover_workspaces_with_counts(_ACP_V3_LISTING_PROVIDER)
+    hidden = {
+        w[0] for w in workspaces_list
+        if "hidden" in get_workspace_settings(config, w[0])["tags"]
+    }
+    try:
+        rows, has_more = data.get_all_sessions_paginated(
+            page=page, page_size=size,
+            provider=_ACP_V3_LISTING_PROVIDER,
+            enabled_providers={_ACP_V3_LISTING_PROVIDER},
+            exclude_cwds=hidden,
+            pinned_sessions=config.pinned_sessions if pinned_set else None)
+    except Exception:
+        log.exception("ACP v3 flat listing: could not collect sessions")
+        rows, has_more = [], False
+
+    pinned_raw = [(s, prov) for s, prov in rows if s.session_id in pinned_set]
+    flat_rows  = [(s, prov) for s, prov in rows if s.session_id not in pinned_set]
+
+    if pinned_set:
+        found_ids = {s.session_id for s, _ in pinned_raw}
+        remaining = pinned_set - found_ids
+        if remaining:
+            for ws_cwd, _count, _updated, _prov in workspaces_list:
+                if not remaining:
+                    break
+                if ws_cwd in hidden:
+                    continue
+                try:
+                    ws_sessions = data.get_sessions(ws_cwd, _ACP_V3_LISTING_PROVIDER)
+                except Exception:
+                    continue
+                for s in ws_sessions:
+                    if s.session_id in remaining:
+                        pinned_raw.append((s, _ACP_V3_LISTING_PROVIDER))
+                        remaining.discard(s.session_id)
+
+    sessions = [s for s, _prov in flat_rows]
+    pinned_sessions_list = [s for s, _prov in pinned_raw]
+
+    all_sids = [s.session_id for s in sessions] + [s.session_id for s in pinned_sessions_list]
+    availability = _acp_availability(all_sids, held)
+    statuses = _acp_status_for_held_v3(
+        [s for s in sessions + pinned_sessions_list
+         if availability.get(s.session_id) == "held"])
+
+    order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
+    flags = dict(zip(order, _acp_exists_flags(order)))
+
+    def _session_dict(s: object) -> dict:
+        return {
+            "id": s.session_id,
+            "title": _acp_row_title(s),
+            "updated_at": s.updated_at,
+            "availability": availability.get(s.session_id, "available"),
+            "status": statuses.get(s.session_id, ""),
+            "cwd": s.cwd,
+            "name": Path(s.cwd).name or s.cwd,
+            "exists": flags.get(s.cwd, True),
+        }
+
+    return {
+        "sessions": [_session_dict(s) for s in sessions],
         "pinned": [_session_dict(s) for s in pinned_sessions_list],
         "page": page,
         "has_more": has_more,
@@ -2419,6 +2630,33 @@ def _acp_workspaces(capacity: dict) -> dict:
     # One budget for the whole sweep, the same helper and the same reason the
     # listing route uses it: `os.stat` on a routable-but-dead UNC host measured
     # 42.2 s, and this list is longer than one listing page.
+    flags = _acp_exists_flags([w[0] for w in found])
+    live = [w for w, ok in zip(found, flags) if ok]
+    return {
+        "workspaces": [{
+            "cwd": cwd,
+            "name": Path(cwd).name or cwd,
+            "sessions": count,
+        } for cwd, count, _updated, _prov in live],
+        "missing": len(found) - len(live),
+        "capacity": capacity,
+    }
+
+
+def _acp_workspaces_v3(capacity: dict) -> dict:
+    """v3 parallel of ``_acp_workspaces``. Reads kiro-cli v3 workspaces via ``data_kiro_v3``.
+
+    Identical logic to `_acp_workspaces` but uses `_ACP_V3_LISTING_PROVIDER`.
+    """
+    from .config import get_workspace_settings
+
+    config = load_config()
+    if not _enabled(config, _ACP_V3_LISTING_PROVIDER):
+        return {"workspaces": [], "missing": 0, "capacity": capacity}
+    found = [
+        w for w in data.discover_workspaces_with_counts(_ACP_V3_LISTING_PROVIDER)
+        if "hidden" not in get_workspace_settings(config, w[0])["tags"]
+    ]
     flags = _acp_exists_flags([w[0] for w in found])
     live = [w for w, ok in zip(found, flags) if ok]
     return {
@@ -2905,10 +3143,10 @@ async def api_acp_v3_sessions(response: Response, cwd: str = "",
     }
     if mode == "recent":
         return await asyncio.to_thread(
-            _acp_flat_listing, max(1, page),
+            _acp_flat_listing_v3, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity)
     return await asyncio.to_thread(
-        _acp_listing, cwd,
+        _acp_listing_v3, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
         held, capacity)
@@ -2924,7 +3162,7 @@ async def api_acp_v3_workspaces(response: Response):
         "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
-    return await asyncio.to_thread(_acp_workspaces, capacity)
+    return await asyncio.to_thread(_acp_workspaces_v3, capacity)
 
 
 @app.post(_ACP_V3_DELETE_PATH)
