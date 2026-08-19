@@ -4624,7 +4624,7 @@ class _SupervisorV3(_Supervisor):
                           "(%d session(s), %d inflight, no sessionId)",
                           len(self.sessions), len(self.inflight))
             return
-        if method == "_kiro.dev/commands/available":
+        if method == "_kiro.dev/commands/available":  # v3 never sends _kiro.dev/commands/available; this branch is dead code for v3 sessions.
             commands = [
                 {"name": _as_text(c.get("name")).lstrip("/"),
                  "description": _as_text(c.get("description"))}
@@ -4976,6 +4976,7 @@ def _emit_v3(session_id: str, frame: dict) -> None:
     """
     if _supervisor_v3 is not None:
         _supervisor_v3.record(session_id, frame)
+    # Spike note: broadcast fires even when supervisor is None; narrow teardown race matches v2 _emit behavior.
     _registry.broadcast(session_id, frame)
 
 
@@ -5216,10 +5217,12 @@ async def serve_socket(ws: WebSocket) -> None:
 
 
 async def serve_socket_v3(ws: WebSocket) -> None:
-    """Own an accepted /ws/acp-v3 socket for its whole lifetime.
+    """v3 counterpart of ``serve_socket`` for the ``/ws/acp-v3`` route.
 
-    Identical to serve_socket except it calls _dispatch_v3 so that all
-    handler functions route to _supervisor_v3 rather than _supervisor.
+    Web.py validates the token and origin, accepts, and hands the socket here
+    without ever reading a frame's ``type``. Phase 3 must add
+    ``_acp_token_ok`` and ``_ws_origin_ok`` before ``await ws.accept()``
+    in the route handler -- this function does not repeat those checks.
     """
     conn = _Connection(ws)
     if len(_registry.connections) >= MAX_CONNECTIONS:
@@ -5329,6 +5332,7 @@ def _dispatch_v3(conn: _Connection, frame: dict) -> None:
         "not_implemented",
         f"'{type_}' is a declared frame type this server does not route.",
         session_id))
+
 
 def _dispatch(conn: _Connection, frame: dict) -> None:
     """Validate an inbound envelope and route it by ``type``."""
@@ -7276,7 +7280,7 @@ def _emit_subagents_frame_v3(parent_id):
         parent_id))
 
 
-def _evict_crew_children_v3(session_id, *, keep_history, broadcast_empty):
+def _evict_crew_children_v3(session_id: str, *, keep_history: bool, broadcast_empty: bool) -> None:
     """Pop done crew entries for a v3 session from all relevant v3 stores.
 
     Mirror of _evict_crew_children but operates on _supervisor_v3.
