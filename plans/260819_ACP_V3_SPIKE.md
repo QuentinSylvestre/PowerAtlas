@@ -726,13 +726,13 @@ All exit criteria ticked. SC-9 satisfied.
 **Memory update** (from doc-impact analysis): update `memory/MEMORY.md` entry at heading `### acp.py and presence.py may not import each other` (line ~209): append a note that `_publish_live` now emits the union of both supervisors' sessions, guarded by `_supervisor_v3 is not None`.
 
 **Exit criteria**:
-- [ ] 12 new pytest tests in `TestSupervisorV3` class; all pass
-- [ ] `test_fulfill_token_malformed_json` and `test_fulfill_token_subprocess_failure` confirm error message does NOT contain any `accessToken` value
-- [ ] `test_stored_session_cwd_v3_rejects_path_traversal` passes (regex gate confirmed)
-- [ ] 3 new `acp_page.test.mjs` tests pass; all existing tests still pass
+- [x] 12 new pytest tests in `TestSupervisorV3` class; all pass (1871 passed vs 1859 baseline)
+- [x] `test_fulfill_token_malformed_json` and `test_fulfill_token_subprocess_failure` confirm error message does NOT contain any `accessToken` value
+- [x] `test_stored_session_cwd_v3_rejects_path_traversal` passes (regex gate confirmed)
+- [x] 3 new `acp_page.test.mjs` tests pass; all existing tests still pass (411 passed; 5 pre-existing failures unchanged)
 - [ ] Playwright: `/acp-v3` loads, session creates, prompt streams, reload replays — all observed without errors
 - [ ] Playwright: `/acp` unchanged — existing session, prompt, reload still work
-- [ ] `node tests/acp_page.test.mjs` passes
+- [x] `node tests/acp_page.test.mjs` passes
 - [x] `.venv-PowerAtlas\Scripts\pytest` passes
  (1859 passed, 2 skipped)
 - [ ] `memory/MEMORY.md` `_publish_live` union note added
@@ -902,3 +902,18 @@ Implementation health: Green (all findings resolved; cycle 2 skipped per low-onl
 | 4 | Low | `ws_acp_v3` missing comment about non-browser peer caveat | User: accepted — spike scope; document at productization |
 | 5 | Low | Unplanned nonce repair in `acp_page` during context restructuring | Fixed — caught and corrected before commit (412fc9c) |
 | 6 | Low | qvalidate count mismatch: implementer reported 13, actual was 14 | Fixed — expect-ticked reconciled to 14 (browser-reload criterion remains unticked per plan) |
+
+
+### 2026-08-19 — Implementation Review (after Phases 6+7, personas: Senior engineer, Security auditor, Reliability engineer, Maintainability reviewer)
+
+Phase 6: Docs-only. Per-phase review deferred to Step 9 per skip rule (prose-only, no executable code).
+
+Phase 7 implementation health: Green (all High/Medium fixed; L1 cosmetic accepted).
+4 findings (2 High, 1 Medium, 1 Low). Cycle 2 skipped (L1 cosmetic only after cycle-1 fixes).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `test_fulfill_token_malformed_json` and `_subprocess_failure` used absence checks instead of exact fixed-string assertions | Fixed — changed to `assert msg == 'Token response format error'` and `'Token fetch timed out'` (37fd774) |
+| 2 | High | `test_publish_live_union` only tested `_Supervisor._publish_live()`; `_SupervisorV3._publish_live()` uncovered | Fixed — added `test_supervisor_v3_publish_live_union` as 13th test (37fd774) |
+| 3 | Medium | `test_get_tool_diffs_v3_failed_result_excluded` triggered 200ms retry sleep unnecessarily | Fixed — added a successful call alongside failed one; retry never fires (37fd774) |
+| 4 | Low | Exit criterion "3 new `acp_page.test.mjs` tests" overstates — 2 were added in Phase 3, 1 in Phase 7 | User: accepted — cosmetic; total count (3 across both phases) is accurate |
