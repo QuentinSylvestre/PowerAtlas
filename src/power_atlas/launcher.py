@@ -145,6 +145,7 @@ def launch_session(
     provider: str = "kiro-cli",
     default_args: str = "",
     launch_profile: LaunchProfile | None = None,
+    session_title: str = "",
 ) -> LaunchResult:
     """Launch a provider session in a terminal (or directly for non-terminal providers). Returns result, never raises."""
     profile = launch_profile or LaunchProfile()
@@ -217,7 +218,7 @@ def launch_session(
     if default_args:
         cli_args += extra_args
 
-    title = f"{display} - {Path(cwd).name}"
+    title = f"{display} - {Path(cwd).name}" + (f" - {session_title}" if session_title else "")
 
     cmd = _build_command(terminal, cwd, cli_args, title=title, wt_profile=profile.wt_profile)
     if cmd is None:

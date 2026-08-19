@@ -4461,12 +4461,20 @@ async def api_launch(request: Request):
     provider = body.get("provider") or "kiro-cli"
     cwd = _resolve_launch_cwd(body.get("workspace", ""), config, provider)
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
+    session_id = body.get("session_id")
+    session_title = ""
+    if session_id:
+        sessions = data.get_sessions(cwd, provider)
+        matched = next((s for s in sessions if s.session_id == session_id), None)
+        if matched:
+            session_title = matched.title
     result = launcher.launch_session(
         cwd=cwd,
-        session_id=body.get("session_id"),
+        session_id=session_id,
         provider=provider,
         default_args=default_args,
         launch_profile=get_active_launch_profile(config),
+        session_title=session_title,
     )
     if not result.success:
         return templates.TemplateResponse(request, "partials/toast.html", {
