@@ -644,6 +644,18 @@
   // requests the desktop site from a mobile browser, they get the desktop UA
   // and therefore see the button \u2014 their deliberate choice.
   var ACP_CAN_DELETE = {{ can_delete | tojson }};
+  // Which ACP engine this page is driving. Set by the route handler:
+  // ``engine="v2"`` for ``/acp`` (default), ``engine="v3"`` for ``/acp-v3``.
+  var ENGINE = {{ engine | tojson }};  // "v2" or "v3"; set by the route handler
+  // WebSocket path — derived from engine so the page can be served from
+  // both routes without duplication.
+  var WS_PATH = ENGINE === 'v3' ? '/ws/acp-v3' : '/ws/acp';
+  // Session-listing API — engine-aware.
+  var RAIL_SESSIONS_API = ENGINE === 'v3' ? '/api/acp-v3/sessions' : '/api/acp/sessions';
+  // Workspace picker API — engine-aware.
+  var PICKER_WORKSPACES_API = ENGINE === 'v3' ? '/api/acp-v3/workspaces' : '/api/acp/workspaces';
+  // Session delete API — engine-aware.
+  var SESSION_DELETE_API = ENGINE === 'v3' ? '/api/acp-v3/sessions/delete' : '/api/acp/sessions/delete';
 
   var statusEl = document.getElementById('acpStatus');
   var logEl = document.getElementById('acpLog');
@@ -888,7 +900,7 @@
   // remote peers (desktop UA). `ACP_CAN_DELETE` gates whether the menu is
   // rendered at all — mobile UA gets false, so the button is never offered.
   // The device cookie + Origin/Referer check is the transport-level boundary.
-  var RAIL_DELETE_PATH = '/api/acp/sessions/delete';
+  var RAIL_DELETE_PATH = SESSION_DELETE_API;
   // How often the rail re-reads availability, and why it re-reads it at all.
   //
   // A row's `availability` is a reading of the world at fetch time, and the
@@ -1108,7 +1120,7 @@
     // `port` to 0 (OS-assigned), so any literal here would be wrong on most
     // launches while looking right on the machine it was written on.
     var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return scheme + '//' + location.host + '/ws/acp?t=' + encodeURIComponent(ACP_TOKEN);
+    return scheme + '//' + location.host + WS_PATH + '?t=' + encodeURIComponent(ACP_TOKEN);
   }
 
   // Returns whether the frame actually left. Callers holding something the
@@ -4127,7 +4139,7 @@
       if (value === null || value === undefined || value === '') continue;
       qs.push(encodeURIComponent(key) + '=' + encodeURIComponent(value));
     }
-    return '/api/acp/sessions' + (qs.length ? '?' + qs.join('&') : '');
+    return RAIL_SESSIONS_API + (qs.length ? '?' + qs.join('&') : '');
   }
 
   function railFetch(params) {
@@ -6167,7 +6179,7 @@
   // whatever was last typed into it, on a pane a phone could not see while
   // looking at the rail.
 
-  var PICKER_WORKSPACES_PATH = '/api/acp/workspaces';
+  var PICKER_WORKSPACES_PATH = PICKER_WORKSPACES_API;
   // Workspaces as of the last time the picker was opened, or null before the
   // first fetch. Re-fetched on every open rather than cached for the session:
   // the list is small, the request is one warm call, and a picker offering a

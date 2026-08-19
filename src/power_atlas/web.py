@@ -719,6 +719,15 @@ _ACP_DELETE_PATH = "/api/acp/sessions/delete"
 # route and its rationale are further down near the other remote-access routes.
 _ACP_RESTART_PATH = "/api/restart"
 
+# v3 ACP path constants — parallel to the v2 constants above, for the
+# `/acp-v3` spike surface. Defined here so `_REMOTE_ALLOWED_PATHS` (built at
+# import time) can name them.
+_ACP_V3_PATH = "/acp-v3"
+_ACP_V3_WS_PATH = "/ws/acp-v3"
+_ACP_V3_LISTING_PATH = "/api/acp-v3/sessions"
+_ACP_V3_WORKSPACES_PATH = "/api/acp-v3/workspaces"
+_ACP_V3_DELETE_PATH = "/api/acp-v3/sessions/delete"
+
 
 def set_remote_host(address: str) -> None:
     """Teach `_ALLOWED_HOSTS` the one non-loopback address we bind. Startup only.
@@ -842,7 +851,7 @@ def _origin_or_referer_ok(request: Request, *, allow_missing: bool) -> bool:
 
 
 def _acp_navigation_ok(request: Request) -> bool:
-    """Whether a ``GET /acp`` may proceed. Modelled on what the real flows send.
+    """Whether a ``GET /acp`` or ``GET /acp-v3`` may proceed. Modelled on what the real flows send.
 
     Copying the POST rule verbatim would break the page. The flows are:
 
@@ -900,7 +909,7 @@ async def same_origin_guard(request: Request, call_next):
     if request.method == "POST":
         if not _origin_or_referer_ok(request, allow_missing=False):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
-    elif request.url.path == _ACP_PATH and not _acp_navigation_ok(request):
+    elif request.url.path in (_ACP_PATH, _ACP_V3_PATH) and not _acp_navigation_ok(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     return await call_next(request)
 
@@ -1153,6 +1162,12 @@ _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     # cookie + Origin/Referer check is the transport-level auth boundary.
     # The stop switch blocks this path when remote access is stopped.
     _ACP_RESTART_PATH: "http",
+    # v3 ACP paths — parallel to the v2 entries above.
+    _ACP_V3_PATH: "http",
+    _ACP_V3_WS_PATH: "websocket",
+    _ACP_V3_LISTING_PATH: "http",
+    _ACP_V3_WORKSPACES_PATH: "http",
+    _ACP_V3_DELETE_PATH: "http",
     _REMOTE_STATIC_MOUNT: "http",
 }
 
@@ -1550,6 +1565,7 @@ async def acp_page(request: Request, sid: str = ""):
     response = templates.TemplateResponse(request, "acp.html", {
         "acp_token": _ACP_TOKEN,
         "sid": sid,
+        "engine": "v2",
         "csp_nonce": nonce,
         # Whether the dashboard is reachable *for this viewer*. `/` is not on
         # `_REMOTE_ALLOWED_PATHS` and never will be (SC-4), so the topbar's
@@ -1635,6 +1651,57 @@ async def ws_acp(ws: WebSocket) -> None:
         return
     await ws.accept()
     await acp.serve_socket(ws)
+
+
+
+@app.get(_ACP_V3_PATH, response_class=HTMLResponse)
+async def acp_v3_page(request: Request, sid: str = ""):
+    """The v3 Agent orchestrator page. Mirrors ``acp_page`` with ``engine='v3'``.
+
+    See ``acp_page`` for security rationale. The same DNS-rebinding defence,
+    CSP header, ``Cache-Control: no-store``, and ``can_delete`` logic apply here.
+    """
+    if not _request_host_allowed(request):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    nonce = secrets.token_urlsafe(16)
+    response = templates.TemplateResponse(request, "acp.html", {
+        "acp_token": _ACP_TOKEN,
+        "sid": sid,
+        "csp_nonce": nonce,
+        "engine": "v3",
+        "local": not _is_remote_peer((request.scope.get("client") or (None,))[0]),
+        "can_delete": (
+            not _is_remote_peer((request.scope.get("client") or (None,))[0])
+            or not _is_mobile_ua(request.headers.get("user-agent", ""))
+        ),
+        "acp_error": _ACP_IMPORT_ERROR,
+    })
+    response.headers["Content-Security-Policy"] = _acp_csp(
+        nonce, request.headers["host"].strip())
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.websocket(_ACP_V3_WS_PATH)
+async def ws_acp_v3(ws: WebSocket) -> None:
+    """v3 WebSocket transport. Token and origin checks before accept().
+
+    Mirrors ``ws_acp``. Calls ``acp.serve_socket_v3`` instead of
+    ``acp.serve_socket``.
+    """
+    if not _acp_token_ok(ws.query_params.get("t", "")):
+        await ws.close(code=1008)
+        return
+    if not _ws_origin_ok(ws):
+        await ws.close(code=1008)
+        return
+    if acp is None:
+        await ws.accept()
+        await ws.close(code=1011, reason="Agent orchestrator unavailable")
+        return
+    await ws.accept()
+    await acp.serve_socket_v3(ws)
+
 
 
 # --- The session browser's data source -----------------------------------
@@ -2803,6 +2870,134 @@ async def api_acp_delete_sessions(request: Request):
     # *creation*, and a session still being created holds no store files a
     # delete could reach.
     held = frozenset(acp._supervisor.sessions)
+    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
+    return JSONResponse({
+        "deleted": result["deleted"],
+        "failed": result["failed"],
+        "total_found": len(session_ids),
+    })
+
+
+
+
+# --- v3 ACP session browser endpoints ---------------------------------
+#
+# Mirrors of the v2 listing, workspaces, and delete endpoints for the
+# ``/acp-v3`` surface. Same security posture; supervisor calls route to
+# ``acp._supervisor_v3`` instead of ``acp._supervisor``.
+
+
+@app.get(_ACP_V3_LISTING_PATH)
+async def api_acp_v3_sessions(response: Response, cwd: str = "",
+                              group_page: int = 1,
+                              group_size: int = _ACP_GROUPS_PER_PAGE,
+                              session_page: int = 1,
+                              session_size: int = _ACP_SESSIONS_PER_GROUP,
+                              mode: str = "", page: int = 1,
+                              size: int = _ACP_FLAT_PAGE_SIZE):
+    """v3 session listing. Mirrors ``api_acp_sessions`` with ``_supervisor_v3``."""
+    response.headers["Cache-Control"] = "no-store"
+    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    capacity = {
+        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
+    if mode == "recent":
+        return await asyncio.to_thread(
+            _acp_flat_listing, max(1, page),
+            max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity)
+    return await asyncio.to_thread(
+        _acp_listing, cwd,
+        max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
+        max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
+        held, capacity)
+
+
+@app.get(_ACP_V3_WORKSPACES_PATH)
+async def api_acp_v3_workspaces(response: Response):
+    """v3 workspace list for the create picker. Mirrors ``api_acp_workspaces``."""
+    response.headers["Cache-Control"] = "no-store"
+    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    capacity = {
+        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
+    return await asyncio.to_thread(_acp_workspaces, capacity)
+
+
+@app.post(_ACP_V3_DELETE_PATH)
+async def api_acp_v3_delete_sessions(request: Request):
+    """v3 session delete. Mirrors ``api_acp_delete_sessions`` with ``_supervisor_v3``.
+
+    Uses the same workspace-level and per-session delete paths as the v2
+    endpoint, but snapshots ``_supervisor_v3.sessions`` for the held set.
+    """
+    if acp is None:
+        return JSONResponse(
+            {"error": "The ACP module is not loaded, so its store is not "
+                      "reachable from here."}, status_code=503)
+    sv3 = getattr(acp, "_supervisor_v3", None)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
+
+    # --- Workspace-level delete path ---
+    cwd: str | None = body.get("cwd") if isinstance(body, dict) else None
+    delete_folder: bool = (
+        bool(body.get("delete_folder", False)) if isinstance(body, dict) else False
+    )
+    if cwd is not None:
+        if not isinstance(cwd, str) or not cwd.strip():
+            return JSONResponse(
+                {"error": "'cwd' must be a non-empty string."}, status_code=400)
+        all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
+        deleted_total: list[str] = []
+        failed_total: list[dict] = []
+        while all_ids:
+            batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
+            held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+            result = await asyncio.to_thread(_acp_delete_many, batch, held)
+            deleted_total.extend(result["deleted"])
+            failed_total.extend(result["failed"])
+        resp_data: dict = {
+            "deleted": deleted_total,
+            "failed": failed_total,
+            "total_found": len(deleted_total) + len(failed_total),
+        }
+        if delete_folder:
+            peer_ip = (request.scope.get("client") or (None,))[0]
+            if _is_remote_peer(peer_ip):
+                resp_data["folder_deleted"] = False
+                resp_data["folder_error"] = (
+                    "Folder deletion is not available from remote access."
+                )
+            else:
+                try:
+                    folder_deleted, folder_error = await asyncio.to_thread(
+                        _acp_delete_workspace_folder, cwd
+                    )
+                except Exception as exc:
+                    folder_deleted = False
+                    folder_error = f"Folder delete failed unexpectedly: {exc}"
+                resp_data["folder_deleted"] = folder_deleted
+                resp_data["folder_error"] = folder_error
+        return JSONResponse(resp_data)
+
+    # --- Per-session delete path ---
+    raw = body.get("session_ids") if isinstance(body, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return JSONResponse(
+            {"error": "'session_ids' must be a non-empty list."},
+            status_code=400)
+    if len(raw) > _ACP_MAX_DELETE_IDS:
+        return JSONResponse(
+            {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
+            status_code=400)
+    session_ids = [s for s in raw if isinstance(s, str)]
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
