@@ -127,13 +127,86 @@ None — no new infrastructure, cloud resources, or third-party services. Token 
 **Record findings** under a `### Phase 0 Results` heading added to this plan after execution.
 
 **Exit criteria**:
-- [ ] AS-6 result recorded: `initialize` response arrives before / after `getAccessToken` request (circle one, with evidence line from wire log)
-- [ ] AS-5 result recorded: `_kiro.dev/session/terminate` response on v3 documented (method works / unknown / other)
-- [ ] AS-4 result recorded: list of all notification method names observed on a real v3 turn
-- [ ] R4 result recorded: `_find_v3_session_path` returns correct path for ACP-created session (yes / no, with evidence)
-- [ ] All probe scripts deleted; `git status` confirms no tracked file changes
+- [x] AS-6 result recorded: `getAccessToken` arrived **before** `initialize` result by 6 ms — see Phase 0 Results
+- [x] AS-5 result recorded: `_kiro.dev/session/terminate` → `-32603`; no working JSON-RPC close method on v3 — see Phase 0 Results
+- [x] AS-4 result recorded: 8 notification methods; 4 `session/update` subtypes — see Phase 0 Results
+- [x] R4 result recorded: session found immediately after `session/new` (no delay) — see Phase 0 Results
+- [x] All probe scripts deleted; `git status` confirms no tracked file changes
 
-**Covers**: SC-5 (liveness probe), SC-6, SC-7
+**Covers**: SC-6, SC-7
+
+### Phase 0 Results (2026-08-19)
+
+**AS-6 — `initialize` / auth timing**: `getAccessToken` request arrived **BEFORE** `initialize` result. Measured ordering from wire log:
+
+```
++1.700s FRAME: {"jsonrpc":"2.0","id":0,"method":"_kiro/auth/getAccessToken","params":{}}
++1.706s FRAME: {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{...}}}
+```
+
+This **contradicts** the governance doc claim (`kiro-cli-local-data.md`): *"The `initialize` result does NOT wait for step 3. Proven live, twice: in both probes the `initialize` result arrived within milliseconds of the `getAccessToken` request."* On this build (kiro-cli 2.18.x, Enterprise), `getAccessToken` (id=0) arrives 6 ms **before** the `initialize` result (id=1). Both arrive within ~6 ms of each other; the difference is tiny but the order is inverted. KAS startup time to first frame: **1.70 s** (well under 20 s — no `INITIALIZE_TIMEOUT_SECONDS` raise needed).
+
+**Implementation impact**: `_fulfill_token` must answer `getAccessToken` as soon as it arrives, whether before or after the `initialize` response. The existing design already handles this correctly (the token fulfillment is dispatched independently of the `initialize` round-trip) — no code change needed.
+
+---
+
+**AS-5 — CLOSE_METHOD**: `_kiro.dev/session/terminate` returns `-32603 Internal error` (not `-32601 Method not found`) with message:
+
+```json
+{"jsonrpc":"2.0","id":3,"error":{"code":-32603,"message":"Internal error","data":{"details":"[PersistenceClassification] Ext method "_kiro.dev/session/terminate" has no persistence classification. Add it to KnownExtMethod in persistence-classification.ts."}}}
+```
+
+Alternatives tested:
+- `session/close` → `-32601 "Method not found": session/close`
+- `_kiro.dev/session/close` → `-32603 Internal error` (same persistence-classification error)
+- `session/cancel` → `-32603 Internal error` (same persistence-classification error)
+
+**Conclusion**: No close method works on v3 via JSON-RPC. The production `close_session` path in `_SupervisorV3` must **not** call `self._discard()` — that kills the entire KAS subprocess and all sessions. Instead, `_SupervisorV3.close_session(session_id)` must execute the per-session local cleanup body directly: remove from `sessions`, `history`, `inflight`, `_diff_backfill`, `subagent_sessions`, `subagent_history`, `crews`, `_bubbles` (session key), and broadcast a `session_closed` frame to subscribers. Add `CLOSE_METHOD_V3 = None` constant. Phase 1 must specify `close_session` as an explicit override method, not rely on the base-class behavior that sends `CLOSE_METHOD`.
+
+---
+
+**AS-4 — notification method names**: Observed from a full `session/new` + `session/prompt` turn:
+
+All notification method names (no `id` field, JSON-RPC notification):
+- `_kiro/governance/state`
+- `_kiro/mcp/status`
+- `_kiro/powers/items_changed`
+- `_kiro/progressive_context/items_changed`
+- `_kiro/sessions/changed`
+- `_kiro/steering/documents_changed`
+- `_kiro/tools/didChange`
+- `session/update`
+
+`session/update` subtypes observed (from `params.update.sessionUpdate`):
+- `agent_message_chunk` — streaming agent text
+- `available_commands_update` — slash command list
+- `config_option_update` — mode/model config options
+- `session_info_update` — context usage, turn start/end, title, steering docs
+
+No v2-only `_kiro.dev/*` methods observed (e.g. `_kiro.dev/commands/available`, `_kiro.dev/metadata`). These are replaced by `session/update` subtypes in v3. The `_on_notification` override in `_SupervisorV3` does not need to handle any additional unknown methods beyond what `_Supervisor._on_notification` already handles — but the override **is** required to route `_emit` → `_emit_v3`.
+
+`session/prompt` response: `{"id":3,"result":{"stopReason":"end_turn"}}`. Session ID in `session/new` result is under `result._meta.id` (not `result.sessionId`).
+
+---
+
+**R4 — ACP-created session path discovery**: Session found **immediately** after `session/new` returns. No cache rebuild or delay needed.
+
+```
+session_id = sess_90fabb8a-2a46-40ed-baa9-1c9b5a084de5
+found at: C:\Users\QSylvestre.POLESTAR\.kiro\sessions\3cc5d435a261c89d\sess_90fabb8a-2a46-40ed-baa9-1c9b5a084de5\session.json
+workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
+```
+
+`session.json` exists immediately — KAS writes it synchronously during `session/new`. The inline path scanner in `_get_tool_diffs_v3` (hash-dir walk) will always find ACP-created sessions on the first call. The unconditional 200 ms retry in the Phase 1 design is harmless but unnecessary for path discovery.
+
+---
+
+**Exit criteria — all ticked**:
+- [x] AS-6 result recorded: `getAccessToken` request arrived **before** `initialize` result (6 ms gap; wire log above)
+- [x] AS-5 result recorded: `_kiro.dev/session/terminate` → `-32603`; no working JSON-RPC close method on v3; `close_session` override must do per-session local cleanup (not `_discard()`)
+- [x] AS-4 result recorded: 8 notification methods; 4 `session/update` subtypes (see above)
+- [x] R4 result recorded: session path found immediately after `session/new` returns (no delay needed)
+- [x] All probe scripts deleted; `git status` confirms only the pre-staged `plans/260819-1740_ACP_V3_SPIKE.md` deletion, no new tracked changes
 
 ### Phase 1: `_SupervisorV3` skeleton + auth handshake [QA]
 
@@ -166,7 +239,9 @@ None — no new infrastructure, cloud resources, or third-party services. Token 
 
    - `_on_notification` — **overrides to route `_emit` calls to `_emit_v3`**. Copy `_Supervisor._on_notification` body, replacing every `_emit(session_id, frame)` call with `_emit_v3(session_id, frame)`. This ensures v3 frame history is recorded in `_supervisor_v3.history`, not `_supervisor.history`.
 
-   - `new_session` — uses `_build_kas_session_params_v3()` (which adds `modeId`) instead of `_build_kas_session_params()`. This is required for SC-1 (`modeId=kiro_default`).
+   - `new_session` — uses `_build_kas_session_params_v3()` (which adds `modeId`) instead of `_build_kas_session_params()`. This is required for SC-1 (`modeId=kiro_default`). **CRITICAL (Phase 0 finding)**: v3 `session/new` returns the session ID at `result._meta.id`, not `result.sessionId`. The override must extract `session_id = (result.get("_meta") or {}).get("id")` — the base class `result.get("sessionId")` returns `None` and raises `AgentRejected`.
+
+   - `close_session` — **CRITICAL (Phase 0 AS-5 finding)**: no JSON-RPC close method works on v3. The override must NOT call `self._discard()` (that kills the entire KAS subprocess and all sessions). Instead, implement per-session local cleanup directly: remove `session_id` from `sessions`, `history`, `inflight`, `_diff_backfill`, `subagent_sessions`, `subagent_history`, `crews`, and `_bubbles` (session key); broadcast a `session_closed` frame to subscribers. Add `CLOSE_METHOD_V3 = None` constant near `CLOSE_METHOD`.
 
    - `load_session` — no lock hint; uses `_stored_session_cwd_v3` for cwd; uses `_get_tool_diffs_v3` for diff backfill.
 
@@ -291,7 +366,12 @@ None — no new infrastructure, cloud resources, or third-party services. Token 
 - [ ] `acp.py` isolation boundary intact: `grep -E "from \.data_kiro_v3|import data_kiro_v3" src/power_atlas/acp.py` returns no hits
 - [ ] Manual smoke test: call `_supervisor_v3.ensure_started()` from a Python script, observe no exception; verify KAS subprocess starts and `_ready` is `True`
 - [ ] `.venv-PowerAtlas\Scripts\pytest` passes (all existing tests)
-- [ ] Phase 0 KAS v3 startup time measured and noted; if > 20 s, raise `INITIALIZE_TIMEOUT_SECONDS` for v3
+- [ ] Phase 0 KAS v3 startup time: 1.70 s (measured in Phase 0) — no timeout adjustment needed
+- [ ] `new_session` override extracts session ID from `result._meta.id` (not `result.get("sessionId")`) — verified by grep
+- [ ] `close_session` override present with per-session local cleanup (does NOT call `_discard()`) — verified by reading implementation
+- [ ] `CLOSE_METHOD_V3 = None` constant added near `CLOSE_METHOD`
+- [ ] `session/cancel` notification (not request) verified on a live v3 turn; `stopReason: "cancelled"` confirmed or behavior noted
+- [ ] Crew panel (`_kiro.dev/subagent/list_update`) compatibility marked as open item (not probed in Phase 0 — single non-subagent turn; requires Phase 2+ with a multi-agent prompt)
 
 **Covers**: SC-1 (partial — handshake only), SC-8 (partial)
 
