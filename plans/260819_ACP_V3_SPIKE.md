@@ -640,7 +640,40 @@ python -c "import ast, sys; [print(n.module or n.names[0].name) for n in ast.wal
 5. **`_kiro/spec/*` and `_kiro/workflow/*` notification handling**. Assess whether these v3-specific notifications should be surfaced in `/acp-v3`. Source: Q5 decision.
 
 ## Review Log
-`<Reserved>`
+
+### 2026-08-19 — Plan Creation (via /qplan, high effort, 4 personas)
+
+25 raw findings (after dedup across 4 personas). 17 auto-resolved; 8 escalated (all Low or already addressed in the resolution column below).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `_on_notification` is inherited and routes all `_emit` calls to `_supervisor.record()`, corrupting v2 history and leaving v3 history empty | Fixed — Phase 1 adds `_SupervisorV3._on_notification` override replacing `_emit` with `_emit_v3`; Phase 2 adds `_emit_v3`; both noted in Design Decisions |
+| 2 | High | `shutdown()` only calls `_supervisor.shutdown()`; `_supervisor_v3` subprocess leaks on exit | Fixed — Phase 1 exit criterion requires `shutdown()` to call `_supervisor_v3.shutdown()` |
+| 3 | High | `_sweep_once` hardcoded to `_supervisor`; v3 sessions never swept | Fixed — Phase 1 extends `_sweep_once` to iterate `_supervisor_v3.sessions`; Phase 5 verifies |
+| 4 | High | `_publish_live` signature mismatch — plan union pseudocode passes one arg but actual signature takes two | Fixed — Phase 1 exit criterion: "read actual `_Supervisor._publish_live` signature before implementing; match it" |
+| 5 | High | `new_session` not in the five listed overrides — calls v2 `_build_kas_session_params()` (no modeId); SC-1 never satisfied | Fixed — Phase 1 now lists `new_session` as a required override; Design Decisions table updated |
+| 6 | High | `same_origin_guard` path check is `== _ACP_PATH` exactly; `/acp-v3` bypasses navigation guard entirely | Fixed — Phase 3 now requires extending the guard to include `_ACP_V3_PATH`; Risk R9 added |
+| 7 | High | `_fulfill_token` exception message includes raw `exc`; malformed JSON parse may leak `accessToken` | Fixed — Phase 1 `_fulfill_token` code sample uses separate `except json.JSONDecodeError` with fixed message; general `except` also uses fixed string; Risk R8 added |
+| 8 | High | Missing `_request_host_allowed` call in `acp_v3_page` — DNS rebinding leaks `_ACP_TOKEN` | Fixed — Phase 3 exit criterion requires `_request_host_allowed`; Phase 3 route spec updated |
+| 9 | High | `_stored_session_cwd_v3` no `_SESSION_ID_RE` validation before path join — path traversal possible | Fixed — Phase 1 spec and exit criteria require `_SESSION_ID_RE.fullmatch` guard at top of function |
+| 10 | High | `_fulfill_token` timeout leaves subprocess running in thread pool on Windows | Fixed — Phase 1 `_fulfill_token` code sample includes explicit `kill()` in `except TimeoutExpired` block |
+| 11 | High | `_supervisor_v3` initialized at module level; `apply_config` rebinds ignore it | Fixed — Design Decisions updated; Phase 1 specifies init inside `apply_config` / lifespan |
+| 12 | Medium | `_sweep_loop` early-exit guard is v2-only; zero v2 sessions with idle v3 sessions never sweeps | Fixed — Phase 1 exit criterion: "sweep loop guard includes v3" |
+| 13 | Medium | `_fulfill_token` inherits full env including `POWER_ATLAS_SESSION`; should use `_build_child_env` | Fixed — Phase 1 `_fulfill_token` code sample uses `env=_build_child_env({})` |
+| 14 | Medium | `/acp-v3` route missing CSP header and `Cache-Control: no-store` | Fixed — Phase 3 exit criteria enumerate both headers explicitly |
+| 15 | Medium | `ws_acp_v3` token/origin check order ambiguous — must precede `accept()` | Fixed — Phase 3 specifies `_acp_token_ok` and `_ws_origin_ok` before `await ws.accept()` |
+| 16 | Medium | `can_delete` context variable not specified for `acp_v3_page` | Fixed — Phase 3 route spec includes `can_delete` via same `_is_remote_peer`/`_is_mobile_ua` logic |
+| 17 | Medium | `_fulfill_token` `AcpError` on write leaves KAS waiting indefinitely | Fixed — Phase 1 code sample calls `_discard` on write failure |
+| 18 | Medium | `_supervisor_v3 = None` permanently on construction failure with no error log | Fixed — Phase 1 specifies `ERROR` log + explicit `None` assignment on failure |
+| 19 | Medium | Multiple `getAccessToken` requests over session lifetime not tested | Fixed — Phase 7 adds `test_fulfill_token_called_twice` |
+| 20 | Medium | `_registry.attach/.detach` call `_supervisor.touch_used()` unconditionally; v3 idle clock never reset | Fixed — Phase 1 exit criterion requires `attach`/`detach` to route `touch_used` to correct supervisor |
+| 21 | Low | Phase 0 doesn't measure KAS v3 startup time vs timeout | Fixed — Phase 1 exit criterion adds startup time measurement and notes to raise timeout if >20 s |
+| 22 | Low | `_get_tool_diffs_v3` retry conditional on Phase 4 probe — should be unconditional | Fixed — Phase 1 specifies unconditional 200 ms retry; Phase 4 conditional language removed |
+| 23 | Low | `kiro-cli` binary not resolved via `shutil.which` for token fetch | Fixed — `_KIRO_V3_TOKEN_BINARY = shutil.which("kiro-cli")` at module level; used in `_fulfill_token` |
+| 24 | Low | `_overlay_steering` placeholder content needs injection-safety note | Fixed — Phase 1 `_fulfill_token` comment notes field must not contain user-controlled strings |
+| 25 | Low | Phase 5 sweeper exit criterion can't pass until H2 resolved | Fixed — Phase 1 resolves the sweeper gap; Phase 5 exit criterion cross-references it |
+
+Health: **Green** (all High and Medium findings resolved; no unresolved findings remaining).
 
 ## Harness Improvement Opportunities
 
