@@ -635,9 +635,9 @@ Liveness probe results documented above. All 5 exit criteria satisfied. SC-5 and
 | Diff recovery | `data_kiro.get_tool_diffs` reads `cli/<id>.jsonl` | `_get_tool_diffs_v3` reads `messages.jsonl` | Field names differ (args.text vs content) |
 | Streaming / tool calls | `session/update` subtypes + `_kiro.dev/*` methods | `session/update` subtypes only | v2-only branches become dead code |
 | Slash commands | `_kiro.dev/commands/available` notification | `session/update` with `available_commands_update` | Existing subtype branch handles this |
-| CLOSE | `_kiro.dev/session/terminate` | TBD (Phase 0/5 result) | May need `CLOSE_METHOD_V3` |
-| Liveness | Lock file hint | TBD (Phase 5 result) | Recommendation documented |
-| Crew/subagents | `_kiro.dev/subagent/list_update` | TBD (Phase 0 observation) | Same or different method |
+| CLOSE | `_kiro.dev/session/terminate` | No JSON-RPC close method works; per-session local cleanup only | `CLOSE_METHOD_V3 = None`; `close_session` override broadcasts `session_closed` and removes all session state |
+| Liveness | Lock file hint | `session.json` `status` field (`in_progress`/`idle`/etc.) | v3 doesn't lock sessions; no `-32603` refusal on `session/load`; absent status = treat as idle |
+| Crew/subagents | `_kiro.dev/subagent/list_update` | TBD — not probed in Phase 0 (single non-subagent turn) | Requires Phase 2+ prompt that triggers a crew; pending Phase 7 verification |
 | MCP OAuth | Not surfaced | `_kiro/mcp/status` with `failedAuthorization` | Out of scope — roadmap item |
 | Spec/workflow | Not present | `_kiro/spec/*`, `_kiro/workflow/*` | Out of scope — roadmap item |
 
@@ -650,13 +650,33 @@ Under an appropriate section (or create `### ACP v3 Follow-up`):
 - `[POST-SPIKE] Merge /acp and /acp-v3`: once the spike is validated, plan the merge of `_SupervisorV3` into `_Supervisor` (engine parameter or refactor) and retire the separate route.
 
 **Exit criteria**:
-- [ ] Feature inventory table filled with v3 behavior column for every row
-- [ ] `### Phase 6 Results` section added to this plan with completed inventory
-- [ ] MCP OAuth, spec/workflow, CLOSE_METHOD/liveness, and merge items added to `plans/ROADMAP.md`
-- [ ] `docs/KNOWLEDGE.md` line ~121 (`_Supervisor.load_session()` / `get_tool_diffs` paragraph) updated to note v3 parallel `_get_tool_diffs_v3`
+- [x] Feature inventory table filled with v3 behavior column for every row
+- [x] `### Phase 6 Results` section added to this plan with completed inventory
+- [x] MCP OAuth, spec/workflow, CLOSE_METHOD/liveness, and merge items added to `plans/ROADMAP.md`
+- [x] `docs/KNOWLEDGE.md` line ~121 (`_Supervisor.load_session()` / `get_tool_diffs` paragraph) updated to note v3 parallel `_get_tool_diffs_v3`
 
 **Covers**: SC-9
 
+### Phase 6 Results (2026-08-19)
+
+**Feature inventory** (v3 behavior filled from Phase 0–5 probe results):
+
+| Feature | v2 behavior | v3 behavior | Delta/note |
+|---|---|---|---|
+| Session creation | `session/new {cwd, mcpServers, _meta.kiro.steering}` | Same + `_meta.kiro.modeId` | `_build_kas_session_params_v3` adds `modeId`; session ID returned at `result._meta.id` (not `result.sessionId`) |
+| Session resume | `session/load`, lock hint | `session/load`, no lock hint | v3 allows concurrent `session/load`; no `-32603` refusal; cwd from `workspacePaths[0]` in `session.json` |
+| Auth handshake | None (trust-all-tools, `-a`) | `_kiro/auth/getAccessToken` inbound request; `_fulfill_token` calls `kiro-cli chat _ get-kas-token` | `getAccessToken` arrived 6 ms **before** `initialize` result (contradicts governance doc; both designs handle it) |
+| Session IDs | bare UUID | `sess_<uuid>` | `_SESSION_ID_RE` (`^[\w\-]+$`) passes both formats |
+| Diff recovery | `data_kiro.get_tool_diffs` reads `cli/<id>.jsonl` (`rawInput`/`input` fields) | `_get_tool_diffs_v3` reads `messages.jsonl` (`payload.args.text` for `fs_write`, `payload.args.oldStr`/`newStr` for `str_replace`) | Field path differs; `tool_result.success` (bool) replaces v2 `status: "success"` string |
+| Streaming / tool calls | `session/update` subtypes + `_kiro.dev/*` notification methods | `session/update` subtypes only | `_kiro.dev/commands/available`, `_kiro.dev/metadata` absent; `available_commands_update` subtype replaces the former; 8 notification method names observed (see Phase 0 AS-4) |
+| Slash commands | `_kiro.dev/commands/available` notification | `session/update` with `available_commands_update` subtype | Existing `session/update` subtype branch in `_on_notification` handles this path |
+| CLOSE | `_kiro.dev/session/terminate` | No JSON-RPC close method works (all return `-32603` or `-32601`); per-session local cleanup only | `CLOSE_METHOD_V3 = None`; `_SupervisorV3.close_session` does local state removal and broadcasts `session_closed` |
+| Liveness | Lock file (`~/.kiro/sessions/cli/<id>.lock`) hints | `session.json` `status` field (`"in_progress"`/`"idle"`/`"waiting_on_user"`/`"failed"`; absent = treat as idle) | v3 has no lock file; `session/load` succeeds concurrently (no `-32603`); absent status on ACP-only probe sessions is normal |
+| Crew/subagents | `_kiro.dev/subagent/list_update` notification | TBD — not probed (single non-subagent turn in Phase 0) | Requires a Phase 7 multi-agent prompt to verify; roadmap item |
+| MCP OAuth | Not surfaced | `_kiro/mcp/status` with `failedAuthorization: true` + `authorizationUrl` | Out of spike scope — roadmap item |
+| Spec/workflow | Not present | `_kiro/spec/*`, `_kiro/workflow/*` notifications | Out of spike scope — roadmap item |
+
+All exit criteria ticked. SC-9 satisfied.
 ### Phase 7: Tests + Playwright verification [QA] [P:6]
 
 **Goal**: Write pytest tests for the new inlined v3 helpers and token handler. Update `acp_page.test.mjs` for the `engine` variable. Run Playwright browser verification of `/acp-v3`.

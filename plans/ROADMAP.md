@@ -26,6 +26,18 @@
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 - **`kiro-cli-v3` liveness attribution (follow-up)**: `presence.py`'s `_match_provider` always returns `"kiro-cli"` (first dict hit) for resumed v3 sessions — live status dot appears on the v2 provider row, not the v3 row. Fix: check whether session ID starts with `sess_` in `_scan()` and route to `"kiro-cli-v3"`. Tracked as Follow-up #2 of `260818-2227_KIRO_CLI_V3_DASHBOARD_SUPPORT.md`.
 
+### ACP v3 Follow-up
+
+> Post-spike items from 260819_ACP_V3_SPIKE.md. The spike validated v3 protocol feasibility (Phases 0-5 complete);
+> these follow-ups require production-grade implementation or design decisions beyond the spike's throwaway scope.
+
+- **[POST-SPIKE] MCP OAuth in /acp-v3** — when a v3 session's MCP server requires OAuth, _kiro/mcp/status arrives with ailedAuthorization: true and an uthorizationUrl. Surface this in /acp-v3 as a "Connect" prompt. Identical to the v2 OAuth flow per governance docs (_kiro/mcp/status with orceAuth); the v3 path merely changes which route receives it.
+
+- **[POST-SPIKE] _kiro/spec/* and _kiro/workflow/* notification handling** — v3 emits spec-workflow and runner notifications not present in v2. Assess whether /acp-v3 should surface them (e.g., spec phase checkpoints, workflow node status).
+
+- **[POST-SPIKE] Liveness detection production implementation using session.json status field; gate out lock-file path for sess_-prefixed session IDs** — Phase 5 probe found session.json status is reliable (KAS writes it at turn boundaries; absent on ACP-only probe sessions = treat as idle). Production path: presence.py reads status from the sess_* path; status_classifier.py's lock-file branch must be skipped for sess_-prefixed IDs. Residual: combine with process-table check to disambiguate a mid-turn crash that leaves "in_progress" stuck.
+
+- **[POST-SPIKE] Merge /acp and /acp-v3 into a single engine-parameterized route** — once the spike is validated end-to-end (Phase 7 Playwright pass), plan the merge of _SupervisorV3 into _Supervisor (engine parameter or subclass retained) and retire the separate route. Source: Q6 design decision (parallel supervisors for spike only).
 ### Session Control & Integration
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
 - **Tell the operator a turn ended** — push notification when a long task finishes; cheapest version uses the existing WebSocket but fails when the phone sleeps the tab
