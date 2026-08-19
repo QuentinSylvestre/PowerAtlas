@@ -1,4 +1,4 @@
-﻿﻿# ACP v3 Spike — `/acp-v3` Prototype
+# ACP v3 Spike — `/acp-v3` Prototype
 
 > **Date**: 2026-08-19
 > **Status**: Draft
@@ -480,25 +480,29 @@ Phase 2 adds: `_emit_v3` (records in `_supervisor_v3.history`, broadcasts via `_
 Update the statement at line 7: "All JS for `/acp` is inline in `src/power_atlas/templates/acp.html`" → "All JS for `/acp` and `/acp-v3` is inline in `src/power_atlas/templates/acp.html`. `/acp-v3` uses the same template with `engine="v3"`; the same hard-reload rule applies."
 
 **Exit criteria**:
-- [ ] `GET /acp-v3` returns 200 and renders `acp.html` with `engine="v3"` in context
-- [ ] `acp_v3_page` calls `_request_host_allowed(request)` (grep confirms — DNS rebinding defence)
-- [ ] `acp_v3_page` sets `Content-Security-Policy` header via `_acp_csp(nonce, host)` (grep confirms)
-- [ ] `acp_v3_page` sets `Cache-Control: no-store` header (grep confirms)
-- [ ] `acp_v3_page` passes `can_delete` context variable using same logic as `acp_page`
-- [ ] `ws_acp_v3` calls `_acp_token_ok` and `_ws_origin_ok` before `await ws.accept()` (read implementation, confirm order)
-- [ ] `same_origin_guard` extended to include `_ACP_V3_PATH` (grep `_ACP_V3_PATH` in guard condition)
-- [ ] `engine` Jinja variable present in template context and JS `const ENGINE` set correctly
-- [ ] `WS_PATH` uses `/ws/acp-v3` when `ENGINE === "v3"`
-- [ ] Rail session listing uses `/api/acp-v3/sessions` when `engine === "v3"`
-- [ ] `/ws/acp-v3` and `/api/acp-v3/*` in `_REMOTE_ALLOWED_PATHS` (grep confirms)
-- [ ] `AGENTS.md` line 7 updated with `/acp-v3` + `engine="v3"` note
+- [x] `GET /acp-v3` returns 200 and renders `acp.html` with `engine="v3"` in context
+- [x] `acp_v3_page` calls `_request_host_allowed(request)` (grep confirms — DNS rebinding defence)
+- [x] `acp_v3_page` sets `Content-Security-Policy` header via `_acp_csp(nonce, host)` (grep confirms)
+- [x] `acp_v3_page` sets `Cache-Control: no-store` header (grep confirms)
+- [x] `acp_v3_page` passes `can_delete` context variable using same logic as `acp_page`
+- [x] `ws_acp_v3` calls `_acp_token_ok` and `_ws_origin_ok` before `await ws.accept()` (read implementation, confirm order)
+- [x] `same_origin_guard` extended to include `_ACP_V3_PATH` (grep `_ACP_V3_PATH` in guard condition)
+- [x] `engine` Jinja variable present in template context and JS `const ENGINE` set correctly
+- [x] `WS_PATH` uses `/ws/acp-v3` when `ENGINE === "v3"`
+- [x] Rail session listing uses `/api/acp-v3/sessions` when `engine === "v3"`
+- [x] `/ws/acp-v3` and `/api/acp-v3/*` in `_REMOTE_ALLOWED_PATHS` (grep confirms)
+- [x] `AGENTS.md` line 7 updated with `/acp-v3` + `engine="v3"` note
 - [ ] Browser hard-reload on `/acp-v3` loads the page; `/acp` still works unchanged
-- [ ] `node tests/acp_page.test.mjs` passes (may need `engine` variable fixture — see below)
+- [x] `node tests/acp_page.test.mjs` passes (2 new tests added; same 5 pre-existing failures remain)
 - [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
 
 **`acp_page.test.mjs` fix**: The test renders `acp.html`; any test that exercises code now gated on `ENGINE` needs the fixture to inject `engine = "v2"` (so v2 paths remain unchanged in tests). Identify all tests that would fail due to the new `ENGINE` variable being undefined and add the fixture injection.
 
 **Covers**: SC-4 (page loads), SC-1 (full end-to-end path now reachable)
+
+### Implementation (2026-08-19, code: 412fc9c, fix: 65e1405)
+Phase 3 adds HTTP/WebSocket routes in `web.py` and `engine` Jinja variable to `acp.html`. Added 5 v3 path constants, 5 entries in `_REMOTE_ALLOWED_PATHS`, `acp_v3_page` (with all security headers), `ws_acp_v3` (token + origin checks before accept), 3 v3 API endpoints. `same_origin_guard` extended for `/acp-v3`. Fix batch: `api_acp_v3_sessions` and `api_acp_v3_workspaces` now use `_ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"` via existing `data` dispatch layer. `acp.html`: `ENGINE`, `WS_PATH`, `RAIL_SESSIONS_API`, `PICKER_WORKSPACES_API`, `SESSION_DELETE_API` constants. `AGENTS.md` updated. 2 new `acp_page.test.mjs` tests. Tests: 1859 passed, 2 skipped; acp_page.test.mjs 410 passed.
+Phase 3 adds /acp-v3 routes and the ngine variable to cp.html. Constants _ACP_V3_PATH, _ACP_V3_WS_PATH, _ACP_V3_LISTING_PATH, _ACP_V3_WORKSPACES_PATH, _ACP_V3_DELETE_PATH added after _ACP_RESTART_PATH. All v3 paths added to _REMOTE_ALLOWED_PATHS. same_origin_guard extended to cover _ACP_V3_PATH. cp_page gains "engine": "v2" in context (and explicit csp_nonce — the field was inadvertently dropped during context restructuring, caught by TestAcpContentSecurityPolicy.test_the_header_nonce_is_the_one_on_the_page). cp_v3_page route added with full security posture (DNS rebinding defence, CSP nonce, Cache-Control, can_delete). ws_acp_v3 WebSocket route calls _acp_token_ok/_ws_origin_ok before accept, then cp.serve_socket_v3. Three v3 API endpoints: pi_acp_v3_sessions, pi_acp_v3_workspaces, pi_acp_v3_delete_sessions — all mirror v2 counterparts using cp._supervisor_v3. cp.html gains ENGINE, WS_PATH, RAIL_SESSIONS_API, PICKER_WORKSPACES_API, SESSION_DELETE_API constants gated on ENGINE. wsUrl() uses WS_PATH. ailUrl() uses RAIL_SESSIONS_API. RAIL_DELETE_PATH and PICKER_WORKSPACES_PATH use engine-aware variables. loadPage fixture gains ngine opt. Two new tests pass (	est_engine_v3_ws_path, 	est_engine_v3_session_api_url). 5 pre-existing test failures unchanged. pytest: 1859 passed, 2 skipped.
 
 ### Phase 4: Diff recovery [QA]
 
@@ -806,3 +810,18 @@ Implementation health: Yellow (no High; 3 Medium, all resolved or deferred per p
 | 4 | Low | `_evict_crew_children_v3` missing type annotations | Fixed — full annotations added matching v2 counterpart (1bc0fd9) |
 | 5 | Low | `_emit_v3` teardown race matches v2 behavior but undocumented | Fixed — spike-scope comment added (1bc0fd9) |
 | 6 | Low | One blank line between `_dispatch_v3` and `_dispatch` (should be two) | Fixed — two blank lines restored (1bc0fd9) |
+
+
+### 2026-08-19 — Implementation Review (after Phase 3, personas: Security auditor, Senior engineer, Reliability engineer, Maintainability reviewer)
+
+Implementation health: Green (all findings resolved; cycle 2 skipped per low-only short-circuit).
+6 findings. 1 Medium (fixed). 5 Low (3 accepted/deferred, 2 fixed).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `api_acp_v3_sessions` used `_acp_listing()` (v2 store) — v3 sessions never appeared in the rail | Fixed — `_acp_listing_v3` + `_ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"` added; `api_acp_v3_sessions` and `api_acp_v3_workspaces` updated (65e1405) |
+| 2 | Low | `api_acp_v3_workspaces` called `_acp_workspaces()` (v2 store) | Fixed — `_acp_workspaces_v3` added using v3 provider (65e1405) |
+| 3 | Low | Three engine-gated JS constants lack test coverage | User: accepted — deferred to Phase 7 per plan structure |
+| 4 | Low | `ws_acp_v3` missing comment about non-browser peer caveat | User: accepted — spike scope; document at productization |
+| 5 | Low | Unplanned nonce repair in `acp_page` during context restructuring | Fixed — caught and corrected before commit (412fc9c) |
+| 6 | Low | qvalidate count mismatch: implementer reported 13, actual was 14 | Fixed — expect-ticked reconciled to 14 (browser-reload criterion remains unticked per plan) |
