@@ -1,7 +1,7 @@
 # ACP v3 Spike — `/acp-v3` Prototype
 
 > **Date**: 2026-08-19
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Build a working `/acp-v3` prototype that drives kiro-cli v3 ACP sessions, covering full v2 feature parity plus v3-specific behaviors, as throwaway spike infrastructure.
 
 ---
