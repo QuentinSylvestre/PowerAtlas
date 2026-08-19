@@ -289,3 +289,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - "`commands_execute` must whitelist every item type the palette can dispatch" — declined 2026-08-14
 - "A new `acp.py` frame type must be added to `SERVER_TYPES` atomically with its `_emit` call" — declined 2026-08-14
 - "`.acp-icon-btn`'s `display: inline-flex` overrides `[hidden]` — add a `[hidden]` escape rule for each icon button" — declined 2026-08-18
+
+- "Two-phase cache design prevents O(n) stat scan on every `_cwd_to_sessions()` call" — declined 2026-08-18
+- "Sub-agent autofix commits can silently wipe test files — verify test count after every sub-agent code commit" — declined 2026-08-18
+- "kiro-cli v3 provider: `--trust-tools *` is a built-in launcher arg, shown read-only in settings; `default_args` is empty" — declined 2026-08-18
