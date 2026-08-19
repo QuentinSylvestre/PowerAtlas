@@ -98,16 +98,19 @@ class TestPowerShellInvocation:
         from power_atlas.launcher import _PROVIDER_TERMINAL
         assert _PROVIDER_TERMINAL.get("kiro-cli-v3") is True
 
-    def test_kiro_v3_default_args_appended_after_trust_tools(self):
-        """default_args come after --trust-tools * in the argv, not before."""
-        # _build_provider_args produces the base; launch_session appends default_args.
-        # Verify the base ends with ["--trust-tools", "*"] so any appended arg follows.
+    def test_kiro_v3_default_args_from_settings_not_hardcoded(self):
+        """--trust-tools * is baked into _build_provider_args (not in default_args / config)."""
         base = _build_provider_args("kiro-cli-v3", "kiro-cli", None)
-        assert base[-2:] == ["--trust-tools", "*"]
-        # Verify resume form also ends correctly (--resume-id is the tail, not in the middle)
-        resumed = _build_provider_args("kiro-cli-v3", "kiro-cli", "sess_xyz")
-        assert "--trust-tools" in resumed
-        assert resumed.index("--trust-tools") < resumed.index("--resume-id")
+        assert "--trust-tools" in base
+        assert "*" in base
+        assert base == ["kiro-cli", "chat", "--agent-engine", "v3", "--trust-tools", "*"]
+
+    def test_kiro_v3_provider_binary_display_shows_trust_tools(self):
+        """_PROVIDER_BINARY_DISPLAY for kiro-cli-v3 shows the full built-in command including --trust-tools *."""
+        from power_atlas.web import _PROVIDER_BINARY_DISPLAY
+        display = _PROVIDER_BINARY_DISPLAY.get("kiro-cli-v3", "")
+        assert "--trust-tools" in display
+        assert "--agent-engine v3" in display
 
 
 class TestLaunchSession:

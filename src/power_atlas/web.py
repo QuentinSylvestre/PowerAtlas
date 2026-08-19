@@ -104,7 +104,7 @@ _PROVIDER_BINARY_DISPLAY = {
     "kiro-cli": "kiro-cli chat",
     "claude-code": "claude",
     "kiro-ide": "kiro",
-    "kiro-cli-v3": "kiro-cli chat --agent-engine v3",
+    "kiro-cli-v3": "kiro-cli chat --agent-engine v3 --trust-tools *",
 }
 
 
