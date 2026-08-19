@@ -4458,8 +4458,199 @@ class _SupervisorV3(_Supervisor):
     prompt.
     """
 
-    # _on_notification override deferred to Phase 2 (requires _emit_v3 which is
-    # added then — Phase 1 does not add that helper yet).
+    # _on_notification override: routes all _emit() calls to _emit_v3() so that
+    # v3 frames are recorded in _supervisor_v3.history rather than _supervisor.history.
+    # This override is what Phase 1 deferred — it requires _emit_v3, which is
+    # defined immediately after the _emit function below.
+
+    def _on_notification(self, msg: dict) -> None:
+        # This is a full copy of _Supervisor._on_notification with every
+        # _emit(session_id, ...) call replaced by _emit_v3(session_id, ...).
+        # The copy is intentional: the only practical alternative is a flag
+        # parameter on the base class, which would couple the base class to the
+        # v3 singleton. For a spike this is the clearest delta.
+        method = msg.get("method")
+        params = msg.get("params") or {}
+        update = params.get("update") or {}
+        kind = update.get("sessionUpdate")
+        session_id = params.get("sessionId")
+        self._stamp_activity(session_id)
+        if method == METADATA_METHOD:
+            percent = _context_percent(params)
+            if percent is not None and isinstance(session_id, str):
+                if session_id in self._compacting:
+                    started_at = self._compaction_started_at.get(session_id)
+                    if (started_at is not None
+                            and time.monotonic() - started_at > COMPACTION_BACKSTOP_SECONDS):
+                        self._compacting.discard(session_id)
+                        self._compaction_started_at.pop(session_id, None)
+                        _registry.broadcast(
+                            session_id,
+                            envelope("compaction",
+                                     {"status": "completed", "error": "",
+                                      "summary": "".join(
+                                          self._compaction_buf.pop(session_id, []))},
+                                     session_id))
+                _note_context(session_id, percent)
+            return
+        if method == COMPACTION_STATUS_METHOD:
+            self._on_compaction_status(params)
+            return
+        if method == SUBAGENT_LIST_METHOD:
+            self._on_subagent_list(params)
+            return
+        if kind in ("agent_message_chunk", "user_message_chunk"):
+            role = "user" if kind == "user_message_chunk" else "agent"
+            content = update.get("content")
+            text = _content_text(content) or _as_text(update.get("text"))
+            if role == "user":
+                text = _with_image_markers(text, _content_image_count(content))
+            if text and isinstance(session_id, str):
+                if role == "user":
+                    _flush_bubble(session_id)
+                _emit_v3(session_id, envelope(
+                    "chunk", {"role": role, "text": text}, session_id))
+                if role == "agent":
+                    _bubble_append(session_id, text)
+                    if session_id in self._compacting:
+                        self._compaction_buf.setdefault(session_id, []).append(text)
+            return
+        if kind in ("tool_call", "tool_call_update"):
+            _backfill = (self._diff_backfill.get(session_id)
+                         if isinstance(session_id, str) else None)
+            payload = _tool_payload(update, _backfill)
+            log.info("ACP v3 tool %s: session=%s id=%s status=%s title=%r kind=%s "
+                     "input=%.200r", kind, session_id, payload["toolCallId"],
+                     payload["status"], payload["title"], payload["kind"],
+                     payload["command"])
+            if isinstance(session_id, str):
+                if kind == "tool_call":
+                    _flush_bubble(session_id)
+                    _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
+                    _spawner_tool_name = (
+                        _kiro_meta.get("toolName") if isinstance(_kiro_meta, dict) else None
+                    )
+                    if (
+                        _spawner_tool_name == "subagent"
+                        and session_id in self.inflight
+                        and payload["toolCallId"]
+                    ):
+                        self.crew_spawn_anchors[payload["toolCallId"]] = session_id
+                    elif (
+                        _spawner_tool_name is not None
+                        and _spawner_tool_name != "subagent"
+                        and session_id in self.inflight
+                    ):
+                        log.debug("ACP v3 tool_call: unrecognised _meta.kiro.toolName=%r"
+                                  " on inflight session=%s — spawner anchor not recorded",
+                                  _spawner_tool_name, session_id)
+                elif not (payload["title"] or payload["kind"] or
+                          payload["status"] or payload["command"]
+                          or "output" in payload):
+                    return
+                body = _tool_output_body(update, _backfill)
+                if body is not None:
+                    body["toolCallId"] = payload["toolCallId"]
+                    _registry.broadcast(
+                        session_id, envelope("tool_output", body, session_id))
+                if kind == "tool_call_update" and payload.get("status") in _TERMINAL_TOOL_STATUSES:
+                    self.crew_spawn_anchors.pop(payload["toolCallId"], None)
+                tc_id = payload.get("toolCallId")
+                if tc_id:
+                    if kind == "tool_call":
+                        _t = time.time()
+                        self._tool_start_times[(session_id, tc_id)] = _t
+                        payload["startedAt"] = _t
+                    elif kind == "tool_call_update":
+                        _started = self._tool_start_times.get((session_id, tc_id))
+                        if _started is not None:
+                            payload["startedAt"] = _started
+                        if payload.get("status") in _TERMINAL_TOOL_STATUSES:
+                            payload["stoppedAt"] = time.time()
+                            self._tool_start_times.pop((session_id, tc_id), None)
+                _emit_v3(session_id, envelope(
+                    "tool_call" if kind == "tool_call" else "tool_update",
+                    payload, session_id))
+            return
+        if kind == "tool_call_chunk":
+            if isinstance(session_id, str) and session_id in self.subagent_sessions:
+                payload = _tool_payload(update)
+                _flush_bubble(session_id)
+                _emit_v3(session_id, envelope("tool_call", payload, session_id))
+                self._note_subagent_action(session_id, payload["title"])
+            return
+        if kind == "agent_thought_chunk":
+            text = _content_text(update.get("content"))
+            if text and isinstance(session_id, str):
+                _flush_bubble(session_id)
+                _emit_v3(session_id, envelope("thought", {"text": text}, session_id))
+            return
+        if kind == "available_commands_update":
+            available = update.get("availableCommands") or []
+            commands = [
+                {"name": _as_text(c.get("name")).lstrip("/"),
+                 "description": _as_text(c.get("description"))}
+                for c in available
+                if isinstance(c, dict)
+                and _as_text(c.get("name"))
+                and not (
+                    (isinstance(c.get("_meta"), dict)
+                     and isinstance(c["_meta"].get("kiro"), dict)
+                     and c["_meta"]["kiro"].get("type") in ("skill", "steering", "prompt"))
+                    or _as_text(c.get("serverName")).startswith("skill:")
+                )
+            ][:MAX_COMMANDS_COUNT]
+            skills = _parse_skills(available)
+            sid = session_id if (session_id and session_id in self.sessions) else None
+            if sid is None:
+                inflight = self.inflight
+                if len(inflight) == 1:
+                    sid = next(iter(inflight))
+                elif len(inflight) == 0 and len(self.sessions) == 1:
+                    sid = next(iter(self.sessions))
+            if sid is not None:
+                meta = self.sessions.get(sid)
+                if meta is not None:
+                    meta["commands"] = commands
+                    meta["skills"] = skills
+                    try:
+                        _registry.broadcast(sid, envelope("commands", {"commands": commands}, sid))
+                        _registry.broadcast(sid, envelope("skills", {"skills": skills}, sid))
+                    except Exception:
+                        log.warning("ACP v3 available_commands_update: broadcast failed"
+                                    " for session %s", sid, exc_info=True)
+            else:
+                log.debug("ACP v3 available_commands_update: cannot attribute; dropped "
+                          "(%d session(s), %d inflight, no sessionId)",
+                          len(self.sessions), len(self.inflight))
+            return
+        if method == "_kiro.dev/commands/available":
+            commands = [
+                {"name": _as_text(c.get("name")).lstrip("/"),
+                 "description": _as_text(c.get("description"))}
+                for c in (params.get("commands") or [])
+                if isinstance(c, dict) and _as_text(c.get("name"))
+            ][:MAX_COMMANDS_COUNT]
+            skills = _parse_skills(params.get("prompts") or [])
+            inflight = self.inflight
+            if len(self.sessions) > 0:
+                for _sid, _meta in self.sessions.items():
+                    _meta["commands"] = commands
+                    _meta["skills"] = skills
+                    _registry.broadcast(_sid, envelope("commands", {"commands": commands}, _sid))
+                    _registry.broadcast(_sid, envelope("skills", {"skills": skills}, _sid))
+            elif len(self.sessions) == 0 and self._reserved > 0:
+                if self._pending_commands is not None:
+                    log.debug("ACP v3 commands_available: replacing buffered pending commands")
+                self._pending_commands = (commands, skills)
+            else:
+                log.debug("ACP v3 commands_available: no sessions known and none reserved - dropped")
+            return
+        if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
+            return
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("ACP v3 notification %s (%s): %.600s",
+                      method, kind or "-", json.dumps(params))
 
     def _spawn(self) -> None:
         """Start the v3 agent. Uses ACP_V3_ARGS instead of ACP_ARGS."""
@@ -4776,6 +4967,18 @@ def _emit(session_id: str, frame: dict) -> None:
     _registry.broadcast(session_id, frame)
 
 
+def _emit_v3(session_id: str, frame: dict) -> None:
+    """Like _emit but records in _supervisor_v3's history for v3 sessions.
+
+    All v3 handler functions call this instead of _emit so that the replay
+    buffer for v3 sessions is stored in _supervisor_v3.history rather than
+    _supervisor.history.
+    """
+    if _supervisor_v3 is not None:
+        _supervisor_v3.record(session_id, frame)
+    _registry.broadcast(session_id, frame)
+
+
 def _first_text(entry: dict, keys: tuple) -> str:
     """The first non-empty string among ``entry``'s candidate key names.
 
@@ -5011,6 +5214,121 @@ async def serve_socket(ws: WebSocket) -> None:
         log.info("ACP socket %s closed (%d open)", conn.cid,
                  len(_registry.connections))
 
+
+async def serve_socket_v3(ws: WebSocket) -> None:
+    """Own an accepted /ws/acp-v3 socket for its whole lifetime.
+
+    Identical to serve_socket except it calls _dispatch_v3 so that all
+    handler functions route to _supervisor_v3 rather than _supervisor.
+    """
+    conn = _Connection(ws)
+    if len(_registry.connections) >= MAX_CONNECTIONS:
+        await ws.send_text(json.dumps(error_frame(
+            "too_many_connections",
+            f"At most {MAX_CONNECTIONS} /acp sockets may be open at once.")))
+        await ws.close(code=1013, reason="too many connections")
+        return
+
+    _registry.connections.add(conn)
+    conn.start()
+    conn.send(envelope("meta", {
+        "connected": True,
+        "maxMessageBytes": MAX_MESSAGE_BYTES,
+        "maxConnections": MAX_CONNECTIONS,
+        "maxPromptImages": MAX_PROMPT_IMAGES,
+        "maxPromptImageBytes": MAX_PROMPT_IMAGE_BYTES,
+    }))
+    log.info("ACP v3 socket %s open (%d/%d)", conn.cid,
+             len(_registry.connections), MAX_CONNECTIONS)
+
+    try:
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            raw = message.get("text")
+            if raw is None:
+                conn.send(error_frame(
+                    "binary_unsupported", "Frames must be UTF-8 JSON text."))
+                continue
+            if len(raw.encode("utf-8")) > MAX_MESSAGE_BYTES:
+                await conn.drain()
+                await conn.stop()
+                await ws.close(code=1009, reason="message too large")
+                break
+            try:
+                frame = json.loads(raw)
+            except ValueError:
+                conn.send(error_frame("bad_json", "Frame is not valid JSON."))
+                continue
+            if not isinstance(frame, dict):
+                conn.send(error_frame("bad_envelope", "Frame must be a JSON object."))
+                continue
+            _dispatch_v3(conn, frame)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        _registry.detach(conn)
+        _registry.connections.discard(conn)
+        await conn.drain()
+        await conn.stop()
+        log.info("ACP v3 socket %s closed (%d open)", conn.cid,
+                 len(_registry.connections))
+
+
+def _dispatch_v3(conn: _Connection, frame: dict) -> None:
+    """Validate an inbound envelope and route it to v3 handler functions."""
+    type_ = frame.get("type")
+    session_id = frame.get("sessionId")
+    if not isinstance(type_, str) or not type_:
+        conn.send(error_frame(
+            "bad_envelope", "Frame needs a non-empty string 'type'."))
+        return
+    if session_id is not None and not isinstance(session_id, str):
+        conn.send(error_frame(
+            "bad_envelope", "'sessionId' must be a string or null."))
+        return
+    if not isinstance(frame.get("payload", {}), dict):
+        conn.send(error_frame(
+            "bad_envelope", "'payload' must be an object.", session_id))
+        return
+    if type_ not in CLIENT_TYPES:
+        conn.send(error_frame(
+            "unknown_type", f"Unknown client frame type '{type_}'.", session_id))
+        return
+    payload = frame.get("payload") or {}
+    if type_ == "new":
+        _spawn_task(_handle_new_v3(conn, payload))
+        return
+    if type_ == "subscribe":
+        _handle_subscribe_v3(conn, session_id)
+        return
+    if type_ == "load":
+        _spawn_task(_handle_load_v3(conn, session_id))
+        return
+    if type_ == "prompt":
+        _spawn_task(_handle_prompt_v3(conn, session_id, payload))
+        return
+    if type_ == "cancel":
+        _spawn_task(_handle_cancel_v3(conn, session_id))
+        return
+    if type_ == "steer":
+        _spawn_task(_handle_steer_v3(conn, session_id, payload))
+        return
+    if type_ == "commands_options":
+        _spawn_task(_handle_commands_options_v3(conn, session_id, payload))
+        return
+    if type_ == "commands_execute":
+        _spawn_task(_handle_commands_execute_v3(conn, session_id, payload))
+        return
+    if type_ == "close":
+        _spawn_task(_handle_close_v3(conn, session_id))
+        return
+    log.error("ACP v3: client frame type '%s' is declared but not routed", type_)
+    conn.send(error_frame(
+        "not_implemented",
+        f"'{type_}' is a declared frame type this server does not route.",
+        session_id))
 
 def _dispatch(conn: _Connection, frame: dict) -> None:
     """Validate an inbound envelope and route it by ``type``."""
@@ -6326,6 +6644,661 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
     for target in tuple(_registry.subscribers.get(session_id, ())):
         target.send(frame)
         _registry.detach(target)
+
+
+# -- v3 handler functions --------------------------------------------------
+
+
+def _handle_subscribe_v3(conn, session_id):
+    """Attach this socket to an existing v3 session and replay its buffer.
+
+    Mirror of _handle_subscribe but checks _supervisor_v3.sessions and uses
+    _supervisor_v3._diff_backfill for the history replay. Must remain sync
+    (no await) for the same atomicity reason as _handle_subscribe.
+    """
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame(
+            "bad_envelope", "'subscribe' needs a sessionId."))
+        log.warning("ACP v3 subscribe refused: [bad_envelope] no sessionId")
+        return
+    sub_meta = _supervisor_v3.subagent_sessions.get(session_id)
+    if sub_meta is not None:
+        _handle_subagent_subscribe(conn, session_id, sub_meta)
+        return
+    if session_id in _registry.loading:
+        _defer_until_loaded(conn, session_id)
+        return
+    meta = _supervisor_v3.sessions.get(session_id)
+    if meta is None:
+        conn.send(error_frame(
+            "unknown_session",
+            "This server has no such live v3 session. It may belong to an "
+            "earlier PowerAtlas process \u2014 create a new one.", session_id))
+        log.warning("ACP v3 subscribe refused: [unknown_session] session=%s",
+                    session_id)
+        return
+    if session_id in _supervisor_v3.closing:
+        conn.send(error_frame(
+            "close_in_progress",
+            "This session is being released. Wait a moment and load it "
+            "again.", session_id))
+        log.warning("ACP v3 subscribe refused: [close_in_progress] session=%s",
+                    session_id)
+        return
+    now = time.monotonic()
+    since = None if conn.replayed_at is None else now - conn.replayed_at
+    if since is not None and since < SUBSCRIBE_MIN_INTERVAL_SECONDS:
+        conn.send(error_frame(
+            "subscribe_throttled",
+            "This socket was replayed less than "
+            f"{SUBSCRIBE_MIN_INTERVAL_SECONDS:.0f}s ago; the replay was not "
+            "rebuilt. Reload the page if the transcript looks wrong.",
+            session_id))
+        log.warning("ACP v3 subscribe throttled: socket=%s session=%s, %.3fs "
+                    "since the last replay", conn.cid, session_id, since)
+        return
+    conn.replayed_at = now
+    _registry.attach(conn, session_id)
+    conn.send(envelope("session", {
+        "sessionId": session_id,
+        "cwd": meta.get("cwd", ""),
+        "created": False,
+        "turnActive": session_id in _supervisor_v3.inflight,
+        "contextPercent": meta.get("contextPercent"),
+    }, session_id))
+    history = _supervisor_v3.history.get(session_id)
+    if history is None:
+        return
+    if history.truncated:
+        conn.send(envelope("history_truncated", {
+            "message": "Earlier events fell out of the replay buffer; what "
+                       "follows is the tail of the conversation.",
+        }, session_id))
+    events = _with_backfilled_bodies(
+        history.events(), session_id, _supervisor_v3._diff_backfill.get(session_id))
+    conn.send(envelope("history", {"events": events}, session_id))
+
+
+async def _handle_load_v3(conn, session_id):
+    """Adopt a v3 session from the kiro store and replay it.
+
+    Mirror of _handle_load but uses _supervisor_v3 and _stored_session_cwd_v3.
+    No lock-hint check (v3 has no lock files).
+    """
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not _valid_session_id(session_id):
+        conn.send(error_frame(
+            "bad_session_id",
+            "That is not a usable session id: up to "
+            f"{MAX_SESSION_ID_CHARS} characters of letters, digits, "
+            "underscores and hyphens, and nothing else."))
+        log.warning("ACP v3 load refused: [bad_session_id] %.200r", session_id)
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        _handle_subagent_subscribe(
+            conn, session_id, _supervisor_v3.subagent_sessions[session_id])
+        return
+    if session_id in _registry.loading:
+        _defer_until_loaded(conn, session_id)
+        return
+    if session_id in _supervisor_v3.closing:
+        conn.send(error_frame(
+            "close_in_progress",
+            "This session is being released. Wait a moment and load it "
+            "again.", session_id))
+        log.warning("ACP v3 load refused: [close_in_progress] session=%s",
+                    session_id)
+        return
+    if session_id in _supervisor_v3.sessions:
+        _handle_subscribe_v3(conn, session_id)
+        return
+    now = time.monotonic()
+    since = None if conn.loaded_at is None else now - conn.loaded_at
+    if since is not None and since < LOAD_MIN_INTERVAL_SECONDS:
+        conn.send(error_frame(
+            "load_throttled",
+            "This socket asked for a load less than "
+            f"{LOAD_MIN_INTERVAL_SECONDS:.0f}s ago. Wait for that one to "
+            "finish, or reload the page.", session_id))
+        log.warning("ACP v3 load throttled: socket=%s session=%s, %.3fs since the "
+                    "last load", conn.cid, session_id, since)
+        return
+    if _supervisor_v3.at_capacity():
+        conn.send(error_frame(
+            SessionLimit.code, _session_limit_message(), session_id))
+        log.warning("ACP v3 load refused: [%s] session=%s at the session cap",
+                    SessionLimit.code, session_id)
+        return
+    conn.loaded_at = now
+    _registry.loading[session_id] = []
+    failure = None
+    try:
+        try:
+            # v3 has no lock files -- skip the lock-holder check.
+            for stale in tuple(_registry.subscribers.get(session_id, ())):
+                log.info("ACP v3 load: detaching a socket left over from an "
+                         "earlier life of session %s", session_id)
+                _registry.detach(stale)
+            conn.send(_load_pending_frame(session_id))
+            cwd = await asyncio.to_thread(_stored_session_cwd_v3, session_id)
+            await _supervisor_v3.load_session(session_id, cwd)
+            _flush_bubble(session_id)
+        except AcpError as exc:
+            failure = _load_failure(exc, None)
+            log.warning("ACP v3 session/load refused: [%s] session=%s %s%s",
+                        failure[0], session_id, failure[1],
+                        "" if failure[1] == str(exc) else " (agent: %s)" % exc)
+        except Exception:
+            log.exception("ACP v3 session/load failed: session=%s", session_id)
+            failure = ("internal_error",
+                       "Loading the session failed; see orchestrator.log.")
+    finally:
+        waiters = _registry.loading.pop(session_id, [])
+    _deliver_load(conn, waiters, session_id, failure)
+
+
+async def _handle_new_v3(conn, payload):
+    """Create a v3 session. Mirror of _handle_new using _supervisor_v3."""
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    raw_cwd = payload.get("cwd")
+    if raw_cwd is not None and not isinstance(raw_cwd, str):
+        conn.send(error_frame("bad_payload", "'cwd' must be a string."))
+        return
+    if _supervisor_v3.at_capacity():
+        conn.send(error_frame(SessionLimit.code, _session_limit_message()))
+        log.warning("ACP v3 session/new refused: [%s] at the session cap",
+                    SessionLimit.code)
+        return
+    conn.send(envelope("meta", {"pending": "new"}))
+    try:
+        cwd = await asyncio.to_thread(_resolve_session_cwd, raw_cwd)
+        info = await _supervisor_v3.new_session(cwd)
+    except AcpError as exc:
+        log.warning("ACP v3 session/new refused: [%s] %s", exc.code, exc)
+        conn.send(error_frame(exc.code, str(exc)))
+        return
+    except Exception:
+        log.exception("ACP v3 session/new failed")
+        conn.send(error_frame(
+            "internal_error",
+            "Creating the session failed; see orchestrator.log."))
+        return
+    session_id = info["sessionId"]
+    if conn not in _registry.connections:
+        log.info("ACP v3 session %s created after its socket went away", session_id)
+        return
+    _registry.attach(conn, session_id)
+    conn.send(envelope("session", {
+        "sessionId": session_id,
+        "cwd": info["cwd"],
+        "created": True,
+    }, session_id))
+
+
+async def _handle_prompt_v3(conn, session_id, payload):
+    """Run one v3 turn. Mirror of _handle_prompt using _supervisor_v3."""
+    def refuse(code, message):
+        conn.send(error_frame(code, message, session_id))
+        log.warning("ACP v3 prompt refused: [%s] session=%s", code, session_id)
+
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'prompt' needs a sessionId."))
+        log.warning("ACP v3 prompt refused: [bad_envelope] no sessionId")
+        return
+    text = payload.get("prompt")
+    if text is None:
+        text = ""
+    if not isinstance(text, str):
+        refuse("bad_payload", "'prompt' must be a string.")
+        return
+    images, why = _validate_images(payload.get("images"))
+    if why:
+        refuse("bad_payload", why)
+        return
+    if not text.strip() and not images:
+        refuse("bad_payload", "A prompt needs text, an image, or both.")
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)
+        return
+    if session_id not in _supervisor_v3.sessions:
+        refuse("unknown_session",
+               "This server has no such live v3 session. It may belong to an "
+               "earlier PowerAtlas process -- create a new one.")
+        return
+    if conn.session_id != session_id:
+        refuse("not_subscribed", "Subscribe to this session before prompting it.")
+        return
+    if session_id in _supervisor_v3.closing:
+        refuse("close_in_progress",
+               "This session is being closed. Create a new one to carry on.")
+        return
+    if session_id in _supervisor_v3.inflight:
+        refuse("turn_in_progress",
+               "This session is still answering the previous prompt.")
+        return
+    _supervisor_v3.inflight.add(session_id)
+    _evict_crew_children_v3(session_id, keep_history=False, broadcast_empty=True)
+    _supervisor_v3.crew_spawn_toolcallids.pop(session_id, None)
+    log.info("ACP v3 turn start: session=%s (%d chars, %d image(s))",
+             session_id, len(text), len(images))
+    if text.strip() == "/compact" and session_id not in _supervisor_v3._compacting:
+        _supervisor_v3._compacting.add(session_id)
+        _supervisor_v3._compaction_started_at[session_id] = time.monotonic()
+        _registry.broadcast(
+            session_id,
+            envelope("compaction", {"status": "started", "error": "", "summary": ""},
+                     session_id))
+    spoken = _with_image_markers(text, len(images))
+    _flush_bubble(session_id)
+    _emit_v3(session_id, envelope("chunk", {"role": "user", "text": spoken}, session_id))
+    _emit_v3(session_id, envelope("meta", {"turn": "start"}, session_id))
+    stop_reason = "interrupted"
+    try:
+        result = await _supervisor_v3.prompt(session_id, spoken, images)
+        stop_reason = result.get("stopReason") or "end_turn"
+    except AcpError as exc:
+        log.warning("ACP v3 session/prompt refused: [%s] %s", exc.code, exc)
+        _emit_v3(session_id, error_frame(exc.code, str(exc), session_id))
+        stop_reason = "error"
+    except Exception:
+        log.exception("ACP v3 session/prompt failed")
+        _emit_v3(session_id, error_frame(
+            "internal_error",
+            "The prompt failed; see orchestrator.log.", session_id))
+        stop_reason = "error"
+    finally:
+        _supervisor_v3.inflight.discard(session_id)
+        for _tcid in [k for k, v in _supervisor_v3.crew_spawn_anchors.items()
+                      if v == session_id]:
+            _supervisor_v3.crew_spawn_anchors.pop(_tcid, None)
+        _finishing_crew = _supervisor_v3.crews.get(session_id)
+        if _finishing_crew:
+            _crew_changed = False
+            for _entry in _finishing_crew.values():
+                if not _entry["done"]:
+                    _entry["done"] = True
+                    if _entry.get("stoppedAt") is None:
+                        _entry["stoppedAt"] = time.time()
+                    _crew_changed = True
+            if _crew_changed:
+                _emit_subagents_frame_v3(session_id)
+        _evict_crew_children_v3(session_id, keep_history=True, broadcast_empty=False)
+        _finished_crew_toolcallid = _crew_toolcallid_v3(session_id)
+        _had_crew = session_id in _supervisor_v3.crews or bool(_finished_crew_toolcallid)
+        _supervisor_v3.crew_spawn_toolcallids.pop(session_id, None)
+        if _had_crew and session_id not in _supervisor_v3.crews:
+            _registry.broadcast(session_id, envelope(
+                "subagents",
+                {"subagents": [], "toolCallId": _finished_crew_toolcallid},
+                session_id))
+        log.info("ACP v3 turn end: session=%s stopReason=%s", session_id, stop_reason)
+        _flush_bubble(session_id)
+        _emit_v3(session_id, envelope(
+            "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
+
+
+async def _handle_steer_v3(conn, session_id, payload):
+    """Inject a mid-turn message into a v3 session. Mirror of _handle_steer."""
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'steer' needs a sessionId."))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "bad_envelope", session_id)
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        conn.send(error_frame(
+            "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "read_only_session", session_id)
+        return
+    if session_id not in _supervisor_v3.sessions:
+        conn.send(error_frame(
+            "unknown_session", "This server has no such live v3 session.", session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "unknown_session", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame(
+            "not_subscribed", "Subscribe to this session first.", session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "not_subscribed", session_id)
+        return
+    if session_id in _supervisor_v3.closing:
+        conn.send(error_frame(
+            "close_in_progress", "Session is being released.", session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "close_in_progress", session_id)
+        return
+    if session_id not in _supervisor_v3.inflight:
+        conn.send(error_frame(
+            "no_turn_in_progress",
+            "No turn is running -- steer is only available during an active turn.",
+            session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "no_turn_in_progress", session_id)
+        return
+    raw = payload.get("message")
+    if not isinstance(raw, (str, type(None))):
+        conn.send(error_frame("bad_payload", "Steer message must be a string.", session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "bad_payload", session_id)
+        return
+    text = (raw or "").strip()
+    if not text:
+        conn.send(error_frame(
+            "bad_payload", "Steer message must not be empty.", session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "bad_payload", session_id)
+        return
+    if len(text) > MAX_STEER_CHARS:
+        conn.send(error_frame(
+            "bad_payload",
+            f"Steer message too long ({len(text)} chars; max {MAX_STEER_CHARS}).",
+            session_id))
+        log.warning("ACP v3 steer refused: [%s] session=%s", "bad_payload", session_id)
+        return
+    try:
+        result = await _supervisor_v3.steer(session_id, text)
+        queued = bool(result.get("queued", True))
+        conn.send(envelope("steer_ack", {"queued": queued}, session_id))
+        if queued:
+            _emit_v3(session_id, envelope("steer_sent", {"text": text}, session_id))
+    except AcpError as exc:
+        conn.send(error_frame(exc.code, str(exc), session_id))
+    except Exception:
+        log.exception("ACP v3 _handle_steer_v3: unexpected error")
+        conn.send(error_frame(
+            "internal_error", "Steer failed unexpectedly.", session_id))
+
+
+async def _handle_cancel_v3(conn, session_id):
+    """Interrupt a v3 turn. Mirror of _handle_cancel using _supervisor_v3."""
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'cancel' needs a sessionId."))
+        log.warning("ACP v3 cancel refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        conn.send(error_frame(
+            "read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP v3 cancel refused: [read_only_session] session=%s",
+                    session_id)
+        return
+    if session_id not in _supervisor_v3.sessions:
+        conn.send(error_frame(
+            "unknown_session",
+            "This server has no such live v3 session. It may belong to an "
+            "earlier PowerAtlas process -- create a new one.", session_id))
+        log.warning("ACP v3 cancel refused: [unknown_session] session=%s", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame(
+            "not_subscribed",
+            "Subscribe to this session before cancelling its turn.", session_id))
+        log.warning("ACP v3 cancel refused: [not_subscribed] session=%s", session_id)
+        return
+    if session_id not in _supervisor_v3.inflight:
+        log.info("ACP v3 cancel: session=%s is not running a turn", session_id)
+        return
+    log.info("ACP v3 cancel requested: session=%s", session_id)
+    try:
+        await _supervisor_v3.cancel(session_id)
+    except AcpError as exc:
+        log.warning("ACP v3 session/cancel refused: [%s] %s", exc.code, exc)
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        return
+    except Exception:
+        log.exception("ACP v3 session/cancel failed: session=%s", session_id)
+        conn.send(error_frame(
+            "internal_error",
+            "Cancelling the turn failed; see orchestrator.log.", session_id))
+        return
+    crew = _supervisor_v3.crews.get(session_id)
+    if crew:
+        now = time.time()
+        if _mark_crew_done(crew, now):
+            try:
+                _emit_subagents_frame_v3(session_id)
+            except Exception:
+                log.exception("ACP v3 cancel cascade: failed to emit subagents frame")
+
+
+async def _handle_close_v3(conn, session_id):
+    """Release a v3 session locally (no JSON-RPC close method exists).
+
+    The Phase 1 proposed-accept finding: v3 close_session does no wire
+    call and has no alive() check. The closing guard still applies.
+    """
+    def refuse(code, message):
+        conn.send(error_frame(code, message, session_id))
+        log.warning("ACP v3 close refused: [%s] session=%s", code, session_id)
+
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'close' needs a sessionId."))
+        log.warning("ACP v3 close refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        refuse("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE)
+        return
+    if session_id in _registry.loading:
+        refuse("session_loading",
+               "This session is still being loaded from the agent. Wait for "
+               "the conversation to arrive, then close it.")
+        return
+    if conn.session_id != session_id:
+        refuse("not_subscribed", "Subscribe to this session before closing it.")
+        return
+    if session_id not in _supervisor_v3.sessions:
+        refuse("nothing_to_close",
+               "This server has no such live v3 session -- there is nothing to "
+               "close.")
+        return
+    if session_id in _supervisor_v3.inflight:
+        refuse("turn_in_progress",
+               "This session is still answering. Stop the turn first, then "
+               "close it.")
+        return
+    if session_id in _supervisor_v3.closing:
+        refuse("close_in_progress", "This session is already being closed.")
+        return
+    _supervisor_v3.closing.add(session_id)
+    try:
+        await _supervisor_v3.close_session(session_id)
+    except AcpError as exc:
+        log.warning("ACP v3 session/close refused: [%s] session=%s %s",
+                    exc.code, session_id, exc)
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        return
+    except Exception:
+        log.exception("ACP v3 session/close failed: session=%s", session_id)
+        conn.send(error_frame(
+            "internal_error",
+            "Closing the session failed; see orchestrator.log.", session_id))
+        return
+    finally:
+        _supervisor_v3.closing.discard(session_id)
+    # close_session already broadcasts session_closed and detaches sockets.
+
+
+async def _handle_commands_options_v3(conn, session_id, payload):
+    """Return autocomplete suggestions for a v3 session."""
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'commands_options' needs a sessionId."))
+        log.warning("ACP v3 commands_options refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP v3 commands_options refused: [read_only_session] session=%s", session_id)
+        return
+    if _supervisor_v3.sessions.get(session_id) is None:
+        conn.send(error_frame("unknown_session", "No such live v3 session.", session_id))
+        log.warning("ACP v3 commands_options refused: [unknown_session] session=%s", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame("not_subscribed",
+            "Subscribe to this session first.", session_id))
+        log.warning("ACP v3 commands_options refused: [not_subscribed] session=%s", session_id)
+        return
+    if session_id in _supervisor_v3.closing:
+        conn.send(error_frame("close_in_progress",
+            "Session is being released; try again after it closes.", session_id))
+        log.warning("ACP v3 commands_options refused: [close_in_progress] session=%s", session_id)
+        return
+    partial = str(payload.get("partial") or "")[:MAX_COMMAND_PARTIAL_CHARS]
+    try:
+        options = await _supervisor_v3.commands_options(session_id, partial)
+    except AcpError as exc:
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        log.warning("ACP v3 commands_options error: session=%s: %s", session_id, exc)
+        return
+    except Exception:
+        log.exception("ACP v3 commands_options: unexpected error for session=%s", session_id)
+        conn.send(error_frame("internal_error",
+            "An unexpected error occurred processing commands_options.", session_id))
+        return
+    conn.send(envelope("commands_options_result", {"options": options}, session_id))
+
+
+async def _handle_commands_execute_v3(conn, session_id, payload):
+    """Execute a slash command in a v3 session."""
+    if _supervisor_v3 is None:
+        conn.send(error_frame("internal_error", "v3 supervisor not available."))
+        return
+    if not session_id:
+        conn.send(error_frame("bad_envelope", "'commands_execute' needs a sessionId."))
+        log.warning("ACP v3 commands_execute refused: [bad_envelope] no sessionId")
+        return
+    if session_id in _supervisor_v3.subagent_sessions:
+        conn.send(error_frame("read_only_session", _READ_ONLY_SUBAGENT_MESSAGE, session_id))
+        log.warning("ACP v3 commands_execute refused: [read_only_session] session=%s", session_id)
+        return
+    meta = _supervisor_v3.sessions.get(session_id)
+    if meta is None:
+        conn.send(error_frame("unknown_session", "No such live v3 session.", session_id))
+        log.warning("ACP v3 commands_execute refused: [unknown_session] session=%s", session_id)
+        return
+    if conn.session_id != session_id:
+        conn.send(error_frame("not_subscribed",
+            "Subscribe to this session first.", session_id))
+        log.warning("ACP v3 commands_execute refused: [not_subscribed] session=%s", session_id)
+        return
+    if session_id in _supervisor_v3.closing:
+        conn.send(error_frame("close_in_progress",
+            "Session is being released; try again after it closes.", session_id))
+        log.warning("ACP v3 commands_execute refused: [close_in_progress] session=%s", session_id)
+        return
+    if session_id in _supervisor_v3.inflight:
+        conn.send(error_frame("turn_in_progress",
+            "A turn is already running; wait for it to finish before sending a command.",
+            session_id))
+        log.warning("ACP v3 commands_execute refused: [turn_in_progress] session=%s", session_id)
+        return
+    name = str(payload.get("name") or "").strip().lstrip("/")
+    if not name:
+        conn.send(error_frame("bad_envelope",
+            "'commands_execute' needs a non-empty name.", session_id))
+        log.warning("ACP v3 commands_execute refused: [bad_envelope] empty name session=%s",
+                    session_id)
+        return
+    if len(name) > MAX_COMMAND_PARTIAL_CHARS:
+        conn.send(error_frame("bad_payload", "Command name too long.", session_id))
+        log.warning("ACP v3 commands_execute refused: [bad_payload] name too long session=%s",
+                    session_id)
+        return
+    all_catalogue = (meta.get("commands") or []) + (meta.get("skills") or [])
+    valid_names = {c.get("name") for c in all_catalogue if isinstance(c, dict) and c.get("name")}
+    if valid_names and name not in valid_names:
+        conn.send(error_frame("bad_payload", "Unknown command.", session_id))
+        log.warning("ACP v3 commands_execute refused: [bad_payload] unknown command %r "
+                    "session=%s", name, session_id)
+        return
+    _supervisor_v3.touch_used(session_id)
+    log.info("ACP v3 commands_execute: session=%s name=%r", session_id, name)
+    if name == "compact" and session_id not in _supervisor_v3._compacting:
+        _supervisor_v3._compacting.add(session_id)
+        _supervisor_v3._compaction_started_at[session_id] = time.monotonic()
+        _registry.broadcast(
+            session_id,
+            envelope("compaction", {"status": "started", "error": "", "summary": ""},
+                     session_id))
+    _supervisor_v3.inflight.add(session_id)
+    try:
+        result = await _supervisor_v3.commands_execute(session_id, name)
+    except AcpError as exc:
+        conn.send(error_frame(exc.code, str(exc), session_id))
+        log.warning("ACP v3 commands_execute error: session=%s: %s", session_id, exc)
+        return
+    except Exception:
+        log.exception("ACP v3 commands_execute: unexpected error session=%s", session_id)
+        conn.send(error_frame("internal_error",
+            "An unexpected error occurred executing the command.", session_id))
+        return
+    finally:
+        _supervisor_v3.inflight.discard(session_id)
+    conn.send(envelope("commands_execute_result",
+        {"name": name, "status": "accepted", "result": result or {}}, session_id))
+
+
+# -- v3 crew helpers ---------------------------------------------------
+
+
+def _crew_toolcallid_v3(parent_id):
+    """Return the spawner tool-call id for the current v3 fan-out, or ''."""
+    if _supervisor_v3 is None:
+        return ""
+    return _supervisor_v3.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
+
+
+def _emit_subagents_frame_v3(parent_id):
+    """Broadcast the current v3 crew snapshot to all attached sockets."""
+    if _supervisor_v3 is None:
+        return
+    crew = _supervisor_v3.crews.get(parent_id)
+    if not crew:
+        return
+    toolcallid = _crew_toolcallid_v3(parent_id)
+    _registry.broadcast(parent_id, envelope(
+        "subagents",
+        {"subagents": _subagents_payload(crew), "toolCallId": toolcallid},
+        parent_id))
+
+
+def _evict_crew_children_v3(session_id, *, keep_history, broadcast_empty):
+    """Pop done crew entries for a v3 session from all relevant v3 stores.
+
+    Mirror of _evict_crew_children but operates on _supervisor_v3.
+    """
+    if _supervisor_v3 is None:
+        return
+    crew = _supervisor_v3.crews.get(session_id)
+    if not crew:
+        return
+    for _child_id in [cid for cid, e in crew.items() if e["done"]]:
+        crew.pop(_child_id, None)
+        if not keep_history:
+            _supervisor_v3.subagent_sessions.pop(_child_id, None)
+            _supervisor_v3.subagent_history.pop(_child_id, None)
+        _bubbles.pop(_child_id, None)
+    if not crew:
+        _supervisor_v3.crews.pop(session_id, None)
+        if broadcast_empty:
+            _registry.broadcast(session_id, envelope(
+                "subagents", {"subagents": []}, session_id))
+    elif broadcast_empty:
+        _emit_subagents_frame_v3(session_id)
 
 
 # -- the idle sweeper ------------------------------------------------------
