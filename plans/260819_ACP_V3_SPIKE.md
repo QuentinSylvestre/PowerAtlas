@@ -917,3 +917,4 @@ Phase 7 implementation health: Green (all High/Medium fixed; L1 cosmetic accepte
 | 2 | High | `test_publish_live_union` only tested `_Supervisor._publish_live()`; `_SupervisorV3._publish_live()` uncovered | Fixed — added `test_supervisor_v3_publish_live_union` as 13th test (37fd774) |
 | 3 | Medium | `test_get_tool_diffs_v3_failed_result_excluded` triggered 200ms retry sleep unnecessarily | Fixed — added a successful call alongside failed one; retry never fires (37fd774) |
 | 4 | Low | Exit criterion "3 new `acp_page.test.mjs` tests" overstates — 2 were added in Phase 3, 1 in Phase 7 | User: accepted — cosmetic; total count (3 across both phases) is accurate |
+
