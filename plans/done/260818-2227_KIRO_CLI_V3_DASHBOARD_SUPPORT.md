@@ -2,9 +2,19 @@
 
 > **Date**: 2026-08-18
 > **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-18
 > **Scope**: Add `kiro-cli-v3` as a built-in provider to the main dashboard — session discovery, display, new/resume launches, and live status dots.
 > **Estimated effort**: 1-2 days
+
+---
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- **Accepted**: `## 9) Implementation Divergences from Plan` section left as `<Reserved>`. Divergences were documented inline in each phase's implementation notes instead (`_hash_dir_mtimes` → `_session_json_mtimes` rename; `_cwd_display` dict addition not in original plan). No information loss.
+- **Skipped (harness opportunity)**: Interactive CLI probes cannot be run non-interactively during `/qexplore` (kiro-cli v3 launch hangs with `--no-interactive`). Cost: one tool-use cancellation. Suggested change to `/qexplore` probe gate. Frequency: 1 plan. User decision: skip.
+- **Post-archival fix (a21311a)**: Launcher config Settings panel now shows full built-in command `kiro-cli chat --agent-engine v3 --trust-tools *` in the read-only command display field. `default_args` remains empty by default (consistent with all providers). Fix committed after `/qclose` was initiated.
 
 ---
 
