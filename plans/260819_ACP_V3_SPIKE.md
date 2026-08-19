@@ -918,3 +918,37 @@ Phase 7 implementation health: Green (all High/Medium fixed; L1 cosmetic accepte
 | 3 | Medium | `test_get_tool_diffs_v3_failed_result_excluded` triggered 200ms retry sleep unnecessarily | Fixed — added a successful call alongside failed one; retry never fires (37fd774) |
 | 4 | Low | Exit criterion "3 new `acp_page.test.mjs` tests" overstates — 2 were added in Phase 3, 1 in Phase 7 | User: accepted — cosmetic; total count (3 across both phases) is accurate |
 
+
+
+### 2026-08-19 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Security auditor, Senior engineer, Architect, Reliability engineer.
+10 findings (1 High, 5 Medium, 4 Low). All resolved, accepted, or explicitly deferred.
+QA verification: BLOCKED on PowerAtlas restart (5 deferred items require live UI session); Step 9b deferred per the same constraint.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 0: Wire probes | not_run | SKIP | Probe-only; no test suite |
+| 1: _SupervisorV3 skeleton | pass (1859) | SKIP | No runtime surface in isolation |
+| 2: Session lifecycle | pass (1859) | SKIP | No WebSocket route in isolation |
+| 3: HTTP routes | pass (1859+) | SKIP | Browser hard-reload deferred (PowerAtlas restart) |
+| 4: Diff recovery | pass (1859) | SKIP | Probe-only; browser deferral |
+| 5: Liveness probe | pass (1859) | SKIP | Probe-only |
+| 6: Feature inventory | not_run | SKIP | Docs-only |
+| 7: Tests + Playwright | pass (1872) | BLOCKED | Playwright deferred (PowerAtlas restart) |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | `api_acp_v3_delete_sessions` silently returned not_found for all v3 sessions (wrong path tree) | Fixed — delete guard rejects `sess_`-prefixed IDs with "not yet implemented" message (272852b) |
+| 2 | Medium | Crew panel broken for v3 fan-outs — crew helpers referenced `_supervisor.*` | Fixed — false positive; helpers already reference `_supervisor_v3.*` exclusively |
+| 3 | Medium | `session/cancel` on v3 unverified (`_notify` sends notification, not request) | Orchestrator: proposed-accept — cancel() sends a notification; Phase 0 -32603 was from testing as a request; notification path likely compatible; re-verify before SC-4 |
+| 4 | Medium | `plans/tests/260701_POWERATLAS.md` not updated for v3 paths | Fixed — v3 path enumeration and delete endpoint documented (272852b) |
+| 5 | Medium | Zero tests for `_handle_*_v3` handlers and `_emit_v3` routing | User: accepted — deferred to merge/production plan; spike scope |
+| 6 | Medium | `memory/MEMORY.md` `_session/steer` entry not qualified as v2-only | Fixed — v3 note added (272852b) |
+| 7 | Low | Smoke test criterion unticked — covered by Phase 0 probe evidence | Fixed — ticked with Phase 0 evidence note (272852b) |
+| 8 | Low | `test_fulfill_token_nonzero_exit` weak assertion | Fixed — exact string assertion (272852b) |
+| 9 | Low | Module docstring isolation-boundary claim stale (says "two names"; data_kiro is third) | User: accepted — pre-existing stale comment; spike scope |
+| 10 | Low | `session/steer` v3 parity unverified; SC-4 steer parity remains unconfirmed | Orchestrator: proposed-accept — noted in deferred follow-ups; productization plan will probe |
