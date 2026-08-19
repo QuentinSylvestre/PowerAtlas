@@ -353,7 +353,7 @@ workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
     ```
 
 **Exit criteria**:
-- [ ] `_SupervisorV3` class present with all overrides: `_spawn`, `_on_agent_request`, `_on_notification`, `new_session`, `load_session`, `_publish_live`
+- [x] `_SupervisorV3` class present with all overrides: `_spawn`, `_on_agent_request`, `_on_notification`, `new_session`, `load_session`, `_publish_live`
 - [x] `_fulfill_token` present with separate `except` blocks for `json.JSONDecodeError`/`KeyError` (no token in error message), `TimeoutExpired` (subprocess killed), and general `Exception`; `_discard` called on pipe-write failure
 - [x] `_KIRO_V3_TOKEN_BINARY = shutil.which("kiro-cli")` at module level; used in `_fulfill_token`
 - [x] `_supervisor_v3` initialized inside `apply_config`, not at module level; construction failure logged at ERROR
@@ -411,15 +411,17 @@ workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
    > **Rejected**: Option B (look up supervisor in `_emit`) — couples a shared utility to both supervisor singletons. **Use instead**: Option A — `_emit_v3(session_id, frame)` calling `_supervisor_v3.record()` and `_registry.broadcast()`. All v3 handler functions call `_emit_v3`; v2 handlers continue calling `_emit`.
 
 **Exit criteria**:
-- [ ] All 9 `_handle_*_v3` functions present in `acp.py`
-- [ ] `_dispatch_v3` and `serve_socket_v3` present
-- [ ] `_emit_v3` function present, calling `_supervisor_v3.record()` and `_registry.broadcast()`
-- [ ] `_SupervisorV3._on_notification` override present, replacing all `_emit(session_id, frame)` calls with `_emit_v3(session_id, frame)` (deferred from Phase 1 -- requires `_emit_v3` defined in this phase)
+- [x] All 9 `_handle_*_v3` functions present in `acp.py`
+- [x] `_dispatch_v3` and `serve_socket_v3` present
+- [x] `_emit_v3` function present, calling `_supervisor_v3.record()` and `_registry.broadcast()`
+- [x] `_SupervisorV3._on_notification` override present, replacing all `_emit(session_id, frame)` calls with `_emit_v3(session_id, frame)` (deferred from Phase 1 -- requires `_emit_v3` defined in this phase)
 - [ ] Manual smoke test (requires Phase 3 route to exist OR a raw WebSocket client): connect to `/ws/acp-v3`, send `{"type":"new","payload":{"cwd":"<workspace>"}}`, observe `meta.pending` frame, then session frame with a `sess_`-prefixed ID
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
 
 **Covers**: SC-1, SC-2 (partial — turn requires Phase 3 page)
 
+### Implementation (2026-08-19, code: 76a02b9, fix: 1bc0fd9)
+Phase 2 adds: `_emit_v3` (records in `_supervisor_v3.history`, broadcasts via `_registry`); `_SupervisorV3._on_notification` override (full copy of base class with `_emit` replaced by `_emit_v3`, ensuring v3 frame history routes to the correct supervisor); 9 `_handle_*_v3` handler functions; 3 v3 crew helpers; `_dispatch_v3`; `serve_socket_v3`. Proposed-accept finding #14 from Phase 1 resolved by `_handle_close_v3`. Fix batch: docstring warning for Phase 3 auth checks, dead-branch comment for `_kiro.dev/commands/available`, type annotations on crew helper, blank line fix. Tests: 1859 passed, 2 skipped.
 ### Phase 3: `/acp-v3` HTTP routes + `acp.html` engine variable [QA]
 
 **Goal**: Add all HTTP/WebSocket routes for `/acp-v3` in `web.py` and the `engine` variable to `acp.html`. After this phase the full `/acp-v3` page is reachable.
@@ -492,7 +494,7 @@ Update the statement at line 7: "All JS for `/acp` is inline in `src/power_atlas
 - [ ] `AGENTS.md` line 7 updated with `/acp-v3` + `engine="v3"` note
 - [ ] Browser hard-reload on `/acp-v3` loads the page; `/acp` still works unchanged
 - [ ] `node tests/acp_page.test.mjs` passes (may need `engine` variable fixture — see below)
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
 
 **`acp_page.test.mjs` fix**: The test renders `acp.html`; any test that exercises code now gated on `ENGINE` needs the fixture to inject `engine = "v2"` (so v2 paths remain unchanged in tests). Identify all tests that would fail due to the new `ENGINE` variable being undefined and add the fixture injection.
 
@@ -520,7 +522,7 @@ Update the statement at line 7: "All JS for `/acp` is inline in `src/power_atlas
 - [ ] Reload of `/acp-v3` page with a session containing file edits: diff row expands with correct path and diff content
 - [ ] `str_replace` diff recovery also verified (oldText = `oldStr`, newText = `newStr`)
 - [ ] R4 probe result addressed (cache invalidation or retry documented)
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
 
 **Covers**: SC-3
 
@@ -651,7 +653,7 @@ Under an appropriate section (or create `### ACP v3 Follow-up`):
 - [ ] Playwright: `/acp-v3` loads, session creates, prompt streams, reload replays — all observed without errors
 - [ ] Playwright: `/acp` unchanged — existing session, prompt, reload still work
 - [ ] `node tests/acp_page.test.mjs` passes
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes (1859 passed, 2 skipped)
 - [ ] `memory/MEMORY.md` `_publish_live` union note added
 
 **Covers**: SC-2, SC-4, SC-8, SC-10
@@ -789,3 +791,18 @@ Implementation health: Green (all High/Medium resolved after 2 cycles; 1 propose
 | 12 | Low | `import time` inside `_get_tool_diffs_v3` body redundant | Fixed — removed (95c6930) |
 | 13 | Low | `apply_config` re-created `_supervisor_v3` on every call | Fixed — guarded with `if _supervisor_v3 is None` (95c6930) |
 | 14 | High (cycle 2) | `_handle_close` session-existence gate v2-only — v3 sessions would get `nothing_to_close` | Orchestrator: proposed-accept — v2 handler only; Phase 2 adds `_handle_close_v3` scoped to `_dispatch_v3` which routes to `_supervisor_v3`; unreachable by v3 session IDs in Phase 1 |
+
+
+### 2026-08-19 — Implementation Review (after Phase 2, personas: Security auditor, Senior engineer, Reliability engineer, Architect)
+
+Implementation health: Yellow (no High; 3 Medium, all resolved or deferred per plan).
+6 findings total. F3 deferred to Phase 7 per plan structure.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `serve_socket_v3` missing docstring reminder that Phase 3 must add auth checks | Fixed — docstring added noting `_acp_token_ok` + `_ws_origin_ok` obligation (1bc0fd9) |
+| 2 | Medium | Dead `_kiro.dev/commands/available` branch in `_on_notification` override used `_registry.broadcast` directly (not `_emit_v3`) | Fixed — comment added explaining dead-code status; broadcast behavior matches v2 for this path (1bc0fd9) |
+| 3 | Medium | Zero tests for 9 `_handle_*_v3` functions and `_emit_v3` routing | User: accepted — tests deferred to Phase 7 per plan structure; Phase 7 exit criteria explicitly cover _emit_v3 routing and handler behavior |
+| 4 | Low | `_evict_crew_children_v3` missing type annotations | Fixed — full annotations added matching v2 counterpart (1bc0fd9) |
+| 5 | Low | `_emit_v3` teardown race matches v2 behavior but undocumented | Fixed — spike-scope comment added (1bc0fd9) |
+| 6 | Low | One blank line between `_dispatch_v3` and `_dispatch` (should be two) | Fixed — two blank lines restored (1bc0fd9) |
