@@ -19910,7 +19910,7 @@ class TestSupervisorV3:
         assert result["tcid2"]["path"] == "/tmp/foo.py"
 
     def test_get_tool_diffs_v3_failed_result_excluded(self, tmp_path):
-        """A tool_result with success=False must NOT appear in the returned dict."""
+        """A failed tool_result is excluded; a successful one is included."""
         import json, re
         import pathlib as _pl
         from unittest.mock import patch
@@ -19924,6 +19924,28 @@ class TestSupervisorV3:
                 "payload": {
                     "type": "tool_call",
                     "toolName": "fs_write",
+                    "toolCallId": "tcid_ok",
+                    "args": {"path": "/tmp/good.py", "text": "good"},
+                    "status": "approved",
+                    "kind": "edit",
+                },
+            },
+            {
+                "id": "2",
+                "timestamp": "2026-01-01T00:00:00.500Z",
+                "payload": {
+                    "type": "tool_result",
+                    "toolCallId": "tcid_ok",
+                    "success": True,
+                    "content": "",
+                },
+            },
+            {
+                "id": "3",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {
+                    "type": "tool_call",
+                    "toolName": "fs_write",
                     "toolCallId": "tcid3",
                     "args": {"path": "/tmp/bad.py", "text": "bad"},
                     "status": "approved",
@@ -19931,8 +19953,8 @@ class TestSupervisorV3:
                 },
             },
             {
-                "id": "2",
-                "timestamp": "2026-01-01T00:00:01Z",
+                "id": "4",
+                "timestamp": "2026-01-01T00:00:01.500Z",
                 "payload": {
                     "type": "tool_result",
                     "toolCallId": "tcid3",
@@ -19949,7 +19971,9 @@ class TestSupervisorV3:
             with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
                 result = acp_mod._get_tool_diffs_v3(session_id)
 
-        assert "tcid3" not in result
+        assert "tcid_ok" in result, "successful tool call must be in result"
+        assert result["tcid_ok"]["path"] == "/tmp/good.py"
+        assert "tcid3" not in result, "failed tool call must not be in result"
 
     # ------------------------------------------------------------------
     # _stored_session_cwd_v3
@@ -20061,9 +20085,9 @@ class TestSupervisorV3:
             asyncio.run(sv3._fulfill_token(7))
 
         assert len(written) == 1
-        resp = written[0]
-        assert "error" in resp
-        assert "accessToken" not in str(resp)
+        msg_written = written[0]
+        assert "error" in msg_written
+        assert msg_written['error']['message'] == 'Token fetch timed out'
 
     def test_fulfill_token_malformed_json(self):
         """Malformed JSON stdout -> error response, not a raw json parse error."""
@@ -20089,12 +20113,12 @@ class TestSupervisorV3:
             asyncio.run(sv3._fulfill_token(8))
 
         assert len(written) == 1
-        resp = written[0]
-        assert "error" in resp
-        msg = resp["error"].get("message", "")
-        # Must be a fixed message, NOT raw stdout or Python exception text.
-        assert "not_json" not in msg
-        assert "accessToken" not in msg
+        msg_written = written[0]
+        assert 'error' in msg_written
+        assert msg_written['error']['message'] == 'Token response format error'
+
+
+
 
     def test_fulfill_token_nonzero_exit(self):
         """Non-zero returncode -> error response written."""
@@ -20242,3 +20266,35 @@ class TestSupervisorV3:
         for resp in written:
             assert "result" in resp
             assert resp["result"]["accessToken"] == "tok_a"
+
+    # ------------------------------------------------------------------
+    # _SupervisorV3._publish_live — union of v3 + v2 sessions
+    # ------------------------------------------------------------------
+
+    def test_supervisor_v3_publish_live_union(self):
+        """_SupervisorV3._publish_live() emits union of v3 + v2 sessions."""
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        hook_calls = []
+
+        def hook(session_ids, pid):
+            hook_calls.append((frozenset(session_ids), pid))
+
+        v3_sid = 'sess_v3-0000-0000-0000-000000000001'
+        v2_sid = 'v2-0000-0000-0000-000000000002'
+
+        mock_v2 = MagicMock()
+        mock_v2.sessions = {v2_sid: {}}
+
+        with patch.object(acp_mod, 'sessions_changed_hook', hook), \
+             patch.object(acp_mod, '_supervisor', mock_v2):
+            sv3 = acp_mod._SupervisorV3.__new__(acp_mod._SupervisorV3)
+            sv3.sessions = {v3_sid: {}}
+            sv3._publish_live()
+
+        assert len(hook_calls) == 1, f'hook called {len(hook_calls)} times, expected 1'
+        published, pid = hook_calls[0]
+        assert v3_sid in published, f'v3 session {v3_sid} missing from union'
+        assert v2_sid in published, f'v2 session {v2_sid} missing from union'
+        assert pid == 0, 'v3 publish_live must pass pid=0'
