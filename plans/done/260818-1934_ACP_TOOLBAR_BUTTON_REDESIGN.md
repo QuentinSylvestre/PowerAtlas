@@ -2,6 +2,7 @@
 
 > **Date**: 2026-08-18
 > **Status**: Complete
+> **Last Updated**: 2026-08-18
 > **Scope**: Redesign the send/stop/steer/queue buttons in the `/acp` composer row
 
 ---
@@ -135,3 +136,12 @@ QA verification: PASS (browser — hard reload picks up CSS changes; `[hidden]` 
 | 3 | Low | `.acp-mode-toggle[aria-expanded="true"]` had same specificity (0,2,0) as `.acp-btn:hover`; hover-while-open state could lose. | Fixed — compound selector `.acp-mode-toggle.acp-icon-btn[aria-expanded="true"]` (0,3,0) added (8a5ebad) |
 | 4 | Low | `aria-label="Start"` rename has no test assertion; a future rename would be silent. | User: accepted — no test infrastructure for aria-label assertions exists today |
 | 5 | Low | `acp-send-mode` class remained on `#acpSendMode` markup after its CSS block was removed — orphan. | Fixed — class removed from markup (4e74d76) |
+
+
+## Harness Improvement Opportunities
+
+- `/qexplore` Step 1.5 mandatory dispatch gate: read relevant files inline before dispatching the trio, then dispatched from a context that already had the file contents. The gate exists to ensure fresh-context sub-agents; the inline pre-read before dispatch defeats the isolation. — cost: unclear (sub-agents still returned good results, but the dispatch rationale was violated) — suggested change: add an explicit reminder in the gate wording that the orchestrator must not read target files before dispatching, only build the problem-context summary from directory listings and grep hits
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): existing gate wording already covers this; wording sufficient
