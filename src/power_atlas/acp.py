@@ -2277,6 +2277,8 @@ def _get_tool_diffs_v3(session_id: str) -> "dict[str, dict]":
     Inlined in acp.py per the isolation boundary constraint (acp.py imports only
     config.CONFIG_DIR and launcher._SESSION_ID_RE from the package).
     """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return {}
     import time as _time
 
     def _scan() -> "dict[str, dict]":
@@ -4600,6 +4602,7 @@ class _SupervisorV3(_Supervisor):
         """
         if self.at_capacity():
             raise SessionLimit(_session_limit_message())
+        session_id = None  # F6: init before try so log.info never raises UnboundLocalError
         self._reserved += 1
         try:
             await self.ensure_started()
@@ -4616,9 +4619,16 @@ class _SupervisorV3(_Supervisor):
                     "The v3 agent returned an unusable session id: "
                     f"{session_id!r:.200}")
             self.sessions[session_id] = _new_session_record(cwd)
-            self._flush_pending_commands(session_id)
-            self._publish_live()
-            self.history[session_id] = _History()
+            try:
+                self._flush_pending_commands(session_id)
+                self._publish_live()
+                self.history[session_id] = _History()
+            except Exception:
+                # F9: roll back the cap slot on post-insert failure so the
+                # session does not leak into the count.
+                self.sessions.pop(session_id, None)
+                self.history.pop(session_id, None)
+                raise
         finally:
             self._reserved -= 1
             if self._pending_commands is not None:
@@ -4651,7 +4661,10 @@ class _SupervisorV3(_Supervisor):
                     break
             self.history[session_id] = _History()
             # v3 diff backfill — uses inlined _get_tool_diffs_v3 (no data_kiro_v3 import).
-            self._diff_backfill[session_id] = _get_tool_diffs_v3(session_id)
+            # Wrapped in asyncio.to_thread (F7): _get_tool_diffs_v3 does blocking
+            # filesystem I/O (iterdir + file reads + time.sleep(0.2)).
+            self._diff_backfill[session_id] = await asyncio.to_thread(
+                _get_tool_diffs_v3, session_id)
             self._reserved -= 1
             reserved = False
             try:
@@ -4684,8 +4697,8 @@ class _SupervisorV3(_Supervisor):
         """
         if session_id not in self.sessions:
             raise AgentRejected("That session no longer exists on this agent.")
-        if not self.alive():
-            raise AgentDied("The agent is not running.")
+        # No alive() check for v3: no wire call is made, so a dead KAS process
+        # should not prevent local cleanup. (F5 fix -- Phase 1 review.)
         # No wire close for v3 (CLOSE_METHOD_V3 is None).
         self.sessions.pop(session_id, None)
         self._publish_live()
@@ -4700,6 +4713,10 @@ class _SupervisorV3(_Supervisor):
             self.crew_spawn_anchors.pop(_tcid, None)
         self.crew_spawn_toolcallids.pop(session_id, None)
         _bubbles.pop(session_id, None)
+        frame = _session_closed_frame(session_id)
+        for target in tuple(_registry.subscribers.get(session_id, ())):
+            target.send(frame)
+            _registry.detach(target)
         for child_id in self.crews.pop(session_id, ()):
             self.subagent_sessions.pop(child_id, None)
             self.subagent_history.pop(child_id, None)
@@ -4719,13 +4736,16 @@ class _SupervisorV3(_Supervisor):
         """Tell whoever is listening which sessions this v3 agent holds.
 
         Emits the union of v3 + v2 sessions so the dashboard reflects both.
+        Passes pid=0 for the combined set (F11): using the v3 PID for v2
+        sessions could cause false liveness results in presence.py, which
+        matches PIDs against running processes.
         """
         hook = sessions_changed_hook
         if hook is None:
             return
         v2_sessions = frozenset(_supervisor.sessions) if _supervisor is not None else frozenset()
         try:
-            hook(frozenset(self.sessions) | v2_sessions, self.agent_pid())
+            hook(frozenset(self.sessions) | v2_sessions, 0)
         except Exception:
             log.exception("ACP v3: publishing the live session set failed")
 
@@ -5094,7 +5114,8 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
         log.warning("ACP subscribe refused: [unknown_session] session=%s",
                     session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         # A release is in flight, and `close_session` leaves the session in
         # `sessions` for the whole terminate round-trip. Without this the attach
         # below would stamp `last_used` on a record about to be popped and
@@ -5440,7 +5461,8 @@ async def _handle_load(conn: _Connection, session_id: str | None) -> None:
         # guard then stopped it retrying.
         _defer_until_loaded(conn, session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         # A release is in flight. `close_session` leaves the session in
         # `sessions` for the whole terminate round-trip, so without this the
         # branch below would hand this socket a live-looking session and a full
@@ -5717,7 +5739,8 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
         # from an agent that never answered.
         refuse("not_subscribed", "Subscribe to this session before prompting it.")
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         # The mirror of the `turn_in_progress` guard in `_handle_close`, and it
         # has to be here because that one only bars the second half of the
         # race. A close claims `closing` before its first await and leaves the
@@ -5897,7 +5920,8 @@ async def _handle_steer(conn: _Connection, session_id: str | None,
             "not_subscribed", "Subscribe to this session first.", session_id))
         log.warning("ACP steer refused: [%s] session=%s", "not_subscribed", session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         conn.send(error_frame(
             "close_in_progress", "Session is being released.", session_id))
         log.warning("ACP steer refused: [%s] session=%s", "close_in_progress", session_id)
@@ -5970,7 +5994,8 @@ async def _handle_commands_options(conn: _Connection, session_id: str | None,
             "Subscribe to this session first.", session_id))
         log.warning("ACP commands_options refused: [not_subscribed] session=%s", session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         conn.send(error_frame("close_in_progress",
             "Session is being released; try again after it closes.", session_id))
         log.warning("ACP commands_options refused: [close_in_progress] session=%s", session_id)
@@ -6018,7 +6043,8 @@ async def _handle_commands_execute(conn: _Connection, session_id: str | None,
             "Subscribe to this session first.", session_id))
         log.warning("ACP commands_execute refused: [not_subscribed] session=%s", session_id)
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         conn.send(error_frame("close_in_progress",
             "Session is being released; try again after it closes.", session_id))
         log.warning("ACP commands_execute refused: [close_in_progress] session=%s", session_id)
@@ -6272,7 +6298,8 @@ async def _handle_close(conn: _Connection, session_id: str | None) -> None:
                "This session is still answering. Stop the turn first, then "
                "close it.")
         return
-    if session_id in _supervisor.closing:
+    if session_id in _supervisor.closing or (
+            _supervisor_v3 is not None and session_id in _supervisor_v3.closing):
         refuse("close_in_progress", "This session is already being closed.")
         return
     _supervisor.closing.add(session_id)
@@ -6354,7 +6381,11 @@ def _sweepable(session_id: str, meta: dict, now: float) -> bool:
         return False
     if session_id in _supervisor.inflight:
         return False
+    if _supervisor_v3 is not None and session_id in _supervisor_v3.inflight:
+        return False
     if session_id in _supervisor.closing:
+        return False
+    if _supervisor_v3 is not None and session_id in _supervisor_v3.closing:
         return False
     if session_id in _registry.loading:
         return False
@@ -6385,9 +6416,11 @@ async def _sweep_once() -> None:
     # bug this mechanism exists to fix. Republishing on the tick makes any such
     # miss self-heal within one sweep interval instead of never. Costs one
     # frozenset of a dict that is at most MAX_SESSIONS long.
+    # F10: _supervisor._publish_live() already unions v2+v3 sessions (see
+    # _Supervisor._publish_live which reads _supervisor_v3.sessions). The
+    # separate _supervisor_v3._publish_live() call was redundant and published
+    # the combined set twice per sweep tick.
     _supervisor._publish_live()
-    if _supervisor_v3 is not None:
-        _supervisor_v3._publish_live()
     # Forget the failure counts of sessions that are no longer here, whatever
     # took them — this is what keeps `_sweep_failures` bounded by the live
     # session count rather than growing for the application's lifetime.
@@ -6556,11 +6589,12 @@ def apply_config(config) -> None:
              "prompt_silence=%.0fs", MAX_SESSIONS, ACP_IDLE_TTL_SECONDS,
              PROMPT_SILENCE_SECONDS)
     global _supervisor_v3
-    try:
-        _supervisor_v3 = _SupervisorV3()
-    except Exception:
-        log.error("ACP v3: failed to construct _SupervisorV3", exc_info=True)
-        _supervisor_v3 = None
+    if _supervisor_v3 is None:  # F12: construct only once; apply_config may be called multiple times
+        try:
+            _supervisor_v3 = _SupervisorV3()
+        except Exception:
+            log.error("ACP v3: failed to construct _SupervisorV3", exc_info=True)
+            _supervisor_v3 = None
 
 
 def _clamped(config, name: str, fallback, low: int, high: int):
