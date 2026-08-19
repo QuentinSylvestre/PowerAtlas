@@ -32,7 +32,7 @@
 - **Auto-mode for `/acp` permissions** — drop `-a` and decide each request automatically; latency is measured and fine, accuracy against adversarial inputs is the open question
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured)
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
-- **[P2b] Session stores PowerAtlas cannot see** — 11 classic sqlite sessions have no file on disk and are invisible; v3 sessions are now covered by the kiro-cli-v3 provider (shipped 2026-08-18)
+- **[P2b] Session stores PowerAtlas cannot see** — 11 classic sqlite sessions still invisible; v3 now covered
 
 ### Misc
 - **[SECURITY] Loopback API token** — any local process can create sessions and run shell commands via `/api/*`; proposed fix is a startup-generated secret injected into the page
@@ -143,10 +143,7 @@ own reopen condition).
 
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext in `config.toml`; shape (a) is an OS keystore reference, shape (b) is an encrypted-at-rest blob. Both require a UI decision about how the user enters/updates credentials.
 
-- **[P2b] Session stores PowerAtlas cannot currently see — a real coverage gap, quantified**
-  - **v3 sessions are now visible via the `kiro-cli-v3` provider (shipped 2026-08-18).** `data_kiro_v3.py` discovers and reads `~\.kiro\sessions\<hash>\sess_*\` directly; `status_classifier.py` routes `kiro-cli-v3` provider sessions to `classify_kiro_v3` without auto-detection. The 23 sessions that were previously invisible are now covered. Live status classification (`status_classifier.py`) imports `V3_SESSIONS_ROOT` from `data_kiro_v3` rather than re-declaring it, eliminating the two-sources-of-truth issue.
-  - **11 "classic" sqlite conversations** in `conversations_v2` (`%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`) have **no file on disk at all** and appear in neither candidate. PowerAtlas already merges their *cwds* for workspace discovery but not the sessions themselves.
-  - **`kiro-cli chat --list-sessions -f json` is the only source that unifies all three stores**, tagging each entry with `source` (`v2`/`v3`/`classic`) — per-entry shape is the ACP shape plus `source`. From `C:\Users\QSylvestre.POLESTAR` it returned 277 sessions: 256 v2, **18 v3, 3 classic**. Cost ~2.13 s per query and it is **cwd-scoped, not global**, so covering 58 workspaces means 58 spawns. Worth considering as a targeted supplement for a single workspace, not as a global replacement.
+- **[P2b] Session stores PowerAtlas cannot see** — 11 classic sqlite conversations in `conversations_v2` (`%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`) have no file on disk and appear in neither candidate. PowerAtlas already merges their *cwds* for workspace discovery but not the sessions themselves. `kiro-cli chat --list-sessions -f json` is the only source that unifies all three stores (`v2`/`v3`/`classic`), tagging each entry with `source` — cost ~2.13 s per query, cwd-scoped (not global), so covering 58 workspaces means 58 spawns. *(v3 sessions now covered by the `kiro-cli-v3` provider, shipped 2026-08-18.)*
 
 ---
 
