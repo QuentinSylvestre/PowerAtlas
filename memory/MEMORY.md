@@ -247,6 +247,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - Model may refuse a steer instruction it judges unhelpful — this is model behavior, not a protocol failure.
 **Source**: session 2026-08-12 — live probe, `acp_steer_probe3.py`, kiro-cli 2.16.x | **Verified**: 2026-08-12
 **Stale-when**: kiro-cli minor version changes past 2.16.x
+**Note (v3)**: Not probed on v3 — applicability unknown. Re-verify before relying on steer from a v3 session.
 
 ### `subagent_sessions` must survive turn-end — it is the click-to-view routing key
 

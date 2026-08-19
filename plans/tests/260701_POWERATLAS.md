@@ -170,6 +170,8 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 >
 > A run of this plan should report the web surface as covered **except** the ACP routes rather than as
 > covered outright.
+>
+> **2026-08-19 update (v3 spike)**: Five v3 paths are now also excluded from this plan for the same reason: _ACP_V3_PATH (/acp-v3), _ACP_V3_WS_PATH (/ws/acp-v3), _ACP_V3_LISTING_PATH (GET /api/acp-v3/sessions), _ACP_V3_WORKSPACES_PATH (GET /api/acp-v3/workspaces), and _ACP_V3_DELETE_PATH (POST /api/acp-v3/sessions/delete). pi_acp_v3_delete_sessions has unit coverage in 	ests/test_web.py (spike-phase tests); runtime probing requires a live v3 kiro-cli acp --agent-engine v3 process.
 
 ### 2.1 Three-panel dashboard bootstrap
 - **what**: `GET /` renders topbar + 3 panels; htmx `hx-trigger=load` fires 4 partials (launchers, pinned-sessions, pinned-workspaces, workspaces).
@@ -354,9 +356,9 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: `{deleted: [...], failed: [...], total_found: N}`; with folder delete: `{folder_deleted: bool, folder_error: str}`.
 - **risks**: path safety checks on cwd; remote-only guard for folder delete; config lost-update race on concurrent settings mutations.
 
----
-
-## 3. Launcher (`launcher.py`)
+### 2.27 v3 session delete endpoint (spike — pi_acp_v3_delete_sessions)
+- **what**: POST /api/acp-v3/sessions/delete. Mirrors 2.26 for v3 sessions but rejects sess_-prefixed IDs with an explicit error (v3 path scanning not yet implemented). The five new v3 paths (_ACP_V3_PATH, _ACP_V3_WS_PATH, _ACP_V3_LISTING_PATH, _ACP_V3_WORKSPACES_PATH, _ACP_V3_DELETE_PATH) share the remote-address allowlist coverage as their v2 counterparts; all are scoped out of this plan for the same reason as the other ACP routes (runtime requires a live v3 process).
+- **test targets**: pi_acp_v3_delete_sessions has unit coverage in 	ests/test_web.py (spike-phase tests).\r\n\r\n---\r\n\r\n## 3. Launcher (`launcher.py`)
 
 ### 3.1 Terminal auto-detection + config override
 - **what**: `detect_terminal` returns config override verbatim, else probes wt>pwsh>cmd (Windows).

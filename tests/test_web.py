@@ -20145,7 +20145,7 @@ class TestSupervisorV3:
 
         assert len(written) == 1
         resp = written[0]
-        assert "error" in resp
+        assert resp["error"]["message"] == "Token fetch failed"
 
     def test_fulfill_token_calls_discard_on_write_failure(self):
         """If _write raises AcpError, _discard is called to clean up."""

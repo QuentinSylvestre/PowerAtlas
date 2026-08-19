@@ -3235,11 +3235,22 @@ async def api_acp_v3_delete_sessions(request: Request):
             {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
             status_code=400)
     session_ids = [s for s in raw if isinstance(s, str)]
+    # Spike note: v3 session deletion requires scanning the hashed path tree.
+    # For the spike, reject delete requests for sess_-prefixed IDs with a
+    # clear error rather than silently reporting not_found.
+    failed: list[dict] = []
+    v2_session_ids: list[str] = []
+    for sid in session_ids:
+        if sid.startswith("sess_"):
+            failed.append({"session_id": sid,
+                           "error": "v3 session deletion not yet implemented"})
+        else:
+            v2_session_ids.append(sid)
     held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
-    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
+    result = await asyncio.to_thread(_acp_delete_many, v2_session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
-        "failed": result["failed"],
+        "failed": failed + result["failed"],
         "total_found": len(session_ids),
     })
 

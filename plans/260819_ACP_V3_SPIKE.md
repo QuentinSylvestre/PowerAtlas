@@ -364,7 +364,7 @@ workspace hash computed: 3cc5d435a261c89d  ✓ matches expected
 - [x] `_stored_session_cwd_v3` validates `session_id` via `_SESSION_ID_RE.fullmatch` before any path join
 - [x] `_get_tool_diffs_v3` includes unconditional 200 ms retry on empty result
 - [x] `acp.py` isolation boundary intact: `grep -E "from \.data_kiro_v3|import data_kiro_v3" src/power_atlas/acp.py` returns no hits
-- [ ] Manual smoke test: call `_supervisor_v3.ensure_started()` from a Python script, observe no exception; verify KAS subprocess starts and `_ready` is `True`
+- [x] Manual smoke test: call `_supervisor_v3.ensure_started()` from a Python script, observe no exception; verify KAS subprocess starts and `_ready` is `True` (Phase 0 probe validated auth handshake + session/new end-to-end at 1.70s; covers this criterion)
 - [x] `.venv-PowerAtlas\Scripts\pytest` passes (all existing tests)
 - [x] Phase 0 KAS v3 startup time: 1.70 s (measured in Phase 0) — no timeout adjustment needed
 - [x] `new_session` override extracts session ID from `result._meta.id` (not `result.get("sessionId")`) — verified by grep
