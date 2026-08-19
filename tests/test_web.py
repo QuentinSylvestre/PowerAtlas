@@ -19764,3 +19764,481 @@ class TestSpawnEnv:
         assert "CLAUDE_CODE_SESSION_ID" not in env
         assert "CLAUDE_CODE_CHILD_SESSION" not in env
         assert "CLAUDE_CODE_BRIDGE_SESSION_ID" not in env
+
+
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — _SupervisorV3 helpers and token handler tests
+# ---------------------------------------------------------------------------
+
+
+def _make_async_to_thread_stub():
+    """Return a patch for asyncio.to_thread that runs fn(*args, **kwargs)
+    synchronously in an already-running event loop (Python 3.11+ safe).
+    """
+    import asyncio
+
+    async def stub(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return stub
+
+
+class TestSupervisorV3:
+    """Tests for v3-specific helpers: _get_tool_diffs_v3, _stored_session_cwd_v3,
+    and _SupervisorV3._fulfill_token.
+    """
+
+    # ------------------------------------------------------------------
+    # _get_tool_diffs_v3
+    # ------------------------------------------------------------------
+
+    def _make_v3_session_dir(self, tmp_path, session_id, lines):
+        """Build tmp_path/.kiro/sessions/<hash>/<session_id>/messages.jsonl."""
+        import json
+        hash_dir = tmp_path / ".kiro" / "sessions" / "abc123hash"
+        sess_dir = hash_dir / session_id
+        sess_dir.mkdir(parents=True)
+        jsonl = sess_dir / "messages.jsonl"
+        jsonl.write_text(
+            "\n".join(json.dumps(l) for l in lines) + "\n",
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_get_tool_diffs_v3_fs_write(self, tmp_path):
+        """fs_write tool_call + successful tool_result -> entry in returned dict."""
+        import json
+        import pathlib as _pl
+        import re
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_12345678-1234-1234-1234-123456789abc"
+        lines = [
+            {
+                "id": "1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {
+                    "type": "tool_call",
+                    "toolName": "fs_write",
+                    "toolCallId": "tcid1",
+                    "args": {"path": "/tmp/test.py", "text": "new content"},
+                    "status": "approved",
+                    "kind": "edit",
+                },
+            },
+            {
+                "id": "2",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {
+                    "type": "tool_result",
+                    "toolCallId": "tcid1",
+                    "success": True,
+                    "content": "",
+                },
+            },
+        ]
+        self._make_v3_session_dir(tmp_path, session_id, lines)
+
+        # Patch Path.home() to return tmp_path so the scan finds our fixture.
+        # Patch _SESSION_ID_RE to allow sess_* IDs (the real one already does,
+        # but being explicit removes the risk of the real module-level value
+        # shadowing the patch).
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE",
+                               re.compile(r"^[\w\-]+$")):
+                result = acp_mod._get_tool_diffs_v3(session_id)
+
+        assert "tcid1" in result
+        entry = result["tcid1"]
+        assert entry["path"] == "/tmp/test.py"
+        assert entry["oldText"] is None
+        assert entry["newText"] == "new content"
+
+    def test_get_tool_diffs_v3_str_replace(self, tmp_path):
+        """str_replace tool_call + successful result -> oldText/newText populated."""
+        import json, re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_12345678-1234-1234-1234-123456789abc"
+        lines = [
+            {
+                "id": "1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {
+                    "type": "tool_call",
+                    "toolName": "str_replace",
+                    "toolCallId": "tcid2",
+                    "args": {
+                        "path": "/tmp/foo.py",
+                        "oldStr": "old content",
+                        "newStr": "new content",
+                    },
+                    "status": "approved",
+                    "kind": "edit",
+                },
+            },
+            {
+                "id": "2",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {
+                    "type": "tool_result",
+                    "toolCallId": "tcid2",
+                    "success": True,
+                    "content": "",
+                },
+            },
+        ]
+        self._make_v3_session_dir(tmp_path, session_id, lines)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._get_tool_diffs_v3(session_id)
+
+        assert "tcid2" in result
+        assert result["tcid2"]["oldText"] == "old content"
+        assert result["tcid2"]["newText"] == "new content"
+        assert result["tcid2"]["path"] == "/tmp/foo.py"
+
+    def test_get_tool_diffs_v3_failed_result_excluded(self, tmp_path):
+        """A tool_result with success=False must NOT appear in the returned dict."""
+        import json, re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_12345678-1234-1234-1234-123456789abc"
+        lines = [
+            {
+                "id": "1",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {
+                    "type": "tool_call",
+                    "toolName": "fs_write",
+                    "toolCallId": "tcid3",
+                    "args": {"path": "/tmp/bad.py", "text": "bad"},
+                    "status": "approved",
+                    "kind": "edit",
+                },
+            },
+            {
+                "id": "2",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {
+                    "type": "tool_result",
+                    "toolCallId": "tcid3",
+                    "success": False,
+                    "content": "error",
+                },
+            },
+        ]
+        self._make_v3_session_dir(tmp_path, session_id, lines)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._get_tool_diffs_v3(session_id)
+
+        assert "tcid3" not in result
+
+    # ------------------------------------------------------------------
+    # _stored_session_cwd_v3
+    # ------------------------------------------------------------------
+
+    def _make_v3_session_json(self, tmp_path, session_id, meta):
+        """Build tmp_path/.kiro/sessions/<hash>/<session_id>/session.json."""
+        import json
+        import pathlib as _pl
+        hash_dir = tmp_path / ".kiro" / "sessions" / "abc123hash"
+        sess_dir = hash_dir / session_id
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text(
+            json.dumps(meta), encoding="utf-8"
+        )
+        return tmp_path
+
+    def test_stored_session_cwd_v3(self, tmp_path):
+        """Returns workspacePaths[0] from a valid session.json."""
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_12345678-1234-1234-1234-123456789abc"
+        meta = {"workspacePaths": ["/some/path"], "status": "idle"}
+        self._make_v3_session_json(tmp_path, session_id, meta)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._stored_session_cwd_v3(session_id)
+
+        assert result == "/some/path"
+
+    def test_stored_session_cwd_v3_rejects_path_traversal(self):
+        """Returns '' for a session_id that would allow path traversal."""
+        from power_atlas import acp as acp_mod
+        # _SESSION_ID_RE matches ^[\w\-]+$ so ../../etc/passwd fails.
+        result = acp_mod._stored_session_cwd_v3("../../etc/passwd")
+        assert result == ""
+
+    # ------------------------------------------------------------------
+    # _SupervisorV3._fulfill_token
+    # ------------------------------------------------------------------
+
+    def test_fulfill_token_success(self):
+        """A valid get-kas-token response is written as a JSON-RPC result."""
+        import asyncio, json, subprocess
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        token_output = json.dumps({
+            "kind": "getKasToken",
+            "data": {
+                "accessToken": "tok123",
+                "expiresAt": "2099-01-01T00:00:00Z",
+                "profileArn": "arn:aws:iam::123:role/Test",
+                "provider": "Enterprise",
+            },
+        })
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = token_output
+
+        sv3 = acp_mod._SupervisorV3()
+        written = []
+
+        def fake_write(obj):
+            written.append(obj)
+
+        with patch.object(sv3, "_write", side_effect=fake_write), \
+             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
+             patch("power_atlas.acp.asyncio.to_thread",
+                   side_effect=_make_async_to_thread_stub()):
+            asyncio.run(sv3._fulfill_token(42))
+
+        assert len(written) == 1
+        resp = written[0]
+        assert resp["id"] == 42
+        assert "result" in resp
+        assert resp["result"]["accessToken"] == "tok123"
+        assert resp["result"]["expiresAt"] == "2099-01-01T00:00:00Z"
+        assert resp["result"]["profileArn"] == "arn:aws:iam::123:role/Test"
+        assert resp["result"]["provider"] == "Enterprise"
+
+    def test_fulfill_token_subprocess_failure(self):
+        """TimeoutExpired -> error response written, no token in message."""
+        import asyncio, subprocess
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        sv3 = acp_mod._SupervisorV3()
+        written = []
+
+        def fake_write(obj):
+            written.append(obj)
+
+        def raise_timeout(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd="kiro-cli", timeout=15)
+
+        with patch.object(sv3, "_write", side_effect=fake_write), \
+             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp.subprocess.run", side_effect=raise_timeout), \
+             patch("power_atlas.acp.asyncio.to_thread",
+                   side_effect=_make_async_to_thread_stub()):
+            asyncio.run(sv3._fulfill_token(7))
+
+        assert len(written) == 1
+        resp = written[0]
+        assert "error" in resp
+        assert "accessToken" not in str(resp)
+
+    def test_fulfill_token_malformed_json(self):
+        """Malformed JSON stdout -> error response, not a raw json parse error."""
+        import asyncio, subprocess
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = "not_json{{"
+
+        sv3 = acp_mod._SupervisorV3()
+        written = []
+
+        def fake_write(obj):
+            written.append(obj)
+
+        with patch.object(sv3, "_write", side_effect=fake_write), \
+             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
+             patch("power_atlas.acp.asyncio.to_thread",
+                   side_effect=_make_async_to_thread_stub()):
+            asyncio.run(sv3._fulfill_token(8))
+
+        assert len(written) == 1
+        resp = written[0]
+        assert "error" in resp
+        msg = resp["error"].get("message", "")
+        # Must be a fixed message, NOT raw stdout or Python exception text.
+        assert "not_json" not in msg
+        assert "accessToken" not in msg
+
+    def test_fulfill_token_nonzero_exit(self):
+        """Non-zero returncode -> error response written."""
+        import asyncio, subprocess
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        fake_proc = MagicMock()
+        fake_proc.returncode = 1
+        fake_proc.stdout = ""
+
+        sv3 = acp_mod._SupervisorV3()
+        written = []
+
+        def fake_write(obj):
+            written.append(obj)
+
+        with patch.object(sv3, "_write", side_effect=fake_write), \
+             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
+             patch("power_atlas.acp.asyncio.to_thread",
+                   side_effect=_make_async_to_thread_stub()):
+            asyncio.run(sv3._fulfill_token(9))
+
+        assert len(written) == 1
+        resp = written[0]
+        assert "error" in resp
+
+    def test_fulfill_token_calls_discard_on_write_failure(self):
+        """If _write raises AcpError, _discard is called to clean up."""
+        import asyncio, subprocess, json
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        token_output = json.dumps({
+            "kind": "getKasToken",
+            "data": {
+                "accessToken": "tok",
+                "expiresAt": "2099-01-01T00:00:00Z",
+                "profileArn": "",
+                "provider": "",
+            },
+        })
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = token_output
+
+        sv3 = acp_mod._SupervisorV3()
+        discarded = []
+
+        def fake_discard(reason):
+            discarded.append(reason)
+
+        with patch.object(sv3, "_write",
+                          side_effect=acp_mod.AcpError("write failed")), \
+             patch.object(sv3, "_discard", side_effect=fake_discard), \
+             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
+             patch("power_atlas.acp.asyncio.to_thread",
+                   side_effect=_make_async_to_thread_stub()):
+            asyncio.run(sv3._fulfill_token(10))
+
+        assert len(discarded) == 1
+        assert "token" in discarded[0].lower() or "delivery" in discarded[0].lower()
+
+    # ------------------------------------------------------------------
+    # _publish_live — union of v2 + v3 sessions
+    # ------------------------------------------------------------------
+
+    def test_publish_live_union(self, monkeypatch):
+        """_supervisor._publish_live() delivers the union of v2 and v3 sessions."""
+        from unittest.mock import MagicMock
+        from power_atlas import acp as acp_mod
+
+        received = []
+
+        def hook(session_ids, pid):
+            received.append(frozenset(session_ids))
+
+        # Save originals so we can restore them.
+        orig_hook = acp_mod.sessions_changed_hook
+        orig_sv2_sessions = dict(acp_mod._supervisor.sessions)
+
+        try:
+            acp_mod.sessions_changed_hook = hook
+
+            # Give the v2 supervisor a fake session.
+            acp_mod._supervisor.sessions["v2-sess-001"] = {}
+
+            # Give the v3 supervisor a fake session.
+            sv3_mock = MagicMock()
+            sv3_mock.sessions = {"v3-sess-001": {}}
+            monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3_mock)
+
+            acp_mod._supervisor._publish_live()
+
+        finally:
+            acp_mod.sessions_changed_hook = orig_hook
+            acp_mod._supervisor.sessions.clear()
+            acp_mod._supervisor.sessions.update(orig_sv2_sessions)
+
+        assert len(received) == 1
+        published = received[0]
+        assert "v2-sess-001" in published
+        assert "v3-sess-001" in published
+
+    # ------------------------------------------------------------------
+    # _fulfill_token — two successive calls both complete cleanly
+    # ------------------------------------------------------------------
+
+    def test_fulfill_token_called_twice(self):
+        """Two sequential _fulfill_token calls both write a result without error."""
+        import asyncio, subprocess, json
+        from unittest.mock import MagicMock, patch
+        from power_atlas import acp as acp_mod
+
+        token_output = json.dumps({
+            "kind": "getKasToken",
+            "data": {
+                "accessToken": "tok_a",
+                "expiresAt": "2099-01-01T00:00:00Z",
+                "profileArn": "arn:aws:iam::1:role/R",
+                "provider": "Enterprise",
+            },
+        })
+        fake_proc = MagicMock()
+        fake_proc.returncode = 0
+        fake_proc.stdout = token_output
+
+        sv3 = acp_mod._SupervisorV3()
+        written = []
+
+        def fake_write(obj):
+            written.append(obj)
+
+        with patch.object(sv3, "_write", side_effect=fake_write), \
+             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
+             patch("power_atlas.acp.asyncio.to_thread",
+                   side_effect=_make_async_to_thread_stub()):
+            asyncio.run(sv3._fulfill_token(11))
+            asyncio.run(sv3._fulfill_token(12))
+
+        assert len(written) == 2
+        for resp in written:
+            assert "result" in resp
+            assert resp["result"]["accessToken"] == "tok_a"

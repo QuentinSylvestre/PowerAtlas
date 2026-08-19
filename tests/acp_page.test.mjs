@@ -10147,6 +10147,25 @@ check("test_engine_v3_session_api_url — rail fetches /api/acp-v3/sessions when
 });
 
 
+
+check("test_engine_v3_workspaces_api_url — picker fetches /api/acp-v3/workspaces when engine=v3",
+  async (tpl) => {
+  // When rendered with engine="v3", opening the session create picker must
+  // fetch the v3 workspaces path, not the v2 one.
+  const store = fakeStore({ workspaces: 2, sessions: 1 });
+  const page = await railed(tpl, { store, engine: "v3" });
+  // Clear fetches from the rail load so we only see the picker fetch.
+  page.fetches.length = 0;
+  // Click the create-new button to trigger a workspace fetch.
+  page.click("acpRailNew");
+  await page.settle();
+  const urls = page.fetches.map((f) => f.url);
+  assert(urls.some((u) => u.startsWith("/api/acp-v3/workspaces")),
+    `picker fetch should use /api/acp-v3/workspaces when engine="v3"; fetched: ${JSON.stringify(urls)}`);
+  assert(!urls.some((u) => u === "/api/acp/workspaces" || u.startsWith("/api/acp/workspaces?")),
+    `picker fetch must not use /api/acp/workspaces (v2 path) when engine="v3"; fetched: ${JSON.stringify(urls)}`);
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
