@@ -1252,11 +1252,12 @@ class TestExtractIconSentinelGuard:
 
     def test_returns_false_when_pil_sentinel_is_none(self, monkeypatch, tmp_path):
         import power_atlas.icons as icons_mod
+        from unittest.mock import MagicMock
         fake_exe = tmp_path / "fake.exe"
         fake_exe.write_bytes(b"MZ")
-        # _win32gui is None so the guard fires; _PilImage state is irrelevant
-        # but we confirm extract_icon still returns False without raising.
-        monkeypatch.setattr(icons_mod, "_win32gui", None)
+        # Keep _win32gui as a mock (non-None) so the first guard passes,
+        # then patch _PilImage to None so the second guard fires.
+        monkeypatch.setattr(icons_mod, "_win32gui", MagicMock())
         monkeypatch.setattr(icons_mod, "_PilImage", None)
         result = icons_mod.extract_icon("test-id", str(fake_exe), False)
         assert result is False

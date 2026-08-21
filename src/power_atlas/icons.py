@@ -25,15 +25,15 @@ try:
 except Exception:  # pragma: no cover - broken Pillow install
     _PilImage = None
 
-_win32gui = _win32ui = _wintypes = None
+_win32gui = _win32ui = _wintypes = _ctypes = None
 if sys.platform == "win32":
     try:
-        import ctypes
+        import ctypes as _ctypes
         import win32gui as _win32gui
         import win32ui as _win32ui
         from ctypes import wintypes as _wintypes
     except Exception:  # pragma: no cover - broken pywin32 install
-        _win32gui = _win32ui = _wintypes = None
+        _win32gui = _win32ui = _wintypes = _ctypes = None
 
 ICONS_DIR = CONFIG_DIR / "icons"
 
@@ -186,12 +186,14 @@ def _extract_windows_icon(binary: Path, target: Path) -> bool:
     try:
         if _win32gui is None:
             return False
+        if _PilImage is None:
+            return False
 
         ICON_SIZE = 48
 
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32 = _ctypes.WinDLL("user32", use_last_error=True)
         hIcon = (_wintypes.HANDLE * 1)()
-        iconId = (ctypes.c_uint * 1)()
+        iconId = (_ctypes.c_uint * 1)()
         count = user32.PrivateExtractIconsW(
             str(binary), 0, ICON_SIZE, ICON_SIZE, hIcon, iconId, 1, 0
         )

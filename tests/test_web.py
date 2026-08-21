@@ -815,7 +815,7 @@ def test_launcher_create(mock_load, mock_save, mock_extract, client):
     from power_atlas.config import Config
     mock_load.return_value = Config()
     resp = client.post("/api/launcher/create", json={
-        "name": "Dev Server", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "color": "#ef4444"
+        "name": "Dev Server", "command": "npm", "custom_args": "start", "cwd": "C:\\proj", "color": "#ef4444", "terminal": True
     })
     assert resp.status_code == 200
     assert "created" in resp.text.lower()

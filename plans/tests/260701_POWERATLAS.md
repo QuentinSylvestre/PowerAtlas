@@ -429,8 +429,8 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ### 4.2 Windows PE icon extraction
 - **what**: `_extract_windows_icon` via `PrivateExtractIconsW` at 48×48 → GetIconInfo → CreateBitmapFromHandle → PIL BGRA → PNG.
-- **how-to-reach**: `extract_icon` with an `.exe`/`.msi` on Windows.
-- **probes**: `_win32gui is None` sentinel → `False` immediately (no win32 import); extract from a known exe (e.g. a terminal binary) → valid 48×48 PNG; Electron app with 256px icon; count==0 / null handle → False; GDI handle cleanup: `hbm_mask`/`hbm_color` freed via nested `try/finally` on all paths (H9 resolved — `finally` blocks ensure both `DeleteObject` calls run even if the first raises); broad `except` hides pywin32/PIL errors.
+- **how-to-reach**: `extract_icon` with an `.exe`/`.msi` on Windows (now via `asyncio.to_thread` from the launcher create/update routes).
+- **probes**: `_win32gui is None` sentinel → `False` immediately; `_PilImage is None` sentinel → `False` immediately; extract from a known exe (e.g. a terminal binary) → valid 48×48 PNG; Electron app with 256px icon; count==0 / null handle → False; GDI handle cleanup: `hbm_mask`/`hbm_color` freed via nested `try/finally` on all paths (H9 resolved); OSError in `extract_icon` outer body → `False` (never raises); broad `except` hides pywin32/PIL errors.
 - **oracle**: True + PNG on success; False on any failure.
 - **risks**: undocumented API; monochrome-icon unhandled.
 
