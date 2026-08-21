@@ -1242,14 +1242,21 @@ class TestExtractIconSentinelGuard:
 
     def test_returns_false_when_win32gui_sentinel_is_none(self, monkeypatch, tmp_path):
         import power_atlas.icons as icons_mod
+        # Create a real .exe file so _resolve_binary can find it and pass it to
+        # _extract_windows_icon — otherwise the guard is never reached.
+        fake_exe = tmp_path / "fake.exe"
+        fake_exe.write_bytes(b"MZ")  # minimal PE magic so suffix check passes
         monkeypatch.setattr(icons_mod, "_win32gui", None)
-        result = icons_mod.extract_icon("test-id", str(tmp_path / "fake.exe"), False)
+        result = icons_mod.extract_icon("test-id", str(fake_exe), False)
         assert result is False
 
     def test_returns_false_when_pil_sentinel_is_none(self, monkeypatch, tmp_path):
         import power_atlas.icons as icons_mod
-        monkeypatch.setattr(icons_mod, "_PilImage", None)
-        # Even with PIL missing, the win32gui guard fires first; result is still False.
+        fake_exe = tmp_path / "fake.exe"
+        fake_exe.write_bytes(b"MZ")
+        # _win32gui is None so the guard fires; _PilImage state is irrelevant
+        # but we confirm extract_icon still returns False without raising.
         monkeypatch.setattr(icons_mod, "_win32gui", None)
-        result = icons_mod.extract_icon("test-id", str(tmp_path / "fake.exe"), False)
+        monkeypatch.setattr(icons_mod, "_PilImage", None)
+        result = icons_mod.extract_icon("test-id", str(fake_exe), False)
         assert result is False
