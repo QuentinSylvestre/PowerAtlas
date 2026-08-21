@@ -1,7 +1,7 @@
 # Icon Extraction Boot-Time Crash Fix
 
 > **Date**: 2026-08-21
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix native C-extension import race in `icons.py` that crashes PowerAtlas on boot
 > **Estimated effort**: 1–2 hours
@@ -179,12 +179,15 @@ The existing `except Exception: return False` at the function level remains as a
 runtime GDI/PIL errors.
 
 **Exit criteria**:
-- [ ] `src/power_atlas/icons.py` has no `import win32gui`, `import win32ui`, `from PIL import Image`, or `from ctypes import wintypes` inside any function body
-- [ ] Module-level sentinel block (`_win32gui = _win32ui = _PilImage = _wintypes = None` + `try:` block) present after `from .config import CONFIG_DIR`
-- [ ] `_extract_windows_icon` opens its `try:` block with the `if _win32gui is None: return False` guard
-- [ ] All `win32gui.`, `win32ui.`, `Image.`, `wintypes.` references in `_extract_windows_icon` updated to `_win32gui.`, `_win32ui.`, `_PilImage.`, `_wintypes.`
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py tests/test_web.py` passes with no new failures
+- [x] `src/power_atlas/icons.py` has no `import win32gui`, `import win32ui`, `from PIL import Image`, or `from ctypes import wintypes` inside any function body
+- [x] Module-level sentinel block (`_win32gui = _win32ui = _PilImage = _wintypes = None` + `try:` block) present after `from .config import CONFIG_DIR`
+- [x] `_extract_windows_icon` opens its `try:` block with the `if _win32gui is None: return False` guard
+- [x] All `win32gui.`, `win32ui.`, `Image.`, `wintypes.` references in `_extract_windows_icon` updated to `_win32gui.`, `_win32ui.`, `_PilImage.`, `_wintypes.`
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py tests/test_web.py` passes with no new failures
 - [ ] [manual] PowerAtlas restarts cleanly (tray → Restart), browser opens dashboard, `crash.log` has no new entry — requires a real restart, cannot be automated
+
+**Implementation (2026-08-21, code: 5310bd9 + fixes afa5af7 + 484cebb)**
+Module-level sentinel block added. `import ctypes` moved inside `if sys.platform == "win32": try:` alongside win32 imports; PIL imported unconditionally in its own `try/except` block before the platform guard (matching plan design decision). Five lazy imports removed from `_extract_windows_icon`; `if _win32gui is None: return False` guard added at entry. All `win32gui.`/`win32ui.`/`Image.`/`wintypes.` references replaced with `_win32gui.`/`_win32ui.`/`_PilImage.`/`_wintypes.`. Lazy `import re as _re` removed from `_resolve_cmd_to_exe`. GDI handle cleanup split into nested `try/finally` to ensure both `DeleteObject` calls run. Two sentinel tests added with real `.exe` files to reach the guard. `plans/tests/260701_POWERATLAS.md` §4.2 updated: H9 resolved, sentinel probe added. 1553 tests pass.
 
 ### Phase 2: Make event-loop call sites non-blocking in `web.py` [QA]
 
@@ -267,6 +270,24 @@ node tests/acp_page.test.mjs
 2. **Add `log.warning` or observability for other blocking calls in `web.py` routes.** `save_config` and other disk IO remain on the event loop in `launcher_create`/`launcher_update`. Pre-existing; out of scope. Source: Architect review finding #7.
 
 ## Review Log
+
+### 2026-08-21 — Implementation Review (after Phase 1, persona: Security auditor, Reliability engineer, Maintainability reviewer, Senior engineer — high effort)
+
+Implementation health: Green.
+8 findings (0 High, 2 Medium, 6 Low). All fixed across 2 auto-fix cycles.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| R1 | Medium | `_PilImage` inside `if sys.platform == "win32":` block contradicts plan decision (no platform guard needed for PIL). | Fixed — moved to its own `try/except` block before the platform guard. |
+| R2 | Medium | No test exercises the `_win32gui is None` guard; crash fix has zero automated coverage. | Fixed — `TestExtractIconSentinelGuard` added with real `.exe` file to reach the guard. |
+| R3 | Low | `_resolve_cmd_to_exe` still has lazy `import re as _re` shadowing module-level `re`. | Fixed — removed lazy import; uses module-level `re` directly. |
+| R4 | Low | `import ctypes` unconditional at module level; could be moved inside platform block. | Fixed — moved inside `if sys.platform == "win32": try:`. |
+| R5 | Low | Comment cited `acp.py:94-107` without noting structural difference (acp.py has no platform guard). | Fixed — comment updated to note the structural difference. |
+| R6 | Low | `plans/tests/260701_POWERATLAS.md` §4.2 describes H9 as open GDI leak; `finally` blocks close it. | Fixed — §4.2 updated to mark H9 resolved; sentinel probe added. |
+| R7 | Low | `hbm_color` handle leaks if `DeleteObject(hbm_mask)` raises in the `finally` block (pre-existing). | Fixed — split into nested `try/finally` ensuring both deletes run. |
+| R8 | Low | No `log.warning` on pywin32 import failure, unlike `acp.py` pattern. | User: accepted — deferred to Follow-up Work #1 (requires module logger). |
+
+Cycle-2 finding (vacuous sentinel tests): Fixed — tests now create a real `.exe` file so `_resolve_binary` returns it and `_extract_windows_icon` is actually reached.
 
 ### 2026-08-21 — Plan Creation (via /qplan)
 
