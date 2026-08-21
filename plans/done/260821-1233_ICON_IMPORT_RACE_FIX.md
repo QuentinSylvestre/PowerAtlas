@@ -2,9 +2,31 @@
 
 > **Date**: 2026-08-21
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-08-21 12:30
 > **Scope**: Fix native C-extension import race in `icons.py` that crashes PowerAtlas on boot
 > **Estimated effort**: 1–2 hours
+
+## Completion Summary
+
+The boot-time `Windows fatal exception: access violation` crash is fixed and verified. PowerAtlas
+restarted cleanly on 2026-08-21 12:14 (pids 38924 + 21320) with no new `crash.log` entry.
+
+**What shipped:**
+- `icons.py` — module-level sentinels for all 5 win32/PIL/ctypes names; `_win32gui` and
+  `_PilImage` null-guards in `_extract_windows_icon`; outer `try/except` in `extract_icon`;
+  GDI handles in nested `try/finally`; path-traversal guard in `icon_path`.
+- `web.py` — both blocking `extract_icon` calls wrapped in `await asyncio.to_thread(...)`.
+- Tests — 4 traversal-guard tests, 2 sentinel-guard tests, `test_launcher_update`, mock
+  assertion in `test_launcher_create`. 1558 tests pass.
+- `plans/tests/260701_POWERATLAS.md` §4.2 updated: H9 resolved, sentinel probe added.
+
+### Acknowledged at archival
+
+- Follow-up plan intended: **Add `log.warning` on pywin32 import failure in `icons.py`** —
+  icons.py has no module logger; adding one is a scope expansion. (Source: review F-I / Follow-up #1)
+- Follow-up plan intended: **Add observability for remaining blocking calls in `web.py` routes**
+  — `save_config` and other disk IO remain on the event loop in `launcher_create`/`launcher_update`.
+  Pre-existing, low priority. (Source: review P2-5 / Follow-up #2)
 
 ---
 
@@ -184,7 +206,7 @@ runtime GDI/PIL errors.
 - [x] `_extract_windows_icon` opens its `try:` block with the `if _win32gui is None: return False` guard
 - [x] All `win32gui.`, `win32ui.`, `Image.`, `wintypes.` references in `_extract_windows_icon` updated to `_win32gui.`, `_win32ui.`, `_PilImage.`, `_wintypes.`
 - [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py tests/test_web.py` passes with no new failures
-- [ ] [manual] PowerAtlas restarts cleanly (tray → Restart), browser opens dashboard, `crash.log` has no new entry — requires a real restart, cannot be automated
+- [x] [manual] PowerAtlas restarts cleanly (tray → Restart), browser opens dashboard, `crash.log` has no new entry — verified 2026-08-21 12:14, pids 38924 + 21320 both clean
 
 **Implementation (2026-08-21, code: 5310bd9 + fixes afa5af7 + 484cebb)**
 Module-level sentinel block added. `import ctypes` moved inside `if sys.platform == "win32": try:` alongside win32 imports; PIL imported unconditionally in its own `try/except` block before the platform guard (matching plan design decision). Five lazy imports removed from `_extract_windows_icon`; `if _win32gui is None: return False` guard added at entry. All `win32gui.`/`win32ui.`/`Image.`/`wintypes.` references replaced with `_win32gui.`/`_win32ui.`/`_PilImage.`/`_wintypes.`. Lazy `import re as _re` removed from `_resolve_cmd_to_exe`. GDI handle cleanup split into nested `try/finally` to ensure both `DeleteObject` calls run. Two sentinel tests added with real `.exe` files to reach the guard. `plans/tests/260701_POWERATLAS.md` §4.2 updated: H9 resolved, sentinel probe added. 1553 tests pass.
@@ -292,7 +314,7 @@ QA verification: PASS (2 surfaces: library + API, 12 probes, 4 state-dependent).
 |---|---|---|---|
 | F1 | Medium | `_extract_windows_icon` had no `_PilImage is None` guard; broken Pillow reaches `_PilImage.frombuffer`. | Fixed — `if _PilImage is None: return False` added after `_win32gui` guard. |
 | F2 | Medium | Second sentinel test patched `_win32gui=None` so PIL path was never reached — misleading name, illusory coverage. | Fixed — `_win32gui` patched to `MagicMock()` so PIL guard fires; test renamed conceptually. |
-| F3 | Medium | `icon_path(launcher_id)` has no parent-dir check; crafted `launcher_id` with `../` could escape ICONS_DIR. | Escalated — pre-existing, out of scope for this plan. Recommend follow-up plan to add path traversal guard. |
+| F3 | Medium | `icon_path(launcher_id)` has no parent-dir check; crafted `launcher_id` with `../` could escape ICONS_DIR. | Fixed — `.resolve(strict=False)` parent check added to `icon_path`; `remove_icon` catches `ValueError` silently; 4 traversal-guard tests added (commit 1dddd7c). |
 | F4 | Low | `ctypes` not aliased as `_ctypes`, inconsistent with other sentinel names. | Fixed — `import ctypes as _ctypes`; function body updated to `_ctypes.WinDLL` / `_ctypes.c_uint`. |
 | F5 | Low | `launcher_update` awaits `to_thread` before `save_config`; `launcher_create` saves first — ordering inconsistency. | User: accepted — pre-existing ordering; `extract_icon` never raises (outer except). |
 | F6 | Low | §4.2 probes missing `_PilImage is None` probe and `to_thread` context. | Fixed — `plans/tests/260701_POWERATLAS.md` §4.2 updated. |
