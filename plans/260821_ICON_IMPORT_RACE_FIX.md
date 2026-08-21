@@ -1,8 +1,10 @@
 # Icon Extraction Boot-Time Crash Fix
 
 > **Date**: 2026-08-21
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix native C-extension import race in `icons.py` that crashes PowerAtlas on boot
+> **Estimated effort**: 1–2 hours
 
 ---
 
@@ -39,7 +41,7 @@ two blocking event-loop call sites are made non-blocking.
    in `acp.py:101–105`.
 5. The two synchronous `extract_icon` calls in `web.py` (lines 5110, 5124) are wrapped in
    `await asyncio.to_thread(...)`.
-6. Existing tests pass without modification.
+6. `test_launcher_create` asserts the icon extraction mock was called with the correct arguments. `test_launcher_update` exists and covers the `to_thread` call.
 
 ### Scope boundaries & non-goals
 
@@ -48,8 +50,7 @@ two blocking event-loop call sites are made non-blocking.
   with `try/except` / `None` sentinel guard pattern.
 - `src/power_atlas/web.py`: wrap the two synchronous `extract_icon` calls (lines 5110, 5124)
   in `await asyncio.to_thread(...)`.
-- Update existing tests in `tests/test_web.py` / `tests/test_launcher.py` if signatures or
-  behavior change.
+- Update and add tests in `tests/test_web.py`: add mock assertion to `test_launcher_create`, add `test_launcher_update`.
 
 **Not in scope:**
 - Adding a test file for parallel icon extraction (no new test files unless the user requests one).
@@ -70,141 +71,220 @@ two blocking event-loop call sites are made non-blocking.
 
 ---
 
-## Exploration Discovery
+## Context
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
+PowerAtlas crashes silently at every login-startup. The browser fires 3-4 simultaneous
+`GET /api/launcher-icon/provider--X` requests on dashboard open; each dispatches via
+`asyncio.to_thread(icons.extract_icon, ...)`. Multiple worker threads race to first-load
+`win32gui`, `win32ui`, and `PIL.Image` — native C-extension modules imported lazily inside
+`_extract_windows_icon` (`icons.py`, inside function body). CPython's C-extension loader
+access-violates mid-`PyInit`, killing the process before any `except` can fire
+(`crash.log` 2026-08-21 09:09:39, pid 4048). The established fix pattern — `try: import ...; except Exception: sentinel = None` at module level — already exists in `acp.py:101–105`
+for the analogous `win32api`/`win32con`/`win32job` case.
 
-### 4. Existing patterns & constraints
+Secondary: `web.py:5110` and `web.py:5124` call `extract_icon` directly on the asyncio event
+loop (blocking IO on a launcher-create/update request). These are not crash sites but are
+incorrect for an async handler.
 
-- **`try/except` module-level win32 import pattern** (`acp.py:101–105`): the established precedent
-  for conditional pywin32 imports. `import win32api; import win32con; import win32job` wrapped in
-  `try: ... except Exception as _e: win32api = win32con = win32job = None`. Callers guard with
-  `if win32job is None: ...`.
-- **`icons.py` module-level imports** (`icons.py:8–13`): only stdlib (`re`, `shutil`, `sys`,
-  `pathlib.Path`) and one local import (`config.CONFIG_DIR`). No win32 or PIL imports.
-- **Platform guard is separate** (`icons.py:55–57`): `sys.platform == "win32"` is checked in
-  `extract_icon` before calling `_extract_windows_icon`. The lazy imports serve no platform-guard
-  purpose — safe to move up.
-- **`ctypes` already loaded** (`__main__.py:4`): `import ctypes` at the entry-point module level.
-  The `from ctypes import wintypes` inside `_extract_windows_icon` is always a cache hit; it is
-  not part of the race and can stay in place (or be moved — no impact).
-- **`asyncio.to_thread` executor** (`web.py:5156`): uses Python's default loop executor
-  (no `set_default_executor` anywhere in the codebase). Default `ThreadPoolExecutor` creates up
-  to `min(32, cpu_count+4)` threads [unverified] — sufficient to run all provider icon extractions
-  simultaneously, which is what triggers the race.
-- **`icons` imported at `web.py:41`** (module level): `from . import autostart, data, icons, ...`.
-  This is executed when `__main__.py` does `from .web import ..., app` — before `server_thread.start()`.
-  Module-level win32 imports in `icons.py` will always complete before the server accepts its first
-  request.
-- **`tray.py` PIL import** (`tray.py:12`): `from PIL import Image, ImageDraw` at module level,
-  but `tray.py` is imported inside `_run_foreground` after `ready_event.wait()` — PIL is cold at
-  first browser request. PIL must be included in the module-level fix in `icons.py`.
-- **Pillow is an unconditional dependency** (`pyproject.toml:14`): no platform guard needed for
-  `PIL.Image`.
-- **pywin32 is a Windows-conditional dependency** (`pyproject.toml:15`,
-  `"pywin32>=306; sys_platform == 'win32'"`): will always be installed on Windows, but the
-  `try/except` guard is still correct — it protects against broken installs (pywin32 not registered
-  after install) and matches the codebase's defensive pattern.
-- **`extract_icon` call sites** (all in `web.py`):
-  - `web.py:5110` — `launcher_create` route, blocking call on event loop (no `await to_thread`)
-  - `web.py:5124` — `launcher_update` route, blocking call on event loop (no `await to_thread`)
-  - `web.py:5156` — `launcher_icon` GET route, already uses `await asyncio.to_thread` (crash site)
-- **Return values discarded at all three call sites** — no caller inspects the bool return.
-- **Test isolation**: `@patch("power_atlas.web.icons.extract_icon")` is the existing patch target
-  (`test_web.py:810`). Wrapping the two sync calls in `to_thread` changes them to coroutines —
-  existing tests mock the function entirely so they are unaffected, but any test asserting
-  synchronous call behavior would need updating. No such test exists.
-- **`acp_page.test.mjs`**: covers inline template JS only — no Python route behavior. Unaffected.
+## Files to modify
 
-### 5. Risks & mitigations
+| File | Change |
+|---|---|
+| `src/power_atlas/icons.py` | Move `win32gui`, `win32ui`, `PIL.Image` imports to module level with `try/except`/`None` sentinel; guard `_extract_windows_icon` entry; remove lazy import lines inside function |
+| `src/power_atlas/web.py` | Wrap `extract_icon` calls at lines 5110 and 5124 with `await asyncio.to_thread(...)` |
 
-- **R1 (Low): `win32gui`/`win32ui` import failure at module level crashes `icons.py` import**
-  Mitigation: use `try/except Exception` with `None` sentinels (matching `acp.py` pattern).
-  Guard `_extract_windows_icon` with `if win32gui is None: return False` at the top.
-- **R2 (Low): `PIL.Image` moved to module level causes Linux import failure**
-  Non-issue: PIL/Pillow is an unconditional `pyproject.toml` dependency — available on all
-  platforms. The `from PIL import Image` is already safe at module level.
-- **R3 (Low): wrapping sync calls in `to_thread` breaks existing tests**
-  Sub-agents confirmed: all three `extract_icon` tests mock the function entirely via
-  `@patch("power_atlas.web.icons.extract_icon")`. The mock works regardless of whether the
-  call is sync or async. No test exercises the actual function.
-- **R4 (Medium): `await asyncio.to_thread` in `launcher_create`/`launcher_update` changes
-  response timing — any test asserting synchronous completion order**
-  No such test found. The routes are already `async def` — `await` is syntactically valid.
-- **R5 (Resolved): lazy imports served as platform guard**
-  Confirmed not the case — `sys.platform == "win32"` check is separate and prior to the
-  `_extract_windows_icon` call.
+## External Dependencies
 
-### 6. Resolved decisions
+None. Code-only change. No infra, no migrations, no third-party service changes.
 
-- Q1: Fix approach — module-level imports with `try/except`/`None` sentinels vs threading.Lock
-  — A: Option A (module-level with try/except) — Decision: move `win32gui`, `win32ui`,
-  `PIL.Image` imports to module level in `icons.py` using the `try/except` / `None` sentinel
-  pattern matching `acp.py:101–105`; guard `_extract_windows_icon` entry with
-  `if win32gui is None: return False`.
-- Q2: Fix the two synchronous blocking `extract_icon` calls in event-loop route handlers
-  — A: yes — Decision: wrap `web.py:5110` and `web.py:5124` with `await asyncio.to_thread(...)`.
+## Rollout / Migration / Cleanup
 
-### 7. Open items
+None. The fix takes effect on next PowerAtlas restart. No data migration, no config changes.
 
-None. All decisions resolved.
+## Design Decisions
 
-### 8. Recommended approach
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Import-safety mechanism | Module-level `try/except` with `None` sentinel | `threading.Lock` + lazy import; no change | Matches `acp.py:101–105` precedent; simpler; eliminates race completely; handles broken pywin32 installs gracefully |
+| `PIL.Image` scope | Module-level (no platform guard) | Windows-only via `sys.platform` block | PIL/Pillow is unconditional `pyproject.toml` dep — available on all platforms; no guard needed |
+| Event-loop call sites | Wrap in `await asyncio.to_thread` | Leave as blocking calls | Already wrong; fix while in the area; routes are `async def` so `await` is valid |
+| Log warning on import failure | Not added | Add `log.warning(...)` matching `acp.py:106` | `icons.py` has no module logger; adding one is a scope expansion. Deferred to follow-up. |
+| Write-write race for same launcher_id | Acknowledged, not fixed | Add per-id lock | Two concurrent creates/edits for the same launcher produce last-writer-wins PNG overwrite — benign (identical source data). Not a crash risk. Fixing requires a per-id lock, disproportionate to the risk. |
 
-**Phase 1 — `icons.py` import fix (crash fix, primary)**
+## Step-by-step
 
-At the top of `icons.py`, after the stdlib imports, add:
+### Phase 1: Move imports to module level in `icons.py` [QA]
+
+**File scope**: `src/power_atlas/icons.py`
+
+After the existing stdlib imports (after `from .config import CONFIG_DIR`, `icons.py:13`), add:
 
 ```python
+# Module-level import of win32/PIL so concurrent threads cannot race the
+# first-ever C-extension load (the crash mechanism: multiple asyncio.to_thread
+# calls hitting _extract_windows_icon simultaneously at cold boot).
+# Pattern matches acp.py:101-105. Pre-assign before try: so a partial-load
+# (win32gui succeeds, win32ui raises) still leaves all sentinels None.
+_win32gui = _win32ui = _PilImage = None
 if sys.platform == "win32":
     try:
         import win32gui as _win32gui
         import win32ui as _win32ui
         from PIL import Image as _PilImage
-    except Exception:
-        _win32gui = _win32ui = _PilImage = None
-else:
-    _win32gui = _win32ui = _PilImage = None
+        from ctypes import wintypes as _wintypes
+    except Exception:  # pragma: no cover - broken pywin32 install
+        _win32gui = _win32ui = _PilImage = _wintypes = None
 ```
 
-In `_extract_windows_icon`, replace the lazy import block with a guard:
+> **Rejected**: placing the `try:` block inside an `if sys.platform == "win32":` with a bare
+> `else: _win32gui = ... = None` AFTER — this form fails if `win32gui` loads but `win32ui`
+> raises: `_win32gui` is non-None, `_win32ui` is unbound. **Use instead**: pre-assign all
+> sentinels to `None` on one line before the `try:` block (shown above).
+
+Also move `from ctypes import wintypes` into the module-level `try:` block above. `wintypes`
+is a submodule of `ctypes`, not pulled in by the plain `import ctypes` at `__main__.py:4`.
+Moving it avoids a redundant per-call import inside the function.
+
+Inside `_extract_windows_icon`, immediately at the top of the `try:` block, **replace** all
+five lazy import lines **and** the wintypes usage:
 
 ```python
+# REMOVE these five lines entirely:
+import ctypes
+from ctypes import wintypes
+import win32gui
+import win32ui
+from PIL import Image
+```
+
+Add a guard at the top of the `try:` block:
+
+```python
+# ADD: sentinel guard — use module-level names directly
 if _win32gui is None:
     return False
-# use _win32gui, _win32ui, _PilImage directly (remove the import lines)
 ```
+
+Then replace every use of `win32gui`, `win32ui`, `Image`, and `wintypes` in the function body
+with `_win32gui`, `_win32ui`, `_PilImage`, and `_wintypes` respectively. No local aliases needed
+— use the module-level names directly.
+
+> **Rejected**: local alias lines `win32gui = _win32gui; win32ui = _win32ui; Image = _PilImage`
+> inside the function. **Use instead**: reference `_win32gui`, `_win32ui`, `_PilImage`,
+> `_wintypes` directly throughout the function body (removes one layer of indirection and keeps
+> the module-level sentinel names visible to readers). The `ctypes.WinDLL`, `wintypes.HANDLE`,
+> `wintypes.c_uint` references become `ctypes.WinDLL`, `_wintypes.HANDLE`, `_wintypes.c_uint`.
 
 The existing `except Exception: return False` at the function level remains as a safety net for
-runtime errors (GDI failures, bad PE headers, etc.).
+runtime GDI/PIL errors.
 
-**Phase 2 — `web.py` non-blocking call sites**
+**Exit criteria**:
+- [ ] `src/power_atlas/icons.py` has no `import win32gui`, `import win32ui`, `from PIL import Image`, or `from ctypes import wintypes` inside any function body
+- [ ] Module-level sentinel block (`_win32gui = _win32ui = _PilImage = _wintypes = None` + `try:` block) present after `from .config import CONFIG_DIR`
+- [ ] `_extract_windows_icon` opens its `try:` block with the `if _win32gui is None: return False` guard
+- [ ] All `win32gui.`, `win32ui.`, `Image.`, `wintypes.` references in `_extract_windows_icon` updated to `_win32gui.`, `_win32ui.`, `_PilImage.`, `_wintypes.`
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_launcher.py tests/test_web.py` passes with no new failures
+- [ ] [manual] PowerAtlas restarts cleanly (tray → Restart), browser opens dashboard, `crash.log` has no new entry — requires a real restart, cannot be automated
 
-Change `web.py:5110` from:
+### Phase 2: Make event-loop call sites non-blocking in `web.py` [QA]
+
+**File scope**: `src/power_atlas/web.py`
+
+Locate the two synchronous calls (search by the surrounding context, not by line number — lines
+drift):
+
+**Call site 1** — inside `launcher_create`, after `save_config(config)`:
 ```python
+# BEFORE (blocking on event loop):
 icons.extract_icon(entry["id"], entry["command"], entry["terminal"])
 ```
-to:
 ```python
+# AFTER:
 await asyncio.to_thread(icons.extract_icon, entry["id"], entry["command"], entry["terminal"])
 ```
 
-Same change at `web.py:5124`.
+**Call site 2** — inside `launcher_update`, after the `for` loop updates the entry and before
+`save_config`:
+```python
+# BEFORE (blocking on event loop):
+icons.extract_icon(lid, entry.get("command", ""), entry.get("terminal", True))
+```
+```python
+# AFTER:
+await asyncio.to_thread(icons.extract_icon, lid, entry.get("command", ""), entry.get("terminal", True))
+```
 
-**Test updates**: run `pytest` after each phase. No new test files. If any existing test
-unexpectedly fails due to the `to_thread` wrapping, update the test's async mock setup.
+Both routes are `async def` so `await` is syntactically valid. The `asyncio` module is already
+imported at `web.py`'s module level — no new import needed.
 
-### 9. QA environment
+**Test updates (same file `tests/test_web.py`)**:
 
-- **Start PowerAtlas**: `.venv-PowerAtlas\Scripts\power-atlas` from the repo root, or restart
-  via the tray icon.
-- **Boot-crash verification**: restart PowerAtlas cleanly (tray → Restart), open the dashboard
-  in a browser, check `crash.log` for a new entry.
-- **Visual regression**: provider icons (kiro-cli, claude-code, kiro-ide) and custom launcher
-  icons should render in the dashboard after restart.
-- **Test suite**: `.venv-PowerAtlas\Scripts\python -m pytest` — should pass without new failures.
-- **Template test**: `node tests/acp_page.test.mjs` — unaffected (no template changes), but run
-  to confirm.
-- **Cannot reproduce the exact cold-boot race in a test** — the crash requires a real cold-boot
-  with the browser opening the dashboard simultaneously. Manual restart + browser open is the
-  verification path for the crash fix itself.
+1. In `test_launcher_create` — add a mock-call assertion after the route call:
+   ```python
+   mock_extract.assert_called_once_with(<expected_id>, <expected_command>, <expected_terminal>)
+   ```
+   Check existing test for the exact entry dict values to use.
+
+2. Add `test_launcher_update` parallel to `test_launcher_create`:
+   - Patch `power_atlas.web.icons.extract_icon` and `power_atlas.web.save_config`
+   - POST to `/api/launcher/update` with a valid `id` matching a config entry and updated fields
+   - Assert response 200 and `mock_extract.assert_called_once_with(lid, updated_command, updated_terminal)`
+
+   > `launcher_update` currently has zero test coverage — this plan touches it, so the test
+   > must be added here. No new test file needed; add to `test_web.py`.
+
+**Exit criteria**:
+- [ ] Neither `icons.extract_icon(...)` call in `web.py` is bare (both are `await asyncio.to_thread(...)`)
+- [ ] `test_launcher_create` asserts `mock_extract.assert_called_once_with(...)` with correct args
+- [ ] `test_launcher_update` added to `tests/test_web.py`, covers the `to_thread` call with mock assertion
+- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py` passes with no new failures
+- [ ] `node tests/acp_page.test.mjs` passes (template JS unaffected — confirm no regression)
+
+## Verification
+
+```
+# Full test suite
+.venv-PowerAtlas\Scripts\python -m pytest
+
+# Template test
+node tests/acp_page.test.mjs
+
+# Manual: PowerAtlas restart + dashboard open
+# Tray icon → Restart (or kill + relaunch), open browser, check crash.log for new entry
+# Verify provider icons render in dashboard
+# Verify creating/editing a custom launcher still extracts + caches the icon
+```
+
+## Documentation updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `plans/tests/260701_POWERATLAS.md` § 4.2 | Note `_extract_windows_icon` now has an explicit `_win32gui is None` guard at entry; import errors now surface via sentinel, not the broad `except`. Separately verify whether the existing `finally` blocks (`DeleteObject`/`DestroyIcon`) already close H9 (GDI handle leak) — if so, update that note to "resolved"; if not, leave H9 open and note it is out of scope for this fix. | 1 |
+
+## Follow-up Work (Deferred)
+
+1. **Add `log.warning` on pywin32 import failure in `icons.py`.** `acp.py:106` logs `log.warning("pywin32 unavailable - ...")` when its sentinel is set. `icons.py` has no module logger and adding one is out of scope for this fix. Source: review finding F-I.
+2. **Add `log.warning` or observability for other blocking calls in `web.py` routes.** `save_config` and other disk IO remain on the event loop in `launcher_create`/`launcher_update`. Pre-existing; out of scope. Source: Architect review finding #7.
+
+## Review Log
+
+### 2026-08-21 — Plan Creation (via /qplan)
+
+10 findings (0 High, 4 Medium, 6 Low). 8 auto-resolved.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F-A | Medium | `launcher_update` route has zero test coverage; SC-3 (edit path) vacuously satisfied | Fixed — `test_launcher_update` added to Phase 2 exit criteria |
+| F-B | Medium | `launcher_update` calls `extract_icon` before `save_config`; after `to_thread`, propagated exception skips config save | Fixed — `extract_icon` catches all exceptions internally (`except Exception: return False`); documented as design decision + deferred follow-up; pattern is safe though fragile |
+| F-C | Medium | `test_launcher_create` has no mock-call assertion; wrong-args or dropped call undetected | Fixed — mock assertion added to Phase 2 exit criteria |
+| F-D | Medium | `from ctypes import wintypes` stays inside function body; `wintypes` is a submodule not pulled in by `import ctypes` | Fixed — `from ctypes import wintypes` moved into module-level `try:` block as `_wintypes` |
+| F-E | Medium | Partial-load sentinel gap: if `win32gui` loads but `win32ui` raises, `_win32gui is None` guard misses it | Fixed — pre-assignment `_win32gui = _win32ui = _PilImage = _wintypes = None` before `try:` block |
+| F-F | Low | Local alias lines inside function are unnecessary indirection | Fixed — plan updated to use `_win32gui` etc. directly, with Rejected entry |
+| F-G | Low | Phase 1 crash.log exit criterion cannot be automated; implies it can be ticked without restart | Fixed — marked `[manual]` in Phase 1 exit criteria |
+| F-H | Low | H9 doc update conflated sentinel guard with GDI handle leak | Fixed — doc update row clarified to separately assess H9 via `finally` blocks |
+| F-I | Low | No `log.warning` on pywin32 import failure, unlike `acp.py` pattern | Escalated — deferred to Follow-up Work #1; requires adding a module logger |
+| F-J | Low | Write-write race for same launcher_id survives (last-writer-wins, identical bytes) | Escalated — acknowledged in Design Decisions; not fixed (benign, disproportionate to fix) |
+
+## Harness Improvement Opportunities
+
+<Reserved>
