@@ -1045,6 +1045,32 @@ class TestSanitizeTitleExtended:
         assert _sanitize_title("it's") == "its"
 
 
+class TestIconPathTraversalGuard:
+    """SC23: icon_path rejects launcher_ids that escape ICONS_DIR."""
+
+    def test_valid_id_returns_path(self):
+        from power_atlas.icons import icon_path
+        p = icon_path("abc-123")
+        assert p.name == "abc-123.png"
+
+    def test_dotdot_raises(self):
+        import pytest
+        from power_atlas.icons import icon_path
+        with pytest.raises(ValueError, match="Invalid launcher_id"):
+            icon_path("../../etc/passwd")
+
+    def test_absolute_path_raises(self):
+        import pytest
+        from power_atlas.icons import icon_path
+        with pytest.raises(ValueError, match="Invalid launcher_id"):
+            icon_path("/etc/passwd")
+
+    def test_remove_icon_ignores_traversal(self):
+        from power_atlas.icons import remove_icon
+        # Should not raise even with a crafted id
+        remove_icon("../../etc/shadow")
+
+
 class TestDefaultIconSvgColorValidation:
     """SC20: invalid color strings must not be injected into SVG."""
 

@@ -54,8 +54,14 @@ _APP_ICON = (
 
 
 def icon_path(launcher_id: str) -> Path:
-    """Return the expected icon file path for a launcher."""
-    return ICONS_DIR / f"{launcher_id}.png"
+    """Return the expected icon file path for a launcher.
+
+    Raises ValueError if the resolved path escapes ICONS_DIR (path traversal guard).
+    """
+    p = ICONS_DIR / f"{launcher_id}.png"
+    if p.resolve(strict=False).parent != ICONS_DIR.resolve(strict=False):
+        raise ValueError(f"Invalid launcher_id: {launcher_id!r}")
+    return p
 
 
 def has_icon(launcher_id: str) -> bool:
@@ -92,7 +98,10 @@ def extract_icon(launcher_id: str, command: str, is_terminal: bool) -> bool:
 
 def remove_icon(launcher_id: str) -> None:
     """Remove the cached icon for a deleted launcher."""
-    icon_path(launcher_id).unlink(missing_ok=True)
+    try:
+        icon_path(launcher_id).unlink(missing_ok=True)
+    except (ValueError, OSError):
+        pass
 
 
 def default_icon_svg(is_terminal: bool, color: str = "") -> str:
