@@ -67,23 +67,27 @@ def extract_icon(launcher_id: str, command: str, is_terminal: bool) -> bool:
     """Extract icon from binary and save as PNG.
 
     Returns True if a real icon was extracted, False if falling back to default.
+    Always returns False on any exception (including filesystem errors), never raises.
     """
-    ICONS_DIR.mkdir(parents=True, exist_ok=True)
-    target = icon_path(launcher_id)
+    try:
+        ICONS_DIR.mkdir(parents=True, exist_ok=True)
+        target = icon_path(launcher_id)
 
-    # Resolve the binary path (first token of command)
-    binary = _resolve_binary(command)
-    if binary and binary.suffix.lower() in (".cmd", ".bat"):
-        resolved = _resolve_cmd_to_exe(binary)
-        if resolved:
-            binary = resolved
-    if binary and binary.suffix.lower() in (".exe", ".msi") and sys.platform == "win32":
-        if _extract_windows_icon(binary, target):
-            return True
+        # Resolve the binary path (first token of command)
+        binary = _resolve_binary(command)
+        if binary and binary.suffix.lower() in (".cmd", ".bat"):
+            resolved = _resolve_cmd_to_exe(binary)
+            if resolved:
+                binary = resolved
+        if binary and binary.suffix.lower() in (".exe", ".msi") and sys.platform == "win32":
+            if _extract_windows_icon(binary, target):
+                return True
 
-    # No extraction possible — remove any stale icon so fallback is used
-    target.unlink(missing_ok=True)
-    return False
+        # No extraction possible — remove any stale icon so fallback is used
+        target.unlink(missing_ok=True)
+        return False
+    except Exception:
+        return False
 
 
 def remove_icon(launcher_id: str) -> None:

@@ -853,6 +853,7 @@ def test_launcher_update(mock_load, mock_save, mock_extract, client):
     assert resp.status_code == 200
     assert "updated" in resp.text.lower()
     mock_extract.assert_called_once_with("abc", "new-cmd", True)
+    mock_save.assert_called_once()
 
 
 @patch("power_atlas.web.launcher.launch_custom")
