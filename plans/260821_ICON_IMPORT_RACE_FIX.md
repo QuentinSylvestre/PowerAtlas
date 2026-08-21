@@ -1,7 +1,7 @@
 # Icon Extraction Boot-Time Crash Fix
 
 > **Date**: 2026-08-21
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Fix native C-extension import race in `icons.py` that crashes PowerAtlas on boot
 > **Estimated effort**: 1–2 hours
@@ -273,6 +273,31 @@ node tests/acp_page.test.mjs
 2. **Add `log.warning` or observability for other blocking calls in `web.py` routes.** `save_config` and other disk IO remain on the event loop in `launcher_create`/`launcher_update`. Pre-existing; out of scope. Source: Architect review finding #7.
 
 ## Review Log
+
+### 2026-08-21 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Security auditor, Reliability engineer, Maintainability reviewer, Senior engineer (high effort).
+8 findings (0 High, 3 Medium, 5 Low). Mediums fixed. One Medium escalated.
+QA verification: PASS (2 surfaces: library + API, 12 probes, 4 state-dependent).
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Move imports to module level | pass (1553) | PASS | Sentinel guard, OSError, non-.exe probes |
+| 2: Non-blocking event-loop calls | pass (1554) | PASS | API create/update routes probed happy-path + state-dependent |
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| F1 | Medium | `_extract_windows_icon` had no `_PilImage is None` guard; broken Pillow reaches `_PilImage.frombuffer`. | Fixed — `if _PilImage is None: return False` added after `_win32gui` guard. |
+| F2 | Medium | Second sentinel test patched `_win32gui=None` so PIL path was never reached — misleading name, illusory coverage. | Fixed — `_win32gui` patched to `MagicMock()` so PIL guard fires; test renamed conceptually. |
+| F3 | Medium | `icon_path(launcher_id)` has no parent-dir check; crafted `launcher_id` with `../` could escape ICONS_DIR. | Escalated — pre-existing, out of scope for this plan. Recommend follow-up plan to add path traversal guard. |
+| F4 | Low | `ctypes` not aliased as `_ctypes`, inconsistent with other sentinel names. | Fixed — `import ctypes as _ctypes`; function body updated to `_ctypes.WinDLL` / `_ctypes.c_uint`. |
+| F5 | Low | `launcher_update` awaits `to_thread` before `save_config`; `launcher_create` saves first — ordering inconsistency. | User: accepted — pre-existing ordering; `extract_icon` never raises (outer except). |
+| F6 | Low | §4.2 probes missing `_PilImage is None` probe and `to_thread` context. | Fixed — `plans/tests/260701_POWERATLAS.md` §4.2 updated. |
+| F7 | Low | `test_launcher_create` relied on route default for `terminal`; explicit value safer. | Fixed — `terminal: True` added to POST body. |
+| F8 | Low | DLL hijack via bare `user32.dll` name (pre-existing). | User: accepted — pre-existing, out of scope. |
 
 ### 2026-08-21 — Implementation Review (after Phase 2, persona: Reliability engineer, Senior engineer, Maintainability reviewer, Architect — high effort)
 
