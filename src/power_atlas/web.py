@@ -5107,7 +5107,7 @@ async def launcher_create(request: Request):
     }
     config.custom_launchers.append(entry)
     save_config(config)
-    icons.extract_icon(entry["id"], entry["command"], entry["terminal"])
+    await asyncio.to_thread(icons.extract_icon, entry["id"], entry["command"], entry["terminal"])
     return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher created", "level": "success"})
 
 
@@ -5121,7 +5121,7 @@ async def launcher_update(request: Request):
             for k in ("name", "command", "custom_args", "cwd", "env", "color", "terminal", "use_selected_workspaces", "show_in_workspace_hover"):
                 if k in body:
                     entry[k] = body[k]
-            icons.extract_icon(lid, entry.get("command", ""), entry.get("terminal", True))
+            await asyncio.to_thread(icons.extract_icon, lid, entry.get("command", ""), entry.get("terminal", True))
             break
     save_config(config)
     return templates.TemplateResponse(request, "partials/toast.html", {"message": "Launcher updated", "level": "success"})

@@ -811,6 +811,7 @@ def test_session_tail_invalid_sid(client):
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_launcher_create(mock_load, mock_save, mock_extract, client):
+    from unittest.mock import ANY
     from power_atlas.config import Config
     mock_load.return_value = Config()
     resp = client.post("/api/launcher/create", json={
@@ -822,6 +823,7 @@ def test_launcher_create(mock_load, mock_save, mock_extract, client):
     assert len(saved.custom_launchers) == 1
     assert saved.custom_launchers[0]["name"] == "Dev Server"
     assert saved.custom_launchers[0]["id"]  # UUID generated
+    mock_extract.assert_called_once_with(ANY, "npm", True)
 
 
 @patch("power_atlas.web.icons.remove_icon")
@@ -835,6 +837,22 @@ def test_launcher_delete(mock_load, mock_save, mock_remove_icon, client):
     assert "deleted" in resp.text.lower()
     saved = mock_save.call_args[0][0]
     assert len(saved.custom_launchers) == 0
+
+
+@patch("power_atlas.web.icons.extract_icon")
+@patch("power_atlas.web.save_config")
+@patch("power_atlas.web.load_config")
+def test_launcher_update(mock_load, mock_save, mock_extract, client):
+    from power_atlas.config import Config
+    mock_load.return_value = Config(custom_launchers=[{
+        "id": "abc", "name": "Old Name", "command": "old-cmd", "terminal": False,
+        "custom_args": "", "cwd": "", "env": {}, "color": "",
+        "use_selected_workspaces": False, "show_in_workspace_hover": False,
+    }])
+    resp = client.post("/api/launcher/update", json={"id": "abc", "command": "new-cmd", "terminal": True})
+    assert resp.status_code == 200
+    assert "updated" in resp.text.lower()
+    mock_extract.assert_called_once_with("abc", "new-cmd", True)
 
 
 @patch("power_atlas.web.launcher.launch_custom")
