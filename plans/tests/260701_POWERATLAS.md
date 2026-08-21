@@ -53,7 +53,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
   `-`, collapsing distinct real paths onto one folder key. (`data_claude.py:33-38`)
 - **H8 — `--restart` 0.5s race (Main, Low/Med).** Fixed sleep; if the old instance still holds the mutex,
   the new guard silently `exit(0)` and nothing restarts. (`__main__.py:319-326`)
-- **H9 — GDI handle leak (Icons, Low).** `hbm_mask`/`hbm_color` freed only on the success path. (`icons.py:140-188`)
+- **H9 — GDI handle leak (Icons, resolved 2026-08-21).** `hbm_mask`/`hbm_color` now freed via nested `try/finally` on all paths. (`icons.py`, plan `260821_ICON_IMPORT_RACE_FIX`)
 - **H10 — Cross-provider lexical sort (Data, Low/Med).** Kiro string timestamps vs Claude ISO-UTC compared
   lexically → mis-ordered workspace recency across providers. (`data.py:176`)
 
@@ -427,12 +427,12 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: PNG at `CONFIG_DIR/icons/<id>.png` on success; unlink on fail.
 - **risks**: failure not surfaced; provider icons never cleaned.
 
-### 4.2 Windows PE icon extraction (H9)
+### 4.2 Windows PE icon extraction
 - **what**: `_extract_windows_icon` via `PrivateExtractIconsW` at 48×48 → GetIconInfo → CreateBitmapFromHandle → PIL BGRA → PNG.
 - **how-to-reach**: `extract_icon` with an `.exe`/`.msi` on Windows.
-- **probes**: extract from a known exe (e.g. a terminal binary) → valid 48×48 PNG; Electron app with 256px icon; count==0 / null handle → False; **H9: GDI handle leak — hbm_mask/hbm_color freed only on success path**; broad `except` hides pywin32/PIL errors.
+- **probes**: `_win32gui is None` sentinel → `False` immediately (no win32 import); extract from a known exe (e.g. a terminal binary) → valid 48×48 PNG; Electron app with 256px icon; count==0 / null handle → False; GDI handle cleanup: `hbm_mask`/`hbm_color` freed via nested `try/finally` on all paths (H9 resolved — `finally` blocks ensure both `DeleteObject` calls run even if the first raises); broad `except` hides pywin32/PIL errors.
 - **oracle**: True + PNG on success; False on any failure.
-- **risks**: H9 handle leak; undocumented API; monochrome-icon unhandled.
+- **risks**: undocumented API; monochrome-icon unhandled.
 
 ### 4.3 `.cmd`/`.bat` shim + binary resolution
 - **what**: `_resolve_cmd_to_exe` (3 regex patterns, 64KB guard); `_resolve_binary` (whole-command / first-token / `shutil.which`).

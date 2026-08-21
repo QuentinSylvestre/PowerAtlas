@@ -5,7 +5,6 @@ as PNGs in CONFIG_DIR/icons/<launcher_id>.png. Falls back to bundled
 default icons (terminal for CLI tools, generic app for GUI).
 """
 
-import ctypes
 import re
 import shutil
 import sys
@@ -16,17 +15,25 @@ from .config import CONFIG_DIR
 # Module-level import of win32/PIL so concurrent threads cannot race the
 # first-ever C-extension load (the crash mechanism: multiple asyncio.to_thread
 # calls hitting _extract_windows_icon simultaneously at cold boot).
-# Pattern matches acp.py:94-107. Pre-assign before try: so a partial-load
-# (win32gui succeeds, win32ui raises) still leaves all sentinels None.
-_win32gui = _win32ui = _PilImage = _wintypes = None
+# Pattern matches acp.py:94-107 but adds a sys.platform guard for win32-only
+# extensions (ctypes/wintypes/win32gui/win32ui absent on Linux/macOS).
+# Pre-assign before try: so a partial-load (win32gui succeeds, win32ui raises)
+# still leaves all sentinels None.
+# PIL/Pillow is an unconditional pyproject.toml dep (available on all platforms).
+try:
+    from PIL import Image as _PilImage
+except Exception:  # pragma: no cover - broken Pillow install
+    _PilImage = None
+
+_win32gui = _win32ui = _wintypes = None
 if sys.platform == "win32":
     try:
+        import ctypes
         import win32gui as _win32gui
         import win32ui as _win32ui
-        from PIL import Image as _PilImage
         from ctypes import wintypes as _wintypes
     except Exception:  # pragma: no cover - broken pywin32 install
-        _win32gui = _win32ui = _PilImage = _wintypes = None
+        _win32gui = _win32ui = _wintypes = None
 
 ICONS_DIR = CONFIG_DIR / "icons"
 
@@ -101,8 +108,6 @@ def _resolve_cmd_to_exe(cmd_path: Path) -> Path | None:
       - "C:\\Absolute\\Path\\App.exe"
       - C:\\Absolute\\Path\\App.exe
     """
-    import re as _re
-
     try:
         if cmd_path.stat().st_size > 64_000:
             return None
@@ -114,20 +119,20 @@ def _resolve_cmd_to_exe(cmd_path: Path) -> Path | None:
 
     # Pattern 1: %~dp0-relative paths (Electron/scoop shim pattern)
     # Matches both quoted and unquoted: "%~dp0..\app.exe" or %~dp0..\app.exe
-    for match in _re.finditer(r'["\']?%~dp0([^"\s\r\n]+\.exe)["\']?', content, _re.IGNORECASE):
+    for match in re.finditer(r'["\']?%~dp0([^"\s\r\n]+\.exe)["\']?', content, re.IGNORECASE):
         rel = match.group(1).lstrip("\\/")
         candidate = (cmd_dir / rel).resolve()
         if candidate.is_file():
             return candidate
 
     # Pattern 2: Quoted absolute paths
-    for match in _re.finditer(r'"([A-Za-z]:\\[^"]+\.exe)"', content):
+    for match in re.finditer(r'"([A-Za-z]:\\[^"]+\.exe)"', content):
         candidate = Path(match.group(1))
         if candidate.is_file():
             return candidate
 
     # Pattern 3: Unquoted absolute paths
-    for match in _re.finditer(r'(?<!")([A-Za-z]:\\[^\s"]+\.exe)', content):
+    for match in re.finditer(r'(?<!")([A-Za-z]:\\[^\s"]+\.exe)', content):
         candidate = Path(match.group(1))
         if candidate.is_file():
             return candidate
@@ -205,8 +210,12 @@ def _extract_windows_icon(binary: Path, target: Path) -> bool:
                 img.save(str(target), "PNG")
                 return True
             finally:
-                _win32gui.DeleteObject(hbm_mask)
-                _win32gui.DeleteObject(hbm_color)
+                # Separate try/finally blocks ensure both handles are released
+                # even if the first DeleteObject raises.
+                try:
+                    _win32gui.DeleteObject(hbm_mask)
+                finally:
+                    _win32gui.DeleteObject(hbm_color)
         finally:
             _win32gui.DestroyIcon(hIcon[0])
 

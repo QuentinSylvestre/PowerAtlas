@@ -1234,3 +1234,22 @@ class TestLaunchTerminalErrors:
         result = launch_terminal("", launch_profile=LaunchProfile(terminal_command="C:\\wt.exe"))
         assert result.success is False
         assert "No directory" in result.error
+
+
+
+class TestExtractIconSentinelGuard:
+    """SC22: extract_icon returns False silently when win32 modules are unavailable."""
+
+    def test_returns_false_when_win32gui_sentinel_is_none(self, monkeypatch, tmp_path):
+        import power_atlas.icons as icons_mod
+        monkeypatch.setattr(icons_mod, "_win32gui", None)
+        result = icons_mod.extract_icon("test-id", str(tmp_path / "fake.exe"), False)
+        assert result is False
+
+    def test_returns_false_when_pil_sentinel_is_none(self, monkeypatch, tmp_path):
+        import power_atlas.icons as icons_mod
+        monkeypatch.setattr(icons_mod, "_PilImage", None)
+        # Even with PIL missing, the win32gui guard fires first; result is still False.
+        monkeypatch.setattr(icons_mod, "_win32gui", None)
+        result = icons_mod.extract_icon("test-id", str(tmp_path / "fake.exe"), False)
+        assert result is False
