@@ -5,12 +5,28 @@ as PNGs in CONFIG_DIR/icons/<launcher_id>.png. Falls back to bundled
 default icons (terminal for CLI tools, generic app for GUI).
 """
 
+import ctypes
 import re
 import shutil
 import sys
 from pathlib import Path
 
 from .config import CONFIG_DIR
+
+# Module-level import of win32/PIL so concurrent threads cannot race the
+# first-ever C-extension load (the crash mechanism: multiple asyncio.to_thread
+# calls hitting _extract_windows_icon simultaneously at cold boot).
+# Pattern matches acp.py:94-107. Pre-assign before try: so a partial-load
+# (win32gui succeeds, win32ui raises) still leaves all sentinels None.
+_win32gui = _win32ui = _PilImage = _wintypes = None
+if sys.platform == "win32":
+    try:
+        import win32gui as _win32gui
+        import win32ui as _win32ui
+        from PIL import Image as _PilImage
+        from ctypes import wintypes as _wintypes
+    except Exception:  # pragma: no cover - broken pywin32 install
+        _win32gui = _win32ui = _PilImage = _wintypes = None
 
 ICONS_DIR = CONFIG_DIR / "icons"
 
@@ -159,16 +175,13 @@ def _extract_windows_icon(binary: Path, target: Path) -> bool:
     icons that Electron apps embed).
     """
     try:
-        import ctypes
-        from ctypes import wintypes
-        import win32gui
-        import win32ui
-        from PIL import Image
+        if _win32gui is None:
+            return False
 
         ICON_SIZE = 48
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
-        hIcon = (wintypes.HANDLE * 1)()
+        hIcon = (_wintypes.HANDLE * 1)()
         iconId = (ctypes.c_uint * 1)()
         count = user32.PrivateExtractIconsW(
             str(binary), 0, ICON_SIZE, ICON_SIZE, hIcon, iconId, 1, 0
@@ -177,25 +190,25 @@ def _extract_windows_icon(binary: Path, target: Path) -> bool:
             return False
 
         try:
-            info = win32gui.GetIconInfo(hIcon[0])
+            info = _win32gui.GetIconInfo(hIcon[0])
             hbm_mask = info[3]
             hbm_color = info[4]
 
             try:
-                bmp = win32ui.CreateBitmapFromHandle(hbm_color)
+                bmp = _win32ui.CreateBitmapFromHandle(hbm_color)
                 bmp_info = bmp.GetInfo()
                 w = bmp_info["bmWidth"]
                 h = bmp_info["bmHeight"]
 
                 bmp_bits = bmp.GetBitmapBits(True)
-                img = Image.frombuffer("RGBA", (w, h), bmp_bits, "raw", "BGRA", 0, 1)
+                img = _PilImage.frombuffer("RGBA", (w, h), bmp_bits, "raw", "BGRA", 0, 1)
                 img.save(str(target), "PNG")
                 return True
             finally:
-                win32gui.DeleteObject(hbm_mask)
-                win32gui.DeleteObject(hbm_color)
+                _win32gui.DeleteObject(hbm_mask)
+                _win32gui.DeleteObject(hbm_color)
         finally:
-            win32gui.DestroyIcon(hIcon[0])
+            _win32gui.DestroyIcon(hIcon[0])
 
     except Exception:
         return False
