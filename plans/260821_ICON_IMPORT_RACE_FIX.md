@@ -237,11 +237,14 @@ imported at `web.py`'s module level — no new import needed.
    > must be added here. No new test file needed; add to `test_web.py`.
 
 **Exit criteria**:
-- [ ] Neither `icons.extract_icon(...)` call in `web.py` is bare (both are `await asyncio.to_thread(...)`)
-- [ ] `test_launcher_create` asserts `mock_extract.assert_called_once_with(...)` with correct args
-- [ ] `test_launcher_update` added to `tests/test_web.py`, covers the `to_thread` call with mock assertion
-- [ ] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py` passes with no new failures
-- [ ] `node tests/acp_page.test.mjs` passes (template JS unaffected — confirm no regression)
+- [x] Neither `icons.extract_icon(...)` call in `web.py` is bare (both are `await asyncio.to_thread(...)`)
+- [x] `test_launcher_create` asserts `mock_extract.assert_called_once_with(...)` with correct args
+- [x] `test_launcher_update` added to `tests/test_web.py`, covers the `to_thread` call with mock assertion
+- [x] `.venv-PowerAtlas\Scripts\python -m pytest tests/test_web.py` passes with no new failures
+- [x] `node tests/acp_page.test.mjs` passes (template JS unaffected — confirm no regression)
+
+**Implementation (2026-08-21, code: 523b722 + fix 458d3d6)**
+Both `icons.extract_icon(...)` calls in `launcher_create` and `launcher_update` wrapped with `await asyncio.to_thread(icons.extract_icon, ...)`. `extract_icon` body wrapped in outer `try/except Exception: return False` to prevent OSError propagation through `to_thread` (plan invariant: must return False, never raise). `test_launcher_create` gains `mock_extract.assert_called_once_with(ANY, "npm", True)`. `test_launcher_update` added covering the update route with extract mock assertion, `save_config` assertion, and response-text assertion. Pre-existing `acp_page.test.mjs` 5 failures confirmed unchanged. 1554 tests pass.
 
 ## Verification
 
@@ -270,6 +273,19 @@ node tests/acp_page.test.mjs
 2. **Add `log.warning` or observability for other blocking calls in `web.py` routes.** `save_config` and other disk IO remain on the event loop in `launcher_create`/`launcher_update`. Pre-existing; out of scope. Source: Architect review finding #7.
 
 ## Review Log
+
+### 2026-08-21 — Implementation Review (after Phase 2, persona: Reliability engineer, Senior engineer, Maintainability reviewer, Architect — high effort)
+
+Implementation health: Green.
+5 findings (0 High, 1 Medium, 4 Low). All fixed.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| P2-1 | Medium | `extract_icon` has no outer `except`; `ICONS_DIR.mkdir`/`target.unlink` can raise `OSError`, propagating through `to_thread` as 500. | Fixed — `extract_icon` body wrapped in `try/except Exception: return False`. |
+| P2-2 | Low | `test_launcher_update` missing `save_config` call assertion. | Fixed — `mock_save.assert_called_once()` added. |
+| P2-3 | Low | `test_launcher_update` missing `assert "updated" in resp.text.lower()`. | Fixed — assertion added. |
+| P2-4 | Low | `test_launcher_update` fixture terminal value is unused noise (POST overrides it). | User: accepted — minor clarity issue, test is functionally correct. |
+| P2-5 | Low | `save_config` remains a blocking disk write on event loop (pre-existing). | User: accepted — deferred per plan scope to Follow-up Work #2. |
 
 ### 2026-08-21 — Implementation Review (after Phase 1, persona: Security auditor, Reliability engineer, Maintainability reviewer, Senior engineer — high effort)
 
