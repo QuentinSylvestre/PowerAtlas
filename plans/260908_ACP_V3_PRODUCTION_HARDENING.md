@@ -476,7 +476,7 @@ Doc-impact scan (mandatory sub-agent dispatch) also flagged, as code-comment cle
 
 ### 2026-09-08 — Plan Creation (via /qplan, medium effort, 4 personas + doc-impact scan)
 
-21 findings (8 High, 12 Medium, 1 Low informational) across Architect (gap-critic lens), Senior engineer, Security auditor, Reliability engineer, plus the mandatory doc-impact sub-agent. Three of the 8 High findings were independently raised by 2-3 personas each (strong convergent signal). All 8 High findings fixed. 11 of 12 Medium findings fixed; 1 deferred to Follow-up Work as a genuine product-shape decision, not a bug. Detailed rationale for every fix lives inline in the plan body (Design Decisions rows and phase Changes sections marked "review finding") rather than restated here.
+27 findings (8 High, 14 Medium, 5 Low) across Architect (gap-critic lens), Senior engineer, Security auditor, Reliability engineer, plus the mandatory doc-impact sub-agent. Three of the 8 High findings were independently raised by 2-3 personas each (strong convergent signal). All 8 High findings fixed. 13 of 14 Medium findings fixed; 1 deferred to Follow-up Work as a genuine product-shape decision, not a bug. 4 of 5 Low findings fixed; 1 accepted as informational (no action needed, per the doc-impact sub-agent's own assessment). Detailed rationale for every fix lives inline in the plan body (Design Decisions rows and phase Changes sections marked "review finding") rather than restated here.
 
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
