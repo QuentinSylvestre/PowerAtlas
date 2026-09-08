@@ -1,7 +1,7 @@
 # ACP v3 Production Hardening
 
 > **Date**: 2026-09-08
-> **Status**: In Progress — Phase 0 complete, Phases 1-8 pending
+> **Status**: In Progress — Phases 0-1 complete, Phases 2-8 pending
 > **Scope**: Bring `/acp-v3` (kiro-cli v3 ACP protocol support) from throwaway-spike quality to production quality, on par with the mature `/acp` (v2) surface — without merging the two engines.
 > **Estimated effort**: 2-3 days
 
@@ -270,17 +270,29 @@ A Senior-engineer review of rounds 1-3's plan updates traced `acp.html`'s and `a
 4. **SC-11 baseline coverage** — add direct unit tests for `_SupervisorV3.load_session`, `_handle_subscribe_v3`, `_handle_cancel_v3`, and `_handle_close_v3` (the 4 of 9 `_handle_*_v3` functions no other phase's fix touches) — characterization tests confirming current behavior, since nothing here is being changed, just covered. Mirror the existing `TestSupervisorV3` test shape (`tests/test_web.py:19808-20319`).
 
 **Exit criteria**:
-- [ ] A resumed v3 session (session ID `sess_`-prefixed) is attributed to `"kiro-cli-v3"` in `presence.py`'s snapshot, verified by a new unit test constructing a fake process record with a v3 session ID.
-- [ ] A resumed v2 session continues to attribute to `"kiro-cli"` (regression test).
-- [ ] `_sidecar_records()` attributes a v3-shaped lock file to `"kiro-cli-v3"`; a v2-shaped one continues attributing to `"kiro-cli"` (regression test).
-- [ ] `_lock_holder_v3` correctly reports held/not-held against a synthetic `session.json` for each `status` value; rejects a malformed session_id via `_SESSION_ID_RE` before any path join (mirroring the existing `_stored_session_cwd_v3` path-traversal test pattern).
-- [ ] `_acp_availability()` reports a held v3 session as unavailable (previously always "available").
-- [ ] `_on_notification`'s unrecognized-kind fallback is visible at INFO level (verify via a unit test capturing log output for a synthetic unknown-kind notification, both classes).
-- [ ] New direct tests exist for `load_session`, `_handle_subscribe_v3`, `_handle_cancel_v3`, `_handle_close_v3` on `_SupervisorV3`.
-- [ ] New/updated tests added to `tests/test_data.py` (presence), `tests/test_web.py` (liveness, log level, handler coverage).
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes.
+- [x] A resumed v3 session (session ID `sess_`-prefixed) is attributed to `"kiro-cli-v3"` in `presence.py`'s snapshot, verified by a new unit test constructing a fake process record with a v3 session ID.
+- [x] A resumed v2 session continues to attribute to `"kiro-cli"` (regression test).
+- [x] `_sidecar_records()` attributes a v3-shaped lock file to `"kiro-cli-v3"`; a v2-shaped one continues attributing to `"kiro-cli"` (regression test).
+- [x] `_lock_holder_v3` correctly reports held/not-held against a synthetic `session.json` for each `status` value; rejects a malformed session_id via `_SESSION_ID_RE` before any path join (mirroring the existing `_stored_session_cwd_v3` path-traversal test pattern).
+- [x] `_acp_availability()` reports a held v3 session as unavailable (previously always "available").
+- [x] `_on_notification`'s unrecognized-kind fallback is visible at INFO level (verify via a unit test capturing log output for a synthetic unknown-kind notification, both classes).
+- [x] New direct tests exist for `load_session`, `_handle_subscribe_v3`, `_handle_cancel_v3`, `_handle_close_v3` on `_SupervisorV3`.
+- [x] New/updated tests added to `tests/test_data.py` (presence), `tests/test_web.py` (liveness, log level, handler coverage).
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes.
 
 **Covers**: SC-6, SC-7, SC-10, SC-11 (partial — 4 of 9 handlers)
+
+Implementation (2026-09-09, code: 6b7ab1a, cycle-2 fix: 0d28480, cleanup pass: f9cd135)
+
+**Initial implementation (6b7ab1a).** `presence.py` (SC-6): `_scan()`'s first pass now extracts the resumed session id via the matched spec's own `--resume-id` flag and reroutes the provider label to `"kiro-cli-v3"` when `sess_`-prefixed, before writing `provider_pids`; `_sidecar_records()` gets the identical reroute. A `_KIRO_PROVIDERS` family-tolerance set was added to 4 guards in `_scan()`'s sidecar-reconciliation pass, since PowerAtlas's own long-lived v3 agent process never carries `--resume-id` on its own argv (v3 multiplexes every session over one process) — without this, a correctly-relabelled v3 sidecar record would fail to match its process's `"kiro-cli"`-labelled pid and vanish from the snapshot entirely. `acp.py` (SC-7): new `_lock_holder_v3(session_id) -> int | None`, mirroring `_stored_session_cwd_v3`'s guard-then-path-join pattern, reading `session.json`'s `status` field with zero ACP round-trip; a new sentinel `_V3_HOLDER_PID_UNKNOWN = -1` stands in for a real PID (v3's session.json has no `pid` field). Wired into `web.py`'s `_acp_availability()` as a `sess_`-prefixed branch. SC-10: both `_on_notification`'s unrecognized-kind fallback bumped DEBUG→INFO. SC-11: baseline characterization tests added for the 4 untouched `_handle_*_v3` functions. 1905 passed, 3 skipped.
+
+**Cycle-1 review (2 personas, Senior engineer + Reliability engineer)** found 1 High + 3 Medium + 4 Low — see the Review Log entry below for the full table. The High (a crashed v3 process leaves its session permanently "held," a UI dead-end with no recovery path — worse for that scenario than the pre-fix "always available" bug) and all Mediums/Lows were fixed in cycle-2 (0d28480): an mtime-based staleness check (`_V3_SESSION_STALE_SECONDS`) added to `_lock_holder_v3`'s valid-but-stuck-status branch; the blanket except-handler split (malformed-but-present file → held; genuinely absent → not held); the D32 self-orphan-suppression guard narrowed back to `"kiro-cli"`-only (3 of the 4 originally-widened guards keep `_KIRO_PROVIDERS`, verified correct); an optional `workspace_hash` fast-path added to `_lock_holder_v3` to avoid a full directory scan when the caller already knows it; 11 new tests. 1917 passed, 2 skipped.
+
+**Cycle-2 review (same 2 personas)** confirmed no new High regression and the fix commit correct on 6 of 8 points, but surfaced 2 new Medium findings via independent convergence: (1) the staleness check's malformed-JSON branch was never wired up (still held-forever for a corrupted file), and (2) Senior engineer questioned whether the entire staleness design rested on a false premise — a nearby comment claimed `session.json` "changes only on creation / title update." **This was resolved empirically, not by argument**: a live standalone probe (create a real v3 session, poll `session.json` during an active ~75s turn) found the comment's literal claim false (5 distinct mtime advances during one continuous `in_progress` turn) but the underlying design sound — writes are bursty/milestone-tied roughly every 25-40s, giving the 1800s threshold ~60x margin; the only residual is a single uninterrupted step exceeding 30 minutes with zero intervening writes, an accepted edge case since this signal only gates UI clickability, not any write-safety path (v3 delete isn't wired to it yet). Per the user's explicit instruction ("Fix all now" via the standard post-cycle-cap action set, then "don't run a new review — it's enough" for Phase 1 specifically, and cap future phases to 1 review cycle), the fix pass (f9cd135) applied all 4 remaining items — malformed-JSON branch now routed through the same staleness check; both the `data_kiro_v3.py` and `acp.py` comments corrected to describe the actual observed (bursty, milestone-tied) write pattern instead of the disproven idealized claim; the "dead code" mischaracterization of `_SupervisorV3._publish_live()` corrected (it IS called, it just always publishes a `pid=0` sentinel); a direct test added for `hash_dir_for_cwd()` — **without a further re-review cycle, per explicit user instruction**. 1921 passed, 2 skipped, final.
+
+**Carried forward from handoff**: none — this session has no `## Handoff` section or standalone handoff file.
+
+**Harness note**: a first attempt at the cleanup-pass commit (4af84bc) accidentally included a `Claude-Session:` trailer, which this user's global CLAUDE.md explicitly forbids overriding the harness default for. Caught immediately and corrected via `git commit-tree`/`git update-ref` (same tree, same parent, corrected message only) — the exact remedy CLAUDE.md documents as precedent for this class of mistake, not an amend. Final commit is `f9cd135`.
 
 ### Phase 2: Notification-drop race fix [QA] [P:5]
 
@@ -582,6 +594,7 @@ Doc-impact scan (mandatory sub-agent dispatch) also flagged, as code-comment cle
 3. **Mode-switcher UI** for `/acp-v3` (letting a user pick `spec`/`quick-spec`/`bug-fix`/`plan`). Would unlock the modes SC-9's permission-handling defends against but doesn't itself build a path to. Source: Scope boundaries.
 4. **Full MCP OAuth "Connect" flow.** No `authorizationUrl`-bearing signal has been observed; revisit if one is ever found. Source: Scope boundaries.
 5. **`_pending_permission` expiry/timeout for an abandoned `session/request_permission` request.** Genuinely a product-shape decision (auto-refuse? default option? rely on the existing `~30`-minute `PROMPT_SILENCE_SECONDS` backstop?), not a deterministic bug fix — deferred rather than guessed at during this plan. Source: Risk R11, Review Log finding (Senior engineer, Medium).
+6. **v3 self-orphan-lock suppression (D32).** `presence._scan()`'s own-agent orphan-lock guard (`pid == acp_pid`) only ever sees `_Supervisor._publish_live()`'s pid — the v2 supervisor's own. `_SupervisorV3._publish_live()` is **not** dead code — it IS called on every v3 mutation site (`new_session`/`load_session`/`close_session`) — but it always publishes a sentinel `pid=0` (deliberately, to avoid false liveness signals from a real v3 pid), a value that can never match a real lock-file pid, so the guard still can't achieve genuine v3 self-orphan suppression regardless of provider label. Widening the guard's provider check to `_KIRO_PROVIDERS` (Phase 1's first pass) could not fix this for the same reason, and was narrowed back to `provider == "kiro-cli"` (Phase 1 cycle-2 review fix — see the comment above the guard in `_scan()`). A real fix would need `_supervisor_v3`'s own agent pid published to `presence._acp_live` instead of the `pid=0` sentinel — kept as a separate, lower-risk follow-up rather than folded into this cycle. **Corollary residual, also unaddressed**: `_acp_live` is a single last-writer-wins global — after any v3 mutation call, `_SupervisorV3._publish_live()`'s `pid=0` overwrites it until the next v2 mutation or sweep tick republishes the real v2 pid, during which window the v2 self-orphan guard is also transiently defeated (self-heals within one sweep interval; not itself a data-safety issue). Source: Phase 1 cycle-2 review finding (Reliability engineer) and Phase 1 cleanup-pass finding.
 
 ## Review Log
 
@@ -634,6 +647,36 @@ Implementation health: Green (after fixes below; the single High finding was cor
 | 4 | Low | Section 9's divergence entry attributed "no silently-broken features" to "the plan's own Goal statement," but that phrase is in Intent's "Desired outcome" paragraph, not the literal `## 2) Goal` section. | Fixed — citation corrected to "Intent > Desired outcome" in Section 9. |
 
 Probe-scope note: this review's High finding triggered a 4th probe round (not a fresh Step 6 auto-fix re-spawn, since Phase 0 has no code to re-implement) — the orchestrator resumed the same investigation sub-agent for one additional targeted, cheap, read-heavy probe, then applied all fixes directly to the plan file itself (documentation, not code). No regression risk to any shipped code, since Phase 0 ships no code.
+
+### 2026-09-09 — Implementation Review (after Phase 1, cycle 1, persona: Senior engineer + Reliability engineer)
+
+Implementation health: Yellow (before fixes; all resolved by cycle 2 below).
+8 findings (1 High, 3 Medium, 4 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | A crashed v3 process left its session permanently "held" (no PID corroboration, no recovery path) — a new UI dead-end worse than the pre-fix "always available" bug for that scenario. | Fixed (cycle 2) — mtime-based staleness check added to `_lock_holder_v3`. |
+| 2 | Medium | Blanket exception handling conflated "session.json absent" with "session.json malformed," both failing open. | Fixed (cycle 2) — split: malformed-but-present now fails toward held, matching the function's own stated intent. |
+| 3 | Medium | The D32 self-orphan-suppression guard's `_KIRO_PROVIDERS` widening was inert for v3 (`acp_pid` never comes from the v3 supervisor). | Fixed (cycle 2) — narrowed that one guard back to `kiro-cli`-only; Follow-up Work item 6 added. |
+| 4 | Medium | Test coverage gaps: malformed-JSON, real-unpatched-`_SESSION_ID_RE`, and staleness scenarios untested. | Fixed (cycle 2) — all 3 scenarios covered. |
+| 5 | Low | `_acp_availability`'s docstring didn't mention the v3 fail-toward-held exception. | Fixed (cycle 2) — docstring sentence added. |
+| 6 | Low | `_lock_holder_v3` did a full directory scan on every call; `_acp_listing_v3` already has the workspace hash available. | Fixed (cycle 2) — optional `workspace_hash` fast path added, full-scan fallback preserved. |
+| 7 | Low | No v3-id variant of the two existing D32 orphan-suppression tests. | Fixed (cycle 2) — added, asserting the current (non-suppressed) behavior. |
+| 8 | Low | No adversarial test proving family-tolerance widening can't cross-attribute a v2/v3 session via pid reuse. | Fixed (cycle 2) — added; confirms the independent skew-window check still rejects it. |
+
+### 2026-09-09 — Implementation Review (after Phase 1, cycle 2, persona: Senior engineer + Reliability engineer)
+
+Implementation health: Green (after the user-directed cleanup pass below; no unresolved High or Medium).
+2 new findings (0 High, 2 Medium — both independently raised by both personas, strong convergence), plus 2 Low.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 9 | Medium | Cycle-2's staleness fix never reached the malformed-JSON branch — a permanently-corrupted `session.json` is still held forever. | Fixed (user-directed cleanup pass) — malformed-JSON branch now routed through the same staleness check. |
+| 10 | Medium | Senior engineer questioned whether the staleness design's premise ("session.json changes only on creation/title update," per a nearby comment) was itself false, which would make the whole fix unsound. | Fixed — resolved empirically via a live probe (not argument): the comment's literal claim was false, but the design is sound (~60x margin); both the stale comment and the new code's own comment corrected to describe the actual observed bursty/milestone-tied write pattern. |
+| 11 | Low | A comment mischaracterized `_SupervisorV3._publish_live()` as "dead code" — it is called on every v3 mutation site, it just always publishes a `pid=0` sentinel. | Fixed — comment corrected; Follow-up Work item 6 reconciled to match. |
+| 12 | Low | `hash_dir_for_cwd()` had no direct test, only monkeypatched stand-in coverage. | Fixed — direct test added against a real fixture. |
+
+Per explicit user instruction, no cycle-3 re-review was run after this cleanup pass, and this caps every subsequent phase in this plan to a single review cycle (dispatch review once, auto-fix, move on — no confirming re-review), overriding Step 6's default 2-cycle loop for the remainder of this `/qdev` run. Escalation-worthy findings in later phases are resolved by orchestrator judgment (documented inline, flagged for later user review) rather than blocking on a synchronous user response, per the same instruction ("keep your questions for later and keep moving").
 
 ## Harness Improvement Opportunities
 
