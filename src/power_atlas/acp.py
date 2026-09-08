@@ -609,6 +609,11 @@ ACP_V3_ARGS = ("acp", "--agent-engine", "v3")
 CLOSE_METHOD_V3: "str | None" = None
 # Resolved once at module load — avoids PATH shadowing at token-fetch time.
 _KIRO_V3_TOKEN_BINARY: "str | None" = shutil.which("kiro-cli")
+# SC-1: cap on _SupervisorV3._pending_early_frames per session_id. A burst of
+# early-arriving notifications (e.g. fetch_cloud_config) is a handful of
+# frames; this is generous headroom. A session hitting the cap drops the
+# oldest buffered frame with a log.warning rather than growing unbounded.
+_MAX_PENDING_EARLY_FRAMES = 50
 
 # Keys stripped from the child env to prevent marker leakage from the PowerAtlas
 # tray process into spawned kiro-cli ACP sessions.
@@ -4611,17 +4616,30 @@ class _SupervisorV3(_Supervisor):
     - Must answer `_kiro/auth/getAccessToken` inbound request with an OIDC token.
     - Session ID is at result._meta.id (not result.sessionId).
     - No JSON-RPC close method works (AS-5 probe); close_session does local cleanup.
-    - _on_notification deferred to Phase 2 (requires _emit_v3, defined then).
+    - _on_notification is fully implemented (see the override below), routing
+      every _emit() call through _emit_v3() so v3 frames land in
+      _supervisor_v3.history rather than _supervisor.history.
 
     Crew panel (_kiro.dev/subagent/list_update) compatibility is an open item —
     not probed in Phase 0 (non-subagent turn); requires Phase 2+ with a multi-agent
     prompt.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        # SC-1: keyed early-frame buffer. A notification for a brand-new
+        # session can arrive (KAS's async delivery) before new_session()
+        # finishes registering self.sessions/self.history for it — this
+        # buffers such frames by session_id until new_session() replays them.
+        # See the "SC-1 mechanism" Design Decisions row in
+        # plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
+        self._pending_early_frames: dict[str, list[dict]] = {}
+        self._pending_early_frames_at: dict[str, float] = {}
+
     # _on_notification override: routes all _emit() calls to _emit_v3() so that
     # v3 frames are recorded in _supervisor_v3.history rather than _supervisor.history.
-    # This override is what Phase 1 deferred — it requires _emit_v3, which is
-    # defined immediately after the _emit function below.
+    # The copy (below) rather than a base-class flag parameter is a deliberate
+    # spike-era choice: a flag would couple the base class to the v3 singleton.
 
     def _on_notification(self, msg: dict) -> None:
         # This is a full copy of _Supervisor._on_notification with every
@@ -4635,6 +4653,25 @@ class _SupervisorV3(_Supervisor):
         kind = update.get("sessionUpdate")
         session_id = params.get("sessionId")
         self._stamp_activity(session_id)
+        # SC-1: a notification for a session_id not yet registered in
+        # self.sessions can arrive while a new_session()/load_session() call
+        # is in flight (self._reserved > 0) — KAS's async delivery can beat
+        # the RPC result that registers the session. Buffer the raw frame
+        # instead of falling through (where it would be silently dropped by
+        # record()'s existing no-op-on-unregistered-session idiom) so
+        # new_session() can replay it once the session is durably committed.
+        # Capped and swept — see the "SC-1 mechanism" / "SC-1 orphan-buffer
+        # sweep" Design Decisions rows.
+        if (isinstance(session_id, str) and session_id not in self.sessions
+                and self._reserved > 0):
+            buf = self._pending_early_frames.setdefault(session_id, [])
+            self._pending_early_frames_at.setdefault(session_id, time.monotonic())
+            if len(buf) >= _MAX_PENDING_EARLY_FRAMES:
+                log.warning("ACP v3: pending-early-frame buffer full for %s, "
+                            "dropping oldest", session_id)
+                buf.pop(0)
+            buf.append(msg)
+            return
         if method == METADATA_METHOD:
             percent = _context_percent(params)
             if percent is not None and isinstance(session_id, str):
@@ -4981,7 +5018,29 @@ class _SupervisorV3(_Supervisor):
                 # session does not leak into the count.
                 self.sessions.pop(session_id, None)
                 self.history.pop(session_id, None)
+                # SC-1: avoid leaking a buffer entry for a session that never
+                # actually gets created.
+                self._pending_early_frames.pop(session_id, None)
+                self._pending_early_frames_at.pop(session_id, None)
                 raise
+            # SC-1 replay isolation: this runs only after the block above has
+            # already committed self.sessions[session_id]/self.history[session_id]
+            # — i.e. only after the point where a raised exception there would
+            # have triggered the rollback above. Replaying inside that
+            # rollback-guarded block would mean one bad buffered frame could
+            # discard a session KAS had already successfully created (see the
+            # "SC-1 replay isolation" Design Decisions row). Each buffered
+            # frame is re-dispatched through _on_notification itself — not
+            # duplicated logic — with its own try/except so a failed replay is
+            # logged and skipped, never grounds to roll back the session.
+            _buffered = self._pending_early_frames.pop(session_id, [])
+            self._pending_early_frames_at.pop(session_id, None)
+            for _buffered_msg in _buffered:
+                try:
+                    self._on_notification(_buffered_msg)
+                except Exception:
+                    log.warning("ACP v3: replay of buffered frame failed for "
+                                "%s, skipping", session_id, exc_info=True)
         finally:
             self._reserved -= 1
             if self._pending_commands is not None:
@@ -7659,6 +7718,26 @@ async def _sweep_once() -> None:
                         "(failure #%d)", session_id, failures)
             finally:
                 _supervisor_v3.closing.discard(session_id)
+
+        # SC-1 orphan-buffer sweep: a _pending_early_frames entry for a
+        # session_id that never completes new_session() (RPC failure, or the
+        # id belonged to a different in-flight reservation that never
+        # registers this particular id) would otherwise never be reclaimed —
+        # new_session()'s own cleanup only fires for the session it is itself
+        # creating. Reuses the sweeper's existing idle threshold rather than a
+        # new timer (see the "SC-1 orphan-buffer sweep" Design Decisions row).
+        for _pending_sid, _buffered_at in tuple(
+                _supervisor_v3._pending_early_frames_at.items()):
+            if _pending_sid in _supervisor_v3.sessions:
+                continue
+            if now - _buffered_at <= ACP_IDLE_TTL_SECONDS:
+                continue
+            log.warning(
+                "ACP v3 sweeper: dropping orphaned pending-early-frame "
+                "buffer for %s (idle %.0fs, session never registered)",
+                _pending_sid, now - _buffered_at)
+            _supervisor_v3._pending_early_frames.pop(_pending_sid, None)
+            _supervisor_v3._pending_early_frames_at.pop(_pending_sid, None)
 
 
 

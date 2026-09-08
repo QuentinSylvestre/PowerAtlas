@@ -20980,3 +20980,214 @@ class TestSupervisorV3:
             assert sid in sv3.sessions
         finally:
             self._cleanup_registry(acp_mod)
+
+    # ------------------------------------------------------------------
+    # SC-1: the new_session() notification-drop race and its fix — a keyed
+    # early-frame buffer on _SupervisorV3, replayed after new_session()
+    # durably commits the session, with per-frame replay isolation and an
+    # idle-sweep backstop for a session_id that never completes new_session().
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _chunk_msg(sid, text):
+        return {
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {"sessionUpdate": "agent_message_chunk",
+                           "content": {"type": "text", "text": text}},
+            },
+        }
+
+    def test_on_notification_buffers_early_frame_when_reserved(self, monkeypatch):
+        """A notification for a session_id not yet in self.sessions, while a
+        new_session()/load_session() call is in flight (self._reserved > 0),
+        is buffered rather than dropped or recorded prematurely."""
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_early0000-0000-0000-0000-000000000001"
+        sv3._reserved = 1  # simulates an in-flight new_session()/load_session()
+        msg = self._chunk_msg(sid, "hello")
+
+        sv3._on_notification(msg)  # must not raise
+
+        assert sv3._pending_early_frames.get(sid) == [msg]
+        assert sid in sv3._pending_early_frames_at
+        # Not dropped, and not recorded prematurely: no history buffer exists
+        # for this session yet, so nothing could have been recorded into it.
+        assert sid not in sv3.history
+        assert sid not in sv3.sessions
+
+    def test_on_notification_drops_unknown_session_when_not_reserved(self, monkeypatch):
+        """Regression: a notification for a genuinely unknown session_id
+        (self._reserved == 0) is still silently dropped, same as before this
+        fix — the buffer must not change behavior for a truly unrelated
+        stray frame."""
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_stray0000-0000-0000-0000-000000000001"
+        assert sv3._reserved == 0
+        msg = self._chunk_msg(sid, "stray")
+
+        sv3._on_notification(msg)  # must not raise
+
+        assert sid not in sv3._pending_early_frames
+        assert sid not in sv3._pending_early_frames_at
+        assert sid not in sv3.history
+        assert sid not in sv3.sessions
+
+    def test_pending_early_frame_buffer_drops_oldest_past_cap(self, monkeypatch):
+        """Buffering past _MAX_PENDING_EARLY_FRAMES drops the oldest entry,
+        never raises, and the buffer never exceeds the cap."""
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_cap00000-0000-0000-0000-000000000001"
+        sv3._reserved = 1
+        cap = acp_mod._MAX_PENDING_EARLY_FRAMES
+        total = cap + 5
+
+        for i in range(total):
+            sv3._on_notification(self._chunk_msg(sid, f"frame-{i}"))  # must not raise
+
+        buf = sv3._pending_early_frames[sid]
+        assert len(buf) == cap
+        texts = [m["params"]["update"]["content"]["text"] for m in buf]
+        # The oldest 5 (frame-0 .. frame-4) were dropped; the buffer holds
+        # exactly the most recent `cap` frames, oldest-first.
+        assert texts == [f"frame-{i}" for i in range(total - cap, total)]
+
+    def test_new_session_replays_buffered_frame_into_history(self, monkeypatch):
+        """Completing new_session() for a session_id with a buffered frame
+        replays it, landing correctly in self.history — e.g. a buffered
+        tool_call with a real title shows up correctly titled, not as a
+        generic fallback."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_replay0000-0000-0000-0000-00000000001"
+
+        buffered_msg = {
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-replay-1",
+                    "title": "Fetching your cloud config",
+                    "kind": "fetch",
+                    "status": "pending",
+                },
+            },
+        }
+        # Simulate the race directly: the frame arrived and was buffered
+        # before new_session()'s own session/new round-trip resolved.
+        sv3._pending_early_frames[sid] = [buffered_msg]
+        sv3._pending_early_frames_at[sid] = 0.0
+
+        async def fake_request(self, method, params, timeout=None):
+            return {"_meta": {"id": sid}}
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+
+        result = asyncio.run(sv3.new_session("C:\\scratch"))
+
+        assert result == {"sessionId": sid, "cwd": "C:\\scratch"}
+        assert sid in sv3.sessions
+        events = sv3.history[sid].events()
+        tool_frames = [e for e in events if e.get("type") == "tool_call"]
+        assert len(tool_frames) == 1
+        assert tool_frames[0]["payload"]["title"] == "Fetching your cloud config"
+        # The buffer is drained by the replay, win or lose.
+        assert sid not in sv3._pending_early_frames
+        assert sid not in sv3._pending_early_frames_at
+
+    def test_new_session_replay_isolates_frame_that_raises(self, monkeypatch, caplog):
+        """The single most important property of this fix: a buffered frame
+        engineered to raise during replay is logged and skipped, and
+        new_session() still returns successfully with self.sessions[sid]
+        present — a bad buffered frame must never roll back an
+        already-successfully-created session (SC-1 replay isolation)."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_raiseb000-0000-0000-0000-00000000001"
+
+        # Malformed on purpose: `update` is a string, so
+        # `update.get("sessionUpdate")` raises AttributeError the instant
+        # _on_notification tries to read it — a frame engineered to raise.
+        bad_msg = {
+            "method": "session/update",
+            "params": {"sessionId": sid, "update": "not-a-dict"},
+        }
+        sv3._pending_early_frames[sid] = [bad_msg]
+        sv3._pending_early_frames_at[sid] = 0.0
+
+        async def fake_request(self, method, params, timeout=None):
+            return {"_meta": {"id": sid}}
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+
+        with caplog.at_level(logging.WARNING, logger="power_atlas.acp"):
+            result = asyncio.run(sv3.new_session("C:\\scratch"))
+
+        assert result == {"sessionId": sid, "cwd": "C:\\scratch"}
+        assert sid in sv3.sessions
+        assert sid in sv3.history
+        assert any("replay" in r.getMessage().lower() for r in caplog.records)
+        # The buffer is drained regardless of the replay failure.
+        assert sid not in sv3._pending_early_frames
+        assert sid not in sv3._pending_early_frames_at
+
+    def test_sweep_once_evicts_orphaned_pending_early_frame_buffer(self, monkeypatch):
+        """A _pending_early_frames entry for a session_id that never calls
+        new_session() (RPC failure, or an id that belonged to a different
+        in-flight reservation) is evicted by the _sweep_once v3 pass once it
+        is older than the sweeper's existing idle threshold."""
+        import asyncio
+        from unittest.mock import MagicMock
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        # Isolate from the real v2 singleton's live session/failure state —
+        # this test only cares about the v3 orphan-buffer pass.
+        fresh_v2 = MagicMock()
+        fresh_v2.sessions = {}
+        monkeypatch.setattr(acp_mod, "_supervisor", fresh_v2)
+
+        sid = "sess_orphan0000-0000-0000-0000-00000000001"
+        sv3._pending_early_frames[sid] = [self._chunk_msg(sid, "orphaned")]
+        sv3._pending_early_frames_at[sid] = (
+            time.monotonic() - acp_mod.ACP_IDLE_TTL_SECONDS - 1)
+
+        asyncio.run(acp_mod._sweep_once())
+
+        assert sid not in sv3._pending_early_frames
+        assert sid not in sv3._pending_early_frames_at
+
+    def test_sweep_once_leaves_a_fresh_pending_buffer_alone(self, monkeypatch):
+        """A _pending_early_frames entry younger than the idle threshold is
+        left alone by the sweep (not evicted prematurely)."""
+        import asyncio
+        from unittest.mock import MagicMock
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        fresh_v2 = MagicMock()
+        fresh_v2.sessions = {}
+        monkeypatch.setattr(acp_mod, "_supervisor", fresh_v2)
+
+        sid = "sess_fresh0000-0000-0000-0000-000000000001"
+        sv3._pending_early_frames[sid] = [self._chunk_msg(sid, "fresh")]
+        sv3._pending_early_frames_at[sid] = time.monotonic()
+
+        asyncio.run(acp_mod._sweep_once())
+
+        assert sid in sv3._pending_early_frames
+        assert sid in sv3._pending_early_frames_at
