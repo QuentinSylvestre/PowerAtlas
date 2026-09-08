@@ -200,6 +200,27 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 
 ## Decision
 
+### v3 session liveness uses session.json status field — lock-file approach does not apply
+
+**Why**: kiro-cli v3 allows concurrent `session/load` without refusal — `session/load` on a session held by another process returns a full result (no `-32603`). The v2 lock-file-based liveness detection (`kiro-cli-local-data.md § Session lock files`) does not apply to v3 sessions, and `presence.py`'s lock-hint path must be gated out for `sess_`-prefixed session IDs. Recommended approach: read `session.json` status field (`in_progress` / `idle` / `waiting_on_user` / `failed`; absent = treat as idle). A mid-turn crash leaves `"in_progress"` stuck; combine with a process-table check (kiro-cli pid with matching cwd) to disambiguate.
+**How to apply**: For v3 session dot status in `presence.py`, read `session.json` status rather than attempting `session/load` refusal detection. Gate the v2 lock-hint path out for `sess_`-prefixed session IDs. Absent status (ACP-only probe sessions with no completed prompt) is treated as idle.
+**Source**: `260908-1636_ACP_V3_SPIKE § Phase 5 Results` — Phase 0 probe (`session/load` on a held session returned full result); Phase 5 `session.json` census (9 idle, 1 in_progress, 5 absent across 15 sessions) | **Verified**: 2026-08-19 (session, empirical — PID + session.json cross-check)
+**Stale-when**: kiro-cli v3 protocol changes
+
+### v3 ACP close has no JSON-RPC method — `_SupervisorV3.close_session` does per-session local cleanup only
+
+**Why**: All close-related JSON-RPC calls return `-32603` on v3 (`_kiro.dev/session/terminate`, `session/close`, `_kiro.dev/session/close`, `session/cancel` tested as a request — all fail). No wire call works. The production close path must remove the session from all local state and broadcast a `session_closed` frame — it must NOT call `_discard()`, which kills the entire KAS subprocess and all sessions it holds.
+**How to apply**: When implementing v3 close for any consumer: set `CLOSE_METHOD_V3 = None`, override `close_session` to do per-session local cleanup (remove from `sessions`, `history`, `inflight`, `_diff_backfill`, `subagent_sessions`, `subagent_history`, `crews`, `_bubbles`; broadcast `session_closed` to subscribers). Never call `_discard()` from `close_session` on v3.
+**Source**: `260908-1636_ACP_V3_SPIKE § Phase 0 Results (AS-5)` — wire log showing -32603 on all four candidates | **Verified**: 2026-08-19 (session, empirical — all candidates probed via wire log)
+**Stale-when**: kiro-cli v3 protocol changes
+
+### v3 session ID returned at `result._meta.id`, not `result.sessionId`
+
+**Why**: kiro-cli v3 `session/new` returns the session ID at `result._meta.id`. The base `_Supervisor.new_session` reads `result.get("sessionId")` which returns `None` on v3 and raises `AgentRejected`. A v3 `new_session` override must extract `session_id = (result.get("_meta") or {}).get("id")`.
+**How to apply**: Any consumer of `session/new` on v3 must read `result._meta.id`. Always include this extraction in any `_Supervisor` subclass that targets v3.
+**Source**: `260908-1636_ACP_V3_SPIKE § Phase 0 Results (AS-4)` — Phase 0 wire probe + Phase 1 exit criteria grep-verified | **Verified**: 2026-08-19 (session, empirical — confirmed from wire probe and Phase 1 exit criteria)
+**Stale-when**: kiro-cli v3 protocol changes
+
 ### `acp.py`'s isolation boundary forces `_build_child_env` duplication — do not extract without adjusting the invariant
 
 **Why**: `acp.py` declares a documented import invariant: it imports exactly two *guarded* names from the rest of the `power_atlas` package (`config.CONFIG_DIR` and `launcher._SESSION_ID_RE`; `data_kiro` is a third import but predates the boundary description). A plan exit criterion greps the file for these module names to keep the guarded set honest. Adding `_build_child_env` as a shared import from `launcher` would add a third guarded name and violate the stated invariant. The helper (~8 lines) is therefore intentionally duplicated in both `acp.py` and `launcher.py`, each carrying a cross-copy comment noting the sync requirement. The two copies have intentionally different signatures: `acp.py` requires `extra: dict[str, str]` (mandatory, because every ACP spawn always passes at least `KIRO_CLI_ACP_CLIENT_NAME`); `launcher.py` uses `extra: dict[str, str] | None = None` (optional). If the copies diverge significantly in a future session, extraction into `config.py` (already an existing import) is the documented path — it would become the second name imported from `config`, not a new import from `launcher`.
