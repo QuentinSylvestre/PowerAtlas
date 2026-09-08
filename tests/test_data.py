@@ -1544,6 +1544,21 @@ def test_presence_matches_kiro_resume_id_flag():
     assert snap.is_live("claude-code", "/w", "kx") is False
 
 
+def test_presence_matches_kiro_v3_resume_id_flag():
+    """A resumed v3 session (sess_-prefixed id) attributes to kiro-cli-v3,
+    not kiro-cli — SC-6. Both entries in _PROVIDER_SPECS share a binary, so
+    the reroute has to happen after the argv match, using the resumed id's
+    own shape."""
+    snap = _scan_with([
+        _FakeProc("kiro-cli", ["kiro-cli", "chat", "--resume-id",
+                                "sess_12345678-1234-1234-1234-123456789abc"],
+                   cwd="/w"),
+    ])
+    v3_id = "sess_12345678-1234-1234-1234-123456789abc"
+    assert snap.is_live("kiro-cli-v3", "/w", v3_id) is True
+    assert snap.is_live("kiro-cli", "/w", v3_id) is False
+
+
 def test_presence_resume_equals_form():
     snap = _scan_with([
         _FakeProc("claude", ["claude", "--resume=eqid"], cwd="/w"),
@@ -2197,6 +2212,34 @@ def test_presence_sidecar_identifies_kiro_session(tmp_path):
         kiro_dir=tmp_path,
     )
     assert snap.is_live("kiro-cli", "C:/work/proj", "sess-a") is True
+
+
+def test_presence_sidecar_identifies_kiro_v3_session(tmp_path):
+    """A v3 lock file (sess_-prefixed stem) attributes to kiro-cli-v3 — SC-6,
+    _sidecar_records() extended scope.
+
+    The holding process is PowerAtlas's own long-lived v3 ACP agent, spawned
+    once via ``kiro-cli acp --agent-engine v3`` with no ``--resume-id`` on
+    argv — v3 multiplexes every session over one process, so the first-pass
+    argv scan can only ever label this pid "kiro-cli". The match against the
+    sidecar-derived "kiro-cli-v3" record must still succeed (both count as
+    one family — presence._KIRO_PROVIDERS), or the record is silently
+    dropped instead of merely mislabelled.
+    """
+    v3_sid = "sess_87654321-4321-4321-4321-cba987654321"
+    _write_kiro_lock(tmp_path, v3_sid, 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe",
+                   ["kiro-cli.exe", "acp", "--agent-engine", "v3"],
+                   pid=500, create_time=started - 1.2)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli-v3", "C:/work/proj", v3_sid) is True
+    assert snap.is_live("kiro-cli", "C:/work/proj", v3_sid) is False
+    from power_atlas.data import _normalize_path
+    assert _normalize_path("C:/work/proj") in snap.live_cwds({"kiro-cli-v3"})
 
 
 def test_presence_sidecar_rejects_recycled_pid_on_other_binary(tmp_path):

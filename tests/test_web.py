@@ -3068,6 +3068,46 @@ class TestAcpNotificationFanout:
         assert _queued(conn) == []
 
 
+class TestAcpUnrecognizedNotificationLogLevel:
+    """SC-10: the unrecognized-notification-kind fallback in both classes'
+    ``_on_notification`` is visible at INFO (production's level) instead of
+    DEBUG, so a future/unknown kind is diagnosable from orchestrator.log
+    without deliberately enabling DEBUG first."""
+
+    def test_v2_fallback_logs_at_info(self, acp_session, caplog):
+        acp_mod, sid = acp_session
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            acp_mod._supervisor._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "some_future_kind_v2",
+                    "content": {"type": "text", "text": "irrelevant"}}},
+            })
+        assert any(
+            r.levelno == logging.INFO and "ACP notification" in r.getMessage()
+            for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+    def test_v3_fallback_logs_at_info(self, monkeypatch, caplog):
+        from power_atlas import acp as acp_mod
+
+        sid = "sess_77777777-7777-7777-7777-777777777777"
+        sv3 = acp_mod._SupervisorV3()
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+
+        with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+            sv3._on_notification({
+                "method": "session/update",
+                "params": {"sessionId": sid, "update": {
+                    "sessionUpdate": "some_future_kind_v3",
+                    "content": {"type": "text", "text": "irrelevant"}}},
+            })
+        assert any(
+            r.levelno == logging.INFO and "ACP v3 notification" in r.getMessage()
+            for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
 class TestAcpToolCallVisibility:
     """Under ``-a`` there is no permission gate, and the accepted justification
     for removing it was a human watching the run. A tool call that reaches only
@@ -15965,6 +16005,73 @@ def acp_store_dir(tmp_path, monkeypatch):
     return _make
 
 
+class TestAcpAvailabilityV3:
+    """SC-7: `_acp_availability` routes a `sess_`-prefixed id to
+    `acp._lock_holder_v3` instead of `acp._lock_holder`, so v3 session
+    listing gets a real availability signal instead of the previous
+    unconditional "available"."""
+
+    def test_a_held_v3_session_is_reported_locked(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+
+        sid = "sess_11111111-1111-1111-1111-111111111111"
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3",
+                             lambda s: acp_mod._V3_HOLDER_PID_UNKNOWN)
+
+        def _v2_holder_must_not_be_called(s):
+            raise AssertionError("_lock_holder (v2) called for a v3 id")
+
+        monkeypatch.setattr(acp_mod, "_lock_holder", _v2_holder_must_not_be_called)
+
+        result = web_mod._acp_availability([sid], held=set())
+        assert result[sid] == "locked"
+
+    def test_an_idle_v3_session_is_reported_available(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+
+        sid = "sess_22222222-2222-2222-2222-222222222222"
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda s: None)
+
+        result = web_mod._acp_availability([sid], held=set())
+        assert result[sid] == "available"
+
+    def test_a_held_v3_session_already_in_the_held_set_is_held_not_locked(
+            self, monkeypatch):
+        """`held` (this PowerAtlas's own v3 supervisor) short-circuits before
+        `_lock_holder_v3` is ever consulted -- same rule the v2 path takes."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+
+        sid = "sess_33333333-3333-3333-3333-333333333333"
+
+        def _must_not_be_called(s):
+            raise AssertionError("_lock_holder_v3 called for an id already held")
+
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", _must_not_be_called)
+
+        result = web_mod._acp_availability([sid], held={sid})
+        assert result[sid] == "held"
+
+    def test_a_v2_id_still_routes_to_the_v2_lock_holder(self, monkeypatch):
+        """Regression: a bare-uuid (v2) id must not be routed to
+        `_lock_holder_v3`."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+
+        sid = "v2-bare-uuid-0001"
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda s: 4242)
+
+        def _v3_holder_must_not_be_called(s):
+            raise AssertionError("_lock_holder_v3 called for a v2 id")
+
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", _v3_holder_must_not_be_called)
+
+        result = web_mod._acp_availability([sid], held=set())
+        assert result[sid] == "locked"
+
+
 class TestAcpFlatListing:
     """`mode=recent` — the flat recency shape a day-grouped rail reads.
 
@@ -20037,6 +20144,79 @@ class TestSupervisorV3:
         assert result == ""
 
     # ------------------------------------------------------------------
+    # _lock_holder_v3 (SC-7)
+    # ------------------------------------------------------------------
+
+    def _held(self, tmp_path, session_id, status):
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        meta = {"workspacePaths": ["/some/path"]}
+        if status is not None:
+            meta["status"] = status
+        self._make_v3_session_json(tmp_path, session_id, meta)
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                return acp_mod._lock_holder_v3(session_id)
+
+    def test_lock_holder_v3_in_progress_is_held(self, tmp_path):
+        from power_atlas import acp as acp_mod
+        session_id = "sess_11111111-1111-1111-1111-111111111111"
+        result = self._held(tmp_path, session_id, "in_progress")
+        assert result is not None
+        assert result == acp_mod._V3_HOLDER_PID_UNKNOWN
+
+    def test_lock_holder_v3_waiting_on_user_is_held(self, tmp_path):
+        session_id = "sess_22222222-2222-2222-2222-222222222222"
+        result = self._held(tmp_path, session_id, "waiting_on_user")
+        assert result is not None
+
+    def test_lock_holder_v3_idle_is_not_held(self, tmp_path):
+        session_id = "sess_33333333-3333-3333-3333-333333333333"
+        result = self._held(tmp_path, session_id, "idle")
+        assert result is None
+
+    def test_lock_holder_v3_failed_is_not_held(self, tmp_path):
+        session_id = "sess_44444444-4444-4444-4444-444444444444"
+        result = self._held(tmp_path, session_id, "failed")
+        assert result is None
+
+    def test_lock_holder_v3_absent_status_is_not_held(self, tmp_path):
+        """No `status` key at all — every ACP-created session before its
+        first turn completes. Treated the same as idle."""
+        session_id = "sess_55555555-5555-5555-5555-555555555555"
+        result = self._held(tmp_path, session_id, None)
+        assert result is None
+
+    def test_lock_holder_v3_rejects_path_traversal(self):
+        """Rejects a malformed session_id via _SESSION_ID_RE before any path
+        join — mirrors test_stored_session_cwd_v3_rejects_path_traversal."""
+        from power_atlas import acp as acp_mod
+        result = acp_mod._lock_holder_v3("../../etc/passwd")
+        assert result is None
+
+    def test_lock_holder_v3_missing_session_returns_none(self, tmp_path):
+        """No session.json anywhere under the (redirected) sessions root —
+        fails closed to "not held", never raises."""
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_66666666-6666-6666-6666-666666666666"
+        (tmp_path / ".kiro" / "sessions").mkdir(parents=True)
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._lock_holder_v3(session_id)
+        assert result is None
+
+    # ------------------------------------------------------------------
     # _SupervisorV3._fulfill_token
     # ------------------------------------------------------------------
 
@@ -20317,3 +20497,259 @@ class TestSupervisorV3:
         assert v3_sid in published, f'v3 session {v3_sid} missing from union'
         assert v2_sid in published, f'v2 session {v2_sid} missing from union'
         assert pid == 0, 'v3 publish_live must pass pid=0'
+
+    # ------------------------------------------------------------------
+    # SC-11 baseline coverage: load_session, _handle_subscribe_v3,
+    # _handle_cancel_v3, _handle_close_v3 — characterization tests, nothing
+    # about these functions changes in this phase.
+    # ------------------------------------------------------------------
+
+    def _sv3(self, monkeypatch):
+        """A real _SupervisorV3 instance installed as the module singleton,
+        restored automatically by monkeypatch's own teardown."""
+        from power_atlas import acp as acp_mod
+        sv3 = acp_mod._SupervisorV3()
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        return sv3
+
+    def _conn_v3(self, acp_mod, sid=None):
+        conn = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn)
+        if sid:
+            acp_mod._registry.attach(conn, sid)
+        return conn
+
+    def _cleanup_registry(self, acp_mod):
+        for conn in tuple(acp_mod._registry.connections):
+            acp_mod._registry.detach(conn)
+        acp_mod._registry.connections.clear()
+        acp_mod._registry.subscribers.clear()
+        acp_mod._registry.loading.clear()
+
+    # -- load_session --
+
+    def test_load_session_v3_adopts_and_replays(self, monkeypatch):
+        """A fresh session_id not already held is registered, and returns
+        the sessionId/cwd shape the WS handler expects."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_load0000-0000-0000-0000-000000000001"
+
+        async def fake_request(self, method, params, timeout=None):
+            return {}
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+        monkeypatch.setattr(acp_mod, "_get_tool_diffs_v3", lambda sid: {})
+
+        result = asyncio.run(sv3.load_session(sid, "C:\\scratch"))
+
+        assert result == {"sessionId": sid, "cwd": "C:\\scratch"}
+        assert sid in sv3.sessions
+        assert sid in sv3.history
+
+    def test_load_session_v3_returns_existing_live_session_unchanged(self, monkeypatch):
+        """Already-registered session_id: no RPC call, existing record wins."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_load0000-0000-0000-0000-000000000002"
+        sv3.sessions[sid] = {"cwd": "C:\\already-there", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+
+        def must_not_request(self, method, params, timeout=None):
+            raise AssertionError("session/load must not be re-requested "
+                                  "for an already-live session")
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", must_not_request)
+
+        result = asyncio.run(sv3.load_session(sid, "C:\\ignored"))
+        assert result == {"sessionId": sid, "cwd": "C:\\already-there"}
+
+    def test_load_session_v3_rolls_back_on_rpc_failure(self, monkeypatch):
+        """A failed session/load pops the just-registered sessions/history
+        entries and re-raises — same D32-shaped rollback v2's load_session
+        follows."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_load0000-0000-0000-0000-000000000003"
+
+        async def refuses(self, method, params, timeout=None):
+            raise acp_mod.AgentRejected("nope")
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", refuses)
+        monkeypatch.setattr(acp_mod, "_get_tool_diffs_v3", lambda sid: {})
+
+        with pytest.raises(acp_mod.AgentRejected):
+            asyncio.run(sv3.load_session(sid, "C:\\scratch"))
+
+        assert sid not in sv3.sessions
+        assert sid not in sv3.history
+
+    # -- _handle_subscribe_v3 --
+
+    def test_handle_subscribe_v3_attaches_and_replays_history(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_sub00000-0000-0000-0000-000000000001"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+
+        conn = self._conn_v3(acp_mod)
+        try:
+            acp_mod._handle_subscribe_v3(conn, sid)
+            frames = _queued(conn)
+            assert frames[0]["type"] == "session"
+            assert frames[0]["payload"]["sessionId"] == sid
+            assert frames[0]["payload"]["cwd"] == "C:\\scratch"
+            assert frames[1]["type"] == "history"
+            assert conn.session_id == sid
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_subscribe_v3_unknown_session_refuses(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+
+        self._sv3(monkeypatch)
+        conn = self._conn_v3(acp_mod)
+        try:
+            acp_mod._handle_subscribe_v3(conn, "sess_no-such-session")
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "unknown_session"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_subscribe_v3_no_supervisor_refuses(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", None)
+        conn = self._conn_v3(acp_mod)
+        try:
+            acp_mod._handle_subscribe_v3(conn, "sess_anything")
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "internal_error"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    # -- _handle_cancel_v3 --
+
+    def test_handle_cancel_v3_without_a_turn_reaches_the_agent_not_at_all(
+            self, monkeypatch, caplog):
+        """Mirror of TestAcpCancel's v2 equivalent: no inflight turn means no
+        wire call."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_cancel000-0000-0000-0000-00000000001"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                    caplog.at_level(logging.INFO, logger="power_atlas.acp"):
+                asyncio.run(acp_mod._handle_cancel_v3(conn, sid))
+            assert written == []
+            assert "not running a turn" in caplog.text
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_cancel_v3_sends_a_notification_for_an_inflight_turn(self, monkeypatch):
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_cancel000-0000-0000-0000-00000000002"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        conn = self._conn_v3(acp_mod, sid)
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                asyncio.run(acp_mod._handle_cancel_v3(conn, sid))
+            assert written == [{"jsonrpc": "2.0", "method": "session/cancel",
+                                "params": {"sessionId": sid}}]
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_cancel_v3_without_a_session_id_is_refused(self, monkeypatch):
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        self._sv3(monkeypatch)
+        conn = self._conn_v3(acp_mod)
+        try:
+            asyncio.run(acp_mod._handle_cancel_v3(conn, None))
+            assert _queued(conn)[0]["payload"]["code"] == "bad_envelope"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    # -- _handle_close_v3 --
+
+    def test_handle_close_v3_releases_the_session_locally_no_wire_call(self, monkeypatch):
+        """v3 close does no JSON-RPC call (CLOSE_METHOD_V3 is None) — unlike
+        v2's close, nothing must ever be written to the agent."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_close0000-0000-0000-0000-00000000001"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_close_v3(conn, sid))
+            assert written == []
+            assert sid not in sv3.sessions
+            assert sid not in sv3.history
+            frames = _queued(conn)
+            assert [f["type"] for f in frames] == ["session_closed"]
+            assert frames[0]["payload"]["sessionId"] == sid
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_close_v3_nothing_to_close_refuses(self, monkeypatch):
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        self._sv3(monkeypatch)
+        conn = self._conn_v3(acp_mod, "sess_never-existed")
+        try:
+            asyncio.run(acp_mod._handle_close_v3(conn, "sess_never-existed"))
+            assert _queued(conn)[0]["payload"]["code"] == "nothing_to_close"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_close_v3_turn_in_progress_refuses(self, monkeypatch):
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_close0000-0000-0000-0000-00000000002"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        conn = self._conn_v3(acp_mod, sid)
+
+        try:
+            asyncio.run(acp_mod._handle_close_v3(conn, sid))
+            assert _queued(conn)[0]["payload"]["code"] == "turn_in_progress"
+            assert sid in sv3.sessions
+        finally:
+            self._cleanup_registry(acp_mod)

@@ -1809,6 +1809,10 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
     costs one click and gets the agent's own typed in-use refusal at load. The
     hint may only add a refusal, never grant one — the same rule
     `acp._lock_holder` states for itself.
+
+    A `sess_`-prefixed id routes to `acp._lock_holder_v3` (session.json's
+    `status` field, zero round-trip) instead of `acp._lock_holder` (v2's lock
+    file) — the two id shapes never collide (SC-7, plan Phase 1).
     """
     out: dict[str, str] = {}
     for sid in session_ids:
@@ -1817,7 +1821,12 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
             continue
         state = "available"
         try:
-            if acp is not None and acp._lock_holder(sid) is not None:
+            if acp is None:
+                pass
+            elif sid.startswith("sess_"):
+                if acp._lock_holder_v3(sid) is not None:
+                    state = "locked"
+            elif acp._lock_holder(sid) is not None:
                 state = "locked"
         except Exception:
             state = "available"

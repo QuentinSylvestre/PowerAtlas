@@ -2370,6 +2370,64 @@ def _stored_session_cwd_v3(session_id: str) -> str:
     return ""
 
 
+# v3 has no lock file with a pid the way v2 does (Current State: concurrent
+# `session/load` still succeeds despite v3 now writing `.lock` files, so
+# lock-file-based checking is the wrong signal regardless). `_lock_holder_v3`
+# answers the same "is this held elsewhere" question `_lock_holder` answers
+# for v2, but from `session.json`'s own `status` field instead, and has no
+# real pid to report when held — `session.json` carries none. This sentinel
+# stands in for one: negative so it can never be mistaken for a real pid,
+# non-zero so a stray truthiness check can't drop it. Callers must test
+# `is not None`, exactly as `_acp_availability` already does for `_lock_holder`.
+_V3_HOLDER_PID_UNKNOWN: Final[int] = -1
+
+# session.json `status` values that mean another process is actively driving
+# this session right now. Per the spike's Phase 5 probe (archived plan,
+# 260908-1636_ACP_V3_SPIKE.md): "idle"/"failed"/absent mean not held; KAS
+# writes "idle" at turn-end, so "in_progress" only sticks past a turn if the
+# process crashed mid-turn -- a known residual (no pid to disambiguate a
+# stale flag against, unlike v2's _lock_holder).
+_V3_HELD_STATUSES: Final[frozenset[str]] = frozenset({"in_progress", "waiting_on_user"})
+
+
+def _lock_holder_v3(session_id: str) -> int | None:
+    """Whether a v3 session is held elsewhere, read from session.json.status.
+
+    Zero ACP round-trip, per the SC-7 approach (plan Design Decisions). Not a
+    real pid -- v3's session.json carries none -- so a held session answers
+    with `_V3_HOLDER_PID_UNKNOWN` rather than `None`; callers must only test
+    `is not None`, the same contract `_lock_holder` documents for itself.
+
+    Validates session_id against _SESSION_ID_RE before any path construction,
+    mirroring _stored_session_cwd_v3 / _get_tool_diffs_v3.
+
+    Known residual: a mid-turn crash can leave `status: "in_progress"` stuck
+    indefinitely, since there is no pid here to check for liveness the way
+    `_lock_holder` checks its lock's pid. This fails toward "held" rather than
+    "available" in that one case -- unlike `_lock_holder`'s general fail-open
+    rule -- because the alternative (a session's own status field lying about
+    whether it is mid-turn) has no cheaper corroboration available. Not fixed
+    here; a future phase could add the process-table disambiguation the
+    spike's Phase 5 results named as the mitigation.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return None
+    sessions_root = Path.home() / ".kiro" / "sessions"
+    try:
+        for hash_dir in sessions_root.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name == "cli":
+                continue
+            candidate = hash_dir / session_id / "session.json"
+            if candidate.is_file():
+                meta = json.loads(candidate.read_text(encoding="utf-8"))
+                status = meta.get("status")
+                if isinstance(status, str) and status in _V3_HELD_STATUSES:
+                    return _V3_HOLDER_PID_UNKNOWN
+                return None
+    except Exception:
+        return None
+    return None
+
 
 class _Supervisor:
     """The single ``kiro-cli acp`` process, and the JSON-RPC channel to it.
@@ -4033,14 +4091,17 @@ class _Supervisor:
             # other kiro extension, and the un-prefixed form this branch used to
             # match alone therefore matched nothing.
             return
-        if log.isEnabledFor(logging.DEBUG):
+        if log.isEnabledFor(logging.INFO):
             # Params and not only the method name. This module talks to an
             # undocumented protocol: `_kiro.dev/*` is not in the ACP spec at
             # all, and the context-window branch above exists only because a
             # line like this one showed what those notifications carry. Guarded
             # rather than lazily formatted because the `json.dumps` would
             # otherwise run on every unmatched notification at every log level.
-            log.debug("ACP notification %s (%s): %.600s",
+            # INFO, not DEBUG (SC-10, plan Phase 1): production runs at INFO,
+            # and a future/unknown kind was previously invisible without
+            # deliberately enabling DEBUG first.
+            log.info("ACP notification %s (%s): %.600s",
                       method, kind or "-", json.dumps(params))
 
     def _on_agent_death(self, proc: subprocess.Popen) -> None:
@@ -4648,8 +4709,10 @@ class _SupervisorV3(_Supervisor):
             return
         if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
             return
-        if log.isEnabledFor(logging.DEBUG):
-            log.debug("ACP v3 notification %s (%s): %.600s",
+        if log.isEnabledFor(logging.INFO):
+            # INFO, not DEBUG (SC-10, plan Phase 1): see the v2 fallback's
+            # comment in _Supervisor._on_notification for why.
+            log.info("ACP v3 notification %s (%s): %.600s",
                       method, kind or "-", json.dumps(params))
 
     def _spawn(self) -> None:
