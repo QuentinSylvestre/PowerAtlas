@@ -16864,6 +16864,417 @@ class TestAcpDeleteEndpoint:
         assert r"C:\dev\other" in cfg.pinned_folders
 
 
+@pytest.fixture
+def acp_store_dir_v3(tmp_path, monkeypatch):
+    """A real on-disk kiro-cli v3 store, and a factory for sessions in it.
+
+    Mirrors `acp_store_dir` (v2) above, but for the v3 hash-dir/directory
+    layout: `<root>/<hash>/sess_<uuid>/{session.json,messages.jsonl,
+    publish.cursor}` and, optionally, a `sub-executions/` subtree.
+
+    Two separate call sites read where "the v3 store" lives, and both are
+    redirected to the *same* directory here, or the two halves of a delete
+    (find-then-check-held vs. actually-remove) would disagree about where to
+    look: `data_kiro_v3.V3_SESSIONS_ROOT` is a plain module attribute
+    `delete_session`/`_find_v3_session_dir`/`load_sessions` read directly,
+    while `acp._lock_holder_v3`/`_stored_session_cwd_v3` instead compute
+    `Path.home() / ".kiro" / "sessions"` fresh on every call (mirroring the
+    existing `TestLockHolderV3` test pattern for that same reason). A fake
+    home directory makes both resolve to one place.
+    """
+    from power_atlas import data_kiro_v3 as dv3_mod
+    import pathlib as _pl
+    from unittest.mock import patch as _patch
+
+    fake_home = tmp_path / "fake_home"
+    sessions_root = fake_home / ".kiro" / "sessions"
+    sessions_root.mkdir(parents=True)
+
+    monkeypatch.setattr(dv3_mod, "V3_SESSIONS_ROOT", sessions_root)
+    # This fixture writes real session.json files under a fresh sessions_root,
+    # so any cwd-index cache populated by an earlier test (module-level state
+    # on data_kiro_v3) must not leak in.
+    monkeypatch.setattr(dv3_mod, "_root_mtime", None)
+    monkeypatch.setattr(dv3_mod, "_session_json_mtimes", {})
+    monkeypatch.setattr(dv3_mod, "_cwd_index", {})
+    monkeypatch.setattr(dv3_mod, "_norm_cwd_to_hash", {})
+    monkeypatch.setattr(dv3_mod, "_cwd_display", {})
+    monkeypatch.setattr(dv3_mod, "_session_path_cache", {})
+
+    def _make(session_id, cwd="C:\\dev\\ws", *, hash_name=None,
+              with_sub_executions=False, status="idle"):
+        if hash_name is None:
+            hash_name = f"hash-{abs(hash(cwd)) % 100000:05d}"
+        sess_dir = sessions_root / hash_name / session_id
+        sess_dir.mkdir(parents=True)
+        written = []
+        meta = sess_dir / "session.json"
+        meta.write_text(json.dumps({
+            "id": session_id, "workspacePaths": [cwd],
+            "title": "a v3 session", "status": status,
+        }), encoding="utf-8")
+        written.append(meta)
+        msgs = sess_dir / "messages.jsonl"
+        msgs.write_text("", encoding="utf-8")
+        written.append(msgs)
+        cursor = sess_dir / "publish.cursor"
+        cursor.write_text("0", encoding="utf-8")
+        written.append(cursor)
+        if with_sub_executions:
+            subex = sess_dir / "sub-executions"
+            subex.mkdir()
+            (subex / "task1.jsonl").write_text("{}", encoding="utf-8")
+            written.append(subex)
+            sub_cursor = sess_dir / "publish-sub.cursor"
+            sub_cursor.write_text("0", encoding="utf-8")
+            written.append(sub_cursor)
+        written.append(sess_dir)
+        return written
+
+    patcher = _patch("power_atlas.acp.Path")
+    mock_path_cls = patcher.start()
+    mock_path_cls.home.return_value = fake_home
+    mock_path_cls.side_effect = _pl.Path
+    try:
+        yield _make
+    finally:
+        patcher.stop()
+
+
+class TestAcpSessionsForWorkspaceV3:
+    """SC-2 / Phase 5 point 3: `_acp_sessions_for_workspace`'s `include_v3`
+    parameter. Defaults to False so the v2 endpoint's call site is
+    unaffected unless it opts in (Invariant 1)."""
+
+    def test_include_v3_false_by_default_ignores_v3_sessions(
+            self, tmp_path, monkeypatch, acp_store_dir_v3):
+        """Regression: the v2 call shape (`_acp_sessions_for_workspace(cwd)`,
+        no include_v3 argument) must return exactly what it always has —
+        v3 sessions in the same workspace are invisible to it."""
+        from power_atlas import acp as acp_mod
+        from power_atlas.web import _acp_sessions_for_workspace
+
+        v2_dir = tmp_path / "v2store"
+        v2_dir.mkdir()
+        monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", v2_dir)
+        target_cwd = r"C:\dev\mixed"
+        acp_store_dir_v3("sess_v3only-0001", cwd=target_cwd)
+
+        result = _acp_sessions_for_workspace(target_cwd)
+        assert result == []
+
+    def test_include_v3_true_finds_v3_sessions_for_the_workspace(
+            self, tmp_path, monkeypatch, acp_store_dir_v3):
+        from power_atlas import acp as acp_mod
+        from power_atlas.web import _acp_sessions_for_workspace
+
+        monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", tmp_path / "v2store")
+        (tmp_path / "v2store").mkdir()
+        target_cwd = r"C:\dev\v3only"
+        acp_store_dir_v3("sess_v3only-0002", cwd=target_cwd)
+
+        result = _acp_sessions_for_workspace(target_cwd, include_v3=True)
+        assert result == ["sess_v3only-0002"]
+
+    def test_include_v3_true_returns_both_v2_and_v3_ids_for_a_mixed_workspace(
+            self, tmp_path, monkeypatch, acp_store_dir_v3):
+        from power_atlas import acp as acp_mod
+        from power_atlas.web import _acp_sessions_for_workspace
+
+        v2_dir = tmp_path / "v2store"
+        v2_dir.mkdir()
+        monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", v2_dir)
+        target_cwd = r"C:\dev\mixed2"
+
+        v2_sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        (v2_dir / f"{v2_sid}.json").write_text(
+            json.dumps({"cwd": target_cwd}), encoding="utf-8")
+
+        def _fake_valid(sid):
+            return sid == v2_sid
+        monkeypatch.setattr(acp_mod, "_valid_session_id", _fake_valid)
+
+        def _fake_cwd(sid):
+            return target_cwd if sid == v2_sid else ""
+        monkeypatch.setattr(acp_mod, "_stored_session_cwd", _fake_cwd)
+
+        acp_store_dir_v3("sess_mixed2-0001", cwd=target_cwd)
+
+        result = _acp_sessions_for_workspace(target_cwd, include_v3=True)
+        assert set(result) == {v2_sid, "sess_mixed2-0001"}
+
+
+class TestAcpDeleteSessionV3Dispatch:
+    """Phase 5 point 1/4: `_acp_delete_session` dispatches a `sess_`-prefixed
+    id to `data_kiro_v3.delete_session`; anything else keeps the original v2
+    path, unchanged (pinned by TestAcpDeleteEndpoint above, which never
+    passes a `sess_`-shaped id)."""
+
+    def test_a_v3_id_deletes_via_data_kiro_v3(self, acp_store_dir_v3):
+        from power_atlas.web import _acp_delete_session
+
+        sid = "sess_dispatch-0001"
+        paths = acp_store_dir_v3(sid)
+        sess_dir = paths[-1]
+        assert sess_dir.is_dir()
+
+        code, message = _acp_delete_session(sid)
+
+        assert (code, message) == ("", "")
+        assert not sess_dir.exists()
+
+    def test_a_v3_id_with_no_files_is_not_found(self, acp_store_dir_v3):
+        from power_atlas.web import _acp_delete_session
+
+        code, message = _acp_delete_session("sess_never-existed-0001")
+        assert code == "not_found"
+        assert "delete" in message.lower() or "nothing" in message.lower()
+
+    def test_a_v3_locked_file_produces_an_in_use_refusal_with_no_partial_delete(
+            self, acp_store_dir_v3, monkeypatch):
+        from power_atlas import data_kiro_v3 as dv3_mod
+        from power_atlas.web import _acp_delete_session
+
+        sid = "sess_dispatch-0002"
+        paths = acp_store_dir_v3(sid)
+        sess_dir = paths[-1]
+
+        monkeypatch.setattr(dv3_mod, "delete_session", lambda s: False)
+
+        code, message = _acp_delete_session(sid)
+
+        assert code == "in_use"
+        assert "open" in message.lower()
+        # The real delete_session was bypassed here (mocked to always fail),
+        # so nothing on disk should have been touched at all.
+        assert sess_dir.is_dir()
+
+    def test_a_v2_id_still_uses_the_original_v2_path(self, acp_store_dir,
+                                                      monkeypatch):
+        """Regression: a bare-uuid (v2) id must not be routed to
+        data_kiro_v3 at all."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import data_kiro_v3 as dv3_mod
+        from power_atlas.web import _acp_delete_session
+
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        paths = acp_store_dir("sess-v2-regression")
+
+        def _must_not_be_called(session_id):
+            raise AssertionError("data_kiro_v3.delete_session called for a v2 id")
+        monkeypatch.setattr(dv3_mod, "delete_session", _must_not_be_called)
+
+        code, message = _acp_delete_session("sess-v2-regression")
+        assert (code, message) == ("", "")
+        assert [p for p in paths if p.exists()] == []
+
+
+class TestAcpDeleteManyV3Dispatch:
+    """Phase 5 point 2/4: `_acp_delete_many` dispatches the held-elsewhere
+    check (`_lock_holder_v3`) and the pre-delete cwd read
+    (`_stored_session_cwd_v3`) by id shape too, alongside the delete call
+    itself — closing the three-persona review finding that enumeration alone
+    (point 3) does not make workspace-level v3 delete actually work."""
+
+    def test_a_v3_session_held_by_this_process_is_refused(
+            self, acp_store_dir_v3):
+        from power_atlas.web import _acp_delete_many
+
+        sid = "sess_heldproc-0001"
+        paths = acp_store_dir_v3(sid)
+        sess_dir = paths[-1]
+
+        result = _acp_delete_many([sid], held=frozenset({sid}))
+
+        assert result["deleted"] == []
+        assert result["failed"][0]["code"] == "held"
+        assert "close" in result["failed"][0]["message"].lower()
+        assert sess_dir.is_dir()
+
+    def test_a_v3_session_held_by_an_external_process_is_refused(
+            self, acp_store_dir_v3, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas.web import _acp_delete_many
+
+        sid = "sess_heldext-0001"
+        paths = acp_store_dir_v3(sid, status="in_progress")
+        sess_dir = paths[-1]
+
+        def _v2_holder_must_not_be_called(s):
+            raise AssertionError("_lock_holder (v2) called for a v3 id")
+        monkeypatch.setattr(acp_mod, "_lock_holder", _v2_holder_must_not_be_called)
+
+        result = _acp_delete_many([sid], held=frozenset())
+
+        assert result["deleted"] == []
+        assert result["failed"][0]["code"] == "locked"
+        assert sess_dir.is_dir()
+
+    def test_an_idle_v3_session_deletes_successfully(self, acp_store_dir_v3):
+        from power_atlas.web import _acp_delete_many
+
+        sid = "sess_idledelete-0001"
+        paths = acp_store_dir_v3(sid, cwd="C:\\dev\\idlews", status="idle")
+        sess_dir = paths[-1]
+
+        result = _acp_delete_many([sid], held=frozenset())
+
+        assert result["deleted"] == [sid]
+        assert result["failed"] == []
+        assert not sess_dir.exists()
+
+    def test_a_successful_v3_delete_forgets_the_v3_provider_cache_only(
+            self, acp_store_dir_v3, monkeypatch):
+        """The v3-keyed session_cache entry is forgotten; the v2-keyed one
+        for the same cwd must not be touched by a v3-only delete."""
+        from power_atlas import data as data_mod
+        from power_atlas.web import _acp_delete_many, _ACP_V3_LISTING_PROVIDER
+
+        sid = "sess_cacheforget-0001"
+        acp_store_dir_v3(sid, cwd="C:\\dev\\cachetest")
+        forgotten = []
+        monkeypatch.setattr(
+            data_mod.session_cache, "forget",
+            lambda cwd, provider="kiro-cli": forgotten.append((cwd, provider)))
+
+        _acp_delete_many([sid], held=frozenset())
+
+        assert forgotten == [("C:\\dev\\cachetest", _ACP_V3_LISTING_PROVIDER)]
+
+    def test_a_mixed_v2_v3_batch_dispatches_each_by_its_own_shape(
+            self, acp_store_dir, acp_store_dir_v3, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas.web import _acp_delete_many
+
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        v2_paths = acp_store_dir("sess-v2-mixed")
+        v3_paths = acp_store_dir_v3("sess_v3-mixed-0001")
+
+        result = _acp_delete_many(
+            ["sess-v2-mixed", "sess_v3-mixed-0001"], held=frozenset())
+
+        assert set(result["deleted"]) == {"sess-v2-mixed", "sess_v3-mixed-0001"}
+        assert result["failed"] == []
+        assert [p for p in v2_paths if p.exists()] == []
+        assert not v3_paths[-1].exists()
+
+
+class TestApiAcpV3DeleteSessionsEndpoint:
+    """End-to-end coverage of `POST /api/acp-v3/sessions/delete` — the SC-2
+    exit criteria's own mandated verification path (direct HTTP call via
+    TestClient, never browser automation: an automated click on a real
+    `confirm()` dialog previously crashed the Chrome extension in this
+    project)."""
+
+    _PATH = "/api/acp-v3/sessions/delete"
+
+    def _sv3(self, monkeypatch):
+        from power_atlas import acp as acp_mod
+        sv3 = acp_mod._SupervisorV3()
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        return sv3
+
+    def test_deleting_a_closed_v3_session_removes_it_from_disk(
+            self, client, acp_store_dir_v3, monkeypatch):
+        self._sv3(monkeypatch)
+        sid = "sess_endpoint-0001"
+        paths = acp_store_dir_v3(sid, with_sub_executions=True)
+        sess_dir = paths[-1]
+        assert (sess_dir / "sub-executions").is_dir()
+
+        res = client.post(self._PATH, json={"session_ids": [sid]})
+
+        assert res.status_code == 200
+        body = res.json()
+        assert body["deleted"] == [sid]
+        assert body["failed"] == []
+        assert not sess_dir.exists()
+
+    def test_deleting_a_currently_open_v3_session_is_refused(
+            self, client, acp_store_dir_v3, monkeypatch):
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_endpoint-0002"
+        paths = acp_store_dir_v3(sid)
+        sess_dir = paths[-1]
+        sv3.sessions[sid] = {"cwd": "C:\\dev\\ws"}
+
+        res = client.post(self._PATH, json={"session_ids": [sid]})
+
+        body = res.json()
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "held"
+        assert sess_dir.is_dir()
+
+    def test_deleting_an_externally_held_v3_session_is_refused(
+            self, client, acp_store_dir_v3, monkeypatch):
+        self._sv3(monkeypatch)
+        sid = "sess_endpoint-0003"
+        paths = acp_store_dir_v3(sid, status="in_progress")
+        sess_dir = paths[-1]
+
+        res = client.post(self._PATH, json={"session_ids": [sid]})
+
+        body = res.json()
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "locked"
+        assert sess_dir.is_dir()
+
+    def test_workspace_delete_for_a_v3_only_workspace_actually_deletes(
+            self, client, tmp_path, monkeypatch, acp_store_dir_v3):
+        """Regression for the previously-silent blindness: workspace delete
+        must both find AND actually remove v3 sessions, not merely report
+        them as found."""
+        from power_atlas import acp as acp_mod
+        self._sv3(monkeypatch)
+        v2_dir = tmp_path / "v2store"
+        v2_dir.mkdir()
+        monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", v2_dir)
+
+        target_cwd = r"C:\dev\v3-only-ws"
+        sid1 = "sess_wsdelete-0001"
+        sid2 = "sess_wsdelete-0002"
+        paths1 = acp_store_dir_v3(sid1, cwd=target_cwd)
+        paths2 = acp_store_dir_v3(sid2, cwd=target_cwd)
+
+        res = client.post(self._PATH, json={"cwd": target_cwd})
+
+        body = res.json()
+        assert set(body["deleted"]) == {sid1, sid2}
+        assert body["failed"] == []
+        assert not paths1[-1].exists()
+        assert not paths2[-1].exists()
+
+
+class TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace:
+    """Invariant 1: the v2 endpoint's workspace-delete output must be
+    byte-for-byte unchanged by this phase, even for a workspace that also
+    has v3 sessions in it — proving `include_v3` defaulting to False
+    actually isolates v2 from every change Phase 5 makes."""
+
+    _PATH = "/api/acp/sessions/delete"
+
+    def test_v2_endpoint_workspace_delete_ignores_v3_sessions_in_the_same_cwd(
+            self, client, acp_store_dir, acp_store_dir_v3, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+
+        target_cwd = "C:\\dev\\mixed-regression"
+        v2_paths = acp_store_dir("sess-v2-only", cwd=target_cwd)
+        v3_paths = acp_store_dir_v3("sess_v3-only-in-mixed", cwd=target_cwd)
+
+        res = client.post(self._PATH, json={"cwd": target_cwd})
+
+        body = res.json()
+        # Exactly what the pre-Phase-5 v2 endpoint would have returned: only
+        # the v2 session is found, reported, and deleted.
+        assert body["deleted"] == ["sess-v2-only"]
+        assert body["total_found"] == 1
+        assert [p for p in v2_paths if p.exists()] == []
+        # The v3 session is completely untouched — the v2 endpoint never
+        # even learns it exists.
+        assert v3_paths[-1].exists()
+
+
 class TestMobileUaDetection:
     """Unit tests for _is_mobile_ua and the can_delete template variable."""
 

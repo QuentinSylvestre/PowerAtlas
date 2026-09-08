@@ -11,11 +11,18 @@ subdirectory. Hash-dir names that appear in _V3_EXCLUDED_NAMES are skipped.
 
 import collections
 import json
+import logging
+import os
+import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
 
 from .data import BoundedCache, Session, _FileInfo, _normalize_path, _cap_text
+from .launcher import _SESSION_ID_RE
+
+log = logging.getLogger("power_atlas.data_kiro_v3")
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +33,22 @@ V3_SESSIONS_ROOT = Path.home() / ".kiro" / "sessions"
 
 # Subdirs of V3_SESSIONS_ROOT that are not workspace-hash dirs
 _V3_EXCLUDED_NAMES: frozenset[str] = frozenset({"cli"})
+
+# Staging suffix a session directory is renamed to before it is torn down
+# (delete_session, below) -- mirrors web.py's _ACP_DELETE_STAGING for v2
+# sessions. A directory renamed to this name matches none of this module's
+# own hash-dir/sess_<uuid> scan patterns, so a half-finished delete can never
+# be picked back up as a live session by any reader.
+_V3_DELETE_STAGING = ".pa-deleting"
+
+# ERROR_SHARING_VIOLATION. Same OS/semantics web.py's _ACP_SHARING_VIOLATION
+# documents: a second open handle on a file inside the directory refuses both
+# os.replace and the unlinks shutil.rmtree performs with winerror=32 on
+# Windows. Not currently branched on by name (delete_session treats any
+# OSError from the rename or the rmtree the same way -- refuse, roll back)
+# but named here for the same reason web.py names it: so a reader does not
+# have to rediscover what the magic number means.
+_V3_SHARING_VIOLATION = 32
 
 
 # ---------------------------------------------------------------------------
@@ -319,33 +342,65 @@ def _extract_prompts_v3_cached(
 # Per-session path finder
 # ---------------------------------------------------------------------------
 
+def _find_v3_session_dir(session_id: str) -> Path | None:
+    """Find the sess_<uuid>/ directory for a session by scanning hash dirs.
+
+    The shared directory-resolution scan: `_find_v3_session_path` (below)
+    layers a `messages.jsonl`-exists check on top of this to find that one
+    file; `delete_session` uses this directly, since a delete must find the
+    directory itself, whether or not the session has written any messages
+    yet. By construction a given session_id lives under at most one hash dir
+    (kiro-cli assigns exactly one workspace-hash dir per session), so the
+    "first match wins" semantics here are equivalent to a full scan for every
+    real session id.
+
+    Not cached — callers that want a cached lookup use
+    `_find_v3_session_path`'s own `_session_path_cache`; `delete_session`
+    always wants a fresh, uncached answer, since acting on a stale directory
+    handle is exactly the kind of mistake a delete cannot afford.
+
+    Returns None if not found, if V3_SESSIONS_ROOT does not exist, or on any
+    OSError encountered while scanning.
+    """
+    if not V3_SESSIONS_ROOT.is_dir():
+        return None
+    sess_dir_name = _ensure_sess_prefix(session_id)
+    try:
+        for hash_dir in V3_SESSIONS_ROOT.iterdir():
+            if not hash_dir.is_dir() or hash_dir.name in _V3_EXCLUDED_NAMES:
+                continue
+            candidate = hash_dir / sess_dir_name
+            try:
+                if candidate.is_dir():
+                    return candidate
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return None
+
+
 def _find_v3_session_path(session_id: str) -> Path | None:
     """Find the messages.jsonl path for a session by scanning hash dirs.
 
     Cached in _session_path_cache (invalidated on index rebuild).
-    Returns None if not found or on any OSError.
+    Returns None if not found, if the session's directory has no
+    messages.jsonl yet (a brand-new session before its first turn), or on
+    any OSError.
     """
     # Check path cache (invalidated on index rebuild via _cwd_to_sessions)
     if session_id in _session_path_cache:
         return _session_path_cache[session_id]
 
-    if not V3_SESSIONS_ROOT.is_dir():
-        return None
-    sess_dir_name = _ensure_sess_prefix(session_id)
+    sess_dir = _find_v3_session_dir(session_id)
     found_path: Path | None = None
-    try:
-        for hash_dir in V3_SESSIONS_ROOT.iterdir():
-            if not hash_dir.is_dir() or hash_dir.name in _V3_EXCLUDED_NAMES:
-                continue
-            candidate = hash_dir / sess_dir_name / "messages.jsonl"
-            try:
-                if candidate.is_file():
-                    found_path = candidate
-                    break
-            except OSError:
-                continue
-    except OSError:
-        pass
+    if sess_dir is not None:
+        candidate = sess_dir / "messages.jsonl"
+        try:
+            if candidate.is_file():
+                found_path = candidate
+        except OSError:
+            found_path = None
 
     # Only cache positive (found) results — None is not cached to allow brand-new
     # ACP sessions to be discovered on the next call without waiting for a full
@@ -353,6 +408,98 @@ def _find_v3_session_path(session_id: str) -> Path | None:
     if found_path is not None:
         _session_path_cache[session_id] = found_path
     return found_path
+
+
+def delete_session(session_id: str) -> bool:
+    """Delete a v3 session's entire directory tree from disk.
+
+    Returns True on success, False if the session's directory could not be
+    found, or if it was found but could not be removed (most likely a file
+    inside it is held open by another process).
+
+    First line is a path-traversal guard — this file has no such guard
+    anywhere else today (`_find_v3_session_dir`/`find_session_workspace` join
+    `session_id` into a path with zero validation), so this is a fresh guard
+    written for this function specifically, not a reuse of an existing one.
+
+    Locates the session's directory via `_find_v3_session_dir` (the same
+    hash-dir scan `_find_v3_session_path` uses, extracted so both share it),
+    then removes the WHOLE directory tree — `messages.jsonl`, `session.json`,
+    `publish.cursor`, and — only for sessions that used subagents —
+    `sub-executions/<agentSubtaskId>.jsonl` and `publish-sub.cursor`. This is
+    a recursive whole-directory delete, not the fixed file-suffix list v2's
+    `_acp_session_paths` (`web.py`) enumerates, because a v3 session is one
+    directory, never up to five sibling files.
+
+    **`.lock`, per Phase 5 point 2's live probe (standalone `kiro-cli acp
+    --agent-engine v3` process, fresh temp cwd, redacted wire log), is
+    neither of the two locations the plan anticipated.** It is not inside
+    `sess_<uuid>/` and not a sibling *file* of it either — it lives at
+    `<hash-dir>/.index/.lock`, one level up, inside a `.index/` directory
+    that is a sibling of every `sess_<uuid>/` directory under that same
+    workspace-hash dir. `.index/` is shared per-workspace state (observed:
+    created once per hash dir, not once per session — most likely backing
+    kiro-cli's own fast session-list index for that workspace), not
+    something this or any single session owns. Removing only `sess_<uuid>/`
+    therefore already does exactly the right thing for entirely the opposite
+    reason the plan expected: not "the rmtree already covers `.lock`" but
+    "`.lock` lives outside the directory being removed, and must stay
+    outside it" — deleting `.index/` alongside one session's directory would
+    destroy shared index state for every *other* session still in that
+    workspace. No extra unlink is added here, and none should be.
+
+    Uses the same rename-to-staging-then-unlink pattern as v2's
+    `_acp_delete_session` (`web.py`) to survive a Windows sharing violation
+    (winerror 32, measured there): the whole directory is renamed first, and
+    only once that succeeds is it torn down with `shutil.rmtree`. A refused
+    rename changes nothing — the directory is exactly as it was. A `rmtree`
+    failure *after* a successful rename is rolled back by renaming the staged
+    directory back to its original name, so a failed delete never leaves the
+    session half-gone; if even that rollback fails (the same "one degradation
+    it accepts" `_acp_delete_session` documents for v2), the session is gone
+    from every reader's point of view but its bytes remain on disk — logged
+    loudly here for the same reason `_acp_delete_session` logs it loudly
+    there: an error naming a path the caller cannot act on would be worse
+    than a log line an operator can grep for.
+
+    Invalidates `_session_path_cache` for `session_id` on success, so a stale
+    cached `messages.jsonl` path can never be served for a session whose
+    directory is already gone.
+    """
+    if not _SESSION_ID_RE.fullmatch(session_id):
+        return False
+
+    sess_dir = _find_v3_session_dir(session_id)
+    if sess_dir is None:
+        return False
+
+    token = secrets.token_hex(4)
+    staged = sess_dir.with_name(f"{sess_dir.name}{_V3_DELETE_STAGING}-{token}")
+    try:
+        os.replace(sess_dir, staged)
+    except OSError as exc:
+        log.warning("ACP v3 delete: staging failed for session=%s: %s",
+                    session_id, exc)
+        return False
+
+    try:
+        shutil.rmtree(staged)
+    except (PermissionError, OSError) as exc:
+        try:
+            os.replace(staged, sess_dir)
+        except OSError:
+            log.exception(
+                "ACP v3 delete: could not restore %s to %s after a failed "
+                "rmtree — session=%s is gone from every reader's point of "
+                "view but its bytes remain on disk at the staged path",
+                staged, sess_dir, session_id)
+        else:
+            log.warning("ACP v3 delete: rmtree failed for session=%s: %s",
+                        session_id, exc)
+        return False
+
+    _session_path_cache.pop(session_id, None)
+    return True
 
 
 # ---------------------------------------------------------------------------

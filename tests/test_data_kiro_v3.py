@@ -966,3 +966,212 @@ class TestKiroV3ExtractContent:
             "payload": {"type": "user", "content": None},
         })
         assert dv3._extract_v3_content(line, "user") == ""
+
+
+# ---------------------------------------------------------------------------
+# TestFindV3SessionDir (Phase 5, SC-2 — shared directory-resolution helper)
+# ---------------------------------------------------------------------------
+
+class TestFindV3SessionDir:
+    """`_find_v3_session_dir` is the extracted scan `_find_v3_session_path`
+    and `delete_session` both use — this class pins its own behavior
+    directly, separately from the two callers' tests."""
+
+    def test_finds_an_existing_session_directory(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        session_id = "sess_11111111-1111-1111-1111-111111111111"
+        _make_session(root, "hashdir1", session_id, "C:\\dev\\proj",
+                      session_id=session_id)
+
+        result = dv3._find_v3_session_dir(session_id)
+        assert result == root / "hashdir1" / session_id
+
+    def test_finds_a_directory_with_no_messages_yet(self, tmp_path, monkeypatch):
+        """A brand-new session (session.json only, no messages.jsonl written
+        yet) must still resolve — delete_session needs to find it even
+        before its first turn, unlike _find_v3_session_path's own
+        messages.jsonl-gated result."""
+        root = tmp_path / "sessions"
+        session_id = "sess_22222222-2222-2222-2222-222222222222"
+        sess_dir = root / "hashdir1" / session_id
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text(
+            json.dumps({"id": session_id, "workspacePaths": ["C:\\dev\\proj"]}),
+            encoding="utf-8")
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        result = dv3._find_v3_session_dir(session_id)
+        assert result == sess_dir
+        # And _find_v3_session_path (messages.jsonl-gated) correctly reports
+        # not-found for the very same directory.
+        assert dv3._find_v3_session_path(session_id) is None
+
+    def test_returns_none_for_unknown_session(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        result = dv3._find_v3_session_dir("sess_99999999-9999-9999-9999-999999999999")
+        assert result is None
+
+    def test_returns_none_when_root_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path / "nonexistent")
+        result = dv3._find_v3_session_dir("sess_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        assert result is None
+
+    def test_skips_the_cli_subdir(self, tmp_path, monkeypatch):
+        """`cli/` is a v2 subdir under the same sessions root, never a
+        workspace-hash dir — must never be scanned into as one."""
+        root = tmp_path / "sessions"
+        session_id = "sess_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        cli_lookalike = root / "cli" / session_id
+        cli_lookalike.mkdir(parents=True)
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        result = dv3._find_v3_session_dir(session_id)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# TestDeleteSessionV3 (Phase 5, SC-2)
+# ---------------------------------------------------------------------------
+
+class TestDeleteSessionV3:
+    """`delete_session` — whole-directory removal for a v3 session, with the
+    same rename-to-staging-then-unlink survival trick v2's
+    `_acp_delete_session` (web.py) uses for a Windows sharing violation."""
+
+    def _make_full_session(self, root, hash_name, session_id, cwd,
+                            with_sub_executions=False):
+        sess_dir = root / hash_name / session_id
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text(
+            json.dumps({"id": session_id, "workspacePaths": [cwd],
+                        "status": "idle"}),
+            encoding="utf-8")
+        (sess_dir / "messages.jsonl").write_text('{"kind":"user"}\n', encoding="utf-8")
+        (sess_dir / "publish.cursor").write_text("0", encoding="utf-8")
+        if with_sub_executions:
+            subex = sess_dir / "sub-executions"
+            subex.mkdir()
+            (subex / "task-abc123.jsonl").write_text("{}", encoding="utf-8")
+            (sess_dir / "publish-sub.cursor").write_text("0", encoding="utf-8")
+        return sess_dir
+
+    def test_removes_the_whole_directory_tree(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        session_id = "sess_c0ffee00-0000-0000-0000-000000000001"
+        sess_dir = self._make_full_session(
+            root, "hashdir1", session_id, "C:\\dev\\proj",
+            with_sub_executions=True)
+        assert sess_dir.is_dir()
+
+        result = dv3.delete_session(session_id)
+
+        assert result is True
+        assert not sess_dir.exists()
+        # The hash dir itself (a sibling of the deleted session, shared by
+        # any other sessions in the same workspace) is untouched.
+        assert (root / "hashdir1").is_dir()
+        # No staged remnant left behind under any `.pa-deleting`-suffixed name.
+        leftovers = list((root / "hashdir1").glob(f"{session_id}{dv3._V3_DELETE_STAGING}*"))
+        assert leftovers == []
+
+    def test_rejects_path_traversal_as_its_first_action(self, tmp_path, monkeypatch):
+        """The guard must run — and refuse — before any path is built from
+        the id, mirroring the existing _stored_session_cwd_v3/_lock_holder_v3
+        test pattern."""
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        def _must_not_be_called(*_a, **_kw):
+            raise AssertionError("_find_v3_session_dir called for a malformed id")
+
+        monkeypatch.setattr(dv3, "_find_v3_session_dir", _must_not_be_called)
+
+        assert dv3.delete_session("../../etc/passwd") is False
+        assert dv3.delete_session("a/b") is False
+        assert dv3.delete_session("") is False
+
+    def test_returns_false_for_a_session_that_does_not_exist(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        result = dv3.delete_session("sess_deadbeef-0000-0000-0000-000000000000")
+        assert result is False
+
+    def test_invalidates_the_session_path_cache_on_success(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        session_id = "sess_c0ffee00-0000-0000-0000-000000000002"
+        self._make_full_session(root, "hashdir1", session_id, "C:\\dev\\proj")
+
+        # Populate the cache the way a normal read would.
+        cached_path = dv3._find_v3_session_path(session_id)
+        assert cached_path is not None
+        assert session_id in dv3._session_path_cache
+
+        assert dv3.delete_session(session_id) is True
+
+        assert session_id not in dv3._session_path_cache
+        # A fresh lookup (uncached) must not resurrect a path to a directory
+        # that is now gone.
+        assert dv3._find_v3_session_path(session_id) is None
+
+    def test_a_locked_file_produces_a_clean_refusal_with_no_partial_deletion(
+            self, tmp_path, monkeypatch):
+        """Simulates a file inside the session directory being held open by
+        another process: shutil.rmtree fails after the directory has already
+        been renamed to its staging name. The rename must be rolled back —
+        the session ends up exactly as it started, not half-deleted."""
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        session_id = "sess_c0ffee00-0000-0000-0000-000000000003"
+        sess_dir = self._make_full_session(root, "hashdir1", session_id, "C:\\dev\\proj")
+
+        def _boom(_path):
+            err = OSError("in use")
+            err.winerror = 32
+            raise err
+
+        monkeypatch.setattr(dv3.shutil, "rmtree", _boom)
+
+        result = dv3.delete_session(session_id)
+
+        assert result is False
+        # Rolled back to its original name — not left staged, not gone.
+        assert sess_dir.is_dir()
+        assert (sess_dir / "session.json").is_file()
+        assert (sess_dir / "messages.jsonl").is_file()
+        leftovers = list((root / "hashdir1").glob(f"{session_id}{dv3._V3_DELETE_STAGING}*"))
+        assert leftovers == []
+
+    def test_a_refused_rename_leaves_the_session_untouched(self, tmp_path, monkeypatch):
+        """If even the initial rename is refused (e.g. the same sharing
+        violation, hit earlier), nothing has moved at all -- the directory
+        must be exactly as it was, and rmtree must never be reached."""
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        session_id = "sess_c0ffee00-0000-0000-0000-000000000004"
+        sess_dir = self._make_full_session(root, "hashdir1", session_id, "C:\\dev\\proj")
+
+        def _boom(_src, _dst):
+            err = OSError("in use")
+            err.winerror = 32
+            raise err
+
+        monkeypatch.setattr(dv3.os, "replace", _boom)
+
+        def _rmtree_must_not_be_called(*_a, **_kw):
+            raise AssertionError("rmtree called despite a refused rename")
+
+        monkeypatch.setattr(dv3.shutil, "rmtree", _rmtree_must_not_be_called)
+
+        result = dv3.delete_session(session_id)
+
+        assert result is False
+        assert sess_dir.is_dir()
+        assert (sess_dir / "session.json").is_file()

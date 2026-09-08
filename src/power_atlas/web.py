@@ -2799,6 +2799,13 @@ def _acp_delete_session(session_id: str) -> tuple[str, str]:
 
     Returns ``("", "")`` on success, or ``(code, message)``.
 
+    **Dispatches by id shape first.** A `sess_`-prefixed id is a v3 session —
+    a single directory tree under `~/.kiro/sessions/<hash>/`, not up to five
+    sibling files under `KIRO_SESSION_DIR` — so it routes to
+    `data_kiro_v3.delete_session`, which implements its own equivalent of the
+    rename-staging design documented below directly against that directory.
+    Everything from here down is v2's original implementation, unchanged.
+
     **Rename first, unlink second, and that ordering is the correctness
     argument rather than a style.** A session is up to five separate paths, and
     the naive loop — unlink each in turn — has no way to fail cleanly: measured
@@ -2828,6 +2835,23 @@ def _acp_delete_session(session_id: str) -> tuple[str, str]:
     view the delete did happen, and an error naming a file they cannot act on
     would be worse than a log line an operator can grep for.
     """
+    if session_id.startswith("sess_"):
+        from . import data_kiro_v3
+        if data_kiro_v3._find_v3_session_dir(session_id) is None:
+            return ("not_found",
+                    "Nothing left to delete — the store has no files for this "
+                    "session.")
+        if data_kiro_v3.delete_session(session_id):
+            return ("", "")
+        # data_kiro_v3.delete_session already rolled back internally (rename
+        # staging, mirroring the v2 design above) on any failure past this
+        # point, so the session's directory is exactly as it was — the
+        # existence check just above ruled out "not_found", which leaves a
+        # locked file inside the directory as the only realistic cause.
+        return ("in_use",
+                "A process still has this session's files open. Close it "
+                "there, then try again.")
+
     paths = _acp_session_paths(session_id)
     if not paths:
         return ("not_found",
@@ -2885,12 +2909,31 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
     `held` is a snapshot taken on the loop and passed in, for the reason
     `_acp_availability` gives at length: `_supervisor.sessions` is loop-owned
     and unlocked, and iterating it from a worker thread is a torn read (D9).
+    Its membership already answers "does *this* process (whichever supervisor
+    the caller snapshotted — v2's or v3's) have this session open" correctly
+    for either id shape, since the caller is the one that chooses which
+    supervisor to snapshot.
+
+    Every other per-id check below dispatches on id shape, exactly like
+    `_acp_availability` already does: a `sess_`-prefixed id is v3, routed to
+    `acp._lock_holder_v3` / `acp._stored_session_cwd_v3` /
+    `_acp_delete_session`'s own v3 branch; anything else is v2, routed to the
+    original `acp._lock_holder` / `acp._stored_session_cwd` /
+    `_acp_delete_session`'s v2 branch, completely unchanged. Without this
+    dispatch, a v3 id reaching this function would be checked against v2's
+    lock-file mechanism (which always reads "not held" for a `sess_`-shaped
+    id — see `_lock_holder_v3`'s own docstring) and would still resolve to
+    `_acp_session_paths`' v2 layout even once `_acp_delete_session` itself
+    knew better, since the "held elsewhere" and "which workspace does this
+    belong to" checks happen here, one level up.
     """
     deleted: list[str] = []
     failed: list[dict] = []
-    touched: set[str] = set()
+    touched_v2: set[str] = set()
+    touched_v3: set[str] = set()
 
     for session_id in session_ids:
+        is_v3 = session_id.startswith("sess_")
         if not acp._valid_session_id(session_id):
             # Before anything joins it to a path. The same guard the `load`
             # path applies, and the reason it exists: this string becomes a
@@ -2906,7 +2949,8 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
                            "conversation pane and press Close first."})
             continue
         try:
-            holder = acp._lock_holder(session_id)
+            holder = (acp._lock_holder_v3(session_id) if is_v3
+                      else acp._lock_holder(session_id))
         except Exception:
             # Same fail-open reading `_acp_availability` takes: the hint may
             # add a refusal, never grant one — so a hint that could not be read
@@ -2923,14 +2967,15 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
         # Read *before* the delete: it is the session's own metadata file that
         # says which workspace it belongs to, and after the delete there is
         # nothing left to ask.
-        cwd = acp._stored_session_cwd(session_id)
+        cwd = (acp._stored_session_cwd_v3(session_id) if is_v3
+               else acp._stored_session_cwd(session_id))
         code, message = _acp_delete_session(session_id)
         if code:
             failed.append({"id": session_id, "code": code, "message": message})
             continue
         deleted.append(session_id)
         if cwd:
-            touched.add(cwd)
+            (touched_v3 if is_v3 else touched_v2).add(cwd)
 
     if deleted:
         # The store has changed under caches that key on it. `data_kiro`'s own
@@ -2938,18 +2983,23 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
         # `session_cache` holds the parsed list per workspace and
         # `discover_workspaces_with_counts` holds the counts for 30 s — so
         # without these two the deleted row comes back on the next Refresh and
-        # the workspace header keeps counting it.
-        for cwd in touched:
+        # the workspace header keeps counting it. Forgotten under each engine's
+        # own provider key — a v3 delete must not leave the v2-keyed cache
+        # entry (or vice versa) serving a workspace whose v3-only row just
+        # disappeared from disk.
+        for cwd in touched_v2:
             data.session_cache.forget(cwd, _ACP_LISTING_PROVIDER)
+        for cwd in touched_v3:
+            data.session_cache.forget(cwd, _ACP_V3_LISTING_PROVIDER)
         data.invalidate_workspace_counts()
         log.info("ACP delete: removed %d session(s) across %d workspace(s)",
-                 len(deleted), len(touched))
+                 len(deleted), len(touched_v2 | touched_v3))
 
     return {"deleted": deleted, "failed": failed}
 
 
-def _acp_sessions_for_workspace(cwd: str) -> list[str]:
-    """Return all v2 session IDs in KIRO_SESSION_DIR that belong to *cwd*.
+def _acp_sessions_for_workspace(cwd: str, include_v3: bool = False) -> list[str]:
+    """Return all v2 (and, if asked, v3) session IDs that belong to *cwd*.
 
     Scans the store directly (not the paged listing). A session belongs to
     this workspace when its stored cwd matches after normalization.
@@ -2959,8 +3009,17 @@ def _acp_sessions_for_workspace(cwd: str) -> list[str]:
     cache or network-backed paths. Called off the event loop via
     asyncio.to_thread.
 
-    Limitation: covers only v2 sessions in KIRO_SESSION_DIR. v3 sessions in
-    ~/.kiro/sessions/<hash>/sess_*/ are not enumerated.
+    `include_v3`, when True, also enumerates v3 session IDs for *cwd* —
+    alongside the v2 enumeration below, not instead of it — via
+    `data_kiro_v3.load_sessions(cwd)`, that module's own direct-scan
+    equivalent of the v2 loop above (it reads `session.json` under
+    `~/.kiro/sessions/<hash>/sess_*/` rather than the paged/cached listing).
+    Defaults to False so the v2 endpoint's call site
+    (`api_acp_delete_sessions`) is completely unaffected unless it opts in —
+    this plan's own Invariant 1 requires v2's workspace-delete output stay
+    byte-for-byte unchanged, and a default-off parameter is what makes that
+    true without duplicating this function. The v3 endpoint
+    (`api_acp_v3_delete_sessions`) passes `include_v3=True`.
     """
     from .data import _normalize_path
     norm = _normalize_path(cwd)
@@ -2974,6 +3033,10 @@ def _acp_sessions_for_workspace(cwd: str) -> list[str]:
         stored = acp._stored_session_cwd(sid)
         if stored and _normalize_path(stored) == norm:
             result.append(sid)
+    if include_v3:
+        from . import data_kiro_v3
+        v3_sessions, _file_stats = data_kiro_v3.load_sessions(cwd)
+        result.extend(s.session_id for s in v3_sessions)
     return result
 
 
@@ -3224,7 +3287,8 @@ async def api_acp_v3_delete_sessions(request: Request):
         if not isinstance(cwd, str) or not cwd.strip():
             return JSONResponse(
                 {"error": "'cwd' must be a non-empty string."}, status_code=400)
-        all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
+        all_ids = await asyncio.to_thread(
+            _acp_sessions_for_workspace, cwd, include_v3=True)
         deleted_total: list[str] = []
         failed_total: list[dict] = []
         while all_ids:
@@ -3268,22 +3332,18 @@ async def api_acp_v3_delete_sessions(request: Request):
             {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
             status_code=400)
     session_ids = [s for s in raw if isinstance(s, str)]
-    # Spike note: v3 session deletion requires scanning the hashed path tree.
-    # For the spike, reject delete requests for sess_-prefixed IDs with a
-    # clear error rather than silently reporting not_found.
-    failed: list[dict] = []
-    v2_session_ids: list[str] = []
-    for sid in session_ids:
-        if sid.startswith("sess_"):
-            failed.append({"session_id": sid,
-                           "error": "v3 session deletion not yet implemented"})
-        else:
-            v2_session_ids.append(sid)
+    # Phase 5 (SC-2): `_acp_delete_many` now dispatches each id by shape —
+    # `sess_`-prefixed routes to `data_kiro_v3.delete_session` (via
+    # `_acp_delete_session`'s own v3 branch) and `_lock_holder_v3`'s
+    # externally-held check, anything else to v2's original path — so every
+    # requested id, v2 or v3, is handled by one call. The `sess_`-prefix
+    # rejection that used to sit here ("v3 session deletion not yet
+    # implemented") is gone.
     held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
-    result = await asyncio.to_thread(_acp_delete_many, v2_session_ids, held)
+    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
-        "failed": failed + result["failed"],
+        "failed": result["failed"],
         "total_found": len(session_ids),
     })
 
