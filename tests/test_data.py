@@ -2328,6 +2328,82 @@ def test_presence_leaves_a_foreign_kiro_lock_alone(tmp_path):
     assert snap.is_live("kiro-cli", "C:/work/proj", "sess-terminal") is True
 
 
+def test_presence_does_not_hide_a_v3_agent_orphaned_lock(tmp_path):
+    """D32's own-agent orphan-lock suppression (`pid == acp_pid`) is scoped to
+    `provider == "kiro-cli"` only, not the widened `_KIRO_PROVIDERS` family
+    the other three sidecar-reconciliation checks use (Phase 1 cycle-2 review
+    fix). `acp_pid` always comes from `_Supervisor._publish_live()` — the v2
+    supervisor's own pid, never `_SupervisorV3`'s (`_SupervisorV3.
+    _publish_live()` is dead code, F10) — so `pid == acp_pid` can never
+    genuinely mean "our v3 agent," regardless of provider widening. This
+    documents the known, currently-unaddressed gap (see the comment above the
+    D32 guard in `_scan()`, and Follow-up Work #6): a v3 session orphaned by
+    our own agent is NOT suppressed today, unlike v2's equivalent case
+    (test_presence_hides_a_lock_our_own_agent_orphaned, above).
+    """
+    v3_sid = "sess_orphan00-0000-0000-0000-000000000000"
+    _write_kiro_lock(tmp_path, v3_sid, 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    agent = _FakeProc("kiro-cli.exe",
+                      ["kiro-cli.exe", "acp", "--agent-engine", "v3"],
+                      pid=500, create_time=started - 600.0)
+    # acp_pid (published by _Supervisor._publish_live -- v2's own pid)
+    # happens to equal this process's pid, and the agent holds a different
+    # session -- exactly the shape that suppresses a v2 orphan. It must NOT
+    # suppress a v3-labeled one, since acp_pid never actually names v3's own
+    # agent.
+    with _acp_published({"sess-other"}, 500):
+        snap = _scan_with([agent], kiro_dir=tmp_path)
+    assert snap.is_live("kiro-cli-v3", "C:/work/proj", v3_sid) is True
+
+
+def test_presence_leaves_a_foreign_v3_kiro_lock_alone(tmp_path):
+    """v3-id mirror of test_presence_leaves_a_foreign_kiro_lock_alone: the
+    (narrowed, kiro-cli-only) D32 suppression only ever applies to our own
+    agent's pid, never to an unrelated kiro-cli-v3 lock -- unaffected by
+    whether the guard's provider check is narrow or widened, since `pid ==
+    acp_pid` already fails here regardless."""
+    v3_sid = "sess_terminal0-0000-0000-0000-000000000000"
+    _write_kiro_lock(tmp_path, v3_sid, 700, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    foreign = _FakeProc("kiro-cli.exe",
+                        ["kiro-cli.exe", "acp", "--agent-engine", "v3"],
+                        pid=700, create_time=started - 1.2)
+    # Our agent is pid 500 and holds nothing. 700 is somebody else's v3 agent.
+    with _acp_published(set(), 500):
+        snap = _scan_with([foreign], kiro_dir=tmp_path)
+    assert snap.is_live("kiro-cli-v3", "C:/work/proj", v3_sid) is True
+
+
+def test_presence_family_tolerance_does_not_defeat_recycled_pid_check(tmp_path):
+    """The kiro-cli/kiro-cli-v3 family tolerance (`_KIRO_PROVIDERS`) added in
+    Phase 1 only widens the *provider-label* match and exempts the family
+    from the *forward* skew ceiling — it must not also defeat the *backward*
+    skew check, which is what actually catches a recycled pid. A stale v3
+    lock whose `started_at` predates the live process it names by more than
+    `_SIDECAR_BACKWARD_SKEW_S` (the pid was recycled onto a new process since
+    the lock was written) must still be rejected, exactly as it would be for
+    a same-provider (v2) match — proving the family widening cannot cause a
+    v2 session and a v3 session to be cross-attributed via pid reuse.
+    """
+    v3_sid = "sess_recycled-0000-0000-0000-000000000000"
+    _write_kiro_lock(tmp_path, v3_sid, 500, "2026-07-24T10:00:01Z",
+                     cwd="C:/work/proj")
+    started = _epoch("2026-07-24T10:00:01Z")
+    # The live process at pid 500 started long *after* the lock's own
+    # started_at -- pid 500 was recycled onto a new process since the v3
+    # lock was written.
+    snap = _scan_with(
+        [_FakeProc("kiro-cli.exe", ["kiro-cli.exe", "chat"],
+                   pid=500, create_time=started + 9000)],
+        kiro_dir=tmp_path,
+    )
+    assert snap.is_live("kiro-cli-v3", "C:/work/proj", v3_sid) is False
+    assert snap.is_live("kiro-cli", "C:/work/proj", v3_sid) is False
+
+
 def test_presence_suppresses_nothing_until_something_publishes(tmp_path):
     """No answer must not read as "no sessions".
 

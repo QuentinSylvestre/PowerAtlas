@@ -734,7 +734,23 @@ def _scan() -> Snapshot:
             # session the agent really holds is in the published set. The
             # residual it replaces is the opposite direction and worse: a live
             # dot on a card for a session nothing can open.
-            if (provider in _KIRO_PROVIDERS and acp_pid is not None
+            #
+            # Scoped to "kiro-cli" only, not the widened _KIRO_PROVIDERS family
+            # the three checks above use. `acp_pid` is always
+            # `_Supervisor._publish_live()`'s own pid -- the v2 supervisor's --
+            # never `_SupervisorV3`'s: `_SupervisorV3._publish_live()` is dead
+            # code (F10, only the base class's runs on the sweep backstop and
+            # every mutation site), and it always publishes `self.agent_pid()`
+            # for the v2 process. So `pid == acp_pid` can never be true for a
+            # "kiro-cli-v3"-labeled record, regardless of this check's own
+            # provider condition -- widening it to _KIRO_PROVIDERS would read
+            # as though it protects v3 self-orphans the way it protects v2's,
+            # but structurally cannot. A v3 session orphaned by our own agent
+            # is therefore a known, currently-unaddressed gap, not something
+            # this check can close by widening its provider condition alone —
+            # see Follow-up Work (Deferred) for the actual fix (publish
+            # `_supervisor_v3`'s own agent pid too).
+            if (provider == "kiro-cli" and acp_pid is not None
                     and pid == acp_pid and sid not in acp_sids):
                 continue
             key = (provider, sid)

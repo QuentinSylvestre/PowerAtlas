@@ -1792,7 +1792,8 @@ def _acp_row_title(session) -> str:
     return title[:_ACP_TITLE_MAX_CHARS]
 
 
-def _acp_availability(session_ids, held) -> dict[str, str]:
+def _acp_availability(session_ids, held,
+                       workspace_hashes: dict[str, str] | None = None) -> dict[str, str]:
     """D17's three states for **these** ids and no others.
 
     Blocking — one bounded file read plus a `psutil` query per id — so this runs
@@ -1812,7 +1813,18 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
 
     A `sess_`-prefixed id routes to `acp._lock_holder_v3` (session.json's
     `status` field, zero round-trip) instead of `acp._lock_holder` (v2's lock
-    file) — the two id shapes never collide (SC-7, plan Phase 1).
+    file) — the two id shapes never collide (SC-7, plan Phase 1). Deliberately
+    *not* the same fail-open contract in one respect: `_lock_holder_v3` fails
+    toward `held` when a session.json exists but cannot be read/parsed (a
+    crash-in-progress signature), and fails a stale "held" status back to
+    "available" using its own mtime-staleness corroboration — see
+    `_lock_holder_v3`'s own docstring for the full reasoning.
+
+    `workspace_hashes`, when the caller has it (e.g. `_acp_listing_v3`, which
+    already knows each row's workspace), maps `session_id -> hash-dir name`
+    and is threaded through to `_lock_holder_v3` so a v3 id skips the
+    full-directory scan. Omitted or missing an id falls back to the full scan,
+    unchanged in outcome, just slower.
     """
     out: dict[str, str] = {}
     for sid in session_ids:
@@ -1824,7 +1836,9 @@ def _acp_availability(session_ids, held) -> dict[str, str]:
             if acp is None:
                 pass
             elif sid.startswith("sess_"):
-                if acp._lock_holder_v3(sid) is not None:
+                wh = workspace_hashes.get(sid) if workspace_hashes else None
+                holder = acp._lock_holder_v3(sid, wh) if wh else acp._lock_holder_v3(sid)
+                if holder is not None:
                     state = "locked"
             elif acp._lock_holder(sid) is not None:
                 state = "locked"
@@ -2189,6 +2203,7 @@ def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
     """
     from .config import get_workspace_settings
     from .data import _normalize_path
+    from . import data_kiro_v3
 
     config = load_config()
     if _enabled(config, _ACP_V3_LISTING_PROVIDER):
@@ -2217,6 +2232,10 @@ def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
     rows: list[tuple[dict, list]] = []
     sids: list[str] = []
     pinned_sessions_found: list[tuple[str, str, object]] = []  # (cwd, name, session)
+    # One hash lookup per workspace group, not per session — _lock_holder_v3's
+    # workspace_hash fast path (Phase 1 cycle-2) needs a session_id -> hash-dir
+    # mapping, and every session in a group shares the group's own hash dir.
+    hash_by_sid: dict[str, str] = {}
     exists_flags = _acp_exists_flags([w[0] for w in page_groups])
     for index, (ws_cwd, _count, _updated, _prov) in enumerate(page_groups):
         try:
@@ -2224,16 +2243,21 @@ def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
         except Exception:
             log.exception("ACP v3 listing: could not read sessions for %s", ws_cwd)
             sessions = []
+        ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
         ws_name = Path(ws_cwd).name or ws_cwd
         if pinned_set:
             for s in sessions:
                 if s.session_id in pinned_set:
                     pinned_sessions_found.append((ws_cwd, ws_name, s))
+                    if ws_hash:
+                        hash_by_sid[s.session_id] = ws_hash
             sessions = [s for s in sessions if s.session_id not in pinned_set]
         total = len(sessions)
         s_start = (session_page - 1) * session_size
         page_sessions = sessions[s_start:s_start + session_size]
         sids.extend(s.session_id for s in page_sessions)
+        if ws_hash:
+            hash_by_sid.update({s.session_id: ws_hash for s in page_sessions})
         rows.append(({
             "cwd": ws_cwd,
             "name": ws_name,
@@ -2244,7 +2268,7 @@ def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
         }, page_sessions))
 
     pinned_sids = [s.session_id for _cwd, _name, s in pinned_sessions_found]
-    availability = _acp_availability(sids + pinned_sids, held)
+    availability = _acp_availability(sids + pinned_sids, held, workspace_hashes=hash_by_sid)
     all_page_sessions = [s for _meta, page_sessions in rows for s in page_sessions]
     statuses = _acp_status_for_held_v3([
         s for s in all_page_sessions + [s for _c, _n, s in pinned_sessions_found]

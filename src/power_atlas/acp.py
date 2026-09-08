@@ -2385,12 +2385,28 @@ _V3_HOLDER_PID_UNKNOWN: Final[int] = -1
 # this session right now. Per the spike's Phase 5 probe (archived plan,
 # 260908-1636_ACP_V3_SPIKE.md): "idle"/"failed"/absent mean not held; KAS
 # writes "idle" at turn-end, so "in_progress" only sticks past a turn if the
-# process crashed mid-turn -- a known residual (no pid to disambiguate a
-# stale flag against, unlike v2's _lock_holder).
+# process crashed mid-turn -- corroborated below against session.json's own
+# mtime, since there is no pid here to check liveness against the way v2's
+# _lock_holder checks its lock's pid.
 _V3_HELD_STATUSES: Final[frozenset[str]] = frozenset({"in_progress", "waiting_on_user"})
 
+# How stale session.json's mtime must be, while status still reads held,
+# before _lock_holder_v3 stops trusting it. An independent constant rather
+# than a reference to PROMPT_SILENCE_SECONDS -- that one is v2's rebindable
+# prompt-timeout knob (apply_config rebinds it; Final here would contradict
+# that), and this is a different question (file staleness, not RPC silence)
+# that happens to warrant the same order of magnitude: it is sized to match
+# PROMPT_SILENCE_SECONDS's own default (1800s / 30min), the window
+# _Supervisor already uses elsewhere in this module to judge a turn dead from
+# silence alone -- see PROMPT_SILENCE_SECONDS's own comment. KAS writes
+# session.json on every status transition, so mtime is the v3-side equivalent
+# of "notification of any kind": untouched for this long while status still
+# reads held means the process that would be updating it is gone, not
+# mid-turn.
+_V3_SESSION_STALE_SECONDS: Final[float] = 1800.0
 
-def _lock_holder_v3(session_id: str) -> int | None:
+
+def _lock_holder_v3(session_id: str, workspace_hash: str | None = None) -> int | None:
     """Whether a v3 session is held elsewhere, read from session.json.status.
 
     Zero ACP round-trip, per the SC-7 approach (plan Design Decisions). Not a
@@ -2401,29 +2417,84 @@ def _lock_holder_v3(session_id: str) -> int | None:
     Validates session_id against _SESSION_ID_RE before any path construction,
     mirroring _stored_session_cwd_v3 / _get_tool_diffs_v3.
 
-    Known residual: a mid-turn crash can leave `status: "in_progress"` stuck
-    indefinitely, since there is no pid here to check for liveness the way
-    `_lock_holder` checks its lock's pid. This fails toward "held" rather than
-    "available" in that one case -- unlike `_lock_holder`'s general fail-open
-    rule -- because the alternative (a session's own status field lying about
-    whether it is mid-turn) has no cheaper corroboration available. Not fixed
-    here; a future phase could add the process-table disambiguation the
-    spike's Phase 5 results named as the mitigation.
+    A "held" status is corroborated against session.json's own mtime before
+    being trusted: KAS touches the file on every status write, so a status
+    that still reads "in_progress"/"waiting_on_user" but has not been written
+    to in over `_V3_SESSION_STALE_SECONDS` means the process that would be
+    updating it is gone -- most likely a crash mid-turn -- not that it is
+    still working. That crash is exactly the scenario this check exists for:
+    without it, a crashed process leaves the session reported "held" forever,
+    with no recovery path (the client permanently disables the session row
+    and Delete on a "held" verdict, per acp.html). A stale mtime is treated as
+    *not* held. Trade named rather than hidden: this also means a live
+    external process legitimately parked on an unanswered
+    `session/request_permission` question (`"waiting_on_user"`) for longer
+    than the window flips to "available" too -- accepted under the same
+    "hint, never the gate" rule `_lock_holder` states for itself: the user
+    clicks in, and gets the agent's own typed refusal if it is in fact still
+    live.
+
+    Distinguishes "session.json is missing entirely" from "session.json
+    exists but could not be read/parsed": unlike the general fail-open rule
+    `_lock_holder` documents for itself, a file that exists but is truncated
+    or malformed is the signature of a process caught mid-write -- the same
+    crash scenario the mtime check above corroborates against -- so it fails
+    toward `_V3_HOLDER_PID_UNKNOWN` (held) rather than `None` (available).
+    Only a session.json that is genuinely absent (no hash directory contains
+    this session_id at all) answers `None`.
+
+    ``workspace_hash``, when the caller already knows the session's own
+    hash-dir name, checks exactly that directory instead of scanning every
+    hash dir under ``~/.kiro/sessions`` -- `_acp_availability`'s v3 branch is
+    called once per row on every listing refresh, which makes the full scan
+    O(rows x hash-dirs) without this. Validated as a bare directory-name
+    (no path separators, no `.`/`..`) before use, the same spirit as
+    `session_id`'s own guard. A hash that turns out not to contain the
+    session (stale cache, moved session) falls back to the full scan rather
+    than answering `None` outright -- the fast path may only change *how* the
+    answer is found, never *what* it is.
     """
     if not _SESSION_ID_RE.fullmatch(session_id):
         return None
     sessions_root = Path.home() / ".kiro" / "sessions"
+
+    def _check(candidate: Path) -> tuple[bool, int | None]:
+        """(found, verdict). found=False means: try the next location."""
+        if not candidate.is_file():
+            return False, None
+        try:
+            meta = json.loads(candidate.read_text(encoding="utf-8"))
+            status = meta.get("status")
+        except Exception:
+            # The file exists but could not be read/parsed -- the signature
+            # of a process caught mid-write. Fail toward held, not available:
+            # see the docstring's "Distinguishes..." paragraph.
+            return True, _V3_HOLDER_PID_UNKNOWN
+        if not (isinstance(status, str) and status in _V3_HELD_STATUSES):
+            return True, None
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            return True, _V3_HOLDER_PID_UNKNOWN
+        if time.time() - mtime > _V3_SESSION_STALE_SECONDS:
+            return True, None
+        return True, _V3_HOLDER_PID_UNKNOWN
+
+    if (workspace_hash and "/" not in workspace_hash and "\\" not in workspace_hash
+            and workspace_hash not in (".", "..")):
+        found, verdict = _check(sessions_root / workspace_hash / session_id / "session.json")
+        if found:
+            return verdict
+        # Not found under the given hash -- fall through to the full scan
+        # below rather than answering None; see the docstring.
+
     try:
         for hash_dir in sessions_root.iterdir():
             if not hash_dir.is_dir() or hash_dir.name == "cli":
                 continue
-            candidate = hash_dir / session_id / "session.json"
-            if candidate.is_file():
-                meta = json.loads(candidate.read_text(encoding="utf-8"))
-                status = meta.get("status")
-                if isinstance(status, str) and status in _V3_HELD_STATUSES:
-                    return _V3_HOLDER_PID_UNKNOWN
-                return None
+            found, verdict = _check(hash_dir / session_id / "session.json")
+            if found:
+                return verdict
     except Exception:
         return None
     return None

@@ -16071,6 +16071,50 @@ class TestAcpAvailabilityV3:
         result = web_mod._acp_availability([sid], held=set())
         assert result[sid] == "locked"
 
+    def test_workspace_hash_is_threaded_to_lock_holder_v3(self, monkeypatch):
+        """When a caller (e.g. `_acp_listing_v3`) supplies a
+        session_id -> hash-dir mapping, `_acp_availability` passes it through
+        to `_lock_holder_v3` as the `workspace_hash` argument — Phase 1
+        cycle-2 perf fix (SC-7), avoiding a full hash-dir scan per row."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+
+        sid = "sess_44444444-4444-4444-4444-444444444444"
+        seen = {}
+
+        def _fake_holder(s, workspace_hash=None):
+            seen["workspace_hash"] = workspace_hash
+            return acp_mod._V3_HOLDER_PID_UNKNOWN
+
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", _fake_holder)
+
+        result = web_mod._acp_availability(
+            [sid], held=set(), workspace_hashes={sid: "abc123hash"})
+        assert result[sid] == "locked"
+        assert seen["workspace_hash"] == "abc123hash"
+
+    def test_missing_workspace_hash_omits_the_argument(self, monkeypatch):
+        """A sid absent from `workspace_hashes` (or no mapping supplied at
+        all) calls `_lock_holder_v3` with just the id — preserves the
+        existing single-argument call shape for every caller that has no
+        hash to offer, so pre-existing monkeypatched single-arg stand-ins
+        (this class's other tests) keep working unchanged."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+
+        sid = "sess_55555555-5555-5555-5555-555555555555"
+        calls = []
+
+        def _fake_holder(s):
+            calls.append(s)
+            return None
+
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", _fake_holder)
+
+        result = web_mod._acp_availability([sid], held=set(), workspace_hashes={})
+        assert result[sid] == "available"
+        assert calls == [sid]
+
 
 class TestAcpFlatListing:
     """`mode=recent` — the flat recency shape a day-grouped rail reads.
@@ -20215,6 +20259,152 @@ class TestSupervisorV3:
             with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
                 result = acp_mod._lock_holder_v3(session_id)
         assert result is None
+
+    def test_lock_holder_v3_malformed_session_json_is_held(self, tmp_path):
+        """A session.json that exists but fails to parse (truncated mid-write,
+        the crash-in-progress signature) fails toward held, not available —
+        unlike the general fail-open rule for a genuinely *missing* file
+        (test_lock_holder_v3_missing_session_returns_none, above). Phase 1
+        cycle-2 fix: the original blanket `except Exception: return None`
+        treated both cases identically, undoing the function's own
+        held-biased intent for exactly the scenario most likely to produce a
+        malformed file."""
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_99999999-9999-9999-9999-999999999999"
+        sess_dir = tmp_path / ".kiro" / "sessions" / "abc123hash" / session_id
+        sess_dir.mkdir(parents=True)
+        (sess_dir / "session.json").write_text('{"status": "in_pro', encoding="utf-8")
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._lock_holder_v3(session_id)
+
+        assert result == acp_mod._V3_HOLDER_PID_UNKNOWN
+
+    def test_lock_holder_v3_stale_in_progress_is_not_held(self, tmp_path):
+        """A session.json whose status still reads "in_progress" but whose
+        mtime is older than _V3_SESSION_STALE_SECONDS is treated as not held.
+        KAS touches session.json on every status write, so a status stuck
+        this long with the file untouched means the writing process is gone
+        (crashed mid-turn), not that it is still working -- Phase 1 cycle-2
+        fix for the "crashed process leaves the session permanently held"
+        gap."""
+        import os
+        import re
+        import time
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        meta = {"workspacePaths": ["/some/path"], "status": "in_progress"}
+        self._make_v3_session_json(tmp_path, session_id, meta)
+        session_json = (tmp_path / ".kiro" / "sessions" / "abc123hash"
+                         / session_id / "session.json")
+        stale = time.time() - acp_mod._V3_SESSION_STALE_SECONDS - 60
+        os.utime(session_json, (stale, stale))
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._lock_holder_v3(session_id)
+
+        assert result is None
+
+    def test_lock_holder_v3_fresh_in_progress_is_still_held(self, tmp_path):
+        """Regression companion to the staleness test above: a freshly
+        written "in_progress" session.json (default mtime = now) must still
+        report held — the staleness corroboration must not over-trigger for
+        the common case of a genuinely active turn."""
+        from power_atlas import acp as acp_mod
+        session_id = "sess_bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        result = self._held(tmp_path, session_id, "in_progress")
+        assert result == acp_mod._V3_HOLDER_PID_UNKNOWN
+
+    def test_lock_holder_v3_accepts_real_session_id_regex_unpatched(self, tmp_path):
+        """Uses acp's actual imported `launcher._SESSION_ID_RE` — not the
+        re-constructed stand-in `_held()`'s helper (and every other test in
+        this class) patches in — against a realistic KAS-emitted
+        `sess_<uuid>` id. Proves the real regex genuinely accepts what KAS
+        emits end-to-end, rather than only ever being exercised against an
+        equivalent-but-separate pattern object. (`launcher._SESSION_ID_RE` is
+        itself `^[\\w\\-]+$` today, identical to the stand-in the other tests
+        use — this test pins the *real* object so a future divergence
+        between the two would be caught here instead of nowhere.)"""
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_c1a2b3d4-5e6f-47a8-9b0c-1d2e3f4a5b6c"
+        meta = {"workspacePaths": ["/some/path"], "status": "idle"}
+        self._make_v3_session_json(tmp_path, session_id, meta)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            # _SESSION_ID_RE is intentionally left unpatched here.
+            result = acp_mod._lock_holder_v3(session_id)
+
+        # idle -> not held; the point of this test is that the real regex did
+        # not reject the id as a path-traversal attempt.
+        assert result is None
+
+    def test_lock_holder_v3_workspace_hash_skips_full_scan(self, tmp_path):
+        """The targeted workspace_hash path checks exactly one hash dir and
+        never calls Path.iterdir at all — proving the full scan is actually
+        skipped, not merely that the two paths happen to agree (Phase 1
+        cycle-2, SC-7 perf fix)."""
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_77777777-7777-7777-7777-777777777777"
+        meta = {"workspacePaths": ["/some/path"], "status": "in_progress"}
+        self._make_v3_session_json(tmp_path, session_id, meta)  # hash dir: abc123hash
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                with patch.object(_pl.Path, "iterdir",
+                                   side_effect=AssertionError("full scan ran")):
+                    result = acp_mod._lock_holder_v3(
+                        session_id, workspace_hash="abc123hash")
+
+        assert result == acp_mod._V3_HOLDER_PID_UNKNOWN
+
+    def test_lock_holder_v3_wrong_workspace_hash_falls_back_correctly(self, tmp_path):
+        """A workspace_hash that does not contain the session (stale cache, a
+        session that moved) must not change the verdict — only skip the fast
+        path when it can. Compared directly against the no-hash-given
+        answer."""
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_88888888-8888-8888-8888-888888888888"
+        meta = {"workspacePaths": ["/some/path"], "status": "in_progress"}
+        self._make_v3_session_json(tmp_path, session_id, meta)  # real hash: abc123hash
+
+        def _run(workspace_hash):
+            with patch("power_atlas.acp.Path") as mock_path_cls:
+                mock_path_cls.home.return_value = tmp_path
+                mock_path_cls.side_effect = _pl.Path
+                with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                    return acp_mod._lock_holder_v3(session_id, workspace_hash=workspace_hash)
+
+        no_hash = _run(None)
+        wrong_hash = _run("does-not-exist-hash")
+        assert no_hash == wrong_hash == acp_mod._V3_HOLDER_PID_UNKNOWN
 
     # ------------------------------------------------------------------
     # _SupervisorV3._fulfill_token

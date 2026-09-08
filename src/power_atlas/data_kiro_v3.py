@@ -388,6 +388,27 @@ def discover_workspaces() -> list[tuple[str, int, str]]:
     return results
 
 
+def hash_dir_for_cwd(cwd: str) -> str | None:
+    """The workspace-hash directory name kiro-cli uses for ``cwd``, if known.
+
+    Backed by the same cwd -> hash index ``load_sessions`` already builds and
+    caches (``_cwd_to_sessions`` / ``_norm_cwd_to_hash``) -- calling this after
+    (or instead of) ``load_sessions`` for the same cwd costs nothing extra
+    beyond the cheap mtime-only freshness check ``_cwd_to_sessions`` already
+    does on every call. Lets a caller that already knows a session's workspace
+    (e.g. ``web._acp_listing_v3``) resolve straight to its hash dir once per
+    workspace, instead of scanning every hash dir under ``V3_SESSIONS_ROOT``
+    once per session (see ``acp._lock_holder_v3``'s ``workspace_hash``
+    parameter).
+
+    Returns ``None`` if ``cwd`` has no v3 session anywhere yet.
+    """
+    norm_cwd = _normalize_path(cwd)
+    _cwd_to_sessions()  # ensure _norm_cwd_to_hash is built/fresh
+    with _index_lock:
+        return _norm_cwd_to_hash.get(norm_cwd)
+
+
 def load_sessions(cwd: str) -> tuple[list[Session], dict[str, _FileInfo]]:
     """Load v3 sessions for a given workspace. Returns (sessions, file_stats)."""
     sessions: list[Session] = []
