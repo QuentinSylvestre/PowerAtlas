@@ -736,20 +736,27 @@ def _scan() -> Snapshot:
             # dot on a card for a session nothing can open.
             #
             # Scoped to "kiro-cli" only, not the widened _KIRO_PROVIDERS family
-            # the three checks above use. `acp_pid` is always
-            # `_Supervisor._publish_live()`'s own pid -- the v2 supervisor's --
-            # never `_SupervisorV3`'s: `_SupervisorV3._publish_live()` is dead
-            # code (F10, only the base class's runs on the sweep backstop and
-            # every mutation site), and it always publishes `self.agent_pid()`
-            # for the v2 process. So `pid == acp_pid` can never be true for a
-            # "kiro-cli-v3"-labeled record, regardless of this check's own
-            # provider condition -- widening it to _KIRO_PROVIDERS would read
-            # as though it protects v3 self-orphans the way it protects v2's,
-            # but structurally cannot. A v3 session orphaned by our own agent
-            # is therefore a known, currently-unaddressed gap, not something
-            # this check can close by widening its provider condition alone —
-            # see Follow-up Work (Deferred) for the actual fix (publish
-            # `_supervisor_v3`'s own agent pid too).
+            # the three checks above use. `_SupervisorV3._publish_live()` IS
+            # called -- v3's own mutation sites (new_session/load_session/
+            # close_session) call `self._publish_live()`, and ordinary Python
+            # method dispatch routes that to this override, not the base
+            # class's (F10 only removed the *redundant* extra call the sweep
+            # backstop used to make on top of those mutation-site calls, not
+            # the mutation-site calls themselves). What defeats this guard is
+            # what the override publishes, not whether it runs: it always
+            # passes the sentinel `pid=0` (see `_SupervisorV3._publish_live`'s
+            # own docstring) -- deliberately, since using the v3 process's pid
+            # for the unioned v2+v3 set could cause false liveness results
+            # here -- never a real pid. So `pid == acp_pid` can never be true
+            # for a "kiro-cli-v3"-labeled record no matter which supervisor's
+            # publish ran last -- widening the provider condition to
+            # _KIRO_PROVIDERS would read as though it protects v3 self-orphans
+            # the way it protects v2's, but structurally cannot. A v3 session
+            # orphaned by our own agent is therefore a known, currently-
+            # unaddressed gap, not something this check can close by widening
+            # its provider condition alone — see Follow-up Work (Deferred) for
+            # the actual fix (publish `_supervisor_v3`'s own agent pid, not
+            # the pid=0 sentinel, for its own sessions).
             if (provider == "kiro-cli" and acp_pid is not None
                     and pid == acp_pid and sid not in acp_sids):
                 continue

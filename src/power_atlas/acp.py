@@ -2398,11 +2398,19 @@ _V3_HELD_STATUSES: Final[frozenset[str]] = frozenset({"in_progress", "waiting_on
 # that happens to warrant the same order of magnitude: it is sized to match
 # PROMPT_SILENCE_SECONDS's own default (1800s / 30min), the window
 # _Supervisor already uses elsewhere in this module to judge a turn dead from
-# silence alone -- see PROMPT_SILENCE_SECONDS's own comment. KAS writes
-# session.json on every status transition, so mtime is the v3-side equivalent
-# of "notification of any kind": untouched for this long while status still
-# reads held means the process that would be updating it is gone, not
-# mid-turn.
+# silence alone -- see PROMPT_SILENCE_SECONDS's own comment. Live probe
+# evidence (ACP v3 production-hardening, same session that informed
+# data_kiro_v3.py's cache-invalidation comment): KAS's session.json writes
+# during an active turn are bursty and milestone-tied, not a continuous
+# heartbeat -- observed gaps of roughly 25-40s between writes in one 75s
+# turn -- so 1800s gives on the order of 60x margin over normal operation
+# before staleness is even considered. The one real residual: a single
+# uninterrupted step (one very long tool call or reasoning segment) that
+# runs past 30 minutes with zero intervening session.json writes would still
+# misfire as "not held" while the process is in fact still alive. Accepted
+# as a narrow edge case -- this signal only affects UI clickability
+# (whether the dashboard offers to resume/delete a row), not any
+# write-safety gate; v3 delete is not wired to it (not implemented yet).
 _V3_SESSION_STALE_SECONDS: Final[float] = 1800.0
 
 
@@ -2439,9 +2447,17 @@ def _lock_holder_v3(session_id: str, workspace_hash: str | None = None) -> int |
     `_lock_holder` documents for itself, a file that exists but is truncated
     or malformed is the signature of a process caught mid-write -- the same
     crash scenario the mtime check above corroborates against -- so it fails
-    toward `_V3_HOLDER_PID_UNKNOWN` (held) rather than `None` (available).
-    Only a session.json that is genuinely absent (no hash directory contains
-    this session_id at all) answers `None`.
+    toward `_V3_HOLDER_PID_UNKNOWN` (held) rather than `None` (available). The
+    same mtime staleness corroboration applies here too, not just to a valid
+    stuck status: a malformed file is only trustworthy evidence of an
+    in-progress write for as long as `_V3_SESSION_STALE_SECONDS` says a write
+    could plausibly still be underway. A malformed file whose mtime is older
+    than that recovers to `None` (not held) exactly like a stale valid status
+    does -- otherwise a session.json that got corrupted once and never
+    written again would report "held" forever, with no recovery path, which
+    is precisely the failure mode the mtime check exists to close. Only a
+    session.json that is genuinely absent (no hash directory contains this
+    session_id at all) answers `None` unconditionally.
 
     ``workspace_hash``, when the caller already knows the session's own
     hash-dir name, checks exactly that directory instead of scanning every
@@ -2458,6 +2474,21 @@ def _lock_holder_v3(session_id: str, workspace_hash: str | None = None) -> int |
         return None
     sessions_root = Path.home() / ".kiro" / "sessions"
 
+    def _fresh(candidate: Path) -> bool:
+        """Whether candidate's mtime is within the staleness window.
+
+        Shared by both held-verdict paths below (valid stuck status, and
+        malformed/unparseable content) so the same staleness corroboration
+        applies to each identically. An unreadable mtime fails toward "fresh"
+        (still held) -- consistent with each caller's own fail-toward-held
+        default when it cannot corroborate further.
+        """
+        try:
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            return True
+        return time.time() - mtime <= _V3_SESSION_STALE_SECONDS
+
     def _check(candidate: Path) -> tuple[bool, int | None]:
         """(found, verdict). found=False means: try the next location."""
         if not candidate.is_file():
@@ -2468,17 +2499,14 @@ def _lock_holder_v3(session_id: str, workspace_hash: str | None = None) -> int |
         except Exception:
             # The file exists but could not be read/parsed -- the signature
             # of a process caught mid-write. Fail toward held, not available:
-            # see the docstring's "Distinguishes..." paragraph.
-            return True, _V3_HOLDER_PID_UNKNOWN
+            # see the docstring's "Distinguishes..." paragraph -- but still
+            # corroborated against mtime staleness exactly like the valid
+            # stuck-status case below, so an old malformed file recovers to
+            # not-held instead of being held forever.
+            return True, (_V3_HOLDER_PID_UNKNOWN if _fresh(candidate) else None)
         if not (isinstance(status, str) and status in _V3_HELD_STATUSES):
             return True, None
-        try:
-            mtime = candidate.stat().st_mtime
-        except OSError:
-            return True, _V3_HOLDER_PID_UNKNOWN
-        if time.time() - mtime > _V3_SESSION_STALE_SECONDS:
-            return True, None
-        return True, _V3_HOLDER_PID_UNKNOWN
+        return True, (_V3_HOLDER_PID_UNKNOWN if _fresh(candidate) else None)
 
     if (workspace_hash and "/" not in workspace_hash and "\\" not in workspace_hash
             and workspace_hash not in (".", "..")):

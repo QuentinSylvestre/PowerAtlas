@@ -20268,7 +20268,12 @@ class TestSupervisorV3:
         cycle-2 fix: the original blanket `except Exception: return None`
         treated both cases identically, undoing the function's own
         held-biased intent for exactly the scenario most likely to produce a
-        malformed file."""
+        malformed file.
+
+        Fresh-mtime case (default mtime = just written) — regression
+        companion to test_lock_holder_v3_stale_malformed_session_json_is_not_held
+        below (Phase 1 cleanup-pass fix): a *freshly* malformed file, caught
+        mid-write moments ago, must still report held."""
         import re
         import pathlib as _pl
         from unittest.mock import patch
@@ -20286,6 +20291,38 @@ class TestSupervisorV3:
                 result = acp_mod._lock_holder_v3(session_id)
 
         assert result == acp_mod._V3_HOLDER_PID_UNKNOWN
+
+    def test_lock_holder_v3_stale_malformed_session_json_is_not_held(self, tmp_path):
+        """Phase 1 cleanup-pass fix: the malformed-JSON branch never applied
+        the staleness check the valid-but-stuck-status branch already had, so
+        a session.json that had been sitting malformed for longer than
+        _V3_SESSION_STALE_SECONDS was reported held forever with no recovery
+        path — worse than the valid-status case, which already recovered.
+        A malformed file whose mtime is old must now recover to not-held,
+        exactly like test_lock_holder_v3_stale_in_progress_is_not_held below
+        does for a valid stuck status."""
+        import os
+        import re
+        import time
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_cccccccc-cccc-cccc-cccc-cccccccccccc"
+        sess_dir = tmp_path / ".kiro" / "sessions" / "abc123hash" / session_id
+        sess_dir.mkdir(parents=True)
+        session_json = sess_dir / "session.json"
+        session_json.write_text('{"status": "in_pro', encoding="utf-8")
+        stale = time.time() - acp_mod._V3_SESSION_STALE_SECONDS - 60
+        os.utime(session_json, (stale, stale))
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._lock_holder_v3(session_id)
+
+        assert result is None
 
     def test_lock_holder_v3_stale_in_progress_is_not_held(self, tmp_path):
         """A session.json whose status still reads "in_progress" but whose

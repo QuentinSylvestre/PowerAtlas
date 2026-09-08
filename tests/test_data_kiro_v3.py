@@ -880,6 +880,42 @@ class TestKiroV3FindSessionWorkspace:
 
 
 # ---------------------------------------------------------------------------
+# TestKiroV3HashDirForCwd
+# ---------------------------------------------------------------------------
+
+class TestKiroV3HashDirForCwd:
+    """Direct coverage for hash_dir_for_cwd() — previously exercised only
+    indirectly via monkeypatched stand-ins in web.py/acp.py tests. Mirrors
+    TestKiroV3FindSessionWorkspace's fixture pattern above, since both
+    functions are backed by the same _cwd_to_sessions() index."""
+
+    def test_known_cwd_returns_its_hash_dir(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        _make_session(root, "abc123hash", "sess_aaa", "C:\\HashProject")
+
+        result = dv3.hash_dir_for_cwd("C:\\HashProject")
+        assert result == "abc123hash"
+
+    def test_unknown_cwd_returns_none(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        _make_session(root, "abc123hash", "sess_aaa", "C:\\HashProject")
+
+        result = dv3.hash_dir_for_cwd("C:\\SomeOtherPlace")
+        assert result is None
+
+    def test_returns_none_when_root_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path / "nonexistent")
+        result = dv3.hash_dir_for_cwd("C:\\HashProject")
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
 # TestKiroV3ExtractContent (internal helper)
 # ---------------------------------------------------------------------------
 

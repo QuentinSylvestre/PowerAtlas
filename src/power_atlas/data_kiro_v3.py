@@ -46,8 +46,14 @@ def _ensure_sess_prefix(session_id: str) -> str:
 #     (detects new/modified sessions within existing hash dirs)
 #
 # Why session.json, not hash-dir mtime: messages.jsonl is written on every
-# agent turn, so hash-dir mtime changes constantly.  session.json changes only
-# on creation / title update — the correct signal for workspace membership.
+# agent turn, so hash-dir mtime changes constantly.  session.json changes on
+# creation, title updates, AND periodically during an active turn (observed
+# live, ACP v3 production-hardening probe: rewritten 5 separate times during
+# one 75-second turn while status stayed "in_progress" throughout -- bursty
+# writes roughly every 25-40s tied to progress milestones, not a continuous
+# heartbeat). messages.jsonl still changes far more often (every streamed
+# chunk), so it remains the wrong signal for this cache's coarser-grained
+# invalidation purpose -- workspace membership, not turn-by-turn progress.
 # Message-content freshness is handled separately via per-session file_stats.
 #
 # Thread-safety design:
