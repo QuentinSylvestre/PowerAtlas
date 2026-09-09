@@ -10327,6 +10327,124 @@ check("agent_error frame with agent-controlled message uses textContent, never i
   assert(!page.sandbox._agent_error_xss, "onerror handler must not fire — agent_error used innerHTML");
 });
 
+// --------------------------------------------------------- Phase 6: SC-9 session/request_permission client UI --
+
+check("permission_request frame renders the question and one button per option", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "permission_request", sessionId: live,
+    payload: {
+      requestId: 1, sessionId: live,
+      toolCall: { title: "Pick a doc to write first" },
+      options: [
+        { optionId: "opt-0", name: "Requirements", kind: "allow_once" },
+        { optionId: "opt-1", name: "Technical Design", kind: "allow_once" },
+        { optionId: "opt-2", name: "Quick Spec", kind: "allow_once" },
+      ],
+    },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  assertEqual(rows.length, 1, "permission_request should append exactly one .acp-msg-permission row");
+  const question = rows[0].querySelector(".acp-permission-question");
+  assert(question !== null, "permission row should contain the question text");
+  assertEqual(question.textContent, "Pick a doc to write first",
+    `permission question should render the toolCall title, got: ${question.textContent}`);
+  const buttons = rows[0].querySelectorAll(".acp-permission-option");
+  assertEqual(buttons.length, 3, "permission row should render one button per option");
+  assertEqual(buttons[0].textContent, "Requirements", "button text should be the option's name");
+  assertEqual(buttons[1].textContent, "Technical Design", "button text should be the option's name");
+  assertEqual(buttons[2].textContent, "Quick Spec", "button text should be the option's name");
+});
+
+check("permission_request frame with agent-controlled text uses textContent, never innerHTML", (tpl) => {
+  const { page, live } = connected(tpl);
+  const malicious = "<img src=x onerror=\"window._perm_xss=true\">";
+  page.deliver({
+    type: "permission_request", sessionId: live,
+    payload: {
+      requestId: 2, sessionId: live,
+      toolCall: { title: malicious },
+      options: [{ optionId: "opt-0", name: malicious, kind: "allow_once" }],
+    },
+  });
+  // Reaching here at all means no innerHTML sink fired (HTML_SINK throws on
+  // any access) — the harness would have thrown before this line otherwise.
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  const question = rows[rows.length - 1].querySelector(".acp-permission-question");
+  assert(question.textContent.includes(malicious),
+    `permission question should render the title as literal text, got: ${question.textContent}`);
+  const button = rows[rows.length - 1].querySelector(".acp-permission-option");
+  assert(button.textContent.includes(malicious),
+    `permission option button should render the name as literal text, got: ${button.textContent}`);
+  assert(!page.sandbox._perm_xss, "onerror handler must not fire — permission_request used innerHTML");
+});
+
+check("clicking a permission option sends permission_response and disables every button in the row", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "permission_request", sessionId: live,
+    payload: {
+      requestId: 3, sessionId: live,
+      toolCall: { title: "Which approach?" },
+      options: [
+        { optionId: "opt-a", name: "Option A", kind: "allow_once" },
+        { optionId: "opt-b", name: "Option B", kind: "allow_once" },
+      ],
+    },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  const buttons = rows[rows.length - 1].querySelectorAll(".acp-permission-option");
+  assertEqual(buttons.length, 2, "sanity check — two option buttons should be rendered");
+  buttons[0].dispatch("click");
+  const sent = page.sentOf("permission_response");
+  assertEqual(sent.length, 1, "clicking an option should send exactly one permission_response frame");
+  assertEqual(sent[0].sessionId, live, "permission_response should carry the session id");
+  assertEqual(sent[0].payload.requestId, 3, "permission_response should carry the original requestId");
+  assertEqual(sent[0].payload.optionId, "opt-a",
+    "permission_response should carry the clicked option's optionId");
+  assertEqual(buttons[0].disabled, true, "the clicked button should be disabled");
+  assertEqual(buttons[1].disabled, true,
+    "the other button should be disabled too, preventing a second click from resolving a different option");
+});
+
+check("a second click on an already-clicked permission row sends nothing further", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "permission_request", sessionId: live,
+    payload: {
+      requestId: 4, sessionId: live,
+      toolCall: { title: "Which approach?" },
+      options: [{ optionId: "opt-a", name: "Option A", kind: "allow_once" }],
+    },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  const button = rows[rows.length - 1].querySelector(".acp-permission-option");
+  button.dispatch("click");
+  assertEqual(page.sentOf("permission_response").length, 1,
+    "sanity check — the first click should have sent exactly one frame");
+  button.dispatch("click");
+  assertEqual(page.sentOf("permission_response").length, 1,
+    "a second click on an already-clicked button must not send a second permission_response — "
+    + "this is the client-side nicety, not the server's actual double-answer guard");
+});
+
+check("permission_request frame renders during history replay (still answerable after a mid-turn reload)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "permission_request", sessionId: live,
+        payload: { requestId: 5, sessionId: live,
+                   toolCall: { title: "Replayed question" },
+                   options: [{ optionId: "opt-0", name: "Only option", kind: "allow_once" }] } },
+    ] },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  assertEqual(rows.length, 1,
+    "a permission_request replayed from history must still render — unlike steer_status's " +
+    "transient echo, a mid-turn reload must leave the request answerable");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

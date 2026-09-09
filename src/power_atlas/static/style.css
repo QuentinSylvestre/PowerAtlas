@@ -798,6 +798,17 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-msg-note .acp-msg-body { color: #fbbf24; font-size: 12px; font-style: italic; }
 .acp-msg-error .acp-msg-role { color: #f87171; }
 .acp-msg-error .acp-msg-body { color: #f87171; font-size: 12px; }
+/* SC-9: an inbound `session/request_permission` -- the agent asking a real
+   multiple-choice clarifying question and blocking the turn on an answer.
+   Same amber as `.acp-msg-note`'s "needs attention" cue, plus a left border
+   like `.acp-msg-tool` so the row reads as an action item rather than agent
+   prose. Option buttons reuse `.acp-btn`'s shape (see below) rather than a
+   new button style. */
+.acp-msg-permission .acp-msg-role { color: #fbbf24; }
+.acp-msg-permission .acp-msg-body { border-left: 2px solid #fbbf24; padding-left: 10px; }
+.acp-permission-question { white-space: pre-wrap; word-break: break-word; }
+.acp-permission-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.acp-permission-option.acp-permission-chosen { border-color: #fbbf24; color: #fbbf24; }
 /* Process chrome, not a message — dimmer than a note and pulsing rather than
    coloured, so a turn's own answer (once it starts streaming) reads as the
    thing that changed rather than one more tinted row among several. The same

@@ -1976,6 +1976,57 @@
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
 
+  /** Render an inbound `session/request_permission` (SC-9) as an interactive
+   *  choice in the transcript: the question, plus one button per option.
+   *
+   *  SECURITY: `title` and each option's `name` are agent-controlled text —
+   *  set via textContent only, matching addMessage/addSystemMessage's rule.
+   *  Never innerHTML.
+   *
+   *  Clicking a button sends `permission_response` with the chosen optionId
+   *  and disables every button in the row. That is a UX nicety only, not the
+   *  double-answer guard — the server's pop-before-write in
+   *  _handle_permission_response_v3 is what actually prevents answering the
+   *  same request twice; this only stops an obviously-confusing second click
+   *  in the same tab before the server's reply (if any) comes back. */
+  function addPermissionRequest(requestId, sid, title, options) {
+    var stick = stuckToBottom();
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-permission';
+    var who = document.createElement('span');
+    who.className = 'acp-msg-role';
+    who.textContent = 'question';
+    var body = document.createElement('div');
+    body.className = 'acp-msg-body';
+    var question = document.createElement('div');
+    question.className = 'acp-permission-question';
+    question.textContent = title;
+    body.appendChild(question);
+    var btnRow = document.createElement('div');
+    btnRow.className = 'acp-permission-options';
+    (options || []).forEach(function (opt) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'acp-btn acp-permission-option';
+      btn.textContent = (opt && opt.name) ? opt.name : ((opt && opt.optionId) || '');
+      btn.addEventListener('click', function () {
+        if (btn.disabled) return;
+        var buttons = btnRow.querySelectorAll('button');
+        for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+        btn.classList.add('acp-permission-chosen');
+        send('permission_response',
+             {requestId: requestId, optionId: opt.optionId}, sid);
+      });
+      btnRow.appendChild(btn);
+    });
+    body.appendChild(btnRow);
+    row.appendChild(who);
+    row.appendChild(body);
+    transcriptEl.appendChild(row);
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    return row;
+  }
+
   /** Returns true when the slash command dropdown is currently visible. */
   function isCommandDropdownVisible() {
     return !cmdDropdownEl.hidden;
@@ -6921,6 +6972,25 @@
       var _errMsg = (payload && typeof payload.message === 'string') ? payload.message : '';
       var _errType = (payload && typeof payload.errorType === 'string') ? payload.errorType : '';
       addMessage('error', (_errType ? '[' + _errType + '] ' : '') + _errMsg);
+      return;
+    }
+    if (type === 'permission_request') {
+      // SC-9: a genuine inbound `session/request_permission` -- the turn is
+      // blocked on an answer. Rendered during replay too, unlike
+      // steer_status's transient echo above: if a reload happens mid-turn
+      // while the request is still unanswered server-side, the buttons must
+      // still work. If it has already been answered/cleared by the time
+      // this replays (turn already ended), clicking one just gets a
+      // harmless "unknown_request" refusal back from the server.
+      var _reqId = payload && payload.requestId;
+      var _permSid = (payload && typeof payload.sessionId === 'string')
+        ? payload.sessionId : (frame.sessionId || sessionId);
+      var _toolCall = (payload && payload.toolCall) || {};
+      var _permTitle = typeof _toolCall.title === 'string' ? _toolCall.title : '';
+      var _permOptions = Array.isArray(payload && payload.options) ? payload.options : [];
+      if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
+        addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions);
+      }
       return;
     }
     if (type === 'subagents') {

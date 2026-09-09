@@ -22843,3 +22843,264 @@ class TestSupervisorV3:
                 f"got {entry['error']!r}")
         finally:
             self._cleanup_registry(acp_mod)
+
+    # ------------------------------------------------------------------
+    # SC-9: `session/request_permission` -- a genuine inbound JSON-RPC
+    # *request* (has an id, blocks the turn on a reply), handled with a
+    # real interactive UI. See the "SC-9 UI shape & pending-request
+    # tracking" and "SC-9 cleanup trigger" Design Decisions rows.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _permission_request_msg(request_id, sid, title="Pick one", options=None):
+        if options is None:
+            options = [
+                {"optionId": "opt-0", "name": "Requirements", "kind": "allow_once"},
+                {"optionId": "opt-1", "name": "Technical Design", "kind": "allow_once"},
+            ]
+        return {
+            "jsonrpc": "2.0", "id": request_id, "method": "session/request_permission",
+            "params": {
+                "sessionId": sid,
+                "toolCall": {"toolCallId": "tc-1", "title": title, "status": "pending"},
+                "options": options,
+            },
+        }
+
+    def test_on_permission_request_emits_frame_and_stores_pending_state(
+            self, monkeypatch):
+        """_on_agent_request receiving session/request_permission emits a
+        permission_request frame with the correct shape and stores pending
+        state (session_id, options) keyed by the request's own id."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permrequest0-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        options = [
+            {"optionId": "opt-0", "name": "Requirements", "kind": "allow_once"},
+            {"optionId": "opt-1", "name": "Technical Design", "kind": "allow_once"},
+        ]
+        msg = self._permission_request_msg(1, sid, title="Pick a doc", options=options)
+        try:
+            sv3._on_agent_request(msg)
+
+            assert sv3._pending_permission[1] == {"session_id": sid, "options": options}
+
+            frames = _queued(conn)
+            perm_frames = [f for f in frames if f["type"] == "permission_request"]
+            assert len(perm_frames) == 1, f"got frame types {[f['type'] for f in frames]}"
+            payload = perm_frames[0]["payload"]
+            assert payload["requestId"] == 1
+            assert payload["sessionId"] == sid
+            assert payload["toolCall"]["title"] == "Pick a doc"
+            assert payload["options"] == options
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_on_permission_request_malformed_request_is_refused_not_stored(
+            self, monkeypatch):
+        """A request missing sessionId/usable options is refused via the
+        base class's _refuse path rather than silently stored -- nothing
+        could ever answer a pending entry with no session to route to.
+
+        Patches _spawn_task itself (rather than running the coroutine) so
+        this stays a synchronous test: what is under test is that the
+        refuse path was taken at all and nothing was stored, not the
+        already-covered mechanics of _refuse's own write."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        msg = {
+            "jsonrpc": "2.0", "id": 42, "method": "session/request_permission",
+            "params": {"sessionId": None, "toolCall": {"title": "x"}, "options": []},
+        }
+        spawned = []
+        monkeypatch.setattr(acp_mod, "_spawn_task", spawned.append)
+        sv3._on_agent_request(msg)
+        assert 42 not in sv3._pending_permission
+        assert len(spawned) == 1, "a malformed request must still be refused"
+        spawned[0].close()  # never awaited -- close() avoids an RuntimeWarning
+
+    def test_handle_permission_response_v3_valid_option_writes_reply_and_clears_pending(
+            self, monkeypatch):
+        """A valid optionId from the owning connection writes the exact
+        JSON-RPC reply shape Phase 0 confirmed live, and clears the pending
+        entry."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permresp0000-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
+        sv3._pending_permission[7] = {"session_id": sid, "options": options}
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 7, "optionId": "opt-0"}))
+
+            assert written == [
+                {"jsonrpc": "2.0", "id": 7, "result": {"optionId": "opt-0"}}]
+            assert 7 not in sv3._pending_permission
+            assert _queued(conn) == [], "a successful answer sends nothing back to the client"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_permission_response_v3_wrong_session_refused_not_subscribed(
+            self, monkeypatch):
+        """A response from a connection whose own subscribed session
+        doesn't match the pending entry's real owner is refused, even when
+        the frame itself claims the correct sessionId -- proving the check
+        is against conn.session_id, not the client's own claim. Without
+        this, any connected WS client could resolve any pending permission
+        request for a session it never subscribed to, since request ids are
+        small sequential integers."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid_a = "sess_permwrong_a0-0000-0000-0000-01"
+        sid_b = "sess_permwrong_b0-0000-0000-0000-01"
+        sv3.sessions[sid_a] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid_a] = acp_mod._History()
+        sv3.sessions[sid_b] = acp_mod._new_session_record("C:\\scratch2")
+        sv3.history[sid_b] = acp_mod._History()
+        # conn is subscribed to B but the frame claims to be answering A's
+        # request, which is the pending entry's real owner.
+        conn = self._conn_v3(acp_mod, sid_b)
+        options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
+        sv3._pending_permission[9] = {"session_id": sid_a, "options": options}
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_permission_response_v3(
+                    conn, sid_a, {"requestId": 9, "optionId": "opt-0"}))
+
+            assert written == [], "a refused response must never reach the agent"
+            assert sv3._pending_permission[9] == {"session_id": sid_a, "options": options}, (
+                "pending state must survive a refused attempt")
+            frames = _queued(conn)
+            assert frames[0]["payload"]["code"] == "not_subscribed"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_permission_response_v3_invalid_option_refused(self, monkeypatch):
+        """An unknown optionId is rejected without corrupting pending state."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permbadopt0-0000-0000-0000-0001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
+        sv3._pending_permission[3] = {"session_id": sid, "options": options}
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 3, "optionId": "does-not-exist"}))
+
+            assert written == []
+            assert sv3._pending_permission[3] == {"session_id": sid, "options": options}
+            assert _queued(conn)[0]["payload"]["code"] == "invalid_option"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_permission_response_v3_double_answer_second_refused_unknown_request(
+            self, monkeypatch):
+        """Two responses to the same requestId -- the second is refused as
+        unknown_request (already popped), proving the pop-before-write
+        ordering actually prevents a double answer, not just a repeat of
+        the same one (the second attempt here uses a *different*
+        optionId)."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permdouble0-0000-0000-0000-0001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        options = [
+            {"optionId": "opt-0", "name": "A", "kind": "allow_once"},
+            {"optionId": "opt-1", "name": "B", "kind": "allow_once"},
+        ]
+        sv3._pending_permission[11] = {"session_id": sid, "options": options}
+
+        written = []
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 11, "optionId": "opt-0"}))
+                assert written == [
+                    {"jsonrpc": "2.0", "id": 11, "result": {"optionId": "opt-0"}}]
+                assert 11 not in sv3._pending_permission
+
+                asyncio.run(acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 11, "optionId": "opt-1"}))
+
+            assert len(written) == 1, "a second answer must never reach the agent"
+            assert _queued(conn)[0]["payload"]["code"] == "unknown_request"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_permission_response_v3_unknown_request_refused(self, monkeypatch):
+        """A requestId with no pending entry at all is refused with no
+        side effects (never even looks at conn.session_id or optionId)."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permunknown0-0000-0000-0000-001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+
+        try:
+            asyncio.run(acp_mod._handle_permission_response_v3(
+                conn, sid, {"requestId": 999, "optionId": "whatever"}))
+            assert _queued(conn)[0]["payload"]["code"] == "unknown_request"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_pending_permission_cleared_at_turn_end_via_handle_prompt_v3_finally(
+            self, monkeypatch):
+        """SC-9 cleanup trigger: _pending_permission is cleared
+        unconditionally inside _handle_prompt_v3's own finally block (turn
+        end), not only on explicit close/cancel -- explicit close is
+        normally refused while a turn is inflight, and a pending permission
+        request only ever exists mid-turn, so this proves the path that
+        actually always fires, not a hand-simulated stand-in for it."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permturnend0-0000-0000-0000-0001"
+        other_sid = "sess_permturnend_other0-0000-0001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.sessions[other_sid] = acp_mod._new_session_record("C:\\scratch2")
+        sv3.history[other_sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+
+        sv3._pending_permission["p1"] = {"session_id": sid, "options": []}
+        sv3._pending_permission["p2"] = {"session_id": other_sid, "options": []}
+
+        async def fake_prompt(self, session_id, text, images):
+            return {"stopReason": "end_turn"}
+
+        try:
+            with patch.object(acp_mod._Supervisor, "prompt", fake_prompt):
+                asyncio.run(acp_mod._handle_prompt_v3(conn, sid, {"prompt": "hello"}))
+
+            assert "p1" not in sv3._pending_permission, (
+                "a pending permission request for the finishing session must "
+                "be cleared at turn-end even with no explicit close/cancel")
+            assert sv3._pending_permission.get("p2") == {
+                "session_id": other_sid, "options": []}, (
+                "turn-end cleanup must not touch another session's pending request")
+        finally:
+            self._cleanup_registry(acp_mod)

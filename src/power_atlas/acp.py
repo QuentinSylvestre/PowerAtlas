@@ -163,6 +163,18 @@ CLIENT_TYPES = frozenset({
     "subscribe", "new", "load", "prompt", "cancel", "close", "steer",
     "commands_options", "commands_execute",
 })
+# v3-only inbound frame types, layered on top of the shared allowlist rather
+# than added into it (SC-9, plan Phase 6): `permission_response` — the
+# client's answer to an inbound `session/request_permission` request — has no
+# v2 equivalent at all (v2's protocol has no such concept), unlike every
+# member of CLIENT_TYPES above, which is genuinely shared, meaningful
+# functionality on both engines. Keeping CLIENT_TYPES itself v2-real means
+# `_dispatch`'s own `TestAcpDeclaredTypesAreRouted` completeness invariant —
+# "every declared client type is actually routed, or it's a server bug" —
+# stays true against v2's dispatcher without inventing a fake route for a
+# frame v2's page can never produce. `_dispatch_v3` alone validates against
+# this wider set. See `_handle_permission_response_v3`.
+CLIENT_TYPES_V3 = CLIENT_TYPES | {"permission_response"}
 SERVER_TYPES = frozenset({
     "session", "chunk", "rendered", "tool_call", "tool_update", "meta", "error",
     "agent_died", "session_closed", "history_truncated", "history", "thought",
@@ -180,6 +192,11 @@ SERVER_TYPES = frozenset({
     # and `agent_error` are genuinely new: neither a live session-title update
     # nor an agent-originated inline error frame existed for v2 to reuse.
     "steer_status", "title", "agent_error",
+    # v3-only (SC-9, plan Phase 6): a genuine inbound `session/request_permission`
+    # *request* (has an id, blocks the turn) translated into a frame the client
+    # can render as an interactive multiple-choice question. See
+    # `_SupervisorV3._on_agent_request`/`_on_permission_request`.
+    "permission_request",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -4705,6 +4722,16 @@ class _SupervisorV3(_Supervisor):
         # wave id (already unique), and every sibling opened while that wave
         # is still active reuses it. See _on_agent_subtask_open.
         self._active_fan_out_wave: dict[str, str] = {}
+        # SC-9: pending `session/request_permission` requests awaiting the
+        # user's answer, keyed by the JSON-RPC request's own `id`. Value is
+        # {"session_id": ..., "options": [...]} — a plain dict, not an
+        # asyncio.Future, per the "SC-9 UI shape & pending-request tracking"
+        # Design Decisions row: the reply is written directly and
+        # synchronously from _handle_permission_response_v3 once the client
+        # answers, so nothing needs to await it here. Cleared unconditionally
+        # at turn-end in _handle_prompt_v3's finally (see that row's "SC-9
+        # cleanup trigger" sibling), not only on session close/cancel.
+        self._pending_permission: dict[str, dict] = {}
 
     # _on_notification override: routes all _emit() calls to _emit_v3() so that
     # v3 frames are recorded in _supervisor_v3.history rather than _supervisor.history.
@@ -5270,11 +5297,71 @@ class _SupervisorV3(_Supervisor):
                  proc.pid, cwd)
 
     def _on_agent_request(self, msg: dict) -> None:
-        """Handle `_kiro/auth/getAccessToken`; refuse everything else."""
-        if msg.get("method") == "_kiro/auth/getAccessToken":
+        """Handle `_kiro/auth/getAccessToken` and `session/request_permission`;
+        refuse everything else."""
+        method = msg.get("method")
+        if method == "_kiro/auth/getAccessToken":
             _spawn_task(self._fulfill_token(msg["id"]))
             return
+        if method == "session/request_permission":
+            self._on_permission_request(msg)
+            return
         super()._on_agent_request(msg)
+
+    def _on_permission_request(self, msg: dict) -> None:
+        """Handle an inbound `session/request_permission` request (SC-9).
+
+        A genuine JSON-RPC *request* — has an ``id``, blocks the agent's turn
+        until answered — not a notification, which is why this is reached
+        from `_on_agent_request` rather than `_on_notification`. Emits a
+        ``permission_request`` frame for the client to render as an inline
+        multiple-choice question, and records the pending state
+        `_handle_permission_response_v3` needs to answer it later: keyed by
+        the request's own ``id``, valued ``{"session_id": ..., "options": [...]}``
+        — see the "SC-9 UI shape & pending-request tracking" Design Decisions
+        row in plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
+
+        A malformed request (no ``sessionId``, or no usable options) is
+        refused via the same `_refuse` path the base class's catch-all uses,
+        rather than silently swallowed or stored — nothing could ever answer
+        a pending entry with no session to route to or no valid choice.
+        """
+        request_id = msg.get("id")
+        params = msg.get("params") or {}
+        session_id = params.get("sessionId")
+        tool_call = params.get("toolCall")
+        if not isinstance(tool_call, dict):
+            tool_call = {}
+        raw_options = params.get("options")
+        options: list[dict] = []
+        if isinstance(raw_options, list):
+            for opt in raw_options:
+                if not isinstance(opt, dict):
+                    continue
+                option_id = opt.get("optionId")
+                if not isinstance(option_id, str) or not option_id:
+                    continue
+                options.append({
+                    "optionId": option_id,
+                    "name": _as_text(opt.get("name")),
+                    "kind": _as_text(opt.get("kind")),
+                })
+        if not isinstance(session_id, str) or not session_id or not options:
+            log.warning(
+                "ACP v3: session/request_permission missing sessionId or "
+                "usable options (id=%r) — refusing", request_id)
+            _spawn_task(self._refuse(request_id, msg.get("method")))
+            return
+        self._pending_permission[request_id] = {
+            "session_id": session_id,
+            "options": options,
+        }
+        _emit_v3(session_id, envelope("permission_request", {
+            "requestId": request_id,
+            "sessionId": session_id,
+            "toolCall": {"title": _as_text(tool_call.get("title"))},
+            "options": options,
+        }, session_id))
 
     async def _fulfill_token(self, request_id) -> None:
         """Fetch a fresh OIDC token and deliver it to the agent.
@@ -5954,7 +6041,7 @@ def _dispatch_v3(conn: _Connection, frame: dict) -> None:
         conn.send(error_frame(
             "bad_envelope", "'payload' must be an object.", session_id))
         return
-    if type_ not in CLIENT_TYPES:
+    if type_ not in CLIENT_TYPES_V3:
         conn.send(error_frame(
             "unknown_type", f"Unknown client frame type '{type_}'.", session_id))
         return
@@ -5982,6 +6069,9 @@ def _dispatch_v3(conn: _Connection, frame: dict) -> None:
         return
     if type_ == "commands_execute":
         _spawn_task(_handle_commands_execute_v3(conn, session_id, payload))
+        return
+    if type_ == "permission_response":
+        _spawn_task(_handle_permission_response_v3(conn, session_id, payload))
         return
     if type_ == "close":
         _spawn_task(_handle_close_v3(conn, session_id))
@@ -7629,6 +7719,16 @@ async def _handle_prompt_v3(conn, session_id, payload):
         for _tcid in [k for k, v in _supervisor_v3.crew_spawn_anchors.items()
                       if v == session_id]:
             _supervisor_v3.crew_spawn_anchors.pop(_tcid, None)
+        # SC-9 cleanup trigger (Design Decisions row of that name): a pending
+        # permission request only ever exists mid-turn, and explicit
+        # close_session is normally refused while a turn is inflight — so
+        # "clean up on close" would be a largely unreachable trigger. This
+        # turn-end finally is the path that actually always fires, mirroring
+        # how crew_spawn_anchors cleanup (immediately above) is already done
+        # here for the identical shape of problem.
+        for _req_id in [k for k, v in _supervisor_v3._pending_permission.items()
+                        if v.get("session_id") == session_id]:
+            _supervisor_v3._pending_permission.pop(_req_id, None)
         _finishing_crew = _supervisor_v3.crews.get(session_id)
         if _finishing_crew:
             _crew_changed = False
@@ -7723,6 +7823,71 @@ async def _handle_steer_v3(conn, session_id, payload):
         log.exception("ACP v3 _handle_steer_v3: unexpected error")
         conn.send(error_frame(
             "internal_error", "Steer failed unexpectedly.", session_id))
+
+
+async def _handle_permission_response_v3(conn, session_id, payload):
+    """Answer a pending `session/request_permission` request (SC-9).
+
+    Deliberately does **not** use the frame's own `session_id` param for the
+    ownership check — see the Design Decisions "SC-9 UI shape &
+    pending-request tracking" row. What actually proves which session a
+    `requestId` belongs to is the pending entry `_on_permission_request`
+    stored for it, not whatever `sessionId` the client claims; without
+    checking `conn.session_id` against that stored value, any connected WS
+    client could resolve any pending permission request for a session it
+    never subscribed to, since request ids are small sequential integers.
+
+    Ordering below is load-bearing (security review finding) and must not be
+    reordered: (a) unknown/already-answered request refused with no side
+    effects, (b) ownership check, (c) option validity check, (d) the pending
+    entry is popped **before** (e) the JSON-RPC reply is written — so a
+    second response for the same (now-popped) requestId hits (a)'s
+    "unknown_request" refusal instead of resolving the same request twice.
+    """
+    if _supervisor_v3 is None:
+        conn.send(error_frame(
+            "internal_error", "v3 supervisor not available.", session_id))
+        return
+    request_id = payload.get("requestId")
+    if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+        conn.send(error_frame(
+            "bad_payload", "'permission_response' needs a requestId.", session_id))
+        return
+    # (a) Unknown or already-answered request — no side effects.
+    entry = _supervisor_v3._pending_permission.get(request_id)
+    if entry is None:
+        conn.send(error_frame(
+            "unknown_request", "No pending permission request with that id.",
+            session_id))
+        return
+    # (b) Ownership — mirrors _handle_steer_v3's own
+    # `conn.session_id != session_id` check.
+    if conn.session_id != entry["session_id"]:
+        conn.send(error_frame(
+            "not_subscribed", "Subscribe to this session first.", session_id))
+        return
+    # (c) The chosen option must be one this request actually offered.
+    option_id = payload.get("optionId")
+    valid_option_ids = {opt["optionId"] for opt in entry["options"]}
+    if not isinstance(option_id, str) or option_id not in valid_option_ids:
+        conn.send(error_frame(
+            "invalid_option", "Not a valid optionId for this request.", session_id))
+        return
+    # (d) Pop BEFORE writing the reply — see the docstring above.
+    _supervisor_v3._pending_permission.pop(request_id, None)
+    # (e) The exact reply shape confirmed live in Phase 0.
+    try:
+        await asyncio.to_thread(_supervisor_v3._write, {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"optionId": option_id},
+        })
+    except AcpError as exc:
+        log.warning(
+            "ACP v3: could not deliver permission_response for request %r: %s",
+            request_id, exc)
+        conn.send(error_frame(
+            "internal_error", "Could not deliver the response.", session_id))
 
 
 async def _handle_cancel_v3(conn, session_id):
