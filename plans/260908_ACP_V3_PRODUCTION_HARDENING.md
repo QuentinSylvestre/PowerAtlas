@@ -1,7 +1,7 @@
 # ACP v3 Production Hardening
 
 > **Date**: 2026-09-08
-> **Status**: In Progress — Phases 0-1 complete, Phases 2-8 pending
+> **Status**: In Progress — Phases 0-2 complete, Phases 3-8 pending
 > **Scope**: Bring `/acp-v3` (kiro-cli v3 ACP protocol support) from throwaway-spike quality to production quality, on par with the mature `/acp` (v2) surface — without merging the two engines.
 > **Estimated effort**: 2-3 days
 
@@ -336,16 +336,22 @@ Implementation (2026-09-09, code: 6b7ab1a, cycle-2 fix: 0d28480, cleanup pass: f
 6. Clean up the stale class-level docstring comment at `acp.py:4454` (*"`_on_notification` deferred to Phase 2 (requires `_emit_v3`...)"*) — this refers to the archived spike's own Phase 2, which shipped long ago; the sentence is now not just stale-numbered but factually describing history, not a pending item. Remove or rewrite it to state the current fact plainly (the override exists and is fully implemented) without a "Phase N" reference that could be misread as pointing at this plan's own Phase 2.
 
 **Exit criteria**:
-- [ ] New test: construct a `_SupervisorV3`, simulate a notification arriving for a `session_id` not yet in `self.sessions` while `self._reserved > 0`, confirm it's buffered (not dropped, not recorded prematurely).
-- [ ] New test: complete `new_session()` for that same `session_id`, confirm the buffered frame is replayed and lands in `self.history[session_id]` with correct content (e.g., a buffered `tool_call` with `title="Fetching your cloud config"` shows up correctly titled, not as the generic "tool call" fallback the exploration observed live).
-- [ ] New test: a notification for a session_id that's genuinely unknown (not pending, `self._reserved == 0`) is still silently dropped as before (regression — the fix must not change behavior for a truly-unrelated stray frame).
-- [ ] New test: buffering past `_MAX_PENDING_EARLY_FRAMES` drops the oldest entry, never raises, and the buffer never exceeds the cap.
-- [ ] New test: a buffered frame that raises inside `_on_notification` during replay is logged and skipped, and the session is **not** rolled back (construct a buffered frame engineered to raise, confirm `new_session()` still returns successfully and `self.sessions[session_id]` remains present).
-- [ ] New test: a `_pending_early_frames` entry for a session_id that never calls `new_session()` is evicted by the `_sweep_once` v3 pass after the idle threshold elapses.
-- [ ] Existing `TestSupervisorV3` tests still pass (no signature changes to public methods).
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes.
+- [x] New test: construct a `_SupervisorV3`, simulate a notification arriving for a `session_id` not yet in `self.sessions` while `self._reserved > 0`, confirm it's buffered (not dropped, not recorded prematurely).
+- [x] New test: complete `new_session()` for that same `session_id`, confirm the buffered frame is replayed and lands in `self.history[session_id]` with correct content (e.g., a buffered `tool_call` with `title="Fetching your cloud config"` shows up correctly titled, not as the generic "tool call" fallback the exploration observed live).
+- [x] New test: a notification for a session_id that's genuinely unknown (not pending, `self._reserved == 0`) is still silently dropped as before (regression — the fix must not change behavior for a truly-unrelated stray frame).
+- [x] New test: buffering past `_MAX_PENDING_EARLY_FRAMES` drops the oldest entry, never raises, and the buffer never exceeds the cap.
+- [x] New test: a buffered frame that raises inside `_on_notification` during replay is logged and skipped, and the session is **not** rolled back (construct a buffered frame engineered to raise, confirm `new_session()` still returns successfully and `self.sessions[session_id]` remains present).
+- [x] New test: a `_pending_early_frames` entry for a session_id that never calls `new_session()` is evicted by the `_sweep_once` v3 pass after the idle threshold elapses.
+- [x] Existing `TestSupervisorV3` tests still pass (no signature changes to public methods).
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes.
 
 **Covers**: SC-1
+
+Implementation (2026-09-09, code: 730080c, review fix: 27fc69e)
+
+Implemented the keyed early-frame buffer exactly per the Design Decisions rows: `self._pending_early_frames`/`self._pending_early_frames_at` added via a minimal new `_SupervisorV3.__init__`; the buffering check placed in `_on_notification` right after `_stamp_activity`, before every other branch; replay in `new_session()` structured to run strictly after the rollback-guarded commit point, re-dispatching each buffered frame through `self._on_notification` itself with a per-frame `try/except` so a bad frame is logged and skipped, never grounds for rollback (verified directly: no `except` clause exists on the outer `try` past the commit point, so nothing there can trigger `self.sessions.pop(...)`). The orphan-buffer sweep extends `_sweep_once`'s existing v3 pass and reclaims any entry whose session_id never registers within the idle threshold. Both stale class-docstring references to the archived spike's own phase numbering were corrected to state the current facts plainly.
+
+Two review personas (Senior engineer, Reliability engineer) confirmed the replay-isolation property is genuinely correct (verified by exception-path tracing and an adversarial test), the buffering guard's known imprecision (a global `_reserved` counter, not session-scoped) is a documented, accepted tradeoff (Risk R10), and the design's fail-safe floor holds — worst case is a lost frame (matching the pre-fix bug), never duplication or corruption. One real gap was found and fixed: `load_session()` never drained `_pending_early_frames` for a session_id it re-registers, so a stray buffered frame for a since-closed session (v3 has no wire-level close) could linger indefinitely if that same id was reloaded before the sweep's idle TTL elapsed. Fixed by popping (discarding, not replaying — a buffered frame predates the reload and replaying it into a freshly-reloaded session's history could be semantically wrong) both buffer dicts at the point `load_session()` registers the session. A concurrent-reservation test was added (two distinct in-flight reservations, confirming one session's completion doesn't touch the other's still-pending buffer) — the scenario that originally motivated a keyed-by-session-id buffer over a single-slot one. An adjacent stale docstring line (a second "Phase 2+" crew-panel reference, missed by the original commit) was also corrected. Per explicit user instruction, no second review cycle was run after this fix — see Review Log.
 
 ### Phase 3: `session_info_update` dispatch branch [QA]
 
@@ -677,6 +683,19 @@ Implementation health: Green (after the user-directed cleanup pass below; no unr
 | 12 | Low | `hash_dir_for_cwd()` had no direct test, only monkeypatched stand-in coverage. | Fixed — direct test added against a real fixture. |
 
 Per explicit user instruction, no cycle-3 re-review was run after this cleanup pass, and this caps every subsequent phase in this plan to a single review cycle (dispatch review once, auto-fix, move on — no confirming re-review), overriding Step 6's default 2-cycle loop for the remainder of this `/qdev` run. Escalation-worthy findings in later phases are resolved by orchestrator judgment (documented inline, flagged for later user review) rather than blocking on a synchronous user response, per the same instruction ("keep your questions for later and keep moving").
+
+### 2026-09-09 — Implementation Review (after Phase 2, persona: Senior engineer + Reliability engineer)
+
+Implementation health: Green (after fix below). 3 findings (0 High, 1 Medium, 2 Low; a 4th item was independently confirmed sound by both personas with no action needed).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `load_session()` never drained `_pending_early_frames` for a session_id it re-registers, so a stray buffered frame for a since-closed session could linger indefinitely if reloaded before the sweep's idle TTL. | Fixed — `load_session()` now pops (discards, doesn't replay) both buffer dicts at registration time. |
+| 2 | Low | An adjacent stale docstring line (a second "Phase 2+" crew-panel reference) was missed by the original commit's cleanup. | Fixed — reworded to state the confirmed `agent-subtask` mechanism plainly, no phase reference. |
+| 3 | Low | No test constructed two concurrent in-flight reservations to confirm buffered frames don't cross-contaminate between session_ids — the exact scenario motivating a keyed buffer over a single-slot one. | Fixed — added. |
+| — | (confirmed sound, no finding) | The global `_reserved` counter's imprecision (a stray frame for an unrelated session can be buffered during someone else's reservation window) is a documented, accepted tradeoff (Risk R10), correctly bounded by the cap and sweep. | No action needed. |
+
+Per user instruction, no second review cycle was run after applying this fix. One informational, explicitly out-of-scope item both personas independently surfaced (a pre-existing exception-safety gap in `_on_notification`'s dispatch chain that predates this plan and affects both engines) was left untouched per this project's "bugs outside the task are not yours to fix" rule.
 
 ## Harness Improvement Opportunities
 
