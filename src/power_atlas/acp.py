@@ -1134,6 +1134,29 @@ def _as_text(value) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _agent_subtask_output_text(raw_output) -> str:
+    """Best-effort text from a completed v3 agent-subtask's ``rawOutput``.
+
+    Confirmed live (plan Current State, SC-5) only as "rawOutput carrying
+    the subagent's final answer directly" — the exact nesting was not
+    captured beyond that, so this tries the shapes ``_content_text``
+    already knows (a bare string, a single ``{"text": ...}`` block, or a
+    list of content blocks) before falling back to a nested ``content``
+    key, the same layered guess this module already makes for other
+    loosely-specified wire fields.
+    """
+    if isinstance(raw_output, str):
+        return raw_output
+    if isinstance(raw_output, list):
+        return _content_text(raw_output)
+    if isinstance(raw_output, dict):
+        text = _content_text(raw_output)
+        if text:
+            return text
+        return _content_text(raw_output.get("content"))
+    return ""
+
+
 def _parse_skills(entries: list) -> list:
     """Extract skill entries from a prompts/availableCommands list.
 
@@ -3616,7 +3639,7 @@ class _Supervisor:
                             _changed = True
                     if _changed:
                         self._evict_finished_subagents(_candidate)
-                        _emit_subagents_frame(_candidate)
+                        _emit_subagents_frame(_candidate, self.crews, self.crew_spawn_toolcallids)
                 return
         crew = self.crews.setdefault(parent_id, {})
         changed = False
@@ -3698,7 +3721,7 @@ class _Supervisor:
         if not changed:
             return
         self._evict_finished_subagents(parent_id)
-        _emit_subagents_frame(parent_id)
+        _emit_subagents_frame(parent_id, self.crews, self.crew_spawn_toolcallids)
 
     def _note_subagent_action(self, child_id: str, title: str) -> None:
         """Record a sub-agent's latest tool title as its crew card's action.
@@ -3719,7 +3742,7 @@ class _Supervisor:
         if entry is None or entry["done"] or entry["action"] == title:
             return
         entry["action"] = title
-        _emit_subagents_frame(meta["parent"])
+        _emit_subagents_frame(meta["parent"], self.crews, self.crew_spawn_toolcallids)
 
     def _evict_finished_subagents(self, parent_id: str) -> None:
         """Keep one session's remembered crew under MAX_SUBAGENTS_PER_SESSION.
@@ -4655,7 +4678,10 @@ class _SupervisorV3(_Supervisor):
     Crew panel data does not use `_kiro.dev/subagent/list_update` at all — v3
     has no `_kiro.dev/*` namespace. It arrives via ordinary `tool_call`/
     `tool_call_update`/`agent_message_chunk` notifications tagged
-    `_meta.kiro.kind: "agent-subtask"`.
+    `_meta.kiro.kind: "agent-subtask"`, translated live (not just at turn-end)
+    into `self.crews` entries by `_on_agent_subtask_open`/
+    `_on_agent_subtask_update` — see `_on_notification`'s `tool_call`/
+    `tool_call_update` branch.
     """
 
     def __init__(self) -> None:
@@ -4730,14 +4756,32 @@ class _SupervisorV3(_Supervisor):
             self._on_subagent_list(params)
             return
         if kind in ("agent_message_chunk", "user_message_chunk"):
+            _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
+            if not isinstance(_kiro_meta, dict):
+                _kiro_meta = {}
+            # SC-5: a sub-agent's own streamed text arrives on this same
+            # notification kind, tagged with agentSubtaskId rather than
+            # delivered on a separate child session — v3 has none. Route it
+            # into the synthetic per-agentSubtaskId history that
+            # _on_agent_subtask_open registers, instead of the parent's own
+            # transcript, so a click-to-view subscribe
+            # (_handle_subagent_subscribe) can replay it.
+            _agent_subtask_id = (_as_text(_kiro_meta.get("agentSubtaskId"))
+                                  if kind == "agent_message_chunk" else "")
             role = "user" if kind == "user_message_chunk" else "agent"
             content = update.get("content")
             text = _content_text(content) or _as_text(update.get("text"))
             if role == "user":
                 text = _with_image_markers(text, _content_image_count(content))
+            if _agent_subtask_id:
+                if text and _agent_subtask_id in self.subagent_history:
+                    _emit_v3(_agent_subtask_id, envelope(
+                        "chunk", {"role": "agent", "text": text}, _agent_subtask_id))
+                    _bubble_append(_agent_subtask_id, text)
+                return
             if text and isinstance(session_id, str):
                 if role == "user":
-                    _flush_bubble(session_id)
+                    _flush_bubble(session_id, _emit_v3)
                 _emit_v3(session_id, envelope(
                     "chunk", {"role": role, "text": text}, session_id))
                 if role == "agent":
@@ -4754,12 +4798,19 @@ class _SupervisorV3(_Supervisor):
                      payload["status"], payload["title"], payload["kind"],
                      payload["command"])
             if isinstance(session_id, str):
+                _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
+                if not isinstance(_kiro_meta, dict):
+                    _kiro_meta = {}
+                # SC-5: subagent spawn/progress/completion arrives as an
+                # ordinary tool_call/tool_call_update tagged with this kind
+                # and an agentSubtaskId — parallel to, not a replacement for,
+                # the toolName == "subagent" spawner-anchor check just below
+                # (that check is v2's own mechanism and never matches on v3,
+                # per the plan's Current State).
+                _agent_subtask_id = _as_text(_kiro_meta.get("agentSubtaskId"))
                 if kind == "tool_call":
-                    _flush_bubble(session_id)
-                    _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
-                    _spawner_tool_name = (
-                        _kiro_meta.get("toolName") if isinstance(_kiro_meta, dict) else None
-                    )
+                    _flush_bubble(session_id, _emit_v3)
+                    _spawner_tool_name = _kiro_meta.get("toolName")
                     if (
                         _spawner_tool_name == "subagent"
                         and session_id in self.inflight
@@ -4774,6 +4825,9 @@ class _SupervisorV3(_Supervisor):
                         log.debug("ACP v3 tool_call: unrecognised _meta.kiro.toolName=%r"
                                   " on inflight session=%s — spawner anchor not recorded",
                                   _spawner_tool_name, session_id)
+                    if _kiro_meta.get("kind") == "agent-subtask" and _agent_subtask_id:
+                        self._on_agent_subtask_open(
+                            session_id, _agent_subtask_id, update.get("rawInput") or {})
                 elif not (payload["title"] or payload["kind"] or
                           payload["status"] or payload["command"]
                           or "output" in payload):
@@ -4785,6 +4839,10 @@ class _SupervisorV3(_Supervisor):
                         session_id, envelope("tool_output", body, session_id))
                 if kind == "tool_call_update" and payload.get("status") in _TERMINAL_TOOL_STATUSES:
                     self.crew_spawn_anchors.pop(payload["toolCallId"], None)
+                if kind == "tool_call_update" and _agent_subtask_id:
+                    self._on_agent_subtask_update(
+                        session_id, _agent_subtask_id, payload.get("status") or "",
+                        update.get("rawOutput"))
                 tc_id = payload.get("toolCallId")
                 if tc_id:
                     if kind == "tool_call":
@@ -4805,14 +4863,14 @@ class _SupervisorV3(_Supervisor):
         if kind == "tool_call_chunk":
             if isinstance(session_id, str) and session_id in self.subagent_sessions:
                 payload = _tool_payload(update)
-                _flush_bubble(session_id)
+                _flush_bubble(session_id, _emit_v3)
                 _emit_v3(session_id, envelope("tool_call", payload, session_id))
                 self._note_subagent_action(session_id, payload["title"])
             return
         if kind == "agent_thought_chunk":
             text = _content_text(update.get("content"))
             if text and isinstance(session_id, str):
-                _flush_bubble(session_id)
+                _flush_bubble(session_id, _emit_v3)
                 _emit_v3(session_id, envelope("thought", {"text": text}, session_id))
             return
         if kind == "available_commands_update":
@@ -4948,6 +5006,81 @@ class _SupervisorV3(_Supervisor):
             # comment in _Supervisor._on_notification for why.
             log.info("ACP v3 notification %s (%s): %.600s",
                       method, kind or "-", json.dumps(params))
+
+    def _on_agent_subtask_open(self, parent_id: str, agent_subtask_id: str,
+                                raw_input: dict) -> None:
+        """Register a new crew entry for a v3 subagent-spawning tool_call.
+
+        SC-5 (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4): v3 has no
+        child session at all, unlike v2's real per-child fan-out sessions —
+        so the key inside ``self.crews[parent_id]`` is the tool call's own
+        ``agentSubtaskId``, not a session id. ``subagent_sessions``/
+        ``subagent_history`` are registered the same way ``_on_subagent_list``
+        registers a v2 child (see that method), so a click on the crew card
+        routes to ``_handle_subagent_subscribe`` instead of ``unknown_session``.
+        """
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+        crew = self.crews.setdefault(parent_id, {})
+        if agent_subtask_id in crew:
+            # A duplicate opening tool_call for the same id must not reset
+            # progress a tool_call_update may have already recorded.
+            return
+        role = _as_text(raw_input.get("name"))
+        task = (_as_text(raw_input.get("explanation"))
+                or _as_text(raw_input.get("prompt")))[:MAX_SUBAGENT_TASK_CHARS]
+        crew[agent_subtask_id] = {
+            "role": role,
+            "task": task,
+            "sessionName": "",
+            "status": "pending",
+            "action": "",
+            "done": False,
+            "error": "",
+            "order": len(crew),
+            "startedAt": time.time(),
+            "stoppedAt": None,
+            "fan_out_id": self.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID),
+        }
+        if agent_subtask_id not in self.subagent_sessions:
+            self.subagent_sessions[agent_subtask_id] = {"parent": parent_id}
+            self.subagent_history[agent_subtask_id] = _History()
+        _emit_subagents_frame(parent_id, self.crews, self.crew_spawn_toolcallids)
+
+    def _on_agent_subtask_update(self, parent_id: str, agent_subtask_id: str,
+                                  status: str, raw_output) -> None:
+        """Update one crew sub-entry from a matching v3 ``tool_call_update``.
+
+        Terminal is sticky, mirroring ``_on_subagent_list``'s own rule (Q&A,
+        2026-08-11: "stay, marked done") — a crew entry that finished must
+        never un-finish because a stale or reordered notification repeats an
+        earlier status. On completion, whatever streamed into the sub-agent's
+        own bubble via ``agent_message_chunk`` is rendered; if nothing ever
+        streamed for it, ``rawOutput`` is used directly — confirmed live
+        (plan Current State, SC-5) to carry the subagent's final answer
+        regardless of whether any chunk arrived for it first.
+        """
+        crew = self.crews.get(parent_id)
+        if not crew or agent_subtask_id not in crew:
+            return
+        entry = crew[agent_subtask_id]
+        if entry["done"]:
+            return
+        done = status in _TERMINAL_TOOL_STATUSES
+        if status:
+            entry["status"] = status
+        entry["done"] = done
+        if done:
+            if entry.get("stoppedAt") is None:
+                entry["stoppedAt"] = time.time()
+            if _bubbles.get(agent_subtask_id):
+                _flush_bubble(agent_subtask_id, _emit_v3)
+            else:
+                _text = _agent_subtask_output_text(raw_output)
+                if _text:
+                    _emit_v3(agent_subtask_id, envelope(
+                        "chunk", {"role": "agent", "text": _text}, agent_subtask_id))
+        _emit_subagents_frame(parent_id, self.crews, self.crew_spawn_toolcallids)
 
     def _spawn(self) -> None:
         """Start the v3 agent. Uses ACP_V3_ARGS instead of ACP_ARGS."""
@@ -5358,7 +5491,8 @@ def _subagents_payload(crew: dict, fan_out_id: str | None = None) -> list:
     ]
 
 
-def _emit_subagents_frame(parent_id: str) -> None:
+def _emit_subagents_frame(parent_id: str, crews: dict | None = None,
+                           crew_spawn_toolcallids: dict | None = None) -> None:
     """Push the current crew snapshot to a session's subscribers.
 
     Deliberately **not** recorded into the replay buffer via ``_emit`` —
@@ -5368,13 +5502,30 @@ def _emit_subagents_frame(parent_id: str) -> None:
     cheaper than replaying every incremental update that produced it and more
     current — the last one is always the whole truth, so only the last one is
     worth keeping.
+
+    ``crews``/``crew_spawn_toolcallids`` default to ``_supervisor``'s own
+    dicts for v2 call sites; a v3 call site passes ``_supervisor_v3.crews``/
+    ``_supervisor_v3.crew_spawn_toolcallids`` explicitly (plan
+    260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4/SC-5) — the explicit
+    parameter is the established pattern (see ``_emit``/``_emit_v3``, and the
+    archived spike's own "Rejected: Option B — look up supervisor in `_emit`"
+    note) rather than having this function guess which supervisor owns
+    *parent_id* by probing both singletons' dicts.
     """
-    crew = _supervisor.crews.get(parent_id)
+    if crews is None:
+        crews = _supervisor.crews
+    if crew_spawn_toolcallids is None:
+        crew_spawn_toolcallids = _supervisor.crew_spawn_toolcallids
+    crew = crews.get(parent_id)
     if not crew:
         return
-    toolcall_id = _crew_toolcallid(parent_id)
-    # BUG-3 fix: filter to only the current fan-out's entries.
-    fan_out_id = _supervisor.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
+    # BUG-3 fix: filter to only the current fan-out's entries. toolcall_id and
+    # fan_out_id are the same value — the spawner tool call's own id both
+    # anchors the client's panel (`toolCallId`) and tags which fan-out an
+    # entry belongs to (`_subagents_payload`'s filter) — kept as two names for
+    # what each is used for, not because they can differ.
+    fan_out_id = crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
+    toolcall_id = fan_out_id
     _registry.broadcast(parent_id, envelope(
         "subagents",
         {"subagents": _subagents_payload(crew, fan_out_id), "toolCallId": toolcall_id},
@@ -5401,7 +5552,7 @@ def _bubble_append(session_id: str, text: str) -> None:
     _bubbles.setdefault(session_id, []).append(text)
 
 
-def _flush_bubble(session_id: str) -> None:
+def _flush_bubble(session_id: str, emit_fn=_emit) -> None:
     """Close the open bubble and emit what its markdown parses to.
 
     Called immediately **before** every frame that closes a bubble on the page,
@@ -5416,6 +5567,14 @@ def _flush_bubble(session_id: str) -> None:
     text the chunks already put there, which is the pre-existing behaviour of
     this whole page. A rendering is an upgrade to a transcript that is already
     correct, so no failure here may cost the transcript.
+
+    ``emit_fn`` defaults to ``_emit`` for v2 call sites; every
+    ``_SupervisorV3`` call site passes ``_emit_v3`` explicitly (plan
+    260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4) so a v3 session's
+    rendered markdown lands in ``_supervisor_v3.history`` rather than
+    ``_supervisor.history``. Matches the archived spike's own precedent of
+    an explicit parameter over a lookup that would couple this shared
+    utility to both supervisor singletons.
     """
     parts = _bubbles.pop(session_id, None)
     if not parts or _markdown is None:
@@ -5440,7 +5599,7 @@ def _flush_bubble(session_id: str) -> None:
         return
     if not isinstance(tokens, list) or not tokens:
         return
-    _emit(session_id, envelope("rendered", {"tokens": tokens}, session_id))
+    emit_fn(session_id, envelope("rendered", {"tokens": tokens}, session_id))
 
 
 def _note_context(session_id: str, percent: float | None) -> None:
@@ -5892,7 +6051,8 @@ def _handle_subscribe(conn: _Connection, session_id: str | None) -> None:
 
 
 def _handle_subagent_subscribe(conn: _Connection, session_id: str,
-                                sub_meta: dict) -> None:
+                                sub_meta: dict, crews: dict | None = None,
+                                subagent_history: dict | None = None) -> None:
     """Attach this socket to a sub-agent's own session, read-only.
 
     Mirrors ``_handle_subscribe`` against ``subagent_history`` instead of
@@ -5907,7 +6067,20 @@ def _handle_subagent_subscribe(conn: _Connection, session_id: str,
     socket a ``session_closed`` at that point exactly as a real session's
     subscriber gets. A subscribe that lands in the brief window before that
     cleanup runs is not a lie — it is correct for the moment it is answered.
+
+    ``crews``/``subagent_history`` default to ``_supervisor``'s own dicts for
+    v2 call sites (``_handle_subscribe``, ``_handle_load``); a v3 call site
+    (``_handle_subscribe_v3``, ``_handle_load_v3``) passes
+    ``_supervisor_v3.crews``/``_supervisor_v3.subagent_history`` explicitly
+    (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4) — this function
+    already identified a v3 sub-agent correctly via which supervisor's
+    ``subagent_sessions`` matched *before* this fix; it just read the wrong
+    (always-v2) dicts for the actual role/task/transcript data.
     """
+    if crews is None:
+        crews = _supervisor.crews
+    if subagent_history is None:
+        subagent_history = _supervisor.subagent_history
     now = time.monotonic()
     since = None if conn.replayed_at is None else now - conn.replayed_at
     if since is not None and since < SUBSCRIBE_MIN_INTERVAL_SECONDS:
@@ -5923,7 +6096,7 @@ def _handle_subagent_subscribe(conn: _Connection, session_id: str,
     conn.replayed_at = now
     _registry.attach(conn, session_id)
     parent_id = sub_meta["parent"]
-    entry = _supervisor.crews.get(parent_id, {}).get(session_id, {})
+    entry = crews.get(parent_id, {}).get(session_id, {})
     conn.send(envelope("session", {
         "sessionId": session_id,
         "cwd": "",
@@ -5935,7 +6108,7 @@ def _handle_subagent_subscribe(conn: _Connection, session_id: str,
         "turnActive": not entry.get("done", False),
         "contextPercent": None,
     }, session_id))
-    history = _supervisor.subagent_history.get(session_id)
+    history = subagent_history.get(session_id)
     if history is None:
         return
     if history.truncated:
@@ -6356,7 +6529,7 @@ def _evict_crew_children(session_id: str, *, keep_history: bool,
                 "subagents", {"subagents": []}, session_id))
     elif broadcast_empty:
         # Some entries still running; emit the trimmed snapshot.
-        _emit_subagents_frame(session_id)
+        _emit_subagents_frame(session_id, _supervisor.crews, _supervisor.crew_spawn_toolcallids)
 
 
 async def _handle_prompt(conn: _Connection, session_id: str | None,
@@ -6527,7 +6700,7 @@ async def _handle_prompt(conn: _Connection, session_id: str | None,
                         _entry["stoppedAt"] = time.time()
                     _crew_changed = True
             if _crew_changed:
-                _emit_subagents_frame(session_id)
+                _emit_subagents_frame(session_id, _supervisor.crews, _supervisor.crew_spawn_toolcallids)
         # Clean up done entries now so a subscribe snapshot never sees stale crew.
         # `subagent_history` is intentionally NOT cleaned here — it holds the replay
         # buffer for the sub-agent click-to-view feature and must survive until
@@ -6905,7 +7078,7 @@ async def _handle_cancel(conn: _Connection, session_id: str | None) -> None:
         now = time.time()
         if _mark_crew_done(crew, now):
             try:
-                _emit_subagents_frame(session_id)
+                _emit_subagents_frame(session_id, _supervisor.crews, _supervisor.crew_spawn_toolcallids)
             except Exception:
                 log.exception("ACP cancel cascade: failed to emit subagents frame")
 
@@ -7029,7 +7202,9 @@ def _handle_subscribe_v3(conn, session_id):
         return
     sub_meta = _supervisor_v3.subagent_sessions.get(session_id)
     if sub_meta is not None:
-        _handle_subagent_subscribe(conn, session_id, sub_meta)
+        _handle_subagent_subscribe(conn, session_id, sub_meta,
+                                    crews=_supervisor_v3.crews,
+                                    subagent_history=_supervisor_v3.subagent_history)
         return
     if session_id in _registry.loading:
         _defer_until_loaded(conn, session_id)
@@ -7104,7 +7279,9 @@ async def _handle_load_v3(conn, session_id):
         return
     if session_id in _supervisor_v3.subagent_sessions:
         _handle_subagent_subscribe(
-            conn, session_id, _supervisor_v3.subagent_sessions[session_id])
+            conn, session_id, _supervisor_v3.subagent_sessions[session_id],
+            crews=_supervisor_v3.crews,
+            subagent_history=_supervisor_v3.subagent_history)
         return
     if session_id in _registry.loading:
         _defer_until_loaded(conn, session_id)
@@ -7150,7 +7327,7 @@ async def _handle_load_v3(conn, session_id):
             conn.send(_load_pending_frame(session_id))
             cwd = await asyncio.to_thread(_stored_session_cwd_v3, session_id)
             await _supervisor_v3.load_session(session_id, cwd)
-            _flush_bubble(session_id)
+            _flush_bubble(session_id, _emit_v3)
         except AcpError as exc:
             failure = _load_failure(exc, None)
             log.warning("ACP v3 session/load refused: [%s] session=%s %s%s",
@@ -7263,7 +7440,7 @@ async def _handle_prompt_v3(conn, session_id, payload):
             envelope("compaction", {"status": "started", "error": "", "summary": ""},
                      session_id))
     spoken = _with_image_markers(text, len(images))
-    _flush_bubble(session_id)
+    _flush_bubble(session_id, _emit_v3)
     _emit_v3(session_id, envelope("chunk", {"role": "user", "text": spoken}, session_id))
     _emit_v3(session_id, envelope("meta", {"turn": "start"}, session_id))
     stop_reason = "interrupted"
@@ -7295,7 +7472,8 @@ async def _handle_prompt_v3(conn, session_id, payload):
                         _entry["stoppedAt"] = time.time()
                     _crew_changed = True
             if _crew_changed:
-                _emit_subagents_frame_v3(session_id)
+                _emit_subagents_frame(session_id, _supervisor_v3.crews,
+                                      _supervisor_v3.crew_spawn_toolcallids)
         _evict_crew_children_v3(session_id, keep_history=True, broadcast_empty=False)
         _finished_crew_toolcallid = _crew_toolcallid_v3(session_id)
         _had_crew = session_id in _supervisor_v3.crews or bool(_finished_crew_toolcallid)
@@ -7306,7 +7484,7 @@ async def _handle_prompt_v3(conn, session_id, payload):
                 {"subagents": [], "toolCallId": _finished_crew_toolcallid},
                 session_id))
         log.info("ACP v3 turn end: session=%s stopReason=%s", session_id, stop_reason)
-        _flush_bubble(session_id)
+        _flush_bubble(session_id, _emit_v3)
         _emit_v3(session_id, envelope(
             "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
 
@@ -7428,7 +7606,8 @@ async def _handle_cancel_v3(conn, session_id):
         now = time.time()
         if _mark_crew_done(crew, now):
             try:
-                _emit_subagents_frame_v3(session_id)
+                _emit_subagents_frame(session_id, _supervisor_v3.crews,
+                                      _supervisor_v3.crew_spawn_toolcallids)
             except Exception:
                 log.exception("ACP v3 cancel cascade: failed to emit subagents frame")
 
@@ -7625,20 +7804,6 @@ def _crew_toolcallid_v3(parent_id):
     return _supervisor_v3.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
 
 
-def _emit_subagents_frame_v3(parent_id):
-    """Broadcast the current v3 crew snapshot to all attached sockets."""
-    if _supervisor_v3 is None:
-        return
-    crew = _supervisor_v3.crews.get(parent_id)
-    if not crew:
-        return
-    toolcallid = _crew_toolcallid_v3(parent_id)
-    _registry.broadcast(parent_id, envelope(
-        "subagents",
-        {"subagents": _subagents_payload(crew), "toolCallId": toolcallid},
-        parent_id))
-
-
 def _evict_crew_children_v3(session_id: str, *, keep_history: bool, broadcast_empty: bool) -> None:
     """Pop done crew entries for a v3 session from all relevant v3 stores.
 
@@ -7661,7 +7826,8 @@ def _evict_crew_children_v3(session_id: str, *, keep_history: bool, broadcast_em
             _registry.broadcast(session_id, envelope(
                 "subagents", {"subagents": []}, session_id))
     elif broadcast_empty:
-        _emit_subagents_frame_v3(session_id)
+        _emit_subagents_frame(session_id, _supervisor_v3.crews,
+                              _supervisor_v3.crew_spawn_toolcallids)
 
 
 # -- the idle sweeper ------------------------------------------------------

@@ -22104,3 +22104,427 @@ class TestSupervisorV3:
         for type_ in ("steer_status", "title", "agent_error"):
             assert type_ in acp_mod.SERVER_TYPES
             assert acp_mod.envelope(type_)["type"] == type_
+
+    # ------------------------------------------------------------------
+    # Phase 4: engine-aware shared helpers (_flush_bubble, _emit_subagents_
+    # frame, _handle_subagent_subscribe) + live crew wiring for v3's
+    # agent-subtask wire shape (SC-4/SC-5).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _agent_subtask_open_msg(sid, agent_subtask_id, tool_call_id="tc-subtask-1",
+                                 name="explorer", explanation="look around"):
+        return {
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_call_id,
+                    "title": f"Sub-agent: {name}",
+                    "status": "pending",
+                    "rawInput": {"name": name, "explanation": explanation},
+                    "_meta": {"kiro": {"kind": "agent-subtask",
+                                       "agentSubtaskId": agent_subtask_id}},
+                },
+            },
+        }
+
+    @staticmethod
+    def _agent_subtask_update_msg(sid, agent_subtask_id, status,
+                                   tool_call_id="tc-subtask-1", raw_output=None):
+        update = {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_call_id,
+            "status": status,
+            "_meta": {"kiro": {"agentSubtaskId": agent_subtask_id}},
+        }
+        if raw_output is not None:
+            update["rawOutput"] = raw_output
+        return {"method": "session/update",
+                "params": {"sessionId": sid, "update": update}}
+
+    def test_flush_bubble_emit_fn_v3_records_into_v3_history_not_v2(self, monkeypatch):
+        """_flush_bubble's emit_fn parameter (Phase 4, SC-4). Passing
+        _emit_v3 -- what every _SupervisorV3 call site now does -- records
+        the rendered frame into _supervisor_v3.history, never
+        _supervisor.history. Before this fix every v3 call site called
+        _flush_bubble(session_id) with no emit_fn, silently defaulting to
+        _emit and recording into the v2 singleton's history instead."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_bubble0000-0000-0000-0000-000000000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        acp_mod._bubbles[sid] = ["**hello**"]
+        try:
+            acp_mod._flush_bubble(sid, acp_mod._emit_v3)
+            events = sv3.history[sid].events()
+            assert any(e["type"] == "rendered" for e in events), events
+            assert sid not in acp_mod._supervisor.history
+        finally:
+            acp_mod._bubbles.pop(sid, None)
+
+    def test_emit_subagents_frame_default_reads_supervisor_crews(self, monkeypatch):
+        """_emit_subagents_frame with no crews/crew_spawn_toolcallids
+        arguments defaults to _supervisor's own dicts -- v2 call sites are
+        unaffected by the Phase 4 parameterization (pure plumbing, not a
+        behavior change)."""
+        from power_atlas import acp as acp_mod
+        sid = "lifecycle-emit-default"
+        acp_mod._supervisor.crews[sid] = {
+            "child-1": {"role": "r", "task": "t", "sessionName": "",
+                        "status": "working", "action": "", "done": False,
+                        "error": "", "order": 0, "startedAt": 1.0,
+                        "stoppedAt": None,
+                        "fan_out_id": acp_mod._NO_ANCHOR_TOOLCALLID},
+        }
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            _queued(conn)
+            acp_mod._emit_subagents_frame(sid)  # no explicit dicts
+            frames = _queued(conn)
+            assert frames and frames[0]["type"] == "subagents"
+            ids = [e["sessionId"] for e in frames[0]["payload"]["subagents"]]
+            assert ids == ["child-1"]
+        finally:
+            acp_mod._supervisor.crews.pop(sid, None)
+            self._cleanup_registry(acp_mod)
+
+    def test_emit_subagents_frame_explicit_v3_dicts_reads_v3_not_v2(self, monkeypatch):
+        """The same session id keys an entry in both _supervisor.crews and
+        _supervisor_v3.crews, with different content. Passing v3's dicts
+        explicitly must read v3's content -- proving the parameterization
+        actually switches source rather than defaulting coincidentally."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_dual00000-0000-0000-0000-000000000001"
+        acp_mod._supervisor.crews[sid] = {
+            "v2-child": {"role": "v2role", "task": "v2task", "sessionName": "",
+                         "status": "working", "action": "", "done": False,
+                         "error": "", "order": 0, "startedAt": 1.0,
+                         "stoppedAt": None,
+                         "fan_out_id": acp_mod._NO_ANCHOR_TOOLCALLID},
+        }
+        sv3.crews[sid] = {
+            "v3-child": {"role": "v3role", "task": "v3task", "sessionName": "",
+                         "status": "working", "action": "", "done": False,
+                         "error": "", "order": 0, "startedAt": 1.0,
+                         "stoppedAt": None,
+                         "fan_out_id": acp_mod._NO_ANCHOR_TOOLCALLID},
+        }
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            _queued(conn)
+            acp_mod._emit_subagents_frame(sid, sv3.crews, sv3.crew_spawn_toolcallids)
+            frames = _queued(conn)
+            assert frames and frames[0]["type"] == "subagents"
+            ids = [e["sessionId"] for e in frames[0]["payload"]["subagents"]]
+            assert ids == ["v3-child"], ids
+        finally:
+            acp_mod._supervisor.crews.pop(sid, None)
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_subagent_subscribe_v3_reads_v3_dicts(self, monkeypatch):
+        """Phase 4, SC-4: _handle_subagent_subscribe already correctly
+        identified a v3 sub-agent via which supervisor's subagent_sessions
+        matched, but then read the wrong (always-v2) crews/subagent_history
+        dicts -- producing blank role/task, an always-True turnActive
+        (``not {}.get('done', False)``), and an always-empty transcript
+        replay. Passing v3's own dicts explicitly fixes all three."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_parent0000-0000-0000-0000-000000000001"
+        child_id = "subtask-abc123"
+        sv3.crews[sid] = {
+            child_id: {
+                # done=True (not the "False" a fresh entry would use): the
+                # pre-fix bug read an always-empty {} from the wrong (v2)
+                # dict, so turnActive == `not {}.get('done', False)` was
+                # always True regardless of real state -- only a done=True
+                # fixture actually discriminates the fix from the bug.
+                "role": "explorer", "task": "look around", "sessionName": "",
+                "status": "completed", "action": "", "done": True, "error": "",
+                "order": 0, "startedAt": 1.0, "stoppedAt": 2.0,
+                "fan_out_id": acp_mod._NO_ANCHOR_TOOLCALLID,
+            },
+        }
+        sv3.subagent_sessions[child_id] = {"parent": sid}
+        hist = acp_mod._History()
+        hist.append(acp_mod.envelope(
+            "chunk", {"role": "agent", "text": "partial answer"}, child_id))
+        sv3.subagent_history[child_id] = hist
+        conn = self._conn_v3(acp_mod)
+        try:
+            acp_mod._handle_subagent_subscribe(
+                conn, child_id, {"parent": sid},
+                crews=sv3.crews, subagent_history=sv3.subagent_history)
+            frames = _queued(conn)
+            assert [f["type"] for f in frames] == ["session", "history"]
+            payload = frames[0]["payload"]
+            assert payload["role"] == "explorer"
+            assert payload["task"] == "look around"
+            assert payload["turnActive"] is False, (
+                "must reflect the real done=True state, not the always-True "
+                "bug from reading an always-empty v2 dict")
+            assert payload["parentSessionId"] == sid
+            assert frames[1]["payload"]["events"], "transcript must not be empty"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_tool_call_populates_crews_and_broadcasts_live(
+            self, monkeypatch):
+        """SC-5: a synthetic tool_call tagged _meta.kiro.kind ==
+        'agent-subtask' populates _supervisor_v3.crews and broadcasts a
+        subagents frame immediately -- live, mid-turn, not deferred to
+        turn-end."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_livecrew0000-0000-0000-0000-00000000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            _queued(conn)  # drain attach noise
+            agent_subtask_id = "subtask-live-1"
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+
+            crew = sv3.crews.get(sid)
+            assert crew is not None
+            entry = crew.get(agent_subtask_id)
+            assert entry is not None
+            assert entry["role"] == "explorer"
+            assert entry["task"] == "look around"
+            assert entry["status"] == "pending"
+            assert entry["done"] is False
+
+            assert sv3.subagent_sessions.get(agent_subtask_id) == {"parent": sid}
+            assert agent_subtask_id in sv3.subagent_history
+
+            frames = _queued(conn)
+            subagents_frames = [f for f in frames if f["type"] == "subagents"]
+            assert subagents_frames, "must broadcast live, not deferred to turn-end"
+            ids = [e["sessionId"]
+                   for e in subagents_frames[-1]["payload"]["subagents"]]
+            assert agent_subtask_id in ids
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_tool_call_update_completes_and_flushes_output(
+            self, monkeypatch):
+        """A completing tool_call_update (status=completed) for a matching
+        agentSubtaskId marks the sub-entry done and, since nothing streamed
+        via agent_message_chunk, falls back to rendering rawOutput directly
+        into the sub-agent's own subagent_history -- SC-5's "otherwise the
+        completing tool_call_update's rawOutput alone is sufficient" bar."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_subtaskdone0-0000-0000-0000-0000000001"
+        agent_subtask_id = "subtask-done-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            _queued(conn)  # drain the opening broadcast
+
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed",
+                raw_output="The final answer."))
+
+            entry = sv3.crews[sid][agent_subtask_id]
+            assert entry["done"] is True
+            assert entry["status"] == "completed"
+            assert entry["stoppedAt"] is not None
+
+            events = sv3.subagent_history[agent_subtask_id].events()
+            assert any(
+                e["type"] == "chunk"
+                and e["payload"]["text"] == "The final answer."
+                for e in events), events
+
+            frames = _queued(conn)
+            assert any(f["type"] == "subagents" for f in frames)
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_terminal_status_is_sticky(self, monkeypatch):
+        """A stale/reordered tool_call_update repeating an earlier, non-
+        terminal status after the entry is already done must not un-finish
+        it -- mirrors _on_subagent_list's own "stay, marked done" rule."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_subtasksticky-0000-0000-0000-000001"
+        agent_subtask_id = "subtask-sticky-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed", raw_output="done"))
+            assert sv3.crews[sid][agent_subtask_id]["done"] is True
+
+            # A late, stale "in_progress" update must not revive the entry.
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "in_progress"))
+            assert sv3.crews[sid][agent_subtask_id]["done"] is True
+            assert sv3.crews[sid][agent_subtask_id]["status"] == "completed"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_message_chunk_streams_into_subagent_history(
+            self, monkeypatch):
+        """agent_message_chunk tagged with _meta.kiro.agentSubtaskId is the
+        sub-agent's own streamed text (v3 has no separate child session for
+        it, unlike v2) -- it must land in the synthetic per-agentSubtaskId
+        history, not leak into the parent session's own transcript."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_subtaskstream0-0000-0000-0000-00000001"
+        agent_subtask_id = "subtask-stream-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            chunk_msg = {
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "partial "},
+                        "_meta": {"kiro": {"agentSubtaskId": agent_subtask_id}},
+                    },
+                },
+            }
+            sv3._on_notification(chunk_msg)
+
+            parent_events = sv3.history[sid].events()
+            assert not any(
+                e["type"] == "chunk"
+                and "partial" in e["payload"].get("text", "")
+                for e in parent_events
+            ), "sub-agent's own text must not leak into the parent's transcript"
+
+            sub_events = sv3.subagent_history[agent_subtask_id].events()
+            assert any(
+                e["type"] == "chunk" and e["payload"]["text"] == "partial "
+                for e in sub_events), sub_events
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_toolname_subagent_anchor_unaffected_by_agent_subtask_detection(
+            self, monkeypatch):
+        """The pre-existing _meta.kiro.toolName == 'subagent' spawner-anchor
+        check (v2's own mechanism, confirmed by the plan's Current State to
+        never match on v3) runs parallel to, not replaced by, the new
+        agent-subtask detection -- an ordinary spawner tool_call with no
+        agentSubtaskId/kind == 'agent-subtask' still records the anchor and
+        creates no crews entry via the new mechanism."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_spawneranchor0-0000-0000-0000-0000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        msg = {
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-spawn-1",
+                    "title": "Spawning agent crew",
+                    "status": "pending",
+                    "_meta": {"kiro": {"toolName": "subagent"}},
+                },
+            },
+        }
+        sv3._on_notification(msg)
+        assert sv3.crew_spawn_anchors.get("tc-spawn-1") == sid
+        assert sid not in sv3.crews
+
+    def test_close_session_v3_tears_down_agent_subtask_crew_data(self, monkeypatch):
+        """close_session's existing crews/subagent_sessions/subagent_history/
+        _bubbles teardown -- including its orphan-eviction pass for entries
+        whose crews entry was already removed at turn-end -- already covers
+        the agent-subtask crew data Phase 4 introduces: same dict shapes as
+        v2's real per-child fan-out sessions, so no close_session change was
+        needed. Regression guard against a future close_session edit that
+        assumes only v2-shaped child ids."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_closeteardown0-0000-0000-0000-000001"
+        agent_subtask_id = "subtask-close-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            assert agent_subtask_id in sv3.subagent_sessions
+            assert agent_subtask_id in sv3.subagent_history
+
+            # Simulate turn-end: the entry finishes and gets evicted from
+            # crews, but subagent_sessions/subagent_history deliberately
+            # survive for click-to-view (keep_history=True) -- exactly what
+            # _handle_prompt_v3's own finally does.
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed", raw_output="done"))
+            acp_mod._evict_crew_children_v3(
+                sid, keep_history=True, broadcast_empty=False)
+            assert sid not in sv3.crews
+            assert agent_subtask_id in sv3.subagent_sessions, (
+                "must survive turn-end for click-to-view")
+            assert agent_subtask_id in sv3.subagent_history
+
+            asyncio.run(sv3.close_session(sid))
+
+            assert agent_subtask_id not in sv3.subagent_sessions
+            assert agent_subtask_id not in sv3.subagent_history
+            assert agent_subtask_id not in acp_mod._bubbles
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_subscribe_v3_routes_agent_subtask_click_with_v3_dicts(
+            self, monkeypatch):
+        """The actual call-site fix, not just the parameterized function in
+        isolation: _handle_subscribe_v3 must pass v3's own crews/
+        subagent_history through to _handle_subagent_subscribe when a
+        socket subscribes to an agent-subtask's synthetic session id."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_subscribev3route-0000-0000-000001"
+        agent_subtask_id = "subtask-route-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed", raw_output="the answer"))
+
+            conn = self._conn_v3(acp_mod)
+            acp_mod._handle_subscribe_v3(conn, agent_subtask_id)
+            frames = _queued(conn)
+            assert [f["type"] for f in frames] == ["session", "history"]
+            payload = frames[0]["payload"]
+            assert payload["role"] == "explorer"
+            assert payload["task"] == "look around"
+            assert payload["parentSessionId"] == sid
+            events = frames[1]["payload"]["events"]
+            assert any(
+                e["type"] == "chunk" and e["payload"]["text"] == "the answer"
+                for e in events), events
+        finally:
+            self._cleanup_registry(acp_mod)
