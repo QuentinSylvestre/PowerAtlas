@@ -21818,6 +21818,44 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
+    # -- _detach --
+
+    def test_detach_clears_the_four_v3_only_dicts(self, monkeypatch):
+        """Step 9 final review, Follow-up Work items 7 and 9: before this
+        fix, _SupervisorV3 had no _detach override at all -- a dead/failed
+        agent process left four v3-only dicts uncleared
+        (_pending_early_frames, _pending_early_frames_at,
+        _active_fan_out_wave, _pending_permission), relying entirely on
+        each one's own indirect reclamation path instead of direct teardown.
+        The override must clear all four AND still delegate to the base
+        class for its own dicts -- a regression check (sessions/history
+        below) that the override didn't shadow or skip the inherited
+        behavior."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_detachv30000-0000-0000-0000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3._pending_early_frames[sid] = [{"dummy": "frame"}]
+        sv3._pending_early_frames_at[sid] = 123.0
+        sv3._active_fan_out_wave[sid] = "wave-1"
+        sv3._pending_permission[7] = {"session_id": sid, "options": []}
+
+        sv3._detach("test")
+
+        assert sv3._pending_early_frames == {}, (
+            "_pending_early_frames must be cleared by _detach")
+        assert sv3._pending_early_frames_at == {}, (
+            "_pending_early_frames_at must be cleared by _detach")
+        assert sv3._active_fan_out_wave == {}, (
+            "_active_fan_out_wave must be cleared by _detach")
+        assert sv3._pending_permission == {}, (
+            "_pending_permission must be cleared by _detach")
+        # Regression check: the base class's own teardown must still run --
+        # the v3 override must not have shadowed or skipped it.
+        assert sv3.sessions == {}
+        assert sv3.history == {}
+
     # ------------------------------------------------------------------
     # SC-1: the new_session() notification-drop race and its fix — a keyed
     # early-frame buffer on _SupervisorV3, replayed after new_session()
@@ -22901,6 +22939,73 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
+    def test_two_overlapping_fan_out_batches_merge_into_one_wave(
+            self, monkeypatch):
+        """Step 9 final review, Follow-up Work item 10: pins the known,
+        intentional characterization of _on_agent_subtask_open's fan-out-wave
+        synthesis for the OVERLAPPING case, as opposed to
+        test_agent_subtask_same_turn_second_fan_out_excludes_first above,
+        which covers the SEQUENTIAL case (batch 1's entries are all done
+        before batch 2's first entry opens).
+
+        _on_agent_subtask_open's only signal for "is this subtask part of
+        the currently active wave, or the first of a brand-new wave" is
+        `any(not e["done"] for e in crew.values())` -- ANY still-open entry
+        for the parent, regardless of which batch it belongs to. v3's wire
+        shape has no batch-level anchor event (unlike v2, where one spawning
+        tool call wraps a whole batch) to tell "a new subtask of the same
+        ongoing wave" apart from "the first subtask of a brand-new,
+        temporally-overlapping wave" -- so when a second, conceptually
+        distinct batch's first entry (B1) opens while the first batch still
+        has an in-flight, not-done entry, B1 is folded into wave 1 rather
+        than starting its own wave 2.
+
+        This is not a bug: no live case of genuinely overlapping same-turn
+        fan-outs (as opposed to sequential ones) has ever been observed, and
+        the merge is a defensible simplification given the protocol has no
+        way to distinguish the two cases. This test documents and pins that
+        behavior so a future change to the synthesis logic does not silently
+        alter it without a deliberate decision.
+        """
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_overlapwaves0-0000-0000-0000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            # Batch 1, entry A1: opens, starts wave 1.
+            sv3._on_agent_subtask_open(
+                sid, "subtask-a1", {"name": "explorer", "explanation": "a1"},
+                tool_call_id="tc-a1")
+            wave1_id = sv3._active_fan_out_wave[sid]
+            assert sv3.crews[sid]["subtask-a1"]["fan_out_id"] == wave1_id
+
+            # Batch 1, entry A2: opens while A1 is still not-done -- joins
+            # wave 1, as expected (this part is not in question here).
+            sv3._on_agent_subtask_open(
+                sid, "subtask-a2", {"name": "explorer", "explanation": "a2"},
+                tool_call_id="tc-a2")
+            assert sv3.crews[sid]["subtask-a2"]["fan_out_id"] == wave1_id
+
+            # Batch 2, entry B1: a conceptually distinct second fan-out opens
+            # while A1/A2 are STILL not-done -- genuinely overlapping, not
+            # sequential. Neither A1 nor A2 is marked done before this call.
+            assert sv3.crews[sid]["subtask-a1"]["done"] is False
+            assert sv3.crews[sid]["subtask-a2"]["done"] is False
+            sv3._on_agent_subtask_open(
+                sid, "subtask-b1", {"name": "explorer", "explanation": "b1"},
+                tool_call_id="tc-b1")
+
+            # Pinned current behavior: B1 is folded into wave 1, not given
+            # its own wave -- the mechanism cannot tell the two cases apart.
+            assert sv3.crews[sid]["subtask-b1"]["fan_out_id"] == wave1_id, (
+                "current behavior: an overlapping second batch merges into "
+                "the still-active wave rather than starting a new one")
+            assert sv3._active_fan_out_wave[sid] == wave1_id
+        finally:
+            self._cleanup_registry(acp_mod)
+
     def test_agent_subtask_update_ignores_mismatched_tool_call_id(
             self, monkeypatch):
         """Finding #2 (Medium/High-if-confirmed): _on_agent_subtask_update
@@ -23269,6 +23374,38 @@ class TestSupervisorV3:
 
         assert 55 not in sv3._pending_permission
         assert len(spawned) == 1, "a non-dict params must still be refused"
+        spawned[0].close()  # never awaited -- close() avoids a RuntimeWarning
+
+    def test_on_permission_request_unregistered_session_is_refused_not_stored(
+            self, monkeypatch):
+        """(Step 9 final review, Follow-up Work item 12) A well-formed
+        request (valid options, valid-shaped sessionId string) whose
+        sessionId names no session this server has registered must be
+        refused the same way a malformed request is -- not silently stored
+        into `_pending_permission`. Near-certainly unreachable in practice
+        (a permission request implies an in-progress turn, which implies
+        `session/new`/`session/load` already registered the session before
+        any turn -- and therefore any permission request -- could exist),
+        but an unregistered session_id sliding past this check would leave
+        an orphaned, unanswerable pending entry while its own
+        `permission_request` broadcast silently no-ops (no subscriber to
+        render it): the same invisible-hang failure class SC-9 exists to
+        prevent. Mirrors the malformed-request test above: patches
+        _spawn_task itself so this stays synchronous, and asserts on the
+        refuse path being taken and nothing stored -- not _refuse's own
+        already-covered write mechanics."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        # No sv3.sessions[sid] registration -- this is the point under test.
+        msg = self._permission_request_msg(77, "sess_unregistered0-0000-000001")
+        spawned = []
+        monkeypatch.setattr(acp_mod, "_spawn_task", spawned.append)
+        sv3._on_agent_request(msg)
+        assert sv3._pending_permission == {}, (
+            "an unregistered session's request must not be stored as pending")
+        assert len(spawned) == 1, (
+            "a well-formed request for an unregistered session must still "
+            "be refused")
         spawned[0].close()  # never awaited -- close() avoids a RuntimeWarning
 
     def test_handle_permission_response_v3_valid_option_writes_reply_and_clears_pending(
@@ -23678,6 +23815,48 @@ class TestSupervisorV3:
             assert frames[0]["payload"]["code"] == "unknown_type", (
                 f"v2's _dispatch must refuse permission_response as "
                 f"unknown_type, got {frames}")
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_all_declared_v3_client_types_are_routed(self, monkeypatch):
+        """v3 completeness counterpart to (v2's) TestAcpDeclaredTypesAreRouted.
+
+        CLIENT_TYPES_V3 = CLIENT_TYPES | {"permission_response"}, and
+        _dispatch_v3 has its own "declared but not routed" not_implemented
+        fallback (the same shape as _dispatch's) -- but unlike CLIENT_TYPES,
+        it had no test proving every declared v3 type actually reaches a
+        route rather than falling through to that fallback. Closes
+        Follow-up Work item 11 of the Step 9 final review
+        (plan 260908_ACP_V3_PRODUCTION_HARDENING).
+        """
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_alltypes00-0000-0000-0000-000000000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+
+        async def no_agent(self):
+            # Mirrors v2's TestAcpDeclaredTypesAreRouted stub: refusing here
+            # keeps every branch that would otherwise spawn a real kiro-cli
+            # agent (or make a real wire request) on its typed-error path,
+            # which is all this test asserts on.
+            raise acp_mod.AgentUnavailable("no agent under test")
+
+        async def dispatch():
+            for type_ in sorted(acp_mod.CLIENT_TYPES_V3):
+                acp_mod._dispatch_v3(conn, {"type": type_, "sessionId": sid,
+                                             "payload": {"prompt": "x"}})
+            await asyncio.gather(*acp_mod._tasks)
+
+        try:
+            with patch.object(acp_mod._Supervisor, "ensure_started", no_agent), \
+                    patch.object(acp_mod._Supervisor, "alive", lambda self: False):
+                asyncio.run(dispatch())
+            codes = [f["payload"].get("code") for f in _queued(conn)]
+            assert "not_implemented" not in codes, codes
         finally:
             self._cleanup_registry(acp_mod)
 

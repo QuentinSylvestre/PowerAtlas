@@ -5336,17 +5336,26 @@ class _SupervisorV3(_Supervisor):
         — see the "SC-9 UI shape & pending-request tracking" Design Decisions
         row in plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
 
-        A malformed request (no ``sessionId``, or no usable options) is
-        refused via the same `_refuse` path the base class's catch-all uses,
-        rather than silently swallowed or stored — nothing could ever answer
-        a pending entry with no session to route to or no valid choice. This
-        includes a truthy non-dict ``params`` (e.g. a JSON list) — without
-        this guard, ``params.get(...)`` below raises ``AttributeError``
-        straight out of a ``call_soon_threadsafe`` callback, where asyncio's
-        default exception handler swallows it silently and the agent's
-        request is left answered by nobody (review finding, Security
-        auditor: empirically reproduced, exactly the class of hang SC-9
-        exists to close).
+        A malformed request (no ``sessionId``, no usable options, or a
+        ``sessionId`` that names no registered session) is refused via the
+        same `_refuse` path the base class's catch-all uses, rather than
+        silently swallowed or stored — nothing could ever answer a pending
+        entry with no session to route to, no valid choice, or a session
+        this server never registered (Step 9 final review, Follow-up Work
+        item 12: near-certainly unreachable in practice — a permission
+        request implies an in-progress turn, which implies `session/new`/
+        `session/load` already registered the session — but if it ever did
+        arrive unregistered, storing it anyway would leave an orphaned
+        `_pending_permission` entry nothing can ever answer, while its
+        `permission_request` broadcast silently no-ops with no subscriber to
+        render it — the same invisible-hang failure class SC-9 exists to
+        prevent). This includes a truthy non-dict ``params`` (e.g. a JSON
+        list) — without this guard, ``params.get(...)`` below raises
+        ``AttributeError`` straight out of a ``call_soon_threadsafe``
+        callback, where asyncio's default exception handler swallows it
+        silently and the agent's request is left answered by nobody (review
+        finding, Security auditor: empirically reproduced, exactly the class
+        of hang SC-9 exists to close).
         """
         request_id = msg.get("id")
         params = msg.get("params") or {}
@@ -5370,10 +5379,12 @@ class _SupervisorV3(_Supervisor):
                     "name": _as_text(opt.get("name")),
                     "kind": _as_text(opt.get("kind")),
                 })
-        if not isinstance(session_id, str) or not session_id or not options:
+        if (not isinstance(session_id, str) or not session_id or not options
+                or session_id not in self.sessions):
             log.warning(
-                "ACP v3: session/request_permission missing sessionId or "
-                "usable options (id=%r) — refusing", request_id)
+                "ACP v3: session/request_permission missing sessionId, "
+                "usable options, or names an unregistered session (id=%r, "
+                "sessionId=%r) — refusing", request_id, session_id)
             _spawn_task(self._refuse(request_id, msg.get("method")))
             return
         self._pending_permission[request_id] = {
@@ -5634,6 +5645,27 @@ class _SupervisorV3(_Supervisor):
             self.subagent_history.pop(_orphan_id, None)
             _bubbles.pop(_orphan_id, None)
         log.info("ACP v3 session closed: %s; %d live", session_id, len(self.sessions))
+
+    def _detach(self, reason: str):
+        """Unbind the process and fail everything waiting on it. v3 override.
+
+        Delegates to the base class for the dicts it knows about, then clears
+        the four v3-only dicts `_Supervisor._detach` has no knowledge of.
+        Review fix (plan 260908_ACP_V3_PRODUCTION_HARDENING, Step 9 final
+        review, Follow-up Work items 7 and 9): each of these has its own
+        indirect reclamation path today (a pending permission is swept by its
+        own turn's `finally` in `_handle_prompt_v3`; `_pending_early_frames`
+        has its own sweep-integrated orphan eviction; `_active_fan_out_wave`
+        gets naturally overwritten on next use since `crews` is cleared by
+        the base class) — but relying on indirect reclamation instead of
+        direct teardown here is fragile.
+        """
+        proc, job = super()._detach(reason)
+        self._pending_early_frames.clear()
+        self._pending_early_frames_at.clear()
+        self._active_fan_out_wave.clear()
+        self._pending_permission.clear()
+        return proc, job
 
     def _publish_live(self) -> None:
         """Tell whoever is listening which sessions this v3 agent holds.
