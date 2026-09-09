@@ -1,7 +1,7 @@
 # ACP v3 Production Hardening
 
 > **Date**: 2026-09-08
-> **Status**: In Progress — Phases 0-2, 5 complete, Phases 3-4, 6-8 pending
+> **Status**: In Progress — Phases 0-3, 5 complete, Phases 4, 6-8 pending
 > **Scope**: Bring `/acp-v3` (kiro-cli v3 ACP protocol support) from throwaway-spike quality to production quality, on par with the mature `/acp` (v2) surface — without merging the two engines.
 > **Estimated effort**: 2-3 days
 
@@ -379,10 +379,37 @@ Two review personas (Senior engineer, Reliability engineer) confirmed the replay
 - [x] New test: a `session_info_update` frame with `kind: "context_usage"` updates `_supervisor_v3.sessions[sid]["contextPercent"]` (or equivalent field) correctly.
 - [x] New test: a `steering_queued`→`steering_injected`→`steering_cleared` sequence produces three distinct emitted frames in order.
 - [x] New test: a `display_error` frame with `errorType: "mcp_connection_error"` emits a frame containing the message text.
-- [x] `node tests/acp_page.test.mjs` passes with new checks for the client-side frame handlers (steer_status, title/context update, agent_error rendering).
+- [x] **Corrected wording (review, Senior engineer, Medium — the original unqualified phrasing was a literal overclaim):** `node tests/acp_page.test.mjs` passes **with no new failures beyond the 5 pre-existing, unrelated failures already present at this plan's own starting commit** (dashboard-link render, group-toggle collapse, unread-on-turn-end, 2× skill-dropdown keyboard-nav — independently confirmed by the orchestrator via a clean worktree checkout of the pre-Phase-0 commit, byte-identical failure set, none touching this phase's diff). All new Phase 3 checks (steer_status, title, agent_error, XSS-safety, document.title reset) pass.
 - [x] `.venv-PowerAtlas\Scripts\pytest` passes.
 
 **Covers**: SC-3
+
+Implementation (2026-09-09, code: 1447686, review fix: f3aacda)
+
+Added the `session_info_update` dispatch branch to `_SupervisorV3._on_notification` exactly per file scope (`_SupervisorV3` only — v2 untouched, v2 never sends this kind). Dispatches on `_meta.kiro.kind`: `context_usage` feeds a new `_context_percent_v3`-validated value into a new v3-scoped sibling `_note_context_v3` (deliberately not a parameterization of v2's `_note_context`, per the Design Decisions row — reuses v2's existing `meta`/`contextPercent` frame shape, so `acp.html`'s context UI needed zero client changes and `_handle_subscribe_v3` already sending `contextPercent` on reconnect makes context-% survive a reload for free); `steering_queued`/`injected`/`cleared` emit a new `steer_status` frame; `focus_update` emits a new `title` frame; `display_error` emits a new `agent_error` frame; `user_message_id_assigned`/`turn_end`/`pending_interaction` are explicit no-ops (see below — the last one's wire value was initially miscoded); anything else falls through to Phase 1's INFO-level fallback. `title`/`agent_error` are genuinely new frame types (investigation found no reusable v2 mechanism — no existing live-title tracking, and the generic `error` frame carries protocol-refusal side effects unsuited to an agent-originated notice) and are registered in `SERVER_TYPES` only (one-way server→client, correctly not in `CLIENT_TYPES`). Client-side, all three new render paths use `.textContent`/`createElement`/a plain `document.title` assignment — never `innerHTML` — verified both by direct trace and a whole-file static sink scan plus dedicated XSS-payload tests.
+
+**Review (Security auditor, Senior engineer) found no High findings, but real gaps.** Most notably, the Senior engineer independently re-verified all three ambiguous wire-shape assumptions (the plan's own documentation didn't state exact field names for `focus_update`'s title or `display_error`'s fields) against the actual KAS server source on disk (`acp-server.js`, kiro-cli 2.21.1 — same zero-side-effect technique as Phase 0's Probe A, not a live re-probe) and confirmed all three implementer assumptions were correct — this substantially de-risks what could otherwise have been a silently non-functional feature in production. The same source-verification pass also caught a genuine bug the plan's own documentation got wrong: `pendingInteraction` (camelCase, as documented and coded) is not the real wire value — it's `pending_interaction` (snake_case) — so every real occurrence was silently falling through to the unrecognized-kind fallback instead of the intended no-op (currently harmless — both paths emit zero frames — but pollutes the INFO-level diagnostic channel Phase 1 specifically promoted for catching genuinely novel kinds). Fixed in both the code and the plan's own Current State documentation, with a strengthened `caplog`-based test that can actually distinguish "handled by the no-op branch" from "fell through to the fallback" (both previously looked identical — zero emitted frames — to the original test).
+
+Security auditor found one Medium (the three new agent-controlled strings had no length bound, breaking this codebase's otherwise-universal convention — fixed by reusing `MAX_STEER_CHARS`/`MAX_ERROR_DETAIL_CHARS` and adding a new `MAX_TITLE_CHARS`) and three Low findings, all fixed: `_context_percent_v3`'s NaN/string rejection pinned with new test cases; `steer_status` switched from `_emit_v3` (record+broadcast) to `_registry.broadcast`-only, matching `_note_context_v3`'s own precedent from the same phase (a transient signal the client explicitly skips during replay shouldn't permanently occupy a replay-buffer slot); `document.title` now resets to a default on session release and session switch, matching the existing `setSteerStatus('')` reset pattern. One more Low (Senior engineer, cosmetic): `steering_cleared`'s real payload carries a plural `messageIds` array, not the `messageId`/`content` pair the other two steering kinds use — documented via a code comment, no functional change (the client already ignores both fields for this kind).
+
+Per explicit user instruction, no second review cycle was run after this fix — see Review Log.
+
+### 2026-09-09 — Implementation Review (after Phase 3, persona: Security auditor + Senior engineer)
+
+Implementation health: Green (after fixes below). 8 findings (0 High, 2 Medium, 6 Low — no unresolved). Notably, the Senior engineer verified all three ambiguous wire-shape assumptions in this phase directly against the actual KAS server source (not just plausibility) and confirmed all three correct — while doing so, found an unrelated real bug the plan's own documentation had wrong.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `pendingInteraction` (camelCase) was miscoded/misdocumented — the real wire value is `pending_interaction` (snake_case), source-verified against `acp-server.js`, so this no-op never actually fired. | Fixed in code, plan's Current State, and a strengthened `caplog`-based test that can distinguish the no-op path from the fallback path. |
+| 2 | Medium | No length bound on the three new agent-controlled strings (`steer_status.content`, `title`, `agent_error.message`/`errorType`), breaking an otherwise-universal codebase convention. | Fixed — reused `MAX_STEER_CHARS`/`MAX_ERROR_DETAIL_CHARS`, added `MAX_TITLE_CHARS`. |
+| 3 | Low | `_context_percent_v3`'s NaN/string-typed rejection was correct but untested, risking a silent future regression. | Fixed — test cases added. |
+| 4 | Low | `steer_status` was recorded into history via `_emit_v3` despite the client never replaying it — an inconsistency with `_note_context_v3`'s own broadcast-only precedent from the same commit. | Fixed — switched to `_registry.broadcast` directly. |
+| 5 | Low | `document.title` was never reset on session release/switch, letting a stale title persist across sessions. | Fixed — reset added, mirroring the existing `setSteerStatus('')` pattern. |
+| 6 | Low | `steering_cleared`'s real payload shape (`messageIds` plural) differs from the other two steering kinds — currently harmless but undocumented. | Fixed — explanatory comment added, no functional change needed. |
+| 7 | Low | Plan's own `focus_update` title field name and `display_error` field-nesting were undocumented assumptions. | Confirmed correct via direct KAS-source verification — no code change needed, wording noted for a future maintainer. |
+| 8 | — (confirmed sound) | `context_usage` reuse of v2's `meta`/`contextPercent` frame, and the decision not to reuse v2's generic `error` handler for `agent_error` — both independently verified sound by direct code trace. | No action needed. |
+
+The 5 pre-existing, unrelated `node tests/acp_page.test.mjs` failures (confirmed independently by the orchestrator against the plan's own starting commit — dashboard-link render, group-toggle collapse, unread-on-turn-end, 2× skill-dropdown keyboard-nav) are untouched by this phase; Phase 3's own exit criterion wording was corrected above to state this precisely rather than claim an unqualified pass. Per user instruction, no second review cycle was run after applying the fixes.
 
 ### Phase 4: Engine-aware shared helpers + live crew panel [QA]
 
