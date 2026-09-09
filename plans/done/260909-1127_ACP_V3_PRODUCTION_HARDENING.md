@@ -1,9 +1,22 @@
 # ACP v3 Production Hardening
 
 > **Date**: 2026-09-08
+> **Last Updated**: 2026-09-09 11:26
 > **Status**: Complete — Phases 0-8 done, Step 9 holistic final review done (4 High + 2 Medium findings fixed and verified; 7 Low findings resolved inline or recorded as Follow-up Work)
 > **Scope**: Bring `/acp-v3` (kiro-cli v3 ACP protocol support) from throwaway-spike quality to production quality, on par with the mature `/acp` (v2) surface — without merging the two engines.
 > **Estimated effort**: 2-3 days
+
+---
+
+## Completion Summary
+
+Archived via `/qclose` on 2026-09-09. Cleanup scan found and fixed 2 exit criteria missed by Phase 8's own checklist (both re-verified live/directly rather than left as accepted gaps), 1 documentation-gap false-positive resolved by re-verification plus an incidental byte-corruption fix, and 1 previously-deferred documented divergence (a corrupted section boundary in `plans/tests/260701_POWERATLAS.md`) fixed rather than left for a future pass — see the individual commits and the plan-body notes each edit landed next to for full detail.
+
+### Acknowledged at archival
+
+- Skipped (harness opportunity): user declined — no background-sub-agent keep-alive-dispatch guidance added to `/qexplore`/`shared/AGENTS.md`.
+- Skipped (harness opportunity): user declined — no explicit `/qdev` Step 7 wording change for the Review Log section-navigation gap.
+- Skipped (harness opportunity): user declined — no citation-depth requirement added for "confirmed via code read" claims.
 
 ---
 
