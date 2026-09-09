@@ -21602,3 +21602,107 @@ class TestSupervisorV3:
 
         assert sid in sv3._pending_early_frames
         assert sid in sv3._pending_early_frames_at
+
+    def test_load_session_discards_stray_buffer_for_reloaded_session_id(
+            self, monkeypatch):
+        """Review fix (Senior engineer + Reliability engineer, independently):
+        v3 has no wire-level close, so KAS can keep emitting stray
+        notifications for a session_id after it closes. If some OTHER
+        new_session()/load_session() reservation is in flight during that
+        window, a stray frame for the closed id can get buffered. If that
+        same session_id is then reloaded via load_session() before the
+        sweep's idle TTL elapses, the sweep would never reclaim it (it skips
+        any session_id present in self.sessions) -- the entry would leak for
+        the life of the resumed session unless load_session() itself drains
+        it. Discard, not replay: a buffered frame predates the reload and
+        could be semantically wrong to inject into the reloaded session's
+        freshly-started history."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_reload0000-0000-0000-0000-00000000001"
+
+        # Simulate the stray-frame scenario directly: a frame for this
+        # session_id was buffered (e.g. while some OTHER new_session()/
+        # load_session() reservation was in flight) before this
+        # load_session() call runs.
+        stray_msg = self._chunk_msg(sid, "stray-before-reload")
+        sv3._pending_early_frames[sid] = [stray_msg]
+        sv3._pending_early_frames_at[sid] = 0.0
+
+        async def fake_request(self, method, params, timeout=None):
+            return {}
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+        monkeypatch.setattr(acp_mod, "_get_tool_diffs_v3", lambda sid: {})
+
+        result = asyncio.run(sv3.load_session(sid, "C:\\scratch"))
+
+        assert result == {"sessionId": sid, "cwd": "C:\\scratch"}
+        assert sid in sv3.sessions
+        # Discarded, not left to linger: the buffer entries are gone.
+        assert sid not in sv3._pending_early_frames
+        assert sid not in sv3._pending_early_frames_at
+        # And not replayed either: the stray frame's content never made it
+        # into the reloaded session's freshly-started history.
+        assert sv3.history[sid].events() == []
+
+    def test_new_session_completing_for_one_id_leaves_other_concurrent_buffer_untouched(
+            self, monkeypatch):
+        """Two or more concurrent in-flight reservations (self._reserved > 1)
+        with distinct buffered frames per session_id: completing
+        new_session() for session A must not touch session B's still-pending
+        buffer. This is the exact scenario that motivated a keyed-by-
+        session-id buffer (dict) over a single-slot buffer in the first
+        place (Design Decisions, SC-1 mechanism)."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid_a = "sess_concA0000-0000-0000-0000-00000000001"
+        sid_b = "sess_concB0000-0000-0000-0000-00000000002"
+
+        msg_a = self._chunk_msg(sid_a, "frame-for-A")
+        msg_b = self._chunk_msg(sid_b, "frame-for-B")
+
+        # sid_b's reservation is already in flight (e.g. a concurrent
+        # load_session() elsewhere) with its own buffered frame.
+        sv3._reserved = 1
+        sv3._pending_early_frames[sid_b] = [msg_b]
+        sv3._pending_early_frames_at[sid_b] = 111.0
+        # sid_a's frame arrived and was buffered before sid_a's own
+        # new_session() round-trip resolved.
+        sv3._pending_early_frames[sid_a] = [msg_a]
+        sv3._pending_early_frames_at[sid_a] = 222.0
+
+        async def fake_request(self, method, params, timeout=None):
+            # sid_b's reservation (self._reserved == 1, set above) is still
+            # outstanding while sid_a's own new_session() runs -- i.e.
+            # self._reserved > 1 for the duration of this call, the
+            # concurrent-reservations scenario under test.
+            assert sv3._reserved > 1
+            return {"_meta": {"id": sid_a}}
+
+        monkeypatch.setattr(acp_mod._Supervisor, "ensure_started", _no_spawn)
+        monkeypatch.setattr(acp_mod._Supervisor, "_request", fake_request)
+
+        result = asyncio.run(sv3.new_session("C:\\scratch"))
+
+        assert result == {"sessionId": sid_a, "cwd": "C:\\scratch"}
+        # A's buffer was drained and replayed -- its history has only A's
+        # frame, never B's.
+        assert sid_a in sv3.sessions
+        chunk_events_a = [e for e in sv3.history[sid_a].events()
+                           if e.get("type") == "chunk"]
+        assert len(chunk_events_a) == 1
+        assert chunk_events_a[0]["payload"]["text"] == "frame-for-A"
+        assert sid_a not in sv3._pending_early_frames
+        assert sid_a not in sv3._pending_early_frames_at
+
+        # B's buffer/timestamp are completely untouched by A's completion.
+        assert sv3._pending_early_frames[sid_b] == [msg_b]
+        assert sv3._pending_early_frames_at[sid_b] == 111.0
+        assert sid_b not in sv3.sessions
+        assert sid_b not in sv3.history

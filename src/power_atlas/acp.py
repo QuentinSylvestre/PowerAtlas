@@ -4620,9 +4620,10 @@ class _SupervisorV3(_Supervisor):
       every _emit() call through _emit_v3() so v3 frames land in
       _supervisor_v3.history rather than _supervisor.history.
 
-    Crew panel (_kiro.dev/subagent/list_update) compatibility is an open item —
-    not probed in Phase 0 (non-subagent turn); requires Phase 2+ with a multi-agent
-    prompt.
+    Crew panel data does not use `_kiro.dev/subagent/list_update` at all — v3
+    has no `_kiro.dev/*` namespace. It arrives via ordinary `tool_call`/
+    `tool_call_update`/`agent_message_chunk` notifications tagged
+    `_meta.kiro.kind: "agent-subtask"`.
     """
 
     def __init__(self) -> None:
@@ -5072,6 +5073,22 @@ class _SupervisorV3(_Supervisor):
                     self.sessions[session_id]["skills"] = _existing_meta.get("skills") or []
                     break
             self.history[session_id] = _History()
+            # SC-1 (review fix): discard, do not replay, any pre-existing
+            # _pending_early_frames entry for this session_id at the same
+            # point new_session()'s rollback path cleans up the same two
+            # dicts. v3 has no wire-level close, so KAS can keep emitting
+            # stray notifications for a session_id after it closes; if some
+            # OTHER new_session()/load_session() reservation was in flight
+            # during that window, a stray frame for the closed id could have
+            # been buffered here. Without this pop, reloading that same
+            # session_id via load_session() before the sweep's idle TTL
+            # elapses would leave the entry stuck forever — the sweep
+            # explicitly skips any session_id present in self.sessions. A
+            # buffered frame predates this reload and could be semantically
+            # wrong to inject into the resumed session's freshly-started
+            # history, so it is discarded rather than replayed.
+            self._pending_early_frames.pop(session_id, None)
+            self._pending_early_frames_at.pop(session_id, None)
             # v3 diff backfill — uses inlined _get_tool_diffs_v3 (no data_kiro_v3 import).
             # Wrapped in asyncio.to_thread (F7): _get_tool_diffs_v3 does blocking
             # filesystem I/O (iterdir + file reads + time.sleep(0.2)).
