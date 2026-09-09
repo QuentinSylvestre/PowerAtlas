@@ -22701,7 +22701,14 @@ class TestSupervisorV3:
         bubble a silently truncated stand-in for "the final answer." Before
         this fix, any prior streaming at all -- even a partial,
         since-truncated stream -- made the code prefer the possibly-
-        truncated _bubbles content over rawOutput."""
+        truncated _bubbles content over rawOutput.
+
+        rawOutput must replace the streamed bubble via a `rendered` frame
+        (the client's replace-not-append handling), not a bare `chunk` --
+        appendChunk (the `chunk` handler) appends to whatever text the
+        client already streamed into the open bubble, so on the ordinary
+        path (streaming succeeded and rawOutput matches what streamed) a
+        bare chunk would show the sub-agent's own answer twice."""
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
         sid = "sess_preferraw0000-0000-0000-0000-0001"
@@ -22734,14 +22741,51 @@ class TestSupervisorV3:
                 raw_output="The complete final answer."))
 
             events = sv3.subagent_history[agent_subtask_id].events()
-            assert events[-1]["type"] == "chunk", events
-            assert events[-1]["payload"]["text"] == "The complete final answer.", (
+            assert events[-1]["type"] == "rendered", events
+            assert "The complete final answer." in json.dumps(
+                events[-1]["payload"]["tokens"]), (
                 "completion must prefer rawOutput over the streamed bubble")
-            assert not any(e["type"] == "rendered" for e in events), (
-                "the streamed (possibly-truncated) bubble must not be "
-                "flushed when rawOutput is available")
+            assert "trunc" not in json.dumps(events[-1]["payload"]["tokens"]), (
+                "the truncated streamed text must not survive into the "
+                "replacement rendering")
+            assert not any(
+                e["type"] == "chunk" and e["payload"]["text"] == "The complete final answer."
+                for e in events), (
+                "rawOutput must replace the streamed bubble via a rendered "
+                "frame, not append as a second chunk -- appendChunk appends "
+                "to the already-open body and would show the answer twice")
         finally:
             acp_mod._bubbles.pop(agent_subtask_id, None)
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_completion_with_no_prior_stream_emits_bare_chunk(
+            self, monkeypatch):
+        """Finding #5b companion case: when nothing ever streamed via
+        agent_message_chunk, no bubble is open client-side for a `rendered`
+        frame to land in (renderMarkdown no-ops with no open body), so
+        rawOutput must still go out as a bare `chunk` -- the same path this
+        codebase already covered before finding #5b (see
+        test_agent_subtask_tool_call_update_completes_and_flushes_output)."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_preferrawnobubble0-0000-0001"
+        agent_subtask_id = "subtask-preferraw-nobubble-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            assert agent_subtask_id not in acp_mod._bubbles
+
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed",
+                raw_output="The only answer."))
+
+            events = sv3.subagent_history[agent_subtask_id].events()
+            assert events[-1]["type"] == "chunk", events
+            assert events[-1]["payload"]["text"] == "The only answer."
+        finally:
             self._cleanup_registry(acp_mod)
 
     def test_agent_subtask_message_chunk_unregistered_id_logs_debug(

@@ -5141,7 +5141,14 @@ class _SupervisorV3(_Supervisor):
         leading chunk (see the ``agent_message_chunk`` branch in
         ``_on_notification``) would otherwise make the streamed bubble a
         silently truncated stand-in for "the final answer." The streamed
-        bubble is used only when rawOutput carries nothing.
+        bubble is used only when rawOutput carries nothing. When a bubble
+        *was* streaming, rawOutput replaces its buffered content rather than
+        being emitted as a separate ``chunk`` — a bare ``chunk`` appends to
+        whatever the client already has open (``appendChunk``), which on the
+        ordinary path (streaming succeeded and rawOutput matches what
+        streamed) would show the sub-agent's own answer twice; routing it
+        through ``_flush_bubble`` instead uses the client's replace-not-append
+        ``rendered`` handling, the same mechanism a normal turn boundary uses.
         """
         crew = self.crews.get(parent_id)
         if not crew or agent_subtask_id not in crew:
@@ -5176,8 +5183,29 @@ class _SupervisorV3(_Supervisor):
                 # than fabricating a message.
                 entry["error"] = _text[:MAX_ERROR_DETAIL_CHARS]
             if _text:
-                _emit_v3(agent_subtask_id, envelope(
-                    "chunk", {"role": "agent", "text": _text}, agent_subtask_id))
+                if _bubbles.get(agent_subtask_id):
+                    # A bubble is already open client-side from live
+                    # agent_message_chunk streaming -- a bare "chunk" here
+                    # would *append* to it (appendChunk does
+                    # `agentBody.textContent += text`), duplicating the
+                    # answer on the ordinary path where streaming succeeded
+                    # and rawOutput matches what already streamed. Route
+                    # rawOutput through the same replace-not-append
+                    # mechanism a normal turn boundary uses instead:
+                    # overwrite the bubble buffer with rawOutput and flush
+                    # it, so `rendered` replaces whatever streamed with the
+                    # authoritative text (renderMarkdown clears and rebuilds
+                    # the open body rather than appending to it).
+                    _bubbles[agent_subtask_id] = [_text]
+                    _flush_bubble(agent_subtask_id, _emit_v3)
+                else:
+                    # Nothing streamed, so no bubble is open client-side for
+                    # a `rendered` frame to land in (renderMarkdown no-ops
+                    # with no open body) -- a bare chunk creates the message
+                    # row directly, mirroring the pre-fix else-branch this
+                    # replaces.
+                    _emit_v3(agent_subtask_id, envelope(
+                        "chunk", {"role": "agent", "text": _text}, agent_subtask_id))
             elif _bubbles.get(agent_subtask_id):
                 _flush_bubble(agent_subtask_id, _emit_v3)
         self._evict_finished_subagents(parent_id)
