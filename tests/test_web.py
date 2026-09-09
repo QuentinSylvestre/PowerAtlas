@@ -12599,6 +12599,41 @@ class TestAcpIdleSweeper:
         _run_bounded(run)
         assert passes == []
 
+    def test_a_tick_with_only_a_pending_v3_buffer_still_sweeps(
+            self, acp_fast, monkeypatch):
+        """Step 9 final review fix (Medium): the idle guard used to look
+        only at _supervisor.sessions / _supervisor_v3.sessions, never at
+        _supervisor_v3._pending_early_frames -- the SC-1 buffer that can
+        hold an orphaned entry when a new_session()/load_session()
+        reservation never completes. With both engines' `sessions` empty
+        but a pending-early-frame buffer outstanding, the app going fully
+        idle used to stop the sweep that's supposed to reclaim it (see
+        _sweep_once's "SC-1 orphan-buffer sweep" pass) from ever running
+        again. Mirrors test_a_tick_with_no_sessions_costs_nothing_and_
+        still_yields above but asserts the opposite outcome."""
+        acp_mod, _ = acp_fast
+        sv3 = acp_mod._SupervisorV3()
+        sv3._pending_early_frames["sess_orphan-test-0001"] = [{"type": "chunk"}]
+        sv3._pending_early_frames_at["sess_orphan-test-0001"] = time.monotonic()
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        passes = []
+
+        async def record():
+            passes.append(1)
+
+        async def run():
+            with patch.object(acp_mod, "_sweep_once", record):
+                task = acp_mod.start_sweeper()
+                await asyncio.sleep(acp_mod.SWEEP_INTERVAL_SECONDS * 20)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+
+        _run_bounded(run)
+        assert passes != [], (
+            "a non-empty _pending_early_frames buffer must still trigger a "
+            "sweep pass even with zero live sessions in either engine")
+
     def test_a_pass_that_raises_does_not_kill_the_loop(self, acp_fast, caplog):
         acp_mod, _ = acp_fast
         _live_session(acp_mod)
@@ -16286,6 +16321,29 @@ class TestAcpDeleteEndpoint:
         assert "close" in body["failed"][0]["message"].lower()
         assert all(p.exists() for p in paths)
 
+    def test_a_v3_session_open_in_the_other_engine_is_refused(
+            self, client, acp_store_dir_v3, monkeypatch):
+        """Cross-engine held-set union (Step 9 final review fix, High): the
+        per-session-ID path used to snapshot only `acp._supervisor.sessions`,
+        so a `sess_`-prefixed (v3) id open right now in
+        `_supervisor_v3.sessions` was never recognized as held here and
+        could be deleted through v2's own delete endpoint despite being
+        actively open. Mirrors `test_a_held_session_is_refused_and_nothing_
+        is_removed` above, but for a v3 id crossing into v2's endpoint."""
+        from power_atlas import acp as acp_mod
+        sv3 = acp_mod._SupervisorV3()
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        sid = "sess_crossengine-0001"
+        paths = acp_store_dir_v3(sid)
+        sess_dir = paths[-1]
+        sv3.sessions[sid] = {"cwd": "C:\\dev\\ws"}
+
+        body = self._post(client, [sid]).json()
+
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "held"
+        assert sess_dir.is_dir()
+
     def test_a_locked_session_is_refused_and_names_the_holder(self, client,
                                                               acp_store_dir,
                                                               monkeypatch):
@@ -17237,6 +17295,31 @@ class TestApiAcpV3DeleteSessionsEndpoint:
         assert body["deleted"] == []
         assert body["failed"][0]["code"] == "held"
         assert sess_dir.is_dir()
+
+    def test_deleting_a_v2_session_open_in_the_other_engine_is_refused(
+            self, client, acp_store_dir, monkeypatch):
+        """Cross-engine held-set union (Step 9 final review fix, High): the
+        per-session-ID path used to snapshot only `_supervisor_v3.sessions`,
+        so a v2 id open right now in `acp._supervisor.sessions` was never
+        recognized as held here and could be deleted through v3's own
+        delete endpoint despite being actively open. Mirrors
+        `test_deleting_a_currently_open_v3_session_is_refused` above, but
+        for a v2 id crossing into v3's endpoint."""
+        from power_atlas import acp as acp_mod
+        self._sv3(monkeypatch)
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        sid = "sess-crossengine-v2-0001"
+        paths = acp_store_dir(sid)
+        acp_mod._supervisor.sessions[sid] = {"cwd": "C:\\dev\\ws"}
+        try:
+            res = client.post(self._PATH, json={"session_ids": [sid]})
+        finally:
+            acp_mod._supervisor.sessions.pop(sid, None)
+
+        body = res.json()
+        assert body["deleted"] == []
+        assert body["failed"][0]["code"] == "held"
+        assert all(p.exists() for p in paths)
 
     def test_deleting_an_externally_held_v3_session_is_refused(
             self, client, acp_store_dir_v3, monkeypatch):
@@ -21462,6 +21545,41 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
+    def test_handle_new_v3_session_frame_carries_buffered_context_percent(
+            self, monkeypatch, tmp_path):
+        """Step 9 final review fix (Medium): _handle_new_v3's `session`
+        envelope used to send only sessionId/cwd/created, unlike
+        _handle_subscribe_v3's equivalent envelope which also sends
+        turnActive/contextPercent. A context_usage notification landing in
+        the SC-1 early-buffer window (the same window the two tests above
+        already cover for history/commands/skills) caches its value into
+        meta["contextPercent"] before this handler's own session frame is
+        built, so the context bar stayed blank until the next live update.
+        """
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_newctx000-0000-0000-0000-000000000001"
+
+        async def fake_new_session(self, cwd):
+            self.sessions[sid] = {"cwd": cwd, "created": 0.0,
+                                   "contextPercent": 42.4}
+            self.history[sid] = acp_mod._History()
+            return {"sessionId": sid, "cwd": cwd}
+
+        monkeypatch.setattr(acp_mod._SupervisorV3, "new_session",
+                             fake_new_session)
+        conn = self._conn_v3(acp_mod)
+        try:
+            asyncio.run(acp_mod._handle_new_v3(conn, {"cwd": str(tmp_path)}))
+            frames = _queued(conn)
+            session_frame = next(f for f in frames if f["type"] == "session")
+            assert session_frame["payload"]["contextPercent"] == 42.4
+            assert session_frame["payload"]["turnActive"] is False
+        finally:
+            self._cleanup_registry(acp_mod)
+
     # -- _handle_subscribe_v3 --
 
     def test_handle_subscribe_v3_attaches_and_replays_history(self, monkeypatch):
@@ -21534,6 +21652,54 @@ class TestSupervisorV3:
             acp_mod._handle_subscribe_v3(conn, "sess_anything")
             frames = _queued(conn)
             assert frames[0]["payload"]["code"] == "internal_error"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    # -- _handle_load_v3 --
+
+    def test_handle_load_v3_delivers_session_and_history_on_success(
+            self, monkeypatch, tmp_path):
+        """Step 9 final review fix (High): _deliver_load unconditionally
+        called the v2-only _handle_subscribe at its end, so a successful
+        _handle_load_v3 cold-load (session_id never in _supervisor.sessions,
+        v2's dict) was told `unknown_session` instead of receiving its
+        session/history frames — breaking resume of any v3 session not
+        already live in this process. Must FAIL against the pre-fix
+        _deliver_load (which always called _handle_subscribe) and PASS once
+        _deliver_load's subscribe_fn is parameterized and _handle_load_v3
+        passes _handle_subscribe_v3."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_coldload0-0000-0000-0000-000000000001"
+        cwd = str(tmp_path)
+
+        async def fake_load_session(self, session_id, cwd):
+            # Mirrors what the real load_session() does: register
+            # sessions/history before returning, the same shape
+            # test_load_session_v3_adopts_and_replays already characterizes.
+            self.sessions[session_id] = {"cwd": cwd, "created": 0.0}
+            self.history[session_id] = acp_mod._History()
+            return {"sessionId": session_id, "cwd": cwd}
+
+        monkeypatch.setattr(acp_mod._SupervisorV3, "load_session",
+                             fake_load_session)
+        monkeypatch.setattr(acp_mod, "_stored_session_cwd_v3", lambda sid: cwd)
+
+        conn = self._conn_v3(acp_mod)
+        try:
+            asyncio.run(acp_mod._handle_load_v3(conn, sid))
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert types == ["meta", "session", "history"], (
+                f"expected a successful load/session/history delivery, "
+                f"got {frames!r}")
+            assert types.count("error") == 0
+            session_frame = frames[1]
+            assert session_frame["payload"]["sessionId"] == sid
+            assert session_frame["payload"]["cwd"] == cwd
+            assert conn.session_id == sid
         finally:
             self._cleanup_registry(acp_mod)
 

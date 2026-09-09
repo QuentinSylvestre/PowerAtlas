@@ -326,8 +326,14 @@ equivalent for — the question and its choices render as buttons directly in th
 turn stays paused until you click one. Answering (from any tab, or on reload) marks the request
 resolved everywhere it's shown; a request answered elsewhere never shows as still-pending.
 
-**The context-usage bar, steering acknowledgement, and session title all update from the same
-mechanism as v2**, translated from v3's own notification shape — nothing to configure differently.
+**The context-usage bar reuses the same mechanism as v2** (the same `contextPercent` frame shape);
+**steering acknowledgement and the session title are v3-only additions** with no v2 equivalent, fed
+by v3's own notification shape — all three show up as the same UI elements you already know either
+way, nothing to configure differently.
+
+**An MCP connection or authorization failure surfaces inline in the transcript**, as a plain-text
+error message attached to the turn — there's no separate "Connect" prompt or MCP status panel for
+`/acp-v3` today.
 
 **The crew panel updates live, mid-fan-out, not just once a turn ends** — the same panel `/acp`
 shows, populated as each sub-agent's own tool calls and streamed output arrive, not deferred to

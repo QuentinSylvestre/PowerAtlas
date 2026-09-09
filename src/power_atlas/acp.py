@@ -6500,13 +6500,22 @@ def _defer_until_loaded(conn: _Connection, session_id: str) -> None:
 
 
 def _deliver_load(conn: _Connection, waiters: list[_Connection],
-                  session_id: str, failure: tuple[str, str] | None) -> None:
+                  session_id: str, failure: tuple[str, str] | None, *,
+                  subscribe_fn=_handle_subscribe) -> None:
     """Answer the socket that asked for the load, and everyone who waited.
 
     Synchronous, and called with the session already out of
     ``_registry.loading``: attaching a socket and queueing its replay with
     nothing suspending in between is the property ``_handle_subscribe`` rests
     on, extended across every waiter.
+
+    ``subscribe_fn`` defaults to ``_handle_subscribe`` for v2's call site
+    (``_handle_load``); the v3 call site (``_handle_load_v3``) passes
+    ``_handle_subscribe_v3`` explicitly (Step 9 final review fix, High) —
+    without it, this helper always attached against v2's
+    ``_supervisor.sessions``, so a v3 session id (never in that dict) was
+    told ``unknown_session`` instead of receiving its `session`/`history`
+    frames, breaking every v3 session resume.
     """
     for target in [conn] + [w for w in waiters if w is not conn]:
         if target not in _registry.connections:
@@ -6525,7 +6534,7 @@ def _deliver_load(conn: _Connection, waiters: list[_Connection],
         # throttling it would discard the entire point of the load — a loaded
         # session that renders nothing.
         target.replayed_at = None
-        _handle_subscribe(target, session_id)
+        subscribe_fn(target, session_id)
 
 
 async def _handle_load(conn: _Connection, session_id: str | None) -> None:
@@ -7626,7 +7635,8 @@ async def _handle_load_v3(conn, session_id):
                        "Loading the session failed; see orchestrator.log.")
     finally:
         waiters = _registry.loading.pop(session_id, [])
-    _deliver_load(conn, waiters, session_id, failure)
+    _deliver_load(conn, waiters, session_id, failure,
+                  subscribe_fn=_handle_subscribe_v3)
 
 
 async def _handle_new_v3(conn, payload):
@@ -7662,10 +7672,25 @@ async def _handle_new_v3(conn, payload):
         log.info("ACP v3 session %s created after its socket went away", session_id)
         return
     _registry.attach(conn, session_id)
+    # Fetched once, before the `session` envelope, and reused below for the
+    # commands/skills resend: same SC-1 buffer-window gap, same meta lookup.
+    meta = _supervisor_v3.sessions.get(session_id)
     conn.send(envelope("session", {
         "sessionId": session_id,
         "cwd": info["cwd"],
         "created": True,
+        # Step 9 final review fix (Medium): _handle_subscribe_v3's `session`
+        # envelope already carries these; this one didn't, so a
+        # contextPercent/inflight state cached into `meta` by a
+        # context_usage notification landing in the SC-1 early-buffer
+        # window (same window the Phase 8 fixes below already cover for
+        # history/commands/skills) never reached the creator's own socket
+        # -- the context bar stayed blank until the next live update. A
+        # freshly created session is essentially never inflight and rarely
+        # has a contextPercent yet, so both are almost always None/False in
+        # practice; this closes the narrow race, not the normal case.
+        "turnActive": session_id in _supervisor_v3.inflight if meta else False,
+        "contextPercent": meta.get("contextPercent") if meta else None,
     }, session_id))
     # Phase 8 live-verification fix: SC-1's replay-buffer mechanism (see
     # new_session()'s "SC-1 replay isolation" block) commits any early
@@ -7689,7 +7714,6 @@ async def _handle_new_v3(conn, payload):
     # replayed and cached into meta["commands"]/["skills"] before attach()
     # runs above, so its own broadcast also reached zero subscribers.
     # Mirrors _handle_subscribe's existing v2 resend (this file, ~6300-6305).
-    meta = _supervisor_v3.sessions.get(session_id)
     if meta is not None:
         commands = meta.get("commands")
         if commands is not None:
@@ -8493,8 +8517,19 @@ async def _sweep_loop() -> None:
     """
     while True:
         await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+        # Step 9 final review fix (Medium): this guard used to skip
+        # _sweep_once() whenever both engines had zero live sessions,
+        # without ever checking _supervisor_v3._pending_early_frames — the
+        # SC-1 buffer that can hold an orphaned entry when a new_session()/
+        # load_session() reservation never completes. If the app goes fully
+        # idle while such an orphan exists, the sweep that is supposed to
+        # reclaim it (see _sweep_once's "SC-1 orphan-buffer sweep" block)
+        # stopped running along with it.
         if not _supervisor.sessions and (
-            _supervisor_v3 is None or not _supervisor_v3.sessions
+            _supervisor_v3 is None or (
+                not _supervisor_v3.sessions
+                and not _supervisor_v3._pending_early_frames
+            )
         ):
             continue
         try:

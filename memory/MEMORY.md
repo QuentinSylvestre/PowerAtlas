@@ -206,6 +206,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: For v3 session dot status in `presence.py`, read `session.json` status rather than attempting `session/load` refusal detection. Gate the v2 lock-hint path out for `sess_`-prefixed session IDs. Absent status (ACP-only probe sessions with no completed prompt) is treated as idle.
 **Source**: `260908-1636_ACP_V3_SPIKE § Phase 5 Results` — Phase 0 probe (`session/load` on a held session returned full result); Phase 5 `session.json` census (9 idle, 1 in_progress, 5 absent across 15 sessions) | **Verified**: 2026-08-19 (session, empirical — PID + session.json cross-check)
 **Stale-when**: kiro-cli v3 protocol changes
+**Update (Phase 1, 2026-09-09, `260908_ACP_V3_PRODUCTION_HARDENING`)**: Implemented as `_lock_holder_v3(session_id) -> int | None` in `acp.py`, reading `session.json`'s `status` field with zero ACP round-trip (`in_progress`/`waiting_on_user` → held; `idle`/`failed`/absent → not held) — wired into `web.py`'s `_acp_availability()` as a `sess_`-prefixed branch, the same "is this session held elsewhere" call site v2's `_lock_holder` already serves. A sentinel `_V3_HOLDER_PID_UNKNOWN = -1` stands in for a real PID (v3's `session.json` carries no `pid` field). Scoped narrower than this entry's original recommendation: `presence.py`'s live-dot computation (`classify_kiro_v3`, a separate `messages.jsonl`-tail mechanism) was deliberately left untouched, and the process-table crash-disambiguation residual this entry names remains unaddressed. (`presence.py`'s *provider-attribution* bug — `_match_provider` always labeling resumed v3 sessions `"kiro-cli"` — is a separate, now also-fixed gap: same Phase 1, SC-6.)
 
 ### v3 ACP close has no JSON-RPC method — `_SupervisorV3.close_session` does per-session local cleanup only
 
@@ -268,7 +269,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - Model may refuse a steer instruction it judges unhelpful — this is model behavior, not a protocol failure.
 **Source**: session 2026-08-12 — live probe, `acp_steer_probe3.py`, kiro-cli 2.16.x | **Verified**: 2026-08-12
 **Stale-when**: kiro-cli minor version changes past 2.16.x
-**Note (v3)**: Not probed on v3 — applicability unknown. Re-verify before relying on steer from a v3 session.
+**Update (v3, 2026-09-09, `260908_ACP_V3_PRODUCTION_HARDENING`)**: `_session/steer` works functionally on v3 (live-confirmed — the probed session actually followed the steered instruction). The echo is **not** `AgentExecutionSteeringInjected` (no v3 equivalent — `_kiro.dev/*` isn't part of v3's namespace); it is the three-state `session_info_update` sequence (`_meta.kiro.kind`: `steering_queued`/`steering_injected`/`steering_cleared`, carrying `messageId`/`content`), dispatched by that plan's SC-3 (`_SupervisorV3._on_notification`'s `session_info_update` branch).
 
 ### `subagent_sessions` must survive turn-end — it is the click-to-view routing key
 

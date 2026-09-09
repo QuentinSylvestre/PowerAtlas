@@ -3230,7 +3230,13 @@ async def api_acp_delete_sessions(request: Request):
     # snapshots it. `_reserved` is deliberately not counted here: it bounds
     # *creation*, and a session still being created holds no store files a
     # delete could reach.
-    held = frozenset(acp._supervisor.sessions)
+    #
+    # Cross-engine held-set union (Step 9 final review fix, High): the
+    # per-session-ID path never got the same union the workspace-cwd path
+    # above already has — see that comment for the full rationale.
+    sv3 = getattr(acp, "_supervisor_v3", None)
+    held = (frozenset(acp._supervisor.sessions)
+            | frozenset(sv3.sessions if sv3 is not None else ()))
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
@@ -3377,7 +3383,12 @@ async def api_acp_v3_delete_sessions(request: Request):
     # requested id, v2 or v3, is handled by one call. The `sess_`-prefix
     # rejection that used to sit here ("v3 session deletion not yet
     # implemented") is gone.
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    #
+    # Cross-engine held-set union (Step 9 final review fix, High): the
+    # per-session-ID path never got the same union the workspace-cwd path
+    # above already has — see that comment for the full rationale.
+    held = ((frozenset(sv3.sessions) if sv3 is not None else frozenset())
+            | frozenset(acp._supervisor.sessions))
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
