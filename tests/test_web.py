@@ -21427,6 +21427,41 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
+    def test_handle_new_v3_delivers_buffered_commands_and_skills_to_creator(
+            self, monkeypatch, tmp_path):
+        """Same gap as the history test above, for the slash-command/skill
+        catalogue: an available_commands_update landing in the SC-1 buffer
+        window is replayed and cached into meta["commands"]/["skills"]
+        before this handler's attach() runs, so its own broadcast also
+        reached zero subscribers. _handle_new_v3 must resend the cached
+        catalogue, mirroring _handle_subscribe's existing v2 behavior."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_newcmds00-0000-0000-0000-000000000001"
+        commands = [{"name": "compact", "description": "Compact the session"}]
+        skills = [{"name": "qexplore", "description": "Exploration skill"}]
+
+        async def fake_new_session(self, cwd):
+            self.sessions[sid] = {"cwd": cwd, "created": 0.0,
+                                   "commands": commands, "skills": skills}
+            self.history[sid] = acp_mod._History()
+            return {"sessionId": sid, "cwd": cwd}
+
+        monkeypatch.setattr(acp_mod._SupervisorV3, "new_session",
+                             fake_new_session)
+        conn = self._conn_v3(acp_mod)
+        try:
+            asyncio.run(acp_mod._handle_new_v3(conn, {"cwd": str(tmp_path)}))
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert types == ["meta", "session", "history", "commands", "skills"]
+            assert frames[3]["payload"]["commands"] == commands
+            assert frames[4]["payload"]["skills"] == skills
+        finally:
+            self._cleanup_registry(acp_mod)
+
     # -- _handle_subscribe_v3 --
 
     def test_handle_subscribe_v3_attaches_and_replays_history(self, monkeypatch):
@@ -21446,6 +21481,35 @@ class TestSupervisorV3:
             assert frames[0]["payload"]["cwd"] == "C:\\scratch"
             assert frames[1]["type"] == "history"
             assert conn.session_id == sid
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_subscribe_v3_resends_cached_commands_and_skills(
+            self, monkeypatch):
+        """Phase 8 live-verification fix: commands/skills are broadcast-only
+        (never recorded into history, like the `subagents` snapshot), so a
+        reconnect's only source for an already-known catalogue is a resend
+        of the cached meta — the client's own `session` frame handler resets
+        sessionCommands/sessionSkills to empty on every attach. Mirrors
+        _handle_subscribe's existing v2 resend."""
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_subcmds0-0000-0000-0000-000000000001"
+        commands = [{"name": "compact", "description": "Compact the session"}]
+        skills = [{"name": "qexplore", "description": "Exploration skill"}]
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0,
+                              "commands": commands, "skills": skills}
+        sv3.history[sid] = acp_mod._History()
+
+        conn = self._conn_v3(acp_mod)
+        try:
+            acp_mod._handle_subscribe_v3(conn, sid)
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert types == ["session", "history", "commands", "skills"]
+            assert frames[2]["payload"]["commands"] == commands
+            assert frames[3]["payload"]["skills"] == skills
         finally:
             self._cleanup_registry(acp_mod)
 

@@ -7532,6 +7532,19 @@ def _handle_subscribe_v3(conn, session_id):
             {"subagents": _subagents_payload(crew, fan_out_id),
              "toolCallId": fan_out_id},
             session_id))
+    # Phase 8 live-verification fix: mirror _handle_subscribe's existing v2
+    # resend (this file, ~6300-6305). commands/skills are broadcast-only,
+    # never recorded into history (same reasoning as the `subagents`
+    # snapshot above), so a reconnect's only source for the already-known
+    # catalogue is this cached re-send -- without it, the client's own
+    # `session` frame handler resets sessionCommands/sessionSkills to empty
+    # on every attach (acp.html) and nothing ever repopulates them.
+    commands = meta.get("commands")
+    if commands is not None:
+        conn.send(envelope("commands", {"commands": commands}, session_id))
+    skills = meta.get("skills")
+    if skills is not None:
+        conn.send(envelope("skills", {"skills": skills}, session_id))
 
 
 async def _handle_load_v3(conn, session_id):
@@ -7671,6 +7684,19 @@ async def _handle_new_v3(conn, payload):
             history.events(), session_id,
             _supervisor_v3._diff_backfill.get(session_id))
         conn.send(envelope("history", {"events": events}, session_id))
+    # Same gap, same fix shape, for the slash-command/skill catalogue: an
+    # available_commands_update landing in the SC-1 buffer window is
+    # replayed and cached into meta["commands"]/["skills"] before attach()
+    # runs above, so its own broadcast also reached zero subscribers.
+    # Mirrors _handle_subscribe's existing v2 resend (this file, ~6300-6305).
+    meta = _supervisor_v3.sessions.get(session_id)
+    if meta is not None:
+        commands = meta.get("commands")
+        if commands is not None:
+            conn.send(envelope("commands", {"commands": commands}, session_id))
+        skills = meta.get("skills")
+        if skills is not None:
+            conn.send(envelope("skills", {"skills": skills}, session_id))
 
 
 async def _handle_prompt_v3(conn, session_id, payload):
