@@ -308,6 +308,37 @@ Three things are worth knowing before leaving a long task running:
 Creating a session writes a permanent `.json`, `.jsonl` and `.lock` into your kiro-cli session store,
 as any kiro-cli session does. Resuming one without prompting leaves the transcript byte-identical.
 
+## Agent sessions, v3 protocol (`/acp-v3`)
+
+A separate route, not a toggle on `/acp` — the two pages drive kiro-cli over different protocol
+versions (`kiro-cli acp` vs. `kiro-cli acp --agent-engine v3`) through two independent supervisor
+processes, and neither affects the other's sessions. `/acp-v3` shares `/acp`'s template, so the rail,
+grouping, image paste, markdown rendering, and diff-on-reload behavior described above all work the
+same way. What differs is protocol-specific:
+
+**Every `/acp-v3` session runs kiro-cli's default agent mode.** There is no mode picker — a v3 session
+cannot be switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from this page. This is
+deliberate scope, not a missing feature: v2 has no mode picker either.
+
+**A v3 agent can ask a clarifying question mid-turn, and the page answers it inline.** When the
+agent needs you to choose between options before continuing — something v2's protocol has no
+equivalent for — the question and its choices render as buttons directly in the transcript, and the
+turn stays paused until you click one. Answering (from any tab, or on reload) marks the request
+resolved everywhere it's shown; a request answered elsewhere never shows as still-pending.
+
+**The context-usage bar, steering acknowledgement, and session title all update from the same
+mechanism as v2**, translated from v3's own notification shape — nothing to configure differently.
+
+**The crew panel updates live, mid-fan-out, not just once a turn ends** — the same panel `/acp`
+shows, populated as each sub-agent's own tool calls and streamed output arrive, not deferred to
+turn completion.
+
+**The slash-command palette lists v3's own catalogue.** Selecting a skill entry works the same way as
+typing its name; kiro-default (the palette's own "switch agent" entry, meaningless while `/acp-v3` is
+hardcoded to one agent) and three built-in steering documents (`architecture-selection`, `quick-spec`,
+`bug-fix`) are not offered — no working trigger exists for those three via anything the page could
+click, so they're left out rather than shown broken.
+
 ## Remote access (opt-in)
 
 Off by default: with `remote_bind_address` unset, PowerAtlas has exactly one listening socket and it is

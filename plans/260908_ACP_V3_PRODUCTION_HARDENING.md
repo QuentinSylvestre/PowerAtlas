@@ -1,7 +1,7 @@
 # ACP v3 Production Hardening
 
 > **Date**: 2026-09-08
-> **Status**: In Progress — Phases 0-7 complete (Phases 6-7's live-verification bullets deferred to Phase 8), Phase 8 pending
+> **Status**: In Progress — Phases 0-8 complete, pending Step 9 holistic final review
 > **Scope**: Bring `/acp-v3` (kiro-cli v3 ACP protocol support) from throwaway-spike quality to production quality, on par with the mature `/acp` (v2) surface — without merging the two engines.
 > **Estimated effort**: 2-3 days
 
@@ -575,14 +575,34 @@ Per explicit user instruction, no second review cycle was run after this fix —
 4. Clean up all test sessions/files created during this verification pass (per established discipline this session — delete on-disk session files and scratch test files after use).
 
 **Exit criteria**:
-- [ ] `README.md` documents `/acp-v3` per point 0.
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes (full suite).
-- [ ] `node tests/acp_page.test.mjs` passes with no new failures beyond the 5 pre-existing, unrelated failures already present at this plan's own starting commit (dashboard-link render, group-toggle collapse, unread-on-turn-end, 2× skill-dropdown keyboard-nav — confirmed via a clean worktree checkout of the pre-Phase-0 commit; see Phase 3's implementation notes for the full verification).
-- [ ] Every live-verification bullet above checked off, with results recorded in this plan's Implementation Divergences section if anything differs from expectation.
-- [ ] `/acp` v2 confirmed unaffected across every action tested.
-- [ ] All test artifacts (sessions, files) cleaned up; `git status` clean.
+- [x] `README.md` documents `/acp-v3` per point 0.
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes (full suite).
+- [x] `node tests/acp_page.test.mjs` passes with no new failures beyond the 5 pre-existing, unrelated failures already present at this plan's own starting commit (dashboard-link render, group-toggle collapse, unread-on-turn-end, 2× skill-dropdown keyboard-nav — confirmed via a clean worktree checkout of the pre-Phase-0 commit; see Phase 3's implementation notes for the full verification).
+- [x] Every live-verification bullet above checked off, with results recorded in this plan's Implementation Divergences section if anything differs from expectation.
+- [x] `/acp` v2 confirmed unaffected across every action tested.
+- [x] All test artifacts (sessions, files) cleaned up; `git status` clean.
 
 **Covers**: SC-12
+
+**Implementation (2026-09-09, code: f636f58, fe04e94)**
+
+Restarted PowerAtlas (`python -m power_atlas --restart`, standing permission — see plan Follow-up/user note) and live-verified every bullet against a running instance with Chrome. Two genuine gaps were found and fixed live, both exit-criteria holes in Phase 2 rather than new scope:
+
+1. **SC-1 delivery gap** (`acp.py`, `_handle_new_v3`): Phase 2's replay-buffer fix committed early frames (e.g. the `fetch_cloud_config` auto-call) into `self.history[session_id]` before `new_session()` returns, but `_handle_new_v3` only attached the creating connection *after* that return — so the in-`new_session()` broadcast of the replay had zero subscribers. The creator saw only a later title-less `tool_call_update`, reproducing the original bug's exact symptom on first paint (confirmed live: a fresh session showed "Called 1 tool: other" instead of "Fetching your cloud config" until the group was expanded, which is where the correct title actually was — a UI-summarization quirk, not the bug, but it masked the real gap underneath). Fixed by sending a `history` frame after attach, mirroring `_handle_subscribe_v3`'s existing replay-on-reconnect. Commit `f636f58`.
+2. **SC-7/SC-8 catalogue resend gap** (`acp.py`, `_handle_new_v3` and `_handle_subscribe_v3`): same root cause, for the slash-command/skill catalogue. `available_commands_update` landing in the SC-1 buffer window is cached into `meta["commands"]`/`meta["skills"]` before attach, so its broadcast also reached zero subscribers; and on any v3 reconnect, the client's `session` frame handler unconditionally resets `sessionCommands`/`sessionSkills` to empty with nothing to repopulate them (v2's `_handle_subscribe` already resends the cached catalogue for exactly this reason — v3 never picked up the mirror). An initial hypothesis that this was protocol drift (`_kiro/progressive_context/items_changed` replacing `available_commands_update` in the current kiro-cli config) was raised and then disproven by direct code reading: `available_commands_update`'s success path returns before the generic notification-fallback log, so its absence from the log is exactly what correct silent handling looks like, not evidence it never arrived. A discriminating live test (fresh session, `/` before any reload, then F5, `/` again) confirmed the palette populates in both cases post-fix, closing the question cleanly. Commit `fe04e94`.
+
+Both fixes came with new unit tests (`test_handle_new_v3_delivers_buffered_history_to_creator`, `test_handle_new_v3_delivers_buffered_commands_and_skills_to_creator`, `test_handle_subscribe_v3_resends_cached_commands_and_skills`) before any live restart, per the session's own testing discipline. Full suite: pytest 2013 passed / 2 skipped (was 2011/2 before this phase — 2 new tests); `node tests/acp_page.test.mjs` 431 passed / 5 failed (same 5 pre-existing, unrelated failures, byte-identical names).
+
+**Live-verification results, per bullet:**
+- SC-1 + SC-3 (fresh v3 session in `acp-cwd`): tool-call title correct on first paint after the fix (previously required expanding the collapsed group to see the correct title underneath, which is what "confirmed" it before the fix was found and applied); context bar populated immediately (7.5%, later 14.1%/14.2%).
+- Normal tool-call rendering + reload/replay (regression): sent a real prompt, tool call rendered correctly (title "search", completed); F5 reload replayed the full transcript byte-consistent with the live session.
+- SC-7/SC-8 (slash-command palette): after the fix, populated with real skill entries both pre-reload and post-reload; clicking a skill entry (`qtest`) correctly inserted `/qtest ` into the composer.
+- SC-5 (subagent fan-out): a prompt requesting two parallel sub-agents produced two concurrent "Sub-agent: semantic_reviewer" tool calls plus an aggregated "Subagent Response," rendered correctly with per-entry expandable output. The turn completed inside the ~10s screenshot cadence, so the live mid-turn crew-panel widget itself wasn't caught in a screenshot — the final rendering was confirmed correct instead, and Phase 4/6's unit coverage already exercises the mid-turn panel mechanics directly.
+- SC-9 (permission request): attempted with a deliberately ambiguous prompt asking for a structured two-option clarifying question. kiro_default answered in prose (a normal agent message listing the two options) rather than invoking the real `session/request_permission` RPC — the mechanism's live trigger is the model's own judgment call, not something a prompt can force. Falls back to Phase 6's already-extensive unit-test verification, exactly as the plan anticipated for this bullet.
+- v2 full regression pass (separate scratch session via `/acp`): create, prompt (tool call + response correct), reload (32 events replayed), slash-command palette (`/agent`, `/chat`, `/clear`, `/code`, `/compact` — v2's own catalogue, unaffected), close, delete (via API) — all correct. Confirmed the Phase 7 review's flagged Medium finding empirically: no `kiro-default`/`custom-agent` entry appears in v2's real catalogue (searched explicitly for "kiro" — only an unrelated skill matched), so Phase 7's shared exclusion fix was a genuine no-op for v2, not just an asserted one.
+- Cleanup: all 4 test sessions (3× v3, 1× v2) deleted via API (`fetch` from the page, not curl — direct `curl` was refused by the same-origin guard as expected); the v3 individual-delete path (`SC-2`'s original bug) exercised live as a side effect and worked correctly. The `acp-cwd` scratch folder's contents all predate this session (Aug 2026 timestamps) — nothing new was written to it this run, so nothing to remove.
+
+Change description: Phase 8 found and fixed two live delivery gaps left by Phase 2 (history and catalogue resend on v3 session creation), verified every other success criterion against a real running instance, confirmed v2 fully unaffected, and documented `/acp-v3` in README.md.
 
 ## 6) Risk Assessment
 
