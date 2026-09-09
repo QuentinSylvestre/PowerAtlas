@@ -21378,6 +21378,55 @@ class TestSupervisorV3:
         assert sid not in sv3.sessions
         assert sid not in sv3.history
 
+    # -- _handle_new_v3 --
+
+    def test_handle_new_v3_delivers_buffered_history_to_creator(
+            self, monkeypatch, tmp_path):
+        """Phase 8 live-verification fix: new_session()'s SC-1 replay-buffer
+        mechanism commits any early frame into self.history[sid] before this
+        handler's own _registry.attach() call, so that frame's live broadcast
+        (during the replay inside new_session()) reached zero subscribers —
+        the connection that asked for the session never saw it, only a later
+        update. _handle_new_v3 must independently deliver whatever landed in
+        history to the connection, the same way _handle_subscribe_v3 already
+        does on reconnect."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_newhist00-0000-0000-0000-000000000001"
+        buffered = acp_mod.envelope(
+            "tool_call",
+            {"toolCallId": "tc1", "title": "Fetching your cloud config",
+             "kind": "other", "status": "in_progress"},
+            sid)
+
+        async def fake_new_session(self, cwd):
+            # Mirrors what the real new_session() does before this handler
+            # ever runs: commit sessions/history, with the early frame
+            # already recorded into history by the SC-1 buffer-and-replay
+            # path.
+            self.sessions[sid] = {"cwd": cwd, "created": 0.0}
+            self.history[sid] = acp_mod._History()
+            self.history[sid].append(buffered)
+            return {"sessionId": sid, "cwd": cwd}
+
+        monkeypatch.setattr(acp_mod._SupervisorV3, "new_session",
+                             fake_new_session)
+        conn = self._conn_v3(acp_mod)
+        try:
+            asyncio.run(acp_mod._handle_new_v3(conn, {"cwd": str(tmp_path)}))
+            frames = _queued(conn)
+            assert frames[0]["type"] == "meta"
+            assert frames[1]["type"] == "session"
+            assert frames[1]["payload"]["created"] is True
+            assert frames[2]["type"] == "history"
+            events = frames[2]["payload"]["events"]
+            assert len(events) == 1
+            assert events[0]["payload"]["title"] == "Fetching your cloud config"
+        finally:
+            self._cleanup_registry(acp_mod)
+
     # -- _handle_subscribe_v3 --
 
     def test_handle_subscribe_v3_attaches_and_replays_history(self, monkeypatch):

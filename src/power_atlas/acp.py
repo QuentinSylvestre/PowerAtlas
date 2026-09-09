@@ -7654,6 +7654,23 @@ async def _handle_new_v3(conn, payload):
         "cwd": info["cwd"],
         "created": True,
     }, session_id))
+    # Phase 8 live-verification fix: SC-1's replay-buffer mechanism (see
+    # new_session()'s "SC-1 replay isolation" block) commits any early
+    # frames -- e.g. KAS's immediate post-create fetch_cloud_config tool
+    # call -- into self.history[session_id] before this handler's attach()
+    # runs above. Phase 2's exit criteria only asserted on history contents,
+    # never on delivery to the connection that created the session, so the
+    # creator never received those buffered frames on the live socket (its
+    # broadcast during replay had zero subscribers). It only saw a later
+    # tool_call_update, rendering as a title-less generic "tool call".
+    # A reload already worked correctly via _handle_subscribe_v3's own
+    # history replay below -- mirror that here so create matches subscribe.
+    history = _supervisor_v3.history.get(session_id)
+    if history is not None:
+        events = _with_backfilled_bodies(
+            history.events(), session_id,
+            _supervisor_v3._diff_backfill.get(session_id))
+        conn.send(envelope("history", {"events": events}, session_id))
 
 
 async def _handle_prompt_v3(conn, session_id, payload):
