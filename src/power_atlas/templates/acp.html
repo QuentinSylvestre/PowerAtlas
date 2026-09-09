@@ -1381,6 +1381,12 @@
     // released session — clearing it here means it never bleeds into
     // whatever session is opened next on this page.
     setSteerStatus('');
+    // The tab title belonged to the released session too (v3's `focus_update`
+    // -> `title` frame, SC-3) — left alone, it would sit on the tab until
+    // whatever session opens next happens to send its own `focus_update`,
+    // which a short session may never do (review finding, Security auditor,
+    // Low).
+    document.title = 'PowerAtlas';
     // Clear queue/steer state so neither fires against whatever session is
     // opened next on this page.
     queuedPrompt = null;
@@ -6771,6 +6777,12 @@
       // any live status for it will arrive fresh over its own `steer_status`
       // frames, not by carrying this one over.
       setSteerStatus('');
+      // Same reasoning for the tab title: a previous session's `focus_update`
+      // must not persist onto whichever session this page just adopted. A
+      // `history` replay right after this (if the adopted session has one)
+      // will re-set it to the correct latest title; a session with none
+      // keeps this default (review finding, Security auditor, Low).
+      document.title = 'PowerAtlas';
       // The one place this page ever learns the workspace: `cwd` arrives on
       // every `session` frame, created or resubscribed alike. Reset the
       // reveal on every frame, not only a fresh selection — a reconnect that

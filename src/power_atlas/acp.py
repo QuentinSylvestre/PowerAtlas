@@ -574,6 +574,12 @@ MAX_SUBAGENT_TASK_CHARS = 4000
 # mid-turn human note, not a document, so the same bound makes sense.
 MAX_STEER_CHARS = 4000
 
+# Cap on a v3 `focus_update` session title (SC-3, plan Phase 3, review fix —
+# Security auditor). A title is a short auto-derived label, not a document, so
+# unlike MAX_STEER_CHARS/MAX_SUBAGENT_TASK_CHARS this stays deliberately small
+# rather than reusing either of them.
+MAX_TITLE_CHARS = 200
+
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
 # targeting a sub-agent's own session id with. One string rather than one
 # per call site, so the three refusals cannot read differently for the same
@@ -4856,7 +4862,7 @@ class _SupervisorV3(_Supervisor):
             # `sessionUpdate` itself. Live-verified vocabulary (plan Current
             # State): context_usage, steering_queued/injected/cleared,
             # focus_update, display_error, user_message_id_assigned, turn_end,
-            # pendingInteraction.
+            # pending_interaction.
             _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
             _info_kind = _kiro_meta.get("kind") if isinstance(_kiro_meta, dict) else None
             if _info_kind == "context_usage":
@@ -4865,31 +4871,50 @@ class _SupervisorV3(_Supervisor):
                 return
             if _info_kind in ("steering_queued", "steering_injected", "steering_cleared"):
                 if isinstance(session_id, str):
-                    _emit_v3(session_id, envelope("steer_status", {
+                    # Broadcast-only, not `_emit_v3` (review fix, Security
+                    # auditor, Low): this is a transient level like
+                    # `_note_context_v3`'s own "meta" broadcast, not a durable
+                    # event — the client skips rendering `steer_status` during
+                    # history replay (`if (!replaying)` in acp.html), so
+                    # recording it would only ever occupy a replay-buffer slot
+                    # for zero value.
+                    #
+                    # `steering_cleared`'s real raw event is
+                    # `{kind:"steering_cleared", messageIds: [...]}` (plural
+                    # array), unlike the flat `messageId`/`content` the other
+                    # two kinds carry — so both fields below are always "" for
+                    # it by design (harmless: the client's steering_cleared
+                    # handler ignores both anyway). A future enhancement
+                    # wanting to show which message was cleared should read
+                    # the plural `messageIds` here instead.
+                    _registry.broadcast(session_id, envelope("steer_status", {
                         "status": _info_kind,
                         "messageId": _as_text(_kiro_meta.get("messageId")),
-                        "content": _as_text(_kiro_meta.get("content")),
+                        "content": _as_text(_kiro_meta.get("content"))[:MAX_STEER_CHARS],
                     }, session_id))
                 return
             if _info_kind == "focus_update":
-                _title = _as_text(_kiro_meta.get("title"))
+                _title = _as_text(_kiro_meta.get("title"))[:MAX_TITLE_CHARS]
                 if _title and isinstance(session_id, str):
                     _emit_v3(session_id, envelope("title", {"title": _title}, session_id))
                 return
             if _info_kind == "display_error":
                 if isinstance(session_id, str):
                     _emit_v3(session_id, envelope("agent_error", {
-                        "message": _as_text(_kiro_meta.get("message")),
-                        "errorType": _as_text(_kiro_meta.get("errorType")),
+                        "message": _as_text(_kiro_meta.get("message"))[:MAX_ERROR_DETAIL_CHARS],
+                        "errorType": _as_text(_kiro_meta.get("errorType"))[:MAX_ERROR_DETAIL_CHARS],
                     }, session_id))
                 return
-            if _info_kind in ("user_message_id_assigned", "turn_end", "pendingInteraction"):
+            if _info_kind in ("user_message_id_assigned", "turn_end", "pending_interaction"):
                 # Explicit no-ops (plan Phase 3): turn-end is already read off
                 # the session/prompt RPC result, not this notification;
-                # pendingInteraction previews the session/request_permission
+                # pending_interaction previews the session/request_permission
                 # request a later phase handles directly, so acting on both
                 # would be redundant; user_message_id_assigned carries
-                # nothing the page renders.
+                # nothing the page renders. (Wire value confirmed
+                # snake_case — `acp-server.js` source, review fix, Senior
+                # engineer — not the camelCase `pendingInteraction` this
+                # branch originally checked for.)
                 return
             # Any other _meta.kiro.kind: no branch recognizes it, so fall
             # through to the unrecognized-notification-kind fallback below

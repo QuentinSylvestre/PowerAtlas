@@ -21886,26 +21886,61 @@ class TestSupervisorV3:
 
     def test_session_info_update_steering_sequence_emits_three_frames_in_order(self, monkeypatch):
         """A steering_queued -> steering_injected -> steering_cleared sequence
-        produces three distinct emitted steer_status frames, in order, each
-        carrying {status, messageId, content}."""
+        produces three distinct broadcast steer_status frames, in order, each
+        carrying {status, messageId, content}.
+
+        Broadcast-only (review fix, Security auditor, Low): steer_status is a
+        transient level, not a durable event — matching `_note_context_v3`'s
+        own precedent from this same phase — so it must reach a live
+        subscriber directly via `_registry.broadcast` and must NOT be
+        recorded into the session's replay history (the client skips
+        rendering it during replay anyway, so recording it would only ever
+        occupy a buffer slot for zero value)."""
         from power_atlas import acp as acp_mod
         sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
 
-        for kind in ("steering_queued", "steering_injected", "steering_cleared"):
+        try:
+            for kind in ("steering_queued", "steering_injected", "steering_cleared"):
+                sv3._on_notification(self._session_info_msg(sid, {
+                    "kind": kind, "messageId": "m-1", "content": "look at foo.py",
+                }))
+
+            steer_events = _queued(conn)
+            assert len(steer_events) == 3
+            assert [e["type"] for e in steer_events] == ["steer_status"] * 3
+            assert [e["payload"]["status"] for e in steer_events] == [
+                "steering_queued", "steering_injected", "steering_cleared"]
+            for e in steer_events:
+                assert e["payload"]["messageId"] == "m-1"
+                assert e["payload"]["content"] == "look at foo.py"
+                assert e["sessionId"] == sid
+                assert e["type"] in acp_mod.SERVER_TYPES
+
+            # Broadcast-only: never recorded into the replay buffer.
+            assert sv3.history[sid].events() == []
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_session_info_update_steering_content_truncated_at_max_steer_chars(
+            self, monkeypatch):
+        """steer_status.content is agent-controlled text echoed back from the
+        agent — it must be bounded the same way every other agent-controlled
+        text field in this file is (review finding, Security auditor,
+        Medium), reusing MAX_STEER_CHARS since it echoes a steer message."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+
+        try:
+            oversized = "x" * (acp_mod.MAX_STEER_CHARS + 500)
             sv3._on_notification(self._session_info_msg(sid, {
-                "kind": kind, "messageId": "m-1", "content": "look at foo.py",
+                "kind": "steering_queued", "messageId": "m-1", "content": oversized,
             }))
-
-        events = sv3.history[sid].events()
-        steer_events = [e for e in events if e.get("type") == "steer_status"]
-        assert len(steer_events) == 3
-        assert [e["payload"]["status"] for e in steer_events] == [
-            "steering_queued", "steering_injected", "steering_cleared"]
-        for e in steer_events:
-            assert e["payload"]["messageId"] == "m-1"
-            assert e["payload"]["content"] == "look at foo.py"
-            assert e["sessionId"] == sid
-            assert e["type"] in acp_mod.SERVER_TYPES
+            events = _queued(conn)
+            assert len(events[0]["payload"]["content"]) == acp_mod.MAX_STEER_CHARS
+        finally:
+            self._cleanup_registry(acp_mod)
 
     def test_session_info_update_focus_update_emits_title_frame(self, monkeypatch):
         """focus_update emits a `title` frame carrying the new session title."""
@@ -21928,6 +21963,23 @@ class TestSupervisorV3:
 
         assert sv3.history[sid].events() == []
 
+    def test_session_info_update_focus_update_title_truncated_at_max_title_chars(
+            self, monkeypatch):
+        """A session title is agent-controlled text — it must be bounded like
+        every other agent-controlled text field in this file (review finding,
+        Security auditor, Medium)."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        oversized = "x" * (acp_mod.MAX_TITLE_CHARS + 500)
+        sv3._on_notification(self._session_info_msg(sid, {
+            "kind": "focus_update", "title": oversized,
+        }))
+
+        events = sv3.history[sid].events()
+        title_events = [e for e in events if e.get("type") == "title"]
+        assert len(title_events) == 1
+        assert len(title_events[0]["payload"]["title"]) == acp_mod.MAX_TITLE_CHARS
+
     def test_session_info_update_display_error_emits_message(self, monkeypatch):
         """A display_error frame with errorType "mcp_connection_error" emits
         an agent_error frame containing the message text."""
@@ -21945,14 +21997,53 @@ class TestSupervisorV3:
             "MCP server 'github' requires authorization.")
         assert error_events[0]["payload"]["errorType"] == "mcp_connection_error"
 
-    def test_session_info_update_explicit_noop_kinds_emit_nothing(self, monkeypatch):
-        """user_message_id_assigned, turn_end, and pendingInteraction are
-        explicit no-ops (plan Phase 3) — no frame is emitted for any of them."""
+    def test_session_info_update_display_error_truncated_at_max_error_detail_chars(
+            self, monkeypatch):
+        """display_error's message/errorType are agent-controlled text on
+        their way to a user-visible frame — bounded via the same
+        MAX_ERROR_DETAIL_CHARS constant this file already uses for exactly
+        this class of content elsewhere (review finding, Security auditor,
+        Medium)."""
+        from power_atlas import acp as acp_mod
         sv3, sid = self._sv3_with_session(monkeypatch)
-        for kind in ("user_message_id_assigned", "turn_end", "pendingInteraction"):
+        oversized_msg = "m" * (acp_mod.MAX_ERROR_DETAIL_CHARS + 500)
+        oversized_type = "t" * (acp_mod.MAX_ERROR_DETAIL_CHARS + 500)
+        sv3._on_notification(self._session_info_msg(sid, {
+            "kind": "display_error", "message": oversized_msg, "errorType": oversized_type,
+        }))
+
+        events = sv3.history[sid].events()
+        error_events = [e for e in events if e.get("type") == "agent_error"]
+        assert len(error_events) == 1
+        assert len(error_events[0]["payload"]["message"]) == acp_mod.MAX_ERROR_DETAIL_CHARS
+        assert len(error_events[0]["payload"]["errorType"]) == acp_mod.MAX_ERROR_DETAIL_CHARS
+
+    def test_session_info_update_explicit_noop_kinds_emit_nothing(self, monkeypatch, caplog):
+        """user_message_id_assigned, turn_end, and pending_interaction are
+        explicit no-ops (plan Phase 3) — no frame is emitted for any of them,
+        and none of them fall through to the unrecognized-kind INFO fallback.
+
+        The fallback check is the only way to prove pending_interaction is
+        actually routed through this explicit no-op branch rather than
+        falling through to the generic unrecognized-kind path (both produce
+        zero emitted frames, so the history-is-empty assertion alone cannot
+        tell the two apart) — review finding, Senior engineer, Medium: the
+        real wire value is snake_case `pending_interaction`
+        (`acp-server.js` source, confirmed at 3 call sites), not the
+        camelCase `pendingInteraction` this branch originally checked for,
+        so every real event was silently falling through to the fallback."""
+        import logging
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        caplog.set_level(logging.INFO, logger="power_atlas.acp")
+
+        for kind in ("user_message_id_assigned", "turn_end", "pending_interaction"):
             sv3._on_notification(self._session_info_msg(sid, {"kind": kind}))
 
         assert sv3.history[sid].events() == []
+        info_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert not any("pending_interaction" in m for m in info_messages), (
+            "pending_interaction must be handled by the explicit no-op branch, "
+            f"not fall through to the unrecognized-kind INFO fallback: {info_messages}")
 
     def test_session_info_update_unrecognized_kind_falls_through_to_info_fallback(
             self, monkeypatch, caplog):
@@ -21971,7 +22062,15 @@ class TestSupervisorV3:
 
     def test_context_percent_v3_helper_validates_like_v2(self):
         """_context_percent_v3 mirrors _context_percent's own validation:
-        bool excluded, out-of-range excluded, rounds to 1 decimal."""
+        bool excluded, out-of-range excluded, rounds to 1 decimal.
+
+        Also pins NaN and string-typed rejection (review finding, Security
+        auditor, Low): both are correctly rejected today (NaN because
+        `0 <= value <= 100` evaluates False for NaN regardless of direction;
+        a string because it fails the `isinstance(value, (int, float))`
+        check before the range comparison ever runs), but neither had a test
+        case — this guards that a future refactor cannot accidentally weaken
+        the check without a test noticing."""
         from power_atlas import acp as acp_mod
 
         assert acp_mod._context_percent_v3(
@@ -21984,6 +22083,10 @@ class TestSupervisorV3:
             {"contextUsage": {"usagePercentage": 101}}) is None
         assert acp_mod._context_percent_v3({"contextUsage": {}}) is None
         assert acp_mod._context_percent_v3({}) is None
+        assert acp_mod._context_percent_v3(
+            {"contextUsage": {"usagePercentage": float("nan")}}) is None
+        assert acp_mod._context_percent_v3(
+            {"contextUsage": {"usagePercentage": "42"}}) is None
 
     def test_note_context_v3_noop_when_supervisor_v3_none(self, monkeypatch):
         """_note_context_v3 must never raise when _supervisor_v3 is None —

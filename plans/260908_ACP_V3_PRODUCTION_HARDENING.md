@@ -74,7 +74,7 @@ Desired outcome: `/acp-v3` reaches the point where it can be recommended as a ge
 
 **`session_info_update` has no dispatch branch at all**, confirmed by direct grep (`session_info_update`/`contextUsage`/`steering_queued`: zero matches in `acp.py`) and by reading `_on_notification`'s full branch list (`3633-4045`/`4466-4653`) — `kind = update.get("sessionUpdate")` (`3637`) extracts it correctly, but no `if kind == "session_info_update"` branch exists. `METADATA_METHOD` (branch 2) only matches the separate, v2-only top-level method `_kiro.dev/metadata`. Every `session_info_update` frame falls through to the DEBUG-only fallback (`4036-4044`/`4651-4653`) today.
 
-**Live-verified `session_info_update` `_meta.kiro.kind` vocabulary** (this session's probes): `context_usage` (`contextUsage.usagePercentage` + a token breakdown), `steering_queued`/`steering_injected`/`steering_cleared` (`messageId`, `content`), `focus_update` (session title, auto-derived from the first prompt), `user_message_id_assigned`, `turn_end` (redundant — turn-end is already read off the `session/prompt` RPC result, not any notification, so this can be ignored), `display_error` (`message`/`errorType`, e.g. `"mcp_connection_error"`), `pendingInteraction` (precedes a `session/request_permission` request with the same question/options as a preview — can be ignored, since the actual request carries the same data and is what needs answering).
+**Live-verified `session_info_update` `_meta.kiro.kind` vocabulary** (this session's probes): `context_usage` (`contextUsage.usagePercentage` + a token breakdown), `steering_queued`/`steering_injected`/`steering_cleared` (`messageId`, `content`), `focus_update` (session title, auto-derived from the first prompt), `user_message_id_assigned`, `turn_end` (redundant — turn-end is already read off the `session/prompt` RPC result, not any notification, so this can be ignored), `display_error` (`message`/`errorType`, e.g. `"mcp_connection_error"`), `pending_interaction` (precedes a `session/request_permission` request with the same question/options as a preview — can be ignored, since the actual request carries the same data and is what needs answering).
 
 **`_flush_bubble`, `_emit_subagents_frame`, `_handle_subagent_subscribe` are hardcoded to `_supervisor`** even when invoked from `_SupervisorV3`'s own paths: `_flush_bubble` calls `_emit(...)` unconditionally at `acp.py:5108`, never `_emit_v3`; `_emit_subagents_frame` reads `_supervisor.crews`/`_supervisor.crew_spawn_toolcallids` at `5037`/`5042`; `_handle_subagent_subscribe` reads `_supervisor.crews`/`_supervisor.subagent_history` at `5567`/`5579`. A correctly-scoped `_emit_subagents_frame_v3` already exists (`7269-7280`) but is only called at turn-end (`_handle_prompt_v3`'s `finally`, `6939`; `_evict_crew_children_v3`, `7305`), not on each live update.
 
@@ -376,11 +376,11 @@ Two review personas (Senior engineer, Reliability engineer) confirmed the replay
 4. **Register every new frame type** (`steer_status`, and `title`/`agent_error` if not reusing an existing v2 type) in both `CLIENT_TYPES`/`SERVER_TYPES` (`acp.py:162-176`) — `envelope()` refuses any type not in `SERVER_TYPES` (`acp.py:966`), so a new frame type left unregistered is silently rejected before reaching any of the rendering logic above (review finding, Security auditor + Senior engineer, Medium).
 
 **Exit criteria**:
-- [ ] New test: a `session_info_update` frame with `kind: "context_usage"` updates `_supervisor_v3.sessions[sid]["contextPercent"]` (or equivalent field) correctly.
-- [ ] New test: a `steering_queued`→`steering_injected`→`steering_cleared` sequence produces three distinct emitted frames in order.
-- [ ] New test: a `display_error` frame with `errorType: "mcp_connection_error"` emits a frame containing the message text.
-- [ ] `node tests/acp_page.test.mjs` passes with new checks for the client-side frame handlers (steer_status, title/context update, agent_error rendering).
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes.
+- [x] New test: a `session_info_update` frame with `kind: "context_usage"` updates `_supervisor_v3.sessions[sid]["contextPercent"]` (or equivalent field) correctly.
+- [x] New test: a `steering_queued`→`steering_injected`→`steering_cleared` sequence produces three distinct emitted frames in order.
+- [x] New test: a `display_error` frame with `errorType: "mcp_connection_error"` emits a frame containing the message text.
+- [x] `node tests/acp_page.test.mjs` passes with new checks for the client-side frame handlers (steer_status, title/context update, agent_error rendering).
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes.
 
 **Covers**: SC-3
 

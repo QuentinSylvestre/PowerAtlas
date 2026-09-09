@@ -10263,6 +10263,41 @@ check("title frame renders during history replay (converges on the latest)", (tp
     `document.title should reflect the last replayed title, got: ${page.sandbox.document.title}`);
 });
 
+check("document.title resets to the page default on releaseSession (session_closed)", (tpl) => {
+  // Review finding, Security auditor, Low: releaseSession() already resets
+  // other per-session transient UI state (setSteerStatus('')) but used to
+  // leave document.title untouched, so session A's focus_update-derived
+  // title would persist on the tab after A closed.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "title", sessionId: live, payload: { title: "Session A's title" } });
+  assert(String(page.sandbox.document.title).includes("Session A's title"),
+    "sanity check — the title frame should have set the tab title first");
+  page.deliver({
+    type: "session_closed", sessionId: live,
+    payload: { message: "closed" },
+  });
+  assertEqual(page.sandbox.document.title, "PowerAtlas",
+    "document.title should reset to the page default once the session is released");
+});
+
+check("document.title resets when switching to a different session", (tpl) => {
+  // Review finding, Security auditor, Low: without a reset in the `session`
+  // frame handler, a short session B that never sends its own focus_update
+  // would keep showing session A's title on the tab indefinitely.
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "title", sessionId: live, payload: { title: "Session A's title" } });
+  assert(String(page.sandbox.document.title).includes("Session A's title"),
+    "sanity check — the title frame should have set the tab title first");
+  page.deliver({
+    type: "session", sessionId: "sess-live-0002",
+    payload: { sessionId: "sess-live-0002", cwd: "C:\\work\\repo2", created: true,
+               turnActive: false, contextPercent: null },
+  });
+  assertEqual(page.sandbox.document.title, "PowerAtlas",
+    "document.title should reset to the page default when a new `session` frame " +
+    "adopts a different session, not carry over the previous session's title");
+});
+
 check("agent_error frame renders inline in the transcript like a failed tool call", (tpl) => {
   const { page, live } = connected(tpl);
   page.deliver({ type: "agent_error", sessionId: live,
