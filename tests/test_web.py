@@ -22528,3 +22528,274 @@ class TestSupervisorV3:
                 for e in events), events
         finally:
             self._cleanup_registry(acp_mod)
+
+    # ------------------------------------------------------------------
+    # Phase 4 review pass (2026-09-09): findings from the Senior engineer
+    # and Reliability engineer personas against the committed Phase 4 code.
+    # ------------------------------------------------------------------
+
+    def test_agent_subtask_same_turn_second_fan_out_excludes_first(
+            self, monkeypatch):
+        """Finding #1 (High): the ported v2 fan_out_id filter was
+        functionally inert for v3 -- crew_spawn_toolcallids is only ever
+        written by _on_subagent_list, a notification kind v3 never emits --
+        so every v3 entry from every fan-out in a turn carried the same
+        sentinel and the filter never excluded anything. Confirmed
+        empirically: two sequential fan-outs in the same turn (A opens and
+        completes, then B opens later) both showed up together. After
+        synthesizing a per-wave id directly in _on_agent_subtask_open, a
+        later fan-out's live snapshot must show only its own entry."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_twowaves0000-0000-0000-0000-000000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            subtask_a = "subtask-wave-a"
+            subtask_b = "subtask-wave-b"
+            # Wave 1: A opens and completes.
+            sv3._on_notification(self._agent_subtask_open_msg(
+                sid, subtask_a, tool_call_id="tc-a"))
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, subtask_a, "completed", tool_call_id="tc-a",
+                raw_output="A's answer"))
+            _queued(conn)  # drain wave 1's broadcasts
+
+            # Wave 2: B opens later in the same turn. A is still present in
+            # crews (done, kept until turn-end) but must not appear
+            # alongside B in the live snapshot.
+            sv3._on_notification(self._agent_subtask_open_msg(
+                sid, subtask_b, tool_call_id="tc-b"))
+
+            assert subtask_a in sv3.crews[sid], "A must still be in crews"
+            frames = _queued(conn)
+            subagents_frames = [f for f in frames if f["type"] == "subagents"]
+            assert subagents_frames, "B's open must broadcast live"
+            ids = [e["sessionId"]
+                   for e in subagents_frames[-1]["payload"]["subagents"]]
+            assert ids == [subtask_b], (
+                f"only the current wave's entry must show; got {ids}")
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_update_ignores_mismatched_tool_call_id(
+            self, monkeypatch):
+        """Finding #2 (Medium/High-if-confirmed): _on_agent_subtask_update
+        fired on any tool_call_update carrying a matching agentSubtaskId,
+        with no correlation against the spawn's own toolCallId. A
+        tool_call_update sharing this agentSubtaskId but carrying a
+        DIFFERENT toolCallId than the spawn's own (e.g. an internal tool
+        call the subagent itself runs, if some kiro-cli build tags those
+        the same way -- unconfirmed by live probe, defended against
+        regardless) must not be taken as the crew entry's terminal update.
+        A genuine update from the spawner's own toolCallId still works."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_tccorrelate0000-0000-0000-0000001"
+        agent_subtask_id = "subtask-correlate-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(self._agent_subtask_open_msg(
+                sid, agent_subtask_id, tool_call_id="tc-spawn-1"))
+
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed",
+                tool_call_id="tc-internal-1", raw_output="wrong answer"))
+            entry = sv3.crews[sid][agent_subtask_id]
+            assert entry["done"] is False, (
+                "a mismatched toolCallId must not mark the entry done")
+            assert entry["status"] == "pending"
+
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed",
+                tool_call_id="tc-spawn-1", raw_output="real answer"))
+            entry = sv3.crews[sid][agent_subtask_id]
+            assert entry["done"] is True, (
+                "the spawner's own matching toolCallId must still mark it done")
+            assert entry["status"] == "completed"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_subscribe_v3_sends_live_crew_snapshot_on_reconnect(
+            self, monkeypatch):
+        """Finding #3 (Medium): _handle_subscribe_v3 never sent a
+        `subagents` snapshot on subscribe/reconnect the way v2's
+        _handle_subscribe does -- a browser reload or WS reconnect during
+        an active v3 fan-out lost the dedicated crew-panel widget until the
+        next live update. Ported v2's equivalent gate."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_reconnectcrew0-0000-0000-0000001"
+        agent_subtask_id = "subtask-reconnect-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+
+            conn = self._conn_v3(acp_mod)
+            acp_mod._handle_subscribe_v3(conn, sid)
+            frames = _queued(conn)
+            subagents_frames = [f for f in frames if f["type"] == "subagents"]
+            assert subagents_frames, (
+                "subscribe during an active fan-out must send a crew snapshot")
+            ids = [e["sessionId"]
+                   for e in subagents_frames[0]["payload"]["subagents"]]
+            assert agent_subtask_id in ids
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_eviction_caps_crew_growth(self, monkeypatch):
+        """Finding #4 (Medium): _on_agent_subtask_open/_update never called
+        _evict_finished_subagents (v2's _on_subagent_list/_note_subagent_action
+        do, on every crew-changing notification), so a session fanning out
+        many subtasks within one turn grew crews/subagent_sessions/
+        subagent_history unbounded for that turn's duration. Mirrors the
+        existing v2 cap tests (TestAcpSubagentEviction)."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_evictv30000-0000-0000-0000-00000001"
+        agent_subtask_id_1 = "subtask-evict-1"
+        agent_subtask_id_2 = "subtask-evict-2"
+        agent_subtask_id_3 = "subtask-evict-3"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            with patch.object(acp_mod, "MAX_SUBAGENTS_PER_SESSION", 2):
+                sv3._on_notification(self._agent_subtask_open_msg(
+                    sid, agent_subtask_id_1, tool_call_id="tc-1"))
+                sv3._on_notification(self._agent_subtask_update_msg(
+                    sid, agent_subtask_id_1, "completed",
+                    tool_call_id="tc-1", raw_output="one"))
+
+                sv3._on_notification(self._agent_subtask_open_msg(
+                    sid, agent_subtask_id_2, tool_call_id="tc-2"))
+                sv3._on_notification(self._agent_subtask_update_msg(
+                    sid, agent_subtask_id_2, "completed",
+                    tool_call_id="tc-2", raw_output="two"))
+
+                sv3._on_notification(self._agent_subtask_open_msg(
+                    sid, agent_subtask_id_3, tool_call_id="tc-3"))
+
+            crew = sv3.crews[sid]
+            assert set(crew) == {agent_subtask_id_2, agent_subtask_id_3}, (
+                f"the oldest finished entry must be evicted over the cap; "
+                f"got {set(crew)}")
+            assert agent_subtask_id_1 not in sv3.subagent_sessions
+            assert agent_subtask_id_1 not in sv3.subagent_history
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_completion_prefers_raw_output_over_streamed_bubble(
+            self, monkeypatch):
+        """Finding #5b (Low): rawOutput is ground truth and always
+        complete; a completion must prefer it over whatever streamed into
+        the sub-agent's own bubble via agent_message_chunk, since a dropped
+        leading chunk (finding #5a) would otherwise make the streamed
+        bubble a silently truncated stand-in for "the final answer." Before
+        this fix, any prior streaming at all -- even a partial,
+        since-truncated stream -- made the code prefer the possibly-
+        truncated _bubbles content over rawOutput."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_preferraw0000-0000-0000-0000-0001"
+        agent_subtask_id = "subtask-preferraw-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+
+            # Some (possibly truncated) content already streamed in via
+            # agent_message_chunk before the completion arrives.
+            chunk_msg = {
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "trunc"},
+                        "_meta": {"kiro": {"agentSubtaskId": agent_subtask_id}},
+                    },
+                },
+            }
+            sv3._on_notification(chunk_msg)
+            assert acp_mod._bubbles.get(agent_subtask_id) == ["trunc"]
+
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "completed",
+                raw_output="The complete final answer."))
+
+            events = sv3.subagent_history[agent_subtask_id].events()
+            assert events[-1]["type"] == "chunk", events
+            assert events[-1]["payload"]["text"] == "The complete final answer.", (
+                "completion must prefer rawOutput over the streamed bubble")
+            assert not any(e["type"] == "rendered" for e in events), (
+                "the streamed (possibly-truncated) bubble must not be "
+                "flushed when rawOutput is available")
+        finally:
+            acp_mod._bubbles.pop(agent_subtask_id, None)
+            self._cleanup_registry(acp_mod)
+
+    def test_agent_subtask_message_chunk_unregistered_id_logs_debug(
+            self, monkeypatch, caplog):
+        """Finding #5a (Low): an agent_message_chunk for an unregistered
+        agentSubtaskId used to drop silently, with no logging at all.
+        Matches this codebase's SC-10 philosophy of not letting unusual
+        conditions be invisible."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_unregisteredchunk-0000-0000-0001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        chunk_msg = {
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "orphaned"},
+                    "_meta": {"kiro": {"agentSubtaskId": "never-opened"}},
+                },
+            },
+        }
+        with caplog.at_level(logging.DEBUG, logger="power_atlas.acp"):
+            sv3._on_notification(chunk_msg)
+        assert any("never-opened" in r.message for r in caplog.records), (
+            "a dropped chunk for an unregistered agentSubtaskId must be logged")
+
+    def test_agent_subtask_failed_status_populates_error(self, monkeypatch):
+        """Finding #6 (Low): _on_agent_subtask_update never populated
+        entry["error"] on a "failed" terminal status (v2's equivalent
+        extracts status.message into error). v3's tool_call_update carries
+        no such nested status.message field -- status is a plain string --
+        so rawOutput (the only message-shaped field this wire shape offers
+        for a terminal update) is used instead."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_subtaskfailed0-0000-0000-0000001"
+        agent_subtask_id = "subtask-failed-1"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        sv3.inflight.add(sid)
+        try:
+            sv3._on_notification(
+                self._agent_subtask_open_msg(sid, agent_subtask_id))
+            sv3._on_notification(self._agent_subtask_update_msg(
+                sid, agent_subtask_id, "failed",
+                raw_output="permission denied reading the file"))
+
+            entry = sv3.crews[sid][agent_subtask_id]
+            assert entry["done"] is True
+            assert entry["status"] == "failed"
+            assert entry["error"] == "permission denied reading the file", (
+                f"got {entry['error']!r}")
+        finally:
+            self._cleanup_registry(acp_mod)

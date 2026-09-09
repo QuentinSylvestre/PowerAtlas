@@ -4694,6 +4694,17 @@ class _SupervisorV3(_Supervisor):
         # plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
         self._pending_early_frames: dict[str, list[dict]] = {}
         self._pending_early_frames_at: dict[str, float] = {}
+        # Review fix (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4 review
+        # pass, finding #1): parent_id -> the currently-active fan-out's own
+        # id. v2's crew_spawn_toolcallids (inherited, unused here) anchors a
+        # fan-out on the spawner tool call's own toolCallId -- a mechanism
+        # that assumes a batch-level wrapping event v3's wire shape does not
+        # have (each subagent is its own independent tool_call). Since there
+        # is no batch anchor to reuse, _on_agent_subtask_open synthesizes one:
+        # the first subtask of a new wave mints its own agentSubtaskId as the
+        # wave id (already unique), and every sibling opened while that wave
+        # is still active reuses it. See _on_agent_subtask_open.
+        self._active_fan_out_wave: dict[str, str] = {}
 
     # _on_notification override: routes all _emit() calls to _emit_v3() so that
     # v3 frames are recorded in _supervisor_v3.history rather than _supervisor.history.
@@ -4778,6 +4789,18 @@ class _SupervisorV3(_Supervisor):
                     _emit_v3(_agent_subtask_id, envelope(
                         "chunk", {"role": "agent", "text": text}, _agent_subtask_id))
                     _bubble_append(_agent_subtask_id, text)
+                elif text:
+                    # Review fix (Phase 4 review pass, finding #5a): this used
+                    # to drop silently. self.subagent_history is only missing
+                    # this id when _on_agent_subtask_open never registered it
+                    # (racing tool_call, or an id this app never opened) --
+                    # worth a trace, matching SC-10's "unusual conditions must
+                    # be diagnosable" philosophy, but not INFO: an agent that
+                    # streams a little text before its own tool_call arrives
+                    # is plausible normal jitter, not a fault.
+                    log.debug("ACP v3 agent_message_chunk: unregistered "
+                              "agentSubtaskId=%r on session=%s -- dropped",
+                              _agent_subtask_id, session_id)
                 return
             if text and isinstance(session_id, str):
                 if role == "user":
@@ -4827,7 +4850,8 @@ class _SupervisorV3(_Supervisor):
                                   _spawner_tool_name, session_id)
                     if _kiro_meta.get("kind") == "agent-subtask" and _agent_subtask_id:
                         self._on_agent_subtask_open(
-                            session_id, _agent_subtask_id, update.get("rawInput") or {})
+                            session_id, _agent_subtask_id, update.get("rawInput") or {},
+                            payload["toolCallId"])
                 elif not (payload["title"] or payload["kind"] or
                           payload["status"] or payload["command"]
                           or "output" in payload):
@@ -4842,7 +4866,7 @@ class _SupervisorV3(_Supervisor):
                 if kind == "tool_call_update" and _agent_subtask_id:
                     self._on_agent_subtask_update(
                         session_id, _agent_subtask_id, payload.get("status") or "",
-                        update.get("rawOutput"))
+                        update.get("rawOutput"), payload.get("toolCallId") or "")
                 tc_id = payload.get("toolCallId")
                 if tc_id:
                     if kind == "tool_call":
@@ -5008,7 +5032,7 @@ class _SupervisorV3(_Supervisor):
                       method, kind or "-", json.dumps(params))
 
     def _on_agent_subtask_open(self, parent_id: str, agent_subtask_id: str,
-                                raw_input: dict) -> None:
+                                raw_input: dict, tool_call_id: str = "") -> None:
         """Register a new crew entry for a v3 subagent-spawning tool_call.
 
         SC-5 (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4): v3 has no
@@ -5018,6 +5042,23 @@ class _SupervisorV3(_Supervisor):
         ``subagent_history`` are registered the same way ``_on_subagent_list``
         registers a v2 child (see that method), so a click on the crew card
         routes to ``_handle_subagent_subscribe`` instead of ``unknown_session``.
+
+        Review fix (Phase 4 review pass, finding #1): v2's ``fan_out_id``
+        filtering (``_subagents_payload``) keys off ``crew_spawn_toolcallids``,
+        which is only ever written by ``_on_subagent_list`` — a notification
+        kind v3 never emits (no ``_kiro.dev/*`` namespace). Every v3 entry
+        was therefore tagged with the same ``_NO_ANCHOR_TOOLCALLID`` sentinel
+        regardless of which fan-out spawned it, making the filter inert:
+        two sequential fan-outs in the same turn both showed up together.
+        v3's wire shape has no batch-level spawner event to anchor a
+        fan-out id on (unlike v2, where one spawning tool call wraps a whole
+        batch), so one is synthesized here instead: while any sibling entry
+        for this parent is still not done, a new subtask joins that same
+        active wave; once every prior sibling has finished (or this is the
+        first subtask ever), a new wave starts and this subtask's own
+        ``agentSubtaskId`` — already unique — becomes the new wave id.
+        ``self._active_fan_out_wave`` tracks the currently-active wave per
+        parent so later opens/updates in the same wave agree on its id.
         """
         if not isinstance(raw_input, dict):
             raw_input = {}
@@ -5026,6 +5067,16 @@ class _SupervisorV3(_Supervisor):
             # A duplicate opening tool_call for the same id must not reset
             # progress a tool_call_update may have already recorded.
             return
+        if any(not e["done"] for e in crew.values()):
+            # An earlier subtask of this same parent is still in flight —
+            # join its wave rather than minting a new one.
+            fan_out_id = self._active_fan_out_wave.get(parent_id, agent_subtask_id)
+        else:
+            # No active sibling: either the very first subtask for this
+            # parent, or every earlier one has already finished — start a
+            # fresh wave keyed by this subtask's own id.
+            fan_out_id = agent_subtask_id
+        self._active_fan_out_wave[parent_id] = fan_out_id
         role = _as_text(raw_input.get("name"))
         task = (_as_text(raw_input.get("explanation"))
                 or _as_text(raw_input.get("prompt")))[:MAX_SUBAGENT_TASK_CHARS]
@@ -5040,31 +5091,70 @@ class _SupervisorV3(_Supervisor):
             "order": len(crew),
             "startedAt": time.time(),
             "stoppedAt": None,
-            "fan_out_id": self.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID),
+            "fan_out_id": fan_out_id,
+            # Review fix (finding #2): the spawner's own toolCallId, kept so
+            # _on_agent_subtask_update can refuse a tool_call_update that
+            # shares this agentSubtaskId but comes from a different tool
+            # call (e.g. an internal tool the subagent itself runs, if a
+            # future kiro-cli build tags those the same way — unconfirmed,
+            # defended against regardless).
+            "spawnToolCallId": tool_call_id,
         }
         if agent_subtask_id not in self.subagent_sessions:
             self.subagent_sessions[agent_subtask_id] = {"parent": parent_id}
             self.subagent_history[agent_subtask_id] = _History()
-        _emit_subagents_frame(parent_id, self.crews, self.crew_spawn_toolcallids)
+        # Review fix (finding #4): v2's _on_subagent_list evicts on every
+        # crew-changing notification; this v3 path never did, so a session
+        # that fans out many subtasks within one turn grew crews/
+        # subagent_sessions/subagent_history unbounded for that turn.
+        self._evict_finished_subagents(parent_id)
+        _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
 
     def _on_agent_subtask_update(self, parent_id: str, agent_subtask_id: str,
-                                  status: str, raw_output) -> None:
+                                  status: str, raw_output,
+                                  tool_call_id: str = "") -> None:
         """Update one crew sub-entry from a matching v3 ``tool_call_update``.
 
         Terminal is sticky, mirroring ``_on_subagent_list``'s own rule (Q&A,
         2026-08-11: "stay, marked done") — a crew entry that finished must
         never un-finish because a stale or reordered notification repeats an
-        earlier status. On completion, whatever streamed into the sub-agent's
-        own bubble via ``agent_message_chunk`` is rendered; if nothing ever
-        streamed for it, ``rawOutput`` is used directly — confirmed live
-        (plan Current State, SC-5) to carry the subagent's final answer
-        regardless of whether any chunk arrived for it first.
+        earlier status.
+
+        Review fix (Phase 4 review pass, finding #2): before applying an
+        update, its own ``toolCallId`` must match the spawn's
+        ``spawnToolCallId`` recorded by ``_on_agent_subtask_open``. Without
+        this, any ``tool_call_update`` sharing this ``agentSubtaskId`` — not
+        just the spawning tool call's own completion — would satisfy the
+        ``entry["done"]`` guard below and be taken as the crew entry's final
+        word. Whether kiro-cli actually tags a subagent's *internal* tool
+        calls with the same ``agentSubtaskId`` was not confirmed by live
+        probe; this check is correct either way — if internal calls never
+        share the id, the comparison always matches and costs nothing; if
+        they do, it is exactly what stops one from being mistaken for the
+        spawner's own terminal update. A missing ``spawnToolCallId`` (no
+        correlation information recorded) does not block an update — that
+        would be a new failure mode of its own, not a fix.
+
+        Review fix (finding #5b): rawOutput is ground truth and always
+        complete — a completion prefers it over whatever streamed into the
+        sub-agent's own bubble via ``agent_message_chunk``, since a dropped
+        leading chunk (see the ``agent_message_chunk`` branch in
+        ``_on_notification``) would otherwise make the streamed bubble a
+        silently truncated stand-in for "the final answer." The streamed
+        bubble is used only when rawOutput carries nothing.
         """
         crew = self.crews.get(parent_id)
         if not crew or agent_subtask_id not in crew:
             return
         entry = crew[agent_subtask_id]
         if entry["done"]:
+            return
+        spawn_tool_call_id = entry.get("spawnToolCallId") or ""
+        if spawn_tool_call_id and tool_call_id and tool_call_id != spawn_tool_call_id:
+            log.debug("ACP v3 tool_call_update: agentSubtaskId=%r toolCallId=%r "
+                      "does not match its spawn's toolCallId=%r -- ignored for "
+                      "crew-panel purposes", agent_subtask_id, tool_call_id,
+                      spawn_tool_call_id)
             return
         done = status in _TERMINAL_TOOL_STATUSES
         if status:
@@ -5073,14 +5163,25 @@ class _SupervisorV3(_Supervisor):
         if done:
             if entry.get("stoppedAt") is None:
                 entry["stoppedAt"] = time.time()
-            if _bubbles.get(agent_subtask_id):
+            _text = _agent_subtask_output_text(raw_output)
+            if status == "failed":
+                # Review fix (finding #6): v2's _on_subagent_list extracts
+                # status.message into entry["error"] on a failure; v3's
+                # tool_call_update carries no such nested status.message
+                # field (status is a plain string here, see _tool_payload),
+                # so rawOutput -- the only message-shaped field this wire
+                # shape actually offers for a terminal update, per
+                # _agent_subtask_output_text's own docstring -- is used
+                # instead. Left empty if rawOutput carries nothing, rather
+                # than fabricating a message.
+                entry["error"] = _text[:MAX_ERROR_DETAIL_CHARS]
+            if _text:
+                _emit_v3(agent_subtask_id, envelope(
+                    "chunk", {"role": "agent", "text": _text}, agent_subtask_id))
+            elif _bubbles.get(agent_subtask_id):
                 _flush_bubble(agent_subtask_id, _emit_v3)
-            else:
-                _text = _agent_subtask_output_text(raw_output)
-                if _text:
-                    _emit_v3(agent_subtask_id, envelope(
-                        "chunk", {"role": "agent", "text": _text}, agent_subtask_id))
-        _emit_subagents_frame(parent_id, self.crews, self.crew_spawn_toolcallids)
+        self._evict_finished_subagents(parent_id)
+        _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
 
     def _spawn(self) -> None:
         """Start the v3 agent. Uses ACP_V3_ARGS instead of ACP_ARGS."""
@@ -5371,6 +5472,10 @@ class _SupervisorV3(_Supervisor):
                       if v == session_id]:
             self.crew_spawn_anchors.pop(_tcid, None)
         self.crew_spawn_toolcallids.pop(session_id, None)
+        # Review fix (Phase 4 review pass, finding #1): the synthesized
+        # fan-out-wave tracker is per-session, same lifecycle as
+        # crew_spawn_toolcallids above.
+        self._active_fan_out_wave.pop(session_id, None)
         _bubbles.pop(session_id, None)
         frame = _session_closed_frame(session_id)
         for target in tuple(_registry.subscribers.get(session_id, ())):
@@ -5504,13 +5609,21 @@ def _emit_subagents_frame(parent_id: str, crews: dict | None = None,
     worth keeping.
 
     ``crews``/``crew_spawn_toolcallids`` default to ``_supervisor``'s own
-    dicts for v2 call sites; a v3 call site passes ``_supervisor_v3.crews``/
-    ``_supervisor_v3.crew_spawn_toolcallids`` explicitly (plan
-    260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4/SC-5) — the explicit
-    parameter is the established pattern (see ``_emit``/``_emit_v3``, and the
-    archived spike's own "Rejected: Option B — look up supervisor in `_emit`"
-    note) rather than having this function guess which supervisor owns
-    *parent_id* by probing both singletons' dicts.
+    dicts for v2 call sites; a v3 call site passes ``_supervisor_v3.crews``
+    explicitly (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4/SC-5)
+    — the explicit parameter is the established pattern (see ``_emit``/
+    ``_emit_v3``, and the archived spike's own "Rejected: Option B — look up
+    supervisor in `_emit`" note) rather than having this function guess
+    which supervisor owns *parent_id* by probing both singletons' dicts.
+    A v3 call site passes ``_supervisor_v3._active_fan_out_wave`` for the
+    ``crew_spawn_toolcallids`` slot, not ``_supervisor_v3.crew_spawn_toolcallids``
+    itself — the latter is inherited from ``_Supervisor`` but never written
+    for a v3 session (Phase 4 review fix, finding #1): v3 has no
+    ``_kiro.dev/subagent/list_update`` notification to populate it from, so
+    every v3 entry would otherwise carry the same no-anchor sentinel
+    regardless of which fan-out spawned it, making the filter below inert.
+    ``_active_fan_out_wave`` is v3's own synthesized equivalent — see
+    ``_SupervisorV3._on_agent_subtask_open``.
     """
     if crews is None:
         crews = _supervisor.crews
@@ -7258,6 +7371,25 @@ def _handle_subscribe_v3(conn, session_id):
     events = _with_backfilled_bodies(
         history.events(), session_id, _supervisor_v3._diff_backfill.get(session_id))
     conn.send(envelope("history", {"events": events}, session_id))
+    # Review fix (Phase 4 review pass, finding #3): port of _handle_subscribe's
+    # own live-crew-snapshot-on-reconnect gate. Without this, a browser
+    # reload or WS reconnect during an active v3 fan-out lost the dedicated
+    # crew-panel widget until the next live update (self-healing, but a real
+    # gap against this plan's own SC-5 wording "live, mid-turn, not just at
+    # turn-end"). `subagents` frames are deliberately not recorded into
+    # history (see _emit_subagents_frame's own docstring), so a reconnect's
+    # only source for "which sub-agents does this session have" is rebuilding
+    # it here, exactly as v2 already does.
+    crew = _supervisor_v3.crews.get(session_id)
+    if crew and (session_id in _supervisor_v3.inflight or
+                 any(not e["done"] for e in crew.values())):
+        fan_out_id = _supervisor_v3._active_fan_out_wave.get(
+            session_id, _NO_ANCHOR_TOOLCALLID)
+        conn.send(envelope(
+            "subagents",
+            {"subagents": _subagents_payload(crew, fan_out_id),
+             "toolCallId": fan_out_id},
+            session_id))
 
 
 async def _handle_load_v3(conn, session_id):
@@ -7430,6 +7562,13 @@ async def _handle_prompt_v3(conn, session_id, payload):
     _supervisor_v3.inflight.add(session_id)
     _evict_crew_children_v3(session_id, keep_history=False, broadcast_empty=True)
     _supervisor_v3.crew_spawn_toolcallids.pop(session_id, None)
+    # Review fix (Phase 4 review pass, finding #1): reset the fan-out-wave
+    # tracker for a new turn too -- not strictly required for correctness
+    # (an empty crew after the eviction above means the next subtask open
+    # finds no active sibling and mints a fresh wave regardless), but avoids
+    # holding a stale wave id in memory for a session that never opens
+    # another subtask.
+    _supervisor_v3._active_fan_out_wave.pop(session_id, None)
     log.info("ACP v3 turn start: session=%s (%d chars, %d image(s))",
              session_id, len(text), len(images))
     if text.strip() == "/compact" and session_id not in _supervisor_v3._compacting:
@@ -7473,11 +7612,12 @@ async def _handle_prompt_v3(conn, session_id, payload):
                     _crew_changed = True
             if _crew_changed:
                 _emit_subagents_frame(session_id, _supervisor_v3.crews,
-                                      _supervisor_v3.crew_spawn_toolcallids)
+                                      _supervisor_v3._active_fan_out_wave)
         _evict_crew_children_v3(session_id, keep_history=True, broadcast_empty=False)
         _finished_crew_toolcallid = _crew_toolcallid_v3(session_id)
         _had_crew = session_id in _supervisor_v3.crews or bool(_finished_crew_toolcallid)
         _supervisor_v3.crew_spawn_toolcallids.pop(session_id, None)
+        _supervisor_v3._active_fan_out_wave.pop(session_id, None)
         if _had_crew and session_id not in _supervisor_v3.crews:
             _registry.broadcast(session_id, envelope(
                 "subagents",
@@ -7607,7 +7747,7 @@ async def _handle_cancel_v3(conn, session_id):
         if _mark_crew_done(crew, now):
             try:
                 _emit_subagents_frame(session_id, _supervisor_v3.crews,
-                                      _supervisor_v3.crew_spawn_toolcallids)
+                                      _supervisor_v3._active_fan_out_wave)
             except Exception:
                 log.exception("ACP v3 cancel cascade: failed to emit subagents frame")
 
@@ -7798,10 +7938,17 @@ async def _handle_commands_execute_v3(conn, session_id, payload):
 
 
 def _crew_toolcallid_v3(parent_id):
-    """Return the spawner tool-call id for the current v3 fan-out, or ''."""
+    """Return the current v3 fan-out's own id, or ''.
+
+    Review fix (Phase 4 review pass, finding #1): reads
+    ``_active_fan_out_wave``, not ``crew_spawn_toolcallids`` -- the latter is
+    inherited from ``_Supervisor`` but never written for a v3 session (v3
+    has no ``_kiro.dev/subagent/list_update`` notification to populate it
+    from), so it would always return the no-anchor sentinel here.
+    """
     if _supervisor_v3 is None:
         return ""
-    return _supervisor_v3.crew_spawn_toolcallids.get(parent_id, _NO_ANCHOR_TOOLCALLID)
+    return _supervisor_v3._active_fan_out_wave.get(parent_id, _NO_ANCHOR_TOOLCALLID)
 
 
 def _evict_crew_children_v3(session_id: str, *, keep_history: bool, broadcast_empty: bool) -> None:
@@ -7827,7 +7974,7 @@ def _evict_crew_children_v3(session_id: str, *, keep_history: bool, broadcast_em
                 "subagents", {"subagents": []}, session_id))
     elif broadcast_empty:
         _emit_subagents_frame(session_id, _supervisor_v3.crews,
-                              _supervisor_v3.crew_spawn_toolcallids)
+                              _supervisor_v3._active_fan_out_wave)
 
 
 # -- the idle sweeper ------------------------------------------------------
