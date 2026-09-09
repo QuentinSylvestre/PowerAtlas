@@ -18674,6 +18674,48 @@ class TestAcpCommandsAvailable:
         )
         assert "steercmd" not in all_names
 
+    def test_available_commands_update_excludes_custom_agent_entries(self, acp_session):
+        """A ``custom-agent``-typed entry (e.g. kiro-default, SC-8) is excluded
+        from both ``meta["commands"]`` and ``meta["skills"]`` — same treatment
+        as skill/steering/prompt — while a no-``_meta`` entry and an unknown
+        future ``_meta.kiro.type`` still land in ``commands`` unaffected,
+        proving the new exclusion doesn't overreach."""
+        acp_mod, sid = acp_session
+        conn = self._attached(acp_mod, sid)
+        _queued(conn)  # drain
+        acp_mod._supervisor._on_notification({
+            "method": "_kiro.dev/session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        {"name": "/qskill", "description": "s",
+                         "_meta": {"kiro": {"type": "skill"}}},
+                        {"name": "/steercmd", "description": "s",
+                         "_meta": {"kiro": {"type": "steering"}}},
+                        {"name": "/kiro-default", "description": "Default agent",
+                         "_meta": {"kiro": {"type": "custom-agent"}}},
+                        {"name": "/nometa", "description": "no _meta at all"},
+                        {"name": "/futuretype", "description": "d",
+                         "_meta": {"kiro": {"type": "some-future-type"}}},
+                    ],
+                },
+            },
+        })
+        meta = acp_mod._supervisor.sessions[sid]
+        assert meta["commands"] == [
+            {"name": "nometa", "description": "no _meta at all"},
+            {"name": "futuretype", "description": "d"},
+        ]
+        assert meta["skills"] == [{"name": "qskill", "description": "s"}]
+        all_names = (
+            [c["name"] for c in meta["commands"]]
+            + [s["name"] for s in meta["skills"]]
+        )
+        assert "kiro-default" not in all_names
+        assert "steercmd" not in all_names
+
     def test_available_commands_update_attribution_by_session_id(self, acp_session):
         """``available_commands_update`` is attributed to the session named by
         ``params.sessionId`` even when two sessions are registered."""
@@ -23357,5 +23399,62 @@ class TestSupervisorV3:
             assert frames[0]["payload"]["code"] == "unknown_type", (
                 f"v2's _dispatch must refuse permission_response as "
                 f"unknown_type, got {frames}")
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    # ------------------------------------------------------------------
+    # SC-8 (Phase 7): available_commands_update excludes custom-agent
+    # entries (e.g. kiro-default) from both meta["commands"] and
+    # meta["skills"] on _SupervisorV3, same as the v2 fix.
+    # ------------------------------------------------------------------
+
+    def test_v3_available_commands_update_excludes_custom_agent_entries(self, monkeypatch):
+        """A ``custom-agent``-typed entry (e.g. kiro-default, SC-8) is
+        excluded from both ``sessions[sid]["commands"]`` and ``["skills"]``
+        on ``_SupervisorV3`` — same treatment as skill/steering/prompt —
+        while a no-``_meta`` entry and an unknown future ``_meta.kiro.type``
+        still land in ``commands`` unaffected, proving the new exclusion
+        doesn't overreach."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        conn = self._conn_v3(acp_mod, sid)
+        _queued(conn)  # drain
+
+        try:
+            sv3._on_notification({
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "available_commands_update",
+                        "availableCommands": [
+                            {"name": "/qskill", "description": "s",
+                             "_meta": {"kiro": {"type": "skill"}}},
+                            {"name": "/steercmd", "description": "s",
+                             "_meta": {"kiro": {"type": "steering"}}},
+                            {"name": "/kiro-default", "description": "Default agent",
+                             "_meta": {"kiro": {"type": "custom-agent"}}},
+                            {"name": "/nometa", "description": "no _meta at all"},
+                            {"name": "/futuretype", "description": "d",
+                             "_meta": {"kiro": {"type": "some-future-type"}}},
+                        ],
+                    },
+                },
+            })
+            assert sv3.sessions[sid]["commands"] == [
+                {"name": "nometa", "description": "no _meta at all"},
+                {"name": "futuretype", "description": "d"},
+            ]
+            assert sv3.sessions[sid]["skills"] == [{"name": "qskill", "description": "s"}]
+            frames = _queued(conn)
+            types = [f["type"] for f in frames]
+            assert "commands" in types
+            assert "skills" in types
+            all_names = (
+                [c["name"] for c in sv3.sessions[sid]["commands"]]
+                + [s["name"] for s in sv3.sessions[sid]["skills"]]
+            )
+            assert "kiro-default" not in all_names
+            assert "steercmd" not in all_names
         finally:
             self._cleanup_registry(acp_mod)

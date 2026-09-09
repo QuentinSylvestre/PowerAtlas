@@ -4192,8 +4192,11 @@ class _Supervisor:
             # e is the session/update payload object, matching `update.get(...)` here.
             available = update.get("availableCommands") or []
             # Filter commands: exclude entries with _meta.kiro.type in (skill, steering,
-            # prompt) or serverName starting with "skill:". Apply MAX_COMMANDS_COUNT
-            # AFTER filtering (not before), so skill entries never displace commands.
+            # prompt, custom-agent) or serverName starting with "skill:". Apply
+            # MAX_COMMANDS_COUNT AFTER filtering (not before), so skill entries never
+            # displace commands. custom-agent (e.g. kiro-default) is excluded because it
+            # requests switching to the one agent /acp-v3 is already hardcoded to — no
+            # defined action for it within this plan's scope (SC-8, Phase 7).
             commands = [
                 {"name": _as_text(c.get("name")).lstrip("/"),
                  "description": _as_text(c.get("description"))}
@@ -4203,7 +4206,8 @@ class _Supervisor:
                 and not (
                     (isinstance(c.get("_meta"), dict)
                      and isinstance(c["_meta"].get("kiro"), dict)
-                     and c["_meta"]["kiro"].get("type") in ("skill", "steering", "prompt"))
+                     and c["_meta"]["kiro"].get("type") in
+                         ("skill", "steering", "prompt", "custom-agent"))
                     or _as_text(c.get("serverName")).startswith("skill:")
                 )
                 # Exclusion logic is the structural inverse of _parse_skills() — any new
@@ -4945,7 +4949,8 @@ class _SupervisorV3(_Supervisor):
                 and not (
                     (isinstance(c.get("_meta"), dict)
                      and isinstance(c["_meta"].get("kiro"), dict)
-                     and c["_meta"]["kiro"].get("type") in ("skill", "steering", "prompt"))
+                     and c["_meta"]["kiro"].get("type") in
+                         ("skill", "steering", "prompt", "custom-agent"))
                     or _as_text(c.get("serverName")).startswith("skill:")
                 )
             ][:MAX_COMMANDS_COUNT]
