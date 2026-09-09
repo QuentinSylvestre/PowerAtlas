@@ -1,7 +1,7 @@
 # ACP v3 Production Hardening
 
 > **Date**: 2026-09-08
-> **Status**: In Progress — Phases 0-3, 5 complete, Phases 4, 6-8 pending
+> **Status**: In Progress — Phases 0-5 complete, Phases 6-8 pending
 > **Scope**: Bring `/acp-v3` (kiro-cli v3 ACP protocol support) from throwaway-spike quality to production quality, on par with the mature `/acp` (v2) surface — without merging the two engines.
 > **Estimated effort**: 2-3 days
 
@@ -394,23 +394,6 @@ Security auditor found one Medium (the three new agent-controlled strings had no
 
 Per explicit user instruction, no second review cycle was run after this fix — see Review Log.
 
-### 2026-09-09 — Implementation Review (after Phase 3, persona: Security auditor + Senior engineer)
-
-Implementation health: Green (after fixes below). 8 findings (0 High, 2 Medium, 6 Low — no unresolved). Notably, the Senior engineer verified all three ambiguous wire-shape assumptions in this phase directly against the actual KAS server source (not just plausibility) and confirmed all three correct — while doing so, found an unrelated real bug the plan's own documentation had wrong.
-
-| # | Severity | Finding (one line) | Resolution (one line) |
-|---|---|---|---|
-| 1 | Medium | `pendingInteraction` (camelCase) was miscoded/misdocumented — the real wire value is `pending_interaction` (snake_case), source-verified against `acp-server.js`, so this no-op never actually fired. | Fixed in code, plan's Current State, and a strengthened `caplog`-based test that can distinguish the no-op path from the fallback path. |
-| 2 | Medium | No length bound on the three new agent-controlled strings (`steer_status.content`, `title`, `agent_error.message`/`errorType`), breaking an otherwise-universal codebase convention. | Fixed — reused `MAX_STEER_CHARS`/`MAX_ERROR_DETAIL_CHARS`, added `MAX_TITLE_CHARS`. |
-| 3 | Low | `_context_percent_v3`'s NaN/string-typed rejection was correct but untested, risking a silent future regression. | Fixed — test cases added. |
-| 4 | Low | `steer_status` was recorded into history via `_emit_v3` despite the client never replaying it — an inconsistency with `_note_context_v3`'s own broadcast-only precedent from the same commit. | Fixed — switched to `_registry.broadcast` directly. |
-| 5 | Low | `document.title` was never reset on session release/switch, letting a stale title persist across sessions. | Fixed — reset added, mirroring the existing `setSteerStatus('')` pattern. |
-| 6 | Low | `steering_cleared`'s real payload shape (`messageIds` plural) differs from the other two steering kinds — currently harmless but undocumented. | Fixed — explanatory comment added, no functional change needed. |
-| 7 | Low | Plan's own `focus_update` title field name and `display_error` field-nesting were undocumented assumptions. | Confirmed correct via direct KAS-source verification — no code change needed, wording noted for a future maintainer. |
-| 8 | — (confirmed sound) | `context_usage` reuse of v2's `meta`/`contextPercent` frame, and the decision not to reuse v2's generic `error` handler for `agent_error` — both independently verified sound by direct code trace. | No action needed. |
-
-The 5 pre-existing, unrelated `node tests/acp_page.test.mjs` failures (confirmed independently by the orchestrator against the plan's own starting commit — dashboard-link render, group-toggle collapse, unread-on-turn-end, 2× skill-dropdown keyboard-nav) are untouched by this phase; Phase 3's own exit criterion wording was corrected above to state this precisely rather than claim an unqualified pass. Per user instruction, no second review cycle was run after applying the fixes.
-
 ### Phase 4: Engine-aware shared helpers + live crew panel [QA]
 
 **Goal**: Fix the three helpers hardcoded to `_supervisor`, and wire live (mid-turn) crew panel updates for v3 using the confirmed `agent-subtask` wire shape.
@@ -434,14 +417,24 @@ The 5 pre-existing, unrelated `node tests/acp_page.test.mjs` failures (confirmed
 5. **Clean up the stale class docstring comments** at `acp.py:4456-4464` (*"Crew panel (`_kiro.dev/subagent/list_update`) compatibility... not probed in Phase 0..."* and *"This override is what Phase 1 deferred..."*) — these are now factually wrong, not just stale-numbered: the exploration's live probe confirmed v3 does **not** use `_kiro.dev/subagent/list_update` at all (it has no `_kiro.dev/*` namespace); crew data arrives via ordinary `tool_call`/`tool_call_update`/`agent_message_chunk` frames tagged `_meta.kiro.kind: "agent-subtask"`. Rewrite these lines to state the confirmed mechanism plainly, removing both the "not probed" hedge (it now is) and the archived spike's "Phase 0"/"Phase 1" references (review finding, doc-impact scan — these sit exactly where this phase's own changes land, and their stale "Phase N" language risks being misread as referring to this plan's own phases).
 
 **Exit criteria**:
-- [ ] New test: `_flush_bubble` called in a v3 context records into `_supervisor_v3.history`, not `_supervisor.history`.
-- [ ] New test: `_emit_subagents_frame` (parameterized) correctly reads from whichever crews dict is passed, verified for both v2 and v3 inputs.
-- [ ] New test: `_handle_subagent_subscribe` for a v3 sub-agent session returns correct `role`/`task`/`turnActive` (not the current blank/always-true bug) and replays its transcript (not empty).
-- [ ] New test: a synthetic `tool_call` notification with `_meta.kiro.kind: "agent-subtask"` populates `_supervisor_v3.crews` correctly and triggers a live `subagents` frame broadcast (not deferred to turn-end).
-- [ ] Existing v2 crew-panel tests still pass (regression — v2 call sites of all three parameterized functions behave identically).
-- [ ] `.venv-PowerAtlas\Scripts\pytest` passes.
+- [x] New test: `_flush_bubble` called in a v3 context records into `_supervisor_v3.history`, not `_supervisor.history`.
+- [x] New test: `_emit_subagents_frame` (parameterized) correctly reads from whichever crews dict is passed, verified for both v2 and v3 inputs.
+- [x] New test: `_handle_subagent_subscribe` for a v3 sub-agent session returns correct `role`/`task`/`turnActive` (not the current blank/always-true bug) and replays its transcript (not empty).
+- [x] New test: a synthetic `tool_call` notification with `_meta.kiro.kind: "agent-subtask"` populates `_supervisor_v3.crews` correctly and triggers a live `subagents` frame broadcast (not deferred to turn-end).
+- [x] Existing v2 crew-panel tests still pass (regression — v2 call sites of all three parameterized functions behave identically).
+- [x] `.venv-PowerAtlas\Scripts\pytest` passes.
 
 **Covers**: SC-4, SC-5
+
+Implementation (2026-09-09, code: 8944124, review fixes: e267da5, 926e216, 867ff03)
+
+Parameterized `_flush_bubble`, `_emit_subagents_frame`, `_handle_subagent_subscribe` (explicit-argument pattern, matching the `_emit`/`_emit_v3` precedent — the plan's rejected alternative, an internal supervisor-lookup, was not implemented) and retired `_emit_subagents_frame_v3` entirely once its callers switched to the parameterized version. Wired live (mid-turn) crew updates via two new methods, `_on_agent_subtask_open`/`_on_agent_subtask_update`, detecting `_meta.kiro.kind == "agent-subtask"` in parallel to (not replacing) v2's `toolName == "subagent"` check, which never matches on v3.
+
+**Review (Senior engineer, Reliability engineer) found the phase's headline claim — that v2's `fan_out_id` cross-contamination filtering had been successfully ported to v3 — was actually false, confirmed empirically by the Senior engineer via a standalone script exercising the Python logic directly (no live kiro-cli needed).** The ported filter read `crew_spawn_toolcallids`, a dict only v2's `_on_subagent_list` (a notification kind v3 never emits) ever writes — every v3 crew entry silently carried the same sentinel value, so two sequential fan-outs within one turn showed up together in the panel instead of the second one excluding the first. Root cause: v2's mechanism assumes a single batch-anchoring "spawner" tool call; v3's wire shape has no such event to anchor on. Fixed by synthesizing a per-parent "active wave" id directly in `_on_agent_subtask_open` (a new subtask joins the current wave if any sibling is still not-done, otherwise mints a fresh wave keyed by its own `agentSubtaskId`) — every v3 call site that read the dead `crew_spawn_toolcallids` dict for this purpose was switched to the new mechanism. The plan's own Review Log (finding #19, originally logged during the initial Phase 4 review) is corrected below to admit this was not actually fixed until this review-fix pass, not the original commit.
+
+Also fixed: (2) `_on_agent_subtask_update` applied any `tool_call_update` sharing an `agentSubtaskId` with no correlation against the spawn's own `toolCallId` — a real risk if a subagent's own internal tool calls ever share its `agentSubtaskId` (unconfirmed from static review, not resolvable without a live probe) — now stores and requires a match, correct under either possible wire shape; (3) `_handle_subscribe_v3` never sent a live crew snapshot on reconnect during an active fan-out (v2's equivalent does) — ported that gate, closing a real gap against this plan's own "live, mid-turn" wording for SC-5; (4) no eviction call during a turn meant an adversarial/misbehaving agent could grow crew-tracking dicts unbounded within one turn — now calls the existing `_evict_finished_subagents` before broadcasting, mirroring v2; (5) a dropped early `agent_message_chunk` (arriving before its subtask's opening `tool_call`) had no logging and, worse, completion preferred a possibly-truncated streamed bubble over the authoritative `rawOutput` whenever any streaming had occurred — fixed to log the drop and prefer `rawOutput` whenever non-empty (a first attempt at this specific fix introduced a duplicate-answer bug on the normal successful-streaming path, caught before being reported and corrected in a follow-up commit); (6) a failed subtask never populated an error message for the panel — now filled from `rawOutput` (confirmed to be the only message-shaped field this wire shape offers for a failure, unlike v2's nested `status.message`).
+
+Per explicit user instruction, no second review cycle was run after these fixes — see Review Log.
 
 ### Phase 5: v3 session deletion [QA] [P:2]
 
@@ -749,7 +742,40 @@ Implementation health: Green (after fixes below). 5 findings (2 High, 2 Medium, 
 
 Per user instruction, no second review cycle was run after applying these fixes — a substantial pass given the severity, but every recommendation was concrete and well-specified (matching v2's existing precedent in each case), not an open design question.
 
+### 2026-09-09 — Implementation Review (after Phase 3, persona: Security auditor + Senior engineer)
+
+Implementation health: Green (after fixes below). 8 findings (0 High, 2 Medium, 6 Low — no unresolved). Notably, the Senior engineer verified all three ambiguous wire-shape assumptions in this phase directly against the actual KAS server source (not just plausibility) and confirmed all three correct — while doing so, found an unrelated real bug the plan's own documentation had wrong.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `pendingInteraction` (camelCase) was miscoded/misdocumented — the real wire value is `pending_interaction` (snake_case), source-verified against `acp-server.js`, so this no-op never actually fired. | Fixed in code, plan's Current State, and a strengthened `caplog`-based test that can distinguish the no-op path from the fallback path. |
+| 2 | Medium | No length bound on the three new agent-controlled strings (`steer_status.content`, `title`, `agent_error.message`/`errorType`), breaking an otherwise-universal codebase convention. | Fixed — reused `MAX_STEER_CHARS`/`MAX_ERROR_DETAIL_CHARS`, added `MAX_TITLE_CHARS`. |
+| 3 | Low | `_context_percent_v3`'s NaN/string-typed rejection was correct but untested, risking a silent future regression. | Fixed — test cases added. |
+| 4 | Low | `steer_status` was recorded into history via `_emit_v3` despite the client never replaying it — an inconsistency with `_note_context_v3`'s own broadcast-only precedent from the same commit. | Fixed — switched to `_registry.broadcast` directly. |
+| 5 | Low | `document.title` was never reset on session release/switch, letting a stale title persist across sessions. | Fixed — reset added, mirroring the existing `setSteerStatus('')` pattern. |
+| 6 | Low | `steering_cleared`'s real payload shape (`messageIds` plural) differs from the other two steering kinds — currently harmless but undocumented. | Fixed — explanatory comment added, no functional change needed. |
+| 7 | Low | Plan's own `focus_update` title field name and `display_error` field-nesting were undocumented assumptions. | Confirmed correct via direct KAS-source verification — no code change needed, wording noted for a future maintainer. |
+| 8 | — (confirmed sound) | `context_usage` reuse of v2's `meta`/`contextPercent` frame, and the decision not to reuse v2's generic `error` handler for `agent_error` — both independently verified sound by direct code trace. | No action needed. |
+
+The 5 pre-existing, unrelated `node tests/acp_page.test.mjs` failures (confirmed independently by the orchestrator against the plan's own starting commit — dashboard-link render, group-toggle collapse, unread-on-turn-end, 2× skill-dropdown keyboard-nav) are untouched by this phase; Phase 3's own exit criterion wording was corrected above to state this precisely rather than claim an unqualified pass. Per user instruction, no second review cycle was run after applying the fixes.
+
+### 2026-09-09 — Implementation Review (after Phase 4, persona: Senior engineer + Reliability engineer)
+
+Implementation health: Green (after fixes below). 6 findings (1 High, 3 Medium, 2 Low — no unresolved). The High finding is significant: it reopened a requirement (`fan_out_id` filtering) that a prior review entry (#19, above) had already marked "Fixed" but which the original Phase 4 commit did not actually achieve — corrected in place rather than left standing, since leaving a wrong "Fixed" claim in the record would be worse than admitting the correction.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | The ported `fan_out_id` filter (finding #19, above) was functionally inert for v3 — it read a dict (`crew_spawn_toolcallids`) only a v2-only notification kind ever writes, so every v3 crew entry carried the same sentinel and two sequential same-turn fan-outs showed up together, confirmed empirically. | Fixed — `_SupervisorV3` now synthesizes a per-parent "active wave" id directly in `_on_agent_subtask_open`, since v3's wire shape has no batch-spawner event to anchor on; every v3 call site switched from the dead dict to the new one. Finding #19's Resolution text corrected to admit the original timeline. |
+| 2 | Medium | `_on_agent_subtask_update` applied any update sharing an `agentSubtaskId` with no correlation to the spawn's own `toolCallId` — a risk if a subagent's internal tool calls ever share its `agentSubtaskId` (unconfirmed without a live probe). | Fixed defensively (correct under either possible wire shape) — the spawn's `toolCallId` is now stored and required to match. |
+| 3 | Medium | `_handle_subscribe_v3` never sent a live crew snapshot on reconnect during an active fan-out, unlike v2 — a real gap against this plan's own "live, mid-turn" wording for SC-5. | Fixed — ported v2's equivalent gate. |
+| 4 | Medium | No eviction call during a turn meant crew-tracking dicts could grow unbounded within one turn under a misbehaving/adversarial agent. | Fixed — now calls the existing `_evict_finished_subagents` before broadcasting, mirroring v2. |
+| 5 | Low | A dropped early `agent_message_chunk` had no logging, and completion preferred a possibly-truncated streamed bubble over the authoritative `rawOutput`. | Fixed — logs the drop; prefers `rawOutput` whenever non-empty (a first-attempt bug that duplicated the answer on the normal path was self-caught and corrected before being reported). |
+| 6 | Low | A failed subtask never populated an error message for the panel. | Fixed — filled from `rawOutput`, the only message-shaped field this wire shape offers for a failure. |
+
+Per user instruction, no second review cycle was run after applying these fixes.
+
 ## Harness Improvement Opportunities
 
 - The `Agent` tool's `subagent_type: "fork"` guidance discourages checking on background forks mid-flight, but there's no equivalent guidance for background `general-purpose` sub-agent dispatches from `/qexplore`'s Step 1.5 — the orchestrator twice dispatched a trivial "check on the other agents" fork purely to keep the turn from ending while waiting, costing real tokens (one such call alone consumed ~380K subagent tokens for a one-line acknowledgment) for zero value, since task-notifications already arrive automatically without any action needed. Cost: ~380K wasted subagent tokens plus a full extra agent-dispatch round-trip, twice. Suggested change: state explicitly (in `/qexplore` Step 1.5 or the general multi-agent-coordination guidance in `shared/AGENTS.md`) that after dispatching parallel background sub-agents, the orchestrator should simply end its turn and wait — no filler action, no "keep-alive" dispatch.
+- The orchestrator itself misplaced a per-phase Review Log entry (Phase 3's) inline within the phase's own section instead of the centralized `## Review Log` section, an inconsistency with every other phase's entry (Phases 0, 1, 2, 5 all landed correctly) that went uncaught until Phase 4's write-up, when adding a new entry to the centralized section surfaced the gap by comparison. Cost: one extra Edit-tool round trip to excise the misplaced block and re-insert it in the right place, plus the risk (avoided here, but real) of a reader never noticing a Review Log entry that isn't where every other one lives. Root cause: the Step 7 instruction to add "an implementation notes sub-section... under the completed phase" and a separate "Review Log entry" (appended to the centralized section) are adjacent asks with very different target locations, and nothing in the process prompts the orchestrator to explicitly re-navigate to the centralized section for the second one when it's already mid-edit at the phase's own location for the first. Suggested change: `/qdev` Step 7's item 7 (Review Log entry) could explicitly say "navigate to the `## Review Log` section (NOT the current phase's own block, even though you were just editing it for item 2)" to make the location switch an explicit, checked step rather than an easy-to-miss implicit one.
 - A `/qexplore`-stage claim labeled "confirmed via client-code read" (SC-8's Current State: "selecting *any* slash command... triggers this broken path (`acp.html:2152`)") turned out to be a single-line citation, not a full branch trace — it missed an early-return branch (`isSkill` check, `acp.html:2119-2147`) two lines above the cited call site that made the claim false for 30 of 31 real catalogue entries. This survived both `/qexplore` and `/qplan`'s 4-persona review cycle unverified, and was only caught by a `/qdev` Step 5 per-phase review dispatched against a documentation-only phase that had no code diff to check it against. Cost: a full extra probe round (round 4) plus a Phase 7 rewrite that could have been avoided if the original citation had traced the containing function's control flow rather than just the one line matching the claim. Suggested change: when Intent/Current State asserts a code-behavior claim as "confirmed via code read," the citation should name the full guarding branch/condition (not just the line where the asserted behavior occurs), or the claim should be flagged for live/empirical verification rather than treated as settled.
