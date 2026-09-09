@@ -310,6 +310,14 @@
       </div>
       <span id="acpModeLiveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></span>
     </div>
+    <!-- v3's `steer_status` echo (SC-3): transient "Steering…" / "Injected"
+         feedback for a mid-turn steer, near the composer rather than in the
+         transcript — the transcript already gets a dimmed steer band from
+         `steer_sent` the moment the message is sent, so this is the async
+         confirmation that it actually queued/landed on the agent side, not a
+         second copy of the same text. Empty and hidden until a frame arrives;
+         built with textContent only, like the rest of this page. -->
+    <div class="acp-steer-status" id="acpSteerStatus" hidden aria-live="polite"></div>
   </div>
   <!-- Collapsed by default and remembered per browser: the transport log is a
        debugging aid, not something most sessions of this page ever need open.
@@ -726,6 +734,9 @@
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
   var contextLabel = document.getElementById('acpContextLabel');
+  // v3's `steer_status` echo (SC-3) — see setSteerStatus().
+  var steerStatusEl = document.getElementById('acpSteerStatus');
+  var _steerStatusTimer = null;
   var shellEl = document.getElementById('acpShell');
   var viewToggle = document.getElementById('acpViewToggle');
   var railSearch = document.getElementById('acpRailSearch');
@@ -1328,6 +1339,23 @@
     contextLabel.textContent = 'context ' + percent + '%';
   }
 
+  /** Show (or clear) the transient composer-area steer status line (SC-3,
+   *  v3's `steer_status` frame). SECURITY: MUST use textContent — never
+   *  innerHTML. `text` may include the agent-controlled steering content. */
+  function setSteerStatus(text) {
+    if (_steerStatusTimer) {
+      clearTimeout(_steerStatusTimer);
+      _steerStatusTimer = null;
+    }
+    if (!text) {
+      steerStatusEl.textContent = '';
+      steerStatusEl.hidden = true;
+      return;
+    }
+    steerStatusEl.textContent = text;
+    steerStatusEl.hidden = false;
+  }
+
   function releaseSession() {
     // Everything that stops being true when this page lets go of a session.
     //
@@ -1349,6 +1377,10 @@
     hideThinking();
     setContext(null);
     setPending(false);
+    // The steer-status line belonged to whatever turn was running on the
+    // released session — clearing it here means it never bleeds into
+    // whatever session is opened next on this page.
+    setSteerStatus('');
     // Clear queue/steer state so neither fires against whatever session is
     // opened next on this page.
     queuedPrompt = null;
@@ -6734,6 +6766,11 @@
       // `null` for a session that has not run a turn yet, which hides the
       // meter rather than drawing an empty one.
       setContext(payload.contextPercent);
+      // Whatever the previous session's (or this one's stale pre-switch)
+      // steer status said has nothing to do with the session just adopted —
+      // any live status for it will arrive fresh over its own `steer_status`
+      // frames, not by carrying this one over.
+      setSteerStatus('');
       // The one place this page ever learns the workspace: `cwd` arrives on
       // every `session` frame, created or resubscribed alike. Reset the
       // reveal on every frame, not only a fresh selection — a reconnect that
@@ -6818,6 +6855,60 @@
         }
         addMessage('steer', steerText);
       }
+      return;
+    }
+    if (type === 'steer_status') {
+      // v3's `session_info_update` steer echo (SC-3): steering_queued ->
+      // steering_injected -> steering_cleared. A live-only status line near
+      // the composer — the transcript already got the actual text from
+      // `steer_sent` above, so this is the async confirmation it queued or
+      // landed, not a second copy of the content. A replayed one from a
+      // reconnect describes a turn that is long over and has no timer left
+      // to clear it, so this does nothing during history replay.
+      if (!replaying) {
+        var _steerStatus = payload && payload.status;
+        var _steerContent = (payload && typeof payload.content === 'string')
+          ? payload.content : '';
+        if (_steerStatus === 'steering_queued') {
+          setSteerStatus(_steerContent ? 'Steering… ' + _steerContent : 'Steering…');
+        } else if (_steerStatus === 'steering_injected') {
+          setSteerStatus(_steerContent ? 'Injected: ' + _steerContent : 'Injected');
+          _steerStatusTimer = setTimeout(function () { setSteerStatus(''); }, 4000);
+        } else if (_steerStatus === 'steering_cleared') {
+          setSteerStatus('');
+        }
+      }
+      return;
+    }
+    if (type === 'title') {
+      // v3's `focus_update` (SC-3) — the session's auto-derived title. No v2
+      // mechanism exists to reuse: this page has never tracked a live
+      // session title before now. Sets the browser tab title directly — a
+      // property assignment, not markup, so there is no innerHTML-equivalent
+      // risk here. Applied during replay too (unlike steer_status above): a
+      // reload should end up with the same tab title the live page had, and
+      // replaying every historical update in order converges on the latest
+      // one exactly like a live frame would.
+      var _newTitle = payload && typeof payload.title === 'string' ? payload.title.trim() : '';
+      if (_newTitle) {
+        document.title = _newTitle + ' — PowerAtlas';
+      }
+      return;
+    }
+    if (type === 'agent_error') {
+      // v3's `display_error` (SC-3) — e.g. an MCP-auth-required signal.
+      // Rendered inline in the transcript, like a failed tool call, via the
+      // same addMessage() row-building helper the generic error/note rows
+      // already use (SECURITY: addMessage sets body.textContent, never
+      // innerHTML). Not routed through the generic `error` frame handler:
+      // that one carries protocol-error side effects (turn-state repaint,
+      // steer-text restore, close/load recovery) keyed on specific
+      // `payload.code` values that do not apply to an agent-originated
+      // mid-turn notice, so reusing it risked misfiring those instead of
+      // just reporting the message.
+      var _errMsg = (payload && typeof payload.message === 'string') ? payload.message : '';
+      var _errType = (payload && typeof payload.errorType === 'string') ? payload.errorType : '';
+      addMessage('error', (_errType ? '[' + _errType + '] ' : '') + _errMsg);
       return;
     }
     if (type === 'subagents') {

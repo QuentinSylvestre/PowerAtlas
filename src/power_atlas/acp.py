@@ -173,6 +173,13 @@ SERVER_TYPES = frozenset({
     # absent after a reload by design and the row says so; the digest that
     # survives rides on `tool_update`. See the note above MAX_TOOL_OUTPUT_CHARS.
     "tool_output",
+    # v3-only (SC-3, plan Phase 3): `_SupervisorV3._on_notification`'s
+    # `session_info_update` branch. `steer_status` is v3's three-state steer
+    # echo (`steering_queued`/`steering_injected`/`steering_cleared` — v3 has
+    # no equivalent of v2's `AgentExecutionSteeringInjected` kind). `title`
+    # and `agent_error` are genuinely new: neither a live session-title update
+    # nor an agent-originated inline error frame existed for v2 to reuse.
+    "steer_status", "title", "agent_error",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -1665,6 +1672,25 @@ def _context_percent(params: dict) -> float | None:
     same number.
     """
     value = params.get(CONTEXT_PERCENT_KEY)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not 0 <= value <= 100:
+        return None
+    return round(float(value), 1)
+
+
+def _context_percent_v3(kiro_meta: dict) -> float | None:
+    """How full the context window is, from a v3 ``context_usage`` payload.
+
+    Same validation as ``_context_percent`` above (``None`` for anything that
+    is not a real, in-range number, since this is rendered as a bar width and
+    a bad value must become "no bar" rather than a false one) but reading the
+    nested ``contextUsage.usagePercentage`` shape v3's ``session_info_update``
+    notification carries, instead of ``_kiro.dev/metadata``'s flat
+    ``contextUsagePercentage`` key.
+    """
+    usage = kiro_meta.get("contextUsage") if isinstance(kiro_meta, dict) else None
+    value = usage.get("usagePercentage") if isinstance(usage, dict) else None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     if not 0 <= value <= 100:
@@ -4822,6 +4848,52 @@ class _SupervisorV3(_Supervisor):
                           "(%d session(s), %d inflight, no sessionId)",
                           len(self.sessions), len(self.inflight))
             return
+        if kind == "session_info_update":
+            # SC-3 (plan Phase 3): v3-only — v2 never emits this kind. Carries
+            # context-window percentage, the three-state steering echo,
+            # session title/focus updates, and MCP-auth-required signals, all
+            # multiplexed under the nested `_meta.kiro.kind` field rather than
+            # `sessionUpdate` itself. Live-verified vocabulary (plan Current
+            # State): context_usage, steering_queued/injected/cleared,
+            # focus_update, display_error, user_message_id_assigned, turn_end,
+            # pendingInteraction.
+            _kiro_meta = (update.get("_meta") or {}).get("kiro") or {}
+            _info_kind = _kiro_meta.get("kind") if isinstance(_kiro_meta, dict) else None
+            if _info_kind == "context_usage":
+                if isinstance(session_id, str):
+                    _note_context_v3(session_id, _context_percent_v3(_kiro_meta))
+                return
+            if _info_kind in ("steering_queued", "steering_injected", "steering_cleared"):
+                if isinstance(session_id, str):
+                    _emit_v3(session_id, envelope("steer_status", {
+                        "status": _info_kind,
+                        "messageId": _as_text(_kiro_meta.get("messageId")),
+                        "content": _as_text(_kiro_meta.get("content")),
+                    }, session_id))
+                return
+            if _info_kind == "focus_update":
+                _title = _as_text(_kiro_meta.get("title"))
+                if _title and isinstance(session_id, str):
+                    _emit_v3(session_id, envelope("title", {"title": _title}, session_id))
+                return
+            if _info_kind == "display_error":
+                if isinstance(session_id, str):
+                    _emit_v3(session_id, envelope("agent_error", {
+                        "message": _as_text(_kiro_meta.get("message")),
+                        "errorType": _as_text(_kiro_meta.get("errorType")),
+                    }, session_id))
+                return
+            if _info_kind in ("user_message_id_assigned", "turn_end", "pendingInteraction"):
+                # Explicit no-ops (plan Phase 3): turn-end is already read off
+                # the session/prompt RPC result, not this notification;
+                # pendingInteraction previews the session/request_permission
+                # request a later phase handles directly, so acting on both
+                # would be redundant; user_message_id_assigned carries
+                # nothing the page renders.
+                return
+            # Any other _meta.kiro.kind: no branch recognizes it, so fall
+            # through to the unrecognized-notification-kind fallback below
+            # (SC-10, visible at INFO since Phase 1) instead of returning here.
         if method == "_kiro.dev/commands/available":  # v3 never sends _kiro.dev/commands/available; this branch is dead code for v3 sessions.
             commands = [
                 {"name": _as_text(c.get("name")).lstrip("/"),
@@ -5358,6 +5430,30 @@ def _note_context(session_id: str, percent: float | None) -> None:
     it back onto every reconnecting socket.
     """
     meta = _supervisor.sessions.get(session_id)
+    if meta is None:
+        return
+    meta["contextPercent"] = percent
+    _registry.broadcast(session_id, envelope(
+        "meta", {"contextPercent": percent}, session_id))
+
+
+def _note_context_v3(session_id: str, percent: float | None) -> None:
+    """v3 sibling of ``_note_context`` (SC-3, plan Phase 3).
+
+    A deliberately new, v3-scoped function reading/writing
+    ``_supervisor_v3.sessions`` rather than a parameterization of
+    ``_note_context``: v2 reaches this concept through ``_kiro.dev/metadata``,
+    a top-level method v3 never sends at all, so there is no shared call site
+    to parameterize — v2 and v3 arrive at "note the context percentage" via
+    structurally different wire mechanisms (Design Decisions, SC-3's
+    `_note_context_v3` row). The client-side rendering is identical, so this
+    reuses the same "meta" frame + ``contextPercent`` field ``_note_context``
+    already broadcasts, rather than adding a third code path for the same
+    ``acpContext``/``acpContextFill``/``acpContextLabel`` UI.
+    """
+    if _supervisor_v3 is None:
+        return
+    meta = _supervisor_v3.sessions.get(session_id)
     if meta is None:
         return
     meta["contextPercent"] = percent

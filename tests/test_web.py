@@ -21811,3 +21811,193 @@ class TestSupervisorV3:
         assert sv3._pending_early_frames_at[sid_b] == 111.0
         assert sid_b not in sv3.sessions
         assert sid_b not in sv3.history
+
+    # ------------------------------------------------------------------
+    # SC-3: the `session_info_update` dispatch branch — context %, the
+    # three-state steering echo, session title, and MCP-auth-required error
+    # signals, all multiplexed under `_meta.kiro.kind`.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _session_info_msg(sid, kiro_meta):
+        return {
+            "method": "session/update",
+            "params": {
+                "sessionId": sid,
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {"kiro": kiro_meta},
+                },
+            },
+        }
+
+    def _sv3_with_session(self, monkeypatch):
+        """A _SupervisorV3 with one registered, history-backed session."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_info00000-0000-0000-0000-000000000001"
+        sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
+        sv3.history[sid] = acp_mod._History()
+        return sv3, sid
+
+    def test_session_info_update_context_usage_updates_context_percent(self, monkeypatch):
+        """A session_info_update frame with kind:"context_usage" updates
+        _supervisor_v3.sessions[sid]["contextPercent"] correctly."""
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        msg = self._session_info_msg(sid, {
+            "kind": "context_usage",
+            "contextUsage": {"usagePercentage": 42.3699, "tokens": 1234},
+        })
+
+        sv3._on_notification(msg)  # must not raise
+
+        assert sv3.sessions[sid]["contextPercent"] == 42.4  # rounded to 1 decimal
+        # Not recorded into the replay buffer — a level, not an event, same
+        # as v2's _note_context.
+        assert sv3.history[sid].events() == []
+
+    def test_session_info_update_context_usage_out_of_range_is_none(self, monkeypatch):
+        """An out-of-range or non-numeric usagePercentage becomes None rather
+        than a false reading, mirroring _context_percent's own validation."""
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        msg = self._session_info_msg(sid, {
+            "kind": "context_usage",
+            "contextUsage": {"usagePercentage": 142.0},
+        })
+
+        sv3._on_notification(msg)
+
+        assert sv3.sessions[sid]["contextPercent"] is None
+
+    def test_session_info_update_context_usage_unregistered_session_is_noop(self, monkeypatch):
+        """context_usage for a session_id _note_context_v3 does not know about
+        (not in self.sessions, not the SC-1 buffering case either) is a
+        silent no-op — it must not raise or create a new sessions entry."""
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_unknown0000-0000-0000-0000-00000000001"
+        msg = self._session_info_msg(sid, {
+            "kind": "context_usage",
+            "contextUsage": {"usagePercentage": 10.0},
+        })
+
+        sv3._on_notification(msg)  # must not raise
+
+        assert sid not in sv3.sessions
+
+    def test_session_info_update_steering_sequence_emits_three_frames_in_order(self, monkeypatch):
+        """A steering_queued -> steering_injected -> steering_cleared sequence
+        produces three distinct emitted steer_status frames, in order, each
+        carrying {status, messageId, content}."""
+        from power_atlas import acp as acp_mod
+        sv3, sid = self._sv3_with_session(monkeypatch)
+
+        for kind in ("steering_queued", "steering_injected", "steering_cleared"):
+            sv3._on_notification(self._session_info_msg(sid, {
+                "kind": kind, "messageId": "m-1", "content": "look at foo.py",
+            }))
+
+        events = sv3.history[sid].events()
+        steer_events = [e for e in events if e.get("type") == "steer_status"]
+        assert len(steer_events) == 3
+        assert [e["payload"]["status"] for e in steer_events] == [
+            "steering_queued", "steering_injected", "steering_cleared"]
+        for e in steer_events:
+            assert e["payload"]["messageId"] == "m-1"
+            assert e["payload"]["content"] == "look at foo.py"
+            assert e["sessionId"] == sid
+            assert e["type"] in acp_mod.SERVER_TYPES
+
+    def test_session_info_update_focus_update_emits_title_frame(self, monkeypatch):
+        """focus_update emits a `title` frame carrying the new session title."""
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        sv3._on_notification(self._session_info_msg(sid, {
+            "kind": "focus_update", "title": "Fix the login bug",
+        }))
+
+        events = sv3.history[sid].events()
+        title_events = [e for e in events if e.get("type") == "title"]
+        assert len(title_events) == 1
+        assert title_events[0]["payload"]["title"] == "Fix the login bug"
+
+    def test_session_info_update_focus_update_empty_title_is_noop(self, monkeypatch):
+        """focus_update with no usable title string emits nothing."""
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        sv3._on_notification(self._session_info_msg(sid, {
+            "kind": "focus_update", "title": "",
+        }))
+
+        assert sv3.history[sid].events() == []
+
+    def test_session_info_update_display_error_emits_message(self, monkeypatch):
+        """A display_error frame with errorType "mcp_connection_error" emits
+        an agent_error frame containing the message text."""
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        sv3._on_notification(self._session_info_msg(sid, {
+            "kind": "display_error",
+            "message": "MCP server 'github' requires authorization.",
+            "errorType": "mcp_connection_error",
+        }))
+
+        events = sv3.history[sid].events()
+        error_events = [e for e in events if e.get("type") == "agent_error"]
+        assert len(error_events) == 1
+        assert error_events[0]["payload"]["message"] == (
+            "MCP server 'github' requires authorization.")
+        assert error_events[0]["payload"]["errorType"] == "mcp_connection_error"
+
+    def test_session_info_update_explicit_noop_kinds_emit_nothing(self, monkeypatch):
+        """user_message_id_assigned, turn_end, and pendingInteraction are
+        explicit no-ops (plan Phase 3) — no frame is emitted for any of them."""
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        for kind in ("user_message_id_assigned", "turn_end", "pendingInteraction"):
+            sv3._on_notification(self._session_info_msg(sid, {"kind": kind}))
+
+        assert sv3.history[sid].events() == []
+
+    def test_session_info_update_unrecognized_kind_falls_through_to_info_fallback(
+            self, monkeypatch, caplog):
+        """An unrecognized _meta.kiro.kind value is not silently swallowed —
+        it falls through to the existing unrecognized-notification-kind
+        fallback, visible at INFO (SC-10, Phase 1)."""
+        import logging
+        sv3, sid = self._sv3_with_session(monkeypatch)
+        caplog.set_level(logging.INFO, logger="power_atlas.acp")
+
+        sv3._on_notification(self._session_info_msg(sid, {"kind": "some_future_kind"}))
+
+        assert sv3.history[sid].events() == []
+        info_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("some_future_kind" in m for m in info_messages), info_messages
+
+    def test_context_percent_v3_helper_validates_like_v2(self):
+        """_context_percent_v3 mirrors _context_percent's own validation:
+        bool excluded, out-of-range excluded, rounds to 1 decimal."""
+        from power_atlas import acp as acp_mod
+
+        assert acp_mod._context_percent_v3(
+            {"contextUsage": {"usagePercentage": 5.8399}}) == 5.8
+        assert acp_mod._context_percent_v3(
+            {"contextUsage": {"usagePercentage": True}}) is None
+        assert acp_mod._context_percent_v3(
+            {"contextUsage": {"usagePercentage": -1}}) is None
+        assert acp_mod._context_percent_v3(
+            {"contextUsage": {"usagePercentage": 101}}) is None
+        assert acp_mod._context_percent_v3({"contextUsage": {}}) is None
+        assert acp_mod._context_percent_v3({}) is None
+
+    def test_note_context_v3_noop_when_supervisor_v3_none(self, monkeypatch):
+        """_note_context_v3 must never raise when _supervisor_v3 is None —
+        the same fail-safe floor _note_context itself relies on."""
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", None)
+
+        acp_mod._note_context_v3("sess_whatever0000-0000-0000-00000000001", 10.0)
+
+    def test_new_frame_types_registered_in_server_types(self):
+        """SC-3 point 4: steer_status/title/agent_error must be registered in
+        SERVER_TYPES, or envelope() silently refuses them before the client
+        ever sees them (review finding, this plan's own Phase 3)."""
+        from power_atlas import acp as acp_mod
+        for type_ in ("steer_status", "title", "agent_error"):
+            assert type_ in acp_mod.SERVER_TYPES
+            assert acp_mod.envelope(type_)["type"] == type_

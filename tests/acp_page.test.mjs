@@ -10166,6 +10166,132 @@ check("test_engine_v3_workspaces_api_url — picker fetches /api/acp-v3/workspac
     `picker fetch must not use /api/acp/workspaces (v2 path) when engine="v3"; fetched: ${JSON.stringify(urls)}`);
 });
 
+// --------------------------------------------------------- Phase 3: SC-3 session_info_update client rendering --
+
+check("steer_status queued shows transient text near composer", (tpl) => {
+  const { page, live } = connected(tpl);
+  const status = page.el("acpSteerStatus");
+  assertEqual(status.hidden, true, "steer status should start hidden");
+  page.deliver({ type: "steer_status", sessionId: live,
+                 payload: { status: "steering_queued", messageId: "m1",
+                            content: "look at foo.py" } });
+  assertEqual(status.hidden, false, "steer status should be shown once queued");
+  assert(status.textContent.includes("look at foo.py"),
+    `steer status text should include the steered content, got: ${status.textContent}`);
+});
+
+check("steer_status injected then auto-clears after a timer", (tpl) => {
+  const { page, live } = connected(tpl);
+  const status = page.el("acpSteerStatus");
+  page.deliver({ type: "steer_status", sessionId: live,
+                 payload: { status: "steering_injected", messageId: "m1",
+                            content: "look at foo.py" } });
+  assertEqual(status.hidden, false, "steer status should be shown once injected");
+  assert(status.textContent.length > 0, "steer status text should be non-empty when injected");
+  const before = page.timers.length;
+  assert(before > 0, "steering_injected should schedule a clear timer");
+  page.runTimers();
+  assertEqual(status.hidden, true, "steer status should hide itself once the clear timer fires");
+  assertEqual(status.textContent, "", "steer status text should be cleared once the timer fires");
+});
+
+check("steer_status cleared hides the status line immediately", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "steer_status", sessionId: live,
+                 payload: { status: "steering_queued", content: "x" } });
+  const status = page.el("acpSteerStatus");
+  assertEqual(status.hidden, false, "sanity check — status should be visible after steering_queued");
+  page.deliver({ type: "steer_status", sessionId: live,
+                 payload: { status: "steering_cleared" } });
+  assertEqual(status.hidden, true, "steer status should hide immediately on steering_cleared");
+});
+
+check("steer_status frame during history replay does not touch the DOM", (tpl) => {
+  const { page, live } = connected(tpl);
+  const status = page.el("acpSteerStatus");
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "steer_status", sessionId: live,
+        payload: { status: "steering_injected", content: "stale" } },
+    ] },
+  });
+  // A replayed steer_status describes a turn long over, with no live timer to
+  // clear it afterward — the handler must be a no-op during replay.
+  assertEqual(status.hidden, true,
+    "a replayed steer_status must not surface a stale composer status");
+});
+
+check("steer_status frame with agent-controlled content uses textContent, never innerHTML", (tpl) => {
+  const { page, live } = connected(tpl);
+  const malicious = "<img src=x onerror=\"window._steer_xss=true\">";
+  page.deliver({ type: "steer_status", sessionId: live,
+                 payload: { status: "steering_queued", content: malicious } });
+  const status = page.el("acpSteerStatus");
+  // Reaching here at all means no innerHTML sink fired (HTML_SINK throws on
+  // any access). textContent returns the literal string, unparsed.
+  assert(status.textContent.includes(malicious),
+    `steer status should render the content as literal text, got: ${status.textContent}`);
+  assert(!page.sandbox._steer_xss, "onerror handler must not fire — steer status used innerHTML");
+});
+
+check("title frame sets the document title from focus_update", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "title", sessionId: live, payload: { title: "Fix the login bug" } });
+  assert(String(page.sandbox.document.title).includes("Fix the login bug"),
+    `document.title should include the session title, got: ${page.sandbox.document.title}`);
+});
+
+check("title frame with empty title is a no-op", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.sandbox.document.title = "unchanged";
+  page.deliver({ type: "title", sessionId: live, payload: { title: "" } });
+  assertEqual(page.sandbox.document.title, "unchanged",
+    "an empty title payload must not overwrite the current document title");
+});
+
+check("title frame renders during history replay (converges on the latest)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "title", sessionId: live, payload: { title: "first title" } },
+      { type: "title", sessionId: live, payload: { title: "second title" } },
+    ] },
+  });
+  assert(String(page.sandbox.document.title).includes("second title"),
+    `document.title should reflect the last replayed title, got: ${page.sandbox.document.title}`);
+});
+
+check("agent_error frame renders inline in the transcript like a failed tool call", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({ type: "agent_error", sessionId: live,
+                 payload: { message: "MCP server requires authorization.",
+                            errorType: "mcp_connection_error" } });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-error");
+  assertEqual(rows.length, 1, "agent_error should append exactly one .acp-msg-error row");
+  const body = rows[0].querySelector(".acp-msg-body");
+  assert(body !== null, ".acp-msg-error row should contain .acp-msg-body");
+  assert(body.textContent.includes("MCP server requires authorization."),
+    `agent_error row should contain the error message, got: ${body.textContent}`);
+  assert(body.textContent.includes("mcp_connection_error"),
+    `agent_error row should surface the errorType, got: ${body.textContent}`);
+});
+
+check("agent_error frame with agent-controlled message uses textContent, never innerHTML", (tpl) => {
+  const { page, live } = connected(tpl);
+  const malicious = "<img src=x onerror=\"window._agent_error_xss=true\">";
+  page.deliver({ type: "agent_error", sessionId: live,
+                 payload: { message: malicious, errorType: "mcp_connection_error" } });
+  // Reaching here at all means no innerHTML sink fired (HTML_SINK throws on
+  // any access) — the harness would have thrown before this line otherwise.
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-error");
+  const body = rows[rows.length - 1].querySelector(".acp-msg-body");
+  assert(body.textContent.includes(malicious),
+    `agent_error should render the message as literal text, got: ${body.textContent}`);
+  assert(!page.sandbox._agent_error_xss, "onerror handler must not fire — agent_error used innerHTML");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

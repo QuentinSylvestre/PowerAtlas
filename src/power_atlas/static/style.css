@@ -1107,6 +1107,9 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 
 .acp-composer { display: flex; flex-direction: column; gap: 8px; flex-shrink: 0; position: relative; }
 .acp-composer-row { display: flex; gap: 8px; align-items: stretch; position: relative; }
+/* v3's `steer_status` echo (SC-3) — transient text near the composer, styled
+   like `.acp-picker-note`'s small transient status line. */
+.acp-steer-status { min-height: 15px; font-size: 11px; line-height: 1.35; color: var(--text-muted); }
 /* Wraps rather than scrolls: at most four chips fit in a prompt and a wrapped
    second line is cheaper to read than a horizontal scroller holding two. */
 .acp-tray { display: flex; flex-wrap: wrap; gap: 6px; }
