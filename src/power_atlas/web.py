@@ -2803,8 +2803,15 @@ def _acp_delete_session(session_id: str) -> tuple[str, str]:
     a single directory tree under `~/.kiro/sessions/<hash>/`, not up to five
     sibling files under `KIRO_SESSION_DIR` — so it routes to
     `data_kiro_v3.delete_session`, which implements its own equivalent of the
-    rename-staging design documented below directly against that directory.
-    Everything from here down is v2's original implementation, unchanged.
+    rename-staging design documented below directly against that directory,
+    and reports its own three-way outcome (`None`/`False`/`True`) directly —
+    this function no longer runs a separate `_find_v3_session_dir` pre-check
+    to distinguish "not found" from "in use" (2026-09-09 fix: that pre-check
+    plus the delete itself was two separate scans of the same directory,
+    a TOCTOU window where a concurrent change between them could produce a
+    misleading result; `delete_session`'s own return value is now the single
+    source of truth for which of the three outcomes occurred). Everything
+    from here down is v2's original implementation, unchanged.
 
     **Rename first, unlink second, and that ordering is the correctness
     argument rather than a style.** A session is up to five separate paths, and
@@ -2837,20 +2844,27 @@ def _acp_delete_session(session_id: str) -> tuple[str, str]:
     """
     if session_id.startswith("sess_"):
         from . import data_kiro_v3
-        if data_kiro_v3._find_v3_session_dir(session_id) is None:
+        result = data_kiro_v3.delete_session(session_id)
+        if result is None:
             return ("not_found",
                     "Nothing left to delete — the store has no files for this "
                     "session.")
-        if data_kiro_v3.delete_session(session_id):
-            return ("", "")
-        # data_kiro_v3.delete_session already rolled back internally (rename
-        # staging, mirroring the v2 design above) on any failure past this
-        # point, so the session's directory is exactly as it was — the
-        # existence check just above ruled out "not_found", which leaves a
-        # locked file inside the directory as the only realistic cause.
-        return ("in_use",
-                "A process still has this session's files open. Close it "
-                "there, then try again.")
+        if result is False:
+            # The staging rename itself was refused (most likely a locked
+            # file inside the directory) — nothing on disk changed, the
+            # directory is exactly as it was.
+            return ("in_use",
+                    "A process still has this session's files open. Close it "
+                    "there, then try again.")
+        # result is True: the delete is committed. This also covers the case
+        # where the staging rename succeeded but a later rmtree only
+        # partially completed — data_kiro_v3.delete_session logs that
+        # degradation itself and still reports success here, the same
+        # accepted-degradation philosophy this function's own docstring
+        # describes for v2 below: a partial result is disclosed via a log
+        # line an operator can grep for, never hidden behind a claim that
+        # nothing happened.
+        return ("", "")
 
     paths = _acp_session_paths(session_id)
     if not paths:
@@ -3152,11 +3166,24 @@ async def api_acp_delete_sessions(request: Request):
         all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
         # Batch delete, D9: re-snapshot `held` on the event loop before each
         # thread hop, because `_supervisor.sessions` is loop-owned and unlocked.
+        #
+        # Cross-engine held-set union (2026-09-09 fix, Senior engineer
+        # finding): `all_ids` here is v2-only (this call omits `include_v3`),
+        # but the held set is still unioned with `_supervisor_v3.sessions`
+        # for symmetry with the v3 endpoint's identical fix below — a v2 id
+        # can never collide with a v3-held id in practice (id shapes never
+        # overlap), so this union is a no-op for THIS endpoint's own
+        # behavior today, but keeps both endpoints' held-set construction
+        # identical rather than silently diverging, and protects against a
+        # future call site that widens `all_ids` to include v3 ids without
+        # remembering to widen this too.
         deleted_total: list[str] = []
         failed_total: list[dict] = []
         while all_ids:
             batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            held = frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
+            sv3 = getattr(acp, "_supervisor_v3", None)
+            held = (frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
+                    | frozenset(sv3.sessions if sv3 is not None else ()))
             result = await asyncio.to_thread(_acp_delete_many, batch, held)
             deleted_total.extend(result["deleted"])
             failed_total.extend(result["failed"])
@@ -3289,11 +3316,22 @@ async def api_acp_v3_delete_sessions(request: Request):
                 {"error": "'cwd' must be a non-empty string."}, status_code=400)
         all_ids = await asyncio.to_thread(
             _acp_sessions_for_workspace, cwd, include_v3=True)
+        # Cross-engine held-set union (2026-09-09 fix, Senior engineer
+        # finding, High): `_acp_sessions_for_workspace(cwd, include_v3=True)`
+        # enumerates BOTH v2 and v3 session ids for this workspace (the v2
+        # side is unconditional, not gated by include_v3 — see that
+        # function's own docstring), but `held` was only ever snapshotted
+        # from `sv3.sessions` — so a v2 session open right now in `/acp`'s
+        # own supervisor (`acp._supervisor.sessions`) was never flagged as
+        # held and could be silently deleted via this v3 endpoint's
+        # workspace-delete for the same folder. Unioned with the v2
+        # supervisor's own held set closes that gap.
         deleted_total: list[str] = []
         failed_total: list[dict] = []
         while all_ids:
             batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+            held = ((frozenset(sv3.sessions) if sv3 is not None else frozenset())
+                    | frozenset(acp._supervisor.sessions))
             result = await asyncio.to_thread(_acp_delete_many, batch, held)
             deleted_total.extend(result["deleted"])
             failed_total.extend(result["failed"])

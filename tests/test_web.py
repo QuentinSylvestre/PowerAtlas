@@ -17032,6 +17032,12 @@ class TestAcpDeleteSessionV3Dispatch:
 
     def test_a_v3_locked_file_produces_an_in_use_refusal_with_no_partial_delete(
             self, acp_store_dir_v3, monkeypatch):
+        """`data_kiro_v3.delete_session` returning `False` means the initial
+        staging rename itself was refused -- nothing on disk changed. (A
+        `True` result, by contrast, now means "committed," even covering a
+        partially-completed rmtree -- see TestDeleteSessionV3 in
+        test_data_kiro_v3.py for that scenario; `_acp_delete_session` no
+        longer treats a post-rename failure as "in_use," 2026-09-09 fix.)"""
         from power_atlas import data_kiro_v3 as dv3_mod
         from power_atlas.web import _acp_delete_session
 
@@ -17048,6 +17054,33 @@ class TestAcpDeleteSessionV3Dispatch:
         # The real delete_session was bypassed here (mocked to always fail),
         # so nothing on disk should have been touched at all.
         assert sess_dir.is_dir()
+
+    def test_a_v3_id_does_not_pre_check_find_v3_session_dir_separately(
+            self, acp_store_dir_v3, monkeypatch):
+        """2026-09-09 fix (Security auditor + Senior engineer finding,
+        Low/TOCTOU): `_acp_delete_session` used to call
+        `data_kiro_v3._find_v3_session_dir` as a separate pre-check before
+        calling `delete_session`, purely to distinguish "not found" from "in
+        use" -- two scans of the same directory, with a window in between
+        where a concurrent change could produce a misleading result. The
+        three-way `None`/`False`/`True` return from `delete_session` itself
+        is now the single source of truth, so `_acp_delete_session` must
+        never reach into that private helper directly."""
+        from power_atlas import data_kiro_v3 as dv3_mod
+        from power_atlas.web import _acp_delete_session
+
+        sid = "sess_dispatch-0004"
+        acp_store_dir_v3(sid)
+
+        def _must_not_be_called(*_a, **_kw):
+            raise AssertionError(
+                "_find_v3_session_dir called directly by _acp_delete_session "
+                "-- the separate pre-check should be gone")
+        monkeypatch.setattr(dv3_mod, "_find_v3_session_dir", _must_not_be_called)
+        monkeypatch.setattr(dv3_mod, "delete_session", lambda s: True)
+
+        code, message = _acp_delete_session(sid)
+        assert (code, message) == ("", "")
 
     def test_a_v2_id_still_uses_the_original_v2_path(self, acp_store_dir,
                                                       monkeypatch):
@@ -17244,6 +17277,45 @@ class TestApiAcpV3DeleteSessionsEndpoint:
         assert not paths1[-1].exists()
         assert not paths2[-1].exists()
 
+    def test_workspace_delete_refuses_a_v2_session_open_in_the_other_engine(
+            self, client, monkeypatch, acp_store_dir, acp_store_dir_v3):
+        """Cross-engine safety (2026-09-09 fix, Senior engineer finding,
+        High): `_acp_sessions_for_workspace(cwd, include_v3=True)`
+        enumerates BOTH v2 and v3 sessions for a workspace unconditionally
+        (the v2 side of that function is not gated by `include_v3` — see its
+        own docstring), so a v2 session open right now in `/acp`'s own
+        supervisor must still be refused when deleting "everything in this
+        workspace" through the V3 endpoint — not silently destroyed just
+        because the held-set snapshot here used to look only at
+        `sv3.sessions`."""
+        from power_atlas import acp as acp_mod
+        self._sv3(monkeypatch)
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+
+        target_cwd = r"C:\dev\cross-engine-ws"
+        v2_sid = "sess-v2-open-elsewhere"
+        v2_paths = acp_store_dir(v2_sid, cwd=target_cwd)
+        v3_sid = "sess_v3-idle-crossengine"
+        v3_paths = acp_store_dir_v3(v3_sid, cwd=target_cwd)
+
+        # The v2 session is open in the OTHER engine's supervisor, not
+        # sv3's — exactly the case the pre-fix held-set snapshot missed.
+        acp_mod._supervisor.sessions[v2_sid] = {"cwd": target_cwd}
+        try:
+            res = client.post(self._PATH, json={"cwd": target_cwd})
+        finally:
+            acp_mod._supervisor.sessions.pop(v2_sid, None)
+
+        body = res.json()
+        assert v2_sid not in body["deleted"]
+        assert any(f["id"] == v2_sid and f["code"] == "held"
+                   for f in body["failed"])
+        assert [p for p in v2_paths if p.exists()] != []
+        # The v3 session, held nowhere, still deletes normally through the
+        # same request — this is a targeted refusal, not a blanket one.
+        assert v3_sid in body["deleted"]
+        assert not v3_paths[-1].exists()
+
 
 class TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace:
     """Invariant 1: the v2 endpoint's workspace-delete output must be
@@ -17273,6 +17345,39 @@ class TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace:
         # The v3 session is completely untouched — the v2 endpoint never
         # even learns it exists.
         assert v3_paths[-1].exists()
+
+    def test_v2_endpoint_workspace_delete_is_unaffected_by_a_v3_session_held_elsewhere(
+            self, client, acp_store_dir, monkeypatch):
+        """Symmetric coverage for the cross-engine held-set union fix
+        (2026-09-09). `api_acp_delete_sessions`'s cwd-delete path now unions
+        `acp._supervisor.sessions` with `_supervisor_v3.sessions` before
+        calling `_acp_delete_many` — for consistency with the v3 endpoint's
+        identical fix, not because a v3 id can reach this endpoint's own
+        `all_ids` (it can't: `_acp_sessions_for_workspace(cwd)` here omits
+        `include_v3`, so `all_ids` is v2-only, structurally, per Invariant
+        1). This test proves the union is a pure addition to the held-set,
+        not a source of false positives: an unrelated v3 session held open
+        elsewhere must not cause the v2 endpoint to wrongly refuse an
+        unrelated v2 session in a *different* workspace it's actually
+        asked to delete."""
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        sv3 = acp_mod._SupervisorV3()
+        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+
+        target_cwd = "C:\\dev\\mixed-regression-2"
+        v2_sid = "sess-v2-alone"
+        v2_paths = acp_store_dir(v2_sid, cwd=target_cwd)
+        # A v3 session held open elsewhere -- a different workspace, never
+        # enumerated by this endpoint's v2-only cwd scan either way.
+        sv3.sessions["sess_v3-open-elsewhere"] = {"cwd": "C:\\dev\\other-ws"}
+
+        res = client.post(self._PATH, json={"cwd": target_cwd})
+
+        body = res.json()
+        assert body["deleted"] == [v2_sid]
+        assert body["failed"] == []
+        assert [p for p in v2_paths if p.exists()] == []
 
 
 class TestMobileUaDetection:

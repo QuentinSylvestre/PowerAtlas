@@ -36,18 +36,36 @@ _V3_EXCLUDED_NAMES: frozenset[str] = frozenset({"cli"})
 
 # Staging suffix a session directory is renamed to before it is torn down
 # (delete_session, below) -- mirrors web.py's _ACP_DELETE_STAGING for v2
-# sessions. A directory renamed to this name matches none of this module's
-# own hash-dir/sess_<uuid> scan patterns, so a half-finished delete can never
-# be picked back up as a live session by any reader.
+# sessions. A directory renamed to this name matches neither
+# _find_v3_session_dir's nor _find_v3_session_path's exact-name sess_<uuid>
+# lookup, so neither of those two readers can pick a half-finished delete
+# back up by session_id. That is NOT enough on its own, though:
+# _cwd_to_sessions()'s scan (which load_sessions() and discover_workspaces()
+# both read) discovers sessions by CONTENT -- any directory holding a
+# parseable session.json -- not by name, and a staged directory's
+# session.json is still readable for as long as rmtree hasn't reached it yet
+# (or failed before reaching it, or the process crashed between the rename
+# and the rmtree). Left unguarded, that scan would re-surface a
+# half-finished delete under its ORIGINAL, clean session_id (read from
+# session.json's own "id" field) as a phantom listing row that can never be
+# opened, resumed, or deleted again -- confirmed real, fixed 2026-09-09 by
+# having _cwd_to_sessions() skip any directory whose name contains this
+# marker, explicitly, by name (see its Phase 1 / Phase 2 scan loops below,
+# and refresh_stale_entries_for_cwd's `current_sess_dirs` comprehension,
+# which needs the identical skip or a staged dir would register as a
+# permanently "new" directory and force a stale-reload on every call).
 _V3_DELETE_STAGING = ".pa-deleting"
 
 # ERROR_SHARING_VIOLATION. Same OS/semantics web.py's _ACP_SHARING_VIOLATION
 # documents: a second open handle on a file inside the directory refuses both
 # os.replace and the unlinks shutil.rmtree performs with winerror=32 on
-# Windows. Not currently branched on by name (delete_session treats any
-# OSError from the rename or the rmtree the same way -- refuse, roll back)
-# but named here for the same reason web.py names it: so a reader does not
-# have to rediscover what the magic number means.
+# Windows. Not currently branched on by name -- delete_session refuses and
+# changes nothing only when the *rename* itself fails this way; an rmtree
+# failure after a successful rename is a different, accepted outcome (see
+# delete_session's own docstring: the delete is already committed by then,
+# so this is logged and the leftover files remain under the staged name,
+# never rolled back). Named here for the same reason web.py names it: so a
+# reader does not have to rediscover what the magic number means.
 _V3_SHARING_VIOLATION = 32
 
 
@@ -155,6 +173,11 @@ def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tupl
                 for sess_dir in hash_dir.iterdir():
                     if not sess_dir.is_dir():
                         continue
+                    if _V3_DELETE_STAGING in sess_dir.name:
+                        # A half-finished delete's staged directory -- never
+                        # tracked, so it can never register as a "changed"
+                        # session.json and force a rebuild on its own.
+                        continue
                     session_json = sess_dir / "session.json"
                     try:
                         new_json_mtimes[f"{hash_dir.name}/{sess_dir.name}"] = \
@@ -189,6 +212,15 @@ def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tupl
             try:
                 for sess_dir in hash_dir.iterdir():
                     if not sess_dir.is_dir():
+                        continue
+                    if _V3_DELETE_STAGING in sess_dir.name:
+                        # A half-finished delete's staged directory. Its
+                        # session.json (if rmtree hasn't reached it yet) is
+                        # still readable and carries the session's ORIGINAL
+                        # clean id -- without this skip it would re-enter
+                        # new_index under that id, an unreachable phantom row
+                        # (its on-disk directory name no longer matches what
+                        # _find_v3_session_dir would look for).
                         continue
                     session_json = sess_dir / "session.json"
                     try:
@@ -410,12 +442,29 @@ def _find_v3_session_path(session_id: str) -> Path | None:
     return found_path
 
 
-def delete_session(session_id: str) -> bool:
+def delete_session(session_id: str) -> bool | None:
     """Delete a v3 session's entire directory tree from disk.
 
-    Returns True on success, False if the session's directory could not be
-    found, or if it was found but could not be removed (most likely a file
-    inside it is held open by another process).
+    Three-way outcome, matching this module's own existing not-found
+    sentinel convention rather than introducing a new outcome type:
+    `_find_v3_session_dir`, `_find_v3_session_path`, `find_session_workspace`
+    and `hash_dir_for_cwd` all return `None` for "no such thing exists," so
+    this function does too, distinct from the `True`/`False` it uses for the
+    two outcomes that assume the session *was* found.
+
+    - Returns ``None`` if `session_id` fails the path-traversal guard, or if
+      no directory exists for it — a caller must check with `is None`
+      (never bare truthiness — `None` and `False` are both falsy, and
+      conflating them is exactly the ambiguity this three-way return exists
+      to remove) to tell "nothing to delete" from "found but refused."
+    - Returns ``False`` only when the directory was found but the delete
+      could not even be *started* — the initial staging rename itself was
+      refused (most likely a file inside it is held open by another
+      process). Nothing on disk changed in this case: a refused rename is a
+      no-op.
+    - Returns ``True`` once the delete is **committed** — see below for
+      what that means when the staging rename succeeds but the following
+      `rmtree` does not fully complete.
 
     First line is a path-traversal guard — this file has no such guard
     anywhere else today (`_find_v3_session_dir`/`find_session_workspace` join
@@ -452,26 +501,41 @@ def delete_session(session_id: str) -> bool:
     `_acp_delete_session` (`web.py`) to survive a Windows sharing violation
     (winerror 32, measured there): the whole directory is renamed first, and
     only once that succeeds is it torn down with `shutil.rmtree`. A refused
-    rename changes nothing — the directory is exactly as it was. A `rmtree`
-    failure *after* a successful rename is rolled back by renaming the staged
-    directory back to its original name, so a failed delete never leaves the
-    session half-gone; if even that rollback fails (the same "one degradation
-    it accepts" `_acp_delete_session` documents for v2), the session is gone
-    from every reader's point of view but its bytes remain on disk — logged
-    loudly here for the same reason `_acp_delete_session` logs it loudly
-    there: an error naming a path the caller cannot act on would be worse
-    than a log line an operator can grep for.
+    rename changes nothing — the directory is exactly as it was, and this is
+    the ONLY case that returns `False`.
+
+    **Once the rename succeeds, the delete is committed — a later `rmtree`
+    failure is never rolled back (fixed 2026-09-09; see below for why the
+    original design was unsound).** The previous version of this function
+    renamed the staged directory back to its original name when `rmtree`
+    raised, and reported `False` ("in_use," implying nothing changed). That
+    was wrong: `shutil.rmtree` walks the directory and deletes entries as it
+    goes, so a failure partway through (a locked file positioned such that
+    siblings are removed before the walk reaches it) means real files are
+    already gone by the time the exception is caught — renaming the
+    directory back restores only its NAME, not the files already deleted
+    under it. A caller told "nothing changed" would then be looking at a
+    session that is silently, permanently missing some of its data. Once the
+    staging rename has succeeded, there is no action left that both (a)
+    reports "nothing changed" and (b) is actually true — so this function
+    stops trying to claim that, and instead treats the delete as committed:
+    a `rmtree` failure at this point is logged (naming the leftover staged
+    path an operator can inspect or manually clear) and `True` is returned.
+    This matches v2's own `_acp_delete_session` philosophy exactly (see its
+    docstring, `web.py`): "the one degradation it accepts" — a partial
+    result is disclosed via a log line, never hidden behind a claim that
+    nothing happened.
 
     Invalidates `_session_path_cache` for `session_id` on success, so a stale
     cached `messages.jsonl` path can never be served for a session whose
     directory is already gone.
     """
     if not _SESSION_ID_RE.fullmatch(session_id):
-        return False
+        return None
 
     sess_dir = _find_v3_session_dir(session_id)
     if sess_dir is None:
-        return False
+        return None
 
     token = secrets.token_hex(4)
     staged = sess_dir.with_name(f"{sess_dir.name}{_V3_DELETE_STAGING}-{token}")
@@ -482,21 +546,18 @@ def delete_session(session_id: str) -> bool:
                     session_id, exc)
         return False
 
+    # From here on the delete is committed -- see the docstring above. A
+    # rmtree failure is logged, not rolled back: rolling back would only
+    # rename the directory back, which cannot undo files rmtree already
+    # deleted before failing.
     try:
         shutil.rmtree(staged)
-    except (PermissionError, OSError) as exc:
-        try:
-            os.replace(staged, sess_dir)
-        except OSError:
-            log.exception(
-                "ACP v3 delete: could not restore %s to %s after a failed "
-                "rmtree — session=%s is gone from every reader's point of "
-                "view but its bytes remain on disk at the staged path",
-                staged, sess_dir, session_id)
-        else:
-            log.warning("ACP v3 delete: rmtree failed for session=%s: %s",
-                        session_id, exc)
-        return False
+    except OSError as exc:
+        log.warning(
+            "ACP v3 delete: rmtree failed partway through for session=%s "
+            "-- the delete is still treated as committed (the staging "
+            "rename already succeeded) and some files may remain on disk, "
+            "unreachable, at %s: %s", session_id, staged, exc)
 
     _session_path_cache.pop(session_id, None)
     return True
@@ -677,10 +738,17 @@ def refresh_stale_entries_for_cwd(
             if p.parent.parent == hash_dir:
                 tracked_sess_dirs.add(p.parent.name)
 
-        # Current sess_* dirs in the hash dir (all cwds combined)
+        # Current sess_* dirs in the hash dir (all cwds combined). Excludes
+        # a half-finished delete's staged directory -- load_sessions() never
+        # tracks one (see _cwd_to_sessions()'s own skip), so without this
+        # exclusion here too it would never make it into tracked_sess_dirs
+        # either, land in new_dirs on every single call, and force a stale
+        # reload for this workspace forever until someone manually removes
+        # the orphaned directory.
         current_sess_dirs = {
             e.name for e in hash_dir.iterdir()
             if e.is_dir() and e.name.startswith("sess_")
+            and _V3_DELETE_STAGING not in e.name
         }
 
         # A previously tracked session was deleted

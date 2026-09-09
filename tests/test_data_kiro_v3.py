@@ -1040,7 +1040,20 @@ class TestFindV3SessionDir:
 class TestDeleteSessionV3:
     """`delete_session` — whole-directory removal for a v3 session, with the
     same rename-to-staging-then-unlink survival trick v2's
-    `_acp_delete_session` (web.py) uses for a Windows sharing violation."""
+    `_acp_delete_session` (web.py) uses for a Windows sharing violation.
+
+    Three-way outcome (2026-09-09 fix): `None` for "no such session" (a
+    malformed id or a well-formed one with no matching directory — this
+    module's own not-found sentinel, shared with `_find_v3_session_dir` and
+    friends), `False` only when the directory was found but the initial
+    staging rename itself was refused (nothing on disk changed), `True` once
+    the rename has succeeded and the delete is committed — including when a
+    later `rmtree` only partially completes (see
+    `test_an_rmtree_failure_after_a_successful_rename_is_treated_as_committed`
+    below). Callers must check with `is None` / `is False`, never bare
+    truthiness — `None` and `False` are both falsy, and collapsing them back
+    together is exactly the ambiguity this three-way return exists to
+    remove."""
 
     def _make_full_session(self, root, hash_name, session_id, cwd,
                             with_sub_executions=False):
@@ -1082,7 +1095,12 @@ class TestDeleteSessionV3:
     def test_rejects_path_traversal_as_its_first_action(self, tmp_path, monkeypatch):
         """The guard must run — and refuse — before any path is built from
         the id, mirroring the existing _stored_session_cwd_v3/_lock_holder_v3
-        test pattern."""
+        test pattern. Returns None (this module's own not-found sentinel,
+        shared with `_find_v3_session_dir`/`_find_v3_session_path`/
+        `find_session_workspace`/`hash_dir_for_cwd`), not False — a
+        malformed id is "nothing to delete," the same outcome as a
+        well-formed id with no matching directory, not "found but
+        refused"."""
         root = tmp_path / "sessions"
         monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
 
@@ -1091,17 +1109,19 @@ class TestDeleteSessionV3:
 
         monkeypatch.setattr(dv3, "_find_v3_session_dir", _must_not_be_called)
 
-        assert dv3.delete_session("../../etc/passwd") is False
-        assert dv3.delete_session("a/b") is False
-        assert dv3.delete_session("") is False
+        assert dv3.delete_session("../../etc/passwd") is None
+        assert dv3.delete_session("a/b") is None
+        assert dv3.delete_session("") is None
 
-    def test_returns_false_for_a_session_that_does_not_exist(self, tmp_path, monkeypatch):
+    def test_returns_none_for_a_session_that_does_not_exist(self, tmp_path, monkeypatch):
+        """None, not False — matches this module's own not-found sentinel
+        convention (see the class docstring's three-way outcome note)."""
         root = tmp_path / "sessions"
         root.mkdir()
         monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
 
         result = dv3.delete_session("sess_deadbeef-0000-0000-0000-000000000000")
-        assert result is False
+        assert result is None
 
     def test_invalidates_the_session_path_cache_on_success(self, tmp_path, monkeypatch):
         root = tmp_path / "sessions"
@@ -1121,33 +1141,69 @@ class TestDeleteSessionV3:
         # that is now gone.
         assert dv3._find_v3_session_path(session_id) is None
 
-    def test_a_locked_file_produces_a_clean_refusal_with_no_partial_deletion(
-            self, tmp_path, monkeypatch):
-        """Simulates a file inside the session directory being held open by
-        another process: shutil.rmtree fails after the directory has already
-        been renamed to its staging name. The rename must be rolled back —
-        the session ends up exactly as it started, not half-deleted."""
+    def test_an_rmtree_failure_after_a_successful_rename_is_treated_as_committed(
+            self, tmp_path, monkeypatch, caplog):
+        """2026-09-09 fix (Security auditor finding, High): the old version
+        of this test mocked `shutil.rmtree` to raise immediately, without
+        touching the filesystem at all — it could never observe (or catch a
+        regression in) the actual partial-completion scenario it claimed to
+        cover. A real `shutil.rmtree` walking a real directory tree deletes
+        entries as it goes; a lock positioned so that siblings are removed
+        before the walk reaches it means real files are already gone by the
+        time the exception is caught. Renaming the directory back (the old
+        behavior) only restores the NAME, not those already-deleted files —
+        so the old "in_use, nothing changed" refusal was actively
+        misleading. This test uses a fake `rmtree` that deletes two of the
+        session's real files for real, then raises — a deterministic stand-in
+        for "a lock positioned deep in the walk," since relying on
+        `os.scandir`'s actual (arbitrary, platform-dependent) ordering to
+        reproduce partial completion would be flaky. It then asserts the
+        function's new, honest contract: the delete is reported as
+        COMMITTED (`True`), the directory survives only under its staged,
+        unreachable name with the files the fake rmtree reached already
+        gone, the cache is invalidated, and a warning names the leftover
+        staged path — disclosed, not hidden."""
         root = tmp_path / "sessions"
         monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
         session_id = "sess_c0ffee00-0000-0000-0000-000000000003"
-        sess_dir = self._make_full_session(root, "hashdir1", session_id, "C:\\dev\\proj")
+        sess_dir = self._make_full_session(
+            root, "hashdir1", session_id, "C:\\dev\\proj", with_sub_executions=True)
 
-        def _boom(_path):
+        # Populate the path cache the way a normal read would, so the
+        # "invalidated on success" assertion below is not vacuous.
+        assert dv3._find_v3_session_path(session_id) is not None
+        assert session_id in dv3._session_path_cache
+
+        def _partial_rmtree(path, *_a, **_kw):
+            p = Path(path)
+            (p / "session.json").unlink()
+            (p / "publish.cursor").unlink()
             err = OSError("in use")
             err.winerror = 32
             raise err
 
-        monkeypatch.setattr(dv3.shutil, "rmtree", _boom)
+        monkeypatch.setattr(dv3.shutil, "rmtree", _partial_rmtree)
 
-        result = dv3.delete_session(session_id)
+        with caplog.at_level("WARNING", logger="power_atlas.data_kiro_v3"):
+            result = dv3.delete_session(session_id)
 
-        assert result is False
-        # Rolled back to its original name — not left staged, not gone.
-        assert sess_dir.is_dir()
-        assert (sess_dir / "session.json").is_file()
-        assert (sess_dir / "messages.jsonl").is_file()
-        leftovers = list((root / "hashdir1").glob(f"{session_id}{dv3._V3_DELETE_STAGING}*"))
-        assert leftovers == []
+        assert result is True
+        # Gone under its ORIGINAL name -- no rollback happened.
+        assert not sess_dir.exists()
+        # Still present, under the staged name, with exactly the files the
+        # fake rmtree reached already removed and the rest untouched --
+        # the accepted, disclosed degradation, not a rollback.
+        staged_dirs = list(
+            (root / "hashdir1").glob(f"{session_id}{dv3._V3_DELETE_STAGING}*"))
+        assert len(staged_dirs) == 1
+        staged = staged_dirs[0]
+        assert not (staged / "session.json").exists()
+        assert not (staged / "publish.cursor").exists()
+        assert (staged / "messages.jsonl").exists()
+        assert (staged / "sub-executions" / "task-abc123.jsonl").exists()
+        assert session_id not in dv3._session_path_cache
+        assert any("rmtree failed" in r.getMessage() for r in caplog.records)
+        assert any(session_id in r.getMessage() for r in caplog.records)
 
     def test_a_refused_rename_leaves_the_session_untouched(self, tmp_path, monkeypatch):
         """If even the initial rename is refused (e.g. the same sharing
@@ -1175,3 +1231,38 @@ class TestDeleteSessionV3:
         assert result is False
         assert sess_dir.is_dir()
         assert (sess_dir / "session.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# TestLoadSessionsSkipsStagedDeletes (Phase 5 fix, SC-2 — Security auditor
+# finding, Medium)
+# ---------------------------------------------------------------------------
+
+class TestLoadSessionsSkipsStagedDeletes:
+    """A directory renamed mid-delete (its name contains `_V3_DELETE_STAGING`)
+    must never resurface in `load_sessions()`'s content-based scan under its
+    original, clean session_id. Without this, a crash between the staging
+    rename and `rmtree` (or a `rmtree` that only partially completes) leaves
+    a `session.json` that is still perfectly readable, under a directory
+    name `_find_v3_session_dir` can no longer match by the clean id — a
+    permanent, invisible-except-in-listings phantom row that can never be
+    opened, resumed, or deleted again."""
+
+    def test_a_staged_directory_does_not_appear_in_load_sessions(
+            self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        staged_dir_name = f"sess_phantom{dv3._V3_DELETE_STAGING}-ab12cd34"
+        # The clean, original session_id is still exactly what session.json
+        # itself claims -- this is precisely what would resurrect it under
+        # a name delete_session/_find_v3_session_dir can no longer match.
+        _make_session(
+            root, "h1", staged_dir_name, "C:\\MyProject",
+            session_id="sess_phantom",
+        )
+
+        sessions, _ = dv3.load_sessions("C:\\MyProject")
+
+        assert sessions == []
