@@ -10445,6 +10445,73 @@ check("permission_request frame renders during history replay (still answerable 
     "transient echo, a mid-turn reload must leave the request answerable");
 });
 
+check("permission_resolved frame disables the matching permission-request row's buttons (review fix)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "permission_request", sessionId: live,
+    payload: {
+      requestId: 6, sessionId: live,
+      toolCall: { title: "Which approach?" },
+      options: [{ optionId: "opt-0", name: "Only option", kind: "allow_once" }],
+    },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  const row = rows[rows.length - 1];
+  const button = row.querySelector(".acp-permission-option");
+  assertEqual(button.disabled, false, "sanity check — the button starts enabled");
+
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 6 } });
+
+  assertEqual(button.disabled, true,
+    "permission_resolved must disable the matching row's buttons even though this tab never " +
+    "clicked one — the cross-tab case: another tab answered this same request");
+  assert(row.classList.contains("acp-permission-resolved"),
+    "permission_resolved must visually mark the row resolved");
+
+  button.dispatch("click");
+  assertEqual(page.sentOf("permission_response").length, 0,
+    "clicking a button after permission_resolved must send nothing — the buttons are disabled");
+});
+
+check("a permission_resolved frame with no matching row is a silent no-op", (tpl) => {
+  const { page, live } = connected(tpl);
+  // No permission_request was ever rendered for requestId 999 in this tab
+  // (e.g. the buffer evicted it, or it belongs to a different session this
+  // tab never subscribed to). This must not throw.
+  page.deliver({ type: "permission_resolved", sessionId: live, payload: { requestId: 999 } });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  assertEqual(rows.length, 0, "no permission row should exist or be created by this frame");
+});
+
+check("permission_request immediately followed by its own permission_resolved replays " +
+      "into a resolved row, not fresh-and-clickable (review fix)", (tpl) => {
+  const { page, live } = connected(tpl);
+  page.deliver({
+    type: "history", sessionId: live,
+    payload: { events: [
+      { type: "permission_request", sessionId: live,
+        payload: { requestId: 7, sessionId: live,
+                   toolCall: { title: "Already answered" },
+                   options: [{ optionId: "opt-0", name: "Only option", kind: "allow_once" }] } },
+      { type: "permission_resolved", sessionId: live, payload: { requestId: 7 } },
+    ] },
+  });
+  const rows = page.el("acpTranscript").querySelectorAll(".acp-msg-permission");
+  assertEqual(rows.length, 1, "sanity check — exactly one permission row rendered");
+  const row = rows[rows.length - 1];
+  const button = row.querySelector(".acp-permission-option");
+  assertEqual(button.disabled, true,
+    "replaying permission_request followed by its own permission_resolved must land on the " +
+    "resolved state, not render as a fresh, fully-clickable question — this is the whole point " +
+    "of recording permission_resolved into history rather than suppressing replay entirely");
+  assert(row.classList.contains("acp-permission-resolved"),
+    "the replayed row must be visually marked resolved");
+
+  button.dispatch("click");
+  assertEqual(page.sentOf("permission_response").length, 0,
+    "clicking a resolved-on-replay row must send nothing");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

@@ -197,6 +197,16 @@ SERVER_TYPES = frozenset({
     # can render as an interactive multiple-choice question. See
     # `_SupervisorV3._on_agent_request`/`_on_permission_request`.
     "permission_request",
+    # v3-only (SC-9 review fix, plan Phase 6): the companion signal to
+    # `permission_request` above -- emitted once a pending request is no
+    # longer actionable, whether because it was answered
+    # (`_handle_permission_response_v3`) or swept away unanswered at turn end
+    # (`_handle_prompt_v3`'s `finally`). Recorded into history exactly like
+    # `permission_request` (not broadcast-only like `steer_status`), so a
+    # reload replays both frames in order and a client that processes them in
+    # sequence lands in the correct final "resolved" state on its own,
+    # closing both the stale-replay and cross-tab cases with one mechanism.
+    "permission_resolved",
 })
 
 # The largest legitimate client frame is a `prompt` payload: prose a human
@@ -5324,10 +5334,19 @@ class _SupervisorV3(_Supervisor):
         A malformed request (no ``sessionId``, or no usable options) is
         refused via the same `_refuse` path the base class's catch-all uses,
         rather than silently swallowed or stored — nothing could ever answer
-        a pending entry with no session to route to or no valid choice.
+        a pending entry with no session to route to or no valid choice. This
+        includes a truthy non-dict ``params`` (e.g. a JSON list) — without
+        this guard, ``params.get(...)`` below raises ``AttributeError``
+        straight out of a ``call_soon_threadsafe`` callback, where asyncio's
+        default exception handler swallows it silently and the agent's
+        request is left answered by nobody (review finding, Security
+        auditor: empirically reproduced, exactly the class of hang SC-9
+        exists to close).
         """
         request_id = msg.get("id")
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            params = {}
         session_id = params.get("sessionId")
         tool_call = params.get("toolCall")
         if not isinstance(tool_call, dict):
@@ -7729,6 +7748,13 @@ async def _handle_prompt_v3(conn, session_id, payload):
         for _req_id in [k for k, v in _supervisor_v3._pending_permission.items()
                         if v.get("session_id") == session_id]:
             _supervisor_v3._pending_permission.pop(_req_id, None)
+            # SC-9 stale-replay / cross-tab fix: a request swept away here was
+            # never answered, but it is no longer actionable either -- the
+            # reply mechanism (the pending entry) is gone, so the client
+            # needs the same "no longer clickable" signal as an answered
+            # request. Same frame type, same client-side handling.
+            _emit_v3(session_id, envelope(
+                "permission_resolved", {"requestId": _req_id}, session_id))
         _finishing_crew = _supervisor_v3.crews.get(session_id)
         if _finishing_crew:
             _crew_changed = False
@@ -7875,6 +7901,18 @@ async def _handle_permission_response_v3(conn, session_id, payload):
         return
     # (d) Pop BEFORE writing the reply — see the docstring above.
     _supervisor_v3._pending_permission.pop(request_id, None)
+    # SC-9 stale-replay / cross-tab fix (Design Decisions row of that name):
+    # broadcast (and record) a `permission_resolved` frame the moment the
+    # pending entry is gone, before attempting the agent-side write below —
+    # every other viewer (a second tab already showing this request, or a
+    # future reload replaying `permission_request` immediately followed by
+    # this frame) can tell the request is settled regardless of whether the
+    # reply below actually reaches the agent. Targets `entry["session_id"]`
+    # (the pending entry's own authoritative owner), not the possibly
+    # client-claimed `session_id` parameter, matching how the original
+    # `permission_request` frame was addressed in `_on_permission_request`.
+    _emit_v3(entry["session_id"], envelope(
+        "permission_resolved", {"requestId": request_id}, entry["session_id"]))
     # (e) The exact reply shape confirmed live in Phase 0.
     try:
         await asyncio.to_thread(_supervisor_v3._write, {
@@ -7888,6 +7926,15 @@ async def _handle_permission_response_v3(conn, session_id, payload):
             request_id, exc)
         conn.send(error_frame(
             "internal_error", "Could not deliver the response.", session_id))
+        # Mirror _fulfill_token's own write-failure handling: most failures
+        # are already caught by _on_agent_death (fires once the process is
+        # actually dead, and calls _discard itself), but a narrower failure
+        # mode -- a stdin write/flush that raises while the process is
+        # otherwise still alive -- would otherwise leave this request's
+        # session permanently unanswerable with no proactive teardown. Do
+        # not leave KAS waiting on an unanswered request.
+        _supervisor_v3._discard(
+            "Permission response delivery failed: could not write reply")
 
 
 async def _handle_cancel_v3(conn, session_id):

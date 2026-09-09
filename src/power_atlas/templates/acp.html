@@ -1993,6 +1993,12 @@
     var stick = stuckToBottom();
     var row = document.createElement('div');
     row.className = 'acp-msg acp-msg-permission';
+    // Threaded onto the DOM so a later `permission_resolved` frame (SC-9
+    // review fix) can find this exact row -- keyed by the same requestId the
+    // server keys `_pending_permission` by. `dataset` always stores strings,
+    // so the lookup side (findPermissionRequestRow) also stringifies before
+    // comparing, whether requestId arrives as a number or a string.
+    row.dataset.requestId = String(requestId);
     var who = document.createElement('span');
     who.className = 'acp-msg-role';
     who.textContent = 'question';
@@ -2025,6 +2031,40 @@
     transcriptEl.appendChild(row);
     if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     return row;
+  }
+
+  /** Find the transcript row `addPermissionRequest` built for `requestId`,
+   *  or null. A plain child scan rather than a CSS attribute-selector
+   *  lookup, so an unusual requestId value never needs escaping into a
+   *  selector string. `dataset.requestId` is always a string; `requestId`
+   *  here may arrive as either a string or a number (JSON-RPC ids are
+   *  typically small integers), so both sides are stringified before
+   *  comparing. */
+  function findPermissionRequestRow(requestId) {
+    var want = String(requestId);
+    var rows = transcriptEl.querySelectorAll('.acp-msg-permission');
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].dataset.requestId === want) return rows[i];
+    }
+    return null;
+  }
+
+  /** Mark a permission-request row as no longer actionable (SC-9 review
+   *  fix): a `permission_resolved` frame means the pending state behind it
+   *  is gone, whether because it was answered or because the turn ended
+   *  while it was still pending. Disables every option button and dims the
+   *  row so it reads as settled, not fresh-and-clickable. Idempotent: a
+   *  row already marked resolved (e.g. the click handler already disabled
+   *  its own buttons before the server's echo arrives) is left alone. If no
+   *  matching row exists (this frame replayed without its own
+   *  `permission_request` still present, or the request was never rendered
+   *  in this tab), this is a silent no-op -- there is nothing to update. */
+  function markPermissionResolved(requestId) {
+    var row = findPermissionRequestRow(requestId);
+    if (!row || row.classList.contains('acp-permission-resolved')) return;
+    row.classList.add('acp-permission-resolved');
+    var buttons = row.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
   }
 
   /** Returns true when the slash command dropdown is currently visible. */
@@ -6990,6 +7030,23 @@
       var _permOptions = Array.isArray(payload && payload.options) ? payload.options : [];
       if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
         addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions);
+      }
+      return;
+    }
+    if (type === 'permission_resolved') {
+      // SC-9 review fix: the companion signal to permission_request above --
+      // recorded into history the same way (not broadcast-only), so a reload
+      // replays both frames in order and this handler runs right after the
+      // one that rendered the row, landing on the correct final "resolved"
+      // state with no cross-tab or stale-reload special-casing needed beyond
+      // finding the row by requestId. Fires whether the request was actually
+      // answered (_handle_permission_response_v3) or swept away unanswered
+      // at turn end (_handle_prompt_v3's finally) -- both cases mean the
+      // pending state behind it is gone, so the client-side handling is
+      // identical either way.
+      var _resolvedId = payload && payload.requestId;
+      if (typeof _resolvedId === 'string' || typeof _resolvedId === 'number') {
+        markPermissionResolved(_resolvedId);
       }
       return;
     }

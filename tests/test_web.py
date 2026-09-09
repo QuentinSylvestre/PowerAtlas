@@ -22922,11 +22922,46 @@ class TestSupervisorV3:
         assert len(spawned) == 1, "a malformed request must still be refused"
         spawned[0].close()  # never awaited -- close() avoids an RuntimeWarning
 
+    def test_on_permission_request_non_dict_params_is_refused_not_raised(
+            self, monkeypatch):
+        """(Review fix, Security auditor -- empirically reproduced) A truthy
+        non-dict `params` (e.g. a JSON list) previously raised AttributeError
+        straight out of `params.get(...)` -- before ever reaching the
+        function's own _refuse fallback below. Since _on_permission_request
+        runs off loop.call_soon_threadsafe in production, that exception was
+        swallowed silently by asyncio's default handler and the agent's
+        request never got any reply: exactly the class of hang SC-9 exists
+        to close, for this one malformed input shape. The fix is a type
+        guard that routes this shape through the same _refuse path as every
+        other malformed request, proven here by *not* raising and by taking
+        the refuse path exactly like the missing-sessionId case above."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        msg = {
+            "jsonrpc": "2.0", "id": 55, "method": "session/request_permission",
+            "params": ["not", "a", "dict"],
+        }
+        spawned = []
+        monkeypatch.setattr(acp_mod, "_spawn_task", spawned.append)
+
+        sv3._on_agent_request(msg)  # must not raise AttributeError
+
+        assert 55 not in sv3._pending_permission
+        assert len(spawned) == 1, "a non-dict params must still be refused"
+        spawned[0].close()  # never awaited -- close() avoids a RuntimeWarning
+
     def test_handle_permission_response_v3_valid_option_writes_reply_and_clears_pending(
             self, monkeypatch):
         """A valid optionId from the owning connection writes the exact
-        JSON-RPC reply shape Phase 0 confirmed live, and clears the pending
-        entry."""
+        JSON-RPC reply shape Phase 0 confirmed live, clears the pending
+        entry, and (review fix -- SC-9 stale-replay/cross-tab closure)
+        broadcasts a companion `permission_resolved` frame -- recorded into
+        history exactly like `permission_request` itself (not
+        broadcast-only like `steer_status`), which is what lets a reload
+        replay both frames in order and land on the correct final state.
+        This is now the only thing a successful answer sends back to the
+        client (the original exit criterion asserted nothing was sent at
+        all -- superseded by this closure)."""
         import asyncio
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
@@ -22946,7 +22981,21 @@ class TestSupervisorV3:
             assert written == [
                 {"jsonrpc": "2.0", "id": 7, "result": {"optionId": "opt-0"}}]
             assert 7 not in sv3._pending_permission
-            assert _queued(conn) == [], "a successful answer sends nothing back to the client"
+
+            frames = _queued(conn)
+            assert len(frames) == 1, (
+                f"a successful answer now sends only the permission_resolved "
+                f"echo, got {frames}")
+            assert frames[0]["type"] == "permission_resolved"
+            assert frames[0]["payload"] == {"requestId": 7}
+            assert frames[0]["sessionId"] == sid
+
+            recorded = sv3.history[sid].events()
+            resolved = [f for f in recorded if f["type"] == "permission_resolved"]
+            assert len(resolved) == 1, (
+                f"permission_resolved must be recorded into history like "
+                f"permission_request, got {[f['type'] for f in recorded]}")
+            assert resolved[0]["payload"] == {"requestId": 7}
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -23045,7 +23094,81 @@ class TestSupervisorV3:
                     conn, sid, {"requestId": 11, "optionId": "opt-1"}))
 
             assert len(written) == 1, "a second answer must never reach the agent"
-            assert _queued(conn)[0]["payload"]["code"] == "unknown_request"
+            frames = _queued(conn)
+            error_codes = [f["payload"].get("code")
+                           for f in frames if f["type"] == "error"]
+            assert error_codes == ["unknown_request"], (
+                f"the second (losing) answer must be refused as "
+                f"unknown_request, got {frames}")
+            resolved = [f for f in frames if f["type"] == "permission_resolved"]
+            assert len(resolved) == 1, (
+                f"the winning first answer must still emit exactly one "
+                f"permission_resolved, got {frames}")
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_handle_permission_response_v3_concurrent_double_answer_one_wins(
+            self, monkeypatch):
+        """(Review fix, Senior engineer -- test-quality gap) Companion to the
+        sequential double-answer test above, which issues two separate
+        asyncio.run(...) calls and so only proves the state machine is
+        correct called twice in a row -- it never exercises the actual
+        double-click/two-tab race the pop-before-write design defends
+        against. This test schedules both handler calls concurrently via
+        asyncio.gather inside one asyncio.run, which is what a genuine race
+        would look like.
+
+        The design is provably safe by construction: zero `await` points
+        exist between the pending-entry lookup (a) and the pop (d) in
+        `_handle_permission_response_v3`, so Python's cooperative
+        single-threaded scheduler cannot interleave two calls between them
+        -- whichever of the two gathered coroutines reaches (a) first runs
+        uninterrupted through the pop before yielding control (the first
+        `await` is the write itself, which happens *after* the pop). This
+        test proves that property holds under real concurrent scheduling,
+        not just in sequence."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permconcurrent0-0000-0000-0001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        options = [
+            {"optionId": "opt-0", "name": "A", "kind": "allow_once"},
+            {"optionId": "opt-1", "name": "B", "kind": "allow_once"},
+        ]
+        sv3._pending_permission[17] = {"session_id": sid, "options": options}
+
+        written = []
+
+        async def run_both():
+            await asyncio.gather(
+                acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 17, "optionId": "opt-0"}),
+                acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 17, "optionId": "opt-1"}),
+            )
+
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                asyncio.run(run_both())
+
+            assert len(written) == 1, (
+                f"exactly one write must reach the agent under real "
+                f"concurrent scheduling, got {written}")
+            assert 17 not in sv3._pending_permission
+
+            frames = _queued(conn)
+            error_codes = [f["payload"].get("code")
+                           for f in frames if f["type"] == "error"]
+            assert error_codes == ["unknown_request"], (
+                f"the losing call must be refused as unknown_request "
+                f"(already popped), got {frames}")
+            resolved = [f for f in frames if f["type"] == "permission_resolved"]
+            assert len(resolved) == 1, (
+                f"the winning call must still emit exactly one "
+                f"permission_resolved, got {frames}")
         finally:
             self._cleanup_registry(acp_mod)
 
@@ -23067,6 +23190,50 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
+    def test_handle_permission_response_v3_reply_write_failure_calls_discard(
+            self, monkeypatch):
+        """(Review fix, Senior engineer) A reply-write failure now
+        proactively discards the process, mirroring _fulfill_token's own
+        precedent (test_fulfill_token_calls_discard_on_write_failure above)
+        exactly. Most failures are already caught by the independent
+        _on_agent_death path (fires once the process is actually dead and
+        calls _discard itself); this covers the narrower failure mode --
+        a stdin write/flush that raises while the process is otherwise
+        still alive -- which would otherwise leave this permission
+        request's session permanently unanswerable with no proactive
+        teardown."""
+        import asyncio
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permwritefail0-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
+        sv3._pending_permission[13] = {"session_id": sid, "options": options}
+
+        discarded = []
+        monkeypatch.setattr(sv3, "_discard", lambda reason: discarded.append(reason))
+
+        def failing_write(self, obj):
+            raise acp_mod.AcpError("write failed")
+
+        try:
+            with patch.object(acp_mod._Supervisor, "_write", failing_write):
+                asyncio.run(acp_mod._handle_permission_response_v3(
+                    conn, sid, {"requestId": 13, "optionId": "opt-0"}))
+
+            assert 13 not in sv3._pending_permission, (
+                "pending state must still be popped before the write attempt")
+            assert len(discarded) == 1, (
+                "a reply-write failure must proactively discard the process")
+            assert "permission" in discarded[0].lower()
+            codes = [f["payload"].get("code") for f in _queued(conn)
+                     if f["type"] == "error"]
+            assert codes == ["internal_error"]
+        finally:
+            self._cleanup_registry(acp_mod)
+
     def test_pending_permission_cleared_at_turn_end_via_handle_prompt_v3_finally(
             self, monkeypatch):
         """SC-9 cleanup trigger: _pending_permission is cleared
@@ -23074,7 +23241,13 @@ class TestSupervisorV3:
         end), not only on explicit close/cancel -- explicit close is
         normally refused while a turn is inflight, and a pending permission
         request only ever exists mid-turn, so this proves the path that
-        actually always fires, not a hand-simulated stand-in for it."""
+        actually always fires, not a hand-simulated stand-in for it.
+
+        Also covers the review fix's turn-end-sweep half: a request swept
+        away here was never answered, but the client still needs to learn it
+        is no longer actionable -- so this sweep emits the same
+        `permission_resolved` companion frame as an actual answer, for the
+        swept session only."""
         import asyncio
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
@@ -23102,5 +23275,87 @@ class TestSupervisorV3:
             assert sv3._pending_permission.get("p2") == {
                 "session_id": other_sid, "options": []}, (
                 "turn-end cleanup must not touch another session's pending request")
+
+            resolved_sid = [f for f in sv3.history[sid].events()
+                             if f["type"] == "permission_resolved"]
+            assert len(resolved_sid) == 1, (
+                f"turn-end sweep of the still-pending p1 request must emit "
+                f"permission_resolved, got "
+                f"{[f['type'] for f in sv3.history[sid].events()]}")
+            assert resolved_sid[0]["payload"] == {"requestId": "p1"}
+            resolved_other = [f for f in sv3.history[other_sid].events()
+                               if f["type"] == "permission_resolved"]
+            assert resolved_other == [], (
+                "turn-end cleanup must not emit permission_resolved for "
+                "another session's still-pending request")
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_permission_response_routing_isolated_between_v2_and_v3_dispatch(
+            self, monkeypatch):
+        """(Review fix, Security auditor) The v2/v3 route isolation for
+        `permission_response` is correct by code inspection -- two entirely
+        separate WS route handlers, `_dispatch` always checking the
+        unchanged `CLIENT_TYPES` and `_dispatch_v3` always checking the new
+        `CLIENT_TYPES_V3` superset -- but had no test proving it. This
+        drives both dispatchers directly instead of calling
+        `_handle_permission_response_v3` itself (which every other test in
+        this class does):
+
+        (a) `_dispatch_v3` actually routes a real `permission_response`
+            frame end to end to `_handle_permission_response_v3`, proving
+            the routing table -- not just the handler function -- works.
+        (b) `_dispatch` (v2) has no route for `permission_response` at all
+            -- `CLIENT_TYPES` never gained it, unlike `CLIENT_TYPES_V3` --
+            so the identical frame is refused as `unknown_type` before ever
+            reaching any v3-only handler or state.
+        """
+        import asyncio
+        from power_atlas import acp as acp_mod
+
+        # (a) v3: real end-to-end routing through _dispatch_v3.
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_dispatchroute0-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn_v3 = self._conn_v3(acp_mod, sid)
+        options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
+        sv3._pending_permission[21] = {"session_id": sid, "options": options}
+
+        written = []
+
+        async def run_v3():
+            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
+                acp_mod._dispatch_v3(conn_v3, {
+                    "type": "permission_response", "sessionId": sid,
+                    "payload": {"requestId": 21, "optionId": "opt-0"}})
+                await asyncio.gather(*acp_mod._tasks)
+
+        try:
+            asyncio.run(run_v3())
+            assert written == [
+                {"jsonrpc": "2.0", "id": 21, "result": {"optionId": "opt-0"}}], (
+                "_dispatch_v3 must route a real permission_response frame "
+                "to _handle_permission_response_v3, not merely accept it")
+            assert 21 not in sv3._pending_permission
+        finally:
+            self._cleanup_registry(acp_mod)
+
+        # (b) v2: the identical frame shape is refused, never routed.
+        conn_v2 = acp_mod._Connection(_SinkWs())
+        acp_mod._registry.connections.add(conn_v2)
+        try:
+            assert "permission_response" not in acp_mod.CLIENT_TYPES, (
+                "CLIENT_TYPES (v2) must never gain permission_response -- "
+                "v2's protocol has no such concept")
+            acp_mod._dispatch(conn_v2, {
+                "type": "permission_response", "sessionId": sid,
+                "payload": {"requestId": 21, "optionId": "opt-0"}})
+            frames = _queued(conn_v2)
+            assert len(frames) == 1
+            assert frames[0]["type"] == "error"
+            assert frames[0]["payload"]["code"] == "unknown_type", (
+                f"v2's _dispatch must refuse permission_response as "
+                f"unknown_type, got {frames}")
         finally:
             self._cleanup_registry(acp_mod)

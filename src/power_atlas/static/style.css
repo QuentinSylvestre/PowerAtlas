@@ -809,6 +809,13 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-permission-question { white-space: pre-wrap; word-break: break-word; }
 .acp-permission-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .acp-permission-option.acp-permission-chosen { border-color: #fbbf24; color: #fbbf24; }
+/* SC-9 review fix: a `permission_resolved` frame means the request behind
+   this row is no longer actionable, whether answered or swept away
+   unanswered at turn end -- reachable live, on a second tab, or on reload
+   replaying both frames in order. Dimmed rather than removed, so a reload
+   still shows the question was asked. */
+.acp-msg-permission.acp-permission-resolved { opacity: 0.55; }
+.acp-msg-permission.acp-permission-resolved .acp-permission-option { cursor: default; }
 /* Process chrome, not a message — dimmer than a note and pulsing rather than
    coloured, so a turn's own answer (once it starts streaming) reads as the
    thing that changed rather than one more tinted row among several. The same
