@@ -27,14 +27,27 @@
 
 ### ACP v3 Follow-up
 
-> Post-spike items from 260819_ACP_V3_SPIKE.md. The spike validated v3 protocol feasibility (Phases 0-5 complete);
-> these follow-ups require production-grade implementation or design decisions beyond the spike's throwaway scope.
+> Items from 260819_ACP_V3_SPIKE.md (spike-validated feasibility, `[POST-SPIKE]`-tagged) and from
+> 260908_ACP_V3_PRODUCTION_HARDENING.md (which brought `/acp-v3` to production quality — its own
+> deferred Follow-up Work items are migrated here on plan close). Each requires design decisions or
+> product-shape choices beyond either plan's own scope.
 
 - **[POST-SPIKE] MCP OAuth in /acp-v3 — corrected.** The real signal is `session_info_update` → `_meta.kiro.displayError` (a human-readable message), not `_kiro/mcp/status` → `failedAuthorization`/`authorizationUrl` as originally guessed here — no `authorizationUrl`-bearing signal has ever been observed. `260908_ACP_V3_PRODUCTION_HARDENING`'s SC-3 surfaces the message; a full OAuth "Connect" completion flow isn't buildable from what's confirmed. Revisit if an `authorizationUrl` signal is ever found.
 
 - **[POST-SPIKE] _kiro/spec/* and _kiro/workflow/* notification handling — corrected.** No such dedicated notification methods exist (confirmed via `260908_ACP_V3_PRODUCTION_HARDENING` Phase 0/6 research) — spec mode only adds a `"spec"` tag to the builtin-tools list and relies on ordinary `session/update` subtypes plus `session/request_permission` (see that plan's SC-9, implemented in Phase 6: a structured clarifying-question request that blocks the turn on an answer).
 
-- **[POST-SPIKE] Merge /acp and /acp-v3 into a single engine-parameterized route** — once the spike is validated end-to-end (Phase 7 Playwright pass), plan the merge of _SupervisorV3 into _Supervisor (engine parameter or subclass retained) and retire the separate route. Source: Q6 design decision (parallel supervisors for spike only).
+- **[POST-SPIKE] Merge /acp and /acp-v3 into a single engine-parameterized route — updated.** `/acp-v3` is now production-hardened (`260908_ACP_V3_PRODUCTION_HARDENING`, complete), not just spike-validated, making this a lower-risk, separately-scoped project rather than blocked on further v3 maturity. Plan the merge of `_SupervisorV3` into `_Supervisor` (engine parameter or subclass retained) and retire the separate route. Source: Q6 design decision (parallel supervisors for spike only); reaffirmed as a deliberate "kept parallel" decision by `260908_ACP_V3_PRODUCTION_HARDENING`'s own Follow-up Work item 1.
+
+- **Linux cross-platform support for the ACP subsystem.** Not v3-specific — v2 has the identical Windows-only `_create_job()` limitation. Source: `260908_ACP_V3_PRODUCTION_HARDENING` exploration Q3, Follow-up Work item 2.
+
+- **Mode-switcher UI for `/acp-v3`** (letting a user pick `spec`/`quick-spec`/`bug-fix`/`plan`). Would unlock the modes SC-9's permission-handling defends against but doesn't itself build a path to. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Scope boundaries, Follow-up Work item 3.
+
+- **`_pending_permission` expiry/timeout for an abandoned `session/request_permission` request.** Genuinely a product-shape decision (auto-refuse? default option? rely on the existing ~30-minute `PROMPT_SILENCE_SECONDS` backstop?), not a deterministic bug fix. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Risk R11, Follow-up Work item 5.
+
+- **v3 self-orphan-lock suppression (D32).** `presence._scan()`'s own-agent orphan-lock guard only ever sees `_Supervisor._publish_live()`'s pid (v2's own); `_SupervisorV3._publish_live()` always publishes a sentinel `pid=0` (deliberately, to avoid false liveness signals), so the guard can't achieve genuine v3 self-orphan suppression regardless of provider label. A real fix needs `_supervisor_v3`'s own agent pid published to `presence._acp_live` instead of the sentinel. Corollary residual: `_acp_live` is a single last-writer-wins global, so the v2 guard is also transiently defeated in the window after any v3 mutation (self-heals within one sweep interval). Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 1 review findings (Reliability engineer), Follow-up Work item 6.
+
+- **3 steering-type slash-command palette entries have no working trigger in `/acp-v3`.** `architecture-selection`/`quick-spec`/`bug-fix` are excluded from both dropdown buckets by the existing `steering` filter, and unreachable even by typing their name — the incoming-prompt converter has no `resource_link` case and the `resource` case needs inline content, not a URI reference. Would need a client-side synthesis mechanism (e.g. inlining the steering document's own content as prompt text); no working shape found yet. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 0 rounds 3-4, Follow-up Work item 8.
+
 ### Session Control & Integration
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
 - **Tell the operator a turn ended** — push notification when a long task finishes; cheapest version uses the existing WebSocket but fails when the phone sleeps the tab
