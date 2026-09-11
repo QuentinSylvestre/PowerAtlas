@@ -1,8 +1,10 @@
 # ACP v2-to-v3 Engine Cutover
 
 > **Date**: 2026-09-11
-> **Status**: Exploring
+> **Status**: Draft
+> **Last Updated**: <set by /qclose at archival>
 > **Scope**: Retire the live v2 ACP protocol engine, make v3 the sole engine behind `/acp`, delete v2-only code and rename the surviving v3 code to drop its suffix.
+> **Estimated effort**: ~1-2 weeks (Major tier — architectural consolidation across two large files, a repo-wide rename with several genuine exceptions, and ~90 test artifacts)
 
 ---
 
@@ -12,84 +14,365 @@
 
 PowerAtlas currently runs two parallel ACP (Agent Client Protocol) engines: `/acp` (v2, mature, spawns kiro-cli with blanket auto-approve `-a`) and `/acp-v3` (v3, kiro-cli `--agent-engine v3`, just brought to production quality by `plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md`). The merge of the two was explicitly deferred at the end of that plan ("kept parallel... lower-risk, separately-scoped future project", `plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md:685`).
 
-This plan reopens that deferral: v3 becomes the only engine, reachable at `/acp` (the URL v2 currently owns). `/acp-v3` as a separate path is retired. v2's live protocol/supervisor code is deleted outright, not just left unreached — including restructuring `_SupervisorV3`, which currently subclasses `_Supervisor` (`acp.py:4697`), so it no longer depends on v2's class body. The surviving v3 code is renamed to drop its `_v3`/`V3` suffix, since there is no longer a second engine to disambiguate from.
+This plan reopens that deferral: v3 becomes the only engine, reachable at `/acp` (the URL v2 currently owns). `/acp-v3` as a separate path is retired. v2's live protocol/supervisor code is deleted outright, not just left unreached — including restructuring `_SupervisorV3`, which currently subclasses `_Supervisor` (`acp.py:4697`), so it no longer depends on v2's class body. The surviving v3 code is renamed to drop its `_v3`/`V3` suffix, since there is no longer a second engine to disambiguate from — except for a small, identified set of names that denote a permanent store/provider-format distinction rather than engine identity (see §3 Design Decisions).
 
 Desired outcome: one ACP engine, at one URL, with no dead v2 code left behind to maintain or reason about.
 
 ### Success criteria
 
-- `/acp` serves v3 sessions; `/acp-v3` and its dedicated route registrations no longer exist.
-- v2-only live-protocol code is deleted: `_Supervisor`'s v2-only methods, `serve_socket`, `_dispatch`, the unsuffixed `_handle_*` handlers, `ACP_ARGS`, `CLOSE_METHOD`. `_SupervisorV3` no longer inherits from `_Supervisor` — the methods it previously inherited unchanged are folded directly into the surviving class.
-- The surviving engine's code is renamed repo-wide to drop the `_v3`/`V3` suffix (`acp.py`, `web.py`, and the ~180 ACP-related test names in `tests/test_web.py` that reference it).
-- `data_kiro.py`'s v2 session-file reader (`get_first_prompt`, `_extract_prompts_cached`, the `.json`/`.jsonl`/`.history` parsing under `KIRO_SESSION_DIR`) is untouched — the dashboard can still browse/display the ~16,414 pre-existing v2 session files.
-- The dashboard's "💬 Open in Agent orchestrator" button (`session_row.html:31`) is hidden or disabled specifically for old v2-provider rows, since there is no live v2 engine left to resume them into.
-- `_REMOTE_ALLOWED_PATHS` (`web.py:1139-1171`) is reconciled to the new single-engine route set — no leftover entries for a retired path.
-- `tests/test_web.py` and `tests/acp_page.test.mjs` pass, updated to match the new (unsuffixed) naming and the retired v2 route/behavior — including the three `acp_page.test.mjs` tests (`test_engine_v3_ws_path`, `test_engine_v3_session_api_url`, `test_engine_v3_workspaces_api_url`) that currently assert v2 URLs are *absent*, which need deliberate rewriting now that there is only one engine.
+- SC-1: `/acp` serves v3-descended sessions; `/acp-v3` and its dedicated route registrations no longer exist; the 5 `_ACP_V3_*` URL constants' *values* take over the 5 current v2 URL strings (`/acp`, `/ws/acp`, `/api/acp/sessions`, `/api/acp/workspaces`, `/api/acp/sessions/delete`).
+- SC-2: v2-only live-protocol code is deleted: the `_Supervisor` class body (v2-only methods), the `_supervisor` global, `serve_socket`, `_dispatch`, the 9 unsuffixed `_handle_*` handlers, `ACP_ARGS`, `CLOSE_METHOD`, `_emit`, `_evict_crew_children`, `_build_kas_session_params`, `_crew_toolcallid` (D13). `_SupervisorV3` no longer inherits from `_Supervisor` — its 35 inherited-unchanged methods (D13) are folded directly into the sole surviving class, constructed eagerly at import time (D1).
+- SC-3: The surviving engine's code is renamed to drop the `_v3`/`V3` suffix, **scoped to the live-engine files this plan touches** (`acp.py`, `web.py`, the templates, and their tests) — **not** a literal repo-wide sweep. `status_classifier.py`'s `classify_kiro_v3`/`_is_v3_format`/`_V3_SKIP_TYPES`, and `presence.py`/`data.py`'s `"kiro-cli-v3"`-provider-aware code, are out of this plan's rename scope entirely: they denote on-disk session-file *format*, used for both historical v2 and live v3 sessions (Q3's permanent distinction), not engine identity, and no phase touches them. Within the in-scope files, the exceptions are: `_lock_holder_v3` (+ `_V3_HOLDER_PID_UNKNOWN`/`_V3_HELD_STATUSES`/`_V3_SESSION_STALE_SECONDS`), `_stored_session_cwd_v3`, `_get_tool_diffs_v3`, the `data_kiro_v3` module, the `"kiro-cli-v3"` provider string and its `_ACP_V3_LISTING_PROVIDER` constant, and the `_context_percent_v3`/`_note_context_v3` pair (which coexists with its unsuffixed sibling — see D2).
+- SC-4: `data_kiro.py`'s v2 session-file reader (`get_first_prompt`, `_extract_prompts_cached`, the `.json`/`.jsonl`/`.history` parsing under `KIRO_SESSION_DIR`) is untouched — the main dashboard can still browse/display the ~16,414 pre-existing v2 session files. **Scope clarification (Step 4 review)**: this is a pre-existing asymmetry, not introduced by this plan — the `/acp` page's own session rail (`_acp_listing`, renamed from `_acp_listing_v3`) is hard-scoped to the `"kiro-cli-v3"` provider today and does not enumerate v2 sessions, remotely or locally; only the main (loopback) dashboard's listing does. SC-4 covers the main dashboard, not a promise that `/acp`'s own rail gains v2-history browsing. `_acp_session_paths`, `_acp_delete_session`'s v2 branch, and `_stored_session_cwd` are confirmed to have no dependency on the deleted live-protocol code (D3 fixes the one exception found: `_lock_holder`'s v2-`_supervisor` self-check).
+- SC-5: The dashboard's "💬 Open in Agent orchestrator" button (`session_row.html:31`) is hidden/disabled for old v2-provider rows, **and** the gate's positive case is widened to include `kiro-cli-v3` — today's gate (`in ('', 'kiro-cli')`) already excludes v3 sessions entirely; without this fix, zero session rows would show a live-resume button post-cutover (see D6).
+- SC-6: `_REMOTE_ALLOWED_PATHS` (`web.py:1139-1171`) is reconciled from 13 entries to the 8-entry post-cutover set (§3 shows the exact before/after).
+- SC-7: `tests/test_web.py` and `tests/acp_page.test.mjs` pass: ~55-60 v3-named tests renamed, ~26 KEEP-named tests (exercising the permanent-distinction set) left unchanged, 6 now-impossible/isolation-asserting cross-engine tests removed (corrected from 4 during Step 4 review — see Phase 4 step 0's discriminator rule), the additional non-v3-named cross-engine tests reviewed and updated, and the 3 `acp_page.test.mjs` ENGINE-ternary tests (`test_engine_v3_ws_path`, `test_engine_v3_session_api_url`, `test_engine_v3_workspaces_api_url`) rewritten — they currently assert v2 URLs are *absent*, which is no longer a meaningful assertion once there is only one engine.
+- SC-8: No stray reference to a deleted/renamed v2 identifier or retired URL survives in tracked documentation, outside `plans/done/` and `plans/CLOSED_INVESTIGATIONS.md` (historical record, deliberately untouched — see D8).
+- SC-9: The module imports cleanly post-consolidation with no NameError from a default-parameter forward reference (D4) or the `_lock_holder` self-check (D3); the merged supervisor is constructed eagerly at import time (D1, reopened during Step 4 review) so no unconditional call site (the 7 in §1) needs a `None`-guard; and no runtime-only reference — the CSRF path check at `web.py:912` (D10) or the three `getattr`/held-set-union sites in `web.py` (D12) — is missed by a rename scoped only to symbol definitions.
 
 ### Scope boundaries & non-goals
 
 - **Out of scope**: the permission-UX consequence of this cutover (v3's interactive `session/request_permission` approval becomes the only approval flow — v2's blanket `-a` auto-approve has no equivalent) is accepted as a deliberate, permanent product decision in this plan, not something to fix here. A v3-side auto-mode remains a separate, already-tracked ROADMAP item under "Session Control & Integration."
 - **Out of scope**: the loss of server-side session-close wire confirmation (previously scoped only to v3 sessions, now universal since v2's `close_session`'s `_kiro.dev/session/terminate` call goes away with the rest of v2) is accepted as a permanent kiro-cli v3 binary limitation, not a defect to chase.
-- **Out of scope**: the mode-switcher UI, `_pending_permission`/orphan-lock/steering-palette follow-ups — tracked separately in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`.
+- **Out of scope**: the mode-switcher UI, `_pending_permission`/orphan-lock/steering-palette follow-ups — tracked separately in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`. That plan's `_publish_live` (D32 orphan-lock) fix targets the same method this plan simplifies (D1/Phase 1 removes its v2-session union) — whichever plan lands second must re-read the method's then-current state rather than assume this plan's snapshot.
 - **Non-goal**: this plan does not change kiro-cli itself or attempt to restore auto-approve-equivalent behavior for v3.
 
 ---
 
-<!-- Transient: /qplan folds these into the planning sections and removes this section. -->
-## Exploration Discovery
+## 1) Current State
 
-### Existing patterns & constraints
+- `_SupervisorV3(_Supervisor)` (`acp.py:4697`) subclasses v2's `_Supervisor` (`acp.py:2618-4696`, ~2079 lines) and overrides 13 methods (`__init__`, `_on_notification`, `_on_agent_subtask_open`, `_on_agent_subtask_update`, `_spawn`, `_on_agent_request`, `_on_permission_request`, `_fulfill_token`, `new_session`, `load_session`, `close_session`, `_detach`, `_publish_live`). **35** methods are inherited unchanged (corrected during Step 4 review — the original enumeration omitted `_create_job`, called via `self._create_job()` inside `_SupervisorV3._spawn`): `alive`, `agent_pid`, `_get_start_lock`, `ensure_started`, `shutdown`, `_discard`, `_dispose`, `_tree_kill`, `_create_job`, `_request`, `_await_inactivity`, `_notify`, `_write`, `_reader_loop`, `_on_line`, `_post`, `_on_message`, `_on_response`, `_refuse`, `_stamp_activity`, `touch_used`, `_on_subagent_list`, `_note_subagent_action`, `_evict_finished_subagents`, `_compaction_session`, `_on_compaction_status`, `_on_agent_death`, `at_capacity`, `_flush_pending_commands`, `record`, `prompt`, `cancel`, `steer`, `commands_options`, `commands_execute`.
+- Transport dispatch is two fully parallel chains: `serve_socket` (`acp.py:5939`) → `_dispatch` (`acp.py:6142`) → `CLIENT_TYPES` (`acp.py:162`, 9 types) → 9 unsuffixed `_handle_*` functions at `acp.py:6200,6572,6725,6831,7044,7123,7168,7309,7390`; vs. `serve_socket_v3` (`acp.py:6021`) → `_dispatch_v3` (`acp.py:6084`) → `CLIENT_TYPES_V3 = CLIENT_TYPES | {"permission_response"}` (`acp.py:177`) → 9 `_handle_*_v3` functions at `acp.py:7484,7591,7674,7758,7890,8159,8201,8044,8099` plus `_handle_permission_response_v3` (`acp.py:7958`, no v2 sibling ever existed).
+- `web.py` mirrors the split: `acp_page`(1549)/`ws_acp`(1610)/`api_acp_sessions`(2518)/`api_acp_workspaces`(2707)/`api_acp_delete_sessions`(~3134) plus private helpers `_acp_listing`/`_acp_flat_listing`/`_acp_workspaces`/`_acp_status_for_held`(1851) are v2-only; `acp_v3_page`(1658)/`ws_acp_v3`(1686)/`api_acp_v3_sessions`(3258)/`api_acp_v3_workspaces`(3285)/`api_acp_v3_delete_sessions`(3298) plus `_acp_listing_v3`(2196)/`_acp_flat_listing_v3`(2433)/`_acp_workspaces_v3`(2679)/`_acp_status_for_held_v3`(1898) are their v3 counterparts. The 5 URL path constants are `web.py:692-729`; `_REMOTE_ALLOWED_PATHS` is `web.py:1139-1171` (13 entries today).
+- `acp.html`'s engine-conditional surface is 5 lines (`templates/acp.html:657-666`): `var ENGINE = {{engine|tojson}}` plus 4 ternaries deriving `WS_PATH`/`RAIL_SESSIONS_API`/`PICKER_WORKSPACES_API`/`SESSION_DELETE_API`, out of 8034 total lines — confirmed by full-file grep, no other `ENGINE` reference exists. `templates/index.html:381`'s `openInAcp()` hardcodes `location.href='/acp?sid=...'` — needs no change, since `/acp`'s string value doesn't change, only its backing engine. `templates/partials/session_row.html:31` gates the resume button on `provider_name in ('', 'kiro-cli')` — `kiro-cli-v3` is not in this tuple today (confirmed via `presence.py`/`status_classifier.py`/`data.py`).
+- `apply_config()` runs synchronously at `__main__.py:754`, before socket binding (`__main__.py:778`) — confirmed no race window for `_supervisor_v3 is None`.
+- **Preserved-exception verification** (deep-research pass, 2026-09-11): `_acp_session_paths` (`web.py:2779`) and `_acp_delete_session`'s v2 branch (`web.py:2869-2917`) are pure file-store operations with **no dependency** on the live v2 protocol code — confirmed clean by direct read. `_acp_availability`'s v2 branch (`web.py:1843`) and `_acp_delete_many` (`web.py:2920-3012`) both call `acp._lock_holder`, which at `acp.py:2253` checks `pid == _supervisor.agent_pid()` — a direct reference to the v2 global being deleted. This is the one real dependency found; D3 below resolves it.
+- **Two module-import-time crash risks** (Python evaluates default-parameter values at `def` time, not call time): `_flush_bubble(session_id, emit_fn=_emit)` (`acp.py:5839`) and `_deliver_load(..., subscribe_fn=_handle_subscribe)` (`acp.py:6536`) both default to names on the delete/rename list. Verified: every real call site already passes both arguments explicitly, so the defaults are functionally dead — but Python still evaluates them at definition time, so a rename that doesn't account for file-order (`_handle_subscribe`'s renamed source, `_handle_subscribe_v3` at `acp.py:7484`, sits *after* `_deliver_load` at `acp.py:6536` in the current file) produces a NameError on import. D4 resolves this.
+- Seven further ripple-effect call sites (7th added during Step 4 review), traced by following every bare `_supervisor` reference (107 lines in `acp.py`, 12 in `web.py`): `_SupervisorV3._publish_live()` (`acp.py:5670-5686`) unions `_supervisor.sessions` into the combined live-session set; `set_sessions_changed_hook` (`acp.py:886`) calls `_supervisor._publish_live()` unconditionally; module-level `shutdown()` (`acp.py:5932-5936`) unconditionally calls `_supervisor.shutdown()`; `_sweepable`/`_sweep_once` (`acp.py:8344-8535`) run two full separately-coded sweep passes (~90 lines each) with dual-engine membership checks; `web.py:3267,3288,3308` (three `getattr(acp, "_supervisor_v3", None)` string-literal lookups) and `web.py:3339-3340,3390-3391` (two held-set unions with `acp._supervisor.sessions`) in the renamed `api_acp_sessions`/`api_acp_workspaces`/`api_acp_delete_sessions` survivors; `_Registry.attach`/`detach` (`acp.py:2061-2089`) dual-dispatch `touch_used` by membership check. All seven need updating as part of the consolidation (§3 D1, D5, D12; Phase 1, Phase 2) — with D1 now eager (reopened during Step 4 review), none of these need a `None`-guard, only a correct rename/repoint to the sole surviving supervisor.
+- **A genuine, un-renameable naming collision**: `_context_percent`(1716)/`_context_percent_v3`(1738) and `_note_context`(5889)/`_note_context_v3`(5908) are four distinct functions that **all four survive** — the single surviving `_SupervisorV3._on_notification` (`acp.py:4755-5075`) calls both the unsuffixed pair (lines 4787, 4802) and the suffixed pair (line 4994: `_note_context_v3(session_id, _context_percent_v3(_kiro_meta))`) within the same method body, because they parse two different payload shapes v3's own protocol emits. See D2.
+- `PROMPT_SILENCE_SECONDS` (`acp.py:765`) and the AGENTS.md restart constraint are unaffected by and out of scope for this plan.
 
-- `_SupervisorV3(_Supervisor)` (`acp.py:4697`) subclasses v2's `_Supervisor` (`acp.py:2618`, ~2065 lines) and overrides only 13 methods; the rest — `alive`, `agent_pid`, `ensure_started`, `shutdown`, `_request`, `_notify`, `_write`, `_reader_loop`, `_on_line`, `_post`, `_on_message`, `_on_response`, `_refuse`, `_stamp_activity`, `touch_used`, `_on_subagent_list`, `_evict_finished_subagents`, `_compaction_session`, `_on_compaction_status`, `_on_agent_death`, `at_capacity`, `_flush_pending_commands`, `record`, `prompt`, `cancel`, `steer`, `commands_options`, `commands_execute` — are inherited unchanged and must be folded directly into the surviving class rather than deleted.
-- Transport dispatch is two fully parallel chains, not shared: `serve_socket` (`acp.py:5939`) → `_dispatch` (`acp.py:6142`) → 9 unsuffixed `_handle_*` functions, vs. `serve_socket_v3` (`acp.py:6021`) → `_dispatch_v3` (`acp.py:6084`) → 9 `_handle_*_v3` functions (confirmed pairs at `acp.py:6200/7484`, `6572/7591`, `6725/7674`, `6831/7758`, `7044/7890`, `7123/8159`, `7168/8201`, `7309/8044`, `7390/8099`) plus `_handle_permission_response_v3` (`acp.py:7958`), which has no v2 equivalent (`CLIENT_TYPES_V3 = CLIENT_TYPES | {"permission_response"}`, `acp.py:177`).
-- Two independent, never-cross-checked engine-identity mechanisms exist today: `web.py`'s three dispatch sites (`_acp_availability` `web.py:1838`, `_acp_delete_session` `web.py:2845`, `_acp_delete_many` `web.py:2950`) use a syntactic `sid.startswith("sess_")` string check; `acp.py`'s `_Registry.attach`/`detach` (`acp.py:2066-2089`) use semantic `session_id in _supervisor_v3.sessions` dict-membership. Both become moot once only one engine exists, but any code that currently branches on this distinction needs to be found and simplified, not just left as dead branching.
-- `_registry` (`acp.py:2097`, one `_Registry()` singleton) and its `MAX_CONNECTIONS = 8` cap are already shared, unpartitioned, process-wide state used identically by both engines today — no change needed here on cutover.
-- `acp.html`'s engine-conditional surface is tiny: exactly 4 lines (`acp.html:660-666`, `ENGINE`-derived URL constants) out of 8034. `static/style.css` has zero engine-conditional rules. The template/CSS side of this cutover is a small, low-risk edit relative to the Python side.
-- `apply_config()` runs synchronously at `__main__.py:754`, well before socket binding (`__main__.py:778`) — confirmed no race window where a request could reach `_supervisor_v3 is None`.
-- AGENTS.md:5,7 — Python changes (`acp.py`, `web.py`) require a PowerAtlas restart to take effect; the agent must never restart autonomously, always defer timing to the user. Template/JS/CSS changes are hot-reloadable (hard browser reload only).
+## 2) Goal
 
-### Risks & mitigations
+Delete v2's live ACP protocol code, fold v3's supervisor into a standalone class (no longer subclassing v2), rename the survivor to drop its version suffix (with a small, explicit set of permanent exceptions), and repoint `/acp` at it — while keeping v2's historical session-file reading intact for the dashboard.
 
-- **Deep retirement is an order-of-magnitude larger change than the ROADMAP item anticipated** ("engine parameter or subclass retained", `plans/ROADMAP.md`) — mitigation: `/qplan` should size this as Major tier given the ~2065-line base-class fold-in, the repo-wide rename, and the test-suite churn, not assume Standard tier from the original ROADMAP framing.
-- **The rename is large mechanical churn** across `acp.py`, `web.py`, and ~180 test names — risk of an unintentional behavior change riding along with a rename that should be pure. Mitigation: treat the rename as its own reviewable step, verified by full test-suite pass before and after.
-- **`_REMOTE_ALLOWED_PATHS` is a hand-maintained allowlist, not derived from the route table** (`web.py:1139-1171`) — must be deliberately reconciled, not assumed to update itself when routes are deleted. Getting this wrong risks either a broken route (over-pruned) or a stale, needlessly-open entry (under-pruned).
-- **A pre-existing asymmetry**: `_handle_subscribe` cross-checks `_supervisor_v3.closing` before attaching a socket (`acp.py:6244-6245`), but `_handle_subscribe_v3` does not symmetrically check `_supervisor.closing`. This is now in scope since the merge directly touches this code — worth fixing as part of the consolidation rather than carrying the asymmetry into the merged class.
-- **122 orphaned `sess_`-prefixed `.history` files already exist in `KIRO_SESSION_DIR` (`~/.kiro/sessions/cli/`, confirmed via live directory listing 2026-09-11)** — no `.json`/`.jsonl` pair, meaning kiro-cli v3 itself already writes readline-history files into the nominally-v2-only directory. Doesn't break anything today (v2's listing globs `.json`, never sees these) and this plan does not need to clean them up, but the "v2 and v3 storage is cleanly separated" assumption in existing code comments is weaker than stated — worth a one-line acknowledgment rather than silently building further on it.
-- **Terminology/documentation fallout**: `plans/ROADMAP.md`, `docs/KNOWLEDGE.md`, and `AGENTS.md` itself reference "v2"/"v3"/"acp-v3" extensively. Once the rename ships, these read as stale. A documentation sweep should be a tracked exit criterion, not an afterthought.
-- **Session-ID collision**: confirmed a non-issue. v2 ids are bare UUIDs, v3 ids are `sess_`-prefixed (`web.py:4920` regex), disjoint by construction and already exercised by tests (`test_deleting_a_v2_session_open_in_the_other_engine_is_refused`, `tests/test_web.py:17299`). Live directory listing (16,414 files, 2026-09-11) found zero v2-stored files starting with `sess_`. No new disjointness logic needed.
+## 3) Design Decisions
 
-### Resolved decisions
+| Decision | Choice | Alternatives considered | Rationale |
+|---|---|---|---|
+| Q1: Scope organization | Two plans: this cutover + a separate bundled follow-ups plan | One combined plan; six fully decomposed plans | User's explicit choice — isolates the high-risk architectural change from independent smaller features |
+| Q2: Depth of replacement | Deep retirement — delete v2-only code now, restructure `_SupervisorV3` off `_Supervisor` | Routing-level takeover only (v2 code stays, unreached); routing-level + permanent v2 retention | User's explicit choice, confirmed non-default (recommended option was routing-level takeover) |
+| Q3: Historical v2 data | Keep `data_kiro.py`'s v2 reader untouched | Retire historical browsing along with the live engine | User's explicit choice; only the live protocol engine retires, not the on-disk history |
+| Q4: Naming | Rename to drop `_v3`/`V3` suffix repo-wide | Keep `_v3` suffix permanently | User's explicit choice — refined by this plan's research into the exception set (D2, SC-3) the exploration interview did not have visibility into |
+| Q5: Permission UX | Accept v3's interactive approval now; auto-mode stays a separate future ROADMAP item | Block cutover on building auto-mode first; add a scoped trust-session shortcut to this plan | User explicitly declined `/qcouncil` and chose directly; recommended option |
+| Q6: Old-session button | Hide/disable for old v2-provider rows | Leave as-is, let it fail gracefully | User's explicit choice; recommended option — refined by D6 below, which this plan's research found necessary to make SC-5 actually work |
+| D1: Supervisor construction | **Reopened during Step 4 review.** Keep the merged supervisor **eagerly** constructed at module import time, matching v2's original `_supervisor = _Supervisor()` pattern | Lazy construction in `apply_config`, matching v3's current pattern (originally chosen, then reversed) | Review found `tests/test_web.py`'s `acp_session`/`acp_store` fixtures (332 call sites) reach into `acp_mod._supervisor.sessions/.history/...` with no construction step, assuming an eager singleton exactly like v2's; going lazy would break all 332 at fixture setup, none of them findable by Phase 4's `grep "v3\|V3"` sweep since none reference v3 by name. Eager construction loses nothing: a constructor failure becomes an import failure, already caught by the existing `_ACP_IMPORT_ERROR`/guarded-import mechanism at the module boundary — the same safety net `apply_config`'s try/except was providing. Eager also eliminates the need to audit every unconditional call site for a `None`-guard (7 confirmed sites, see Phase 1 step 9) |
+| D2: `_context_percent`/`_note_context` collision | Keep all four functions (`_context_percent`, `_context_percent_v3`, `_note_context`, `_note_context_v3`) exactly as named — do not rename the `_v3` pair | Force a rename with new distinguishing names (e.g. `_context_percent_from_notification`) | Both pairs are actively called together from the single surviving `_on_notification`, parsing genuinely different payload shapes; renaming either `_v3` one would collide with its still-live unsuffixed sibling. A larger rename is out of scope for a plan whose goal is dropping suffixes, not inventing new names |
+| D3: `_lock_holder`'s v2 self-check | Delete the `pid == _supervisor.agent_pid()` check (`acp.py:2253`) outright | Repoint it to the renamed supervisor | **Reworded per Step 4 review**: the staleness/skew check at `acp.py:2249` does not actually catch "this pid is genuinely our own still-running process" (a live, non-recycled pid passes it cleanly) — that clause of the original rationale doesn't hold under inspection. The real, structural reason the deletion is safe: the sole surviving `load_session` (v3-descended) writes `.history` files, never `.lock` files, so the scenario this self-check exists for (our own live pid appearing in a `.lock` file from our own failed load) is unreachable once v2's `.lock`-writing code path is deleted, independent of staleness. `_lock_holder` is documented as "a hint, never a grant" (`web.py:1811`), so even a wrong deletion would only cause a spurious fail-closed refusal on a legacy v2 delete, never an over-grant |
+| D4: Forward-reference-unsafe defaults | Remove the `emit_fn=_emit`/`subscribe_fn=_handle_subscribe` defaults from `_flush_bubble`/`_deliver_load`; make both required keyword arguments | Rely on post-rename file ordering to keep the reference valid | **Reworded per Step 4 review**: every call site that *survives Phase 1's deletions* already passes both explicitly — not "every real call site" in the pre-Phase-1 file, where at least 8 v2-only call sites (`acp.py:4012,4041,4166,4184,6701,6722,6950,7039`) rely on the default. Those sites are themselves deleted by Phase 1 (they live in v2-only `_on_notification`/`_handle_load`/`_handle_prompt`), so the engineering conclusion holds — a required kwarg removes the NameError risk unconditionally rather than depending on where in the file the renamed function ends up |
+| D5: Dual sweep passes | Collapse `_sweepable`/`_sweep_once`'s two ~90-line passes into one, keeping **both** of the two passes' non-overlapping pieces: the v2 pass's subscriber-notification-on-release block (`acp.py:8479-8490`, `session_closed` frame sent to subscribers) and the v3 pass's `_pending_early_frames` orphan-buffer sweep (`acp.py:8517-8535`, SC-1). **Do not assume either is redundant without first confirming**: before merging, read `_SupervisorV3.close_session` (renamed) to check whether it already emits an equivalent subscriber notification independently of the sweep loop — if yes, the v2 pass's block is genuinely redundant and can be dropped; if no, v3 sessions have been silently missing that notification and the block must be added, not merged as a no-op | Leave both passes, have the v2 pass become dead code | Only one engine exists post-cutover; a dead 90-line pass is exactly the "no dead v2 code left behind" the Problem statement commits to. **Amended per Step 4 review**: the two passes are not mirrors — a naive "collapse into one" leaves an undocumented judgment call about which pieces survive |
+| D6: Dashboard resume-button gate | Widen `session_row.html:31`'s positive case to include `kiro-cli-v3`, in addition to Q6's negative-case fix for old v2 rows | Ship only Q6's fix | Today's gate already excludes `kiro-cli-v3` entirely; without this, post-cutover the button would show for *zero* rows — old v2 rows newly hidden by Q6, v3 rows (the only live sessions left) already excluded by the pre-existing tuple. Confirmed a real, currently-live gap, not a hypothetical |
+| D7: `memory/MEMORY.md` entries | Update the ~13 entries' cited identifier names; preserve the underlying documented facts | Leave them referencing now-renamed/deleted names | The facts (protocol behavior, empirical findings) remain true; only the names they cite go stale |
+| D8: `plans/CLOSED_INVESTIGATIONS.md` | Leave its 10 hits untouched | Update to current naming | Dated, historical record of what was true when investigated — not live documentation; rewriting it would misrepresent the historical record |
+| D9: `plans/ROADMAP.md`'s merge item | Remove the "Merge `/acp` and `/acp-v3`" item (line 39) as superseded, rather than edit it in place | Edit it to describe this plan | This plan supersedes the item entirely once complete; a stale "still to do" entry for already-done work is worse than removing it |
+| D10 *(added, Step 4 review)*: `same_origin_guard`'s CSRF path check | Simplify `web.py:912`'s `request.url.path in (_ACP_PATH, _ACP_V3_PATH)` to `request.url.path == _ACP_PATH`; update `_acp_navigation_ok`'s docstring (`web.py:854`) to drop its `/acp-v3` mention | Leave the tuple form, relying on `_ACP_PATH`/`_ACP_V3_PATH`'s renamed definitions to resolve correctly | This line lives inside a function body (evaluated per-request, not at import time) and gates the *only* loopback-originated CSRF-navigation defense for `/acp` — a missed rename here is invisible to the plan's "clean import" check and its URL-literal grep (§7), and would only surface as a runtime `NameError` on the first served request after `_ACP_V3_PATH`'s old name is gone. Security-relevant: this is not a cosmetic rename site |
+| D11 *(added, Step 4 review)*: `acp_page`/`ws_acp`'s security-rationale docstrings | Fold the deleted v2 `acp_page`'s docstring content (`web.py:1548-1559`, explaining why `_request_host_allowed` is deliberately re-checked despite `same_origin_guard` already covering it) and the deleted v2 `ws_acp`'s docstring content (`web.py:1610-1638`, the disproved "phantom control" finding about `_ws_origin_ok`) directly into their renamed survivors, replacing the survivors' current "Mirrors `acp_page`/`ws_acp`, see there for rationale" stub text | Leave the stub text as-is | Once the v2 functions are deleted, "see `acp_page` for security rationale" on `acp_page` itself is a dangling self-reference with the actual rationale silently gone — a future maintainer could read the now-stub-only doc and conclude the "redundant-looking" host check is dead code, and remove it, reopening the DNS-rebinding token-leak gap the check exists to close |
+| D12 *(added, Step 4 review)*: web.py-side `_supervisor_v3` references Phase 1 doesn't reach | Phase 1 is scoped to `acp.py` only; three `getattr(acp, "_supervisor_v3", None)` string-literal lookups (`web.py:3267,3288,3308`) and two `acp._supervisor.sessions` held-set unions (`web.py:3339-3340,3390-3391`) in `web.py` are not covered by any Phase 1 step and need their own explicit Phase 2 step | Assume Phase 1's `acp.py` rename covers these because they reference the same concept | These are `web.py`-side literals/expressions, invisible to a rename scoped to `acp.py`; left alone, the `getattr` calls silently return `None` post-rename (dead attribute, zeroing a "held" count) and the held-set unions raise `AttributeError` against a supervisor that (even under D1's eager reversal) is simply the wrong name to reference |
+| D13 *(added, Step 4 review)*: Inherited-method count and v2-only orphan helpers | §1/Phase 1's "34 inherited methods" is corrected to **35** (`_create_job`, a `_Supervisor` static method called via `self._create_job()` inside `_SupervisorV3._spawn`, was omitted). `_build_kas_session_params` (`acp.py:700`, v2-only, called only from deleted v2 code) and `_crew_toolcallid` (`acp.py:5692`, v2-only, called only from deleted v2 `_handle_subscribe`) are added to Phase 1's Delete list | Trust the original enumerated lists as complete | Both gaps were found by independently diffing the two classes' full method sets and every caller of the two helpers against the plan's lists, rather than trusting the lists themselves. A missed `_create_job` fold-in breaks every session spawn (`AttributeError` in the sole surviving `_spawn`); missed deletion of the two v2-only helpers doesn't crash (Python's last-definition-wins silently shadows the orphan with the renamed v3 survivor) but leaves ~15 unreachable lines, violating SC-2/SC-8's "no dead v2 code" commitment in a way no `v3`-keyed grep would catch |
 
-- Q1: How should this request be organized into project file(s), given it spans ~6 largely-independent pieces of work? — A: Two plans: cutover + bundled follow-ups (Recommended). — Decision: split into this cutover plan and a separate `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`.
-- Q2: Does "v3 fully replaces v2" mean routing-level takeover (v2 code stays, unreached) or deep retirement (v2 code deleted now, requiring `_SupervisorV3` to stop inheriting from `_Supervisor`)? — A: Deep retirement in this same plan. — Decision: delete v2-only live-protocol code now; fold `_SupervisorV3`'s inherited-unchanged methods directly into the surviving class.
-- Q3: Should the dashboard still browse/read the ~16,414 pre-existing v2 session files after the live v2 engine is retired? — A: Keep old v2 history browsable (Recommended). — Decision: `data_kiro.py`'s v2 session-file reader stays untouched; only the live v2 supervisor/protocol code is retired.
-- Q4: Should the surviving v3 code be renamed to drop the `_v3`/`V3` suffix? — A: Rename to drop the v3 suffix (Recommended). — Decision: repo-wide mechanical rename across `acp.py`, `web.py`, and `tests/test_web.py`'s ACP test names.
-- Q5: How to handle the loss of v2's blanket auto-approve, given v3's `-a` is structurally incompatible (exits 2) and v2's own planned auto-mode alternative doesn't exist yet? Council-eligible; user explicitly opted to skip `/qcouncil` and be asked directly. — A: Accept it now, auto-mode stays a separate future item (Recommended). — Decision: ship v3's interactive `session/request_permission` approval as the permanent default; the existing "Auto-mode for `/acp` permissions" ROADMAP item (under "Session Control & Integration") remains a separately-scoped future plan, untouched by this one.
-- Q6: What should happen to the dashboard's "Open in Agent orchestrator" button for old v2 session rows, given it currently implies a live resume that v2's retirement makes impossible? — A: Hide/disable the button for old v2 rows (Recommended). — Decision: gate `session_row.html:31`'s button to exclude v2-provider rows once this cutover ships.
+## 4) External Dependencies & Costs
 
-### Open items
+### Required external changes
 
-- Exact `_REMOTE_ALLOWED_PATHS` reconciliation shape (which of the 10 current entries collapse into which of the post-cutover set) — deterministic, resolvable by `/qplan` reading the current allowlist against the final route list.
-- Full-breadth confirmation that no `web.py` helper function beyond the ones already traced (`_acp_availability`, `_acp_delete_session`, `_acp_delete_many`, and the route-level pairs) branches on v2-vs-v3 engine identity — the research passes' coverage of `web.py`'s many `_acp_*`/`api_acp_*` helpers was not exhaustive; `/qplan` or the implementation phase should do a full sweep before assuming the traced set is complete.
+| Category | Change needed | Owner | Status |
+|---|---|---|---|
+| Rollout / cutover | Coordinated PowerAtlas restart (Phase 7) — kills every live kiro-cli process for both engines, per AGENTS.md:5 | User | Pending |
 
-**Assumptions (unconfirmed)**: none beyond what's already recorded in Risks above — the exploration interview covered every consequence-significant decision point directly with the user rather than defaulting any of them.
+All other rows from the template do not apply — no cloud resources, IAM, CI/CD, secrets, DNS, or third-party services are touched by this plan.
 
-### Recommended approach
+### Cost impact
 
-1. Restructure `_SupervisorV3` into the sole supervisor class: fold in the ~15 inherited-unchanged methods from `_Supervisor`, delete v2-only methods (`_spawn`'s v2 branch, v2-only constants `ACP_ARGS`/`CLOSE_METHOD`), then rename the class to drop `V3`.
-2. Delete `serve_socket`/`_dispatch` and the 9 unsuffixed `_handle_*` functions; rename the `_v3`-suffixed survivors to drop the suffix.
-3. Repoint `web.py`'s `/acp` route (`acp_page`, `ws_acp`) to the renamed engine; delete `/acp-v3`'s route registrations (`acp_v3_page`, `ws_acp_v3`) and reconcile `_REMOTE_ALLOWED_PATHS`.
-4. Rename `web.py`'s surviving `_v3`-suffixed endpoints/helpers to drop the suffix; delete their v2-only counterparts, keeping the cross-engine-aware logic (e.g., `data_kiro.py`'s v2 history reading) that must survive.
-5. Update `session_row.html`'s gate to hide the "Open in Agent orchestrator" action for v2-provider rows.
-6. Rename `tests/test_web.py`'s ~180 ACP test names and rewrite `tests/acp_page.test.mjs`'s three v2-URL-absence assertions to match the single-engine reality.
-7. Documentation sweep: update `ROADMAP.md`, `docs/KNOWLEDGE.md`, `AGENTS.md` references to the old v2/v3 split.
-8. Coordinate the restart with the user — this cannot be verified without one, per AGENTS.md.
+None. No hosting, compute, API-call-volume, storage, or licensing change.
 
-`/qplan` should independently assess tier (this exploration's own read: Major, given the base-class fold-in and repo-wide rename) rather than deferring to the ROADMAP item's original "engine parameter or subclass retained" framing, which predates this session's decision to go with deep retirement.
+## 5) Implementation Phases
 
-### QA environment
+### Phase 1: Backend engine consolidation (acp.py) [QA]
+**Goal**: Fold `_SupervisorV3` into a standalone class, delete all v2-only live-protocol code, rename the survivor per SC-3's rule and exceptions, and resolve the 7 ripple-effect call sites found in §1.
+**Covers**: SC-2, SC-3, SC-9
 
-- PowerAtlas is the user's live, daily-use instance. `acp.py`/`web.py` changes require a restart to take effect (AGENTS.md:5,7) — never restart autonomously; coordinate timing with the user before any phase that needs one to verify.
-- `tests/test_web.py` (pytest) covers backend routing/dispatch — run via the project's existing test invocation.
-- `tests/acp_page.test.mjs` (`node tests/acp_page.test.mjs`) covers `acp.html`'s inline JS, including the `ENGINE`-conditional lines — not part of CI/pytest, must be run by hand after any template change.
-- Live browser verification against the running instance is available and was successfully used during this exploration (a live probe of the v3 steering-command wire shape via an isolated kiro-cli subprocess, and interactive palette/composer checks against a real idle `/acp-v3` session) — the same approach can verify post-cutover behavior once a restart has been coordinated.
+**File scope**: `src/power_atlas/acp.py`
+
+Steps:
+1. Delete `_Supervisor`'s v2-only body (`acp.py:2618-4696`) down to the 35 methods it shares with `_SupervisorV3` (§1 list, corrected — includes `_create_job`) — fold those 35 directly into what remains, dropping the class's separate identity. **Do not delete** the module-level `_supervisor = _Supervisor()` construction statement itself (`acp.py:4683`) — under D1 (reopened, eager), the renamed sole supervisor keeps this exact construction pattern, just against the renamed class and at its post-fold-in position in the file.
+2. Delete `ACP_ARGS` (`acp.py:642`), `CLOSE_METHOD` (`acp.py:459`), `serve_socket` (`acp.py:5939`), `_dispatch` (`acp.py:6142`), the 9 unsuffixed `_handle_*` functions, `_emit` (`acp.py:5701`), `_evict_crew_children` (`acp.py:6781`), and (D13, added during Step 4 review) two v2-only orphan helpers: `_build_kas_session_params` (`acp.py:700`) and `_crew_toolcallid` (`acp.py:5692`) — both are called only from code already being deleted, and must be removed *before* step 3 renames their v3-suffixed siblings onto the same names, or Python's last-definition-wins rebinding silently shadows them as unreachable dead code instead of actually replacing them.
+3. Rename the survivors per SC-3: `_SupervisorV3`→`_Supervisor`, `serve_socket_v3`→`serve_socket`, `_dispatch_v3`→`_dispatch`, the 8 paired `_handle_*_v3`→`_handle_*`, `_handle_permission_response_v3`→`_handle_permission_response`, `ACP_V3_ARGS`→`ACP_ARGS`, `CLOSE_METHOD_V3`→`CLOSE_METHOD`, `_supervisor_v3`→`_supervisor`, `_build_kas_session_params_v3`→`_build_kas_session_params`, `_crew_toolcallid_v3`→`_crew_toolcallid`, `_emit_v3`→`_emit`, `_evict_crew_children_v3`→`_evict_crew_children`, `_KIRO_V3_TOKEN_BINARY`→`_KIRO_TOKEN_BINARY`, `CLIENT_TYPES_V3`→ merge into `CLIENT_TYPES` (adding `permission_response`), `SERVER_TYPES`'s v3-only additions stay merged into the one set.
+4. **Do NOT rename** (SC-3 exceptions): `_lock_holder_v3`, `_V3_HOLDER_PID_UNKNOWN`, `_V3_HELD_STATUSES`, `_V3_SESSION_STALE_SECONDS`, `_stored_session_cwd_v3`, `_get_tool_diffs_v3`, `_context_percent_v3`, `_note_context_v3` (D2 — leave both pairs exactly as-is).
+5. Apply D3: delete the `pid == _supervisor.agent_pid()` self-check at `_lock_holder` (formerly `acp.py:2253`).
+6. Apply D4: remove the `emit_fn=_emit` default from `_flush_bubble` and the `subscribe_fn=_handle_subscribe` default from `_deliver_load`; make both required keyword arguments; update their call sites (already pass both explicitly per §1 — confirm no site relies on the default).
+7. Apply D5: collapse `_sweepable`/`_sweep_once`'s two sweep passes into one.
+8. Simplify `_SupervisorV3._publish_live()` (renamed) to publish only `self.sessions` — remove the `frozenset(self.sessions) | v2_sessions` union (`acp.py:5670-5686`), since there is only one engine's sessions to publish. **Leave the `pid=0` sentinel as-is** — that is the separate D32 orphan-lock fix tracked in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`, out of scope here; note in a code comment that this method is shared cutover ground with that plan.
+9. Apply D1 (reopened, eager): repoint the 7 ripple-effect call sites in §1 to the renamed sole supervisor by name only — `set_sessions_changed_hook` (`acp.py:886`), module-level `shutdown()` (`acp.py:5932-5936`, the 7th site, added during Step 4 review), `_Registry.attach`/`detach` (`acp.py:2061-2089`, collapse the dual-dispatch to one unconditional call). Since construction is eager, **none of these need a `None`-guard** — that was D1's original (now-reversed) lazy framing; a plain unconditional reference to the renamed `_supervisor` is correct and sufficient.
+10. Sweep in-code comments (not just identifiers) for text that explains the *current* v2/v3 split and will misdescribe reality once it's gone — confirmed instances: `acp.py:166-177` (the `CLIENT_TYPES`/`CLIENT_TYPES_V3` rationale, obsolete once step 3 merges the two sets) and the present-tense `-a`/trust-all-tools framing in comments at `acp.py:356,896,2178` (v2's blanket auto-approve is being deleted; v3's interactive-approval model should be described in its place, not left describing removed behavior as current).
+11. Read the current file fresh before editing — line numbers throughout this plan are as of 2026-09-11 and will drift after step 1's large deletion.
+
+**Exit criteria**:
+- [ ] `_Supervisor` class contains no v2-only method; `_supervisor` (renamed from `_supervisor_v3`) is the sole module-level instance, constructed **eagerly** at import time per D1 (reopened)
+- [ ] Every rename in step 3 applied; every exception in step 4 preserved unchanged; the two v2-only orphan helpers (D13) deleted before their v3-suffixed siblings were renamed onto the same names
+- [ ] D3, D4, D5 applied; D5's sweep-pass merge decision (subscriber-notification block, `_pending_early_frames` sweep) resolved by actually reading `close_session`, not assumed
+- [ ] `_publish_live`'s v2-session union removed (step 8), sentinel pid left as-is
+- [ ] All 7 ripple-effect call sites (§1) repointed to the renamed sole supervisor by name, no `None`-guards added (none needed under eager construction)
+- [ ] `grep -rn "SupervisorV3\|_supervisor_v3\|CLIENT_TYPES_V3\|_dispatch_v3\|serve_socket_v3" src/power_atlas/acp.py` returns zero hits outside the SC-3 exception set
+- [ ] `python -c "from power_atlas import acp"` succeeds with no NameError or AttributeError
+- [ ] Full pytest suite scoped to `acp.py`-testable behavior passes, **including** `acp_session`/`acp_store`-fixture-based tests (`tests/test_web.py`, 332 call sites) — these depend on eager construction (D1) and must not be treated as "expected failures until Phase 4"; only tests referencing a renamed/deleted symbol by name are expected to fail here
+
+### Phase 2: Backend routing & endpoints (web.py) [QA] [P:3]
+**Goal**: Repoint `/acp` at the renamed engine, retire `/acp-v3`'s routes, migrate the 5 URL constants' values, reconcile `_REMOTE_ALLOWED_PATHS`.
+**Covers**: SC-1, SC-6, SC-9
+
+**File scope**: `src/power_atlas/web.py`
+
+Steps:
+1. Delete `acp_page`(1549), `ws_acp`(1611), `api_acp_sessions`(2518), `api_acp_workspaces`(2707), `api_acp_delete_sessions`(~3129), `_acp_listing`(2041), `_acp_flat_listing`(2311), `_acp_workspaces`(2639), `_acp_status_for_held`(1851). **Before deleting**, copy `acp_page`'s docstring (`web.py:1548-1559`, the `_request_host_allowed`-repetition rationale) and `ws_acp`'s docstring (`web.py:1610-1638`, the disproved "phantom control" / `_ws_origin_ok` finding) aside — step 2 folds them into the renamed survivors (D11).
+2. Rename the v3 survivors to drop the suffix: `acp_v3_page`→`acp_page`, `ws_acp_v3`→`ws_acp`, `api_acp_v3_sessions`→`api_acp_sessions`, `api_acp_v3_workspaces`→`api_acp_workspaces`, `api_acp_v3_delete_sessions`→`api_acp_delete_sessions`, `_acp_listing_v3`→`_acp_listing`, `_acp_flat_listing_v3`→`_acp_flat_listing`, `_acp_workspaces_v3`→`_acp_workspaces`, `_acp_status_for_held_v3`→`_acp_status_for_held`. Inside the renamed `acp_page`, drop the `"engine": "v3"` template variable entirely (Phase 3 removes the template's need for it). Apply D11: replace the renamed `acp_page`'s current "Mirrors `acp_page` with `engine='v3'`. See `acp_page` for security rationale" stub with the actual v2 docstring content saved in step 1 (rewritten to no longer describe itself in the third person); do the same for the renamed `ws_acp`.
+3. Migrate URL path constant values: `_ACP_V3_PATH`("/acp-v3")→`_ACP_PATH`("/acp"), `_ACP_V3_WS_PATH`("/ws/acp-v3")→`_ACP_WS_PATH`("/ws/acp") — the first-ever named constant for this path, replacing the bare `"/ws/acp"` literal that appears nowhere else after step 1's deletions — `_ACP_V3_LISTING_PATH`→`_ACP_LISTING_PATH`("/api/acp/sessions"), `_ACP_V3_WORKSPACES_PATH`→`_ACP_WORKSPACES_PATH`("/api/acp/workspaces"), `_ACP_V3_DELETE_PATH`→`_ACP_DELETE_PATH`("/api/acp/sessions/delete"). Delete the 5 old v2 constants entirely.
+4. Apply D10: in `same_origin_guard`, simplify `request.url.path in (_ACP_PATH, _ACP_V3_PATH)` (`web.py:912`) to `request.url.path == _ACP_PATH`; update `_acp_navigation_ok`'s docstring (`web.py:854`) to drop its `/acp-v3` mention. This reference lives inside a function body — not caught by an import-time check or a URL-literal grep — so treat it as a named step, not an incidental consequence of the constant rename in step 3.
+5. Apply D12: rename the three `getattr(acp, "_supervisor_v3", None)` string literals (`web.py:3267,3288,3308`, inside the renamed `api_acp_sessions`/`api_acp_workspaces`/`api_acp_delete_sessions`) to `"_supervisor"`; collapse the two `frozenset(sv3.sessions if sv3 else ()) | frozenset(acp._supervisor.sessions)`-shaped held-set unions (`web.py:3339-3340,3390-3391`) into a single reference to the sole renamed supervisor.
+6. Reconcile `_REMOTE_ALLOWED_PATHS` (`web.py:1139-1171`) from the current 13 entries to exactly the 8 keys below — **preserve each surviving entry's existing rationale comment** (`web.py:1144-1149` for workspaces, `1151-1158` for delete, `1160-1164` for restart); delete only the `# v3 ACP paths — parallel to the v2 entries above` header (`web.py:1165`) and the 5 keys it introduces:
+   ```python
+   _REMOTE_ALLOWED_PATHS: dict[str, str] = {
+       _REMOTE_AUTH_PATH: "http",
+       _ACP_RESTART_PATH: "http",
+       _ACP_PATH: "http",
+       _ACP_WS_PATH: "websocket",
+       _ACP_LISTING_PATH: "http",
+       _ACP_WORKSPACES_PATH: "http",
+       _ACP_DELETE_PATH: "http",
+       _REMOTE_STATIC_MOUNT: "http",
+   }
+   ```
+7. **Keep unchanged** (D-exceptions, per Phase 1 step 4's rationale extended to web.py — and out of this plan's rename scope entirely per SC-3's narrowing, since these denote store/provider format, not engine identity): `_ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"` (`web.py:1778`), the `PROVIDER_COLOR`/`PROVIDER_LABEL`/`PROVIDER_ICON`/`launcher_arg` dict entries for `"kiro-cli-v3"` (`web.py:89,95,101,107`), and the `sess_`-prefix shape-dispatch logic in `_acp_availability`/`_acp_delete_session`/`_acp_delete_many` (these route between the now-sole live v3 store and v2's permanently-preserved historical store — SC-4 depends on this staying, not becoming dead code).
+8. Apply D3's downstream effect: confirm `_acp_availability`'s v2 branch and `_acp_delete_many` no longer hit the deleted `_lock_holder` self-check (Phase 1 already removed it at the source).
+
+**Exit criteria**:
+- [ ] `/acp` and `/ws/acp` resolve to the renamed v3-descended engine; `/acp-v3`, `/ws/acp-v3` and their 3 API siblings no longer route anywhere
+- [ ] `same_origin_guard`'s CSRF check (D10) and the `getattr`/held-set-union sites (D12) are updated — verified by an actual served request in Phase 7, not just import cleanliness, since both are runtime-only references
+- [ ] The renamed `acp_page`/`ws_acp` carry the folded-in v2 security rationale (D11), not a dangling "see `acp_page`" self-reference
+- [ ] `_REMOTE_ALLOWED_PATHS` matches the 8-entry table in step 6 exactly, with every surviving entry's rationale comment intact
+- [ ] `_acp_availability`/`_acp_delete_session`/`_acp_delete_many`'s `sess_`-prefix dispatch logic is unchanged and still functions (verified by the Phase 4 test updates)
+- [ ] `"kiro-cli-v3"` provider identity constants (`_ACP_V3_LISTING_PROVIDER`, `PROVIDER_*` dict entries) are unchanged
+
+### Phase 3: Frontend — ENGINE collapse & dashboard gate fix [QA] [P:2]
+**Goal**: Remove the now-dead `ENGINE` branching in `acp.html`; fix `session_row.html`'s resume-button gate (D6).
+**Covers**: SC-1, SC-5
+
+**File scope**: `src/power_atlas/templates/acp.html`, `src/power_atlas/templates/partials/session_row.html`
+
+Steps:
+1. In `acp.html:657-666`, replace the `ENGINE`-ternary block with hardcoded constants using the post-migration v2-spelled URL strings: `WS_PATH = '/ws/acp'`, `RAIL_SESSIONS_API = '/api/acp/sessions'`, `PICKER_WORKSPACES_API = '/api/acp/workspaces'`, `SESSION_DELETE_API = '/api/acp/sessions/delete'`. Remove the `var ENGINE = {{engine|tojson}}` line.
+2. In `session_row.html:31`, change `provider_name|default('') in ('', 'kiro-cli')` to `provider_name|default('') in ('', 'kiro-cli', 'kiro-cli-v3')`.
+3. Apply Q6's negative-case fix in the same edit: for a row whose `provider_name == 'kiro-cli'` (a historical v2 session — confirmed identifiable since `data_kiro.py`'s reader still populates this provider tag per SC-4), hide/disable the resume button specifically, distinct from the general gate widened in step 2. Concretely: the gate in step 2 controls whether the button renders *at all*; a second, narrower condition disables it specifically for `provider_name == 'kiro-cli'` rows (old v2 history) while leaving it enabled for `kiro-cli-v3` rows (the only live sessions left).
+
+**Exit criteria**:
+- [ ] `acp.html` has no remaining reference to `ENGINE` or the `engine` template variable (grep confirms zero hits)
+- [ ] `session_row.html`'s resume button renders for `kiro-cli-v3` rows, and is hidden/disabled specifically for `kiro-cli` (v2, historical) rows
+- [ ] Hard browser reload against a live (pre-restart) `/acp-v3` page renders and its JS executes with no console error — this phase's changes are hot-reloadable per AGENTS.md:7 and can be checked without a restart. **Scope note (Step 4 review)**: this checks page load only, not session functionality — pre-restart, the running Python process still routes `/ws/acp` to the old v2 handler (`AGENTS.md:7`, Python changes need a restart), so opening a session at this point would hit v2's dispatcher with a v3-shaped frame and fail; that is expected and not a Phase 3 defect. Real session-level verification happens in Phase 7
+- [ ] `node tests/acp_page.test.mjs` run — the 3 `test_engine_*` tests are **expected to fail** until Phase 5 rewrites them; this is not a Phase 3 regression, confirm no *other* test in that file newly fails
+
+### Phase 4: Test suite — tests/test_web.py [QA] [P:5,6]
+**Goal**: Rename, delete, or update every ACP-related test to match the consolidated engine.
+**Covers**: SC-7
+
+**File scope**: `tests/test_web.py`
+
+Steps:
+0. **Discriminator rule (added, Step 4 review)** — apply before bucketing any test: a test body referencing **both** the suffixed and unsuffixed spelling of the same identifier (`_dispatch`+`_dispatch_v3`, `CLIENT_TYPES`+`CLIENT_TYPES_V3`, `_supervisor`+`_supervisor_v3`) is cross-engine-scoped, never a plain rename target — DELETE it if it asserts *isolation* between the two spellings (the assertion becomes false once Phase 1 merges them, not merely stale), or re-scope it per step 3 if it asserts *coexistence*. A mechanical "rename internal references" pass does not fix a false assertion.
+1. **Rename** (~55-60 tests, the RENAME-target bucket from the enumeration research — full list is drift-prone by line number; regenerate via `grep -n "v3\|V3" tests/test_web.py` against the then-current file and cross-reference against the KEEP/DELETE buckets in steps 2-3 before renaming anything): update test names and internal references (function calls, URL literals, class names) to match Phase 1/2's renames.
+2. **Delete** (6 tests under step 0's isolation rule, now-impossible scenarios — corrected from 4 during Step 4 review): `test_a_v3_session_open_in_the_other_engine_is_refused`(16324), `test_deleting_a_v2_session_open_in_the_other_engine_is_refused`(17299), `test_v2_endpoint_workspace_delete_ignores_v3_sessions_in_the_same_cwd`(17411), `test_v2_endpoint_workspace_delete_is_unaffected_by_a_v3_session_held_elsewhere`(17432), and (found by the discriminator rule) `test_permission_response_routing_isolated_between_v2_and_v3_dispatch`(23752-23819, asserts `"permission_response" not in acp_mod.CLIENT_TYPES` — false once step 1's `CLIENT_TYPES` merge lands) and `test_all_declared_v3_client_types_are_routed`(23821-23859, iterates the deleted `CLIENT_TYPES_V3` over `_dispatch_v3`) — the latter becomes a duplicate of `TestAcpDeclaredTypesAreRouted`(7037-7068) once both dispatchers merge into one; fold the merged-set assertion into that surviving class instead of keeping both.
+3. **Review and update, not delete** (non-v3-named but cross-engine-scoped, per step 0): `TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace` and any sibling test asserting behavior across both a live v2 session and a live v3 session — these need to become tests of "a historical v2 file entry coexisting with a live v3 session," not deleted outright, since SC-4's historical-browsing guarantee is exactly what they should now verify.
+4. **Keep unchanged** (~26 tests, exercise the permanent-distinction set — SC-3 exceptions): `TestClassifyKiroV3`+members, `test_kiro_v3_*`, `test_classify_from_path_routes_v3_provider_to_v3_classifier`, `TestAcpAvailabilityV3`+members, `TestAcpSessionsForWorkspaceV3`+members, `TestAcpDeleteSessionV3Dispatch`+members, `test_get_tool_diffs_v3_*`, `test_stored_session_cwd_v3*`, `test_lock_holder_v3_*`. **Exception within `TestSupervisorV3`**: this class is itself mixed — its `_get_tool_diffs_v3`/`_stored_session_cwd_v3` coverage stays, but its `_SupervisorV3._fulfill_token` coverage is a RENAME target (bucket 1) since `_fulfill_token` itself is not in the permanent-distinction set.
+5. Update the 69 v2-URL literal occurrences (`"/acp"` ×49, `"/ws/acp"` ×14, `"/api/acp/sessions"` ×3, `"/api/acp/workspaces"` ×1, `"/api/acp/sessions/delete"` ×2) that were previously exercising v2's *own* route — confirm each still makes sense post-cutover (most should, since the URL strings are unchanged, only their backing engine is) or update per step 3's re-scoping.
+6. Update the 1 v3-URL literal (`"/api/acp-v3/sessions/delete"`, `TestApiAcpV3DeleteSessionsEndpoint`, line 17260) — this class is a RENAME target.
+
+**Exit criteria**:
+- [ ] Full pytest run passes with zero references to a deleted v2-only function/class/constant remaining
+- [ ] The 6 now-impossible/isolation-asserting cross-engine tests are removed (step 2); the mixed-scenario tests (step 3) are re-scoped to "historical v2 + live v3," not deleted
+- [ ] The ~26 KEEP-named tests are unchanged and still pass, confirming the permanent-distinction set (SC-3) survived Phase 1/2 correctly
+- [ ] The `acp_session`/`acp_store` fixtures (`tests/test_web.py:2634-2672,5022-5059`) work unmodified against the eagerly-constructed renamed supervisor (D1) — these 332 call sites are the single largest consumer of Phase 1's correctness and must not be treated as an afterthought
+
+### Phase 5: Test suite — tests/acp_page.test.mjs [QA] [P:4,6]
+**Goal**: Rewrite the 3 tests that currently assert v2 URLs are absent, to match single-engine reality.
+**Covers**: SC-7
+
+**File scope**: `tests/acp_page.test.mjs`
+
+Steps:
+1. Rewrite `test_engine_v3_ws_path`(10123), `test_engine_v3_session_api_url`(10137), `test_engine_v3_workspaces_api_url`(10151): remove the `ENGINE`-ternary premise entirely (Phase 3 deleted the variable). Replace with direct assertions that `WS_PATH === '/ws/acp'`, `RAIL_SESSIONS_API === '/api/acp/sessions'`, `PICKER_WORKSPACES_API === '/api/acp/workspaces'` — no longer conditional on anything.
+2. Sweep the file for any other `/acp-v3`, `/ws/acp-v3`, `/api/acp-v3/*` literal (10, 3, 6 occurrences respectively per the enumeration research) and update or remove as appropriate.
+
+**Exit criteria**:
+- [ ] `node tests/acp_page.test.mjs` passes in full, including the 3 rewritten tests
+- [ ] Zero remaining `/acp-v3`-family literal in the file
+
+### Phase 6: Documentation sweep [P:4,5]
+**Goal**: Update every live documentation reference to the retired v2/v3 split; leave historical records untouched (D8).
+**Covers**: SC-8
+
+**File scope**: `README.md`, `AGENTS.md`, `docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `memory/MEMORY.md`, `plans/tests/260701_POWERATLAS.md`
+
+Steps:
+1. `README.md`: rewrite the `## Agent sessions, v3 protocol (/acp-v3)` section (line 311, ~10 lines following) — the "two engines" framing itself is retired, this needs substantive rewriting, not a name-swap. Line 61 (kiro-cli v3 sessions scanned separately from v2, a store-format fact) stays.
+2. `AGENTS.md`: update line 7's "`/acp-v3` uses the same template with `engine="v3"`" to reflect the removed `ENGINE` variable (Phase 3).
+3. `docs/KNOWLEDGE.md`: update the `_get_tool_diffs_v3` mechanism note at line 122 only if its cited call sites changed name (per SC-3, `_get_tool_diffs_v3` itself is unrenamed — likely no change needed beyond confirming its cross-references still resolve). Line 45's `kiro-cli --agent-engine v1|v2|v3` flag documentation is a kiro-cli CLI fact, unrelated to this plan — leave as-is.
+4. `plans/ROADMAP.md`: apply D9 — remove the `[POST-SPIKE] Merge /acp and /acp-v3...` item (line 39) as superseded by this plan. Update the "ACP v3 Follow-up" section's remaining references to `_SupervisorV3`/`CLOSE_METHOD_V3`/`/acp-v3` to match the post-rename names, or add a forward-pointer note where the underlying item now lives in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`. Leave the unrelated `conversations_v2` sqlite-table reference (line 166) untouched — confirmed unrelated to the ACP engine split.
+5. `memory/MEMORY.md`: apply D7 — update the ~13 entries' cited identifier names (`_SupervisorV3.close_session`, `CLOSE_METHOD_V3`, `_lock_holder_v3`, `_handle_new_v3`, `_Supervisor._publish_live`, and others) to their post-rename form, preserving the documented facts themselves.
+6. `plans/tests/260701_POWERATLAS.md`: update line 174's references to the 5 `_ACP_V3_*` constants and their values, and the test class names listed there (`TestAcpSessionsForWorkspaceV3`, `TestAcpDeleteSessionV3Dispatch`, `TestAcpDeleteManyV3Dispatch`, `TestApiAcpV3DeleteSessionsEndpoint`, and the non-v3-named `TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace` at line 361) to match Phase 4's actual disposition of each.
+7. **Do not touch** (D8): `plans/CLOSED_INVESTIGATIONS.md`'s 10 hits — historical record.
+
+**Exit criteria**:
+- [ ] `README.md`'s v3-protocol section rewritten; no reference to `/acp-v3` as a live, separate path remains in any file this phase covers
+- [ ] `grep -rn "acp-v3\|_v3\b\|SupervisorV3\|CLOSE_METHOD_V3" README.md AGENTS.md docs/KNOWLEDGE.md plans/ROADMAP.md memory/MEMORY.md plans/tests/260701_POWERATLAS.md` returns only expected hits from the permanent-distinction set (SC-3) or explicitly-preserved facts (steps 3, 4's line 166)
+- [ ] `plans/CLOSED_INVESTIGATIONS.md` is unmodified (`git diff` confirms)
+
+### Phase 7: Restart coordination & live verification
+**Goal**: Deploy the consolidated engine and verify every success criterion against the real, running instance.
+**Covers**: SC-1, SC-4, SC-5
+
+**File scope**: none (verification only)
+
+Steps:
+1. Confirm all prior phases' automated tests (pytest, `node tests/acp_page.test.mjs`) pass before requesting a restart.
+2. Present the restart as needed to the user; do not restart autonomously (AGENTS.md:5). Every currently-open v2 and v3 session dies at this restart — this is the same pre-existing cost any `acp.py`/`web.py` change already carries, not something this plan adds.
+3. Post-restart, live-verify each SC: `/acp` opens a v3 session (SC-1); `/acp-v3` returns 404 or an equivalent "not found" (SC-1); the dashboard still lists and can open historical v2 sessions, with the resume button correctly hidden for them (SC-4, SC-5); a live v3 session's resume button works (SC-5); old bookmarked v2-shaped `?sid=` links degrade gracefully (already confirmed via code reading during exploration — re-confirm live).
+4. Run the full pytest suite and `node tests/acp_page.test.mjs` one more time against the restarted, live instance.
+
+**Exit criteria**:
+- [ ] User has confirmed the restart
+- [ ] All SC-1 through SC-9 verified live, not just by code reading
+- [ ] Full pytest + `node tests/acp_page.test.mjs` pass post-restart
+
+## 6) Risk Assessment
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Phase 1's mechanical rename/delete is large enough that a manual pass could miss a reference | Module fails to import, or a subtle behavior change ships silently | Exit criteria require a clean import plus full pytest pass before Phase 2 begins; Phase 4/5 test updates independently re-verify every renamed symbol is actually exercised |
+| The `_context_percent`/`_note_context` collision (D2) is easy to mis-simplify if a future editor doesn't know why both pairs exist | A "helpful" cleanup rename reintroduces the collision or silently drops one payload shape's parsing | D2's rationale is recorded in this plan and should be left as an inline code comment at the point of definition (addressed within this plan, Phase 1) |
+| D1's lazy-construction choice means every unconditional call site must be found, not just the two named in §1 | A missed call site raises `AttributeError: NoneType` in production if ACP fails to initialize | Phase 1 exit criteria explicitly require auditing beyond the two named sites; Phase 7's live verification includes a cold-start check |
+| Phase 6's documentation sweep is easy to under-scope (memory/MEMORY.md was not in the original exploration's risk list — found only by this deep-research pass) | Stale documentation ships, misleading a future session | Phase 6 lists every file explicitly with a grep-verifiable exit criterion, rather than an open-ended "update docs" instruction |
+| Restart timing (Phase 7) is entirely user-dependent per AGENTS.md | Plan cannot fully complete/verify without user action | Addressed within this plan — Phase 7 explicitly waits for user confirmation, all other phases are structured to be fully testable via pytest/node beforehand |
+
+## 7) Verification
+
+- `python -c "from power_atlas import acp, web"` — clean import, no NameError/AttributeError (Phase 1, 2).
+- Full pytest suite (project's existing invocation) — Phase 4's updates make this the authoritative pass/fail signal for Phases 1-2's correctness.
+- `node tests/acp_page.test.mjs` — Phase 5's updates make this authoritative for Phase 3's correctness.
+- `grep -rn "acp-v3\|/ws/acp-v3\|api/acp-v3" src/power_atlas tests` — zero hits after Phase 1-5 (a stray literal is exactly the failure mode a mechanical rename risks).
+- Live browser verification against the restarted instance (Phase 7) — reuses the disposable-subprocess and live-composer-check techniques already proven during this plan's exploration.
+
+## 8) Documentation Updates
+
+| Document | Update needed | Phase |
+|---|---|---|
+| `README.md` | Rewrite the v3-protocol/two-engine section | 6 |
+| `AGENTS.md` | Update the `engine="v3"` template-variable reference | 6 |
+| `docs/KNOWLEDGE.md` | Confirm `_get_tool_diffs_v3` cross-references still resolve | 6 |
+| `plans/ROADMAP.md` | Remove the superseded merge item; update the ACP v3 Follow-up section's identifier references | 6 |
+| `memory/MEMORY.md` | Update ~13 entries' cited identifier names | 6 |
+| `plans/tests/260701_POWERATLAS.md` | Update constant/test-class references to match Phase 4's disposition | 6 |
+| `plans/CLOSED_INVESTIGATIONS.md` | None — explicitly preserved (D8) | doc-table-only |
+
+## 9) Implementation Divergences from Plan
+<Reserved -- filled during implementation>
+
+## Progress Tracker
+
+| # | Phase/Task | Status | Notes |
+|---|---|---|---|
+| 1 | Backend engine consolidation (acp.py) | Not started | |
+| 2 | Backend routing & endpoints (web.py) | Not started | |
+| 3 | Frontend — ENGINE collapse & dashboard gate fix | Not started | |
+| 4 | Test suite — tests/test_web.py | Not started | |
+| 5 | Test suite — tests/acp_page.test.mjs | Not started | |
+| 6 | Documentation sweep | Not started | |
+| 7 | Restart coordination & live verification | Not started | |
+
+## Dependency Graph
+
+```
+Phase 1 (acp.py)
+   │
+   ├──> Phase 2 (web.py) ──┐
+   └──> Phase 3 (templates) ┘  [P:2,3 — disjoint files, both depend only on Phase 1]
+              │
+              ├──> Phase 4 (test_web.py) ──┐
+              ├──> Phase 5 (acp_page.test.mjs) ──┤  [P:4,5,6 — disjoint files]
+              └──> Phase 6 (docs) ──────────┘
+                         │
+                         └──> Phase 7 (restart + live verification)
+```
+
+## Backwards Compatibility
+
+| Item | Strategy | Safety effect |
+|---|---|---|
+| `/acp` URL | Unchanged string, new backing engine | Existing bookmarks/links to `/acp` continue to work, now opening v3 sessions |
+| `/acp-v3` URL | Retired, no redirect | A bookmarked `/acp-v3` link 404s post-cutover — acceptable per this plan's scope (no redirect requested) |
+| Old v2-shaped `?sid=` on `/acp` | Degrades gracefully (confirmed via code reading during exploration: `_handle_load`'s refusal path returns a clean "session not found"-style error, not a crash) | No special handling added; existing fail-open pattern already covers this |
+| Historical v2 session files | Untouched (SC-4) | Full backward compatibility for the dashboard's history/browsing surface |
+| v2 session deletion | Preserved (Phase 2 step 5) | Users can still delete old v2 sessions from the dashboard post-cutover |
+
+## File Change Summary
+
+### Created
+- None (this plan modifies existing files only)
+
+### Modified
+- `src/power_atlas/acp.py` (Phase 1)
+- `src/power_atlas/web.py` (Phase 2)
+- `src/power_atlas/templates/acp.html` (Phase 3)
+- `src/power_atlas/templates/partials/session_row.html` (Phase 3)
+- `tests/test_web.py` (Phase 4)
+- `tests/acp_page.test.mjs` (Phase 5)
+- `README.md`, `AGENTS.md`, `docs/KNOWLEDGE.md`, `plans/ROADMAP.md`, `memory/MEMORY.md`, `plans/tests/260701_POWERATLAS.md` (Phase 6)
+
+### Deleted
+- No files deleted — this is a within-file consolidation, not a file removal
+
+### Unchanged
+- `src/power_atlas/data_kiro.py` (SC-4 — deliberately untouched)
+- `src/power_atlas/data_kiro_v3.py` (permanent-distinction set)
+- `src/power_atlas/static/style.css` (confirmed zero engine-conditional rules)
+- `plans/CLOSED_INVESTIGATIONS.md` (D8)
+- `src/power_atlas/status_classifier.py` (`classify_kiro_v3`, `_is_v3_format`, `_V3_SKIP_TYPES` — added during Step 4 review; `v3` here denotes on-disk session-file format, not engine identity, per SC-3's scope narrowing)
+- `src/power_atlas/presence.py`, `src/power_atlas/data.py` (`"kiro-cli-v3"`-provider-aware code — same rationale)
+- `tests/test_data_kiro_v3.py` (confirmed during exploration to have zero functional reference to `acp.py`/`web.py`'s v2/v3 split)
+
+## Follow-up Work (Deferred)
+
+1. **Mode-switcher UI, `_pending_permission`/orphan-lock/steering-palette follow-ups.** Tracked in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`, deliberately out of scope here. Source: Scope boundaries.
+2. **v3-side auto-mode for ACP permissions.** Already tracked in `plans/ROADMAP.md`'s "Session Control & Integration" section, untouched by this plan. Source: Q5.
+
+## Review Log
+
+### 2026-09-11 — Plan Review (via /qplan Step 4, cycle 1 of 1 — capped per user instruction)
+
+Architect (gap-critic lens), Senior engineer, and Security auditor personas, dispatched in parallel against the finished plan. 14 findings (2 High, 6 Medium, 6 Low). All 14 auto-resolved — no unresolved High or Medium findings remain. Per the user's standing "1 review cycle max" instruction, no second cycle was run to re-verify the fixes; the fixes below were applied directly to this plan document.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | D1's lazy supervisor construction breaks 332 `acp_session`/`acp_store` test-fixture call sites that assume eager construction, undetectable by a v3-keyed grep | Fixed — D1 reopened, reversed to eager construction, matching v2's original pattern; eliminates the None-guard audit entirely |
+| 2 | High | Several tests assert things that become *false* post-merge (e.g. `CLIENT_TYPES`/`CLIENT_TYPES_V3` isolation), not just stale-named — a mechanical rename doesn't fix a false assertion | Fixed — Phase 4 step 0 adds an explicit discriminator rule; 2 more tests added to the delete list (6 total, was 4); SC-7 corrected |
+| 3 | High | Phase 2 never updates 3 `getattr(acp, "_supervisor_v3", None)` string literals or 2 held-set unions in `web.py` — outside Phase 1's `acp.py`-only scope | Fixed — new D12, new Phase 2 step 5 |
+| 4 | Medium | `same_origin_guard`'s CSRF path check (`web.py:912`) references `_ACP_V3_PATH` inside a function body — a missed rename here is invisible to import checks or URL-literal greps, breaks every served request | Fixed — new D10, new Phase 2 step 4, added to exit criteria |
+| 5 | Medium | `acp_page`'s security-rationale docstring is deleted with v2; the renamed survivor's "see `acp_page` for rationale" stub becomes a dangling self-reference, risking future removal of a real security check | Fixed — new D11, Phase 2 steps 1/2 fold the v2 docstring content into the survivors |
+| 6 | Medium | D5's "collapse two sweep passes into one" doesn't say which non-overlapping piece (v2's subscriber-notification block vs. v3's `_pending_early_frames` sweep) survives | Fixed — D5 amended with an explicit merge spec and a required code-read confirmation step |
+| 7 | Medium | `_REMOTE_ALLOWED_PATHS`'s reconciliation gave a bare dict literal, silently dropping ~17 lines of per-entry security rationale comments | Fixed — Phase 2 step 6 reworded to require preserving existing comments |
+| 8 | Medium | SC-3's "repo-wide" rename wording doesn't account for `status_classifier.py`'s permanent v3-format-distinction names | Fixed — SC-3 narrowed to the live-engine files; File Change Summary's Unchanged table extended |
+| 9 | Medium | `_create_job` omitted from the "34 inherited methods" list; `_build_kas_session_params`/`_crew_toolcallid` (v2-only) omitted from the Delete list, risking silent shadowing | Fixed — new D13; §1 and Phase 1 corrected to 35 methods and the two orphans added to the Delete list |
+| 10 | Low | No exit criterion sweeps in-code comments (not just URLs/identifiers) for stale v2/v3 explanations | Fixed — new Phase 1 step 10 |
+| 11 | Low | Phase 3's "renders correctly" pre-restart exit criterion overstates what's verifiable (JS-load only, not session functionality) | Fixed — reworded with an explicit scope note |
+| 12 | Low | D4's "every real call site" claim is false for the pre-Phase-1 file (8 v2-only sites rely on the default); true only post-deletion | Fixed — D4 reworded |
+| 13 | Low | D3's stated rationale's second clause (staleness check) doesn't actually hold under inspection; the real reason is structural | Fixed — D3 reworded to the structural argument |
+| 14 | Low | Stale present-tense `-a`/trust-all-tools comments in `acp.py`/`web.py` will misdescribe v3's interactive-approval model as v2's blanket auto-approve | Fixed — folded into new Phase 1 step 10 |
+
+## Harness Improvement Opportunities
+<Reserved -- appended during /qexplore, /qplan and /qdev when harness friction is felt.>
