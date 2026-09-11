@@ -48,6 +48,8 @@
 
 - **3 steering-type slash-command palette entries have no working trigger in `/acp-v3`.** `architecture-selection`/`quick-spec`/`bug-fix` are excluded from both dropdown buckets by the existing `steering` filter, and unreachable even by typing their name — the incoming-prompt converter has no `resource_link` case and the `resource` case needs inline content, not a URI reference. Would need a client-side synthesis mechanism (e.g. inlining the steering document's own content as prompt text); no working shape found yet. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 0 rounds 3-4, Follow-up Work item 8.
 
+- **`/acp-v3` session close has no wire-level confirmation — permanent kiro-cli v3 limitation.** v2's `close_session` (`acp.py:4622-4636`) sends `_kiro.dev/session/terminate` and waits for the agent's acknowledgment before dropping local state. v3's override (`acp.py:5600-5612`, `CLOSE_METHOD_V3 = None` at `acp.py:649`) drops local state with no wire call — every terminate method tried during the spike returned `-32603`/`-32601`. Mitigated (local cleanup + `session_closed` broadcast still fire), but v3 never confirms the agent actually released server-side resources for a closed session; not fixable from the PowerAtlas side without kiro-cli v3 binary support. Source: v2-vs-v3 feature comparison, 2026-09-11.
+
 ### Session Control & Integration
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
 - **Tell the operator a turn ended** — push notification when a long task finishes; cheapest version uses the existing WebSocket but fails when the phone sleeps the tab
