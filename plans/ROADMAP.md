@@ -38,11 +38,7 @@
 
 - **[POST-SPIKE] Merge /acp and /acp-v3 into a single engine-parameterized route — updated.** `/acp-v3` is now production-hardened (`260908_ACP_V3_PRODUCTION_HARDENING`, complete), not just spike-validated, making this a lower-risk, separately-scoped project rather than blocked on further v3 maturity. Plan the merge of `_SupervisorV3` into `_Supervisor` (engine parameter or subclass retained) and retire the separate route. Source: Q6 design decision (parallel supervisors for spike only); reaffirmed as a deliberate "kept parallel" decision by `260908_ACP_V3_PRODUCTION_HARDENING`'s own Follow-up Work item 1.
 
-- **Linux cross-platform support for the ACP subsystem.** Not v3-specific — v2 has the identical Windows-only `_create_job()` limitation. Source: `260908_ACP_V3_PRODUCTION_HARDENING` exploration Q3, Follow-up Work item 2.
-
 - **Mode-switcher UI for `/acp-v3`** (letting a user pick `spec`/`quick-spec`/`bug-fix`/`plan`). Would unlock the modes SC-9's permission-handling defends against but doesn't itself build a path to. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Scope boundaries, Follow-up Work item 3.
-
-- **`_pending_permission` expiry/timeout for an abandoned `session/request_permission` request.** Genuinely a product-shape decision (auto-refuse? default option? rely on the existing ~30-minute `PROMPT_SILENCE_SECONDS` backstop?), not a deterministic bug fix. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Risk R11, Follow-up Work item 5.
 
 - **v3 self-orphan-lock suppression (D32).** `presence._scan()`'s own-agent orphan-lock guard only ever sees `_Supervisor._publish_live()`'s pid (v2's own); `_SupervisorV3._publish_live()` always publishes a sentinel `pid=0` (deliberately, to avoid false liveness signals), so the guard can't achieve genuine v3 self-orphan suppression regardless of provider label. A real fix needs `_supervisor_v3`'s own agent pid published to `presence._acp_live` instead of the sentinel. Corollary residual: `_acp_live` is a single last-writer-wins global, so the v2 guard is also transiently defeated in the window after any v3 mutation (self-heals within one sweep interval). Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 1 review findings (Reliability engineer), Follow-up Work item 6.
 
