@@ -652,18 +652,14 @@
   // requests the desktop site from a mobile browser, they get the desktop UA
   // and therefore see the button \u2014 their deliberate choice.
   var ACP_CAN_DELETE = {{ can_delete | tojson }};
-  // Which ACP engine this page is driving. Set by the route handler:
-  // ``engine="v2"`` for ``/acp`` (default), ``engine="v3"`` for ``/acp-v3``.
-  var ENGINE = {{ engine | tojson }};  // "v2" or "v3"; set by the route handler
-  // WebSocket path — derived from engine so the page can be served from
-  // both routes without duplication.
-  var WS_PATH = ENGINE === 'v3' ? '/ws/acp-v3' : '/ws/acp';
-  // Session-listing API — engine-aware.
-  var RAIL_SESSIONS_API = ENGINE === 'v3' ? '/api/acp-v3/sessions' : '/api/acp/sessions';
-  // Workspace picker API — engine-aware.
-  var PICKER_WORKSPACES_API = ENGINE === 'v3' ? '/api/acp-v3/workspaces' : '/api/acp/workspaces';
-  // Session delete API — engine-aware.
-  var SESSION_DELETE_API = ENGINE === 'v3' ? '/api/acp-v3/sessions/delete' : '/api/acp/sessions/delete';
+  // WebSocket path for the sole ACP engine.
+  var WS_PATH = '/ws/acp';
+  // Session-listing API.
+  var RAIL_SESSIONS_API = '/api/acp/sessions';
+  // Workspace picker API.
+  var PICKER_WORKSPACES_API = '/api/acp/workspaces';
+  // Session delete API.
+  var SESSION_DELETE_API = '/api/acp/sessions/delete';
 
   var statusEl = document.getElementById('acpStatus');
   var logEl = document.getElementById('acpLog');

@@ -26,10 +26,12 @@
        onclick excludes, so anywhere else in the row a click here would toggle
        multi-select instead of opening the session. Recorded at
        CLOSED_INVESTIGATIONS.md:90 as one of the two collisions that killed the
-       terminal-window-focus feature. kiro-cli only — /acp speaks ACP to
+       terminal-window-focus feature. kiro-cli only (both the historical v2
+       "kiro-cli" tag and the live v3 "kiro-cli-v3" tag) — /acp speaks ACP to
        kiro-cli and no other provider has a loadable session there. #}
-    {% if provider_name|default('') in ('', 'kiro-cli') %}
-    <button class="row-btn acp-open-btn" onclick="openInAcp(this)" aria-label="Open in Agent orchestrator" title="Open in Agent orchestrator">💬</button>
+    {% if provider_name|default('') in ('', 'kiro-cli', 'kiro-cli-v3') %}
+    {% set acp_open_disabled = provider_name|default('') == 'kiro-cli' %}
+    <button class="row-btn acp-open-btn" onclick="openInAcp(this)" aria-label="Open in Agent orchestrator"{% if acp_open_disabled %} disabled aria-disabled="true" title="Unavailable — this session is from the retired v2 engine"{% else %} title="Open in Agent orchestrator"{% endif %}>💬</button>
     {% endif %}
     {% if not stale %}
     <button class="row-btn primary terminal-btn" onclick="resumeSession(this)" aria-label="{% if provider_name == 'kiro-ide' %}Open in Kiro IDE{% else %}Resume{% endif %}" title="{% if provider_name == 'kiro-ide' %}Open workspace in Kiro IDE{% else %}Resume session{% endif %}">
