@@ -2,9 +2,28 @@
 
 > **Date**: 2026-09-11
 > **Status**: Complete — all 7 phases done, live-verified post-restart
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-09-12
 > **Scope**: Retire the live v2 ACP protocol engine, make v3 the sole engine behind `/acp`, delete v2-only code and rename the surviving v3 code to drop its suffix.
 > **Estimated effort**: ~1-2 weeks (Major tier — architectural consolidation across two large files, a repo-wide rename with several genuine exceptions, and ~90 test artifacts)
+
+---
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- **Documented divergence** — the final cleanup fixing ~91 stale `"ACP v3 ..."` log-string literals and one thread name in `acp.py`, plus 3 coupled test assertions pinning the old wording (commit `817ebf2`), never went through a sub-agent review cycle. **Accepted** — mechanical, string-content-only change with thorough direct verification already done by the orchestrator (clean import, full pytest 1535/0, exact grep-count match, zero duplicate defs).
+- **Documented divergence** — two small follow-up fixes (README mode-terminology clarity and `acp.html` stale-comment corrections, commits `6f1e93a`/`840b0b3`) also never went through a formal sub-agent review, though the user explicitly authorized both directly ("1. fix. 2. fix."). **Accepted** — user-directed, independently spot-verified by the orchestrator.
+- **Harness opportunity** — `pytest-timeout` not installed, causing silent `--timeout` flag failure and indefinite test hangs. **Fixed directly** (not a playbook governance promotion — this is a project-level fix): added `pytest-timeout>=2.3` to `pyproject.toml`'s dev extras, installed it in `.venv-PowerAtlas`, and added a note to `AGENTS.md`'s Doc & Test Guidelines recommending `--timeout=300` for concurrency-sensitive test runs (code: `e6eb630`).
+- **Harness opportunity** — a suggested `/qdev` test-reconciliation discriminator category for `asyncio.Event`-based tests depending on retired code paths. **Skipped (harness opportunity): superseded by this plan's own resolution** — Phase 4 already found and fixed all 7 affected tests directly without this formal category existing.
+- **Harness opportunity** — a rate-limit-killed sub-agent's partial edits deserve the same scrutiny as a self-directed "done" return. **Accepted (harness opportunity): single-occurrence observation this session; deferred to `/qdream`'s cross-plan harvest to confirm recurrence before promoting to `shared/skills/qdev/SKILL.md`.**
+- **Harness opportunity** — every sub-agent brief granting commit authority must include the no-AI-attribution instruction (one omission this session produced a real policy-violating commit requiring a git-history rewrite to fix). **Accepted (harness opportunity): deferred to `/qdream`'s cross-plan harvest rather than promoted immediately, despite the concrete incident this session.**
+- **Harness opportunity** — a phase's file-scope boundary routinely sits one file away from a stale reference it can't reach (observed twice in this plan). **Accepted (harness opportunity): observed twice in one plan; deferred to `/qdream`'s cross-plan harvest to confirm cross-plan recurrence before promoting a new `/qdev` sweep step.**
+- **Harness opportunity** — this plan's own Phase 1 deferred work to "Phase 4/Phase 6" by name, but neither phase's file scope actually covered it — undetected through the whole plan and 8 review sub-agents. **Accepted (harness opportunity): a real, costly miss, but a single occurrence; deferred to `/qdream`'s cross-plan harvest before promoting a new `/qplan` Step 4 review check.**
+- **Harness opportunity** — `qvalidate`'s `doc-updates` check can't distinguish "never addressed" from "verified, no change needed." **Accepted (harness opportunity): concrete, well-specified script-behavior change, but a single occurrence; deferred to `/qdream`'s cross-plan harvest before promoting a change to `qvalidate.{sh,ps1}`.** (This specific instance was independently resolved via a genuine documentation fix rather than an override — see `docs/KNOWLEDGE.md`, code: `7d7e00a`.)
+- **Documentation gap** — `docs/KNOWLEDGE.md`'s `doc-updates` row initially showed FAIL (no commit touched it, despite Phase 6 confirming no change was needed). **Fixed** — resolved genuinely rather than carried as an override: added a dated re-verification annotation matching the file's own established convention (code: `7d7e00a`). `qvalidate --check-commits` now reports a clean PASS on all 8 checks.
+
+Pass 4 (documentation-ripple sweep): 3 grep hits found across all tracked markdown outside the Documentation Updates table, all confirmed as deliberate, already-reviewed exceptions — the sibling `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` (a separate plan's own scope description, explicitly written to be execution-order-independent), `plans/CLOSED_INVESTIGATIONS.md` (D8's explicit historical-record exception), and `plans/tests/260701_POWERATLAS.md`'s own dated historical annotations (already handled in Phase 6 step 6). No fixes applied — zero genuine findings.
 
 ---
 
