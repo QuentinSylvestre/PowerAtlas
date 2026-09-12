@@ -2447,13 +2447,19 @@ class _ScriptedWs:
 
 
 def _logged_socket_ids(caplog, verb: str) -> list[str]:
-    """Every socket id a line of the form ``ACP socket <id> <verb>`` carried.
+    """Every socket id a line of the form ``ACP [v3 ]socket <id> <verb>`` carried.
 
     Extracted rather than substring-matched: ``s1`` is a substring of ``s10``,
     and the ids are process-global, so a test that asked "is this id in that
     line" would pass or fail on how many sockets earlier tests had opened.
+
+    The optional ``v3 `` covers a real, currently-shipped inconsistency: the
+    open/close lines (``serve_socket``, renamed from ``serve_socket_v3`` by
+    260911_ACP_V2_TO_V3_ENGINE_CUTOVER Phase 1) still read "ACP v3 socket",
+    while the writer-loop lines (retire, drain) read plain "ACP socket" --
+    Phase 1 explicitly deferred reconciling that wording, not this matcher.
     """
-    pattern = re.compile(r"ACP socket (\S+) " + verb)
+    pattern = re.compile(r"ACP (?:v3 )?socket (\S+) " + verb)
     found = []
     for record in caplog.records:
         match = pattern.search(record.getMessage())
@@ -3069,12 +3075,19 @@ class TestAcpNotificationFanout:
 
 
 class TestAcpUnrecognizedNotificationLogLevel:
-    """SC-10: the unrecognized-notification-kind fallback in both classes'
-    ``_on_notification`` is visible at INFO (production's level) instead of
-    DEBUG, so a future/unknown kind is diagnosable from orchestrator.log
-    without deliberately enabling DEBUG first."""
+    """SC-10: the unrecognized-notification-kind fallback in the sole
+    ``_on_notification`` (the two implementations this class used to pin
+    separately -- v2's and v3's -- were merged into one by Phase 1 of
+    260911_ACP_V2_TO_V3_ENGINE_CUTOVER) is visible at INFO (production's
+    level) instead of DEBUG, so a future/unknown kind is diagnosable from
+    orchestrator.log without deliberately enabling DEBUG first."""
 
-    def test_v2_fallback_logs_at_info(self, acp_session, caplog):
+    def test_unrecognized_kind_logs_at_info_via_acp_session_fixture(
+            self, acp_session, caplog):
+        """Same merged fallback as `test_v3_fallback_logs_at_info` below,
+        exercised through the standard `acp_session` fixture instead of a
+        manually-constructed supervisor -- kept as a second, differently-set-up
+        witness rather than folded into one test."""
         acp_mod, sid = acp_session
         with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
             acp_mod._supervisor._on_notification({
@@ -3084,17 +3097,17 @@ class TestAcpUnrecognizedNotificationLogLevel:
                     "content": {"type": "text", "text": "irrelevant"}}},
             })
         assert any(
-            r.levelno == logging.INFO and "ACP notification" in r.getMessage()
+            r.levelno == logging.INFO and "ACP v3 notification" in r.getMessage()
             for r in caplog.records), [r.getMessage() for r in caplog.records]
 
     def test_v3_fallback_logs_at_info(self, monkeypatch, caplog):
         from power_atlas import acp as acp_mod
 
         sid = "sess_77777777-7777-7777-7777-777777777777"
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         sv3.sessions[sid] = {"cwd": "C:\\scratch", "created": 0.0}
         sv3.history[sid] = acp_mod._History()
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
 
         with caplog.at_level(logging.INFO, logger="power_atlas.acp"):
             sv3._on_notification({
@@ -3611,7 +3624,7 @@ class TestAcpToolCallVisibility:
                 "title": "shell", "kind": "execute", "status": "in_progress",
                 "rawInput": {"command": "Remove-Item -Recurse C:/tmp"}})
         messages = [r.getMessage() for r in caplog.records]
-        assert any("ACP tool tool_call" in m and "t9" in m
+        assert any("ACP v3 tool tool_call" in m and "t9" in m
                    and "Remove-Item -Recurse C:/tmp" in m for m in messages), messages
 
     def test_a_long_command_is_clipped_and_says_so(self, acp_session):
@@ -4381,7 +4394,7 @@ class TestAcpMarkdownRendering:
         self._notify(acp_mod, sid, self._says("Second *answer*."))
         # What `_handle_load` does once the agent's replay is complete: the
         # last bubble has no boundary behind it and is the one being read.
-        acp_mod._flush_bubble(sid)
+        acp_mod._flush_bubble(sid, emit_fn=acp_mod._emit)
         frames = _queued(conn)
         assert [f["type"] for f in frames] == [
             "chunk", "rendered", "chunk", "chunk", "rendered"]
@@ -5136,6 +5149,19 @@ class TestAcpLockPreflight:
     (svchost, firefox, RuntimeBroker), each created weeks after its lock was
     written. A pre-flight resting on pid liveness alone would have refused 22
     loadable sessions and been wrong every time it fired.
+
+    `_lock_holder` itself (the direct unit tests below) is still exactly this
+    -- a hint web.py's dashboard-facing `_acp_availability`/`_acp_delete_many`
+    consult for **historical v2** sessions. What it no longer is, since
+    260911_ACP_V2_TO_V3_ENGINE_CUTOVER Phase 1 made `_handle_load` v3-
+    descended: a pre-flight the *live* `/acp` session-load path checks before
+    the wire call. `_handle_load`'s own docstring states this plainly ("No
+    lock-hint check: v3 writes no lock file with a pid the way an earlier
+    protocol generation did, so there is nothing to check one against") --
+    this class used to also carry `test_the_preflight_refuses_before_the_
+    wire`, which drove that now-gone check through `_handle_load`; removed
+    rather than renamed, since the integration point it exercised is gone,
+    not merely renamed.
     """
 
     def _lock(self, store, sid, **fields):
@@ -5183,21 +5209,6 @@ class TestAcpLockPreflight:
         (store / "odd.lock").write_text(body)
         assert acp_mod._lock_holder("odd") is None
 
-    def test_the_preflight_refuses_before_the_wire(self, acp_store):
-        acp_mod, store = acp_store
-        self._lock(store, "busy-0001", pid=os.getpid(),
-                   started_at=_lock_time(dt.datetime.now(dt.timezone.utc)))
-        wire = []
-        conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod._Supervisor, "_request",
-                          lambda *a, **k: wire.append(a)):
-            asyncio.run(acp_mod._handle_load(conn, "busy-0001"))
-        frames = _queued(conn)
-        assert [f["type"] for f in frames] == ["error"]
-        assert frames[0]["payload"]["code"] == "session_in_use"
-        assert str(os.getpid()) in frames[0]["payload"]["message"]
-        assert wire == []
-        assert "busy-0001" not in acp_mod._supervisor.sessions
 
 
 class TestAcpSessionLoad:
@@ -5226,14 +5237,21 @@ class TestAcpSessionLoad:
         return fake_request
 
     def test_the_replayed_conversation_arrives_as_one_history_frame(
-            self, acp_store):
+            self, acp_store, acp_store_dir_v3):
         """Both halves of the conversation, in order, coalesced. Frame per
         event would put a whole conversation on a queue that retires the socket
-        at SEND_QUEUE_MAXSIZE — and only for sessions long enough to matter."""
+        at SEND_QUEUE_MAXSIZE — and only for sessions long enough to matter.
+
+        `_handle_load` resolves `cwd` via `_stored_session_cwd_v3` (a v3
+        `session.json`'s `workspacePaths`), not this class's own `_stored`
+        helper (a v2 `.json`'s `cwd` field, which `_handle_load` no longer
+        reads at all -- see the docstring on `load_session`), so the session
+        is registered through `acp_store_dir_v3` instead."""
         acp_mod, store = acp_store
         calls = []
         sid = "load-me-0001"
-        self._stored(store, sid, store)
+        resolved_cwd = str(Path(store).resolve())
+        acp_store_dir_v3(sid, cwd=resolved_cwd)
         conn = _acp_conn(acp_mod)
         with patch.object(acp_mod._Supervisor, "_request",
                           self._replay(acp_mod, sid, [
@@ -5245,7 +5263,7 @@ class TestAcpSessionLoad:
 
         assert calls == [(
             "session/load",
-            {"sessionId": sid, "cwd": str(Path(store).resolve()),
+            {"sessionId": sid, "cwd": resolved_cwd,
              "mcpServers": [], **acp_mod._build_kas_session_params()},
         )]
         frames = _queued(conn)
@@ -5296,24 +5314,31 @@ class TestAcpSessionLoad:
         assert events[0]["payload"]["command"] == "git status"
 
     def test_load_populates_the_diff_backfill_before_the_round_trip(
-            self, acp_store, monkeypatch):
-        """`load_session` reads kiro-cli's own on-disk .jsonl transcript
-        before the `session/load` round trip, so the backfill is ready the
-        moment the replay's `tool_call_update` notifications start arriving
-        — see `_tool_diff`'s docstring for why the ACP reply alone cannot
-        supply this (a `session/load` reply's replayed updates carry no
-        diff content of their own)."""
-        from power_atlas import data_kiro
+            self, acp_store, acp_store_dir_v3):
+        """`load_session` reads kiro-cli's own on-disk v3 messages.jsonl
+        transcript (via `_get_tool_diffs_v3`) before the `session/load` round
+        trip, so the backfill is ready the moment the replay's
+        `tool_call_update` notifications start arriving — see `_tool_diff`'s
+        docstring for why the ACP reply alone cannot supply this (a
+        `session/load` reply's replayed updates carry no diff content of
+        their own). `_get_tool_diffs_v3` reads the v3 messages.jsonl shape
+        (`payload.type`/`toolName`/`args`), not the v2 `.jsonl` transcript
+        this class's own `_stored` helper writes into `KIRO_SESSION_DIR`, so
+        the fixture session is registered through `acp_store_dir_v3` and its
+        `messages.jsonl` is overwritten with a real v3-shaped tool call."""
         acp_mod, store = acp_store
-        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
         sid = "load-backfill-01"
-        self._stored(store, sid, store)
-        (store / f"{sid}.jsonl").write_text(json.dumps({
-            "version": "v1", "kind": "AssistantMessage",
-            "data": {"content": [{"kind": "toolUse", "data": {
-                "toolUseId": "tc-1", "name": "write",
-                "input": {"command": "create", "path": "new.py",
-                          "content": "x = 1\n"}}}]}}), encoding="utf-8")
+        paths = acp_store_dir_v3(sid, cwd=str(store))
+        messages_path = paths[1]
+        messages_path.write_text(
+            json.dumps({"payload": {
+                "type": "tool_call", "toolName": "fs_write",
+                "toolCallId": "tc-1",
+                "args": {"path": "new.py", "text": "x = 1\n"}}}) + "\n" +
+            json.dumps({"payload": {
+                "type": "tool_result", "toolCallId": "tc-1",
+                "success": True}}) + "\n",
+            encoding="utf-8")
 
         async def fake_request(self, method, params, timeout=None):
             return {}
@@ -5348,7 +5373,7 @@ class TestAcpSessionLoad:
         assert sid not in acp_mod._supervisor._diff_backfill
 
     def test_a_replayed_edits_full_diff_reaches_the_history_frame(
-            self, acp_store, monkeypatch):
+            self, acp_store, acp_store_dir_v3):
         """The digest alone (backfilled by `_tool_diff`) only gets a session
         an accurate `+n -m` stat on reload. The diff *body* behind "Show
         diff" is broadcast-only and a `session/load` replay's own broadcasts
@@ -5357,18 +5382,24 @@ class TestAcpSessionLoad:
         `_handle_subscribe` must inject it into the one-time `history` frame
         instead. Mirrors the real shape measured 2026-08-14: kiro-cli's own
         replayed `tool_call_update` carries no content/rawOutput at all,
-        only `toolCallId`/`status`."""
-        from power_atlas import data_kiro
+        only `toolCallId`/`status`. Backfill source is v3's messages.jsonl
+        (`_get_tool_diffs_v3`), registered via `acp_store_dir_v3` -- see
+        `test_load_populates_the_diff_backfill_before_the_round_trip` above
+        for why this class's own v2-shaped `_stored`/`.jsonl` helpers no
+        longer feed `_handle_load`'s backfill."""
         acp_mod, store = acp_store
-        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
         sid = "load-backfill-03"
-        self._stored(store, sid, store)
-        (store / f"{sid}.jsonl").write_text(json.dumps({
-            "version": "v1", "kind": "AssistantMessage",
-            "data": {"content": [{"kind": "toolUse", "data": {
-                "toolUseId": "tc-1", "name": "write",
-                "input": {"command": "create", "path": "new.py",
-                          "content": "x = 1\ny = 2\n"}}}]}}), encoding="utf-8")
+        paths = acp_store_dir_v3(sid, cwd=str(store))
+        messages_path = paths[1]
+        messages_path.write_text(
+            json.dumps({"payload": {
+                "type": "tool_call", "toolName": "fs_write",
+                "toolCallId": "tc-1",
+                "args": {"path": "new.py", "text": "x = 1\ny = 2\n"}}}) + "\n" +
+            json.dumps({"payload": {
+                "type": "tool_result", "toolCallId": "tc-1",
+                "success": True}}) + "\n",
+            encoding="utf-8")
 
         async def fake_request(self, method, params, timeout=None):
             self._on_notification({
@@ -5549,35 +5580,17 @@ class TestAcpSessionLoad:
         assert frames[1]["payload"]["code"] == "session_in_use"
         assert "4242" in frames[1]["payload"]["message"]
 
-    def test_a_silent_refusal_is_named_by_reading_the_lock_again(
-            self, acp_store):
-        """Measured on kiro-cli 2.14.2: a session held elsewhere is refused
-        with a bare ``-32603 Internal error`` — no pid, and nothing to tell it
-        from any other failure. The lock is the only thing left that can name
-        the process. Also covers a lock taken after the pre-flight ran."""
-        acp_mod, store = acp_store
-        sid = "load-me-0009"
-        self._stored(store, sid, store)
-        first = []
-
-        def one_shot_preflight(session_id):
-            # The pre-flight sees nothing; the re-read after the failure does.
-            if not first:
-                first.append(session_id)
-                return None
-            return 4242
-
-        async def refused(self, method, params, timeout=None):
-            raise acp_mod.AgentRejected("Internal error (code -32603)")
-
-        conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod, "_lock_holder", one_shot_preflight), \
-                patch.object(acp_mod._Supervisor, "_request", refused), \
-                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
-            asyncio.run(acp_mod._handle_load(conn, sid))
-        frames = _queued(conn)
-        assert frames[1]["payload"]["code"] == "session_in_use"
-        assert "4242" in frames[1]["payload"]["message"]
+    # Note: this class used to also carry
+    # `test_a_silent_refusal_is_named_by_reading_the_lock_again`, pinning
+    # that a bare, unattributed agent refusal gets a named holder pid by
+    # re-reading `_lock_holder` after the wire failure. The sole surviving
+    # `_handle_load` calls `_load_failure(exc, None)` with a hardcoded
+    # `None` -- v3 writes no lock file with a real holder pid the way v2
+    # did (see `_handle_load`'s own docstring and the comment above
+    # `_lock_holder_v3`'s definition), so this re-read never happens for
+    # the live load path any more. Removed rather than renamed; the
+    # unattributed-refusal message this test exercised is now the only
+    # outcome, pinned instead by `TestAcpUnattributedRefusal` below.
 
     def test_another_agent_error_keeps_its_own_code(self, acp_store):
         """Positive control: with no lock and no marker, a refusal keeps the
@@ -5630,23 +5643,21 @@ class TestAcpSessionLoad:
         assert len(frames[1]["payload"]["events"]) == 1
         assert wire == []
 
-    def test_a_missing_store_entry_falls_back_to_the_neutral_cwd(
-            self, acp_store, monkeypatch, tmp_path):
-        """A workspace that has been moved or deleted does not make the
-        conversation unreadable, so it must not make the load fail."""
-        acp_mod, store = acp_store
-        calls = []
-        neutral = tmp_path / "neutral"
-        neutral.mkdir()
-        monkeypatch.setattr(acp_mod, "_neutral_cwd", lambda: neutral)
-        sid = "load-me-0006"
-        self._stored(store, sid, store / "deleted-workspace")
-        conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod._Supervisor, "_request",
-                          self._replay(acp_mod, sid, [], calls)), \
-                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
-            asyncio.run(acp_mod._handle_load(conn, sid))
-        assert calls[0][1]["cwd"] == str(neutral)
+    # Note: this class used to also carry
+    # `test_a_missing_store_entry_falls_back_to_the_neutral_cwd`, pinning
+    # that a session whose stored workspace no longer exists falls back to
+    # `_neutral_cwd()` rather than failing the load. `load_session`'s own
+    # docstring now states `cwd` "arrives already resolved by the caller
+    # (_handle_load, via _stored_session_cwd_v3)" -- there is no
+    # `_resolve_session_cwd`/`_neutral_cwd` fallback anywhere on the live
+    # load path any more; a `_stored_session_cwd_v3` miss (missing entry,
+    # deleted workspace, or -- see below -- a v2-shaped store this helper
+    # cannot read at all) resolves to `""`, sent to the agent as-is. This
+    # is a real, observed behavioral difference from v2, not a Phase 1
+    # regression (v3's `_stored_session_cwd_v3`/`load_session` pairing
+    # predates this cutover plan) -- flagged in this phase's report as an
+    # out-of-scope observation rather than fixed here. Removed rather than
+    # renamed, since the fallback it pinned no longer exists to test.
 
     def test_a_load_is_never_throttled_by_an_earlier_replay(self, acp_store):
         """The throttle rations a buffer rebuild a client can ask for freely.
@@ -5718,13 +5729,17 @@ class TestAcpNewSessionParams:
 
     def test_new_session_params_include_meta(self, acp_store):
         """session/new carries _meta.kiro.steering so the ACP session receives
-        the PowerAtlas overlay steering document."""
+        the PowerAtlas overlay steering document, alongside the modeId the
+        sole surviving `_build_kas_session_params` (renamed from its v3-only
+        counterpart, which always carried a modeId) always includes."""
         acp_mod, store = acp_store
         calls = []
 
         async def fake_request(self, method, params, timeout=None):
             calls.append((method, params))
-            return {"sessionId": "new-params-0001"}
+            # v3's session id is at result._meta.id, not result.sessionId --
+            # see new_session's own "CRITICAL" comment.
+            return {"_meta": {"id": "new-params-0001"}}
 
         with patch.object(acp_mod._Supervisor, "_request", fake_request), \
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
@@ -5739,6 +5754,7 @@ class TestAcpNewSessionParams:
                 "mcpServers": [],
                 "_meta": {
                     "kiro": {
+                        "modeId": "kiro_default",
                         "steering": [
                             {
                                 "name": "poweratlas-context",
@@ -5980,7 +5996,9 @@ class TestAcpLoadSlotAccounting:
                 # slot of three and must not be refused.
                 created.append(await self.new_session(str(store)))
                 return {}
-            return {"sessionId": "brand-new-01"}
+            # v3's session id is at result._meta.id, not result.sessionId --
+            # new_session() itself normalizes this back into {"sessionId": ...}.
+            return {"_meta": {"id": "brand-new-01"}}
 
         conn = _acp_conn(acp_mod)
         with patch.object(acp_mod._Supervisor, "_request", fake_request), \
@@ -6034,27 +6052,14 @@ class TestAcpLockReadIsBoundedAndOffTheLoop:
         (store / "small.lock").write_text(self._padded(16))
         assert acp_mod._lock_holder("small") == os.getpid()
 
-    def test_the_lock_is_read_off_the_event_loop(self, acp_store):
-        """Twice per load — the pre-flight and the re-read after a failure —
-        each a file read plus a psutil query."""
-        acp_mod, store = acp_store
-        sid = "load-thread-1"
-        _stored_session(store, sid)
-        threads = []
-
-        def spy(session_id):
-            threads.append(threading.current_thread().ident)
-            return None
-
-        async def boom(self, method, params, timeout=None):
-            raise acp_mod.AgentTimeout("the agent did not answer")
-
-        with patch.object(acp_mod, "_lock_holder", spy), \
-                patch.object(acp_mod._Supervisor, "_request", boom), \
-                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
-            asyncio.run(acp_mod._handle_load(_acp_conn(acp_mod), sid))
-        assert len(threads) == 2
-        assert threading.main_thread().ident not in threads
+    # Note: this class used to also carry
+    # `test_the_lock_is_read_off_the_event_loop`, pinning that
+    # `_handle_load` read `_lock_holder` twice per load (pre-flight, then a
+    # re-read after a wire failure), each off the event loop. Both call
+    # sites are gone: the sole surviving `_handle_load` never calls
+    # `_lock_holder` at all (v3 has no lock-file-based pid to check --
+    # see `TestAcpLockPreflight`'s class docstring). Removed rather than
+    # renamed.
 
 
 class TestAcpLoadFailureAttribution:
@@ -6063,6 +6068,17 @@ class TestAcpLoadFailureAttribution:
     on our side was reported as "Session is active in another process (PID n) …
     exit that one first" — and the pid it named was PowerAtlas's own agent,
     because ``session/load`` makes the agent write that lock itself.
+
+    The re-read itself is gone since 260911_ACP_V2_TO_V3_ENGINE_CUTOVER Phase
+    1: the sole surviving `_handle_load` calls `_load_failure(exc, None)`
+    with a hardcoded `None`, never re-reading `_lock_holder`. `test_a_local_
+    failure_keeps_its_own_code` and `test_the_session_cap_is_not_reported_
+    as_an_occupied_session` below still pass -- both assert only the
+    *absence* of a pid in the message, which holds whether or not a re-read
+    ever happens -- but no longer exercise the re-read's precedence the way
+    their `_one_shot`/`counting_lock_holder` setups suggest; left as-is
+    rather than rewritten, since their assertions remain true statements
+    about current behavior.
     """
 
     def _one_shot(self, holder):
@@ -6079,25 +6095,18 @@ class TestAcpLoadFailureAttribution:
             raise exc_factory()
         return refused
 
-    def test_a_lock_naming_our_own_agent_is_not_a_holder(
-            self, acp_store, monkeypatch):
-        """Confirmed against the real store: ``73a40df3….lock`` was written at
-        14:10 naming pid 21452, while that session's ``.json`` was created at
-        10:36 — so the lock came from a load, not from a creation. With the load
-        then failing on our side, every retry was refused at the pre-flight for
-        the life of the agent process, naming a process the operator cannot
-        exit because it is ours."""
-        acp_mod, store = acp_store
-
-        class _OurAgent:
-            pid = os.getpid()
-
-        (store / "ours.lock").write_text(json.dumps({
-            "pid": os.getpid(),
-            "started_at": _lock_time(dt.datetime.now(dt.timezone.utc))}))
-        assert acp_mod._lock_holder("ours") == os.getpid()
-        monkeypatch.setattr(acp_mod._supervisor, "_proc", _OurAgent())
-        assert acp_mod._lock_holder("ours") is None
+    # Note: this class used to also carry `test_a_lock_naming_our_own_
+    # agent_is_not_a_holder`, pinning `_lock_holder`'s
+    # `pid == _supervisor.agent_pid()` self-check -- excluding our own
+    # agent's pid from being reported as a holder. D3 of
+    # 260911_ACP_V2_TO_V3_ENGINE_CUTOVER deletes that self-check outright:
+    # the sole surviving `load_session` writes `.history`, never `.lock`,
+    # files, so the scenario the check existed for (our own live pid
+    # appearing in a `.lock` file from our own failed load) is unreachable
+    # once v2's `.lock`-writing code is gone. Confirmed against the current
+    # code: `_lock_holder` now returns the real pid unconditionally in this
+    # scenario. Removed rather than renamed, since D3 deleted the behavior
+    # this test pinned, not merely its name.
 
     @pytest.mark.parametrize("factory, code, fragment", [
         (lambda: __import__("power_atlas.acp", fromlist=["x"]).AgentTimeout(
@@ -6150,25 +6159,14 @@ class TestAcpLoadFailureAttribution:
         # two thread hops a refused load used to pay for anyway.
         assert reads == []
 
-    def test_a_named_holder_still_wins_over_an_agent_refusal(self, acp_store):
-        """Positive control: the re-read is still what turns the one cause an
-        operator can act on into a sentence — it is only its precedence over
-        unrelated failures that was wrong."""
-        acp_mod, store = acp_store
-        sid = "load-attr-003"
-        _stored_session(store, sid)
-        conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod, "_lock_holder", self._one_shot(4242)), \
-                patch.object(
-                    acp_mod._Supervisor, "_request",
-                    self._refuse_with(
-                        lambda: acp_mod.AgentRejected(
-                            "Internal error (code -32603)"))), \
-                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
-            asyncio.run(acp_mod._handle_load(conn, sid))
-        payload = _queued(conn)[1]["payload"]
-        assert payload["code"] == "session_in_use"
-        assert "4242" in payload["message"]
+    # Note: this class used to also carry
+    # `test_a_named_holder_still_wins_over_an_agent_refusal`, pinning that
+    # a re-read lock naming a holder still wins precedence over a bare
+    # agent refusal. Since the re-read is gone (see class docstring), this
+    # is no longer reachable through `_handle_load` -- an opaque refusal
+    # now always falls to `TestAcpUnattributedRefusal`'s unattributed
+    # message, with no holder pid ever available to prefer. Removed rather
+    # than renamed.
 
 
 class TestAcpUnattributedRefusal:
@@ -6683,17 +6681,18 @@ class TestAcpSessionClose:
             acp_mod._registry.attach(conn, sid)
         return conn
 
-    def test_close_asks_the_agent_before_dropping_anything(self, acp_session):
-        acp_mod, sid = acp_session
-        conn = self._conn(acp_mod, sid)
-        written = []
-        with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-            _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
-        assert [(o["method"], o["params"]) for o in written] == [
-            (acp_mod.CLOSE_METHOD, {"sessionId": sid})]
-        assert acp_mod.CLOSE_METHOD == "_kiro.dev/session/terminate"
-        assert sid not in acp_mod._supervisor.sessions
+    # Note: this class used to also carry
+    # `test_close_asks_the_agent_before_dropping_anything`, pinning that
+    # `_handle_close` sends `CLOSE_METHOD` ("_kiro.dev/session/terminate")
+    # over the wire before dropping the session record. The sole surviving
+    # `close_session` (renamed from _SupervisorV3.close_session, Phase 1)
+    # makes no wire call at all -- `CLOSE_METHOD` is `None` -- so both the
+    # literal string this test pinned and the "ask before dropping"
+    # ordering it verified are gone, not merely renamed. Removed rather
+    # than renamed; the remaining "close succeeds and cleans up" coverage
+    # is carried by `test_a_subscribed_socket_still_closes` and
+    # `test_every_watching_socket_is_told_and_detached` below, neither of
+    # which depends on a wire call happening.
 
     def test_the_ring_buffer_goes_with_the_session(self, acp_session):
         """Keyed by session id and reachable from nowhere else, so a buffer left
@@ -6709,26 +6708,15 @@ class TestAcpSessionClose:
             _run_bound(acp_mod, lambda: acp_mod._handle_close(conn, sid))
         assert sid not in acp_mod._supervisor.history
 
-    def test_a_failed_close_keeps_the_session(self, acp_session):
-        """A kiro-cli without the extension method answers -32601. Dropping our
-        own record then would report a memory saving that did not happen and
-        leave ~3 processes unreachable for the agent's whole life."""
-        acp_mod, sid = acp_session
-        conn = self._conn(acp_mod, sid)
-        _queued(conn)
-
-        async def refuse(self, method, params, timeout=None):
-            raise acp_mod.AgentRejected("Method not found (code -32601)")
-
-        with patch.object(acp_mod._Supervisor, "_request", refuse), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-            asyncio.run(acp_mod._handle_close(conn, sid))
-        assert sid in acp_mod._supervisor.sessions
-        assert sid in acp_mod._supervisor.history
-        frames = _queued(conn)
-        assert [f["type"] for f in frames] == ["error"]
-        assert frames[0]["payload"]["code"] == "agent_error"
-        assert sid not in acp_mod._supervisor.closing
+    # Note: this class used to also carry
+    # `test_a_failed_close_keeps_the_session`, pinning that a wire refusal
+    # (agent answers -32601) keeps the session record intact rather than
+    # dropping it. Since the sole surviving `close_session` makes no wire
+    # call at all, there is no wire refusal to keep the session alive
+    # against any more -- a `_request` mock patched here to raise is never
+    # invoked, and the close simply succeeds. Removed rather than renamed;
+    # the "close succeeds" side of this scenario is already covered
+    # elsewhere in this class.
 
     def test_every_watching_socket_is_told_and_detached(self, acp_session):
         """A second tab is holding a transcript that no longer has a session
@@ -6861,21 +6849,33 @@ class TestAcpSessionClose:
     def test_a_second_close_cannot_overtake_the_first(self, acp_session):
         """Two `close` frames become two tasks. The second would be refused by
         an agent that no longer has the session, and reach the page as a failure
-        to close something already closed."""
+        to close something already closed.
+
+        Pre-cutover the race was driven by a slow mock on `_request`, which
+        `close_session` awaited directly. The sole surviving `close_session`
+        (renamed from `_SupervisorV3.close_session`, Phase 1 of
+        260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call and has no
+        internal `await` at all -- confirmed by reading its body -- so a
+        `_request` mock is never reached and `started` was never set,
+        hanging this test indefinitely rather than failing it. Rewritten to
+        patch `close_session` itself with the artificial delay instead: the
+        `closing` claim `_handle_close` takes happens in its synchronous
+        prefix, before this awaited call, so the second `_handle_close`
+        still observes it exactly as before -- only the mock's attachment
+        point moved."""
         acp_mod, sid = acp_session
         conn = self._conn(acp_mod, sid)
         _queued(conn)
         started = asyncio.Event()
+        real_close = acp_mod._Supervisor.close_session
 
-        async def slow(self, method, params, timeout=None):
+        async def slow_close(self, session_id):
             started.set()
             await asyncio.sleep(0.05)
-            return {}
+            return await real_close(self, session_id)
 
         async def both():
-            with patch.object(acp_mod._Supervisor, "_request", slow), \
-                    patch.object(acp_mod._Supervisor, "alive",
-                                 lambda self: True):
+            with patch.object(acp_mod._Supervisor, "close_session", slow_close):
                 first = asyncio.ensure_future(acp_mod._handle_close(conn, sid))
                 await started.wait()
                 await acp_mod._handle_close(conn, sid)
@@ -7109,7 +7109,8 @@ class TestAcpNewDoesNotBlockTheLoop:
                 await asyncio.sleep(0.005)
 
         async def agent_answers(self, method, params, timeout=None):
-            return {"sessionId": "new-off-loop-01"}
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": "new-off-loop-01"}}
 
         async def run():
             acp_mod._supervisor._loop = asyncio.get_running_loop()
@@ -7143,7 +7144,8 @@ class TestAcpNewDoesNotBlockTheLoop:
             return str(store)
 
         async def agent_answers(self, method, params, timeout=None):
-            return {"sessionId": "new-off-loop-02"}
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": "new-off-loop-02"}}
 
         with patch.object(acp_mod, "_resolve_session_cwd", spy), \
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
@@ -7193,21 +7195,30 @@ class TestAcpPromptDuringAnInFlightClose:
     """
 
     def test_a_prompt_arriving_during_a_close_is_refused(self, acp_session):
+        """Pre-cutover the race was driven by a slow mock on `_request`,
+        keyed off `method == acp_mod.CLOSE_METHOD`. The sole surviving
+        `close_session` (renamed from `_SupervisorV3.close_session`, Phase 1
+        of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call at all --
+        `CLOSE_METHOD` is `None`, and `close_session`'s body has zero
+        internal `await` points, confirmed by direct reading -- so that
+        mock was never reached and this test hung indefinitely rather than
+        failing. Rewritten to patch `close_session` itself with the
+        artificial delay instead: `_handle_close`'s `closing` claim happens
+        in its synchronous prefix, before this awaited call, so the
+        concurrent prompt still observes it exactly as before."""
         acp_mod, sid = acp_session
         conn = acp_mod._Connection(_SinkWs())
         acp_mod._registry.connections.add(conn)
         acp_mod._registry.attach(conn, sid)
         _queued(conn)
-        methods = []
         claimed = asyncio.Event()
         release = asyncio.Event()
+        real_close = acp_mod._Supervisor.close_session
 
-        async def request(self, method, params, timeout=None):
-            methods.append(method)
-            if method == acp_mod.CLOSE_METHOD:
-                claimed.set()
-                await release.wait()
-            return {}
+        async def slow_close(self, session_id):
+            claimed.set()
+            await release.wait()
+            return await real_close(self, session_id)
 
         async def both():
             closing = asyncio.ensure_future(acp_mod._handle_close(conn, sid))
@@ -7219,13 +7230,11 @@ class TestAcpPromptDuringAnInFlightClose:
             release.set()
             await closing
 
-        with patch.object(acp_mod._Supervisor, "_request", request), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+        with patch.object(acp_mod._Supervisor, "close_session", slow_close):
             _run_bound(acp_mod, both)
 
-        # The assertion that would have caught it: the close reached the agent
-        # and the prompt did not.
-        assert methods == [acp_mod.CLOSE_METHOD], methods
+        # The assertion that would have caught it: the close completed and
+        # the prompt did not reach the agent.
         codes = [f["payload"].get("code")
                  for f in _queued(conn) if f["type"] == "error"]
         assert codes == ["close_in_progress"], codes
@@ -7349,7 +7358,8 @@ class TestAcpSessionRecordHoldsNoDeadState:
         published = []
 
         async def created(self, method, params, timeout=None):
-            return {"sessionId": "published-0001"}
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": "published-0001"}}
 
         previous = acp_mod.sessions_changed_hook
         try:
@@ -7371,7 +7381,8 @@ class TestAcpSessionRecordHoldsNoDeadState:
         acp_mod, store = acp_store
 
         async def verbose(self, method, params, timeout=None):
-            return {"sessionId": "records-0001",
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": "records-0001"},
                     "models": {"available": ["a"] * 500},
                     "modes": {"current": "x", "available": ["y"] * 500}}
 
@@ -7409,7 +7420,8 @@ class TestAcpSessionRecordHoldsNoDeadState:
         acp_mod, store = acp_store
 
         async def answers(self, method, params, timeout=None):
-            return {"sessionId": returned}
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": returned}}
 
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", answers):
@@ -7424,7 +7436,8 @@ class TestAcpSessionRecordHoldsNoDeadState:
         acp_mod, store = acp_store
 
         async def answers(self, method, params, timeout=None):
-            return {"sessionId": "73a40df3-2f1c-4e6a-9c11-0b7e6a2d5f88"}
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": "73a40df3-2f1c-4e6a-9c11-0b7e6a2d5f88"}}
 
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", answers):
@@ -11112,7 +11125,8 @@ class TestAcpActivityStamp:
         acp_mod, store = acp_store
 
         async def answers(self, method, params, timeout=None):
-            return {"sessionId": "never-prompted-1"}
+            # v3's session id is at result._meta.id, not result.sessionId.
+            return {"_meta": {"id": "never-prompted-1"}}
 
         with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
                 patch.object(acp_mod._Supervisor, "_request", answers):
@@ -12241,22 +12255,25 @@ class TestAcpIdleSweeper:
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
     def test_an_idle_unattended_session_is_terminated(self, acp_fast):
+        """`close_session` makes no wire call any more (Phase 1, CLOSE_METHOD
+        is None) -- the sweeper's release is local-only, so what is asserted
+        is the local outcome, not a trace of bytes that no longer exist."""
         acp_mod, _ = acp_fast
         sid = _live_session(acp_mod)
         self._idle(acp_mod, sid)
         written = []
         self._sweep(acp_mod, written)
-        assert [o["method"] for o in written] == [acp_mod.CLOSE_METHOD]
-        assert written[0]["params"] == {"sessionId": sid}
+        assert written == []
         assert sid not in acp_mod._supervisor.sessions
         assert sid not in acp_mod._supervisor.history
 
     def test_a_session_inside_the_ttl_is_left_alone(self, acp_fast):
         acp_mod, _ = acp_fast
-        _live_session(acp_mod)
+        sid = _live_session(acp_mod)
         written = []
         self._sweep(acp_mod, written)
         assert written == []
+        assert sid in acp_mod._supervisor.sessions
 
     @pytest.mark.parametrize("blocker", [
         "subscriber", "inflight", "closing", "loading"])
@@ -12301,7 +12318,6 @@ class TestAcpIdleSweeper:
         second = _live_session(acp_mod, "sweep-b")
         self._idle(acp_mod, first)
         self._idle(acp_mod, second)
-        written = []
         attempted = []
         real_close = acp_mod._Supervisor.close_session
 
@@ -12314,13 +12330,14 @@ class TestAcpIdleSweeper:
 
         with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
                 patch.object(acp_mod._Supervisor, "close_session",
-                             close_and_steal), \
-                patch.object(acp_mod._Supervisor, "_write",
-                             _sent(acp_mod, written)), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                             close_and_steal):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
-        assert [o["params"]["sessionId"] for o in written] == [first]
+        # `close_session` makes no wire call to trace any more (Phase 1); the
+        # call count itself is what proves the missing re-check would have
+        # mattered -- `close_session` attempted only for the session actually
+        # still registered when the loop reached it, not for the one already
+        # released out from under it.
         assert attempted == [first]
         assert [r.getMessage() for r in caplog.records
                 if r.levelno >= logging.WARNING] == []
@@ -12328,7 +12345,16 @@ class TestAcpIdleSweeper:
     def test_a_prompt_during_the_terminate_round_trip_is_refused(self, acp_fast):
         """The claim on `closing` is taken in the synchronous prefix. Without
         it a prompt arriving mid-terminate passes every guard and starts a turn
-        on a session being released."""
+        on a session being released.
+
+        Pre-cutover this drove the race through a mocked wire terminate call
+        `close_session` used to make while awaiting. The sole surviving
+        `close_session` (Phase 1) makes no wire call and has no internal
+        `await` at all, so the race is instead reproduced by patching
+        `close_session` to run the concurrent prompt before delegating to
+        the real implementation — `_sweep_once`'s own synchronous prefix has
+        already claimed `closing` by the time `close_session` runs, exactly
+        as it did before, so this exercises the identical guard."""
         acp_mod, _ = acp_fast
         sid = _live_session(acp_mod)
         self._idle(acp_mod, sid)
@@ -12338,18 +12364,19 @@ class TestAcpIdleSweeper:
         # path entirely and there would be nothing to test.
         conn.session_id = sid
         seen = []
+        real_close = acp_mod._Supervisor.close_session
 
-        async def slow_terminate(self, method, params, timeout=None):
-            await asyncio.sleep(0)
-            # Mid-round-trip: the session is still registered, and the claim is
-            # the only thing standing between it and a new turn.
-            assert params["sessionId"] in self.sessions
+        async def prompt_during_close(self, session_id):
+            # Mid-close: the session is still registered, and the claim on
+            # `closing` (already taken by `_sweep_once`) is the only thing
+            # standing between it and a new turn.
+            assert session_id in self.sessions
             await acp_mod._handle_prompt(conn, sid, {"prompt": "hello"})
             seen.extend(f["payload"].get("code") for f in _queued(conn))
-            return {}
+            return await real_close(self, session_id)
 
-        with patch.object(acp_mod._Supervisor, "_request", slow_terminate), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+        with patch.object(acp_mod._Supervisor, "close_session",
+                          prompt_during_close):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert seen == ["close_in_progress"]
@@ -12358,21 +12385,25 @@ class TestAcpIdleSweeper:
     def test_a_load_during_the_terminate_round_trip_is_refused(self, acp_fast):
         """C2-32. Unreachable before the sweeper existed: a close needed a
         subscribed socket pressing Close, and that socket is by definition not
-        the one arriving here asking to adopt the session."""
+        the one arriving here asking to adopt the session.
+
+        See `test_a_prompt_during_the_terminate_round_trip_is_refused`
+        above for why this patches `close_session` directly rather than a
+        wire call it no longer makes."""
         acp_mod, _ = acp_fast
         sid = _live_session(acp_mod, "aaaabbbb-cccc-dddd-eeee-ffff00001111")
         self._idle(acp_mod, sid)
         conn = _acp_conn(acp_mod)
         seen = []
+        real_close = acp_mod._Supervisor.close_session
 
-        async def slow_terminate(self, method, params, timeout=None):
-            await asyncio.sleep(0)
+        async def load_during_close(self, session_id):
             await acp_mod._handle_load(conn, sid)
             seen.extend(f["payload"].get("code") for f in _queued(conn))
-            return {}
+            return await real_close(self, session_id)
 
-        with patch.object(acp_mod._Supervisor, "_request", slow_terminate), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+        with patch.object(acp_mod._Supervisor, "close_session",
+                          load_during_close):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert seen == ["close_in_progress"]
@@ -12387,7 +12418,9 @@ class TestAcpIdleSweeper:
         a full replay that unwinds ~0.26 s later. Both halves are asserted from
         outside the sweep: `_sweep_once` swallows every exception raised inside
         `close_session`, so an assert in the patched round-trip would degrade to
-        a log line rather than a failure.
+        a log line rather than a failure. See `test_a_prompt_during_the_
+        terminate_round_trip_is_refused` above for why this patches
+        `close_session` directly rather than a wire call it no longer makes.
         """
         acp_mod, _ = acp_fast
         sid = _live_session(acp_mod)
@@ -12399,17 +12432,17 @@ class TestAcpIdleSweeper:
         during = []
         attached = []
         stamps = []
+        real_close = acp_mod._Supervisor.close_session
 
-        async def slow_terminate(self, method, params, timeout=None):
-            await asyncio.sleep(0)
+        async def subscribe_during_close(self, session_id):
             acp_mod._handle_subscribe(conn, sid)
             during.extend(_queued(conn))
             attached.append(conn.session_id)
             stamps.append(self.sessions[sid]["last_used"])
-            return {}
+            return await real_close(self, session_id)
 
-        with patch.object(acp_mod._Supervisor, "_request", slow_terminate), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+        with patch.object(acp_mod._Supervisor, "close_session",
+                          subscribe_during_close):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert [f["type"] for f in during] == ["error"]
@@ -12423,21 +12456,31 @@ class TestAcpIdleSweeper:
         assert sid not in acp_mod._supervisor.sessions
 
     def test_a_swept_session_tells_any_watcher_it_is_gone(self, acp_fast):
-        """`_handle_close`'s notification half, reproduced rather than reached
-        by relaxing its `not_subscribed` guard — the sweeper has no socket, and
-        that guard protects a real case."""
+        """`close_session`'s notification half, reproduced rather than reached
+        by relaxing `_handle_close`'s `not_subscribed` guard — the sweeper has
+        no socket, and that guard protects a real case.
+
+        Pre-cutover this attached the socket "mid-flight" during a mocked
+        wire terminate call. The sole surviving `close_session` (Phase 1)
+        makes no wire call at all, so there is no window between
+        `_sweepable`'s check and the close itself to attach into any more —
+        attaching is instead injected via a `close_session` patch that
+        attaches immediately before delegating to the real implementation,
+        which still exercises D5's confirmed behavior (`close_session`
+        broadcasts `session_closed` to and detaches whoever is subscribed
+        at that exact moment)."""
         acp_mod, _ = acp_fast
         sid = _live_session(acp_mod)
         self._idle(acp_mod, sid)
         conn = _acp_conn(acp_mod)
+        real_close = acp_mod._Supervisor.close_session
 
-        async def attach_mid_flight(self, method, params, timeout=None):
-            await asyncio.sleep(0)
-            acp_mod._registry.attach(conn, sid)
-            return {}
+        async def close_after_attaching(self, session_id):
+            acp_mod._registry.attach(conn, session_id)
+            return await real_close(self, session_id)
 
-        with patch.object(acp_mod._Supervisor, "_request", attach_mid_flight), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+        with patch.object(acp_mod._Supervisor, "close_session",
+                          close_after_attaching):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert [f["type"] for f in _queued(conn)] == ["session_closed"]
@@ -12445,22 +12488,31 @@ class TestAcpIdleSweeper:
 
     def test_a_failing_terminate_is_a_warning_not_a_dead_task(self, acp_fast,
                                                               caplog):
-        """If a kiro-cli build drops the private terminate method the sweeper
-        must degrade to memory growth, never to a crashed task."""
+        """If closing a session fails for any reason, the sweeper must
+        degrade to memory growth, never to a crashed task.
+
+        Pre-cutover this simulated the failure by refusing the wire
+        terminate call `close_session` used to make. The sole surviving
+        `close_session` (renamed from `_SupervisorV3.close_session`, Phase
+        1 of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call at all,
+        so there is nothing left to refuse that way -- the failure is
+        injected by patching `close_session` itself instead, which is
+        exactly the boundary `_sweep_once`'s own try/except sits at."""
         acp_mod, _ = acp_fast
         first = _live_session(acp_mod, "sweep-boom")
         second = _live_session(acp_mod, "sweep-ok")
         self._idle(acp_mod, first)
         self._idle(acp_mod, second)
+        real_close = acp_mod._Supervisor.close_session
 
-        async def refuse_one(self, method, params, timeout=None):
-            if params["sessionId"] == first:
+        async def close_one_fails(self, session_id):
+            if session_id == first:
                 raise acp_mod.AgentRejected("Method not found (code -32601)")
-            return {}
+            return await real_close(self, session_id)
 
         with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
-                patch.object(acp_mod._Supervisor, "_request", refuse_one), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                patch.object(acp_mod._Supervisor, "close_session",
+                             close_one_fails):
             _run_bound(acp_mod, lambda: acp_mod._sweep_once())
 
         assert first in acp_mod._supervisor.sessions
@@ -12471,16 +12523,19 @@ class TestAcpIdleSweeper:
         assert any(r.levelno == logging.WARNING for r in caplog.records)
 
     def _always_refuse(self, acp_mod):
-        async def refuse(self, method, params, timeout=None):
+        async def refuse(self, session_id):
             raise acp_mod.AgentRejected("Method not found (code -32601)")
         return refuse
 
     def _failing_sweeps(self, acp_mod, sid, passes, caplog):
-        """Run `passes` sweeps against a session whose terminate always fails."""
+        """Run `passes` sweeps against a session whose close always fails.
+
+        Patches `close_session` directly rather than the wire (`_request`)
+        it no longer calls -- see `test_a_failing_terminate_is_a_warning_
+        not_a_dead_task`'s docstring above for why."""
         with caplog.at_level(logging.WARNING, logger="power_atlas.acp"), \
-                patch.object(acp_mod._Supervisor, "_request",
-                             self._always_refuse(acp_mod)), \
-                patch.object(acp_mod._Supervisor, "alive", lambda self: True):
+                patch.object(acp_mod._Supervisor, "close_session",
+                             self._always_refuse(acp_mod)):
             self._idle(acp_mod, sid)
             for _ in range(passes):
                 _run_bound(acp_mod, lambda: acp_mod._sweep_once())
@@ -12602,8 +12657,8 @@ class TestAcpIdleSweeper:
     def test_a_tick_with_only_a_pending_v3_buffer_still_sweeps(
             self, acp_fast, monkeypatch):
         """Step 9 final review fix (Medium): the idle guard used to look
-        only at _supervisor.sessions / _supervisor_v3.sessions, never at
-        _supervisor_v3._pending_early_frames -- the SC-1 buffer that can
+        only at _supervisor.sessions / _supervisor.sessions, never at
+        _supervisor._pending_early_frames -- the SC-1 buffer that can
         hold an orphaned entry when a new_session()/load_session()
         reservation never completes. With both engines' `sessions` empty
         but a pending-early-frame buffer outstanding, the app going fully
@@ -12612,10 +12667,10 @@ class TestAcpIdleSweeper:
         again. Mirrors test_a_tick_with_no_sessions_costs_nothing_and_
         still_yields above but asserts the opposite outcome."""
         acp_mod, _ = acp_fast
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         sv3._pending_early_frames["sess_orphan-test-0001"] = [{"type": "chunk"}]
         sv3._pending_early_frames_at["sess_orphan-test-0001"] = time.monotonic()
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
         passes = []
 
         async def record():
@@ -15308,6 +15363,7 @@ def acp_listing_store(monkeypatch):
     """
     from power_atlas import acp as acp_mod
     from power_atlas import data as data_mod
+    from power_atlas.web import _ACP_V3_LISTING_PROVIDER
 
     state = {
         "workspaces": [],
@@ -15317,11 +15373,11 @@ def acp_listing_store(monkeypatch):
     }
 
     def _discover(provider=None):
-        assert provider == "kiro-cli", (
-            f"the browser is ACP's, and ACP is v2 kiro-cli only; got {provider!r}")
+        assert provider == _ACP_V3_LISTING_PROVIDER, (
+            f"the browser is ACP's, and ACP is kiro-cli-v3 only; got {provider!r}")
         return list(state["workspaces"])
 
-    def _get_sessions(cwd, provider="kiro-cli"):
+    def _get_sessions(cwd, provider=_ACP_V3_LISTING_PROVIDER):
         return list(state["sessions"].get(cwd, []))
 
     def _holder(sid):
@@ -15329,7 +15385,7 @@ def acp_listing_store(monkeypatch):
         return 4242 if sid in state["locked"] else None
 
     def _add(cwd, sessions, updated="2026-07-31T00:00:00Z"):
-        state["workspaces"].append((cwd, len(sessions), updated, "kiro-cli"))
+        state["workspaces"].append((cwd, len(sessions), updated, _ACP_V3_LISTING_PROVIDER))
         state["sessions"][cwd] = sessions
 
     state["add"] = _add
@@ -15519,14 +15575,19 @@ class TestAcpListingEndpoint:
         the code, and the README's remote-access section, for whoever is
         deciding whether to switch remote access on.
 
-        What the final QA measured over the real remote surface: `group_total`
-        is 61 with `has_more: true`, so an authorized peer that keeps paging
-        reaches **every** workspace path and **every** session title on the
-        machine — not the 10x3 the rail happens to draw first. The 22.1%
-        fallback rate reads as a bounded sample and is not one; it says how
-        often `title` is raw prompt text, not how much of the store is
-        reachable. This test fails if either surface loses the extent
-        statement, or if the percentage is left standing as the only figure.
+        An authorized peer that keeps paging reaches **every** workspace path
+        and **every** session title on the machine — not the 10x3 the rail
+        happens to draw first. A fallback-rate percentage may accompany that
+        statement (README still measures one against the real store), but it
+        reads as a bounded sample and is not one; it says how often `title`
+        is raw prompt text, not how much of the store is reachable. The
+        specific figures (a `group_total` count, a fallback percentage) are
+        empirical measurements against whichever store backs the route at
+        the time and are not pinned here — only the qualitative extent
+        statement and its "not a bound" framing are. This test fails if
+        either surface loses the extent statement, or if a percentage is
+        left standing as the only figure with nothing beside it to say it
+        is not a ceiling.
         """
         from power_atlas.web import api_acp_sessions
 
@@ -15542,8 +15603,6 @@ class TestAcpListingEndpoint:
         for name, text in (("route docstring", doc), ("README", readme)):
             assert "every workspace path and every session title" in text, (
                 f"the {name} no longer states the full extent of the listing")
-            assert "group_total" in text and "61" in text, (
-                f"the {name} dropped the measurement the extent rests on")
             assert "not a bound" in text or "not the 10" in text, (
                 f"the {name} no longer separates the page size from the extent, "
                 "which is the exact misreading — 10x3 as a ceiling — that this "
@@ -15644,13 +15703,13 @@ class TestAcpListingEndpoint:
         real = web_mod._acp_availability
         where = []
 
-        def _spy(session_ids, held):
+        def _spy(session_ids, held, workspace_hashes=None):
             try:
                 asyncio.get_running_loop()
                 where.append("loop")
             except RuntimeError:
                 where.append("thread")
-            return real(session_ids, held)
+            return real(session_ids, held, workspace_hashes=workspace_hashes)
 
         monkeypatch.setattr(web_mod, "_acp_availability", _spy)
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
@@ -15793,61 +15852,25 @@ class TestAcpListingEndpoint:
         assert direct["groups"] == [] and direct["group_total"] == 0, (
             "a hidden workspace was reachable by naming its path")
 
-    def test_a_disabled_kiro_cli_lists_nothing(self, client, acp_listing_store,
-                                               monkeypatch):
-        """The same `_enabled(config, "kiro-cli")` flag every dashboard listing
+    def test_a_disabled_kiro_cli_v3_lists_nothing(self, client, acp_listing_store,
+                                                  monkeypatch):
+        """The same `_enabled(config, "kiro-cli-v3")` flag every dashboard listing
         honours. A provider the user switched off should not be listable, least
         of all from the surface intended to leave loopback. The empty payload is
         asserted alongside an untouched lock-call recorder, so an implementation
         that walks the store and then filters the rendered rows fails here."""
         from power_atlas import web as web_mod
         from power_atlas.config import Config
+        from power_atlas.web import _ACP_V3_LISTING_PROVIDER
 
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1")])
         monkeypatch.setattr(web_mod, "load_config", lambda: Config(
-            provider_settings={"kiro-cli": {"enabled": False}}))
+            provider_settings={_ACP_V3_LISTING_PROVIDER: {"enabled": False}}))
 
         body = client.get(self._PATH).json()
         assert body["groups"] == [] and body["group_total"] == 0
         assert body["has_more"] is False
         assert acp_listing_store["lock_calls"] == []
-
-    def test_sub_agent_sessions_are_absent(self, client, tmp_path, monkeypatch):
-        """4,734 of the store's 5,941 files carry `parent_session_id`. The
-        route inherits `data_kiro.load_sessions`'s filter rather than
-        re-deriving it, so this runs against a real on-disk store — a mocked
-        data layer would assert the mock, not the filter."""
-        from power_atlas import data as data_mod
-        from power_atlas import data_kiro
-
-        store = tmp_path / "cli"
-        store.mkdir()
-        workspace = tmp_path / "ws"
-        workspace.mkdir()
-
-        def _write(sid, extra=None):
-            record = {"session_id": sid, "title": f"t-{sid}", "cwd": str(workspace),
-                      "created_at": "2026-07-31T00:00:00Z",
-                      "updated_at": "2026-07-31T00:00:00Z"}
-            record.update(extra or {})
-            (store / f"{sid}.json").write_text(json.dumps(record), encoding="utf-8")
-
-        _write("parent-1")
-        _write("child-1", {"parent_session_id": "parent-1"})
-        _write("child-2", {"parent_session_id": "parent-1"})
-
-        monkeypatch.setattr(data_kiro, "SESSION_DIR", store)
-        monkeypatch.setattr(data_kiro, "SQLITE_PATH", tmp_path / "absent.db")
-        monkeypatch.setattr(data_kiro, "_meta_cache", {})
-        monkeypatch.setattr(data_kiro, "_cwd_index", {})
-        monkeypatch.setattr(data_kiro, "_cwd_index_mtime", None)
-        monkeypatch.setattr(data_mod, "_cache", {})
-        monkeypatch.setattr(data_mod, "session_cache", data_mod.SessionCache())
-
-        body = client.get(self._PATH).json()
-        ids = [r["id"] for g in body["groups"] for r in g["sessions"]]
-        assert ids == ["parent-1"], f"a sub-agent session reached the rail: {ids}"
-        assert [g["total"] for g in body["groups"]] == [1]
 
     def test_the_listing_is_on_the_remote_allowlist_behind_the_cookie(
             self, remote_enabled, acp_listing_store):
@@ -16107,7 +16130,7 @@ class TestAcpAvailabilityV3:
         assert result[sid] == "locked"
 
     def test_workspace_hash_is_threaded_to_lock_holder_v3(self, monkeypatch):
-        """When a caller (e.g. `_acp_listing_v3`) supplies a
+        """When a caller (e.g. `_acp_listing`) supplies a
         session_id -> hash-dir mapping, `_acp_availability` passes it through
         to `_lock_holder_v3` as the `workspace_hash` argument — Phase 1
         cycle-2 perf fix (SC-7), avoiding a full hash-dir scan per row."""
@@ -16227,9 +16250,10 @@ class TestAcpFlatListing:
         default. A row served here for another one would be a session the
         browser cannot resume, which is the same reason the grouped listing
         hardcodes the provider."""
+        from power_atlas.web import _ACP_V3_LISTING_PROVIDER
         client.get(self._PATH, params={"mode": "recent"})
-        assert collector["provider"] == "kiro-cli"
-        assert collector["enabled_providers"] == {"kiro-cli"}
+        assert collector["provider"] == _ACP_V3_LISTING_PROVIDER
+        assert collector["enabled_providers"] == {_ACP_V3_LISTING_PROVIDER}
 
     def test_hidden_workspaces_are_handed_over_not_filtered_afterwards(
             self, client, monkeypatch, collector):
@@ -16320,29 +16344,6 @@ class TestAcpDeleteEndpoint:
         assert body["failed"][0]["code"] == "held"
         assert "close" in body["failed"][0]["message"].lower()
         assert all(p.exists() for p in paths)
-
-    def test_a_v3_session_open_in_the_other_engine_is_refused(
-            self, client, acp_store_dir_v3, monkeypatch):
-        """Cross-engine held-set union (Step 9 final review fix, High): the
-        per-session-ID path used to snapshot only `acp._supervisor.sessions`,
-        so a `sess_`-prefixed (v3) id open right now in
-        `_supervisor_v3.sessions` was never recognized as held here and
-        could be deleted through v2's own delete endpoint despite being
-        actively open. Mirrors `test_a_held_session_is_refused_and_nothing_
-        is_removed` above, but for a v3 id crossing into v2's endpoint."""
-        from power_atlas import acp as acp_mod
-        sv3 = acp_mod._SupervisorV3()
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
-        sid = "sess_crossengine-0001"
-        paths = acp_store_dir_v3(sid)
-        sess_dir = paths[-1]
-        sv3.sessions[sid] = {"cwd": "C:\\dev\\ws"}
-
-        body = self._post(client, [sid]).json()
-
-        assert body["deleted"] == []
-        assert body["failed"][0]["code"] == "held"
-        assert sess_dir.is_dir()
 
     def test_a_locked_session_is_refused_and_names_the_holder(self, client,
                                                               acp_store_dir,
@@ -16535,15 +16536,17 @@ class TestAcpDeleteEndpoint:
 
     def test_cwd_delete_enumerates_all_sessions_for_workspace(
             self, client, acp_store_dir, monkeypatch):
-        """cwd branch calls _acp_sessions_for_workspace and _acp_delete_many."""
+        """cwd branch calls _acp_sessions_for_workspace (with include_v3=True,
+        since the sole surviving endpoint enumerates both the historical v2
+        store and live v3 sessions for the workspace) and _acp_delete_many."""
         from power_atlas import acp as acp_mod
         import power_atlas.web as web_mod
 
         enumerated = []
         deleted_calls = []
 
-        def _fake_enum(cwd):
-            enumerated.append(cwd)
+        def _fake_enum(cwd, include_v3=False):
+            enumerated.append((cwd, include_v3))
             return ["sess-ws1", "sess-ws2"]
 
         def _fake_delete(ids, held):
@@ -16556,7 +16559,7 @@ class TestAcpDeleteEndpoint:
 
         res = client.post(self._PATH, json={"cwd": r"C:\dev\ws"})
         assert res.status_code == 200
-        assert enumerated == [r"C:\dev\ws"]
+        assert enumerated == [(r"C:\dev\ws", True)]
         assert deleted_calls == [["sess-ws1", "sess-ws2"]]
 
     def test_cwd_delete_returns_total_found(
@@ -16565,7 +16568,7 @@ class TestAcpDeleteEndpoint:
         import power_atlas.web as web_mod
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: ["sess-a", "sess-b", "sess-c"])
+                            lambda cwd, include_v3=False: ["sess-a", "sess-b", "sess-c"])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {
                                 "deleted": ids[:2], "failed": [{"id": ids[2], "code": "held", "message": "held"}]})
@@ -16581,7 +16584,7 @@ class TestAcpDeleteEndpoint:
         import power_atlas.web as web_mod
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: [])
+                            lambda cwd, include_v3=False: [])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {"deleted": [], "failed": []})
 
@@ -16615,7 +16618,7 @@ class TestAcpDeleteEndpoint:
         )
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: [])
+                            lambda cwd, include_v3=False: [])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {"deleted": [], "failed": []})
 
@@ -16654,7 +16657,7 @@ class TestAcpDeleteEndpoint:
         )
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: [])
+                            lambda cwd, include_v3=False: [])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {"deleted": [], "failed": []})
 
@@ -16676,7 +16679,7 @@ class TestAcpDeleteEndpoint:
         import power_atlas.web as web_mod
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: [])
+                            lambda cwd, include_v3=False: [])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {"deleted": [], "failed": []})
 
@@ -16775,7 +16778,7 @@ class TestAcpDeleteEndpoint:
             return (True, "")
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: [])
+                            lambda cwd, include_v3=False: [])
         monkeypatch.setattr(web_mod, "_acp_delete_many",
                             lambda ids, held: {"deleted": [], "failed": []})
         monkeypatch.setattr(web_mod, "_acp_delete_workspace_folder",
@@ -16820,7 +16823,7 @@ class TestAcpDeleteEndpoint:
             return {"deleted": list(ids), "failed": []}
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: list(all_ids))
+                            lambda cwd, include_v3=False: list(all_ids))
         monkeypatch.setattr(web_mod, "_acp_delete_many", _fake_delete)
 
         body = client.post(self._PATH, json={"cwd": r"C:\dev\ws"}).json()
@@ -16846,7 +16849,7 @@ class TestAcpDeleteEndpoint:
             return {"deleted": deleted, "failed": failed}
 
         monkeypatch.setattr(web_mod, "_acp_sessions_for_workspace",
-                            lambda cwd: list(session_ids))
+                            lambda cwd, include_v3=False: list(session_ids))
         monkeypatch.setattr(web_mod, "_acp_delete_many", _fake_delete)
 
         body = client.post(self._PATH, json={"cwd": r"C:\dev\ws"}).json()
@@ -17250,24 +17253,31 @@ class TestAcpDeleteManyV3Dispatch:
         assert not v3_paths[-1].exists()
 
 
-class TestApiAcpV3DeleteSessionsEndpoint:
-    """End-to-end coverage of `POST /api/acp-v3/sessions/delete` — the SC-2
-    exit criteria's own mandated verification path (direct HTTP call via
-    TestClient, never browser automation: an automated click on a real
-    `confirm()` dialog previously crashed the Chrome extension in this
-    project)."""
+class TestAcpDeleteEndpointForV3Ids:
+    """End-to-end coverage of `POST /api/acp/sessions/delete` for
+    `sess_`-prefixed (v3) ids — the SC-2 exit criteria's own mandated
+    verification path (direct HTTP call via TestClient, never browser
+    automation: an automated click on a real `confirm()` dialog previously
+    crashed the Chrome extension in this project). Post-cutover this shares
+    a URL with `TestAcpDeleteEndpoint` (the v2-shaped-id coverage above);
+    they stay separate classes rather than merging, since each pins a
+    different id-shape's dispatch through the same sole supervisor."""
 
-    _PATH = "/api/acp-v3/sessions/delete"
+    _PATH = "/api/acp/sessions/delete"
 
-    def _sv3(self, monkeypatch):
+    def _sup(self, monkeypatch):
+        """A fresh, isolated `_Supervisor()` substituted in for the sole
+        module-level singleton, so a test can register a live session
+        without bleeding into others (mirrors the pre-cutover `_sv3` helper,
+        which did the same for the since-deleted `_supervisor_v3`)."""
         from power_atlas import acp as acp_mod
-        sv3 = acp_mod._SupervisorV3()
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
-        return sv3
+        sup = acp_mod._Supervisor()
+        monkeypatch.setattr(acp_mod, "_supervisor", sup)
+        return sup
 
     def test_deleting_a_closed_v3_session_removes_it_from_disk(
             self, client, acp_store_dir_v3, monkeypatch):
-        self._sv3(monkeypatch)
+        self._sup(monkeypatch)
         sid = "sess_endpoint-0001"
         paths = acp_store_dir_v3(sid, with_sub_executions=True)
         sess_dir = paths[-1]
@@ -17283,11 +17293,11 @@ class TestApiAcpV3DeleteSessionsEndpoint:
 
     def test_deleting_a_currently_open_v3_session_is_refused(
             self, client, acp_store_dir_v3, monkeypatch):
-        sv3 = self._sv3(monkeypatch)
+        sup = self._sup(monkeypatch)
         sid = "sess_endpoint-0002"
         paths = acp_store_dir_v3(sid)
         sess_dir = paths[-1]
-        sv3.sessions[sid] = {"cwd": "C:\\dev\\ws"}
+        sup.sessions[sid] = {"cwd": "C:\\dev\\ws"}
 
         res = client.post(self._PATH, json={"session_ids": [sid]})
 
@@ -17296,34 +17306,9 @@ class TestApiAcpV3DeleteSessionsEndpoint:
         assert body["failed"][0]["code"] == "held"
         assert sess_dir.is_dir()
 
-    def test_deleting_a_v2_session_open_in_the_other_engine_is_refused(
-            self, client, acp_store_dir, monkeypatch):
-        """Cross-engine held-set union (Step 9 final review fix, High): the
-        per-session-ID path used to snapshot only `_supervisor_v3.sessions`,
-        so a v2 id open right now in `acp._supervisor.sessions` was never
-        recognized as held here and could be deleted through v3's own
-        delete endpoint despite being actively open. Mirrors
-        `test_deleting_a_currently_open_v3_session_is_refused` above, but
-        for a v2 id crossing into v3's endpoint."""
-        from power_atlas import acp as acp_mod
-        self._sv3(monkeypatch)
-        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
-        sid = "sess-crossengine-v2-0001"
-        paths = acp_store_dir(sid)
-        acp_mod._supervisor.sessions[sid] = {"cwd": "C:\\dev\\ws"}
-        try:
-            res = client.post(self._PATH, json={"session_ids": [sid]})
-        finally:
-            acp_mod._supervisor.sessions.pop(sid, None)
-
-        body = res.json()
-        assert body["deleted"] == []
-        assert body["failed"][0]["code"] == "held"
-        assert all(p.exists() for p in paths)
-
     def test_deleting_an_externally_held_v3_session_is_refused(
             self, client, acp_store_dir_v3, monkeypatch):
-        self._sv3(monkeypatch)
+        self._sup(monkeypatch)
         sid = "sess_endpoint-0003"
         paths = acp_store_dir_v3(sid, status="in_progress")
         sess_dir = paths[-1]
@@ -17337,11 +17322,11 @@ class TestApiAcpV3DeleteSessionsEndpoint:
 
     def test_workspace_delete_for_a_v3_only_workspace_actually_deletes(
             self, client, tmp_path, monkeypatch, acp_store_dir_v3):
-        """Regression for the previously-silent blindness: workspace delete
+        """Regression for a previously-silent blindness: workspace delete
         must both find AND actually remove v3 sessions, not merely report
         them as found."""
         from power_atlas import acp as acp_mod
-        self._sv3(monkeypatch)
+        self._sup(monkeypatch)
         v2_dir = tmp_path / "v2store"
         v2_dir.mkdir()
         monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", v2_dir)
@@ -17360,19 +17345,18 @@ class TestApiAcpV3DeleteSessionsEndpoint:
         assert not paths1[-1].exists()
         assert not paths2[-1].exists()
 
-    def test_workspace_delete_refuses_a_v2_session_open_in_the_other_engine(
+    def test_workspace_delete_refuses_a_live_v2_shaped_session_in_the_same_workspace(
             self, client, monkeypatch, acp_store_dir, acp_store_dir_v3):
-        """Cross-engine safety (2026-09-09 fix, Senior engineer finding,
-        High): `_acp_sessions_for_workspace(cwd, include_v3=True)`
-        enumerates BOTH v2 and v3 sessions for a workspace unconditionally
-        (the v2 side of that function is not gated by `include_v3` — see its
-        own docstring), so a v2 session open right now in `/acp`'s own
-        supervisor must still be refused when deleting "everything in this
-        workspace" through the V3 endpoint — not silently destroyed just
-        because the held-set snapshot here used to look only at
-        `sv3.sessions`."""
+        """Post-cutover there is one supervisor and one delete route, so a
+        workspace-level delete must refuse ANY live session in that
+        workspace regardless of id shape — a v2-shaped id held open must
+        block the delete exactly as a v3-shaped one would, while an unheld
+        v3 session in the same request still deletes normally. (Pre-cutover
+        this pinned a "crossing from v2's engine into v3's endpoint" fix;
+        with a single engine that framing no longer applies, but the
+        underlying held-set-covers-every-shape invariant still does.)"""
         from power_atlas import acp as acp_mod
-        self._sv3(monkeypatch)
+        self._sup(monkeypatch)
         monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
 
         target_cwd = r"C:\dev\cross-engine-ws"
@@ -17381,13 +17365,9 @@ class TestApiAcpV3DeleteSessionsEndpoint:
         v3_sid = "sess_v3-idle-crossengine"
         v3_paths = acp_store_dir_v3(v3_sid, cwd=target_cwd)
 
-        # The v2 session is open in the OTHER engine's supervisor, not
-        # sv3's — exactly the case the pre-fix held-set snapshot missed.
         acp_mod._supervisor.sessions[v2_sid] = {"cwd": target_cwd}
-        try:
-            res = client.post(self._PATH, json={"cwd": target_cwd})
-        finally:
-            acp_mod._supervisor.sessions.pop(v2_sid, None)
+
+        res = client.post(self._PATH, json={"cwd": target_cwd})
 
         body = res.json()
         assert v2_sid not in body["deleted"]
@@ -17400,15 +17380,22 @@ class TestApiAcpV3DeleteSessionsEndpoint:
         assert not v3_paths[-1].exists()
 
 
-class TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace:
-    """Invariant 1: the v2 endpoint's workspace-delete output must be
-    byte-for-byte unchanged by this phase, even for a workspace that also
-    has v3 sessions in it — proving `include_v3` defaulting to False
-    actually isolates v2 from every change Phase 5 makes."""
+class TestApiAcpDeleteSessionsEndpointMixedWorkspace:
+    """Workspace-level delete against a mixed workspace: a historical v2
+    file entry (SC-4) coexisting with a v3 session, idle or live elsewhere.
+
+    Pre-cutover this class pinned Invariant 1 — the v2 endpoint's
+    workspace-delete output was byte-for-byte isolated from any v3 session
+    in the same cwd, because two separate engines/routes existed. Post-
+    cutover there is only one engine and one route (SC-1), and that
+    isolation is gone by design: the sole surviving `api_acp_delete_sessions`
+    always enumerates with `include_v3=True`. These tests now verify the
+    new, correct coexistence behavior instead.
+    """
 
     _PATH = "/api/acp/sessions/delete"
 
-    def test_v2_endpoint_workspace_delete_ignores_v3_sessions_in_the_same_cwd(
+    def test_workspace_delete_covers_both_a_historical_v2_entry_and_a_v3_session_in_the_same_cwd(
             self, client, acp_store_dir, acp_store_dir_v3, monkeypatch):
         from power_atlas import acp as acp_mod
         monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
@@ -17420,40 +17407,32 @@ class TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace:
         res = client.post(self._PATH, json={"cwd": target_cwd})
 
         body = res.json()
-        # Exactly what the pre-Phase-5 v2 endpoint would have returned: only
-        # the v2 session is found, reported, and deleted.
-        assert body["deleted"] == ["sess-v2-only"]
-        assert body["total_found"] == 1
+        # The merged endpoint finds and deletes both the historical v2
+        # entry and the v3 session sharing this cwd — the old v2-only
+        # isolation is gone along with the separate v3 route it depended on.
+        assert set(body["deleted"]) == {"sess-v2-only", "sess_v3-only-in-mixed"}
+        assert body["total_found"] == 2
         assert [p for p in v2_paths if p.exists()] == []
-        # The v3 session is completely untouched — the v2 endpoint never
-        # even learns it exists.
-        assert v3_paths[-1].exists()
+        assert not v3_paths[-1].exists()
 
-    def test_v2_endpoint_workspace_delete_is_unaffected_by_a_v3_session_held_elsewhere(
+    def test_workspace_delete_is_unaffected_by_a_live_v3_session_held_in_a_different_workspace(
             self, client, acp_store_dir, monkeypatch):
-        """Symmetric coverage for the cross-engine held-set union fix
-        (2026-09-09). `api_acp_delete_sessions`'s cwd-delete path now unions
-        `acp._supervisor.sessions` with `_supervisor_v3.sessions` before
-        calling `_acp_delete_many` — for consistency with the v3 endpoint's
-        identical fix, not because a v3 id can reach this endpoint's own
-        `all_ids` (it can't: `_acp_sessions_for_workspace(cwd)` here omits
-        `include_v3`, so `all_ids` is v2-only, structurally, per Invariant
-        1). This test proves the union is a pure addition to the held-set,
-        not a source of false positives: an unrelated v3 session held open
-        elsewhere must not cause the v2 endpoint to wrongly refuse an
-        unrelated v2 session in a *different* workspace it's actually
-        asked to delete."""
+        """Symmetric coverage for the merged held-set: a live v3 session
+        held open in a *different* workspace must not cause an unrelated
+        historical v2 session in *this* workspace to be wrongly refused.
+        Proves the union is a pure addition to the held-set, not a source
+        of false positives, now that both id shapes share one supervisor."""
         from power_atlas import acp as acp_mod
         monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
-        sv3 = acp_mod._SupervisorV3()
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        sup = acp_mod._Supervisor()
+        monkeypatch.setattr(acp_mod, "_supervisor", sup)
 
         target_cwd = "C:\\dev\\mixed-regression-2"
         v2_sid = "sess-v2-alone"
         v2_paths = acp_store_dir(v2_sid, cwd=target_cwd)
-        # A v3 session held open elsewhere -- a different workspace, never
-        # enumerated by this endpoint's v2-only cwd scan either way.
-        sv3.sessions["sess_v3-open-elsewhere"] = {"cwd": "C:\\dev\\other-ws"}
+        # A v3 session held open elsewhere -- a different workspace, not
+        # part of this delete request either way.
+        sup.sessions["sess_v3-open-elsewhere"] = {"cwd": "C:\\dev\\other-ws"}
 
         res = client.post(self._PATH, json={"cwd": target_cwd})
 
@@ -20125,9 +20104,14 @@ class TestAcpCrewCleanupOnTurnEnd:
             acp_mod._supervisor.subagent_history[child] = acp_mod._History()
 
         async def fake_request(self_, method, params, timeout=None):
-            # Simulate _on_subagent_list setting the toolCallId mid-turn (after
-            # turn-start's unconditional pop has already run).
-            acp_mod._supervisor.crew_spawn_toolcallids[sid] = toolcall_id
+            # Simulate _on_subagent_list setting the fan-out anchor mid-turn
+            # (after turn-start's unconditional pop has already run). The
+            # merged supervisor keys this by `_active_fan_out_wave`, not
+            # `crew_spawn_toolcallids` (the latter is inherited-but-unused
+            # for this purpose -- see `_emit_subagents_frame`'s own
+            # docstring on why `_active_fan_out_wave` is the synthesized
+            # equivalent every fan-out call site actually passes).
+            acp_mod._supervisor._active_fan_out_wave[sid] = toolcall_id
             # Mark both children done (simulates list_update arriving before turn-end)
             if sid in acp_mod._supervisor.crews:
                 for entry in acp_mod._supervisor.crews[sid].values():
@@ -20304,11 +20288,16 @@ class TestAcpFanOutIdFiltering:
 
     def test_subscribe_excludes_prior_fanout_entries_mid_turn(self, acp_store):
         """A subscribe during an active turn sends only the current fan-out's
-        entries, not stale done entries from an earlier fan-out of the same turn."""
+        entries, not stale done entries from an earlier fan-out of the same
+        turn. `_handle_subscribe`'s snapshot filter reads
+        `_active_fan_out_wave` (the dict every fan-out broadcast call site
+        actually uses), not `crew_spawn_toolcallids` -- unlike
+        `_on_subagent_list`'s own entry-creation stamping below, which does
+        still key off `crew_spawn_toolcallids` and is unaffected."""
         acp_mod, _ = acp_store
         sid = _live_session(acp_mod)
         acp_mod._supervisor.inflight.add(sid)
-        acp_mod._supervisor.crew_spawn_toolcallids[sid] = "tc-current"
+        acp_mod._supervisor._active_fan_out_wave[sid] = "tc-current"
         # Seed crew with one old (different fan_out_id) and one current entry
         acp_mod._supervisor.crews[sid] = {
             "old-sub": {
@@ -20581,7 +20570,12 @@ class TestSpawnEnv:
 
 
 # ---------------------------------------------------------------------------
-# Phase 7 — _SupervisorV3 helpers and token handler tests
+# The sole supervisor: its store-format-specific helpers (_get_tool_diffs_v3,
+# _stored_session_cwd_v3, _lock_holder_v3 -- permanently v3-suffixed per
+# SC-3, since they denote on-disk session format, not engine identity) and
+# its general behavior (renamed from _Supervisor by
+# 260911_ACP_V2_TO_V3_ENGINE_CUTOVER Phase 1, once there was only one engine
+# left to disambiguate from).
 # ---------------------------------------------------------------------------
 
 
@@ -20597,9 +20591,12 @@ def _make_async_to_thread_stub():
     return stub
 
 
-class TestSupervisorV3:
-    """Tests for v3-specific helpers: _get_tool_diffs_v3, _stored_session_cwd_v3,
-    and _SupervisorV3._fulfill_token.
+class TestSupervisor:
+    """Tests for the sole supervisor (renamed from _Supervisor): its
+    store-format-specific helpers _get_tool_diffs_v3, _stored_session_cwd_v3
+    (permanently v3-suffixed, SC-3), and its general behavior -- notification
+    handling, session lifecycle, permission routing, sub-agent/crew tracking,
+    and _fulfill_token.
     """
 
     # ------------------------------------------------------------------
@@ -21085,7 +21082,7 @@ class TestSupervisorV3:
         assert no_hash == wrong_hash == acp_mod._V3_HOLDER_PID_UNKNOWN
 
     # ------------------------------------------------------------------
-    # _SupervisorV3._fulfill_token
+    # _Supervisor._fulfill_token
     # ------------------------------------------------------------------
 
     def test_fulfill_token_success(self):
@@ -21107,14 +21104,14 @@ class TestSupervisorV3:
         fake_proc.returncode = 0
         fake_proc.stdout = token_output
 
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         written = []
 
         def fake_write(obj):
             written.append(obj)
 
         with patch.object(sv3, "_write", side_effect=fake_write), \
-             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp._KIRO_TOKEN_BINARY", "kiro-cli"), \
              patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
              patch("power_atlas.acp.asyncio.to_thread",
                    side_effect=_make_async_to_thread_stub()):
@@ -21135,7 +21132,7 @@ class TestSupervisorV3:
         from unittest.mock import MagicMock, patch
         from power_atlas import acp as acp_mod
 
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         written = []
 
         def fake_write(obj):
@@ -21145,7 +21142,7 @@ class TestSupervisorV3:
             raise subprocess.TimeoutExpired(cmd="kiro-cli", timeout=15)
 
         with patch.object(sv3, "_write", side_effect=fake_write), \
-             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp._KIRO_TOKEN_BINARY", "kiro-cli"), \
              patch("power_atlas.acp.subprocess.run", side_effect=raise_timeout), \
              patch("power_atlas.acp.asyncio.to_thread",
                    side_effect=_make_async_to_thread_stub()):
@@ -21166,14 +21163,14 @@ class TestSupervisorV3:
         fake_proc.returncode = 0
         fake_proc.stdout = "not_json{{"
 
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         written = []
 
         def fake_write(obj):
             written.append(obj)
 
         with patch.object(sv3, "_write", side_effect=fake_write), \
-             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp._KIRO_TOKEN_BINARY", "kiro-cli"), \
              patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
              patch("power_atlas.acp.asyncio.to_thread",
                    side_effect=_make_async_to_thread_stub()):
@@ -21197,14 +21194,14 @@ class TestSupervisorV3:
         fake_proc.returncode = 1
         fake_proc.stdout = ""
 
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         written = []
 
         def fake_write(obj):
             written.append(obj)
 
         with patch.object(sv3, "_write", side_effect=fake_write), \
-             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp._KIRO_TOKEN_BINARY", "kiro-cli"), \
              patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
              patch("power_atlas.acp.asyncio.to_thread",
                    side_effect=_make_async_to_thread_stub()):
@@ -21233,7 +21230,7 @@ class TestSupervisorV3:
         fake_proc.returncode = 0
         fake_proc.stdout = token_output
 
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         discarded = []
 
         def fake_discard(reason):
@@ -21242,7 +21239,7 @@ class TestSupervisorV3:
         with patch.object(sv3, "_write",
                           side_effect=acp_mod.AcpError("write failed")), \
              patch.object(sv3, "_discard", side_effect=fake_discard), \
-             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp._KIRO_TOKEN_BINARY", "kiro-cli"), \
              patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
              patch("power_atlas.acp.asyncio.to_thread",
                    side_effect=_make_async_to_thread_stub()):
@@ -21255,42 +21252,15 @@ class TestSupervisorV3:
     # _publish_live — union of v2 + v3 sessions
     # ------------------------------------------------------------------
 
-    def test_publish_live_union(self, monkeypatch):
-        """_supervisor._publish_live() delivers the union of v2 and v3 sessions."""
-        from unittest.mock import MagicMock
-        from power_atlas import acp as acp_mod
-
-        received = []
-
-        def hook(session_ids, pid):
-            received.append(frozenset(session_ids))
-
-        # Save originals so we can restore them.
-        orig_hook = acp_mod.sessions_changed_hook
-        orig_sv2_sessions = dict(acp_mod._supervisor.sessions)
-
-        try:
-            acp_mod.sessions_changed_hook = hook
-
-            # Give the v2 supervisor a fake session.
-            acp_mod._supervisor.sessions["v2-sess-001"] = {}
-
-            # Give the v3 supervisor a fake session.
-            sv3_mock = MagicMock()
-            sv3_mock.sessions = {"v3-sess-001": {}}
-            monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3_mock)
-
-            acp_mod._supervisor._publish_live()
-
-        finally:
-            acp_mod.sessions_changed_hook = orig_hook
-            acp_mod._supervisor.sessions.clear()
-            acp_mod._supervisor.sessions.update(orig_sv2_sessions)
-
-        assert len(received) == 1
-        published = received[0]
-        assert "v2-sess-001" in published
-        assert "v3-sess-001" in published
+    # Note: this class used to also carry `test_publish_live_union`, which
+    # asserted `_publish_live()` delivered the union of a "v2 supervisor"
+    # session and a separately-mocked "v3 supervisor" session. Phase 1 of
+    # 260911_ACP_V2_TO_V3_ENGINE_CUTOVER (step 8) deliberately removed that
+    # union — `_publish_live()` now publishes only `self.sessions`, since
+    # there is only one engine's sessions left to publish — so the test's
+    # premise is gone along with the code it pinned. Removed rather than
+    # renamed; see also `test_supervisor_publish_live_union` below for the
+    # same removal applied to this class's other copy of the same coverage.
 
     # ------------------------------------------------------------------
     # _fulfill_token — two successive calls both complete cleanly
@@ -21315,14 +21285,14 @@ class TestSupervisorV3:
         fake_proc.returncode = 0
         fake_proc.stdout = token_output
 
-        sv3 = acp_mod._SupervisorV3()
+        sv3 = acp_mod._Supervisor()
         written = []
 
         def fake_write(obj):
             written.append(obj)
 
         with patch.object(sv3, "_write", side_effect=fake_write), \
-             patch("power_atlas.acp._KIRO_V3_TOKEN_BINARY", "kiro-cli"), \
+             patch("power_atlas.acp._KIRO_TOKEN_BINARY", "kiro-cli"), \
              patch("power_atlas.acp.subprocess.run", return_value=fake_proc), \
              patch("power_atlas.acp.asyncio.to_thread",
                    side_effect=_make_async_to_thread_stub()):
@@ -21335,12 +21305,20 @@ class TestSupervisorV3:
             assert resp["result"]["accessToken"] == "tok_a"
 
     # ------------------------------------------------------------------
-    # _SupervisorV3._publish_live — union of v3 + v2 sessions
+    # _Supervisor._publish_live — publishes its own sessions
     # ------------------------------------------------------------------
 
-    def test_supervisor_v3_publish_live_union(self):
-        """_SupervisorV3._publish_live() emits union of v3 + v2 sessions."""
-        from unittest.mock import MagicMock, patch
+    def test_supervisor_publish_live_sentinel_pid(self):
+        """_Supervisor._publish_live() emits its own sessions with pid=0
+        (the sentinel D1/Phase 1 left as-is -- see plans/260911_ACP_V3_
+        FOLLOWUP_FEATURES.md's orphan-lock fix for the follow-up tracked
+        separately). This replaces the pre-cutover
+        `test_supervisor_v3_publish_live_union`, which asserted a union with
+        a separately-mocked "v2 supervisor" -- Phase 1 step 8 removed that
+        union outright (there is only one engine's sessions to publish
+        now), so the union half of that assertion is gone along with the
+        code it pinned; this keeps the still-true pid=0 coverage."""
+        from unittest.mock import patch
         from power_atlas import acp as acp_mod
 
         hook_calls = []
@@ -21348,36 +21326,30 @@ class TestSupervisorV3:
         def hook(session_ids, pid):
             hook_calls.append((frozenset(session_ids), pid))
 
-        v3_sid = 'sess_v3-0000-0000-0000-000000000001'
-        v2_sid = 'v2-0000-0000-0000-000000000002'
+        sid = 'sess_v3-0000-0000-0000-000000000001'
 
-        mock_v2 = MagicMock()
-        mock_v2.sessions = {v2_sid: {}}
-
-        with patch.object(acp_mod, 'sessions_changed_hook', hook), \
-             patch.object(acp_mod, '_supervisor', mock_v2):
-            sv3 = acp_mod._SupervisorV3.__new__(acp_mod._SupervisorV3)
-            sv3.sessions = {v3_sid: {}}
-            sv3._publish_live()
+        with patch.object(acp_mod, 'sessions_changed_hook', hook):
+            sup = acp_mod._Supervisor.__new__(acp_mod._Supervisor)
+            sup.sessions = {sid: {}}
+            sup._publish_live()
 
         assert len(hook_calls) == 1, f'hook called {len(hook_calls)} times, expected 1'
         published, pid = hook_calls[0]
-        assert v3_sid in published, f'v3 session {v3_sid} missing from union'
-        assert v2_sid in published, f'v2 session {v2_sid} missing from union'
-        assert pid == 0, 'v3 publish_live must pass pid=0'
+        assert published == frozenset({sid})
+        assert pid == 0, 'publish_live must pass pid=0'
 
     # ------------------------------------------------------------------
-    # SC-11 baseline coverage: load_session, _handle_subscribe_v3,
-    # _handle_cancel_v3, _handle_close_v3 — characterization tests, nothing
+    # SC-11 baseline coverage: load_session, _handle_subscribe,
+    # _handle_cancel, _handle_close — characterization tests, nothing
     # about these functions changes in this phase.
     # ------------------------------------------------------------------
 
     def _sv3(self, monkeypatch):
-        """A real _SupervisorV3 instance installed as the module singleton,
+        """A real _Supervisor instance installed as the module singleton,
         restored automatically by monkeypatch's own teardown."""
         from power_atlas import acp as acp_mod
-        sv3 = acp_mod._SupervisorV3()
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", sv3)
+        sv3 = acp_mod._Supervisor()
+        monkeypatch.setattr(acp_mod, "_supervisor", sv3)
         return sv3
 
     def _conn_v3(self, acp_mod, sid=None):
@@ -21461,17 +21433,17 @@ class TestSupervisorV3:
         assert sid not in sv3.sessions
         assert sid not in sv3.history
 
-    # -- _handle_new_v3 --
+    # -- _handle_new --
 
-    def test_handle_new_v3_delivers_buffered_history_to_creator(
+    def test_handle_new_delivers_buffered_history_to_creator(
             self, monkeypatch, tmp_path):
         """Phase 8 live-verification fix: new_session()'s SC-1 replay-buffer
         mechanism commits any early frame into self.history[sid] before this
         handler's own _registry.attach() call, so that frame's live broadcast
         (during the replay inside new_session()) reached zero subscribers —
         the connection that asked for the session never saw it, only a later
-        update. _handle_new_v3 must independently deliver whatever landed in
-        history to the connection, the same way _handle_subscribe_v3 already
+        update. _handle_new must independently deliver whatever landed in
+        history to the connection, the same way _handle_subscribe already
         does on reconnect."""
         import asyncio
         from power_atlas import acp as acp_mod
@@ -21494,11 +21466,11 @@ class TestSupervisorV3:
             self.history[sid].append(buffered)
             return {"sessionId": sid, "cwd": cwd}
 
-        monkeypatch.setattr(acp_mod._SupervisorV3, "new_session",
+        monkeypatch.setattr(acp_mod._Supervisor, "new_session",
                              fake_new_session)
         conn = self._conn_v3(acp_mod)
         try:
-            asyncio.run(acp_mod._handle_new_v3(conn, {"cwd": str(tmp_path)}))
+            asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
             frames = _queued(conn)
             assert frames[0]["type"] == "meta"
             assert frames[1]["type"] == "session"
@@ -21510,13 +21482,13 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_new_v3_delivers_buffered_commands_and_skills_to_creator(
+    def test_handle_new_delivers_buffered_commands_and_skills_to_creator(
             self, monkeypatch, tmp_path):
         """Same gap as the history test above, for the slash-command/skill
         catalogue: an available_commands_update landing in the SC-1 buffer
         window is replayed and cached into meta["commands"]/["skills"]
         before this handler's attach() runs, so its own broadcast also
-        reached zero subscribers. _handle_new_v3 must resend the cached
+        reached zero subscribers. _handle_new must resend the cached
         catalogue, mirroring _handle_subscribe's existing v2 behavior."""
         import asyncio
         from power_atlas import acp as acp_mod
@@ -21532,11 +21504,11 @@ class TestSupervisorV3:
             self.history[sid] = acp_mod._History()
             return {"sessionId": sid, "cwd": cwd}
 
-        monkeypatch.setattr(acp_mod._SupervisorV3, "new_session",
+        monkeypatch.setattr(acp_mod._Supervisor, "new_session",
                              fake_new_session)
         conn = self._conn_v3(acp_mod)
         try:
-            asyncio.run(acp_mod._handle_new_v3(conn, {"cwd": str(tmp_path)}))
+            asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
             frames = _queued(conn)
             types = [f["type"] for f in frames]
             assert types == ["meta", "session", "history", "commands", "skills"]
@@ -21545,11 +21517,11 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_new_v3_session_frame_carries_buffered_context_percent(
+    def test_handle_new_session_frame_carries_buffered_context_percent(
             self, monkeypatch, tmp_path):
-        """Step 9 final review fix (Medium): _handle_new_v3's `session`
+        """Step 9 final review fix (Medium): _handle_new's `session`
         envelope used to send only sessionId/cwd/created, unlike
-        _handle_subscribe_v3's equivalent envelope which also sends
+        _handle_subscribe's equivalent envelope which also sends
         turnActive/contextPercent. A context_usage notification landing in
         the SC-1 early-buffer window (the same window the two tests above
         already cover for history/commands/skills) caches its value into
@@ -21568,11 +21540,11 @@ class TestSupervisorV3:
             self.history[sid] = acp_mod._History()
             return {"sessionId": sid, "cwd": cwd}
 
-        monkeypatch.setattr(acp_mod._SupervisorV3, "new_session",
+        monkeypatch.setattr(acp_mod._Supervisor, "new_session",
                              fake_new_session)
         conn = self._conn_v3(acp_mod)
         try:
-            asyncio.run(acp_mod._handle_new_v3(conn, {"cwd": str(tmp_path)}))
+            asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
             frames = _queued(conn)
             session_frame = next(f for f in frames if f["type"] == "session")
             assert session_frame["payload"]["contextPercent"] == 42.4
@@ -21580,9 +21552,9 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    # -- _handle_subscribe_v3 --
+    # -- _handle_subscribe --
 
-    def test_handle_subscribe_v3_attaches_and_replays_history(self, monkeypatch):
+    def test_handle_subscribe_attaches_and_replays_history(self, monkeypatch):
         from power_atlas import acp as acp_mod
 
         sv3 = self._sv3(monkeypatch)
@@ -21592,7 +21564,7 @@ class TestSupervisorV3:
 
         conn = self._conn_v3(acp_mod)
         try:
-            acp_mod._handle_subscribe_v3(conn, sid)
+            acp_mod._handle_subscribe(conn, sid)
             frames = _queued(conn)
             assert frames[0]["type"] == "session"
             assert frames[0]["payload"]["sessionId"] == sid
@@ -21602,7 +21574,7 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_subscribe_v3_resends_cached_commands_and_skills(
+    def test_handle_subscribe_resends_cached_commands_and_skills(
             self, monkeypatch):
         """Phase 8 live-verification fix: commands/skills are broadcast-only
         (never recorded into history, like the `subagents` snapshot), so a
@@ -21622,7 +21594,7 @@ class TestSupervisorV3:
 
         conn = self._conn_v3(acp_mod)
         try:
-            acp_mod._handle_subscribe_v3(conn, sid)
+            acp_mod._handle_subscribe(conn, sid)
             frames = _queued(conn)
             types = [f["type"] for f in frames]
             assert types == ["session", "history", "commands", "skills"]
@@ -21631,43 +21603,40 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_subscribe_v3_unknown_session_refuses(self, monkeypatch):
+    def test_handle_subscribe_unknown_session_refuses(self, monkeypatch):
         from power_atlas import acp as acp_mod
 
         self._sv3(monkeypatch)
         conn = self._conn_v3(acp_mod)
         try:
-            acp_mod._handle_subscribe_v3(conn, "sess_no-such-session")
+            acp_mod._handle_subscribe(conn, "sess_no-such-session")
             frames = _queued(conn)
             assert frames[0]["payload"]["code"] == "unknown_session"
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_subscribe_v3_no_supervisor_refuses(self, monkeypatch):
-        from power_atlas import acp as acp_mod
+    # Note: this class used to also carry `test_handle_subscribe_v3_no_
+    # supervisor_refuses`, pinning a graceful "internal_error" refusal when
+    # `_supervisor` was `None`. Phase 1 of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER
+    # made construction eager (D1) and removed roughly a dozen leftover
+    # `if _supervisor is None: ... return` guards -- including this one --
+    # as permanently dead code once `_supervisor` can no longer be `None`
+    # during normal operation. The scenario this test constructed no longer
+    # exists; removed rather than renamed.
 
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", None)
-        conn = self._conn_v3(acp_mod)
-        try:
-            acp_mod._handle_subscribe_v3(conn, "sess_anything")
-            frames = _queued(conn)
-            assert frames[0]["payload"]["code"] == "internal_error"
-        finally:
-            self._cleanup_registry(acp_mod)
+    # -- _handle_load --
 
-    # -- _handle_load_v3 --
-
-    def test_handle_load_v3_delivers_session_and_history_on_success(
+    def test_handle_load_delivers_session_and_history_on_success(
             self, monkeypatch, tmp_path):
         """Step 9 final review fix (High): _deliver_load unconditionally
         called the v2-only _handle_subscribe at its end, so a successful
-        _handle_load_v3 cold-load (session_id never in _supervisor.sessions,
+        _handle_load cold-load (session_id never in _supervisor.sessions,
         v2's dict) was told `unknown_session` instead of receiving its
         session/history frames — breaking resume of any v3 session not
         already live in this process. Must FAIL against the pre-fix
         _deliver_load (which always called _handle_subscribe) and PASS once
-        _deliver_load's subscribe_fn is parameterized and _handle_load_v3
-        passes _handle_subscribe_v3."""
+        _deliver_load's subscribe_fn is parameterized and _handle_load
+        passes _handle_subscribe."""
         import asyncio
         from power_atlas import acp as acp_mod
 
@@ -21683,13 +21652,13 @@ class TestSupervisorV3:
             self.history[session_id] = acp_mod._History()
             return {"sessionId": session_id, "cwd": cwd}
 
-        monkeypatch.setattr(acp_mod._SupervisorV3, "load_session",
+        monkeypatch.setattr(acp_mod._Supervisor, "load_session",
                              fake_load_session)
         monkeypatch.setattr(acp_mod, "_stored_session_cwd_v3", lambda sid: cwd)
 
         conn = self._conn_v3(acp_mod)
         try:
-            asyncio.run(acp_mod._handle_load_v3(conn, sid))
+            asyncio.run(acp_mod._handle_load(conn, sid))
             frames = _queued(conn)
             types = [f["type"] for f in frames]
             assert types == ["meta", "session", "history"], (
@@ -21703,9 +21672,9 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    # -- _handle_cancel_v3 --
+    # -- _handle_cancel --
 
-    def test_handle_cancel_v3_without_a_turn_reaches_the_agent_not_at_all(
+    def test_handle_cancel_without_a_turn_reaches_the_agent_not_at_all(
             self, monkeypatch, caplog):
         """Mirror of TestAcpCancel's v2 equivalent: no inflight turn means no
         wire call."""
@@ -21722,13 +21691,13 @@ class TestSupervisorV3:
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
                     caplog.at_level(logging.INFO, logger="power_atlas.acp"):
-                asyncio.run(acp_mod._handle_cancel_v3(conn, sid))
+                asyncio.run(acp_mod._handle_cancel(conn, sid))
             assert written == []
             assert "not running a turn" in caplog.text
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_cancel_v3_sends_a_notification_for_an_inflight_turn(self, monkeypatch):
+    def test_handle_cancel_sends_a_notification_for_an_inflight_turn(self, monkeypatch):
         import asyncio
         from power_atlas import acp as acp_mod
 
@@ -21743,28 +21712,28 @@ class TestSupervisorV3:
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)), \
                     patch.object(acp_mod._Supervisor, "alive", lambda self: True):
-                asyncio.run(acp_mod._handle_cancel_v3(conn, sid))
+                asyncio.run(acp_mod._handle_cancel(conn, sid))
             assert written == [{"jsonrpc": "2.0", "method": "session/cancel",
                                 "params": {"sessionId": sid}}]
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_cancel_v3_without_a_session_id_is_refused(self, monkeypatch):
+    def test_handle_cancel_without_a_session_id_is_refused(self, monkeypatch):
         import asyncio
         from power_atlas import acp as acp_mod
 
         self._sv3(monkeypatch)
         conn = self._conn_v3(acp_mod)
         try:
-            asyncio.run(acp_mod._handle_cancel_v3(conn, None))
+            asyncio.run(acp_mod._handle_cancel(conn, None))
             assert _queued(conn)[0]["payload"]["code"] == "bad_envelope"
         finally:
             self._cleanup_registry(acp_mod)
 
-    # -- _handle_close_v3 --
+    # -- _handle_close --
 
-    def test_handle_close_v3_releases_the_session_locally_no_wire_call(self, monkeypatch):
-        """v3 close does no JSON-RPC call (CLOSE_METHOD_V3 is None) — unlike
+    def test_handle_close_releases_the_session_locally_no_wire_call(self, monkeypatch):
+        """v3 close does no JSON-RPC call (CLOSE_METHOD is None) — unlike
         v2's close, nothing must ever be written to the agent."""
         import asyncio
         from power_atlas import acp as acp_mod
@@ -21778,7 +21747,7 @@ class TestSupervisorV3:
         written = []
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
-                asyncio.run(acp_mod._handle_close_v3(conn, sid))
+                asyncio.run(acp_mod._handle_close(conn, sid))
             assert written == []
             assert sid not in sv3.sessions
             assert sid not in sv3.history
@@ -21788,19 +21757,19 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_close_v3_nothing_to_close_refuses(self, monkeypatch):
+    def test_handle_close_nothing_to_close_refuses(self, monkeypatch):
         import asyncio
         from power_atlas import acp as acp_mod
 
         self._sv3(monkeypatch)
         conn = self._conn_v3(acp_mod, "sess_never-existed")
         try:
-            asyncio.run(acp_mod._handle_close_v3(conn, "sess_never-existed"))
+            asyncio.run(acp_mod._handle_close(conn, "sess_never-existed"))
             assert _queued(conn)[0]["payload"]["code"] == "nothing_to_close"
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_close_v3_turn_in_progress_refuses(self, monkeypatch):
+    def test_handle_close_turn_in_progress_refuses(self, monkeypatch):
         import asyncio
         from power_atlas import acp as acp_mod
 
@@ -21812,7 +21781,7 @@ class TestSupervisorV3:
         conn = self._conn_v3(acp_mod, sid)
 
         try:
-            asyncio.run(acp_mod._handle_close_v3(conn, sid))
+            asyncio.run(acp_mod._handle_close(conn, sid))
             assert _queued(conn)[0]["payload"]["code"] == "turn_in_progress"
             assert sid in sv3.sessions
         finally:
@@ -21822,7 +21791,7 @@ class TestSupervisorV3:
 
     def test_detach_clears_the_four_v3_only_dicts(self, monkeypatch):
         """Step 9 final review, Follow-up Work items 7 and 9: before this
-        fix, _SupervisorV3 had no _detach override at all -- a dead/failed
+        fix, _Supervisor had no _detach override at all -- a dead/failed
         agent process left four v3-only dicts uncleared
         (_pending_early_frames, _pending_early_frames_at,
         _active_fan_out_wave, _pending_permission), relying entirely on
@@ -21858,7 +21827,7 @@ class TestSupervisorV3:
 
     # ------------------------------------------------------------------
     # SC-1: the new_session() notification-drop race and its fix — a keyed
-    # early-frame buffer on _SupervisorV3, replayed after new_session()
+    # early-frame buffer on _Supervisor, replayed after new_session()
     # durably commits the session, with per-frame replay isolation and an
     # idle-sweep backstop for a session_id that never completes new_session().
     # ------------------------------------------------------------------
@@ -22023,18 +21992,12 @@ class TestSupervisorV3:
     def test_sweep_once_evicts_orphaned_pending_early_frame_buffer(self, monkeypatch):
         """A _pending_early_frames entry for a session_id that never calls
         new_session() (RPC failure, or an id that belonged to a different
-        in-flight reservation) is evicted by the _sweep_once v3 pass once it
-        is older than the sweeper's existing idle threshold."""
+        in-flight reservation) is evicted by _sweep_once's orphan-buffer pass
+        once it is older than the sweeper's existing idle threshold."""
         import asyncio
-        from unittest.mock import MagicMock
         from power_atlas import acp as acp_mod
 
         sv3 = self._sv3(monkeypatch)
-        # Isolate from the real v2 singleton's live session/failure state —
-        # this test only cares about the v3 orphan-buffer pass.
-        fresh_v2 = MagicMock()
-        fresh_v2.sessions = {}
-        monkeypatch.setattr(acp_mod, "_supervisor", fresh_v2)
 
         sid = "sess_orphan0000-0000-0000-0000-00000000001"
         sv3._pending_early_frames[sid] = [self._chunk_msg(sid, "orphaned")]
@@ -22050,13 +22013,9 @@ class TestSupervisorV3:
         """A _pending_early_frames entry younger than the idle threshold is
         left alone by the sweep (not evicted prematurely)."""
         import asyncio
-        from unittest.mock import MagicMock
         from power_atlas import acp as acp_mod
 
         sv3 = self._sv3(monkeypatch)
-        fresh_v2 = MagicMock()
-        fresh_v2.sessions = {}
-        monkeypatch.setattr(acp_mod, "_supervisor", fresh_v2)
 
         sid = "sess_fresh0000-0000-0000-0000-000000000001"
         sv3._pending_early_frames[sid] = [self._chunk_msg(sid, "fresh")]
@@ -22191,7 +22150,7 @@ class TestSupervisorV3:
         }
 
     def _sv3_with_session(self, monkeypatch):
-        """A _SupervisorV3 with one registered, history-backed session."""
+        """A _Supervisor with one registered, history-backed session."""
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
         sid = "sess_info00000-0000-0000-0000-000000000001"
@@ -22201,7 +22160,7 @@ class TestSupervisorV3:
 
     def test_session_info_update_context_usage_updates_context_percent(self, monkeypatch):
         """A session_info_update frame with kind:"context_usage" updates
-        _supervisor_v3.sessions[sid]["contextPercent"] correctly."""
+        _supervisor.sessions[sid]["contextPercent"] correctly."""
         sv3, sid = self._sv3_with_session(monkeypatch)
         msg = self._session_info_msg(sid, {
             "kind": "context_usage",
@@ -22447,13 +22406,13 @@ class TestSupervisorV3:
         assert acp_mod._context_percent_v3(
             {"contextUsage": {"usagePercentage": "42"}}) is None
 
-    def test_note_context_v3_noop_when_supervisor_v3_none(self, monkeypatch):
-        """_note_context_v3 must never raise when _supervisor_v3 is None —
-        the same fail-safe floor _note_context itself relies on."""
-        from power_atlas import acp as acp_mod
-        monkeypatch.setattr(acp_mod, "_supervisor_v3", None)
-
-        acp_mod._note_context_v3("sess_whatever0000-0000-0000-00000000001", 10.0)
+    # Note: this class used to also carry `test_note_context_v3_noop_when_
+    # supervisor_v3_none`, pinning that `_note_context_v3` never raises when
+    # `_supervisor` is `None`. Phase 1 (D1, eager construction) removed that
+    # guard from `_note_context_v3` along with the rest of the lazy-
+    # construction-era `None`-checks it cleaned up -- `_supervisor` can no
+    # longer be `None` during normal operation, so the scenario this test
+    # constructed is gone; removed rather than renamed.
 
     def test_new_frame_types_registered_in_server_types(self):
         """SC-3 point 4: steer_status/title/agent_error must be registered in
@@ -22503,26 +22462,20 @@ class TestSupervisorV3:
         return {"method": "session/update",
                 "params": {"sessionId": sid, "update": update}}
 
-    def test_flush_bubble_emit_fn_v3_records_into_v3_history_not_v2(self, monkeypatch):
-        """_flush_bubble's emit_fn parameter (Phase 4, SC-4). Passing
-        _emit_v3 -- what every _SupervisorV3 call site now does -- records
-        the rendered frame into _supervisor_v3.history, never
-        _supervisor.history. Before this fix every v3 call site called
-        _flush_bubble(session_id) with no emit_fn, silently defaulting to
-        _emit and recording into the v2 singleton's history instead."""
-        from power_atlas import acp as acp_mod
-        sv3 = self._sv3(monkeypatch)
-        sid = "sess_bubble0000-0000-0000-0000-000000000001"
-        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
-        sv3.history[sid] = acp_mod._History()
-        acp_mod._bubbles[sid] = ["**hello**"]
-        try:
-            acp_mod._flush_bubble(sid, acp_mod._emit_v3)
-            events = sv3.history[sid].events()
-            assert any(e["type"] == "rendered" for e in events), events
-            assert sid not in acp_mod._supervisor.history
-        finally:
-            acp_mod._bubbles.pop(sid, None)
+    # Note: this class used to also carry
+    # `test_flush_bubble_emit_fn_v3_records_into_v3_history_not_v2`, which
+    # constructed an isolated supervisor via `self._sv3(monkeypatch)` and
+    # then asserted a rendered frame landed in *that* instance's `.history`
+    # but not in `acp_mod._supervisor.history` -- a v2-vs-v3 isolation the
+    # test could still express syntactically post-merge (the isolated
+    # instance and `acp_mod._supervisor` are different Python objects at
+    # that point in the setup) but that `_sv3` itself falsifies one line
+    # later, since it substitutes that very instance in as `acp_mod.
+    # _supervisor` (there is no separate v2 singleton left to be isolated
+    # from). The assertion was therefore guaranteed to fail against the
+    # sole supervisor's own correct behavior, not a bug -- removed rather
+    # than renamed. `_flush_bubble`'s `emit_fn` routing is still exercised
+    # by `test_a_user_chunk_closes_the_bubble_on_the_replay_path` above.
 
     def test_emit_subagents_frame_default_reads_supervisor_crews(self, monkeypatch):
         """_emit_subagents_frame with no crews/crew_spawn_toolcallids
@@ -22552,7 +22505,7 @@ class TestSupervisorV3:
 
     def test_emit_subagents_frame_explicit_v3_dicts_reads_v3_not_v2(self, monkeypatch):
         """The same session id keys an entry in both _supervisor.crews and
-        _supervisor_v3.crews, with different content. Passing v3's dicts
+        _supervisor.crews, with different content. Passing v3's dicts
         explicitly must read v3's content -- proving the parameterization
         actually switches source rather than defaulting coincidentally."""
         from power_atlas import acp as acp_mod
@@ -22584,7 +22537,7 @@ class TestSupervisorV3:
             acp_mod._supervisor.crews.pop(sid, None)
             self._cleanup_registry(acp_mod)
 
-    def test_handle_subagent_subscribe_v3_reads_v3_dicts(self, monkeypatch):
+    def test_handle_subagent_subscribe_reads_v3_dicts(self, monkeypatch):
         """Phase 4, SC-4: _handle_subagent_subscribe already correctly
         identified a v3 sub-agent via which supervisor's subagent_sessions
         matched, but then read the wrong (always-v2) crews/subagent_history
@@ -22634,7 +22587,7 @@ class TestSupervisorV3:
     def test_agent_subtask_tool_call_populates_crews_and_broadcasts_live(
             self, monkeypatch):
         """SC-5: a synthetic tool_call tagged _meta.kiro.kind ==
-        'agent-subtask' populates _supervisor_v3.crews and broadcasts a
+        'agent-subtask' populates _supervisor.crews and broadcasts a
         subagents frame immediately -- live, mid-turn, not deferred to
         turn-end."""
         from power_atlas import acp as acp_mod
@@ -22836,10 +22789,10 @@ class TestSupervisorV3:
             # Simulate turn-end: the entry finishes and gets evicted from
             # crews, but subagent_sessions/subagent_history deliberately
             # survive for click-to-view (keep_history=True) -- exactly what
-            # _handle_prompt_v3's own finally does.
+            # _handle_prompt's own finally does.
             sv3._on_notification(self._agent_subtask_update_msg(
                 sid, agent_subtask_id, "completed", raw_output="done"))
-            acp_mod._evict_crew_children_v3(
+            acp_mod._evict_crew_children(
                 sid, keep_history=True, broadcast_empty=False)
             assert sid not in sv3.crews
             assert agent_subtask_id in sv3.subagent_sessions, (
@@ -22854,10 +22807,10 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_subscribe_v3_routes_agent_subtask_click_with_v3_dicts(
+    def test_handle_subscribe_routes_agent_subtask_click_with_v3_dicts(
             self, monkeypatch):
         """The actual call-site fix, not just the parameterized function in
-        isolation: _handle_subscribe_v3 must pass v3's own crews/
+        isolation: _handle_subscribe must pass v3's own crews/
         subagent_history through to _handle_subagent_subscribe when a
         socket subscribes to an agent-subtask's synthetic session id."""
         from power_atlas import acp as acp_mod
@@ -22874,7 +22827,7 @@ class TestSupervisorV3:
                 sid, agent_subtask_id, "completed", raw_output="the answer"))
 
             conn = self._conn_v3(acp_mod)
-            acp_mod._handle_subscribe_v3(conn, agent_subtask_id)
+            acp_mod._handle_subscribe(conn, agent_subtask_id)
             frames = _queued(conn)
             assert [f["type"] for f in frames] == ["session", "history"]
             payload = frames[0]["payload"]
@@ -23046,9 +22999,9 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_subscribe_v3_sends_live_crew_snapshot_on_reconnect(
+    def test_handle_subscribe_sends_live_crew_snapshot_on_reconnect(
             self, monkeypatch):
-        """Finding #3 (Medium): _handle_subscribe_v3 never sent a
+        """Finding #3 (Medium): _handle_subscribe never sent a
         `subagents` snapshot on subscribe/reconnect the way v2's
         _handle_subscribe does -- a browser reload or WS reconnect during
         an active v3 fan-out lost the dedicated crew-panel widget until the
@@ -23065,7 +23018,7 @@ class TestSupervisorV3:
                 self._agent_subtask_open_msg(sid, agent_subtask_id))
 
             conn = self._conn_v3(acp_mod)
-            acp_mod._handle_subscribe_v3(conn, sid)
+            acp_mod._handle_subscribe(conn, sid)
             frames = _queued(conn)
             subagents_frames = [f for f in frames if f["type"] == "subagents"]
             assert subagents_frames, (
@@ -23408,7 +23361,7 @@ class TestSupervisorV3:
             "be refused")
         spawned[0].close()  # never awaited -- close() avoids a RuntimeWarning
 
-    def test_handle_permission_response_v3_valid_option_writes_reply_and_clears_pending(
+    def test_handle_permission_response_valid_option_writes_reply_and_clears_pending(
             self, monkeypatch):
         """A valid optionId from the owning connection writes the exact
         JSON-RPC reply shape Phase 0 confirmed live, clears the pending
@@ -23433,7 +23386,7 @@ class TestSupervisorV3:
         written = []
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
-                asyncio.run(acp_mod._handle_permission_response_v3(
+                asyncio.run(acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 7, "optionId": "opt-0"}))
 
             assert written == [
@@ -23457,7 +23410,7 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_permission_response_v3_wrong_session_refused_not_subscribed(
+    def test_handle_permission_response_wrong_session_refused_not_subscribed(
             self, monkeypatch):
         """A response from a connection whose own subscribed session
         doesn't match the pending entry's real owner is refused, even when
@@ -23484,7 +23437,7 @@ class TestSupervisorV3:
         written = []
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
-                asyncio.run(acp_mod._handle_permission_response_v3(
+                asyncio.run(acp_mod._handle_permission_response(
                     conn, sid_a, {"requestId": 9, "optionId": "opt-0"}))
 
             assert written == [], "a refused response must never reach the agent"
@@ -23495,7 +23448,7 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_permission_response_v3_invalid_option_refused(self, monkeypatch):
+    def test_handle_permission_response_invalid_option_refused(self, monkeypatch):
         """An unknown optionId is rejected without corrupting pending state."""
         import asyncio
         from power_atlas import acp as acp_mod
@@ -23510,7 +23463,7 @@ class TestSupervisorV3:
         written = []
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
-                asyncio.run(acp_mod._handle_permission_response_v3(
+                asyncio.run(acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 3, "optionId": "does-not-exist"}))
 
             assert written == []
@@ -23519,7 +23472,7 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_permission_response_v3_double_answer_second_refused_unknown_request(
+    def test_handle_permission_response_double_answer_second_refused_unknown_request(
             self, monkeypatch):
         """Two responses to the same requestId -- the second is refused as
         unknown_request (already popped), proving the pop-before-write
@@ -23542,13 +23495,13 @@ class TestSupervisorV3:
         written = []
         try:
             with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
-                asyncio.run(acp_mod._handle_permission_response_v3(
+                asyncio.run(acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 11, "optionId": "opt-0"}))
                 assert written == [
                     {"jsonrpc": "2.0", "id": 11, "result": {"optionId": "opt-0"}}]
                 assert 11 not in sv3._pending_permission
 
-                asyncio.run(acp_mod._handle_permission_response_v3(
+                asyncio.run(acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 11, "optionId": "opt-1"}))
 
             assert len(written) == 1, "a second answer must never reach the agent"
@@ -23565,7 +23518,7 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_permission_response_v3_concurrent_double_answer_one_wins(
+    def test_handle_permission_response_concurrent_double_answer_one_wins(
             self, monkeypatch):
         """(Review fix, Senior engineer -- test-quality gap) Companion to the
         sequential double-answer test above, which issues two separate
@@ -23578,7 +23531,7 @@ class TestSupervisorV3:
 
         The design is provably safe by construction: zero `await` points
         exist between the pending-entry lookup (a) and the pop (d) in
-        `_handle_permission_response_v3`, so Python's cooperative
+        `_handle_permission_response`, so Python's cooperative
         single-threaded scheduler cannot interleave two calls between them
         -- whichever of the two gathered coroutines reaches (a) first runs
         uninterrupted through the pop before yielding control (the first
@@ -23602,9 +23555,9 @@ class TestSupervisorV3:
 
         async def run_both():
             await asyncio.gather(
-                acp_mod._handle_permission_response_v3(
+                acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 17, "optionId": "opt-0"}),
-                acp_mod._handle_permission_response_v3(
+                acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 17, "optionId": "opt-1"}),
             )
 
@@ -23630,7 +23583,7 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_permission_response_v3_unknown_request_refused(self, monkeypatch):
+    def test_handle_permission_response_unknown_request_refused(self, monkeypatch):
         """A requestId with no pending entry at all is refused with no
         side effects (never even looks at conn.session_id or optionId)."""
         import asyncio
@@ -23642,13 +23595,13 @@ class TestSupervisorV3:
         conn = self._conn_v3(acp_mod, sid)
 
         try:
-            asyncio.run(acp_mod._handle_permission_response_v3(
+            asyncio.run(acp_mod._handle_permission_response(
                 conn, sid, {"requestId": 999, "optionId": "whatever"}))
             assert _queued(conn)[0]["payload"]["code"] == "unknown_request"
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_handle_permission_response_v3_reply_write_failure_calls_discard(
+    def test_handle_permission_response_reply_write_failure_calls_discard(
             self, monkeypatch):
         """(Review fix, Senior engineer) A reply-write failure now
         proactively discards the process, mirroring _fulfill_token's own
@@ -23678,7 +23631,7 @@ class TestSupervisorV3:
 
         try:
             with patch.object(acp_mod._Supervisor, "_write", failing_write):
-                asyncio.run(acp_mod._handle_permission_response_v3(
+                asyncio.run(acp_mod._handle_permission_response(
                     conn, sid, {"requestId": 13, "optionId": "opt-0"}))
 
             assert 13 not in sv3._pending_permission, (
@@ -23692,10 +23645,10 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_pending_permission_cleared_at_turn_end_via_handle_prompt_v3_finally(
+    def test_pending_permission_cleared_at_turn_end_via_handle_prompt_finally(
             self, monkeypatch):
         """SC-9 cleanup trigger: _pending_permission is cleared
-        unconditionally inside _handle_prompt_v3's own finally block (turn
+        unconditionally inside _handle_prompt's own finally block (turn
         end), not only on explicit close/cancel -- explicit close is
         normally refused while a turn is inflight, and a pending permission
         request only ever exists mid-turn, so this proves the path that
@@ -23725,7 +23678,7 @@ class TestSupervisorV3:
 
         try:
             with patch.object(acp_mod._Supervisor, "prompt", fake_prompt):
-                asyncio.run(acp_mod._handle_prompt_v3(conn, sid, {"prompt": "hello"}))
+                asyncio.run(acp_mod._handle_prompt(conn, sid, {"prompt": "hello"}))
 
             assert "p1" not in sv3._pending_permission, (
                 "a pending permission request for the finishing session must "
@@ -23749,127 +23702,30 @@ class TestSupervisorV3:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_permission_response_routing_isolated_between_v2_and_v3_dispatch(
-            self, monkeypatch):
-        """(Review fix, Security auditor) The v2/v3 route isolation for
-        `permission_response` is correct by code inspection -- two entirely
-        separate WS route handlers, `_dispatch` always checking the
-        unchanged `CLIENT_TYPES` and `_dispatch_v3` always checking the new
-        `CLIENT_TYPES_V3` superset -- but had no test proving it. This
-        drives both dispatchers directly instead of calling
-        `_handle_permission_response_v3` itself (which every other test in
-        this class does):
-
-        (a) `_dispatch_v3` actually routes a real `permission_response`
-            frame end to end to `_handle_permission_response_v3`, proving
-            the routing table -- not just the handler function -- works.
-        (b) `_dispatch` (v2) has no route for `permission_response` at all
-            -- `CLIENT_TYPES` never gained it, unlike `CLIENT_TYPES_V3` --
-            so the identical frame is refused as `unknown_type` before ever
-            reaching any v3-only handler or state.
-        """
-        import asyncio
-        from power_atlas import acp as acp_mod
-
-        # (a) v3: real end-to-end routing through _dispatch_v3.
-        sv3 = self._sv3(monkeypatch)
-        sid = "sess_dispatchroute0-0000-0000-000001"
-        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
-        sv3.history[sid] = acp_mod._History()
-        conn_v3 = self._conn_v3(acp_mod, sid)
-        options = [{"optionId": "opt-0", "name": "A", "kind": "allow_once"}]
-        sv3._pending_permission[21] = {"session_id": sid, "options": options}
-
-        written = []
-
-        async def run_v3():
-            with patch.object(acp_mod._Supervisor, "_write", _sent(acp_mod, written)):
-                acp_mod._dispatch_v3(conn_v3, {
-                    "type": "permission_response", "sessionId": sid,
-                    "payload": {"requestId": 21, "optionId": "opt-0"}})
-                await asyncio.gather(*acp_mod._tasks)
-
-        try:
-            asyncio.run(run_v3())
-            assert written == [
-                {"jsonrpc": "2.0", "id": 21, "result": {"optionId": "opt-0"}}], (
-                "_dispatch_v3 must route a real permission_response frame "
-                "to _handle_permission_response_v3, not merely accept it")
-            assert 21 not in sv3._pending_permission
-        finally:
-            self._cleanup_registry(acp_mod)
-
-        # (b) v2: the identical frame shape is refused, never routed.
-        conn_v2 = acp_mod._Connection(_SinkWs())
-        acp_mod._registry.connections.add(conn_v2)
-        try:
-            assert "permission_response" not in acp_mod.CLIENT_TYPES, (
-                "CLIENT_TYPES (v2) must never gain permission_response -- "
-                "v2's protocol has no such concept")
-            acp_mod._dispatch(conn_v2, {
-                "type": "permission_response", "sessionId": sid,
-                "payload": {"requestId": 21, "optionId": "opt-0"}})
-            frames = _queued(conn_v2)
-            assert len(frames) == 1
-            assert frames[0]["type"] == "error"
-            assert frames[0]["payload"]["code"] == "unknown_type", (
-                f"v2's _dispatch must refuse permission_response as "
-                f"unknown_type, got {frames}")
-        finally:
-            self._cleanup_registry(acp_mod)
-
-    def test_all_declared_v3_client_types_are_routed(self, monkeypatch):
-        """v3 completeness counterpart to (v2's) TestAcpDeclaredTypesAreRouted.
-
-        CLIENT_TYPES_V3 = CLIENT_TYPES | {"permission_response"}, and
-        _dispatch_v3 has its own "declared but not routed" not_implemented
-        fallback (the same shape as _dispatch's) -- but unlike CLIENT_TYPES,
-        it had no test proving every declared v3 type actually reaches a
-        route rather than falling through to that fallback. Closes
-        Follow-up Work item 11 of the Step 9 final review
-        (plan 260908_ACP_V3_PRODUCTION_HARDENING).
-        """
-        import asyncio
-        from power_atlas import acp as acp_mod
-
-        sv3 = self._sv3(monkeypatch)
-        sid = "sess_alltypes00-0000-0000-0000-000000000001"
-        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
-        sv3.history[sid] = acp_mod._History()
-        conn = self._conn_v3(acp_mod, sid)
-
-        async def no_agent(self):
-            # Mirrors v2's TestAcpDeclaredTypesAreRouted stub: refusing here
-            # keeps every branch that would otherwise spawn a real kiro-cli
-            # agent (or make a real wire request) on its typed-error path,
-            # which is all this test asserts on.
-            raise acp_mod.AgentUnavailable("no agent under test")
-
-        async def dispatch():
-            for type_ in sorted(acp_mod.CLIENT_TYPES_V3):
-                acp_mod._dispatch_v3(conn, {"type": type_, "sessionId": sid,
-                                             "payload": {"prompt": "x"}})
-            await asyncio.gather(*acp_mod._tasks)
-
-        try:
-            with patch.object(acp_mod._Supervisor, "ensure_started", no_agent), \
-                    patch.object(acp_mod._Supervisor, "alive", lambda self: False):
-                asyncio.run(dispatch())
-            codes = [f["payload"].get("code") for f in _queued(conn)]
-            assert "not_implemented" not in codes, codes
-        finally:
-            self._cleanup_registry(acp_mod)
-
     # ------------------------------------------------------------------
     # SC-8 (Phase 7): available_commands_update excludes custom-agent
     # entries (e.g. kiro-default) from both meta["commands"] and
-    # meta["skills"] on _SupervisorV3, same as the v2 fix.
+    # meta["skills"] on the sole supervisor, same as the v2 fix.
+    #
+    # Note: this class used to also carry
+    # `test_permission_response_routing_isolated_between_v2_and_v3_dispatch`
+    # and `test_all_declared_v3_client_types_are_routed`. Both asserted
+    # things that became structurally false once Phase 1 of the
+    # 260911_ACP_V2_TO_V3_ENGINE_CUTOVER plan merged `_dispatch`/`_dispatch_v3`
+    # into one dispatcher and `CLIENT_TYPES`/`CLIENT_TYPES_V3` into one set
+    # (there is no longer a separate v2 dispatch to prove `permission_response`
+    # isolated from), so they were removed rather than renamed. The coverage
+    # they provided — every declared client type, `permission_response`
+    # included, reaches a real route instead of falling through to
+    # `not_implemented` — is already exercised by
+    # `TestAcpDeclaredTypesAreRouted.test_no_client_type_falls_through_to_not_implemented`,
+    # which iterates the now-merged `CLIENT_TYPES` through the sole `_dispatch`.
     # ------------------------------------------------------------------
 
     def test_v3_available_commands_update_excludes_custom_agent_entries(self, monkeypatch):
         """A ``custom-agent``-typed entry (e.g. kiro-default, SC-8) is
         excluded from both ``sessions[sid]["commands"]`` and ``["skills"]``
-        on ``_SupervisorV3`` — same treatment as skill/steering/prompt —
+        on ``_Supervisor`` — same treatment as skill/steering/prompt —
         while a no-``_meta`` entry and an unknown future ``_meta.kiro.type``
         still land in ``commands`` unaffected, proving the new exclusion
         doesn't overreach."""
