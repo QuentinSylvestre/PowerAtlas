@@ -6073,22 +6073,15 @@ class TestAcpLoadFailureAttribution:
     1: the sole surviving `_handle_load` calls `_load_failure(exc, None)`
     with a hardcoded `None`, never re-reading `_lock_holder`. `test_a_local_
     failure_keeps_its_own_code` and `test_the_session_cap_is_not_reported_
-    as_an_occupied_session` below still pass -- both assert only the
-    *absence* of a pid in the message, which holds whether or not a re-read
-    ever happens -- but no longer exercise the re-read's precedence the way
-    their `_one_shot`/`counting_lock_holder` setups suggest; left as-is
-    rather than rewritten, since their assertions remain true statements
-    about current behavior.
+    as_an_occupied_session` below used to also patch `_lock_holder` with a
+    one-shot/counting mock and assert on it -- dead scaffolding once
+    `_handle_load` stopped calling `_lock_holder` at all, since a mock never
+    invoked can never make its sub-assertions (a pid string absent from the
+    message, a read count of zero) fail regardless of the code under test.
+    Removed during this phase's review pass; each test's core assertion
+    (the failure keeps its own code, the cap is reported as itself) remains
+    and is still load-bearing.
     """
-
-    def _one_shot(self, holder):
-        """A pre-flight that sees nothing and a re-read that sees ``holder``."""
-        seen = []
-
-        def _lock_holder(session_id):
-            seen.append(session_id)
-            return None if len(seen) == 1 else holder
-        return _lock_holder
 
     def _refuse_with(self, exc_factory):
         async def refused(self, method, params, timeout=None):
@@ -6125,15 +6118,13 @@ class TestAcpLoadFailureAttribution:
         sid = "load-attr-001"
         _stored_session(store, sid)
         conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod, "_lock_holder", self._one_shot(4242)), \
-                patch.object(acp_mod._Supervisor, "_request",
-                             self._refuse_with(factory)), \
+        with patch.object(acp_mod._Supervisor, "_request",
+                          self._refuse_with(factory)), \
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, sid))
         payload = _queued(conn)[1]["payload"]
         assert payload["code"] == code
         assert fragment in payload["message"]
-        assert "4242" not in payload["message"]
 
     def test_the_session_cap_is_not_reported_as_an_occupied_session(
             self, acp_store):
@@ -6143,21 +6134,10 @@ class TestAcpLoadFailureAttribution:
         for i in range(acp_mod.MAX_SESSIONS):
             acp_mod._supervisor.sessions["filler%d" % i] = {"cwd": ""}
         conn = _acp_conn(acp_mod)
-        reads = []
-
-        def counting_lock_holder(session_id):
-            reads.append(session_id)
-            return 4242
-
-        with patch.object(acp_mod, "_lock_holder", counting_lock_holder), \
-                patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
+        with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, sid))
         payload = _queued(conn)[0]["payload"]
         assert payload["code"] == "too_many_sessions"
-        assert "4242" not in payload["message"]
-        # And the lock is never read at all now: the cap is consulted before the
-        # two thread hops a refused load used to pay for anyway.
-        assert reads == []
 
     # Note: this class used to also carry
     # `test_a_named_holder_still_wins_over_an_agent_refusal`, pinning that
@@ -6718,6 +6698,44 @@ class TestAcpSessionClose:
     # the "close succeeds" side of this scenario is already covered
     # elsewhere in this class.
 
+    def test_a_failing_close_still_frees_the_closing_claim(self, acp_session):
+        """The only remaining test of `_handle_close`'s own `except
+        Exception`/`finally: _supervisor.closing.discard(...)` cleanup path
+        -- lost along with the wire-handshake tests above, which exercised
+        a *wire* refusal this v3-descended `close_session` can no longer
+        produce (it makes no wire call at all, confirmed by reading its
+        body). Forcing `close_session` itself to raise is the only way left
+        to reach that branch.
+
+        The claim `_handle_close` takes (`_supervisor.closing.add`)
+        happens before its one `await` point, same fact
+        `test_a_second_close_cannot_overtake_the_first` below relies on.
+        If `finally`'s `closing.discard` did not run after a failure, every
+        later close attempt on this session would be wrongly refused as
+        "already being closed", forever."""
+        acp_mod, sid = acp_session
+        conn = self._conn(acp_mod, sid)
+        _queued(conn)
+
+        async def boom(self, session_id):
+            raise RuntimeError("close_session blew up")
+
+        with patch.object(acp_mod._Supervisor, "close_session", boom):
+            asyncio.run(acp_mod._handle_close(conn, sid))
+        frames = _queued(conn)
+        assert [f["type"] for f in frames] == ["error"]
+        assert frames[0]["payload"]["code"] == "internal_error"
+        # close_session's own sessions.pop() never ran -- it raised before
+        # reaching it -- so the failed close leaves the session in place.
+        assert sid in acp_mod._supervisor.sessions
+        # But the closing claim must still be freed, or a later close is
+        # wrongly refused as already in progress.
+        assert sid not in acp_mod._supervisor.closing
+
+        asyncio.run(acp_mod._handle_close(conn, sid))
+        assert [f["type"] for f in _queued(conn)] == ["session_closed"]
+        assert sid not in acp_mod._supervisor.sessions
+
     def test_every_watching_socket_is_told_and_detached(self, acp_session):
         """A second tab is holding a transcript that no longer has a session
         behind it, and a subscriber entry for a session that is gone would
@@ -6849,10 +6867,15 @@ class TestAcpSessionClose:
     def test_a_second_close_cannot_overtake_the_first(self, acp_session):
         """Two `close` frames become two tasks. The second would be refused by
         an agent that no longer has the session, and reach the page as a failure
-        to close something already closed.
+        to close something already closed. Execution order between the two is
+        deterministic under asyncio's cooperative scheduling, not a genuine
+        race -- `closing.add()` always precedes the only `await` in
+        `_handle_close`, which is what enforces that the second call sees
+        the first's claim.
 
-        Pre-cutover the race was driven by a slow mock on `_request`, which
-        `close_session` awaited directly. The sole surviving `close_session`
+        Pre-cutover this ordering was reproduced via a slow mock on
+        `_request`, which `close_session` awaited directly. The sole
+        surviving `close_session`
         (renamed from `_SupervisorV3.close_session`, Phase 1 of
         260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call and has no
         internal `await` at all -- confirmed by reading its body -- so a
@@ -7068,7 +7091,7 @@ class TestAcpDeclaredTypesAreRouted:
         assert "not_implemented" not in codes, codes
 
 
-# --- ACP closing review: loop blocking, the close/prompt race, dead state ---
+# --- ACP closing review: loop blocking, the close/prompt ordering, dead state ---
 
 
 class TestAcpNewDoesNotBlockTheLoop:
@@ -7195,8 +7218,14 @@ class TestAcpPromptDuringAnInFlightClose:
     """
 
     def test_a_prompt_arriving_during_a_close_is_refused(self, acp_session):
-        """Pre-cutover the race was driven by a slow mock on `_request`,
-        keyed off `method == acp_mod.CLOSE_METHOD`. The sole surviving
+        """Execution order between the close and the concurrent prompt is
+        deterministic under asyncio's cooperative scheduling, not a genuine
+        race -- `closing.add()` always precedes the only `await` in
+        `_handle_close`, which is what enforces that the prompt sees the
+        claim already taken.
+
+        Pre-cutover this ordering was reproduced via a slow mock on
+        `_request`, keyed off `method == acp_mod.CLOSE_METHOD`. The sole surviving
         `close_session` (renamed from `_SupervisorV3.close_session`, Phase 1
         of 260911_ACP_V2_TO_V3_ENGINE_CUTOVER) makes no wire call at all --
         `CLOSE_METHOD` is `None`, and `close_session`'s body has zero
@@ -12345,12 +12374,16 @@ class TestAcpIdleSweeper:
     def test_a_prompt_during_the_terminate_round_trip_is_refused(self, acp_fast):
         """The claim on `closing` is taken in the synchronous prefix. Without
         it a prompt arriving mid-terminate passes every guard and starts a turn
-        on a session being released.
+        on a session being released. As with the close/prompt tests above,
+        this is enforced sequencing under asyncio's cooperative scheduling,
+        not a genuine race: for a given session, `_sweep_once` takes the
+        `closing` claim synchronously, before the one `await` (on
+        `close_session`) that follows it for that same session.
 
-        Pre-cutover this drove the race through a mocked wire terminate call
-        `close_session` used to make while awaiting. The sole surviving
-        `close_session` (Phase 1) makes no wire call and has no internal
-        `await` at all, so the race is instead reproduced by patching
+        Pre-cutover this ordering was reproduced through a mocked wire
+        terminate call `close_session` used to make while awaiting. The
+        sole surviving `close_session` (Phase 1) makes no wire call and has
+        no internal `await` at all, so it is instead reproduced by patching
         `close_session` to run the concurrent prompt before delegating to
         the real implementation — `_sweep_once`'s own synchronous prefix has
         already claimed `closing` by the time `close_session` runs, exactly
@@ -15871,6 +15904,19 @@ class TestAcpListingEndpoint:
         assert body["groups"] == [] and body["group_total"] == 0
         assert body["has_more"] is False
         assert acp_listing_store["lock_calls"] == []
+
+    # Note: this class used to also carry
+    # `test_sub_agent_sessions_are_absent`, pinning that a sub-agent's session
+    # entry (identified by a `parent_session_id` field on its store record) is
+    # filtered out of the listing rather than shown as a sibling row. That
+    # mechanism has no live analog on the v3-descended route: `_acp_listing`
+    # now resolves through `data.get_sessions(cwd, "kiro-cli-v3")` to
+    # `data_kiro_v3.load_sessions`, which has zero references to
+    # `parent_session_id` anywhere -- `data_kiro_v3`'s sub-agent data is
+    # nested as `sub-executions/<agentSubtaskId>.jsonl` files inside the
+    # parent session's own directory, not as sibling listable session entries
+    # `_cwd_to_sessions()` would need to filter out. There is nothing left to
+    # filter, so this was removed rather than renamed.
 
     def test_the_listing_is_on_the_remote_allowlist_behind_the_cookie(
             self, remote_enabled, acp_listing_store):
@@ -20823,6 +20869,40 @@ class TestSupervisor:
         from power_atlas import acp as acp_mod
         # _SESSION_ID_RE matches ^[\w\-]+$ so ../../etc/passwd fails.
         result = acp_mod._stored_session_cwd_v3("../../etc/passwd")
+        assert result == ""
+
+    def test_stored_session_cwd_v3_returns_empty_for_a_missing_entry(
+            self, tmp_path):
+        """No hash_dir under sessions_root has a session.json for this
+        session_id at all -- the store simply never heard of it (moved,
+        deleted, or never a v3 session). 260911_ACP_V2_TO_V3_ENGINE_CUTOVER
+        Phase 4 deleted `test_a_missing_store_entry_falls_back_to_the_
+        neutral_cwd` because v2's `_neutral_cwd()` fallback it pinned has
+        no counterpart here: `_stored_session_cwd_v3`'s for-loop simply
+        finds no matching `candidate.is_file()` and falls through to the
+        function's own bare `return ''`, exactly as a lookup error would.
+        This regression test pins that actual behavior directly, so a
+        future change reintroducing a fallback (or making a miss raise
+        instead) is caught here rather than only downstream in
+        `_handle_load`, which passes this straight through as `cwd`."""
+        import re
+        import pathlib as _pl
+        from unittest.mock import patch
+        from power_atlas import acp as acp_mod
+
+        session_id = "sess_99999999-9999-9999-9999-999999999999"
+        # A real hash dir exists (holding some other session) but none of
+        # its entries is this session_id -- a genuine "missing entry", not
+        # merely a missing sessions_root directory.
+        (tmp_path / ".kiro" / "sessions" / "abc123hash" / "other-session").mkdir(
+            parents=True)
+
+        with patch("power_atlas.acp.Path") as mock_path_cls:
+            mock_path_cls.home.return_value = tmp_path
+            mock_path_cls.side_effect = _pl.Path
+            with patch.object(acp_mod, "_SESSION_ID_RE", re.compile(r"^[\w\-]+$")):
+                result = acp_mod._stored_session_cwd_v3(session_id)
+
         assert result == ""
 
     # ------------------------------------------------------------------
