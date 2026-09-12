@@ -10125,8 +10125,11 @@ check("WebSocket connects to /ws/acp", (tpl) => {
   page.open();
   const url = page.sockets[0] && page.sockets[0].url;
   assert(url != null, "page.open() did not create a WebSocket socket");
-  assert(url.includes("/ws/acp"),
-    `WebSocket URL should contain /ws/acp; got: ${JSON.stringify(url)}`);
+  // wsUrl() always appends "?t=" + the token, so the real path is followed
+  // by "?" — not by "-v3" or anything else. Anchor on that boundary so this
+  // can't be satisfied by a retired sibling path like /ws/acp-v3.
+  assert(/\/ws\/acp(\?|$)/.test(url),
+    `WebSocket URL should connect to /ws/acp; got: ${JSON.stringify(url)}`);
 });
 
 
