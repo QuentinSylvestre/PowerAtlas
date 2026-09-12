@@ -691,6 +691,13 @@ _PORT_RE = re.compile(r"[0-9]{1,5}")
 # cannot drift apart.
 _ACP_PATH = "/acp"
 
+# The WebSocket transport for the ACP page — the first-ever named constant for
+# this path. Previously a bare `"/ws/acp"` literal on the route decorator and
+# inside `_REMOTE_ALLOWED_PATHS`; named now for the same reason its HTTP
+# siblings below are, and because a second engine briefly needed a name to
+# disambiguate from (now retired).
+_ACP_WS_PATH = "/ws/acp"
+
 # The secret-exchange surface: one path, GET renders the form and POST trades
 # the device secret for the cookie. Named once because three things must agree
 # about it — the routes, the remote path allowlist, and the cookie exemption.
@@ -718,15 +725,6 @@ _ACP_DELETE_PATH = "/api/acp/sessions/delete"
 # `_REMOTE_ALLOWED_PATHS` names it and that dict is built at import time. The
 # route and its rationale are further down near the other remote-access routes.
 _ACP_RESTART_PATH = "/api/restart"
-
-# v3 ACP path constants — parallel to the v2 constants above, for the
-# `/acp-v3` spike surface. Defined here so `_REMOTE_ALLOWED_PATHS` (built at
-# import time) can name them.
-_ACP_V3_PATH = "/acp-v3"
-_ACP_V3_WS_PATH = "/ws/acp-v3"
-_ACP_V3_LISTING_PATH = "/api/acp-v3/sessions"
-_ACP_V3_WORKSPACES_PATH = "/api/acp-v3/workspaces"
-_ACP_V3_DELETE_PATH = "/api/acp-v3/sessions/delete"
 
 
 def set_remote_host(address: str) -> None:
@@ -851,7 +849,7 @@ def _origin_or_referer_ok(request: Request, *, allow_missing: bool) -> bool:
 
 
 def _acp_navigation_ok(request: Request) -> bool:
-    """Whether a ``GET /acp`` or ``GET /acp-v3`` may proceed. Modelled on what the real flows send.
+    """Whether a ``GET /acp`` may proceed. Modelled on what the real flows send.
 
     Copying the POST rule verbatim would break the page. The flows are:
 
@@ -909,7 +907,7 @@ async def same_origin_guard(request: Request, call_next):
     if request.method == "POST":
         if not _origin_or_referer_ok(request, allow_missing=False):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
-    elif request.url.path in (_ACP_PATH, _ACP_V3_PATH) and not _acp_navigation_ok(request):
+    elif request.url.path == _ACP_PATH and not _acp_navigation_ok(request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
     return await call_next(request)
 
@@ -1137,9 +1135,14 @@ def _is_mobile_ua(ua: str) -> bool:
 _REMOTE_STATIC_MOUNT = "/static"
 
 _REMOTE_ALLOWED_PATHS: dict[str, str] = {
-    _ACP_PATH: "http",
-    "/ws/acp": "websocket",
     _REMOTE_AUTH_PATH: "http",
+    # Restart: admitted to authenticated remote peers so the mobile user can
+    # restart PowerAtlas from /acp without walking to the machine.  The device
+    # cookie + Origin/Referer check is the transport-level auth boundary.
+    # The stop switch blocks this path when remote access is stopped.
+    _ACP_RESTART_PATH: "http",
+    _ACP_PATH: "http",
+    _ACP_WS_PATH: "websocket",
     _ACP_LISTING_PATH: "http",
     # The create picker's workspace list. Here because creating a session is
     # already a remote capability — `session/new` rides the allowlisted
@@ -1157,17 +1160,6 @@ _REMOTE_ALLOWED_PATHS: dict[str, str] = {
     # transport-level auth boundary, identical to `_ACP_LISTING_PATH` above.
     # The stop switch (`_REMOTE_SURFACE_STOPPED`) blocks this path when stopped.
     _ACP_DELETE_PATH: "http",
-    # Restart: admitted to authenticated remote peers so the mobile user can
-    # restart PowerAtlas from /acp without walking to the machine.  The device
-    # cookie + Origin/Referer check is the transport-level auth boundary.
-    # The stop switch blocks this path when remote access is stopped.
-    _ACP_RESTART_PATH: "http",
-    # v3 ACP paths — parallel to the v2 entries above.
-    _ACP_V3_PATH: "http",
-    _ACP_V3_WS_PATH: "websocket",
-    _ACP_V3_LISTING_PATH: "http",
-    _ACP_V3_WORKSPACES_PATH: "http",
-    _ACP_V3_DELETE_PATH: "http",
     _REMOTE_STATIC_MOUNT: "http",
 }
 
@@ -1565,7 +1557,6 @@ async def acp_page(request: Request, sid: str = ""):
     response = templates.TemplateResponse(request, "acp.html", {
         "acp_token": _ACP_TOKEN,
         "sid": sid,
-        "engine": "v2",
         "csp_nonce": nonce,
         # Whether the dashboard is reachable *for this viewer*. `/` is not on
         # `_REMOTE_ALLOWED_PATHS` and never will be (SC-4), so the topbar's
@@ -1607,7 +1598,7 @@ async def acp_page(request: Request, sid: str = ""):
     return response
 
 
-@app.websocket("/ws/acp")
+@app.websocket(_ACP_WS_PATH)
 async def ws_acp(ws: WebSocket) -> None:
     """Transport for the ACP page. Token, then origin, then hand off.
 
@@ -1651,57 +1642,6 @@ async def ws_acp(ws: WebSocket) -> None:
         return
     await ws.accept()
     await acp.serve_socket(ws)
-
-
-
-@app.get(_ACP_V3_PATH, response_class=HTMLResponse)
-async def acp_v3_page(request: Request, sid: str = ""):
-    """The v3 Agent orchestrator page. Mirrors ``acp_page`` with ``engine='v3'``.
-
-    See ``acp_page`` for security rationale. The same DNS-rebinding defence,
-    CSP header, ``Cache-Control: no-store``, and ``can_delete`` logic apply here.
-    """
-    if not _request_host_allowed(request):
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-    nonce = secrets.token_urlsafe(16)
-    response = templates.TemplateResponse(request, "acp.html", {
-        "acp_token": _ACP_TOKEN,
-        "sid": sid,
-        "csp_nonce": nonce,
-        "engine": "v3",
-        "local": not _is_remote_peer((request.scope.get("client") or (None,))[0]),
-        "can_delete": (
-            not _is_remote_peer((request.scope.get("client") or (None,))[0])
-            or not _is_mobile_ua(request.headers.get("user-agent", ""))
-        ),
-        "acp_error": _ACP_IMPORT_ERROR,
-    })
-    response.headers["Content-Security-Policy"] = _acp_csp(
-        nonce, request.headers["host"].strip())
-    response.headers["Cache-Control"] = "no-store"
-    return response
-
-
-@app.websocket(_ACP_V3_WS_PATH)
-async def ws_acp_v3(ws: WebSocket) -> None:
-    """v3 WebSocket transport. Token and origin checks before accept().
-
-    Mirrors ``ws_acp``. Calls ``acp.serve_socket_v3`` instead of
-    ``acp.serve_socket``.
-    """
-    if not _acp_token_ok(ws.query_params.get("t", "")):
-        await ws.close(code=1008)
-        return
-    if not _ws_origin_ok(ws):
-        await ws.close(code=1008)
-        return
-    if acp is None:
-        await ws.accept()
-        await ws.close(code=1011, reason="Agent orchestrator unavailable")
-        return
-    await ws.accept()
-    await acp.serve_socket_v3(ws)
-
 
 
 # --- The session browser's data source -----------------------------------
@@ -1820,7 +1760,7 @@ def _acp_availability(session_ids, held,
     "available" using its own mtime-staleness corroboration — see
     `_lock_holder_v3`'s own docstring for the full reasoning.
 
-    `workspace_hashes`, when the caller has it (e.g. `_acp_listing_v3`, which
+    `workspace_hashes`, when the caller has it (e.g. `_acp_listing`, which
     already knows each row's workspace), maps `session_id -> hash-dir name`
     and is threaded through to `_lock_holder_v3` so a v3 id skips the
     full-directory scan. Omitted or missing an id falls back to the full scan,
@@ -1871,34 +1811,6 @@ def _acp_status_for_held(sessions) -> dict[str, str]:
     """
     if not sessions:
         return {}
-    # One scan for the whole response. It contributes nothing for kiro-cli
-    # today — only claude-code writes a self-reported status, and
-    # `presence._sidecar_records` pushes "" for every kiro record — but passing
-    # it is what keeps this on the shared code path instead of a local
-    # re-implementation that would drift the first time that stops being true.
-    snapshot = presence.get_snapshot()
-    out: dict[str, str] = {}
-    for session in sessions:
-        try:
-            semantic = get_semantic_status(
-                session.session_id, _ACP_LISTING_PROVIDER, session.cwd)
-            out[session.session_id] = _resolved_session_status(
-                snapshot, _ACP_LISTING_PROVIDER, session.session_id, semantic)
-        except Exception:
-            log.exception("ACP listing: could not settle status for %s",
-                          session.session_id)
-            # The direction `_resolved_session_status` itself fails in when
-            # nothing classifies. A session this process holds is running, and
-            # a quieter-looking verdict would be a wrong one on a live row.
-            out[session.session_id] = "working"
-    return out
-
-
-
-def _acp_status_for_held_v3(sessions) -> dict[str, str]:
-    """v3 parallel of ``_acp_status_for_held``. Uses ``_ACP_V3_LISTING_PROVIDER``."""
-    if not sessions:
-        return {}
     snapshot = presence.get_snapshot()
     out: dict[str, str] = {}
     for session in sessions:
@@ -1912,6 +1824,7 @@ def _acp_status_for_held_v3(sessions) -> dict[str, str]:
                           session.session_id)
             out[session.session_id] = "working"
     return out
+
 
 # Error codes that mean **"there is nothing at that path"**. Everything not
 # named here — including everything Windows and POSIX have to say about a host
@@ -2070,139 +1983,6 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     """
     from .config import get_workspace_settings
     from .data import _normalize_path
-
-    config = load_config()
-    if _enabled(config, _ACP_LISTING_PROVIDER):
-        workspaces = [
-            w for w in data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
-            if "hidden" not in get_workspace_settings(config, w[0])["tags"]
-        ]
-    else:
-        workspaces = []
-
-    if cwd:
-        target = _normalize_path(cwd)
-        matched = [w for w in workspaces if _normalize_path(w[0]) == target]
-        page_groups = matched[:1]
-        group_total = len(matched)
-        group_page = 1
-        groups_has_more = False
-    else:
-        group_total = len(workspaces)
-        start = (group_page - 1) * group_size
-        page_groups = workspaces[start:start + group_size]
-        groups_has_more = start + group_size < group_total
-
-    pinned_set: set[str] = set(config.pinned_sessions)
-
-    rows: list[tuple[dict, list]] = []
-    sids: list[str] = []
-    # Pinned sessions collected across all workspaces on this page. Carried
-    # alongside the workspace rows so a single availability/status lookup covers
-    # both, keeping the "one call per response" discipline.
-    pinned_sessions_found: list[tuple[str, str, object]] = []  # (cwd, name, session)
-    # Hoisted out of the row loop so one budget covers the whole page rather
-    # than each group getting its own — see `_acp_exists_flags`.
-    exists_flags = _acp_exists_flags([w[0] for w in page_groups])
-    for index, (ws_cwd, _count, _updated, _prov) in enumerate(page_groups):
-        try:
-            sessions = data.get_sessions(ws_cwd, _ACP_LISTING_PROVIDER)
-        except Exception:
-            log.exception("ACP listing: could not read sessions for %s", ws_cwd)
-            sessions = []
-        ws_name = Path(ws_cwd).name or ws_cwd
-        # Pull out pinned sessions before paginating so `total` and `has_more`
-        # reflect only the non-pinned count (pinned appear in the Pinned section
-        # rather than in their workspace group).
-        if pinned_set:
-            for s in sessions:
-                if s.session_id in pinned_set:
-                    pinned_sessions_found.append((ws_cwd, ws_name, s))
-            sessions = [s for s in sessions if s.session_id not in pinned_set]
-        total = len(sessions)
-        s_start = (session_page - 1) * session_size
-        page_sessions = sessions[s_start:s_start + session_size]
-        sids.extend(s.session_id for s in page_sessions)
-        rows.append(({
-            "cwd": ws_cwd,
-            "name": ws_name,
-            "total": total,
-            "session_page": session_page,
-            "has_more": s_start + session_size < total,
-            "exists": exists_flags[index],
-        }, page_sessions))
-
-    # Pinned session ids join the availability/status lookup so the Pinned
-    # section's dots are as fresh as the workspace rows'.
-    pinned_sids = [s.session_id for _cwd, _name, s in pinned_sessions_found]
-    # One call for the whole response, over exactly the ids the response
-    # contains — ~30 by default, not the store's 1,207.
-    availability = _acp_availability(sids + pinned_sids, held)
-    # Bounded by the session cap rather than by the page: only a held row
-    # carries a dot, so only a held row needs a verdict behind it.
-    all_page_sessions = [s for _meta, page_sessions in rows for s in page_sessions]
-    statuses = _acp_status_for_held([
-        s for s in all_page_sessions + [s for _c, _n, s in pinned_sessions_found]
-        if availability.get(s.session_id) == "held"])
-
-    groups = []
-    for meta, page_sessions in rows:
-        meta["sessions"] = [{
-            "id": s.session_id,
-            "title": _acp_row_title(s),
-            "updated_at": s.updated_at,
-            "availability": availability.get(s.session_id, "available"),
-            # "" for every row this ACP does not hold. The rail draws no dot
-            # there, so there is no verdict to carry and none is invented.
-            "status": statuses.get(s.session_id, ""),
-        } for s in page_sessions]
-        groups.append(meta)
-
-    # Pinned section — same per-session shape as grouped rows, plus cwd/name so
-    # the rail can show workspace context in the hover text. exists_flags only
-    # covers the page_groups workspaces; check pinned workspaces separately.
-    pinned_cwds = list(dict.fromkeys(cwd for cwd, _n, _s in pinned_sessions_found))
-    pinned_exists = dict(zip(pinned_cwds, _acp_exists_flags(pinned_cwds)))
-    pinned: list[dict] = [{
-        "id": s.session_id,
-        "title": _acp_row_title(s),
-        "updated_at": s.updated_at,
-        "availability": availability.get(s.session_id, "available"),
-        "status": statuses.get(s.session_id, ""),
-        "cwd": cwd,
-        "name": name,
-        "exists": pinned_exists.get(cwd, True),
-    } for cwd, name, s in pinned_sessions_found]
-
-    return {
-        "groups": groups,
-        "group_page": group_page,
-        "group_total": group_total,
-        "has_more": groups_has_more,
-        # Always present so the client has no conditional — empty list when
-        # nothing is pinned.
-        "pinned": pinned,
-        # How full the session cap is. The rail can reach `MAX_SESSIONS` in
-        # eight taps and had no way to say so: the ninth was refused by the
-        # server *after* `selectSession` had already cleared the transcript and
-        # repointed `?sid=`, so the cost of finding out was losing what you were
-        # reading. Carried on the listing rather than on a websocket frame
-        # because the rail already re-fetches this every 60 s, so the number
-        # converges without a new protocol surface.
-        "capacity": capacity,
-    }
-
-
-def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
-                    session_page: int, session_size: int, held,
-                    capacity: dict) -> dict:
-    """v3 parallel of ``_acp_listing``. Reads kiro-cli v3 sessions via ``data_kiro_v3``.
-
-    Identical logic to `_acp_listing` but uses `_ACP_V3_LISTING_PROVIDER` for
-    provider-keyed calls and routes status through `_acp_status_for_held_v3`.
-    """
-    from .config import get_workspace_settings
-    from .data import _normalize_path
     from . import data_kiro_v3
 
     config = load_config()
@@ -2270,7 +2050,7 @@ def _acp_listing_v3(cwd: str, group_page: int, group_size: int,
     pinned_sids = [s.session_id for _cwd, _name, s in pinned_sessions_found]
     availability = _acp_availability(sids + pinned_sids, held, workspace_hashes=hash_by_sid)
     all_page_sessions = [s for _meta, page_sessions in rows for s in page_sessions]
-    statuses = _acp_status_for_held_v3([
+    statuses = _acp_status_for_held([
         s for s in all_page_sessions + [s for _c, _n, s in pinned_sessions_found]
         if availability.get(s.session_id) == "held"])
 
@@ -2334,107 +2114,10 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
     it returns — see that function's `exclude_cwds` documentation for why the
     placement decides whether `page_size` and `has_more` mean anything.
 
-    Pinned to `_ACP_LISTING_PROVIDER`. `get_all_sessions_paginated` spans every
+    Pinned to `_ACP_V3_LISTING_PROVIDER`. `get_all_sessions_paginated` spans every
     registered provider by default, and a row served here for another one would
     be a session the browser cannot resume — the same constraint that makes the
     grouped listing single-provider, arriving from the opposite direction.
-    """
-    from .config import get_workspace_settings
-
-    config = load_config()
-    if not _enabled(config, _ACP_LISTING_PROVIDER):
-        return {"sessions": [], "pinned": [], "page": page, "has_more": False,
-                "capacity": capacity}
-
-    pinned_set = set(config.pinned_sessions)
-    workspaces_list = data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
-    hidden = {
-        w[0] for w in workspaces_list
-        if "hidden" in get_workspace_settings(config, w[0])["tags"]
-    }
-    try:
-        rows, has_more = data.get_all_sessions_paginated(
-            page=page, page_size=size,
-            provider=_ACP_LISTING_PROVIDER,
-            enabled_providers={_ACP_LISTING_PROVIDER},
-            exclude_cwds=hidden,
-            pinned_sessions=config.pinned_sessions if pinned_set else None)
-    except Exception:
-        log.exception("ACP flat listing: could not collect sessions")
-        rows, has_more = [], False
-
-    # Separate the pinned sessions (returned first by get_all_sessions_paginated)
-    # from the paginated non-pinned rows.
-    pinned_raw = [(s, prov) for s, prov in rows if s.session_id in pinned_set]
-    flat_rows  = [(s, prov) for s, prov in rows if s.session_id not in pinned_set]
-
-    # For pinned sessions not already in `rows` (workspace not yet loaded into
-    # cache, e.g. workspace was not among the most recently active), scan the
-    # workspace list directly. Skip hidden workspaces.
-    if pinned_set:
-        found_ids = {s.session_id for s, _ in pinned_raw}
-        remaining = pinned_set - found_ids
-        if remaining:
-            for ws_cwd, _count, _updated, _prov in workspaces_list:
-                if not remaining:
-                    break
-                if ws_cwd in hidden:
-                    continue
-                try:
-                    ws_sessions = data.get_sessions(ws_cwd, _ACP_LISTING_PROVIDER)
-                except Exception:
-                    continue
-                for s in ws_sessions:
-                    if s.session_id in remaining:
-                        pinned_raw.append((s, _ACP_LISTING_PROVIDER))
-                        remaining.discard(s.session_id)
-
-    sessions = [s for s, _prov in flat_rows]
-    pinned_sessions_list = [s for s, _prov in pinned_raw]
-
-    # One call per response covers both pinned and flat rows.
-    all_sids = [s.session_id for s in sessions] + [s.session_id for s in pinned_sessions_list]
-    availability = _acp_availability(all_sids, held)
-    statuses = _acp_status_for_held(
-        [s for s in sessions + pinned_sessions_list
-         if availability.get(s.session_id) == "held"])
-
-    # One stat per distinct workspace rather than one per row, which is a much
-    # bigger saving here than the grouped path ever needed: measured against
-    # this store, the 100 most recent sessions live in 5 workspaces. Ordered
-    # dedupe rather than a set, so the budget inside `_acp_exists_flags` is
-    # spent newest-workspace-first if it runs out.
-    order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
-    flags = dict(zip(order, _acp_exists_flags(order)))
-
-    def _session_dict(s: object) -> dict:
-        return {
-            "id": s.session_id,
-            "title": _acp_row_title(s),
-            "updated_at": s.updated_at,
-            "availability": availability.get(s.session_id, "available"),
-            "status": statuses.get(s.session_id, ""),
-            "cwd": s.cwd,
-            "name": Path(s.cwd).name or s.cwd,
-            "exists": flags.get(s.cwd, True),
-        }
-
-    return {
-        "sessions": [_session_dict(s) for s in sessions],
-        # Always present — empty list when nothing is pinned. Same per-session
-        # shape as the flat rows so the rail can render them identically.
-        "pinned": [_session_dict(s) for s in pinned_sessions_list],
-        "page": page,
-        "has_more": has_more,
-        "capacity": capacity,
-    }
-
-
-def _acp_flat_listing_v3(page: int, size: int, held, capacity: dict) -> dict:
-    """v3 parallel of ``_acp_flat_listing``. Reads kiro-cli v3 sessions via ``data_kiro_v3``.
-
-    Identical logic to `_acp_flat_listing` but uses `_ACP_V3_LISTING_PROVIDER`
-    for provider-keyed calls and routes status through `_acp_status_for_held_v3`.
     """
     from .config import get_workspace_settings
 
@@ -2486,7 +2169,7 @@ def _acp_flat_listing_v3(page: int, size: int, held, capacity: dict) -> dict:
 
     all_sids = [s.session_id for s in sessions] + [s.session_id for s in pinned_sessions_list]
     availability = _acp_availability(all_sids, held)
-    statuses = _acp_status_for_held_v3(
+    statuses = _acp_status_for_held(
         [s for s in sessions + pinned_sessions_list
          if availability.get(s.session_id) == "held"])
 
@@ -2523,10 +2206,10 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
                            size: int = _ACP_FLAT_PAGE_SIZE):
     """Sessions for the session browser, grouped or flat. Read-only.
 
-    Returns **only** the workspace path, display name and whether that
-    directory still exists, and per session the id, title, updated timestamp,
-    availability state and — for a held session alone — the semantic status the
-    dashboard would show for it. No `env`, no launcher data, no action
+    Returns only the workspace path, display name and whether that directory
+    still exists, and per session the id, title, updated timestamp,
+    availability state and — for a held session alone — the semantic status
+    the dashboard would show for it. No `env`, no launcher data, no action
     affordances — the payload is the whole audit surface, so what is not here
     cannot leak from here.
 
@@ -2538,69 +2221,37 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     **The whole store is reachable through this route, not a sample of it.**
     Paging is the entire access-control story here: `group_page` walks the
     workspace axis and `session_page` walks the sessions inside each one, and
-    neither has a ceiling other than the data running out. Measured over the
-    real remote surface, `group_total` is 61 with `has_more: true` — so an
-    authorized peer that keeps asking enumerates **every workspace path and
-    every session title on this machine**. The rail's default 10 workspaces by
-    3 sessions is a page size, not a bound, and reading the numbers below as a
-    bounded sample is the mistake this paragraph exists to prevent.
+    neither has a ceiling other than the data running out — so an authorized
+    peer that keeps asking enumerates every workspace path and every session
+    title on this machine. The rail's default page size is a page size, not a
+    bound.
 
     `mode=recent` does not widen that exposure — same route, same store, same
-    two exclusions — but it does make collecting it cheaper, and that is worth
-    stating rather than leaving to be discovered. It answers one flat
-    recency-ordered walk with `page`/`has_more`, so a peer enumerating the
+    two exclusions — but it does make collecting it cheaper: it answers one
+    flat recency-ordered walk with `page`/`has_more`, so a peer enumerating the
     store follows a single cursor to the end instead of crossing two nested
-    axes and reconciling them. Nothing becomes reachable that was not, and
-    reaching all of it takes less work.
+    axes and reconciling them.
 
-    **`title` may be raw user prompt text.** `_acp_row_title` falls back to the
-    first 120 characters of the session's first prompt whenever the store holds
-    no title or the literal `"<untitled>"` — 267 of the real store's 1,210
-    sessions, 22.1%. That proportion describes how often the fallback fires; it
-    does **not** bound the exposure, because the peer can page to all 1,210.
-    The fallback is deliberate (the `session-tab-title` rework that would
-    populate the field is out of this plan's scope, and the first prompt is
-    what the user will recognise), but it means one field of this payload
-    carries free-form text the user typed.
+    **`title` may be raw user prompt text.** `_acp_row_title` falls back to
+    the first 120 characters of the session's first prompt whenever the store
+    holds no title or the literal `"<untitled>"`. Anyone deciding whether to
+    enable remote access should read this route as publishing the names of
+    everything worked on, to every peer holding a valid device cookie.
 
-    What that is in practice, from page one of the real listing: an employer
-    name, four client and project names, the directory layout of the whole
-    machine, a colleague's first name and the subject line of an email. Anyone
-    deciding whether to enable remote access — on a work laptop especially —
-    should read this route as publishing the *names of everything you have
-    worked on*, to every peer holding a valid device cookie, and decide on that
-    basis rather than on the 22.1%.
+    Workspaces tagged `hidden` and a disabled `kiro-cli-v3` provider are
+    excluded; see `_acp_listing`.
 
-    Workspaces tagged `hidden` and a disabled `kiro-cli` provider are excluded;
-    see `_acp_listing`.
-
-    Sub-agent sessions are absent because `data_kiro.load_sessions` skips any
-    record carrying `parent_session_id`; that filter removes 4,734 of the
-    store's 5,941 files and this route inherits it rather than re-deriving it.
-
-    `no-store`: availability is a liveness reading with a lifetime of seconds,
-    and a phone rendering a cached `available` for a session another process
-    took in the meantime is exactly the wrong failure to cache.
+    `no-store`: availability is a liveness reading with a lifetime of
+    seconds, and a phone rendering a cached `available` for a session another
+    process took in the meantime is exactly the wrong failure to cache.
     """
     response.headers["Cache-Control"] = "no-store"
-    # **On the loop, synchronously, before the thread hop** (D9). `sessions` is
-    # loop-owned and unlocked; a worker thread iterating it races every mutation
-    # the loop makes. `frozenset` also makes the snapshot un-mutable by anything
-    # downstream, so the thread cannot write back into loop-owned state either.
-    held = frozenset(acp._supervisor.sessions) if acp is not None else frozenset()
-    # Same loop-side snapshot rule as `held`, and the same reason. `_reserved`
-    # counts creations in flight, and `at_capacity()` is
-    # `len(sessions) + _reserved >= MAX_SESSIONS` — so counting `held` alone
-    # would report a free slot during the ~0.5-1.1 s a `session/new` is
-    # resolving, which is exactly when a second tap arrives.
+    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
     capacity = {
-        "held": (len(held) + acp._supervisor._reserved) if acp is not None else 0,
+        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
-    # An exact match, not a truthiness test. `mode` is caller-supplied and the
-    # only value that means anything is this one; anything else — a typo, an
-    # older client, a probe — falls through to the grouped shape, which is the
-    # response every existing caller already expects.
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
@@ -2654,36 +2305,6 @@ def _acp_workspaces(capacity: dict) -> dict:
     from .config import get_workspace_settings
 
     config = load_config()
-    if not _enabled(config, _ACP_LISTING_PROVIDER):
-        return {"workspaces": [], "missing": 0, "capacity": capacity}
-    found = [
-        w for w in data.discover_workspaces_with_counts(_ACP_LISTING_PROVIDER)
-        if "hidden" not in get_workspace_settings(config, w[0])["tags"]
-    ]
-    # One budget for the whole sweep, the same helper and the same reason the
-    # listing route uses it: `os.stat` on a routable-but-dead UNC host measured
-    # 42.2 s, and this list is longer than one listing page.
-    flags = _acp_exists_flags([w[0] for w in found])
-    live = [w for w, ok in zip(found, flags) if ok]
-    return {
-        "workspaces": [{
-            "cwd": cwd,
-            "name": Path(cwd).name or cwd,
-            "sessions": count,
-        } for cwd, count, _updated, _prov in live],
-        "missing": len(found) - len(live),
-        "capacity": capacity,
-    }
-
-
-def _acp_workspaces_v3(capacity: dict) -> dict:
-    """v3 parallel of ``_acp_workspaces``. Reads kiro-cli v3 workspaces via ``data_kiro_v3``.
-
-    Identical logic to `_acp_workspaces` but uses `_ACP_V3_LISTING_PROVIDER`.
-    """
-    from .config import get_workspace_settings
-
-    config = load_config()
     if not _enabled(config, _ACP_V3_LISTING_PROVIDER):
         return {"workspaces": [], "missing": 0, "capacity": capacity}
     found = [
@@ -2717,12 +2338,10 @@ async def api_acp_workspaces(response: Response):
     and the same pair the listing route reports.
     """
     response.headers["Cache-Control"] = "no-store"
-    # Loop-side snapshot before the thread hop (D9), exactly as the listing
-    # route takes it, and `_reserved` counted for the same reason: a creation
-    # in flight already holds the slot this number is asked about.
-    held = frozenset(acp._supervisor.sessions) if acp is not None else frozenset()
+    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
     capacity = {
-        "held": (len(held) + acp._supervisor._reserved) if acp is not None else 0,
+        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
     return await asyncio.to_thread(_acp_workspaces, capacity)
@@ -3028,12 +2647,12 @@ def _acp_sessions_for_workspace(cwd: str, include_v3: bool = False) -> list[str]
     `data_kiro_v3.load_sessions(cwd)`, that module's own direct-scan
     equivalent of the v2 loop above (it reads `session.json` under
     `~/.kiro/sessions/<hash>/sess_*/` rather than the paged/cached listing).
-    Defaults to False so the v2 endpoint's call site
-    (`api_acp_delete_sessions`) is completely unaffected unless it opts in —
-    this plan's own Invariant 1 requires v2's workspace-delete output stay
-    byte-for-byte unchanged, and a default-off parameter is what makes that
-    true without duplicating this function. The v3 endpoint
-    (`api_acp_v3_delete_sessions`) passes `include_v3=True`.
+    `api_acp_delete_sessions`'s workspace-delete branch passes
+    `include_v3=True`, so a folder delete reaches both the historical v2
+    entries and the live v3 sessions for that workspace. Defaults to False so
+    a caller that only cares about the historical v2 store — none exists in
+    this file today, but the parameter is kept opt-in rather than folded away —
+    is not charged the extra `data_kiro_v3` scan.
     """
     from .data import _normalize_path
     norm = _normalize_path(cwd)
@@ -3153,165 +2772,6 @@ async def api_acp_delete_sessions(request: Request):
         return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
 
     # --- Workspace-level delete path ---
-    # Handled first so the existing `session_ids` guard never sees a `cwd` request.
-    cwd: str | None = body.get("cwd") if isinstance(body, dict) else None
-    delete_folder: bool = (
-        bool(body.get("delete_folder", False)) if isinstance(body, dict) else False
-    )
-    if cwd is not None:
-        if not isinstance(cwd, str) or not cwd.strip():
-            return JSONResponse(
-                {"error": "'cwd' must be a non-empty string."}, status_code=400)
-        # Enumerate all session IDs for this workspace (off the event loop).
-        all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
-        # Batch delete, D9: re-snapshot `held` on the event loop before each
-        # thread hop, because `_supervisor.sessions` is loop-owned and unlocked.
-        #
-        # Cross-engine held-set union (2026-09-09 fix, Senior engineer
-        # finding): `all_ids` here is v2-only (this call omits `include_v3`),
-        # but the held set is still unioned with `_supervisor_v3.sessions`
-        # for symmetry with the v3 endpoint's identical fix below — a v2 id
-        # can never collide with a v3-held id in practice (id shapes never
-        # overlap), so this union is a no-op for THIS endpoint's own
-        # behavior today, but keeps both endpoints' held-set construction
-        # identical rather than silently diverging, and protects against a
-        # future call site that widens `all_ids` to include v3 ids without
-        # remembering to widen this too.
-        deleted_total: list[str] = []
-        failed_total: list[dict] = []
-        while all_ids:
-            batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            sv3 = getattr(acp, "_supervisor_v3", None)
-            held = (frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
-                    | frozenset(sv3.sessions if sv3 is not None else ()))
-            result = await asyncio.to_thread(_acp_delete_many, batch, held)
-            deleted_total.extend(result["deleted"])
-            failed_total.extend(result["failed"])
-        response: dict = {
-            "deleted": deleted_total,
-            "failed": failed_total,
-            "total_found": len(deleted_total) + len(failed_total),
-        }
-        # Folder delete: loopback-only guard — irreversible local filesystem
-        # operation must not be triggerable from a remote device.
-        # D26: use scope["client"] (transport-level peer IP) not the Host header,
-        # which is attacker-controlled and would let a remote peer spoof loopback.
-        if delete_folder:
-            peer_ip = (request.scope.get("client") or (None,))[0]
-            if _is_remote_peer(peer_ip):
-                response["folder_deleted"] = False
-                response["folder_error"] = (
-                    "Folder deletion is not available from remote access."
-                )
-            else:
-                try:
-                    folder_deleted, folder_error = await asyncio.to_thread(
-                        _acp_delete_workspace_folder, cwd
-                    )
-                except Exception as exc:
-                    folder_deleted = False
-                    folder_error = f"Folder delete failed unexpectedly: {exc}"
-                response["folder_deleted"] = folder_deleted
-                response["folder_error"] = folder_error
-        return JSONResponse(response)
-
-    # --- Per-session delete path (existing, unchanged) ---
-    raw = body.get("session_ids") if isinstance(body, dict) else None
-    if not isinstance(raw, list) or not raw:
-        return JSONResponse(
-            {"error": "'session_ids' must be a non-empty list."},
-            status_code=400)
-    if len(raw) > _ACP_MAX_DELETE_IDS:
-        return JSONResponse(
-            {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
-            status_code=400)
-    session_ids = [s for s in raw if isinstance(s, str)]
-    # **On the loop, before the thread hop** (D9), exactly as the listing route
-    # snapshots it. `_reserved` is deliberately not counted here: it bounds
-    # *creation*, and a session still being created holds no store files a
-    # delete could reach.
-    #
-    # Cross-engine held-set union (Step 9 final review fix, High): the
-    # per-session-ID path never got the same union the workspace-cwd path
-    # above already has — see that comment for the full rationale.
-    sv3 = getattr(acp, "_supervisor_v3", None)
-    held = (frozenset(acp._supervisor.sessions)
-            | frozenset(sv3.sessions if sv3 is not None else ()))
-    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
-    return JSONResponse({
-        "deleted": result["deleted"],
-        "failed": result["failed"],
-        "total_found": len(session_ids),
-    })
-
-
-
-
-# --- v3 ACP session browser endpoints ---------------------------------
-#
-# Mirrors of the v2 listing, workspaces, and delete endpoints for the
-# ``/acp-v3`` surface. Same security posture; supervisor calls route to
-# ``acp._supervisor_v3`` instead of ``acp._supervisor``.
-
-
-@app.get(_ACP_V3_LISTING_PATH)
-async def api_acp_v3_sessions(response: Response, cwd: str = "",
-                              group_page: int = 1,
-                              group_size: int = _ACP_GROUPS_PER_PAGE,
-                              session_page: int = 1,
-                              session_size: int = _ACP_SESSIONS_PER_GROUP,
-                              mode: str = "", page: int = 1,
-                              size: int = _ACP_FLAT_PAGE_SIZE):
-    """v3 session listing. Mirrors ``api_acp_sessions`` with ``_supervisor_v3``."""
-    response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
-    capacity = {
-        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
-        "max": acp.MAX_SESSIONS if acp is not None else 0,
-    }
-    if mode == "recent":
-        return await asyncio.to_thread(
-            _acp_flat_listing_v3, max(1, page),
-            max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity)
-    return await asyncio.to_thread(
-        _acp_listing_v3, cwd,
-        max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
-        max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity)
-
-
-@app.get(_ACP_V3_WORKSPACES_PATH)
-async def api_acp_v3_workspaces(response: Response):
-    """v3 workspace list for the create picker. Mirrors ``api_acp_workspaces``."""
-    response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
-    capacity = {
-        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
-        "max": acp.MAX_SESSIONS if acp is not None else 0,
-    }
-    return await asyncio.to_thread(_acp_workspaces_v3, capacity)
-
-
-@app.post(_ACP_V3_DELETE_PATH)
-async def api_acp_v3_delete_sessions(request: Request):
-    """v3 session delete. Mirrors ``api_acp_delete_sessions`` with ``_supervisor_v3``.
-
-    Uses the same workspace-level and per-session delete paths as the v2
-    endpoint, but snapshots ``_supervisor_v3.sessions`` for the held set.
-    """
-    if acp is None:
-        return JSONResponse(
-            {"error": "The ACP module is not loaded, so its store is not "
-                      "reachable from here."}, status_code=503)
-    sv3 = getattr(acp, "_supervisor_v3", None)
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
-
-    # --- Workspace-level delete path ---
     cwd: str | None = body.get("cwd") if isinstance(body, dict) else None
     delete_folder: bool = (
         bool(body.get("delete_folder", False)) if isinstance(body, dict) else False
@@ -3322,22 +2782,16 @@ async def api_acp_v3_delete_sessions(request: Request):
                 {"error": "'cwd' must be a non-empty string."}, status_code=400)
         all_ids = await asyncio.to_thread(
             _acp_sessions_for_workspace, cwd, include_v3=True)
-        # Cross-engine held-set union (2026-09-09 fix, Senior engineer
-        # finding, High): `_acp_sessions_for_workspace(cwd, include_v3=True)`
-        # enumerates BOTH v2 and v3 session ids for this workspace (the v2
-        # side is unconditional, not gated by include_v3 — see that
-        # function's own docstring), but `held` was only ever snapshotted
-        # from `sv3.sessions` — so a v2 session open right now in `/acp`'s
-        # own supervisor (`acp._supervisor.sessions`) was never flagged as
-        # held and could be silently deleted via this v3 endpoint's
-        # workspace-delete for the same folder. Unioned with the v2
-        # supervisor's own held set closes that gap.
+        # `_acp_sessions_for_workspace(cwd, include_v3=True)` enumerates both
+        # the historical v2 file-store ids and the live ids for this
+        # workspace, so the held set below must cover both shapes — it does,
+        # since `acp._supervisor` is the sole supervisor and its `.sessions`
+        # already carries every live id regardless of shape.
         deleted_total: list[str] = []
         failed_total: list[dict] = []
         while all_ids:
             batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            held = ((frozenset(sv3.sessions) if sv3 is not None else frozenset())
-                    | frozenset(acp._supervisor.sessions))
+            held = frozenset(acp._supervisor.sessions)
             result = await asyncio.to_thread(_acp_delete_many, batch, held)
             deleted_total.extend(result["deleted"])
             failed_total.extend(result["failed"])
@@ -3376,19 +2830,11 @@ async def api_acp_v3_delete_sessions(request: Request):
             {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
             status_code=400)
     session_ids = [s for s in raw if isinstance(s, str)]
-    # Phase 5 (SC-2): `_acp_delete_many` now dispatches each id by shape —
-    # `sess_`-prefixed routes to `data_kiro_v3.delete_session` (via
-    # `_acp_delete_session`'s own v3 branch) and `_lock_holder_v3`'s
-    # externally-held check, anything else to v2's original path — so every
-    # requested id, v2 or v3, is handled by one call. The `sess_`-prefix
-    # rejection that used to sit here ("v3 session deletion not yet
-    # implemented") is gone.
-    #
-    # Cross-engine held-set union (Step 9 final review fix, High): the
-    # per-session-ID path never got the same union the workspace-cwd path
-    # above already has — see that comment for the full rationale.
-    held = ((frozenset(sv3.sessions) if sv3 is not None else frozenset())
-            | frozenset(acp._supervisor.sessions))
+    # `_acp_delete_many` dispatches each id by shape — `sess_`-prefixed routes
+    # to `data_kiro_v3.delete_session` (via `_acp_delete_session`'s own v3
+    # branch) and `_lock_holder_v3`'s externally-held check, anything else to
+    # the historical v2 path — so every requested id is handled by one call.
+    held = frozenset(acp._supervisor.sessions)
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
     return JSONResponse({
         "deleted": result["deleted"],
