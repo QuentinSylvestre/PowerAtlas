@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27", "ruff>=0.3"]
+dev = ["pytest>=8.0", "pytest-timeout>=2.3", "httpx>=0.27", "ruff>=0.3"]
 
 [project.scripts]
 power-atlas = "power_atlas.__main__:main"
