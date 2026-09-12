@@ -609,9 +609,6 @@ function loadPage(templatePath, opts = {}) {
     // to true (loopback reading). Pass `canDelete: false` to simulate a remote
     // mobile viewer; pass `canDelete: true, local: false` for a remote desktop.
     can_delete: opts.canDelete ?? true,
-    // Which engine the page is serving. "v2" is the default (existing /acp
-    // behaviour). Pass `engine: "v3"` to exercise the /acp-v3 code path.
-    engine: opts.engine ?? "v2",
   });
 
   // `acp.html`'s own content block only — `{% extends %}` is stripped by
@@ -10120,50 +10117,43 @@ check("delete button absent when canDelete=false", async (tpl) => {
     + "non-desktop or non-authenticated remote viewers");
 });
 
-check("test_engine_v3_ws_path — WebSocket connects to /ws/acp-v3 when engine=v3", (tpl) => {
-  // When rendered with engine="v3", wsUrl() must produce the v3 WebSocket path.
-  // Verified by opening the socket and reading the URL the FakeWs constructor received.
-  const page = loadPage(tpl, { engine: "v3" });
+check("WebSocket connects to /ws/acp", (tpl) => {
+  // There is now exactly one ACP engine, so wsUrl() has nothing to branch on
+  // — it must always produce the sole engine's WebSocket path. Verified by
+  // opening the socket and reading the URL the FakeWs constructor received.
+  const page = loadPage(tpl);
   page.open();
   const url = page.sockets[0] && page.sockets[0].url;
   assert(url != null, "page.open() did not create a WebSocket socket");
-  assert(url.includes("/ws/acp-v3"),
-    `WebSocket URL should contain /ws/acp-v3 when engine="v3"; got: ${JSON.stringify(url)}`);
-  assert(!url.includes("/ws/acp?"),
-    `WebSocket URL must not contain /ws/acp? (v2 path) when engine="v3"; got: ${JSON.stringify(url)}`);
+  assert(url.includes("/ws/acp"),
+    `WebSocket URL should contain /ws/acp; got: ${JSON.stringify(url)}`);
 });
 
 
-check("test_engine_v3_session_api_url — rail fetches /api/acp-v3/sessions when engine=v3", async (tpl) => {
-  // When rendered with engine="v3", the first rail fetch must use the v3 listing path.
+check("rail fetches /api/acp/sessions", async (tpl) => {
+  // Same story for the rail's first fetch: one engine, one listing path.
   const store = fakeStore({ workspaces: 1, sessions: 1 });
-  const page = await railed(tpl, { store, engine: "v3" });
+  const page = await railed(tpl, { store });
   const urls = page.fetches.map((f) => f.url);
   assert(urls.length > 0, "no fetch calls were made after railed()");
-  assert(urls.some((u) => u.startsWith("/api/acp-v3/sessions")),
-    `rail fetch should use /api/acp-v3/sessions when engine="v3"; fetched: ${JSON.stringify(urls)}`);
-  assert(!urls.some((u) => u.startsWith("/api/acp/sessions")),
-    `rail fetch must not use /api/acp/sessions (v2 path) when engine="v3"; fetched: ${JSON.stringify(urls)}`);
+  assert(urls.some((u) => u.startsWith("/api/acp/sessions")),
+    `rail fetch should use /api/acp/sessions; fetched: ${JSON.stringify(urls)}`);
 });
 
 
 
-check("test_engine_v3_workspaces_api_url — picker fetches /api/acp-v3/workspaces when engine=v3",
-  async (tpl) => {
-  // When rendered with engine="v3", opening the session create picker must
-  // fetch the v3 workspaces path, not the v2 one.
+check("picker fetches /api/acp/workspaces", async (tpl) => {
+  // Same story for the create-session picker's workspaces fetch.
   const store = fakeStore({ workspaces: 2, sessions: 1 });
-  const page = await railed(tpl, { store, engine: "v3" });
+  const page = await railed(tpl, { store });
   // Clear fetches from the rail load so we only see the picker fetch.
   page.fetches.length = 0;
   // Click the create-new button to trigger a workspace fetch.
   page.click("acpRailNew");
   await page.settle();
   const urls = page.fetches.map((f) => f.url);
-  assert(urls.some((u) => u.startsWith("/api/acp-v3/workspaces")),
-    `picker fetch should use /api/acp-v3/workspaces when engine="v3"; fetched: ${JSON.stringify(urls)}`);
-  assert(!urls.some((u) => u === "/api/acp/workspaces" || u.startsWith("/api/acp/workspaces?")),
-    `picker fetch must not use /api/acp/workspaces (v2 path) when engine="v3"; fetched: ${JSON.stringify(urls)}`);
+  assert(urls.some((u) => u.startsWith("/api/acp/workspaces")),
+    `picker fetch should use /api/acp/workspaces; fetched: ${JSON.stringify(urls)}`);
 });
 
 // --------------------------------------------------------- Phase 3: SC-3 session_info_update client rendering --
