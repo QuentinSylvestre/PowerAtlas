@@ -1982,7 +1982,7 @@
    *  Clicking a button sends `permission_response` with the chosen optionId
    *  and disables every button in the row. That is a UX nicety only, not the
    *  double-answer guard — the server's pop-before-write in
-   *  _handle_permission_response_v3 is what actually prevents answering the
+   *  _handle_permission_response is what actually prevents answering the
    *  same request twice; this only stops an obviously-confusing second click
    *  in the same tab before the server's reply (if any) comes back. */
   function addPermissionRequest(requestId, sid, title, options) {
@@ -7036,7 +7036,7 @@
       // one that rendered the row, landing on the correct final "resolved"
       // state with no cross-tab or stale-reload special-casing needed beyond
       // finding the row by requestId. Fires whether the request was actually
-      // answered (_handle_permission_response_v3) or swept away unanswered
+      // answered (_handle_permission_response) or swept away unanswered
       // at turn end (_handle_prompt_v3's finally) -- both cases mean the
       // pending state behind it is gone, so the client-side handling is
       // identical either way.

@@ -225,14 +225,14 @@ transcript, which is what keeps a reload from replaying megabytes and what stops
 evicting the conversation behind them. A reloaded transcript therefore shows `[Image 1]` rather than the
 picture. The prompt box also grows as you type, up to a limit, then scrolls.
 
-**Queue and Steer let you act during a running turn.** When a turn is active and the prompt box has
-text, the Stop button is replaced by a single full-height action button and a mode selector. Choose
-**Steer** (the default) or **Queue** from the selector; the button label tracks your choice and the
-selection persists across page reloads. **Queue** stores the text and
+**Queue and Steer let you choose a send mode during a running turn.** When a turn is active and the
+prompt box has text, the Stop button is replaced by a single full-height action button and a
+send-mode selector. Choose **Steer** (the default) or **Queue** from the selector; the button label
+tracks your choice and the selection persists across page reloads. **Queue** stores the text and
 clears the box — showing a cancellable inline note — then sends it as a normal prompt the moment the
 turn ends. **Steer** injects the text mid-turn via `_session/steer`, which kiro-cli processes without
 interrupting the turn in progress; the injected text appears as a dimmed band in the transcript and
-persists across WebSocket reconnects within the same PowerAtlas session. Pressing Enter during a turn triggers whichever mode is selected,
+persists across WebSocket reconnects within the same PowerAtlas session. Pressing Enter during a turn triggers whichever send mode is selected,
 consistent with Enter sending a prompt outside a turn. Both discard safely if something unexpected
 happens: Queue restores the text if the connection drops or the session changes, and Steer restores
 it if the server returns an error. Two floating arrow buttons (↑ / ↓) appear at the bottom-left of the transcript when there are at least two of your messages; they jump to the previous or next user message.
@@ -313,9 +313,9 @@ directory inside your kiro-cli session store. The workspace's `.lock` file lives
 across every session in that workspace rather than owned by this one. Resuming a session without
 prompting leaves the transcript byte-identical.
 
-There is no mode picker on this page — a session runs kiro-cli's default agent mode and cannot be
-switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from here. This is deliberate scope, not a
-missing feature.
+**There is no agent-mode picker on this page.** A session runs kiro-cli's default agent mode and
+cannot be switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from here. This is deliberate
+scope, not a missing feature.
 
 **The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
 needs you to choose between options before continuing, the question and its choices render as buttons
