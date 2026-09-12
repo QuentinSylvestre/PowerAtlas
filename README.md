@@ -201,8 +201,9 @@ works. At the session limit both create controls are disabled and say why, rathe
 the press.
 
 **Deleting a session is possible, from this machine only.** Each rail row carries a `⋯` menu whose
-*Delete session* erases that conversation from kiro-cli's own store — the transcript, its metadata, its
-lock and its task files — after a confirmation. This is not the same as *Close*, which only releases
+*Delete session* erases that conversation's whole directory from kiro-cli's own store — the transcript,
+its metadata, and any subagent task files — after a confirmation, leaving the workspace's shared lock
+file untouched, since other sessions in the same workspace still depend on it. This is not the same as *Close*, which only releases
 the memory and leaves the conversation resumable. It cannot be undone, there is no trash, and it is
 refused for a session PowerAtlas has open (close it first) or one another process is using. The menu is
 not shown to mobile browsers; authenticated desktop browsers at the remote address can use it. It is
@@ -255,8 +256,9 @@ language name. Raw HTML and any image the *agent* writes into its markdown are d
 — an image there is a URL the page would fetch on the agent's say-so, which is a different thing from a
 picture you attached yourself (see below) — and a link is clickable only when its URL is `http(s)`;
 anything else stays as plain text. The page builds every one of those elements itself and
-never parses markup, which is what stops an agent running with every tool pre-approved from putting
-something executable on a page you have open.
+never parses markup, which is defense-in-depth against the agent's own output landing on a page you
+have open: the transcript holds text the agent wrote, not text you vetted, and never becomes something
+executable regardless of what the agent tried to render.
 
 **Tool calls say what happened, not only what ran.** Each row carries an icon for the kind of tool,
 a coloured status — pending, in progress, completed, failed — and, for a call that touched a file,
@@ -296,17 +298,20 @@ Three things are worth knowing before leaving a long task running:
   side. A 24-hour absolute ceiling applies regardless, so a turn emitting one chunk per window cannot
   hold a session open forever.
 - **Idle sessions are reclaimed.** A session with no tab attached, no turn running and no load in
-  flight is terminated after `acp_idle_ttl_seconds` (default 30 minutes) and its lock removed. The
+  flight is released locally after `acp_idle_ttl_seconds` (default 30 minutes), without waiting for
+  wire-level confirmation from the agent — kiro-cli's v3 protocol offers none to wait for. The
   transcript is left on disk, so the session is resumable afterwards at the cost of one reload — and a
   session with a tab open or a turn running is never swept, however old.
-- **Cancelling a turn does not kill what the agent started.** Measured on kiro-cli 2.16.0: both
-  `session/cancel` and the session terminate the sweeper uses stop the ACP turn while leaving any
-  shell subprocess the agent spawned running to completion. It is reaped only when PowerAtlas exits.
+- **Cancelling a turn does not kill what the agent started.** Measured on kiro-cli 2.16.0:
+  `session/cancel` stops the ACP turn while leaving any shell subprocess the agent spawned running to
+  completion. It is reaped only when PowerAtlas exits.
   So a cancelled build or long-running command keeps consuming CPU and memory that the per-session
   figure above does not include. When a fan-out runs, an inline crew panel appears directly below the spawner tool call in the transcript, listing each sub-agent with its elapsed time; done entries freeze their timer at their actual stop time. Each fan-out produces its own panel. The panel updates live, mid-fan-out, populated as each sub-agent's own tool calls and streamed output arrive — not deferred to turn completion.
 
-Creating a session writes a permanent `.json`, `.jsonl` and `.lock` into your kiro-cli session store,
-as any kiro-cli session does. Resuming one without prompting leaves the transcript byte-identical.
+Creating a session writes `session.json` and `messages.jsonl` into a per-session `sess_<uuid>/`
+directory inside your kiro-cli session store. The workspace's `.lock` file lives one level up, shared
+across every session in that workspace rather than owned by this one. Resuming a session without
+prompting leaves the transcript byte-identical.
 
 There is no mode picker on this page — a session runs kiro-cli's default agent mode and cannot be
 switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from here. This is deliberate scope, not a
