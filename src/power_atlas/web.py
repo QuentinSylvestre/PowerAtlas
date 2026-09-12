@@ -892,8 +892,11 @@ async def same_origin_guard(request: Request, call_next):
     longer be justified as "a GET here is never state-changing": rendering that
     page seeds a socket that sends ``subscribe``, is answered
     ``unknown_session``, and sends ``load`` — which reaches ``ensure_started``
-    and spawns ``kiro-cli acp -a``. A cross-origin top-level navigation was
-    therefore enough to start a trust-all-tools agent with no user gesture.
+    and spawns ``kiro-cli acp --agent-engine v3``. A cross-origin top-level
+    navigation was therefore enough to start an ACP agent process with no user
+    gesture; v3 gates each tool call behind an interactive
+    ``session/request_permission`` prompt rather than a blanket trust mode, but
+    an unwanted spawn is still an unwanted spawn.
     """
     # `_ALLOWED_HOSTS` is loopback-only by default and gains **at most one**
     # further name — the configured remote bind address, taught to it by
@@ -919,8 +922,11 @@ async def same_origin_guard(request: Request, call_next):
 # all 17 peers on the account sit in this host's network map, so reachability
 # is not authorization and the cookie below is the ONLY control. D33 records
 # the user's decision to ship on that basis, with the consequence stated: what
-# sits behind this code is `kiro-cli acp -a`, i.e. arbitrary command execution
-# as the user. Every check here is load-bearing on its own.
+# sits behind this code is `kiro-cli acp --agent-engine v3` — an agent that
+# answers `session/request_permission` interactively rather than trusting
+# every tool, but whose approval channel a cookie-holding client can drive
+# itself (see `ws_acp` below), so the practical consequence is still arbitrary
+# command execution as the user. Every check here is load-bearing on its own.
 
 # Loaded once at startup by `set_remote_secret`, from a file, never from
 # `config.toml` (D8). Empty means "no usable secret", which is the state a
@@ -1352,8 +1358,10 @@ app.add_middleware(RemoteAccessGuard)
 
 # Per-process, never persisted, regenerated every launch. The origin check
 # below stops a web page; it does nothing against a local non-browser process,
-# which can send any header it likes — and the ACP agent runs with
-# trust-all-tools, so that gap is arbitrary command execution.
+# which can send any header it likes — and past the handoff `ws_acp` is an
+# opaque router onto the full ACP protocol, `session/request_permission`
+# prompts included, so a holder of this token can answer its own approval
+# prompts and reach arbitrary command execution just the same.
 #
 # Residual risk, stated rather than implied: this token is delivered inside a
 # page served over unauthenticated HTTP, so any local process that can fetch
@@ -1665,22 +1673,25 @@ async def ws_acp(ws: WebSocket) -> None:
 # name before this point in the file is reached.
 
 # D16's defaults — 10 groups, 3 sessions each. The product of the two is what
-# bounds the per-row lock check to ~30 rather than the store's 1,207.
+# bounds the per-row lock check to ~30 rather than a count that scales with
+# the size of the store.
 _ACP_GROUPS_PER_PAGE = 10
 _ACP_SESSIONS_PER_GROUP = 3
 # A caller-supplied page size is an amplification lever, so both axes are
 # clamped — but they are not equally expensive. A row costs one `.lock` read
 # plus one `psutil` query; a *group* costs that for its rows **plus a full
 # session load**, because the group's `total` needs its whole list. The group
-# axis is therefore the amplification axis: measured against the real store,
-# the previous 50-group ceiling answered a single 50x50 request with 472 rows
-# and 975 of the store's 1,210 sessions loaded.
+# axis is therefore the amplification axis: measured pre-cutover against the
+# v2 store (2026-08-01, before `data_kiro_v3.py` existed), the previous
+# 50-group ceiling answered a single 50x50 request with 472 rows and 975 of
+# that store's 1,210 sessions loaded — illustrative of the shape of the cost,
+# not a current figure.
 #
 # 20 is twice what the product asks for — the rail shows 10 groups with a
 # show-more — which leaves headroom for a client wanting a larger first page
 # while halving the worst-case group fan-out. The session axis stays at 50: an
 # extra row there costs one slice of an already-loaded list plus one lock read,
-# and paging a 208-session workspace is a real use. This route becomes remotely
+# and paging a large workspace is a real use. This route becomes remotely
 # reachable in Phase 5, so both numbers are bounds, not preferences.
 _ACP_MAX_GROUPS_PER_PAGE = 20
 _ACP_MAX_SESSIONS_PER_GROUP = 50
@@ -1692,9 +1703,10 @@ _ACP_MAX_SESSIONS_PER_GROUP = 50
 #
 # 30 matches the ~30 rows the grouped default puts on screen (10 x 3), which is
 # what bounds the per-row lock check. It is also what makes the day grouping
-# useful rather than degenerate: measured against this store, 30 rows reach
-# back to 2026-07-19, so a first page is roughly two weeks of day groups rather
-# than one enormous "Today".
+# useful rather than degenerate: measured pre-cutover against the v2 store
+# (2026-08-03, before `data_kiro_v3.py` existed), 30 rows reached back about
+# two weeks, so a first page was roughly two weeks of day groups rather than
+# one enormous "Today" — illustrative of the shape, not a current figure.
 #
 # The ceiling is where the cost stops being free rather than where it starts to
 # hurt. `_acp_availability` has no wall-clock budget of its own and is strictly
@@ -1820,7 +1832,7 @@ def _acp_status_for_held(sessions) -> dict[str, str]:
             out[session.session_id] = _resolved_session_status(
                 snapshot, _ACP_V3_LISTING_PROVIDER, session.session_id, semantic)
         except Exception:
-            log.exception("ACP v3 listing: could not settle status for %s",
+            log.exception("ACP listing: could not settle status for %s",
                           session.session_id)
             out[session.session_id] = "working"
     return out
@@ -1863,12 +1875,11 @@ def _acp_cwd_exists(cwd: str) -> bool:
     """Does the workspace directory still exist on disk?
 
     A **separate question from D17's availability**, which measures lock
-    liveness and nothing else. Measured on the real store 2026-08-01: 14 of 65
-    workspaces name a directory that is gone, including the 208-session
-    `nrf_tool` worktree that is D19's own showcase — and every one of their
-    sessions reports `available`, correctly, because no process holds a lock on
-    a session in a deleted tree. The rail would otherwise offer 208 sessions
-    that fail the moment one is tapped.
+    liveness and nothing else. A workspace whose directory has been deleted
+    still has sessions that report `available`, correctly, because no process
+    holds a lock on a session in a deleted tree — so without this check the
+    rail would offer sessions from a vanished workspace, including a large
+    one, that fail the moment one is tapped.
 
     The field has to come from here because **a browser cannot stat a
     filesystem**; there is no client-side answer to substitute. Cost is one
@@ -1959,15 +1970,15 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     Paginated **independently at both levels** (D19). The existing listing
     filters all set `has_more = False` (`partials_all_sessions`), i.e. they
     filter the loaded page and then declare there is nothing after it —
-    inheriting that here would silently truncate this store's 208-session
-    workspace at whatever the first page happened to hold. So each group
-    carries its own `total`/`has_more` computed from its own session list, and
-    the group axis carries its own, and moving one does not move the other.
+    inheriting that here would silently truncate a large workspace's session
+    list at whatever the first page happened to hold. So each group carries
+    its own `total`/`has_more` computed from its own session list, and the
+    group axis carries its own, and moving one does not move the other.
 
     A `cwd` selects a single workspace and bypasses the group axis entirely:
     that is the shape the rail's per-group "show more" needs, and it is what
-    makes paging a 208-session workspace cost one workspace's sessions rather
-    than the whole page's.
+    makes paging a large workspace cost one workspace's sessions rather than
+    the whole page's.
 
     **Honours the `hidden` workspace tag and the provider's enabled flag**, the
     same two config-driven exclusions `/partials/all-sessions` applies — a
@@ -2021,7 +2032,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         try:
             sessions = data.get_sessions(ws_cwd, _ACP_V3_LISTING_PROVIDER)
         except Exception:
-            log.exception("ACP v3 listing: could not read sessions for %s", ws_cwd)
+            log.exception("ACP listing: could not read sessions for %s", ws_cwd)
             sessions = []
         ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
         ws_name = Path(ws_cwd).name or ws_cwd
@@ -2140,7 +2151,7 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
             exclude_cwds=hidden,
             pinned_sessions=config.pinned_sessions if pinned_set else None)
     except Exception:
-        log.exception("ACP v3 flat listing: could not collect sessions")
+        log.exception("ACP flat listing: could not collect sessions")
         rows, has_more = [], False
 
     pinned_raw = [(s, prov) for s, prov in rows if s.session_id in pinned_set]
@@ -2246,10 +2257,10 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
     process took in the meantime is exactly the wrong failure to cache.
     """
     response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
+    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
     capacity = {
-        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
+        "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
     if mode == "recent":
@@ -2277,9 +2288,10 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
 # paths and counts with no session content at all.
 #
 # Cheap on purpose. `/api/acp/sessions` costs a full `get_sessions` per group
-# because each group's `total` needs the whole list — measured at 975 of 1,210
-# sessions loaded for a single 50x50 request — so building a 65-workspace picker
-# out of four pages of it would be the most expensive request the app makes.
+# because each group's `total` needs the whole list — measured pre-cutover
+# against the v2 store at 975 of 1,210 sessions loaded for a single 50x50
+# request — so building the workspace picker out of several pages of it would
+# be one of the most expensive requests the app makes.
 # `discover_workspaces_with_counts` already carries the count, is cached for 30 s
 # and is the same call the dashboard makes, so this is a filter over a warm list.
 #
@@ -2292,15 +2304,15 @@ def _acp_workspaces(capacity: dict) -> dict:
 
     Excludes the same two sets `_acp_listing` excludes — `hidden`-tagged
     workspaces and a disabled provider — plus a third this route needs and that
-    one does not: **workspaces whose directory is gone**. 14 of the real store's
-    65 are in that state, and `_resolve_session_cwd` refuses every one of them
-    with `BadCwd`, so offering them as create targets would be offering 14
-    guaranteed failures. The listing route keeps them because reading an old
-    conversation from a deleted tree is perfectly reasonable; creating a new one
-    there is not.
+    one does not: **workspaces whose directory is gone**. `_resolve_session_cwd`
+    refuses every one of them with `BadCwd`, so offering them as create targets
+    would be offering guaranteed failures. The listing route keeps them because
+    reading an old conversation from a deleted tree is perfectly reasonable;
+    creating a new one there is not.
 
     The count of what was dropped is reported rather than swallowed: a picker
-    that silently shows 51 of 65 workspaces reads as a broken list.
+    that silently shows fewer workspaces than actually exist reads as a broken
+    list.
     """
     from .config import get_workspace_settings
 
@@ -2338,10 +2350,10 @@ async def api_acp_workspaces(response: Response):
     and the same pair the listing route reports.
     """
     response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
-    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
+    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
     capacity = {
-        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
+        "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
     return await asyncio.to_thread(_acp_workspaces, capacity)

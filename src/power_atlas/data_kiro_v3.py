@@ -610,7 +610,7 @@ def hash_dir_for_cwd(cwd: str) -> str | None:
     (or instead of) ``load_sessions`` for the same cwd costs nothing extra
     beyond the cheap mtime-only freshness check ``_cwd_to_sessions`` already
     does on every call. Lets a caller that already knows a session's workspace
-    (e.g. ``web._acp_listing_v3``) resolve straight to its hash dir once per
+    (e.g. ``web._acp_listing``) resolve straight to its hash dir once per
     workspace, instead of scanning every hash dir under ``V3_SESSIONS_ROOT``
     once per session (see ``acp._lock_holder_v3``'s ``workspace_hash``
     parameter).
