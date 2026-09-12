@@ -1,7 +1,7 @@
 # ACP v2-to-v3 Engine Cutover
 
 > **Date**: 2026-09-11
-> **Status**: In Progress — Phases 1-3 complete, Phases 4-7 pending
+> **Status**: In Progress — Phases 1-6 complete, Phase 7 (restart + live verification) pending
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Retire the live v2 ACP protocol engine, make v3 the sole engine behind `/acp`, delete v2-only code and rename the surviving v3 code to drop its suffix.
 > **Estimated effort**: ~1-2 weeks (Major tier — architectural consolidation across two large files, a repo-wide rename with several genuine exceptions, and ~90 test artifacts)
@@ -258,9 +258,14 @@ Steps:
 7. **Do not touch** (D8): `plans/CLOSED_INVESTIGATIONS.md`'s 10 hits — historical record.
 
 **Exit criteria**:
-- [ ] `README.md`'s v3-protocol section rewritten; no reference to `/acp-v3` as a live, separate path remains in any file this phase covers
-- [ ] `grep -rn "acp-v3\|_v3\b\|SupervisorV3\|CLOSE_METHOD_V3" README.md AGENTS.md docs/KNOWLEDGE.md plans/ROADMAP.md memory/MEMORY.md plans/tests/260701_POWERATLAS.md` returns only expected hits from the permanent-distinction set (SC-3) or explicitly-preserved facts (steps 3, 4's line 166)
-- [ ] `plans/CLOSED_INVESTIGATIONS.md` is unmodified (`git diff` confirms)
+- [x] `README.md`'s v3-protocol section rewritten; no reference to `/acp-v3` as a live, separate path remains in any file this phase covers — the two-section split was merged into one (see Implementation Divergences), a more thorough treatment than a name-swap
+- [x] `grep -rn "acp-v3\|_v3\b\|SupervisorV3\|CLOSE_METHOD_V3" README.md AGENTS.md docs/KNOWLEDGE.md plans/ROADMAP.md memory/MEMORY.md plans/tests/260701_POWERATLAS.md` returns only expected hits from the permanent-distinction set (SC-3) or explicitly-preserved facts — confirmed by the orchestrator; remaining hits are SC-3 exceptions and clearly-labeled historical text (the `260701_POWERATLAS.md` section 2.27 rewrite explicitly marks its retained pre-cutover description as historical)
+- [x] `plans/CLOSED_INVESTIGATIONS.md` is unmodified — confirmed, zero diff
+
+Implementation (2026-09-12, code: e2550ba, 14153ee)
+Steps 1-5 and 7 landed as a parallel-dispatched sub-agent (code: e2550ba); step 6 (`plans/tests/260701_POWERATLAS.md`) was deliberately deferred — it needed Phase 4's actual test disposition, which the concurrent dispatch couldn't know yet despite the plan's `[P:4,5,6]` annotation — and completed as a small follow-up once Phase 4 landed (code: 14153ee). `docs/KNOWLEDGE.md` needed no edits (confirmed via direct code read that its cross-references still resolve). Full detail, including the README.md section-merge rationale and the `260701_POWERATLAS.md` byte-corruption workaround, is in Implementation Divergences below.
+
+**Step 5b QA verification**: N/A — prose-only phase, no runtime surface.
 
 ### Phase 7: Restart coordination & live verification
 **Goal**: Deploy the consolidated engine and verify every success criterion against the real, running instance.
@@ -346,6 +351,13 @@ Steps:
 - **Plan's literal-count estimate was stale**: the plan's 2026-09-11 research counted 10/3/6 `/acp-v3`-family literal occurrences; the actual current-file count was 9 total. Re-verified directly rather than trusting the cited figure, consistent with this plan's own repeated finding that line-number and count citations drift.
 - **Removed one item beyond the 3 named tests**: a dead `engine: opts.engine ?? "v2"` context key in `loadPage()`, unreferenced by any remaining call site after the 3 tests were rewritten, and itself containing a literal `/acp-v3` string the exit criterion required gone.
 
+### Phase 6 (2026-09-12)
+
+- **README.md's two-engine section fully merged, not name-swapped**: the plan's step 1 called for "substantive rewriting, not a name-swap" — the implementing sub-agent went further and merged the separate `## Agent sessions, v3 protocol (/acp-v3)` section entirely into the main `## Agent sessions (/acp)` section, since every fact in the v3-specific section is now simply true of the sole engine and a separate "protocol notes" heading had nothing left to contrast against. Also corrected the main section's process-invocation line to name the actual spawn (`kiro-cli acp --agent-engine v3`), which the pre-existing text had never fully stated.
+- **memory/MEMORY.md: two entries got new dated annotations instead of in-place rewrites**: where the underlying *mechanism* changed (not just a name) — the `_publish_live` v2-session union's deletion, and the base/subclass split behind `new_session`'s `_meta.id` read — the sub-agent added a new `**Update (2026-09-12, ...)**` annotation rather than silently rewriting the original entry, matching the file's own pre-existing convention for exactly this situation (D7 requires facts preserved, not merely names updated).
+- **plans/tests/260701_POWERATLAS.md's known byte-corruption issue, confirmed pre-existing and left untouched**: the file's line 174 (the "2026-08-19 update (v3 spike)" note) contains literal control characters (0x07 BEL replacing the "a" in "api", 0x09 TAB replacing the "t" in "tests") — the same recurring cross-file corruption pattern `memory/MEMORY.md` already documents with unknown origin. A plain string-match edit against this line failed for exactly this reason; worked around with a byte-level, line-indexed insertion that left the corrupted line itself completely untouched. Not this plan's bug to fix.
+- **Step 6 deferred and completed as a follow-up, not skipped**: the plan's `[P:4,5,6]` parallel annotation implied Phase 6 could run fully concurrently with Phase 4, but step 6 explicitly needs "Phase 4's actual disposition" of each renamed/deleted test class — unknowable while Phase 4 was still in flight. Deferred cleanly (the concurrent sub-agent was told to skip it explicitly, not left to guess), then completed once Phase 4's actual class-name dispositions (`TestApiAcpV3DeleteSessionsEndpoint`→`TestAcpDeleteEndpointForV3Ids`, `TestApiAcpDeleteSessionsV2RegressionForMixedWorkspace`→`TestApiAcpDeleteSessionsEndpointMixedWorkspace`) were known and independently confirmed present in the committed test file.
+
 ## Progress Tracker
 
 | # | Phase/Task | Status | Notes |
@@ -355,7 +367,7 @@ Steps:
 | 3 | Frontend — ENGINE collapse & dashboard gate fix | Complete | ENGINE ternary collapsed, D6 gate fix applied; node test 428/436 (exactly 3 expected regressions); browser console check unavailable, substituted with HTTP fetch + DOM harness |
 | 4 | Test suite — tests/test_web.py | Complete | 1533 passed/0 failed/0 skipped; 17 net deletions (plan estimated 6); both hang-prone tests root-caused and fixed, not skipped |
 | 5 | Test suite — tests/acp_page.test.mjs | Complete | 431/436 passed (3 targeted tests fixed, 5 unrelated pre-existing failures untouched); zero acp-v3 literals remain |
-| 6 | Documentation sweep | Not started | |
+| 6 | Documentation sweep | Complete | Steps 1-5,7 via parallel dispatch; step 6 deferred and completed as a follow-up once Phase 4's disposition was known |
 | 7 | Restart coordination & live verification | Not started | |
 
 ## Dependency Graph
