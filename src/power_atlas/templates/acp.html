@@ -7037,7 +7037,7 @@
       // state with no cross-tab or stale-reload special-casing needed beyond
       // finding the row by requestId. Fires whether the request was actually
       // answered (_handle_permission_response) or swept away unanswered
-      // at turn end (_handle_prompt_v3's finally) -- both cases mean the
+      // at turn end (_handle_prompt's finally) -- both cases mean the
       // pending state behind it is gone, so the client-side handling is
       // identical either way.
       var _resolvedId = payload && payload.requestId;
