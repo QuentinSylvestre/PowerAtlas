@@ -244,6 +244,8 @@ Rewrote the 3 `test_engine_v3_*` checks to assert directly against the single ha
 
 **Step 5b QA verification**: N/A — test-suite-only phase.
 
+Post-review auto-fix (code: 9803aba): applied the review's assertion-precision finding (see Review Log). Orchestrator independently confirmed the fix is correctly scoped and the pass/fail count is unchanged.
+
 ### Phase 6: Documentation sweep [P:4,5]
 **Goal**: Update every live documentation reference to the retired v2/v3 split; leave historical records untouched (D8).
 **Covers**: SC-8
@@ -513,6 +515,17 @@ Implementation health: Green. 1 review cycle (capped per user instruction — no
 | 6 | Low | Docstrings for the two hang-fix tests (and one sibling) called their scenario a "race," but `closing.add()` always precedes the only relevant `await` in both call sites, making the ordering deterministic under asyncio's cooperative scheduling, not a genuine race. | Fixed — reworded to describe enforced ordering/sequencing; left every other, genuinely-different "race" occurrence in the file untouched. |
 
 Auto-fix commit `39d5a1c` (tests/test_web.py). Orchestrator independently reproduced: 1535 passed / 0 failed / 0 skipped (was 1533 before the 2 new tests), zero duplicate defs (fresh AST scan), and read both new tests in full to confirm they assert real, current behavior rather than trivially-true statements.
+
+### 2026-09-12 -- Implementation Review (after Phase 5, persona: Senior engineer)
+
+Implementation health: Green. 1 review cycle (capped per user instruction).
+1 finding (0 High, 0 Medium, 1 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | The rewritten `/ws/acp` WebSocket-URL assertion used `.includes()` with no boundary check, so it would also pass against a future regression reintroducing `/ws/acp-v3` — inconsistent with its two sibling tests' precise `.startsWith()` checks. | Fixed — tightened to a boundary-aware regex (`/\/ws\/acp(\?|$)/`); manually verified it accepts the real URL and rejects a hypothetical `-v3` regression. |
+
+Auto-fix commit `9803aba` (tests/acp_page.test.mjs). Orchestrator independently confirmed the commit is clean and scoped to exactly this one assertion.
 
 ## Harness Improvement Opportunities
 <Reserved -- appended during /qexplore, /qplan and /qdev when harness friction is felt.>
