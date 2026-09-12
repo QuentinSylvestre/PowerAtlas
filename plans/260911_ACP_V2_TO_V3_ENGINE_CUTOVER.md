@@ -234,8 +234,13 @@ Steps:
 2. Sweep the file for any other `/acp-v3`, `/ws/acp-v3`, `/api/acp-v3/*` literal (10, 3, 6 occurrences respectively per the enumeration research) and update or remove as appropriate.
 
 **Exit criteria**:
-- [ ] `node tests/acp_page.test.mjs` passes in full, including the 3 rewritten tests
-- [ ] Zero remaining `/acp-v3`-family literal in the file
+- [x] `node tests/acp_page.test.mjs` passes in full, including the 3 rewritten tests — 431 passed / 5 failed (up from 428/8); the 3 targeted tests pass, the 5 remaining failures are pre-existing and confirmed unrelated (reproduced identically on pristine pre-Phase-3 code during Phase 3's own review)
+- [x] Zero remaining `/acp-v3`-family literal in the file — confirmed
+
+Implementation (2026-09-12, code: ef094ab)
+Rewrote the 3 `test_engine_v3_*` checks to assert directly against the single hardcoded `WS_PATH`/`RAIL_SESSIONS_API`/`PICKER_WORKSPACES_API` values, following the file's existing verify-via-observed-effect pattern. Renamed the checks away from their `test_engine_v3_*` names (the only checks in the file using that naming convention) since retaining "v3"/"engine" language on assertions that no longer branch on anything would mislead. Also removed a now-dead `engine` context key from `loadPage()`. The plan's original 10/3/6 literal-count estimate was stale; re-verified against the current file directly (9 total occurrences found, all now removed).
+
+**Step 5b QA verification**: N/A — test-suite-only phase.
 
 ### Phase 6: Documentation sweep [P:4,5]
 **Goal**: Update every live documentation reference to the retired v2/v3 split; leave historical records untouched (D8).
@@ -336,6 +341,11 @@ Steps:
 - **One vacuous assertion found and fixed on final review**: `test_a_session_inside_the_ttl_is_left_alone` asserted only that no wire bytes were written — trivially true now regardless of outcome, since no wire call is ever made either way, so the assertion could no longer distinguish "left alone" from "silently terminated." Added a positive assertion (`sid in acp_mod._supervisor.sessions`) mirroring the fix already needed on a sibling test, making the test load-bearing again.
 - **Two out-of-scope, unrelated staleness patterns flagged, not fixed**: `_sweep_once`'s and `_load_failure`'s docstrings in `acp.py` still describe mechanisms (`_kiro.dev/session/terminate`, `.lock`-file removal, a holder re-read) that no longer execute — outside this phase's `tests/test_web.py`-only file scope. A pre-existing, unrelated log-wording split ("ACP socket" vs. "ACP v3 socket") predates the v2/v3 merge; the shared test-helper regex was made tolerant of either spelling rather than picking a side to enforce, since fixing the actual log lines is outside this phase's scope.
 
+### Phase 5 (2026-09-12)
+
+- **Plan's literal-count estimate was stale**: the plan's 2026-09-11 research counted 10/3/6 `/acp-v3`-family literal occurrences; the actual current-file count was 9 total. Re-verified directly rather than trusting the cited figure, consistent with this plan's own repeated finding that line-number and count citations drift.
+- **Removed one item beyond the 3 named tests**: a dead `engine: opts.engine ?? "v2"` context key in `loadPage()`, unreferenced by any remaining call site after the 3 tests were rewritten, and itself containing a literal `/acp-v3` string the exit criterion required gone.
+
 ## Progress Tracker
 
 | # | Phase/Task | Status | Notes |
@@ -344,7 +354,7 @@ Steps:
 | 2 | Backend routing & endpoints (web.py) | Complete | Retried once (first attempt had a duplicate-route bug, discarded uncommitted); routes/constants/D10/D11(extended)/D12(corrected)/`_REMOTE_ALLOWED_PATHS` all applied; pytest 1378 passed/170 failed/2 deselected, delta from Phase 1 baseline fully traced (see §9) |
 | 3 | Frontend — ENGINE collapse & dashboard gate fix | Complete | ENGINE ternary collapsed, D6 gate fix applied; node test 428/436 (exactly 3 expected regressions); browser console check unavailable, substituted with HTTP fetch + DOM harness |
 | 4 | Test suite — tests/test_web.py | Complete | 1533 passed/0 failed/0 skipped; 17 net deletions (plan estimated 6); both hang-prone tests root-caused and fixed, not skipped |
-| 5 | Test suite — tests/acp_page.test.mjs | Not started | |
+| 5 | Test suite — tests/acp_page.test.mjs | Complete | 431/436 passed (3 targeted tests fixed, 5 unrelated pre-existing failures untouched); zero acp-v3 literals remain |
 | 6 | Documentation sweep | Not started | |
 | 7 | Restart coordination & live verification | Not started | |
 
