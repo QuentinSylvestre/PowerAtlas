@@ -170,8 +170,8 @@ Linux users need `gir1.2-webkit2-4.1` system package for pywebview. The peek hot
 
 Reached from the **ACP** button beside the logo in the dashboard topbar, or by opening `/acp` directly.
 
-`/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp` process holds every session PowerAtlas
-opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by
+`/acp` drives kiro-cli over ACP: one supervised `kiro-cli acp --agent-engine v3` process holds every
+session PowerAtlas opens. The left rail lists workspaces with their sessions — ten workspaces and three sessions each by
 default, each axis paging independently — and marks every visible row *available*, *held by PowerAtlas*,
 or *locked* by another process. Selecting a row resumes that session and replays its history; sessions
 whose workspace directory no longer exists are marked so, since they cannot be resumed usefully.
@@ -303,47 +303,33 @@ Three things are worth knowing before leaving a long task running:
   `session/cancel` and the session terminate the sweeper uses stop the ACP turn while leaving any
   shell subprocess the agent spawned running to completion. It is reaped only when PowerAtlas exits.
   So a cancelled build or long-running command keeps consuming CPU and memory that the per-session
-  figure above does not include. When a fan-out runs, an inline crew panel appears directly below the spawner tool call in the transcript, listing each sub-agent with its elapsed time; done entries freeze their timer at their actual stop time. Each fan-out produces its own panel.
+  figure above does not include. When a fan-out runs, an inline crew panel appears directly below the spawner tool call in the transcript, listing each sub-agent with its elapsed time; done entries freeze their timer at their actual stop time. Each fan-out produces its own panel. The panel updates live, mid-fan-out, populated as each sub-agent's own tool calls and streamed output arrive — not deferred to turn completion.
 
 Creating a session writes a permanent `.json`, `.jsonl` and `.lock` into your kiro-cli session store,
 as any kiro-cli session does. Resuming one without prompting leaves the transcript byte-identical.
 
-## Agent sessions, v3 protocol (`/acp-v3`)
+There is no mode picker on this page — a session runs kiro-cli's default agent mode and cannot be
+switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from here. This is deliberate scope, not a
+missing feature.
 
-A separate route, not a toggle on `/acp` — the two pages drive kiro-cli over different protocol
-versions (`kiro-cli acp` vs. `kiro-cli acp --agent-engine v3`) through two independent supervisor
-processes, and neither affects the other's sessions. `/acp-v3` shares `/acp`'s template, so the rail,
-grouping, image paste, markdown rendering, and diff-on-reload behavior described above all work the
-same way. What differs is protocol-specific:
+**The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
+needs you to choose between options before continuing, the question and its choices render as buttons
+directly in the transcript, and the turn stays paused until you click one. Answering (from any tab, or
+on reload) marks the request resolved everywhere it's shown; a request answered elsewhere never shows
+as still-pending.
 
-**Every `/acp-v3` session runs kiro-cli's default agent mode.** There is no mode picker — a v3 session
-cannot be switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from this page. This is
-deliberate scope, not a missing feature: v2 has no mode picker either.
-
-**A v3 agent can ask a clarifying question mid-turn, and the page answers it inline.** When the
-agent needs you to choose between options before continuing — something v2's protocol has no
-equivalent for — the question and its choices render as buttons directly in the transcript, and the
-turn stays paused until you click one. Answering (from any tab, or on reload) marks the request
-resolved everywhere it's shown; a request answered elsewhere never shows as still-pending.
-
-**The context-usage bar reuses the same mechanism as v2** (the same `contextPercent` frame shape);
-**steering acknowledgement and the session title are v3-only additions** with no v2 equivalent, fed
-by v3's own notification shape — all three show up as the same UI elements you already know either
-way, nothing to configure differently.
+**The context-usage bar, steering acknowledgement, and the session title** all show up as the UI
+elements you'd expect, fed by the protocol's own notification frames — nothing to configure
+separately.
 
 **An MCP connection or authorization failure surfaces inline in the transcript**, as a plain-text
-error message attached to the turn — there's no separate "Connect" prompt or MCP status panel for
-`/acp-v3` today.
+error message attached to the turn — there's no separate "Connect" prompt or MCP status panel.
 
-**The crew panel updates live, mid-fan-out, not just once a turn ends** — the same panel `/acp`
-shows, populated as each sub-agent's own tool calls and streamed output arrive, not deferred to
-turn completion.
-
-**The slash-command palette lists v3's own catalogue.** Selecting a skill entry works the same way as
-typing its name; kiro-default (the palette's own "switch agent" entry, meaningless while `/acp-v3` is
-hardcoded to one agent) and three built-in steering documents (`architecture-selection`, `quick-spec`,
-`bug-fix`) are not offered — no working trigger exists for those three via anything the page could
-click, so they're left out rather than shown broken.
+**The slash-command palette lists the agent's own catalogue.** Selecting a skill entry works the same
+way as typing its name; kiro-default (the palette's own "switch agent" entry, meaningless while this
+page is hardcoded to one agent) and three built-in steering documents (`architecture-selection`,
+`quick-spec`, `bug-fix`) are not offered — no working trigger exists for those three via anything the
+page could click, so they're left out rather than shown broken.
 
 ## Remote access (opt-in)
 
