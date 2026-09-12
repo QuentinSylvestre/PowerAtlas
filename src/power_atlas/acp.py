@@ -299,7 +299,8 @@ SEND_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 # The agent→client direction's size cap, and the block size the reader works
 # in. Until Phase 4 nothing streamed, so `for line in proc.stdout` had no
 # ceiling on a single line while the client→server path enforced
-# MAX_MESSAGE_BYTES; tool output under `-a` is what makes that a live path.
+# MAX_MESSAGE_BYTES; tool output from an approved tool call is what makes
+# that a live path.
 #
 # 1 MiB rather than the client's 256 KiB because the two directions carry
 # different things: the largest legitimate client frame is prose a human typed,
@@ -374,9 +375,11 @@ MAX_TOOL_INPUT_CHARS = 4000
 # thing, and they separate along exactly the record-versus-broadcast seam:
 #
 #   the DIGEST — an exit status, a byte count, a diff stat, the head of
-#   stderr. This is the audit answer, the one `-a` makes necessary, and it
-#   MUST survive a reload. It is ~150 bytes, so it goes through `_emit` and
-#   into the buffer like every other frame. ~3 KB a turn, ~75 turns retained.
+#   stderr. This is the audit answer — v3's interactive
+#   `session/request_permission` prompt is terse and doesn't capture what a
+#   call actually did, so this MUST survive a reload. It is ~150 bytes, so
+#   it goes through `_emit` and into the buffer like every other frame.
+#   ~3 KB a turn, ~75 turns retained.
 #
 #   the BODY — the diff, the stdout tail. This is the comprehension aid. It is
 #   large, and it only matters to someone watching. It is broadcast and never
@@ -4274,8 +4277,15 @@ class _Supervisor:
         if method in ("_kiro.dev/clear/status", "kiro.dev/clear/status"):
             return
         if log.isEnabledFor(logging.INFO):
-            # INFO, not DEBUG (SC-10, plan Phase 1): see the v2 fallback's
-            # comment in _Supervisor._on_notification for why.
+            # Params and not only the method name. This module talks to an
+            # undocumented protocol: `_kiro.dev/*` is not in the ACP spec at
+            # all, and the context-window branch above exists only because a
+            # line like this one showed what those notifications carry.
+            # Guarded rather than lazily formatted because the `json.dumps`
+            # would otherwise run on every unmatched notification at every
+            # log level. INFO, not DEBUG (SC-10, plan Phase 1): production
+            # runs at INFO, and a future/unknown kind was previously
+            # invisible without deliberately enabling DEBUG first.
             log.info("ACP v3 notification %s (%s): %.600s",
                       method, kind or "-", json.dumps(params))
 
@@ -4460,7 +4470,7 @@ class _Supervisor:
         _emit_subagents_frame(parent_id, self.crews, self._active_fan_out_wave)
 
     def _spawn(self) -> None:
-        """Start the v3 agent. Uses ACP_ARGS instead of ACP_ARGS."""
+        """Start the agent process, spawned with ACP_ARGS."""
         exe = shutil.which(KIRO_BINARY)
         if not exe:
             raise AgentUnavailable(
@@ -4741,10 +4751,11 @@ class _Supervisor:
         return {"sessionId": session_id, "cwd": cwd}
 
     async def load_session(self, session_id: str, cwd: str) -> dict:
-        """Adopt a v3 session from the kiro-cli store.
+        """Adopt a session from the kiro-cli store.
 
-        Differences from base: no lock hint; cwd resolved via
-        _stored_session_cwd_v3; diff backfill via _get_tool_diffs_v3.
+        No lock-hint check; diff backfill via _get_tool_diffs_v3. `cwd`
+        arrives already resolved by the caller (_handle_load, via
+        _stored_session_cwd_v3).
         """
         if self.at_capacity():
             raise SessionLimit(_session_limit_message())
@@ -5090,12 +5101,11 @@ def shutdown() -> None:
 
 
 async def serve_socket(ws: WebSocket) -> None:
-    """v3 counterpart of ``serve_socket`` for the ``/ws/acp-v3`` route.
+    """Handle one WebSocket connection on the ``/ws/acp`` route.
 
-    Web.py validates the token and origin, accepts, and hands the socket here
-    without ever reading a frame's ``type``. Phase 3 must add
-    ``_acp_token_ok`` and ``_ws_origin_ok`` before ``await ws.accept()``
-    in the route handler -- this function does not repeat those checks.
+    Web.py's route handler checks ``_acp_token_ok`` and ``_ws_origin_ok`` and
+    accepts before handing the socket here without ever reading a frame's
+    ``type`` -- this function does not repeat those checks.
     """
     conn = _Connection(ws)
     if len(_registry.connections) >= MAX_CONNECTIONS:
@@ -5228,14 +5238,10 @@ def _handle_subagent_subscribe(conn: _Connection, session_id: str,
     subscriber gets. A subscribe that lands in the brief window before that
     cleanup runs is not a lie — it is correct for the moment it is answered.
 
-    ``crews``/``subagent_history`` default to ``_supervisor``'s own dicts for
-    v2 call sites (``_handle_subscribe``, ``_handle_load``); a v3 call site
-    (``_handle_subscribe``, ``_handle_load``) passes
-    ``_supervisor.crews``/``_supervisor.subagent_history`` explicitly
-    (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4) — this function
-    already identified a v3 sub-agent correctly via which supervisor's
-    ``subagent_sessions`` matched *before* this fix; it just read the wrong
-    (always-v2) dicts for the actual role/task/transcript data.
+    ``crews``/``subagent_history`` default to ``_supervisor``'s own dicts,
+    an explicit parameter rather than this function reaching for the module
+    global directly (plan 260908_ACP_V3_PRODUCTION_HARDENING, Phase 4, SC-4)
+    — the same pattern ``_emit_subagents_frame`` uses.
     """
     if crews is None:
         crews = _supervisor.crews
@@ -5539,15 +5545,14 @@ def _handle_subscribe(conn, session_id):
     events = _with_backfilled_bodies(
         history.events(), session_id, _supervisor._diff_backfill.get(session_id))
     conn.send(envelope("history", {"events": events}, session_id))
-    # Review fix (Phase 4 review pass, finding #3): port of _handle_subscribe's
-    # own live-crew-snapshot-on-reconnect gate. Without this, a browser
-    # reload or WS reconnect during an active v3 fan-out lost the dedicated
-    # crew-panel widget until the next live update (self-healing, but a real
-    # gap against this plan's own SC-5 wording "live, mid-turn, not just at
-    # turn-end"). `subagents` frames are deliberately not recorded into
-    # history (see _emit_subagents_frame's own docstring), so a reconnect's
-    # only source for "which sub-agents does this session have" is rebuilding
-    # it here, exactly as v2 already does.
+    # Review fix (Phase 4 review pass, finding #3): live-crew-snapshot-on-
+    # reconnect gate. Without this, a browser reload or WS reconnect during
+    # an active fan-out lost the dedicated crew-panel widget until the next
+    # live update (self-healing, but a real gap against this plan's own
+    # SC-5 wording "live, mid-turn, not just at turn-end"). `subagents`
+    # frames are deliberately not recorded into history (see
+    # _emit_subagents_frame's own docstring), so a reconnect's only source
+    # for "which sub-agents does this session have" is rebuilding it here.
     crew = _supervisor.crews.get(session_id)
     if crew and (session_id in _supervisor.inflight or
                  any(not e["done"] for e in crew.values())):
@@ -5558,8 +5563,7 @@ def _handle_subscribe(conn, session_id):
             {"subagents": _subagents_payload(crew, fan_out_id),
              "toolCallId": fan_out_id},
             session_id))
-    # Phase 8 live-verification fix: mirror _handle_subscribe's existing v2
-    # resend (this file, ~6300-6305). commands/skills are broadcast-only,
+    # Phase 8 live-verification fix: commands/skills are broadcast-only,
     # never recorded into history (same reasoning as the `subagents`
     # snapshot above), so a reconnect's only source for the already-known
     # catalogue is this cached re-send -- without it, the client's own
