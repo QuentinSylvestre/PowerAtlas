@@ -3097,7 +3097,7 @@ class TestAcpUnrecognizedNotificationLogLevel:
                     "content": {"type": "text", "text": "irrelevant"}}},
             })
         assert any(
-            r.levelno == logging.INFO and "ACP v3 notification" in r.getMessage()
+            r.levelno == logging.INFO and "ACP notification" in r.getMessage()
             for r in caplog.records), [r.getMessage() for r in caplog.records]
 
     def test_v3_fallback_logs_at_info(self, monkeypatch, caplog):
@@ -3117,7 +3117,7 @@ class TestAcpUnrecognizedNotificationLogLevel:
                     "content": {"type": "text", "text": "irrelevant"}}},
             })
         assert any(
-            r.levelno == logging.INFO and "ACP v3 notification" in r.getMessage()
+            r.levelno == logging.INFO and "ACP notification" in r.getMessage()
             for r in caplog.records), [r.getMessage() for r in caplog.records]
 
 
@@ -3624,7 +3624,7 @@ class TestAcpToolCallVisibility:
                 "title": "shell", "kind": "execute", "status": "in_progress",
                 "rawInput": {"command": "Remove-Item -Recurse C:/tmp"}})
         messages = [r.getMessage() for r in caplog.records]
-        assert any("ACP v3 tool tool_call" in m and "t9" in m
+        assert any("ACP tool tool_call" in m and "t9" in m
                    and "Remove-Item -Recurse C:/tmp" in m for m in messages), messages
 
     def test_a_long_command_is_clipped_and_says_so(self, acp_session):
