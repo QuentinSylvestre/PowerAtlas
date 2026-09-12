@@ -219,7 +219,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface-hover); padding-left: 8px; }
 .session-row:hover .session-actions { opacity: 1; }
 .row-btn { font-size: 11px; padding: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.1s; }
-.row-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+.row-btn:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: white; }
+.row-btn:disabled { opacity: 0.45; cursor: default; }
 .row-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
 .terminal-btn { font-family: monospace; font-weight: 600; }
 .row-btn.primary:hover { background: var(--accent); color: white; }
