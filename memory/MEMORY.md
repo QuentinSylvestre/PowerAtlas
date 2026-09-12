@@ -166,6 +166,18 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: this session (2026-08-11) — two direct `kiro-cli acp -a` 2.16.2 subprocess captures (a 3-stage all-succeed fan-out, and a 2-stage fan-out with one stage's command deliberately failed), both logged to session scratchpad only (not retained, same practice as the depth-2 probe above); corrections landed in `acp.py` (SUBAGENT_LIST_METHOD/SUBAGENT_ACTIVITY_METHOD/`_SUBAGENT_ACTIVE_STATUSES`/`_SUBAGENT_ROLE_KEYS`/`_SUBAGENT_TASK_KEYS`/`MAX_SUBAGENT_TASK_CHARS` comments, the `error =` line, the `agent_message_chunk` dispatch comment, and the content-only `tool_call_update` skip) and `tests/test_web.py` (matching comment corrections plus two new regression tests, `test_an_oversized_task_is_clipped` and `test_a_content_only_update_is_not_forwarded`) | **Verified**: 2026-08-11 (session, empirical — every claim backed by a raw captured JSON-RPC line, not model self-report)
 **Stale-when**: kiro-cli minor version changes past 2.16.2 — like the depth-2 entry, the exact status vocabulary and channel behavior are build-specific and should be re-measured rather than assumed to persist.
 
+### `close_session` having zero internal `await` points makes wire-call-mocking test synchronization silently useless
+
+**Why**: Two tests hung indefinitely (not failed) after `260911_ACP_V2_TO_V3_ENGINE_CUTOVER` removed `close_session`'s wire round-trip, because their `asyncio.Event`-based race simulation patched `_request` (the wire call) to create a suspension point — but `close_session` never calls `_request`, so the patch never intercepted anything and the tests blocked forever waiting on an event nothing would set.
+**How to apply**: When a test needs an artificial suspension point to simulate concurrency around an async method, patch that method directly (e.g. `patch.object(_Supervisor, 'close_session', delegate_with_artificial_delay)`) rather than a downstream call it may or may not still make — verify via direct read that the target function actually awaits what you think it awaits before building a race test around it.
+**Source**: `260911_ACP_V2_TO_V3_ENGINE_CUTOVER` Phase 4, code: `39d5a1c` | **Verified**: 2026-09-12 (session, empirical — confirmed via direct read of `close_session`'s body, zero `await` statements, plus a mutation test on the fix)
+
+### A plan's own deferral to "Phase N" can name a phase whose file scope doesn't actually cover the deferred work
+
+**Why**: Phase 1's Implementation Divergences deferred ~91 stale log-message literals to "Phase 4/Phase 6" by name — but Phase 4's file scope was `tests/test_web.py` and Phase 6's was documentation files; neither ever covered `acp.py`. This survived the whole plan's execution and 8 review sub-agents undetected, only surfacing when the orchestrator ran the plan's own final verification grep sweep after everything was believed done.
+**How to apply**: When a plan phase's own text defers cleanup work "to Phase N," verify Phase N's stated **File scope** line actually covers the deferred item's file before trusting the reference — a deferral naming a phase is not itself evidence that phase can act on it.
+**Source**: `260911_ACP_V2_TO_V3_ENGINE_CUTOVER`, code: `817ebf2` | **Verified**: 2026-09-12 (session, empirical)
+
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
