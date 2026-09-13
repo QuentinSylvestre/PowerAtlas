@@ -4394,19 +4394,25 @@ async def launcher_icon(launcher_id: str):
         svg = icons.default_icon_svg(True, "#6b7280")
         return Response(content=svg, media_type="image/svg+xml")
 
-    # Handle provider launcher icons
+    # Handle provider launcher icons. Cached for an hour: a session row now
+    # requests this per provider on every rail render (dashboard/ACP-merge),
+    # and for a provider whose binary yields no extractable icon (kiro-cli,
+    # kiro-cli-v3 today) every uncached request re-ran the full resolve +
+    # extract_icon attempt, which is real wall-clock cost multiplied by every
+    # row of that provider on every refresh.
     if launcher_id.startswith("provider--"):
         provider_key = launcher_id[len("provider--"):]
+        cache_headers = {"Cache-Control": "public, max-age=3600"}
         if icons.has_icon(launcher_id):
-            return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
+            return FileResponse(icons.icon_path(launcher_id), media_type="image/png", headers=cache_headers)
         binary = launcher._PROVIDER_BINARY.get(provider_key, provider_key)
         await asyncio.to_thread(icons.extract_icon, launcher_id, binary, True)
         if icons.has_icon(launcher_id):
-            return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
+            return FileResponse(icons.icon_path(launcher_id), media_type="image/png", headers=cache_headers)
         config = load_config()
         color = _get_provider_color(provider_key, config)
         svg = icons.default_icon_svg(True, color)
-        return Response(content=svg, media_type="image/svg+xml")
+        return Response(content=svg, media_type="image/svg+xml", headers=cache_headers)
 
     if icons.has_icon(launcher_id):
         return FileResponse(icons.icon_path(launcher_id), media_type="image/png")
