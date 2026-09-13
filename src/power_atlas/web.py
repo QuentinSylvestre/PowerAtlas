@@ -2025,7 +2025,9 @@ def _acp_exists_flags(cwds: list[str]) -> list[bool]:
 
 def _acp_listing(cwd: str, group_page: int, group_size: int,
                  session_page: int, session_size: int, held,
-                 capacity: dict) -> dict:
+                 capacity: dict,
+                 providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
+                 include_provider: bool = False) -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     Paginated **independently at both levels** (D19). The existing listing
@@ -2041,30 +2043,66 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     makes paging a large workspace cost one workspace's sessions rather than
     the whole page's.
 
-    **Honours the `hidden` workspace tag and the provider's enabled flag**, the
-    same two config-driven exclusions `/partials/all-sessions` applies — a
-    workspace the user hid from the dashboard has not asked to be visible from
-    a phone, and a disabled provider is not a listing this route may serve. The
-    config read costs an uncached TOML parse, which is exactly why D15 forbids
-    it in `at_capacity()`; D15's ban is **on the event loop**, and this function
-    body runs entirely inside `asyncio.to_thread`. `load_config` is guarded by a
-    `threading.Lock` (`config.py:_lock`) and returns a fresh `Config` per call,
-    so it is safe to call from a worker thread. Unlike the dashboard routes this
-    one takes no `tag` parameter: there is no "show hidden" view to reveal them,
-    so `hidden` here means hidden.
+    **Honours the `hidden` workspace tag and each provider's enabled flag**,
+    the same two config-driven exclusions `/partials/all-sessions` applies —
+    a workspace the user hid from the dashboard has not asked to be visible
+    from a phone, and a disabled provider is not a listing this route may
+    serve. The config read costs an uncached TOML parse, which is exactly why
+    D15 forbids it in `at_capacity()`; D15's ban is **on the event loop**, and
+    this function body runs entirely inside `asyncio.to_thread`. `load_config`
+    is guarded by a `threading.Lock` (`config.py:_lock`) and returns a fresh
+    `Config` per call, so it is safe to call from a worker thread. Unlike the
+    dashboard routes this one takes no `tag` parameter: there is no "show
+    hidden" view to reveal them, so `hidden` here means hidden.
+
+    `providers` (dashboard/ACP-merge Phase 4): defaults to the single-provider
+    set `/api/acp/sessions` has always used, so that route's call is
+    byte-for-byte the same query it always ran — see this module's own
+    docstring on that route for why it must never be repointed at a wider
+    set. A caller passing more than one provider gets one row per *workspace*
+    rather than per (workspace, provider): `_group_workspaces` (already used
+    by `/partials/workspaces` for the same merge) folds same-path rows from
+    different providers together, and each merged workspace's sessions come
+    from every provider that touches it, interleaved by `updated_at` — the
+    same merge `/partials/sessions?provider=all` already does per workspace,
+    just applied across a whole page of them here.
+
+    `include_provider`, off by default: adds a `"provider"` field to every
+    session dict (grouped and pinned alike). Left off for `/api/acp/sessions`
+    on purpose — `test_the_payload_carries_exactly_the_documented_fields`
+    asserts that route's session fields by exact set equality specifically so
+    a field added later fails there rather than reaching a phone, and every
+    session that route ever returns is `kiro-cli-v3` anyway, so the field
+    would say nothing a v3-only caller does not already know. The dashboard's
+    own multi-provider route passes `True`: unlike that route, its rows can
+    be any registered provider, and the client needs to know which one a row
+    is to know how to open or resume it.
     """
     from .config import get_workspace_settings
     from .data import _normalize_path
     from . import data_kiro_v3
 
     config = load_config()
-    if _enabled(config, _ACP_V3_LISTING_PROVIDER):
+    enabled = frozenset(p for p in providers if _enabled(config, p))
+    if not enabled:
+        workspaces: list[tuple[str, int, str, list[str]]] = []
+    elif len(enabled) == 1:
+        only = next(iter(enabled))
         workspaces = [
-            w for w in data.discover_workspaces_with_counts(_ACP_V3_LISTING_PROVIDER)
+            (w[0], w[1], w[2], [only])
+            for w in data.discover_workspaces_with_counts(only)
             if "hidden" not in get_workspace_settings(config, w[0])["tags"]
         ]
     else:
-        workspaces = []
+        grouped = _group_workspaces(
+            [w for w in data.discover_workspaces_with_counts(None) if w[3] in enabled],
+            config)
+        workspaces = [
+            (g["cwd"], g["total_count"], g["latest_updated"],
+             [p["name"] for p in g["providers"]])
+            for g in grouped
+            if "hidden" not in get_workspace_settings(config, g["cwd"])["tags"]
+        ]
 
     if cwd:
         target = _normalize_path(cwd)
@@ -2081,35 +2119,44 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
     pinned_set: set[str] = set(config.pinned_sessions)
 
-    rows: list[tuple[dict, list]] = []
+    rows: list[tuple[dict, list]] = []  # (meta, [(session, provider), ...])
     sids: list[str] = []
-    pinned_sessions_found: list[tuple[str, str, object]] = []  # (cwd, name, session)
+    pinned_sessions_found: list[tuple[str, str, object, str]] = []  # (cwd, name, session, provider)
     # One hash lookup per workspace group, not per session — _lock_holder_v3's
     # workspace_hash fast path (Phase 1 cycle-2) needs a session_id -> hash-dir
     # mapping, and every session in a group shares the group's own hash dir.
     hash_by_sid: dict[str, str] = {}
     exists_flags = _acp_exists_flags([w[0] for w in page_groups])
-    for index, (ws_cwd, _count, _updated, _prov) in enumerate(page_groups):
-        try:
-            sessions = data.get_sessions(ws_cwd, _ACP_V3_LISTING_PROVIDER)
-        except Exception:
-            log.exception("ACP listing: could not read sessions for %s", ws_cwd)
-            sessions = []
+    for index, (ws_cwd, _count, _updated, ws_provs) in enumerate(page_groups):
+        # One fetch per provider touching this workspace — a 1-item `ws_provs`
+        # (every existing caller) makes this the exact same single call the
+        # pre-Phase-4 code made, with no merge and no re-sort applied after.
+        tagged: list[tuple[object, str]] = []
+        for prov_name in ws_provs:
+            try:
+                tagged.extend((s, prov_name) for s in data.get_sessions(ws_cwd, prov_name))
+            except Exception:
+                log.exception("ACP listing: could not read %s sessions for %s",
+                              prov_name, ws_cwd)
+        if len(ws_provs) > 1:
+            # Same interleave /partials/sessions?provider=all already uses.
+            tagged.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"),
+                        reverse=True)
         ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
         ws_name = Path(ws_cwd).name or ws_cwd
         if pinned_set:
-            for s in sessions:
+            for s, prov_name in tagged:
                 if s.session_id in pinned_set:
-                    pinned_sessions_found.append((ws_cwd, ws_name, s))
+                    pinned_sessions_found.append((ws_cwd, ws_name, s, prov_name))
                     if ws_hash:
                         hash_by_sid[s.session_id] = ws_hash
-            sessions = [s for s in sessions if s.session_id not in pinned_set]
-        total = len(sessions)
+            tagged = [(s, p) for s, p in tagged if s.session_id not in pinned_set]
+        total = len(tagged)
         s_start = (session_page - 1) * session_size
-        page_sessions = sessions[s_start:s_start + session_size]
-        sids.extend(s.session_id for s in page_sessions)
+        page_tagged = tagged[s_start:s_start + session_size]
+        sids.extend(s.session_id for s, _p in page_tagged)
         if ws_hash:
-            hash_by_sid.update({s.session_id: ws_hash for s in page_sessions})
+            hash_by_sid.update({s.session_id: ws_hash for s, _p in page_tagged})
         rows.append(({
             "cwd": ws_cwd,
             "name": ws_name,
@@ -2117,38 +2164,39 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             "session_page": session_page,
             "has_more": s_start + session_size < total,
             "exists": exists_flags[index],
-        }, page_sessions))
+        }, page_tagged))
 
-    pinned_sids = [s.session_id for _cwd, _name, s in pinned_sessions_found]
+    pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]
     availability = _acp_availability(sids + pinned_sids, held, workspace_hashes=hash_by_sid)
-    all_page_sessions = [s for _meta, page_sessions in rows for s in page_sessions]
+    all_page_sessions = [s for _meta, page_tagged in rows for s, _p in page_tagged]
     statuses = _acp_status_for_held([
-        s for s in all_page_sessions + [s for _c, _n, s in pinned_sessions_found]
+        s for s in all_page_sessions + [s for _c, _n, s, _p in pinned_sessions_found]
         if availability.get(s.session_id) == "held"])
 
-    groups = []
-    for meta, page_sessions in rows:
-        meta["sessions"] = [{
+    def _row_dict(s, prov_name: str) -> dict:
+        d = {
             "id": s.session_id,
             "title": _acp_row_title(s),
             "updated_at": s.updated_at,
             "availability": availability.get(s.session_id, "available"),
             "status": statuses.get(s.session_id, ""),
-        } for s in page_sessions]
+        }
+        if include_provider:
+            d["provider"] = prov_name
+        return d
+
+    groups = []
+    for meta, page_tagged in rows:
+        meta["sessions"] = [_row_dict(s, p) for s, p in page_tagged]
         groups.append(meta)
 
-    pinned_cwds = list(dict.fromkeys(cwd for cwd, _n, _s in pinned_sessions_found))
+    pinned_cwds = list(dict.fromkeys(cwd for cwd, _n, _s, _p in pinned_sessions_found))
     pinned_exists = dict(zip(pinned_cwds, _acp_exists_flags(pinned_cwds)))
-    pinned: list[dict] = [{
-        "id": s.session_id,
-        "title": _acp_row_title(s),
-        "updated_at": s.updated_at,
-        "availability": availability.get(s.session_id, "available"),
-        "status": statuses.get(s.session_id, ""),
-        "cwd": cwd,
-        "name": name,
-        "exists": pinned_exists.get(cwd, True),
-    } for cwd, name, s in pinned_sessions_found]
+    pinned: list[dict] = [
+        {**_row_dict(s, prov_name), "cwd": cwd, "name": name,
+         "exists": pinned_exists.get(cwd, True)}
+        for cwd, name, s, prov_name in pinned_sessions_found
+    ]
 
     return {
         "groups": groups,
@@ -2160,7 +2208,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     }
 
 
-def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
+def _acp_flat_listing(page: int, size: int, held, capacity: dict,
+                       providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
+                       include_provider: bool = False) -> dict:
     """Build the recency-ordered listing payload. Blocking; runs off the loop.
 
     The listing's second shape: every session this ACP can resume, newest
@@ -2186,20 +2236,38 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
     it returns — see that function's `exclude_cwds` documentation for why the
     placement decides whether `page_size` and `has_more` mean anything.
 
-    Pinned to `_ACP_V3_LISTING_PROVIDER`. `get_all_sessions_paginated` spans every
-    registered provider by default, and a row served here for another one would
-    be a session the browser cannot resume — the same constraint that makes the
-    grouped listing single-provider, arriving from the opposite direction.
+    `providers` (dashboard/ACP-merge Phase 4) defaults to the single-provider
+    set `/api/acp/sessions?mode=recent` has always used, so that call is
+    byte-for-byte the same query as before — a row served there for another
+    provider would be a session the phone cannot resume, the same constraint
+    that makes the grouped listing single-provider by default, arriving from
+    the opposite direction. `get_all_sessions_paginated` already spans
+    whichever provider set it is given (`provider=None` plus
+    `enabled_providers`), so widening this to several providers costs nothing
+    beyond passing that same set through — unlike the grouped listing, no
+    per-workspace merge is needed here: this route's rows are sessions, not
+    workspaces, so a session from two different providers was always going
+    to be two different rows.
+
+    `include_provider`, off by default: adds a `"provider"` field to every
+    session dict. See `_acp_listing`'s own parameter of the same name for why
+    `/api/acp/sessions` must never turn this on and the dashboard's route
+    always does.
     """
     from .config import get_workspace_settings
 
     config = load_config()
-    if not _enabled(config, _ACP_V3_LISTING_PROVIDER):
+    enabled = frozenset(p for p in providers if _enabled(config, p))
+    if not enabled:
         return {"sessions": [], "pinned": [], "page": page, "has_more": False,
                 "capacity": capacity}
 
     pinned_set = set(config.pinned_sessions)
-    workspaces_list = data.discover_workspaces_with_counts(_ACP_V3_LISTING_PROVIDER)
+    workspaces_list = (
+        data.discover_workspaces_with_counts(next(iter(enabled)))
+        if len(enabled) == 1 else
+        [w for w in data.discover_workspaces_with_counts(None) if w[3] in enabled]
+    )
     hidden = {
         w[0] for w in workspaces_list
         if "hidden" in get_workspace_settings(config, w[0])["tags"]
@@ -2207,8 +2275,8 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
     try:
         rows, has_more = data.get_all_sessions_paginated(
             page=page, page_size=size,
-            provider=_ACP_V3_LISTING_PROVIDER,
-            enabled_providers={_ACP_V3_LISTING_PROVIDER},
+            provider=next(iter(enabled)) if len(enabled) == 1 else None,
+            enabled_providers=enabled,
             exclude_cwds=hidden,
             pinned_sessions=config.pinned_sessions if pinned_set else None)
     except Exception:
@@ -2222,18 +2290,18 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
         found_ids = {s.session_id for s, _ in pinned_raw}
         remaining = pinned_set - found_ids
         if remaining:
-            for ws_cwd, _count, _updated, _prov in workspaces_list:
+            for ws_cwd, _count, _updated, ws_prov in workspaces_list:
                 if not remaining:
                     break
                 if ws_cwd in hidden:
                     continue
                 try:
-                    ws_sessions = data.get_sessions(ws_cwd, _ACP_V3_LISTING_PROVIDER)
+                    ws_sessions = data.get_sessions(ws_cwd, ws_prov)
                 except Exception:
                     continue
                 for s in ws_sessions:
                     if s.session_id in remaining:
-                        pinned_raw.append((s, _ACP_V3_LISTING_PROVIDER))
+                        pinned_raw.append((s, ws_prov))
                         remaining.discard(s.session_id)
 
     sessions = [s for s, _prov in flat_rows]
@@ -2248,8 +2316,8 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
     order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
     flags = dict(zip(order, _acp_exists_flags(order)))
 
-    def _session_dict(s: object) -> dict:
-        return {
+    def _session_dict(s: object, prov_name: str) -> dict:
+        d = {
             "id": s.session_id,
             "title": _acp_row_title(s),
             "updated_at": s.updated_at,
@@ -2259,10 +2327,13 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict) -> dict:
             "name": Path(s.cwd).name or s.cwd,
             "exists": flags.get(s.cwd, True),
         }
+        if include_provider:
+            d["provider"] = prov_name
+        return d
 
     return {
-        "sessions": [_session_dict(s) for s in sessions],
-        "pinned": [_session_dict(s) for s in pinned_sessions_list],
+        "sessions": [_session_dict(s, prov) for s, prov in flat_rows],
+        "pinned": [_session_dict(s, prov) for s, prov in pinned_raw],
         "page": page,
         "has_more": has_more,
         "capacity": capacity,
@@ -2333,6 +2404,52 @@ async def api_acp_sessions(response: Response, cwd: str = "", group_page: int = 
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
         held, capacity)
+
+
+_DASHBOARD_LISTING_PATH = "/api/dashboard/sessions"
+
+
+@app.get(_DASHBOARD_LISTING_PATH)
+async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: int = 1,
+                                 group_size: int = _ACP_GROUPS_PER_PAGE,
+                                 session_page: int = 1,
+                                 session_size: int = _ACP_SESSIONS_PER_GROUP,
+                                 mode: str = "", page: int = 1,
+                                 size: int = _ACP_FLAT_PAGE_SIZE):
+    """The dashboard's own rail feed (dashboard/ACP-merge Phase 4): every
+    enabled, available provider, not only kiro-cli-v3. Same parameters,
+    pagination, `hidden`-tag/disabled-provider exclusions and grouped/
+    `mode=recent` shapes as `/api/acp/sessions` — this route only widens
+    `_acp_listing`/`_acp_flat_listing`'s own `providers` argument and turns
+    on `include_provider` (each session dict names which provider it came
+    from, since unlike the v3-only route this one's rows are not all the
+    same provider). See `api_acp_sessions` for the full field documentation,
+    which otherwise applies here verbatim.
+
+    Not scoped any differently than the rest of the dashboard: this app's
+    `RemoteAccessGuard` middleware already covers every route including this
+    one, and a session's title/path is no more exposed here than it already
+    is via `/partials/workspaces`/`/partials/sessions` — this is a second
+    reader of the same store, not a wider one.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
+    held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
+    capacity = {
+        "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
+    providers = frozenset(data.available_providers())
+    if mode == "recent":
+        return await asyncio.to_thread(
+            _acp_flat_listing, max(1, page),
+            max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
+            providers, True)
+    return await asyncio.to_thread(
+        _acp_listing, cwd,
+        max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
+        max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
+        held, capacity, providers, True)
 
 
 # --- The create flow's workspace list ------------------------------------

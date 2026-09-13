@@ -16578,6 +16578,152 @@ class TestAcpFlatListing:
         assert set(cap) == {"held", "max"}
 
 
+class TestDashboardListingEndpoint:
+    """dashboard/ACP-merge Phase 4: /api/dashboard/sessions widens
+    `_acp_listing`/`_acp_flat_listing`'s `providers` argument to every
+    enabled, available provider instead of pinning to kiro-cli-v3, and turns
+    on `include_provider`. Seamed the same way TestAcpFlatListing's
+    `collector` is for the flat-mode contract tests; grouped-mode merge
+    tests use their own two-provider store (acp_listing_store's `_discover`
+    hard-asserts a single kiro-cli-v3 provider, by design, for its own
+    class's tests -- not reusable here)."""
+
+    _PATH = "/api/dashboard/sessions"
+
+    @pytest.fixture
+    def multi_collector(self, monkeypatch):
+        """Like TestAcpFlatListing's `collector`, but the fake collector
+        answers with sessions from two different providers, and
+        `available_providers` reports both -- what proves the widened
+        contract is `provider=None` plus the *full* `enabled_providers` set,
+        not the pinned single-provider pair."""
+        from power_atlas import data as data_mod
+
+        asked = {}
+
+        def _paginated(page=1, page_size=20, provider=None,
+                       pinned_sessions=None, enabled_providers=None,
+                       exclude_cwds=None):
+            asked.update(page=page, page_size=page_size, provider=provider,
+                         enabled_providers=enabled_providers,
+                         exclude_cwds=exclude_cwds)
+            rows = [(data_mod.Session(
+                session_id=f"s{i}", title=f"title {i}", cwd=rf"C:\ws\w{i}",
+                created_at="", updated_at=f"2026-08-0{3 - i}T10:00:00.000000000Z",
+                first_prompt="", last_prompt="", last_reply_tail=""),
+                "kiro-cli-v3" if i % 2 == 0 else "claude-code") for i in range(3)]
+            return rows, True
+
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated", _paginated)
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts",
+                            lambda provider=None: [])
+        monkeypatch.setattr(data_mod, "available_providers",
+                            lambda: ["kiro-cli-v3", "claude-code"])
+        return asked
+
+    def test_the_collector_is_asked_for_every_available_provider(
+            self, client, multi_collector):
+        client.get(self._PATH, params={"mode": "recent"})
+        assert multi_collector["provider"] is None
+        assert multi_collector["enabled_providers"] == {"kiro-cli-v3", "claude-code"}
+
+    def test_a_single_available_provider_matches_the_pinned_route_exactly(
+            self, client, monkeypatch, multi_collector):
+        """With only one provider actually available, the dashboard route's
+        query degrades to the exact same shape /api/acp/sessions always
+        sends -- no behavior difference just because a second route exists."""
+        from power_atlas import data as data_mod
+        monkeypatch.setattr(data_mod, "available_providers", lambda: ["kiro-cli-v3"])
+        client.get(self._PATH, params={"mode": "recent"})
+        assert multi_collector["provider"] == "kiro-cli-v3"
+        assert multi_collector["enabled_providers"] == {"kiro-cli-v3"}
+
+    def test_each_session_carries_which_provider_it_came_from(
+            self, client, multi_collector):
+        body = client.get(self._PATH, params={"mode": "recent"}).json()
+        assert [r["provider"] for r in body["sessions"]] == [
+            "kiro-cli-v3", "claude-code", "kiro-cli-v3"]
+
+    def test_the_pinned_route_never_carries_a_provider_field(
+            self, client, monkeypatch):
+        """The exact-field-set contract on /api/acp/sessions
+        (TestAcpFlatListing/TestAcpListingEndpoint's own field tests) must
+        hold even with this route sharing the same underlying functions --
+        `include_provider` must not leak across calls as stale default/shared
+        state, so the dashboard route is hit first here, immediately before
+        the pinned one, on the same synthetic store."""
+        from power_atlas import data as data_mod
+
+        def _paginated(page=1, page_size=20, provider=None,
+                       pinned_sessions=None, enabled_providers=None,
+                       exclude_cwds=None):
+            return [(data_mod.Session(
+                session_id="s0", title="t", cwd=r"C:\ws\w0", created_at="",
+                updated_at="2026-08-03T10:00:00Z", first_prompt="",
+                last_prompt="", last_reply_tail=""), "kiro-cli-v3")], False
+
+        monkeypatch.setattr(data_mod, "get_all_sessions_paginated", _paginated)
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts",
+                            lambda provider=None: [])
+        monkeypatch.setattr(data_mod, "available_providers",
+                            lambda: ["kiro-cli-v3", "claude-code"])
+        client.get(self._PATH, params={"mode": "recent"})
+        row = client.get("/api/acp/sessions",
+                         params={"mode": "recent"}).json()["sessions"][0]
+        assert "provider" not in row
+
+    @pytest.fixture
+    def grouped_multi_store(self, monkeypatch):
+        """A synthetic two-provider store for grouped-mode merge testing.
+        Unlike `acp_listing_store`, `discover_workspaces_with_counts` here
+        accepts any provider (including None for "all") and `get_sessions`
+        keys on (cwd, provider) -- what the multi-provider merge needs."""
+        from power_atlas import acp as acp_mod
+        from power_atlas import data as data_mod
+
+        state: dict = {"workspaces": [], "sessions": {}}
+
+        def _discover(provider=None):
+            if provider is None:
+                return list(state["workspaces"])
+            return [w for w in state["workspaces"] if w[3] == provider]
+
+        def _get_sessions(cwd, provider="kiro-cli"):
+            return list(state["sessions"].get((cwd, provider), []))
+
+        def _add(cwd, provider, sessions, updated="2026-07-31T00:00:00Z"):
+            state["workspaces"].append((cwd, len(sessions), updated, provider))
+            state["sessions"][(cwd, provider)] = sessions
+
+        state["add"] = _add
+        monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", _discover)
+        monkeypatch.setattr(data_mod, "get_sessions", _get_sessions)
+        monkeypatch.setattr(data_mod, "available_providers",
+                            lambda: ["kiro-cli-v3", "claude-code"])
+        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda sid, wh=None: None)
+        monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
+        return state
+
+    def test_grouped_mode_merges_two_providers_at_the_same_workspace(
+            self, client, grouped_multi_store):
+        """The same folder touched by two providers is one row, not two --
+        the same merge /partials/sessions?provider=all already does per
+        workspace, applied here across a whole page via _group_workspaces."""
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
+            _acp_row("v3s1", updated="2026-08-01T00:00:00Z")])
+        grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [
+            _acp_row("ccs1", updated="2026-08-02T00:00:00Z")])
+        body = client.get(self._PATH).json()
+        assert len(body["groups"]) == 1
+        group = body["groups"][0]
+        assert group["cwd"] == r"C:\dev\ws"
+        # Newest first, interleaved across providers by updated_at.
+        assert [s["id"] for s in group["sessions"]] == ["ccs1", "v3s1"]
+        assert [s["provider"] for s in group["sessions"]] == [
+            "claude-code", "kiro-cli-v3"]
+
+
 class TestAcpDeleteEndpoint:
     """Session deletion — the first thing PowerAtlas writes to kiro-cli's store.
 
