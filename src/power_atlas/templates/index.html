@@ -107,8 +107,15 @@
        acp.html's `.acp-transcript-wrap` exactly, using the same style.css
        rules (already shared by both pages via base.html) and the same
        element roles transcript-renderer.js's initTranscriptDom() expects,
-       just under this page's own element ids. No composer: read-only until
-       Phase 3 wires live-attach. -->
+       just under this page's own element ids.
+
+       dashComposer (Phase 3, live-attach): a deliberately small subset of
+       acp.html's composer -- a textarea and one Send button, no Stop,
+       Queue/Steer mode, image attachments or slash commands. Those are live-
+       chat luxuries /acp already provides; this panel's job is a working
+       chat for a held/available kiro-cli-v3 session, not parity with the
+       full agent orchestrator page. Hidden until a selected session's
+       availability peek says there is something live to talk to. -->
   <section class="right-panel" id="sessions-panel">
     <div class="section-label"><span>Transcript</span></div>
     <div class="acp-transcript-wrap" id="dashTranscriptWrap">
@@ -122,6 +129,20 @@
         <button class="acp-btn acp-prompt-nav-btn" id="dashPromptDown" type="button"
                 aria-label="Next prompt or scroll to bottom">↓</button>
       </div>
+    </div>
+    <div class="acp-composer" id="dashComposer" hidden>
+      <div class="acp-composer-row">
+        <textarea class="acp-prompt" id="dashPromptInput" rows="2" spellcheck="false"
+                  placeholder="Prompt this agent — Enter to send, Shift+Enter for a new line"
+                  aria-label="Prompt"></textarea>
+        <button class="acp-btn acp-icon-btn" id="dashSendBtn" type="button" disabled
+                aria-label="Send">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="acp-steer-status" id="dashComposerNote" hidden aria-live="polite"></div>
     </div>
   </section>
 </main>
@@ -250,9 +271,11 @@ var _viewingSid = null;
 function openSessionTranscript(row){
   var sid = row.dataset.sid;
   if(!sid) return;
+  dashCloseIfAbandoned();
   document.querySelectorAll('.session-row.viewing').forEach(function(r){r.classList.remove('viewing')});
   row.classList.add('viewing');
   _viewingSid = sid;
+  dashComposerEl.hidden = true;
   var el = document.getElementById('dashTranscript');
   el.textContent = '';
   var loading = document.createElement('div');
@@ -268,6 +291,7 @@ function openSessionTranscript(row){
   }).then(function(data){
     if(_viewingSid !== sid) return; // superseded by a later click
     renderTranscriptHistory(data.events || []);
+    dashMaybeAttach(row, sid);
   }).catch(function(){
     if(_viewingSid !== sid) return;
     el.textContent = '';
@@ -276,6 +300,270 @@ function openSessionTranscript(row){
     err.textContent = 'Could not load this transcript.';
     el.appendChild(err);
   });
+}
+
+// ---- Phase 3: live-attach wiring -----------------------------------------
+//
+// A deliberately small subset of acp.html's live protocol handling: this
+// panel opens /ws/acp for exactly one purpose (chat with a held/available
+// kiro-cli-v3 session), not the full agent-orchestrator experience -- no
+// Stop/cancel, Queue/Steer modes, image attachments, slash commands or
+// sub-agent panels. Rendering itself is not reinvented: chunk/rendered/
+// tool_call/tool_update/tool_output/thought/permission_request/
+// permission_resolved/agent_error all go through the exact same shared
+// functions transcript-renderer.js already gives both pages (Phase 2), so a
+// live turn cannot render any differently here than it does on /acp.
+var ACP_TOKEN = {{ acp_token | tojson }};
+var WS_PATH = '/ws/acp';
+function dashWsUrl(){
+  var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return scheme + '//' + location.host + WS_PATH + '?t=' + encodeURIComponent(ACP_TOKEN);
+}
+var _dashWs = null;
+// Returns whether the frame actually left, mirroring acp.html's own send().
+// A true global (this page's scripts carry no IIFE — see the comment on
+// initTranscriptDom above) is what lets transcript-renderer.js's
+// addPermissionRequest/mdColour reach it through their own
+// `typeof send === 'function'` guards without this page doing anything
+// special to expose it.
+function send(type, payload, sid){
+  if (!_dashWs || _dashWs.readyState !== WebSocket.OPEN) return false;
+  _dashWs.send(JSON.stringify({type: type, sessionId: sid || null, payload: payload || {}}));
+  return true;
+}
+// Opens the socket if needed (reused across session switches within one page
+// load, same as acp.html's single `ws`) and runs `onReady` once it is open —
+// immediately if a connection is already up. No reconnect-on-drop for this
+// MVP: a dropped socket silently ends live-attach until the next full page
+// load, which is never worse than the static transcript Phase 2 already
+// renders underneath it.
+function dashConnect(onReady){
+  if (_dashWs && _dashWs.readyState === WebSocket.OPEN) { if (onReady) onReady(); return; }
+  if (_dashWs && _dashWs.readyState === WebSocket.CONNECTING) {
+    if (onReady) { var prev = _dashWs.onopen; _dashWs.onopen = function(e){ if (prev) prev(e); onReady(); }; }
+    return;
+  }
+  _dashWs = new WebSocket(dashWsUrl());
+  _dashWs.onopen = onReady || null;
+  _dashWs.onerror = function(){};
+  _dashWs.onmessage = function(event){
+    var frame;
+    try { frame = JSON.parse(event.data); } catch (e) { return; }
+    dashHandle(frame);
+  };
+}
+var dashComposerEl = document.getElementById('dashComposer');
+var dashPromptInput = document.getElementById('dashPromptInput');
+var dashSendBtn = document.getElementById('dashSendBtn');
+var dashComposerNote = document.getElementById('dashComposerNote');
+// _dashAttachedSid: the sid this socket is confirmed attached to (a `session`
+// frame answered for it) -- null until then, even while a subscribe/load is
+// in flight. _dashOrigin: 'joined' (subscribe — this page did not spend a
+// slot) or 'dashboard' (load — this page did), set the moment the attach is
+// requested, read by dashCloseIfAbandoned(). _dashLoadingSid: the sid a
+// lazy `load` was issued for, tracked separately from _viewingSid so a load
+// that resolves after the user has already clicked a different row is still
+// noticed and closed rather than leaking a session slot.
+var _dashAttachedSid = null;
+var _dashOrigin = null;
+var _dashSent = false;
+var _dashTurnActive = false;
+var _dashLoadingSid = null;
+var _dashPendingSend = null;
+
+function dashSetComposerNote(text){
+  if (!text) { dashComposerNote.hidden = true; dashComposerNote.textContent = ''; return; }
+  dashComposerNote.textContent = text;
+  dashComposerNote.hidden = false;
+}
+function dashRefreshSendButton(){
+  var hasText = dashPromptInput.value.trim().length > 0;
+  dashSendBtn.disabled = !hasText || _dashTurnActive;
+}
+dashPromptInput.addEventListener('input', dashRefreshSendButton);
+dashPromptInput.addEventListener('keydown', function(e){
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); dashSendPrompt(); }
+});
+dashSendBtn.addEventListener('click', dashSendPrompt);
+
+/** Called once per newly-rendered session, right after the availability
+ *  peek answers. Shows/hides/enables the composer; for 'held' it also
+ *  subscribes immediately (cheap, no new agent process) since the session
+ *  is already running somewhere. 'available' does nothing else here — it
+ *  attaches lazily on the user's first send (dashSendPrompt), the same
+ *  capacity-conscious reasoning acp.html's selectSession documents: eagerly
+ *  loading every row a user merely glances at would exhaust the shared
+ *  8-session cap on curiosity alone. Skipped entirely for a non-kiro-cli-v3
+ *  provider (no composer, ever) or when ACP_TOKEN is null (acp failed to
+ *  import — see _ACP_TOKEN's comment in web.py). */
+function dashMaybeAttach(row, sid){
+  if (!ACP_TOKEN || row.dataset.provider !== 'kiro-cli-v3') return;
+  fetch('/api/session-availability?sid=' + encodeURIComponent(sid) +
+        '&cwd=' + encodeURIComponent(row.dataset.cwd || ''))
+    .then(function(r){ if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(function(data){
+      if (_viewingSid !== sid) return; // superseded by a later click
+      var state = data.availability;
+      if (state === 'locked') {
+        dashComposerEl.hidden = false;
+        dashPromptInput.disabled = true;
+        dashSendBtn.disabled = true;
+        dashSetComposerNote('This session is open elsewhere right now, so it can’t be prompted from here.');
+        return;
+      }
+      dashComposerEl.hidden = false;
+      dashPromptInput.disabled = false;
+      dashSetComposerNote('');
+      dashRefreshSendButton();
+      if (state === 'held') {
+        _dashOrigin = 'joined';
+        dashConnect(function(){ send('subscribe', {}, sid); });
+      }
+    })
+    .catch(function(){}); // no live-attach on a failed peek — static transcript stands as-is
+}
+
+function dashSendPrompt(){
+  var text = dashPromptInput.value;
+  if (!text.trim() || _dashTurnActive) return;
+  var sid = _viewingSid;
+  if (!sid) return;
+  if (_dashAttachedSid === sid) {
+    if (!send('prompt', {prompt: text}, sid)) {
+      showToast('<div class="toast toast-error">Not connected — nothing sent<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+      return;
+    }
+    _dashSent = true;
+    dashPromptInput.value = '';
+    dashRefreshSendButton();
+    return;
+  }
+  // Not attached yet — the lazy 'available' -> first-send path (also the
+  // fallback when a 'held' subscribe above turned out stale, since
+  // _dashAttachedSid stays null until a session frame actually confirms
+  // it, exactly mirroring acp.html's subscribe-then-load-on-refusal order).
+  _dashOrigin = 'dashboard';
+  _dashLoadingSid = sid;
+  _dashPendingSend = text;
+  dashPromptInput.disabled = true;
+  dashSendBtn.disabled = true;
+  dashSetComposerNote('Starting the agent…');
+  dashConnect(function(){ send('load', {}, sid); });
+}
+
+/** A dashboard-originated attach (this page's own `load`) that never sent a
+ *  prompt is scrap the moment the user walks away from it — freeing the
+ *  slot now rather than leaving it idle for up to ACP_IDLE_TTL_SECONDS
+ *  (acp.py, 30 minutes by default) until the sweeper reclaims it. A
+ *  joined-not-owned attach (this page only `subscribe`d to a session
+ *  already held elsewhere) is left alone, and so is one with a real
+ *  conversation on it — closing either would surprise whoever, or
+ *  whichever other tab, still has it open. Called before switching to a
+ *  different session and on the page unloading. */
+function dashCloseIfAbandoned(){
+  if (_dashAttachedSid && _dashOrigin === 'dashboard' && !_dashSent) {
+    send('close', {}, _dashAttachedSid);
+  }
+  _dashAttachedSid = null;
+  _dashOrigin = null;
+  _dashSent = false;
+  _dashTurnActive = false;
+  _dashPendingSend = null;
+}
+window.addEventListener('pagehide', dashCloseIfAbandoned);
+
+function dashHandle(frame){
+  var type = frame && frame.type;
+  var sid = frame && frame.sessionId;
+  var payload = (frame && frame.payload) || {};
+
+  if (type === 'session') {
+    if (sid === _dashLoadingSid && sid !== _viewingSid) {
+      // Landed after the user already clicked a different row. Nobody is
+      // watching it and it was never sent a prompt — exactly
+      // dashCloseIfAbandoned()'s case, reached here instead because the
+      // load was still in flight (not yet attached) at the moment of
+      // abandonment, so that function had nothing to act on yet.
+      send('close', {}, sid);
+      _dashLoadingSid = null;
+      _dashPendingSend = null;
+      return;
+    }
+    if (sid !== _viewingSid) return;
+    _dashAttachedSid = sid;
+    _dashTurnActive = !!payload.turnActive;
+    _dashLoadingSid = null;
+    dashSetComposerNote('');
+    dashRefreshSendButton();
+    return;
+  }
+  if (sid && sid !== _viewingSid) return; // stale frame for a session no longer on screen
+
+  if (type === 'history') {
+    // The live ring buffer supersedes whatever the static
+    // /api/session-transcript fetch already drew, through the exact same
+    // renderer, so the two can never disagree about how a frame looks.
+    renderTranscriptHistory(payload.events || []);
+    if (_dashPendingSend !== null) {
+      var text = _dashPendingSend;
+      _dashPendingSend = null;
+      send('prompt', {prompt: text}, sid);
+      _dashSent = true;
+      dashPromptInput.value = '';
+    }
+    dashPromptInput.disabled = false;
+    dashRefreshSendButton();
+    return;
+  }
+  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); return; }
+  if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); return; }
+  if (type === 'chunk' || type === 'rendered' || type === 'tool_call' || type === 'tool_update') {
+    renderTranscriptFrame(frame);
+    return;
+  }
+  if (type === 'tool_output') { hideThinking(); addToolOutput(payload); return; }
+  if (type === 'thought') { appendThought(payload.text || ''); return; }
+  if (type === 'agent_error') {
+    var errMsg = (payload && typeof payload.message === 'string') ? payload.message : '';
+    var errType = (payload && typeof payload.errorType === 'string') ? payload.errorType : '';
+    addMessage('error', (errType ? '[' + errType + '] ' : '') + errMsg);
+    return;
+  }
+  if (type === 'permission_request') {
+    var reqId = payload && payload.requestId;
+    var toolCall = (payload && payload.toolCall) || {};
+    var title = typeof toolCall.title === 'string' ? toolCall.title : '';
+    var options = Array.isArray(payload && payload.options) ? payload.options : [];
+    if ((typeof reqId === 'string' || typeof reqId === 'number') && options.length) {
+      addPermissionRequest(reqId, sid, title, options);
+    }
+    return;
+  }
+  if (type === 'permission_resolved') {
+    var resolvedId = payload && payload.requestId;
+    if (typeof resolvedId === 'string' || typeof resolvedId === 'number') markPermissionResolved(resolvedId);
+    return;
+  }
+  if (type === 'session_closed') {
+    addMessage('note', 'This session was closed.');
+    dashComposerEl.hidden = true;
+    _dashAttachedSid = null;
+    _dashOrigin = null;
+    return;
+  }
+  if (type === 'error') {
+    // A refusal on the lazy-load path (dashSendPrompt) never cleared the
+    // textarea to begin with -- the typed text stays visible (disabled,
+    // under the "Starting the agent…" note) for exactly this outcome, so
+    // there is nothing to restore here, only to re-enable.
+    if (sid && sid === _dashLoadingSid) { _dashLoadingSid = null; _dashPendingSend = null; }
+    var errText = (payload && typeof payload.message === 'string') ? payload.message : 'The agent refused that.';
+    showToast('<div class="toast toast-error">' + _escHtml(errText) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+    dashSetComposerNote('');
+    dashPromptInput.disabled = false;
+    dashRefreshSendButton();
+    return;
+  }
 }
 function toggleCard(card){card.classList.toggle('collapsed');var header=card.querySelector('.card-header');if(header)header.setAttribute('aria-expanded',!card.classList.contains('collapsed'));var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;var provider=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)+'&provider='+encodeURIComponent(provider)+_statusQs()).then(function(r){return r.text()}).then(function(html){body.innerHTML=html;if(window.htmx)htmx.process(body)}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}
 // CSS.escape handles backslashes in Windows paths; filesystem paths cannot contain literal '"'

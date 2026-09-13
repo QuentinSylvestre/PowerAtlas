@@ -211,6 +211,28 @@ def test_index_returns_html(client):
     assert "skeleton-card" in resp.text
 
 
+def test_index_carries_the_live_acp_token_for_the_transcript_panel(client):
+    """dashboard/ACP-merge Phase 3: the transcript panel's composer opens
+    /ws/acp directly for held/available kiro-cli-v3 sessions, the same way
+    acp.html already does -- it needs the same token acp.html embeds."""
+    from power_atlas.web import _ACP_TOKEN
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert f"var ACP_TOKEN = {_ACP_TOKEN!r}".replace("'", '"') in resp.text
+
+
+def test_index_reports_no_acp_token_when_acp_is_unavailable(client, monkeypatch):
+    """acp is optional/guarded-import prototype code -- the dashboard must
+    not embed a token that opens nothing, so its own JS can skip trying."""
+    import power_atlas.web as web_mod
+    monkeypatch.setattr(web_mod, "acp", None)
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "var ACP_TOKEN = null" in resp.text
+
+
 @patch("power_atlas.web.data.get_sessions")
 @patch("power_atlas.web.data.available_providers")
 @patch("power_atlas.web.data.discover_workspaces_with_counts")

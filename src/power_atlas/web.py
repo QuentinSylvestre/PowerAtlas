@@ -1414,6 +1414,12 @@ app.add_middleware(RemoteAccessGuard)
 # GET /acp can read it. That raises the bar from "connect blindly" to "scrape
 # one page first"; it is not a boundary. Closing it properly means
 # authenticating the page route too, which this prototype does not do.
+#
+# dashboard/ACP-merge Phase 3: `index()` now embeds this token too, since the
+# dashboard's own transcript panel speaks the live protocol directly for
+# `held`/`available` kiro-cli-v3 sessions. This does not narrow the residual
+# risk above — `/` is at least as reachable as `/acp` already — it only
+# widens which already-reachable page it can be scraped from.
 _ACP_TOKEN = secrets.token_urlsafe(32)
 
 
@@ -1527,6 +1533,15 @@ async def index(request: Request):
         "default_directory": config.default_directory,
         "provider_settings": config.provider_settings,
         "autostart_label": "Start at login" if sys.platform != "win32" else "Start with Windows",
+        # dashboard/ACP-merge Phase 3: the transcript panel's own composer
+        # opens `/ws/acp` directly for held/available kiro-cli-v3 sessions,
+        # same as acp.html — see _ACP_TOKEN's comment for what this widens.
+        # `None` (never the empty string acp is None already uses elsewhere)
+        # when the module failed to import, so the dashboard's own JS can
+        # tell "no token issued" apart from "issued, but empty" and skip
+        # ever trying to open the socket rather than connecting with a
+        # token that will just be refused.
+        "acp_token": _ACP_TOKEN if acp is not None else None,
     })
 
 
