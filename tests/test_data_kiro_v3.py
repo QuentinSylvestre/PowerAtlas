@@ -713,6 +713,132 @@ class TestKiroV3GetFirstPrompt:
 
 
 # ---------------------------------------------------------------------------
+# TestKiroV3GetFullTranscript
+# ---------------------------------------------------------------------------
+
+def _tool_call_line(tool_call_id: str, tool_name: str, args: dict) -> str:
+    """Build a real v3 tool_call payload line (toolCallId/toolName/args), the
+    same shape acp.py's _get_tool_diffs_v3 reads -- distinct from this file's
+    other fixtures' simplified {"content": ...} tool_call stand-ins, which
+    only needed to be *ignored* by get_session_tail/get_first_prompt."""
+    return json.dumps({
+        "id": tool_call_id, "timestamp": "2026-01-01T00:00:30Z",
+        "payload": {"type": "tool_call", "toolCallId": tool_call_id,
+                    "toolName": tool_name, "args": args},
+    })
+
+
+def _tool_result_line(tool_call_id: str, success: bool) -> str:
+    return json.dumps({
+        "id": tool_call_id + "-result", "timestamp": "2026-01-01T00:00:45Z",
+        "payload": {"type": "tool_result", "toolCallId": tool_call_id, "success": success},
+    })
+
+
+class TestKiroV3GetFullTranscript:
+    def test_returns_empty_for_unknown_session(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+        assert dv3.get_full_transcript("sess_nonexistent", "C:\\W") == []
+
+    def test_full_ordered_transcript_across_all_event_kinds(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        messages = [
+            _user_line("Please fix the bug"),
+            _tool_call_line("tc1", "fs_write", {"path": "a.py", "text": "print(1)"}),
+            _tool_result_line("tc1", True),
+            _assistant_line("Fixed it."),
+        ]
+        _make_session(root, "h1", "sess_full", "C:\\W", messages=messages)
+
+        events = dv3.get_full_transcript("sess_full", "C:\\W")
+        assert [e.kind for e in events] == ["user", "tool_call", "tool_result", "assistant"]
+        assert events[0].text == "Please fix the bug"
+        assert events[1].tool_call_id == "tc1"
+        assert events[1].tool_name == "fs_write"
+        assert events[1].tool_args == {"path": "a.py", "text": "print(1)"}
+        assert events[2].tool_call_id == "tc1"
+        assert events[2].success is True
+        assert events[3].text == "Fixed it."
+
+    def test_preserves_full_history_beyond_tail_window(self, tmp_path, monkeypatch):
+        """get_session_tail truncates to the last-128KB/max_lines; a full
+        transcript must not -- this is the whole point of the new function."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        messages = [_user_line(f"Q{i}") for i in range(40)] + [_assistant_line("final answer")]
+        _make_session(root, "h1", "sess_long", "C:\\W", messages=messages)
+
+        events = dv3.get_full_transcript("sess_long", "C:\\W")
+        user_events = [e for e in events if e.kind == "user"]
+        assert len(user_events) == 40
+        assert user_events[0].text == "Q0"
+        assert events[-1].text == "final answer"
+
+    def test_image_only_message_skipped_not_rendered_as_empty_text(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        image_only = json.dumps({
+            "id": "m1", "timestamp": "t",
+            "payload": {"type": "user", "content": [{"type": "image", "data": "..."}]},
+        })
+        messages = [image_only, _user_line("real question")]
+        _make_session(root, "h1", "sess_img", "C:\\W", messages=messages)
+
+        events = dv3.get_full_transcript("sess_img", "C:\\W")
+        assert [e.text for e in events] == ["real question"]
+
+    def test_malformed_line_skipped_not_raised(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        messages = ["not json at all", _user_line("still readable")]
+        _make_session(root, "h1", "sess_bad", "C:\\W", messages=messages)
+
+        events = dv3.get_full_transcript("sess_bad", "C:\\W")
+        assert [e.text for e in events] == ["still readable"]
+
+    def test_unknown_success_value_normalizes_to_none(self, tmp_path, monkeypatch):
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        result_missing_success = json.dumps({
+            "id": "tc1-result", "timestamp": "t",
+            "payload": {"type": "tool_result", "toolCallId": "tc1"},
+        })
+        _make_session(root, "h1", "sess_res", "C:\\W", messages=[result_missing_success])
+
+        events = dv3.get_full_transcript("sess_res", "C:\\W")
+        assert events[0].kind == "tool_result"
+        assert events[0].success is None
+
+    def test_not_cached_reflects_file_changes_without_mtime_bump(self, tmp_path, monkeypatch):
+        """Unlike get_session_tail/get_first_prompt, get_full_transcript has no
+        cache to invalidate -- every call re-reads the file from disk."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", root)
+
+        _, msgs_path = _make_session(root, "h1", "sess_live", "C:\\W",
+                                      messages=[_user_line("first")])
+        assert [e.text for e in dv3.get_full_transcript("sess_live", "C:\\W")] == ["first"]
+
+        msgs_path.write_text(
+            _user_line("first") + "\n" + _assistant_line("second"), encoding="utf-8")
+        assert [e.text for e in dv3.get_full_transcript("sess_live", "C:\\W")] == ["first", "second"]
+
+
+# ---------------------------------------------------------------------------
 # TestKiroV3RefreshStale
 # ---------------------------------------------------------------------------
 

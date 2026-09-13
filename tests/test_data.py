@@ -1054,6 +1054,88 @@ class TestKiroIdeGetFirstPrompt:
         assert result == ""
 
 
+class TestKiroIdeGetFullTranscript:
+    """`get_full_transcript` returns every history turn in order, unlike
+    `get_session_tail` (assistant-only, last `max_lines`)."""
+
+    def _make_session(self, tmp_path, monkeypatch, cwd, sid, history):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir(exist_ok=True)
+        folder = sessions_dir / f"{sid}_folder"
+        folder.mkdir()
+        sessions_data = [{"sessionId": sid, "title": "T", "dateCreated": "1700000000000",
+                           "workspaceDirectory": cwd}]
+        (folder / "sessions.json").write_text(json.dumps(sessions_data), encoding="utf-8")
+        (folder / f"{sid}.json").write_text(json.dumps({"history": history}), encoding="utf-8")
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        return folder
+
+    def test_returns_empty_for_missing_session(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        assert data_kiro_ide.get_full_transcript("nonexistent", "C:\\Whatever") == []
+
+    def test_full_ordered_transcript(self, tmp_path, monkeypatch):
+        cwd = "C:\\FullTest"
+        history = [
+            {"message": {"role": "user", "content": [{"type": "text", "text": "q1"}]}},
+            {"message": {"role": "assistant", "content": "answer 1"}},
+            {"message": {"role": "user", "content": [{"type": "text", "text": "q2"}]}},
+            {"message": {"role": "assistant", "content": "answer 2"}},
+        ]
+        self._make_session(tmp_path, monkeypatch, cwd, "full1", history)
+
+        events = data_kiro_ide.get_full_transcript("full1", cwd)
+        assert [e.kind for e in events] == ["user", "assistant", "user", "assistant"]
+        assert [e.text for e in events] == ["q1", "answer 1", "q2", "answer 2"]
+
+    def test_preserves_full_history_beyond_tail_window(self, tmp_path, monkeypatch):
+        """Unlike get_session_tail, which is assistant-only and truncates to
+        max_lines, a full transcript keeps every turn, including user ones."""
+        cwd = "C:\\LongTest"
+        history = [
+            {"message": {"role": "assistant", "content": f"msg{i}"}}
+            for i in range(10)
+        ]
+        self._make_session(tmp_path, monkeypatch, cwd, "long1", history)
+
+        events = data_kiro_ide.get_full_transcript("long1", cwd)
+        assert len(events) == 10
+        assert events[0].text == "msg0"
+        assert events[-1].text == "msg9"
+
+    def test_unrecognized_role_skipped_not_raised(self, tmp_path, monkeypatch):
+        cwd = "C:\\RoleTest"
+        history = [
+            {"message": {"role": "system", "content": "internal note"}},
+            {"message": {"role": "user", "content": "real question"}},
+        ]
+        self._make_session(tmp_path, monkeypatch, cwd, "role1", history)
+
+        events = data_kiro_ide.get_full_transcript("role1", cwd)
+        assert [e.text for e in events] == ["real question"]
+
+    def test_unknown_workspace_returns_empty_list(self, tmp_path, monkeypatch):
+        sessions_dir = tmp_path / "workspace-sessions"
+        sessions_dir.mkdir()
+        monkeypatch.setattr("power_atlas.data_kiro_ide.SESSIONS_DIR", sessions_dir)
+        assert data_kiro_ide.get_full_transcript("full1", "C:\\NoSuchWorkspace") == []
+
+    def test_not_cached_reflects_file_changes(self, tmp_path, monkeypatch):
+        cwd = "C:\\LiveTest"
+        folder = self._make_session(tmp_path, monkeypatch, cwd, "live1", [
+            {"message": {"role": "user", "content": "first"}},
+        ])
+        assert [e.text for e in data_kiro_ide.get_full_transcript("live1", cwd)] == ["first"]
+
+        (folder / "live1.json").write_text(json.dumps({"history": [
+            {"message": {"role": "user", "content": "first"}},
+            {"message": {"role": "assistant", "content": "second"}},
+        ]}), encoding="utf-8")
+        assert [e.text for e in data_kiro_ide.get_full_transcript("live1", cwd)] == ["first", "second"]
+
+
 class TestKiroIdeRefreshStale:
     def test_detects_changed_file(self, tmp_path):
         f = tmp_path / "test.json"
@@ -1193,6 +1275,150 @@ class TestClaudeFirstPromptCached:
             result2 = data_claude.get_first_prompt(sid, "C:\\Work")
 
         assert result2 == "my question"
+
+
+class TestClaudeGetFullTranscript:
+    """`get_full_transcript` parses the whole session `.jsonl`, unlike
+    `get_session_tail` (last-128KB tail, assistant-text-only) -- and, unlike
+    both tail helpers, also surfaces tool_use/tool_result content blocks."""
+
+    def _make_project(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        proj = projects_dir / "C--Work"
+        proj.mkdir()
+        monkeypatch.setattr("power_atlas.data_claude.CLAUDE_PROJECTS_DIR", projects_dir)
+        return proj
+
+    def test_missing_jsonl_returns_empty_list(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path, monkeypatch)
+        assert data_claude.get_full_transcript("does-not-exist", "C:\\Work") == []
+
+    def test_full_ordered_transcript_across_all_event_kinds(self, tmp_path, monkeypatch):
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s1"
+        lines = [
+            json.dumps({"type": "user", "message": {"role": "user", "content": "Please fix the bug"}}),
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Let me check."},
+                {"type": "tool_use", "id": "tc1", "name": "fs_write",
+                 "input": {"path": "a.py", "text": "print(1)"}},
+            ]}}),
+            json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tc1", "content": "ok", "is_error": False},
+            ]}}),
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "Fixed it."}}),
+        ]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        assert [e.kind for e in events] == ["user", "assistant", "tool_call", "tool_result", "assistant"]
+        assert events[0].text == "Please fix the bug"
+        assert events[1].text == "Let me check."
+        assert events[2].tool_call_id == "tc1"
+        assert events[2].tool_name == "fs_write"
+        assert events[2].tool_args == {"path": "a.py", "text": "print(1)"}
+        assert events[3].tool_call_id == "tc1"
+        assert events[3].success is True
+        assert events[4].text == "Fixed it."
+
+    def test_tool_result_is_error_true_maps_to_success_false(self, tmp_path, monkeypatch):
+        from power_atlas.data import TranscriptEvent
+
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s2"
+        lines = [json.dumps({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tc2", "content": "boom", "is_error": True},
+        ]}})]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        assert events == [TranscriptEvent(kind="tool_result", tool_call_id="tc2", success=False)]
+
+    def test_tool_result_missing_is_error_normalizes_to_none(self, tmp_path, monkeypatch):
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s3"
+        lines = [json.dumps({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tc3", "content": "ok"},
+        ]}})]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        assert events[0].success is None
+
+    def test_meta_and_command_messages_excluded(self, tmp_path, monkeypatch):
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s4"
+        lines = [
+            json.dumps({"type": "user", "isMeta": True, "message": {"role": "user", "content": "meta stuff"}}),
+            json.dumps({"type": "mode", "message": {}}),
+            json.dumps({"type": "user", "message": {"role": "user", "content": "real question"}}),
+        ]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        assert [e.text for e in events] == ["real question"]
+
+    def test_command_xml_stripped_from_user_text(self, tmp_path, monkeypatch):
+        """A message starting with a command tag is filtered out entirely by
+        `_is_meta_or_command_message` -- this test instead covers the
+        *stripping* path: an embedded, non-leading command tag survives the
+        filter but has its surrounding tag markup (not its inner text)
+        cleaned out of the rendered text, per `_strip_command_xml`'s own
+        tags-only regex."""
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s5"
+        lines = [json.dumps({"type": "user", "message": {
+            "role": "user",
+            "content": "actual text <command-name>note</command-name> trailing",
+        }})]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        assert events[0].text == "actual text note trailing"
+
+    def test_malformed_line_skipped_not_raised(self, tmp_path, monkeypatch):
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s6"
+        lines = [
+            "not valid json",
+            json.dumps({"type": "user", "message": {"role": "user", "content": "still readable"}}),
+        ]
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        assert [e.text for e in events] == ["still readable"]
+
+    def test_preserves_full_history_beyond_tail_window(self, tmp_path, monkeypatch):
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s7"
+        lines = [json.dumps({"type": "user", "message": {"role": "user", "content": f"Q{i}"}})
+                 for i in range(40)]
+        lines.append(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "final"}}))
+        (proj / f"{sid}.jsonl").write_text("\n".join(lines), encoding="utf-8")
+
+        events = data_claude.get_full_transcript(sid, "C:\\Work")
+        user_events = [e for e in events if e.kind == "user"]
+        assert len(user_events) == 40
+        assert events[-1].text == "final"
+
+    def test_not_cached_reflects_file_changes_without_mtime_bump(self, tmp_path, monkeypatch):
+        proj = self._make_project(tmp_path, monkeypatch)
+        sid = "s8"
+        jsonl_path = proj / f"{sid}.jsonl"
+        jsonl_path.write_text(json.dumps(
+            {"type": "user", "message": {"role": "user", "content": "first"}}), encoding="utf-8")
+        assert [e.text for e in data_claude.get_full_transcript(sid, "C:\\Work")] == ["first"]
+
+        jsonl_path.write_text(
+            json.dumps({"type": "user", "message": {"role": "user", "content": "first"}}) + "\n"
+            + json.dumps({"type": "assistant", "message": {"role": "assistant", "content": "second"}}),
+            encoding="utf-8")
+        assert [e.text for e in data_claude.get_full_transcript(sid, "C:\\Work")] == ["first", "second"]
+
+    def test_unknown_cwd_returns_empty_list(self, tmp_path, monkeypatch):
+        self._make_project(tmp_path, monkeypatch)
+        assert data_claude.get_full_transcript("s1", "C:\\NoSuchProject") == []
 
 
 class TestKiroFirstPromptMtimeRefresh:
@@ -2156,6 +2382,121 @@ class TestKiroToolDiffs:
         assert diffs["tooluse_l"]["newText"] == "c = 4\n"
 
 
+class TestKiroGetFullTranscript:
+    """`get_full_transcript` is v2's only remaining transcript source now that
+    live ACP attach is retired for this provider — unlike `get_tool_diffs`
+    (write-only, success-only) it surfaces every event kind, and unlike
+    `get_session_tail` it does not truncate or skip tool-call lines."""
+
+    def _toolUse_line(self, tool_use_id, name, input_, extra_text=None):
+        content = []
+        if extra_text is not None:
+            content.append({"kind": "text", "data": extra_text})
+        content.append({"kind": "toolUse", "data": {
+            "toolUseId": tool_use_id, "name": name, "input": input_}})
+        return json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": content}})
+
+    def _result_line(self, tool_use_id, status):
+        return json.dumps({
+            "version": "v1", "kind": "ToolResults",
+            "data": {"content": [{"kind": "toolResult", "data": {
+                "toolUseId": tool_use_id, "status": status}}]},
+        })
+
+    def test_missing_jsonl_returns_empty_list(self, mock_sessions):
+        assert data_kiro.get_full_transcript("does-not-exist") == []
+
+    def test_full_ordered_transcript_across_all_event_kinds(self, mock_sessions):
+        _write_session(mock_sessions, "t1", "C:\\Work", jsonl_lines=[
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "Please fix the bug"}}),
+            self._toolUse_line("tu1", "write", {"command": "create", "path": "a.py", "content": "print(1)"}),
+            self._result_line("tu1", "success"),
+            json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "Fixed it."}}),
+        ])
+        events = data_kiro.get_full_transcript("t1")
+        assert [e.kind for e in events] == ["user", "tool_call", "tool_result", "assistant"]
+        assert events[0].text == "Please fix the bug"
+        assert events[1].tool_call_id == "tu1"
+        assert events[1].tool_name == "write"
+        assert events[1].tool_args == {"command": "create", "path": "a.py", "content": "print(1)"}
+        assert events[2].tool_call_id == "tu1"
+        assert events[2].success is True
+        assert events[3].text == "Fixed it."
+
+    def test_assistant_text_precedes_its_own_tool_call_in_same_message(self, mock_sessions):
+        _write_session(mock_sessions, "t2", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tu2", "shell", {"command": "ls"}, extra_text="Let me check."),
+        ])
+        events = data_kiro.get_full_transcript("t2")
+        assert [e.kind for e in events] == ["assistant", "tool_call"]
+        assert events[0].text == "Let me check."
+        assert events[1].tool_name == "shell"
+
+    def test_non_write_tool_calls_are_included_unlike_get_tool_diffs(self, mock_sessions):
+        """get_tool_diffs only cares about `write`; a full transcript must show
+        every tool, since it renders the whole session, not just diffs."""
+        _write_session(mock_sessions, "t3", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tu3", "shell", {"command": "echo hi"}),
+        ])
+        events = data_kiro.get_full_transcript("t3")
+        assert len(events) == 1
+        assert events[0].kind == "tool_call"
+        assert events[0].tool_name == "shell"
+
+    def test_cancelled_tool_call_still_appears_with_failed_result(self, mock_sessions):
+        """Unlike get_tool_diffs (drops a cancelled write entirely), a full
+        transcript must show the attempt actually happened."""
+        _write_session(mock_sessions, "t4", "C:\\Work", jsonl_lines=[
+            self._toolUse_line("tu4", "write", {"command": "create", "path": "never.py", "content": "x"}),
+            self._result_line("tu4", "error"),
+        ])
+        events = data_kiro.get_full_transcript("t4")
+        assert [e.kind for e in events] == ["tool_call", "tool_result"]
+        assert events[1].success is False
+
+    def test_tool_result_missing_status_normalizes_to_none(self, mock_sessions):
+        _write_session(mock_sessions, "t5", "C:\\Work", jsonl_lines=[
+            json.dumps({
+                "version": "v1", "kind": "ToolResults",
+                "data": {"content": [{"kind": "toolResult", "data": {"toolUseId": "tu5"}}]},
+            }),
+        ])
+        events = data_kiro.get_full_transcript("t5")
+        assert events[0].kind == "tool_result"
+        assert events[0].success is None
+
+    def test_malformed_line_skipped_not_raised(self, mock_sessions):
+        _write_session(mock_sessions, "t6", "C:\\Work", jsonl_lines=[
+            "not valid json",
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "still readable"}}),
+        ])
+        events = data_kiro.get_full_transcript("t6")
+        assert [e.text for e in events] == ["still readable"]
+
+    def test_preserves_full_history_beyond_tail_window(self, mock_sessions):
+        lines = [json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": f"Q{i}"}})
+                 for i in range(40)]
+        lines.append(json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "final"}}))
+        _write_session(mock_sessions, "t7", "C:\\Work", jsonl_lines=lines)
+        events = data_kiro.get_full_transcript("t7")
+        user_events = [e for e in events if e.kind == "user"]
+        assert len(user_events) == 40
+        assert events[-1].text == "final"
+
+    def test_not_cached_reflects_file_changes_without_mtime_bump(self, mock_sessions):
+        _write_session(mock_sessions, "t8", "C:\\Work", jsonl_lines=[
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "first"}}),
+        ])
+        assert [e.text for e in data_kiro.get_full_transcript("t8")] == ["first"]
+
+        jsonl = mock_sessions / "t8.jsonl"
+        jsonl.write_text(
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "first"}}) + "\n"
+            + json.dumps({"version": "v1", "kind": "AssistantMessage", "data": {"content": "second"}}),
+            encoding="utf-8")
+        assert [e.text for e in data_kiro.get_full_transcript("t8")] == ["first", "second"]
+
+
 # --- Sidecar-derived session identity (presence.py) ---
 #
 # Neither CLI puts its session id on argv, so these files are the only way a
@@ -2754,3 +3095,20 @@ def test_kiro_load_sessions_sees_rewritten_metadata(tmp_path):
         _kiro_meta(tmp_path, "a", "C:/one", "2026-06-06T00:00:00Z")
         second, _ = data_kiro.load_sessions("C:/one")
     assert second[0].updated_at == "2026-06-06T00:00:00Z", "stale metadata served"
+
+
+class TestGetFullTranscriptDispatch:
+    """`data.get_full_transcript` dispatches to the named provider module,
+    mirroring `get_session_tail`'s existing dispatch pattern."""
+
+    def test_dispatches_to_the_named_provider(self, mock_sessions):
+        _write_session(mock_sessions, "d1", "C:\\Work", jsonl_lines=[
+            json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "hi"}}),
+        ])
+        from power_atlas.data import get_full_transcript
+        events = get_full_transcript("d1", provider="kiro-cli", cwd="C:\\Work")
+        assert [e.text for e in events] == ["hi"]
+
+    def test_unknown_provider_returns_empty_list(self):
+        from power_atlas.data import get_full_transcript
+        assert get_full_transcript("any", provider="not-a-real-provider", cwd="C:\\Work") == []

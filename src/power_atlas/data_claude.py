@@ -602,6 +602,96 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
     return ""
 
 
+def get_full_transcript(session_id: str, cwd: str) -> list:
+    """Full ordered transcript: every user/assistant text, tool_use, and tool_result event.
+
+    Unlike `get_session_tail` (last-128KB tail, assistant-text-only), this
+    parses the whole session `.jsonl` in order and surfaces tool_use/
+    tool_result blocks too, for the dashboard/ACP-merge's static transcript
+    panel, which renders a session's complete history rather than a preview.
+    Not cached: read once per panel-open, not on every refresh tick.
+
+    Claude Code's tool_result blocks live inside "user"-typed lines (the
+    Anthropic Messages API convention: a tool result is submitted as part of
+    the *next* user turn) -- this still emits each one as its own
+    "tool_result" TranscriptEvent rather than folding it into a "user" text
+    event, matching how a `tool_use` block is emitted as its own "tool_call"
+    event within an "assistant" line.
+    """
+    from .data import TranscriptEvent
+
+    folder = _get_project_folder(cwd)
+    if folder is None:
+        return []
+    jsonl_path = folder / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return []
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+
+    events: list[TranscriptEvent] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        obj_type = obj.get("type")
+        if not isinstance(obj_type, str):
+            continue
+        if obj_type in _METADATA_TYPES or obj_type.startswith("hook_"):
+            continue
+        if obj_type not in ("user", "assistant"):
+            continue
+        if obj_type == "user" and _is_meta_or_command_message(obj):
+            continue
+
+        msg = obj.get("message", {})
+        content = msg.get("content", "")
+        timestamp = obj.get("timestamp") or ""
+
+        if isinstance(content, str):
+            text = _strip_command_xml(content) if obj_type == "user" else content
+            if text:
+                events.append(TranscriptEvent(kind=obj_type, text=text, timestamp=timestamp))
+            continue
+        if not isinstance(content, list):
+            continue
+
+        text = _extract_text_from_content(content)
+        if text and obj_type == "user":
+            text = _strip_command_xml(text)
+        if text:
+            events.append(TranscriptEvent(kind=obj_type, text=text, timestamp=timestamp))
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "tool_use":
+                events.append(TranscriptEvent(
+                    kind="tool_call",
+                    tool_call_id=block.get("id") or "",
+                    tool_name=block.get("name") or "",
+                    tool_args=block.get("input") or {},
+                    timestamp=timestamp,
+                ))
+            elif btype == "tool_result":
+                is_error = block.get("is_error")
+                events.append(TranscriptEvent(
+                    kind="tool_result",
+                    tool_call_id=block.get("tool_use_id") or "",
+                    success=(not is_error) if isinstance(is_error, bool) else None,
+                    timestamp=timestamp,
+                ))
+    return events
+
+
 def find_session_workspace(session_id: str) -> str | None:
     """Find the workspace for a given Claude Code session by scanning project folders."""
     if not CLAUDE_PROJECTS_DIR.is_dir():

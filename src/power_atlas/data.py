@@ -36,6 +36,37 @@ class Session:
     extra_fields: dict = field(default_factory=dict, hash=False, compare=False)  # extra_fields must remain the last field -- positional Session(...) calls in tests/test_data.py use 8-argument form
 
 
+@dataclass(frozen=True)
+class TranscriptEvent:
+    """One provider-agnostic event in a session's full transcript, in on-disk order.
+
+    A deliberately small, lowest-common-denominator shape every provider's
+    `get_full_transcript()` returns — the dashboard/ACP-merge's translator
+    layer converts these into the live ACP protocol's richer frame shapes, so
+    this type only needs to carry what every provider's file format can
+    actually supply, not everything the live wire protocol can express (e.g.
+    no `kind`/digest/diff fields here — a provider's tool_call args carry
+    enough for the translator to derive those itself; `get_session_tail`-style
+    truncation is also NOT applied here, unlike the tail helpers, since a full
+    transcript is meant to render everything the file has).
+
+    kind: "user" | "assistant" | "tool_call" | "tool_result"
+    text: message text, for "user"/"assistant" only.
+    tool_call_id: correlates a "tool_call" with its later "tool_result".
+    tool_name: e.g. "fs_write", "str_replace" -- "tool_call" only.
+    tool_args: the tool's raw call arguments -- "tool_call" only.
+    success: whether the tool succeeded -- "tool_result" only (None if unknown).
+    timestamp: ISO-ish on-disk timestamp when the provider's format has one, else "".
+    """
+    kind: str
+    text: str = ""
+    tool_call_id: str = ""
+    tool_name: str = ""
+    tool_args: dict = field(default_factory=dict, hash=False, compare=False)
+    success: bool | None = None
+    timestamp: str = ""
+
+
 @dataclass
 class _FileInfo:
     mtime: float
@@ -380,6 +411,20 @@ def get_first_prompt(session_id: str, provider: str = "kiro-cli", cwd: str = "")
     if mod is None:
         return ""
     return mod.get_first_prompt(session_id, cwd)
+
+
+def get_full_transcript(session_id: str, provider: str = "kiro-cli", cwd: str = "") -> list["TranscriptEvent"]:
+    """Full ordered transcript (every user/assistant/tool event, not just a tail).
+
+    Dispatches to the provider adapter's own `get_full_transcript`, mirroring
+    `get_session_tail`'s dispatch pattern. Returns [] for an unknown provider
+    or a session with no readable transcript file, matching the tail
+    functions' existing empty-list convention rather than raising.
+    """
+    mod = PROVIDERS.get(provider)
+    if mod is None:
+        return []
+    return mod.get_full_transcript(session_id, cwd)
 
 
 def get_all_sessions_paginated(

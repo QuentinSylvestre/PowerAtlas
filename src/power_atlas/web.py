@@ -574,6 +574,52 @@ def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -
     return result
 
 
+def _combined_pinned_list(
+    pinned_sessions_with_prov: list[tuple],
+    pinned_workspace_groups: list[dict],
+    pinned_session_order: list[str],
+) -> list[dict]:
+    """Merge pinned sessions and pinned workspaces into one ordered list.
+
+    Sessions come first, in `pinned_session_order` (config.pinned_sessions)
+    order; workspaces follow, alphabetically by folder name — the same
+    ordering each list already had on its own, just concatenated with
+    sessions on top. Each entry is tagged `"kind"` ("session"/"workspace") so
+    a renderer can draw either row shape. Duplicate session ids or workspace
+    cwds (e.g. a stale/duplicated config entry) collapse to their first
+    occurrence rather than rendering twice.
+    """
+    from .data import _normalize_path
+
+    order_index = {sid: i for i, sid in enumerate(pinned_session_order)}
+    seen_sessions: set[str] = set()
+    session_entries = []
+    for session, prov_name in pinned_sessions_with_prov:
+        if session.session_id in seen_sessions:
+            continue
+        seen_sessions.add(session.session_id)
+        session_entries.append({
+            "kind": "session",
+            "session": session,
+            "provider_name": prov_name,
+            "_order": order_index.get(session.session_id, len(order_index)),
+        })
+    session_entries.sort(key=lambda e: e["_order"])
+    for entry in session_entries:
+        del entry["_order"]
+
+    seen_cwds: set[str] = set()
+    workspace_entries = []
+    for group in sorted(pinned_workspace_groups, key=lambda g: g["folder_name"].lower()):
+        norm = _normalize_path(group["cwd"])
+        if norm in seen_cwds:
+            continue
+        seen_cwds.add(norm)
+        workspace_entries.append({"kind": "workspace", "group": group})
+
+    return session_entries + workspace_entries
+
+
 _PKG_DIR = Path(__file__).parent
 _TEMPLATES_DIR = _PKG_DIR / "templates"
 _STATIC_DIR = _PKG_DIR / "static"

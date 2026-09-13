@@ -118,6 +118,91 @@ def _make_session(title="test session", cwd="C:\\projects\\myapp", **kwargs):
     return Session(**defaults)
 
 
+from power_atlas.web import _combined_pinned_list, _group_workspaces  # noqa: E402
+
+
+class TestCombinedPinnedList:
+    """Pinned sessions and pinned workspaces merge into one ordered list:
+    sessions first (in config order), then workspaces (alphabetical) — the
+    dashboard/ACP-rail merge's replacement for two separate pinned sections."""
+
+    def _workspace_group(self, cwd, folder_name=None):
+        from power_atlas.config import Config
+        return _group_workspaces(
+            [(cwd, 1, "2026-06-17T12:00:00", "kiro-cli-v3")], config=Config(),
+        )[0] if folder_name is None else {
+            "cwd": cwd, "folder_name": folder_name, "providers": [],
+            "total_count": 0, "latest_updated": "",
+        }
+
+    def test_sessions_ordered_before_workspaces(self):
+        s1 = _make_session(session_id="s1", cwd="C:\\proj\\a")
+        s2 = _make_session(session_id="s2", cwd="C:\\proj\\b")
+        combined = _combined_pinned_list(
+            pinned_sessions_with_prov=[(s1, "kiro-cli-v3"), (s2, "kiro-cli-v3")],
+            pinned_workspace_groups=[self._workspace_group("C:\\proj\\a")],
+            pinned_session_order=["s1", "s2"],
+        )
+        assert [e["kind"] for e in combined] == ["session", "session", "workspace"]
+
+    def test_sessions_follow_config_pin_order_not_input_order(self):
+        s1 = _make_session(session_id="s1")
+        s2 = _make_session(session_id="s2")
+        combined = _combined_pinned_list(
+            pinned_sessions_with_prov=[(s1, "kiro-cli-v3"), (s2, "kiro-cli-v3")],
+            pinned_workspace_groups=[],
+            pinned_session_order=["s2", "s1"],
+        )
+        assert [e["session"].session_id for e in combined] == ["s2", "s1"]
+
+    def test_duplicate_session_id_collapses_to_first_occurrence(self):
+        s1 = _make_session(session_id="s1", title="first")
+        s1_dup = _make_session(session_id="s1", title="duplicate")
+        combined = _combined_pinned_list(
+            pinned_sessions_with_prov=[(s1, "kiro-cli-v3"), (s1_dup, "kiro-cli-v3")],
+            pinned_workspace_groups=[],
+            pinned_session_order=["s1"],
+        )
+        assert len(combined) == 1
+        assert combined[0]["session"].title == "first"
+
+    def test_duplicate_workspace_cwd_collapses_to_first_occurrence(self):
+        group_a = self._workspace_group("C:\\proj\\a", folder_name="a")
+        group_a_dup = self._workspace_group("C:\\proj\\a", folder_name="a")
+        combined = _combined_pinned_list(
+            pinned_sessions_with_prov=[],
+            pinned_workspace_groups=[group_a, group_a_dup],
+            pinned_session_order=[],
+        )
+        assert len(combined) == 1
+
+    def test_workspaces_sorted_alphabetically_by_folder_name(self):
+        group_b = self._workspace_group("C:\\proj\\b", folder_name="b")
+        group_a = self._workspace_group("C:\\proj\\a", folder_name="a")
+        combined = _combined_pinned_list(
+            pinned_sessions_with_prov=[],
+            pinned_workspace_groups=[group_b, group_a],
+            pinned_session_order=[],
+        )
+        assert [e["group"]["folder_name"] for e in combined] == ["a", "b"]
+
+    def test_unpinned_session_not_in_pin_order_still_included_last(self):
+        """A session in `pinned_sessions_with_prov` but absent from
+        `pinned_session_order` (e.g. config changed between fetch and render)
+        sorts after every session that IS in the order, rather than raising."""
+        s1 = _make_session(session_id="s1")
+        s_stray = _make_session(session_id="stray")
+        combined = _combined_pinned_list(
+            pinned_sessions_with_prov=[(s_stray, "kiro-cli-v3"), (s1, "kiro-cli-v3")],
+            pinned_workspace_groups=[],
+            pinned_session_order=["s1"],
+        )
+        assert [e["session"].session_id for e in combined] == ["s1", "stray"]
+
+    def test_empty_inputs_produce_empty_list(self):
+        assert _combined_pinned_list([], [], []) == []
+
+
 def test_index_returns_html(client):
     resp = client.get("/")
     assert resp.status_code == 200

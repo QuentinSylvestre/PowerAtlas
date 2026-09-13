@@ -364,6 +364,55 @@ def get_first_prompt(session_id: str, cwd: str) -> str:
     return ""
 
 
+def get_full_transcript(session_id: str, cwd: str) -> list:
+    """Full ordered transcript: every user/assistant text turn.
+
+    Unlike `get_session_tail` (assistant-text-only, last `max_lines`), this
+    returns every turn in the session's `history` array, in order -- for the
+    dashboard/ACP-merge's static transcript panel, which renders a session's
+    complete history rather than a preview. Not cached: read once per
+    panel-open, not on every refresh tick.
+
+    Kiro IDE's history format has no tool-call/tool-result concept anywhere
+    in this adapter (confirmed: no other function here parses one) -- only
+    "user" and "assistant" roles are ever emitted, matching what
+    `get_session_tail`/`get_first_prompt` already extract.
+    """
+    from .data import TranscriptEvent
+
+    folder = _find_workspace_folder(cwd)
+    if folder is None:
+        return []
+
+    session_file = folder / f"{session_id}.json"
+    try:
+        sess_data = json.loads(session_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+
+    history = sess_data.get("history", [])
+    if not isinstance(history, list):
+        return []
+
+    events: list[TranscriptEvent] = []
+    for entry in history:
+        msg = entry.get("message", {}) if isinstance(entry, dict) else {}
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "user":
+            text = _extract_user_text(content)
+            if text:
+                events.append(TranscriptEvent(kind="user", text=text))
+        elif role == "assistant":
+            text = _extract_assistant_text(content)
+            if text:
+                events.append(TranscriptEvent(kind="assistant", text=text))
+        # Any other role is silently skipped, matching
+        # _extract_from_history's existing "unrecognized role -> ignored"
+        # convention rather than raising on a future/unknown shape.
+    return events
+
+
 # --- Reverse index for find_session_workspace ---
 
 _reverse_index: dict[str, str] | None = None  # session_id -> workspaceDirectory

@@ -910,3 +910,76 @@ def get_first_prompt(session_id: str, cwd: str = "") -> str:
     # a tool-only session on every TTL miss (M5 fix).
     _first_prompt_cache.put(cache_key, (time.time(), current_mtime, first_prompt))
     return first_prompt
+
+
+def get_full_transcript(session_id: str, cwd: str = "") -> "list":
+    """Full ordered transcript: every user/assistant/tool_call/tool_result event.
+
+    Unlike `get_session_tail` (last-128KB tail, assistant-text-only), this
+    parses the whole `messages.jsonl` in order, for the dashboard/ACP-merge's
+    static transcript panel, which renders a session's complete history
+    rather than a preview. Not cached — a full transcript is read once per
+    panel-open, not on every refresh tick the way the tail helpers are.
+    """
+    from .data import TranscriptEvent
+
+    messages_path = _find_v3_session_path(session_id)
+    if messages_path is None:
+        return []
+    try:
+        with messages_path.open(encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+
+    events: list[TranscriptEvent] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        payload = obj.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        timestamp = obj.get("timestamp") or ""
+
+        if ptype in ("user", "assistant"):
+            content = payload.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = " ".join(
+                    item.get("text", "") for item in content
+                    if isinstance(item, dict) and item.get("type") == "text"
+                )
+            else:
+                text = ""
+            if not text:
+                # e.g. an image-only message -- nothing to render as text,
+                # matching _extract_v3_content's existing "" convention.
+                continue
+            events.append(TranscriptEvent(kind=ptype, text=text, timestamp=timestamp))
+        elif ptype == "tool_call":
+            events.append(TranscriptEvent(
+                kind="tool_call",
+                tool_call_id=payload.get("toolCallId") or "",
+                tool_name=payload.get("toolName") or "",
+                tool_args=payload.get("args") or {},
+                timestamp=timestamp,
+            ))
+        elif ptype == "tool_result":
+            success = payload.get("success")
+            events.append(TranscriptEvent(
+                kind="tool_result",
+                tool_call_id=payload.get("toolCallId") or "",
+                success=success if isinstance(success, bool) else None,
+                timestamp=timestamp,
+            ))
+        # Other payload types are silently skipped -- matching
+        # _extract_v3_content's existing "unrecognized type -> no content"
+        # behavior rather than raising on a future/unknown envelope shape.
+    return events

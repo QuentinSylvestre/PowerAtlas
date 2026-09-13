@@ -565,3 +565,112 @@ def get_first_prompt(session_id: str, cwd: str = "") -> str:
     except OSError:
         pass
     return ""  # Don't negative-cache empty strings
+
+
+def _join_text_parts(content) -> str:
+    """Same text-joining rule as `_extract_content`, applied to an already-parsed
+    `data.content` value instead of a raw line -- used by `get_full_transcript`,
+    which needs the rest of the parsed line (kind, toolUse items) too and would
+    otherwise re-parse the same JSON a second time via `_extract_content`."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and (item.get("kind") == "text" or item.get("type") == "text"):
+                text_val = item.get("text", "")
+                if not text_val:
+                    d = item.get("data")
+                    text_val = d if isinstance(d, str) else (d.get("text", "") if isinstance(d, dict) else "")
+                parts.append(text_val)
+        return " ".join(parts)
+    return ""
+
+
+def get_full_transcript(session_id: str, cwd: str = "") -> list:
+    """Full ordered transcript: every prompt/assistant-text/tool_call/tool_result event.
+
+    Unlike `get_session_tail` (last-128KB tail, assistant-text-only, tool-call
+    lines explicitly skipped) or `get_tool_diffs` (`write`-only, success-only,
+    diff bodies rather than events), this parses the whole `.jsonl` in order
+    and surfaces every event kind -- retired-v2 sessions have no live ACP path
+    any more, so this file is their only remaining transcript source. Not
+    cached: read once per panel-open, not on every refresh tick.
+
+    A `toolUse` item nested inside an `AssistantMessage`'s content list emits
+    as its own `tool_call` event, positioned after that message's joined text
+    (if any) -- the source format does not preserve finer-grained ordering
+    between prose and tool calls within one message, matching how
+    `_extract_content`/`get_tool_diffs` already treat these fields as separate
+    categories rather than a single interleaved sequence.
+    """
+    from .data import TranscriptEvent
+
+    jsonl_path = SESSION_DIR / f"{session_id}.jsonl"
+    if not jsonl_path.exists():
+        return []
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+
+    events: list[TranscriptEvent] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        kind = obj.get("kind")
+        data_field = obj.get("data")
+        if not isinstance(data_field, dict):
+            continue
+
+        if kind == "Prompt":
+            text = _join_text_parts(data_field.get("content"))
+            if text:
+                events.append(TranscriptEvent(kind="user", text=text))
+        elif kind == "AssistantMessage":
+            content = data_field.get("content")
+            text = _join_text_parts(content)
+            if text:
+                events.append(TranscriptEvent(kind="assistant", text=text))
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("kind") != "toolUse":
+                    continue
+                tool = item.get("data")
+                if not isinstance(tool, dict):
+                    continue
+                tool_use_id = tool.get("toolUseId")
+                if not isinstance(tool_use_id, str):
+                    continue
+                events.append(TranscriptEvent(
+                    kind="tool_call",
+                    tool_call_id=tool_use_id,
+                    tool_name=tool.get("name") or "",
+                    tool_args=tool.get("input") or {},
+                ))
+        elif kind == "ToolResults":
+            content = data_field.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                result = item.get("data") if isinstance(item, dict) else None
+                if not isinstance(result, dict):
+                    continue
+                tool_use_id = result.get("toolUseId")
+                if not isinstance(tool_use_id, str):
+                    continue
+                status = result.get("status")
+                success = True if status == "success" else (False if status is not None else None)
+                events.append(TranscriptEvent(
+                    kind="tool_result", tool_call_id=tool_use_id, success=success,
+                ))
+        # Other kinds (if any) are silently skipped, matching _extract_content's
+        # existing "unrecognized kind -> no content" convention.
+    return events
