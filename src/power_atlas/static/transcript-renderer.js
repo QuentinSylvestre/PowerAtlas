@@ -1848,3 +1848,56 @@ function appendThought(text) {
   if (thinkingRow.body.textContent === 'thinking…') thinkingRow.body.textContent = '';
   thinkingRow.body.textContent += text;
 }
+
+// ---- resetting the panel for a new session -------------------------------
+
+/** Wipe every rendered row and every piece of shared state tracked in this
+ *  file, so the next session's frames start from a blank panel rather than
+ *  drawing on top of (or being confused by) the previous one's leftovers.
+ *  Called before loading a new session's history, and before re-subscribing
+ *  to the same session id after a reconnect.
+ *
+ *  removeAllCrewPanels/closeSubagentView are acp.html-only: the crew/
+ *  sub-agent fan-out panel is a live-WebSocket feature with no static/
+ *  file-replayed equivalent (translate_transcript() emits no frame type for
+ *  it — see transcript_translator.py), so a page without them (the
+ *  dashboard's transcript panel) has nothing to tear down. Guarded and
+ *  exposed the same way as send/logLine above: both are declared inside
+ *  acp.html's IIFE, so a bare `typeof X === 'function'` here would not find
+ *  them without that page explicitly assigning `window.X = X`. */
+function clearTranscript() {
+  // Emptying by textContent rather than innerHTML: same effect, and it keeps
+  // the no-innerHTML rule true of every line on this page without exception.
+  transcriptEl.textContent = '';
+  // promptNavEl is now outside the transcript (sibling in .acp-transcript-wrap),
+  // so textContent = '' above does not remove it. Just hide it and clear the
+  // userMsgEls tracking array.
+  userMsgEls = [];
+  promptNavEl.hidden = true;
+  _updateNavArrows();
+  agentBody = null;
+  toolRows = Object.create(null);
+  // Clear any live elapsed-time timers — the rows they were ticking against
+  // were just removed and the intervals would otherwise run forever.
+  Object.keys(_toolTimers).forEach(function(k) {
+    clearInterval(_toolTimers[k]);
+  });
+  _toolTimers = Object.create(null);
+  // Held bodies belong to rows that no longer exist. Kept in step with
+  // `toolRows`, or a body stashed under an id the next session happened to
+  // reuse would attach itself to a stranger's tool call.
+  pendingToolOutput = Object.create(null);
+  toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
+  // The row emptying just detached, if one was showing — nothing left to
+  // remove a second time, and `showThinking` would otherwise believe one
+  // still stands.
+  thinkingRow = null;
+  // A new session (or a reload of this one) has no crew of its own yet —
+  // whatever the previous session's fan-out looked like does not carry over,
+  // and a sub-agent panel left open would be showing a conversation that no
+  // longer has anything to do with what is on screen behind it.
+  if (typeof removeAllCrewPanels === 'function') removeAllCrewPanels();
+  if (typeof closeSubagentView === 'function') closeSubagentView();
+  // Reset prompt navigation state: the nav arrows track DOM rows that were
+  // just cleared by textContent = '' above, so stale refs are cleared here.
+}

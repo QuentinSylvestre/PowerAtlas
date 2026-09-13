@@ -747,6 +747,15 @@
   // both are `function` declarations, fully hoisted within this script.
   window.send = send;
   window.logLine = logLine;
+  // removeAllCrewPanels/closeSubagentView, exposed the same way and for the
+  // same reason: clearTranscript() (also moved to transcript-renderer.js,
+  // Phase 2 slice 5) calls both, guarded, to tear down the crew/sub-agent
+  // panel -- a live-only feature with no file-replay equivalent, so a page
+  // without them (the dashboard) just skips those calls. Safe to assign
+  // before either's own declaration further down; both are hoisted function
+  // declarations.
+  window.removeAllCrewPanels = removeAllCrewPanels;
+  window.closeSubagentView = closeSubagentView;
   var closeBtn = document.getElementById('acpClose');
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
@@ -2155,42 +2164,11 @@
   // attacker-influenced — repo files, fetched pages, commit messages — and the
   // agent runs trust-all-tools, so treat every field below as hostile.
 
-  function clearTranscript() {
-    // Emptying by textContent rather than innerHTML: same effect, and it keeps
-    // the no-innerHTML rule true of every line on this page without exception.
-    transcriptEl.textContent = '';
-    // promptNavEl is now outside the transcript (sibling in .acp-transcript-wrap),
-    // so textContent = '' above does not remove it. Just hide it and clear the
-    // userMsgEls tracking array.
-    userMsgEls = [];
-    promptNavEl.hidden = true;
-    _updateNavArrows();
-    agentBody = null;
-    toolRows = Object.create(null);
-    // Clear any live elapsed-time timers — the rows they were ticking against
-    // were just removed and the intervals would otherwise run forever.
-    Object.keys(_toolTimers).forEach(function(k) {
-      clearInterval(_toolTimers[k]);
-    });
-    _toolTimers = Object.create(null);
-    // Held bodies belong to rows that no longer exist. Kept in step with
-    // `toolRows`, or a body stashed under an id the next session happened to
-    // reuse would attach itself to a stranger's tool call.
-    pendingToolOutput = Object.create(null);
-    toolGroup = null; // also reset at meta turn:start and at end of flushToolGroups()
-    // The row emptying just detached, if one was showing — nothing left to
-    // remove a second time, and `showThinking` would otherwise believe one
-    // still stands.
-    thinkingRow = null;
-    // A new session (or a reload of this one) has no crew of its own yet —
-    // whatever the previous session's fan-out looked like does not carry over,
-    // and a sub-agent panel left open would be showing a conversation that no
-    // longer has anything to do with what is on screen behind it.
-    removeAllCrewPanels();
-    closeSubagentView();
-    // Reset prompt navigation state: the nav arrows track DOM rows that were
-    // just cleared by textContent = '' above, so stale refs are cleared here.
-  }
+  // clearTranscript() is declared in /static/transcript-renderer.js (Phase 2
+  // slice 5) — it resets shared transcript state (transcriptEl, userMsgEls,
+  // agentBody, toolRows, etc., all already relocated there) and, guarded,
+  // the crew/sub-agent teardown below (removeAllCrewPanels/closeSubagentView,
+  // exposed as window globals above for that guard to find).
 
   // ---- the crew panel ------------------------------------------------------
   //
