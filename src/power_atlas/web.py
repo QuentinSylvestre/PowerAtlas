@@ -2027,7 +2027,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                  session_page: int, session_size: int, held,
                  capacity: dict,
                  providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
-                 include_provider: bool = False) -> dict:
+                 include_provider: bool = False,
+                 tag: str = "", time_filter: str = "") -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     Paginated **independently at both levels** (D19). The existing listing
@@ -2077,12 +2078,38 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     own multi-provider route passes `True`: unlike that route, its rows can
     be any registered provider, and the client needs to know which one a row
     is to know how to open or resume it.
+
+    `tag`/`time_filter` (dashboard/ACP-merge Phase 4): the dashboard's
+    existing tag-filter/tag-management feature and time filter, preserved
+    from `/partials/workspaces` rather than dropped when that route's rail
+    replaced it. `tag` is the same three-way rule that route already uses —
+    empty excludes `hidden` (the default), `"hidden"` shows only `hidden`,
+    anything else shows only workspaces carrying that exact tag — applied
+    here instead of the plain `"hidden" not in tags` check. `time_filter`
+    buckets by `latest_updated` exactly as that route's `_time_bucket` does.
+    Both apply before pagination, for the reason `get_all_sessions_paginated`
+    already documents on `exclude_cwds`: filtering a page after the fact
+    would cut it short and make `has_more` stop describing what is shown.
+    Neither reaches `/api/acp/sessions`, which passes neither argument, so
+    that route's behavior is unaffected. `time_filter` is grouped-mode only
+    — the dashboard's own Date grouping mode already buckets by day, which
+    makes a separate time filter mostly redundant there; `_acp_flat_listing`
+    does not take it.
     """
     from .config import get_workspace_settings
     from .data import _normalize_path
     from . import data_kiro_v3
 
     config = load_config()
+
+    def _tag_keep(ws_cwd: str) -> bool:
+        tags = get_workspace_settings(config, ws_cwd)["tags"]
+        if not tag:
+            return "hidden" not in tags
+        if tag == "hidden":
+            return "hidden" in tags
+        return tag in tags
+
     enabled = frozenset(p for p in providers if _enabled(config, p))
     if not enabled:
         workspaces: list[tuple[str, int, str, list[str]]] = []
@@ -2091,7 +2118,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         workspaces = [
             (w[0], w[1], w[2], [only])
             for w in data.discover_workspaces_with_counts(only)
-            if "hidden" not in get_workspace_settings(config, w[0])["tags"]
+            if _tag_keep(w[0])
         ]
     else:
         grouped = _group_workspaces(
@@ -2101,8 +2128,11 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             (g["cwd"], g["total_count"], g["latest_updated"],
              [p["name"] for p in g["providers"]])
             for g in grouped
-            if "hidden" not in get_workspace_settings(config, g["cwd"])["tags"]
+            if _tag_keep(g["cwd"])
         ]
+
+    if time_filter:
+        workspaces = [w for w in workspaces if _time_bucket(w[2]) == time_filter]
 
     if cwd:
         target = _normalize_path(cwd)
@@ -2210,7 +2240,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
 def _acp_flat_listing(page: int, size: int, held, capacity: dict,
                        providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
-                       include_provider: bool = False) -> dict:
+                       include_provider: bool = False, tag: str = "") -> dict:
     """Build the recency-ordered listing payload. Blocking; runs off the loop.
 
     The listing's second shape: every session this ACP can resume, newest
@@ -2253,6 +2283,11 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
     session dict. See `_acp_listing`'s own parameter of the same name for why
     `/api/acp/sessions` must never turn this on and the dashboard's route
     always does.
+
+    `tag` (dashboard/ACP-merge Phase 4): same three-way rule as
+    `_acp_listing`'s own `tag` parameter — see that docstring. No
+    `time_filter` here; see `_acp_listing` for why grouped mode alone
+    carries it.
     """
     from .config import get_workspace_settings
 
@@ -2268,10 +2303,16 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         if len(enabled) == 1 else
         [w for w in data.discover_workspaces_with_counts(None) if w[3] in enabled]
     )
-    hidden = {
-        w[0] for w in workspaces_list
-        if "hidden" in get_workspace_settings(config, w[0])["tags"]
-    }
+
+    def _tag_keep(ws_cwd: str) -> bool:
+        tags = get_workspace_settings(config, ws_cwd)["tags"]
+        if not tag:
+            return "hidden" not in tags
+        if tag == "hidden":
+            return "hidden" in tags
+        return tag in tags
+
+    hidden = {w[0] for w in workspaces_list if not _tag_keep(w[0])}
     try:
         rows, has_more = data.get_all_sessions_paginated(
             page=page, page_size=size,
@@ -2415,7 +2456,9 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
                                  session_page: int = 1,
                                  session_size: int = _ACP_SESSIONS_PER_GROUP,
                                  mode: str = "", page: int = 1,
-                                 size: int = _ACP_FLAT_PAGE_SIZE):
+                                 size: int = _ACP_FLAT_PAGE_SIZE,
+                                 provider: str = "", tag: str = "",
+                                 time_filter: str = ""):
     """The dashboard's own rail feed (dashboard/ACP-merge Phase 4): every
     enabled, available provider, not only kiro-cli-v3. Same parameters,
     pagination, `hidden`-tag/disabled-provider exclusions and grouped/
@@ -2425,6 +2468,15 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
     from, since unlike the v3-only route this one's rows are not all the
     same provider). See `api_acp_sessions` for the full field documentation,
     which otherwise applies here verbatim.
+
+    `provider`, `tag`, `time_filter`: the dashboard's existing workspace
+    filters (provider tabs, tag filter/management, time filter), preserved
+    from `/partials/workspaces` rather than dropped when this route's rail
+    replaced it — see `_acp_listing`'s own docstring for the exact `tag`/
+    `time_filter` semantics. `provider=""` (the default) means every
+    enabled+available provider; a specific name narrows `providers` to just
+    that one, the same choice `/partials/workspaces`'s own `provider`
+    parameter makes.
 
     Not scoped any differently than the rest of the dashboard: this app's
     `RemoteAccessGuard` middleware already covers every route including this
@@ -2439,17 +2491,18 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
         "held": ((len(held) + supervisor._reserved) if supervisor is not None else 0),
         "max": acp.MAX_SESSIONS if acp is not None else 0,
     }
-    providers = frozenset(data.available_providers())
+    available = frozenset(data.available_providers())
+    providers = frozenset({provider}) & available if provider else available
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
             max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity,
-            providers, True)
+            providers, True, tag)
     return await asyncio.to_thread(
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity, providers, True)
+        held, capacity, providers, True, tag, time_filter)
 
 
 # --- The create flow's workspace list ------------------------------------

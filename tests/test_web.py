@@ -16723,6 +16723,72 @@ class TestDashboardListingEndpoint:
         assert [s["provider"] for s in group["sessions"]] == [
             "claude-code", "kiro-cli-v3"]
 
+    def test_provider_param_narrows_to_one_provider(
+            self, client, grouped_multi_store):
+        """The dashboard's provider tabs, preserved: ?provider=claude-code
+        must not also pull in kiro-cli-v3 rows for the same workspace."""
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("v3s1")])
+        grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("ccs1")])
+        body = client.get(self._PATH, params={"provider": "claude-code"}).json()
+        group = body["groups"][0]
+        assert [s["id"] for s in group["sessions"]] == ["ccs1"]
+
+    def test_tag_filter_default_excludes_hidden(
+            self, client, grouped_multi_store, monkeypatch):
+        """Preserves /partials/workspaces's default: no `tag` means hidden
+        workspaces are left out, not merely deprioritized."""
+        from power_atlas import config as config_mod
+        grouped_multi_store["add"](r"C:\dev\secret", "kiro-cli-v3", [_acp_row("s1")])
+        grouped_multi_store["add"](r"C:\dev\open", "kiro-cli-v3", [_acp_row("s2")])
+        monkeypatch.setattr(
+            config_mod, "get_workspace_settings",
+            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else []})
+        body = client.get(self._PATH).json()
+        assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\open"]
+
+    def test_tag_filter_hidden_shows_only_hidden(
+            self, client, grouped_multi_store, monkeypatch):
+        from power_atlas import config as config_mod
+        grouped_multi_store["add"](r"C:\dev\secret", "kiro-cli-v3", [_acp_row("s1")])
+        grouped_multi_store["add"](r"C:\dev\open", "kiro-cli-v3", [_acp_row("s2")])
+        monkeypatch.setattr(
+            config_mod, "get_workspace_settings",
+            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else []})
+        body = client.get(self._PATH, params={"tag": "hidden"}).json()
+        assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\secret"]
+
+    def test_tag_filter_matches_a_named_tag(
+            self, client, grouped_multi_store, monkeypatch):
+        from power_atlas import config as config_mod
+        grouped_multi_store["add"](r"C:\dev\frontend", "kiro-cli-v3", [_acp_row("s1")])
+        grouped_multi_store["add"](r"C:\dev\backend", "kiro-cli-v3", [_acp_row("s2")])
+        monkeypatch.setattr(
+            config_mod, "get_workspace_settings",
+            lambda cfg, cwd: {"tags": ["frontend"] if "frontend" in cwd else []})
+        body = client.get(self._PATH, params={"tag": "frontend"}).json()
+        assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\frontend"]
+
+    def test_time_filter_narrows_grouped_mode_before_pagination(
+            self, client, grouped_multi_store):
+        grouped_multi_store["add"](r"C:\dev\new", "kiro-cli-v3", [_acp_row("s1")],
+                                   updated="2026-08-03T10:00:00Z")
+        grouped_multi_store["add"](r"C:\dev\old", "kiro-cli-v3", [_acp_row("s2")],
+                                   updated="2020-01-01T10:00:00Z")
+        body = client.get(self._PATH, params={"time_filter": "today"}).json()
+        # Whatever "today" resolves to on this machine, the far-past workspace
+        # must never match it -- this proves the filter actually excludes
+        # rather than being silently ignored.
+        assert r"C:\dev\old" not in [g["cwd"] for g in body["groups"]]
+
+    def test_time_filter_is_not_accepted_in_flat_mode(
+            self, client, grouped_multi_store):
+        """Documented scope cut: Date mode already buckets by day, so
+        `_acp_flat_listing` takes no `time_filter` -- passing one must not
+        error, only be ignored."""
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("s1")])
+        resp = client.get(self._PATH, params={"mode": "recent", "time_filter": "today"})
+        assert resp.status_code == 200
+
 
 class TestAcpDeleteEndpoint:
     """Session deletion — the first thing PowerAtlas writes to kiro-cli's store.
