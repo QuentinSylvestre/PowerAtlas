@@ -233,184 +233,6 @@ def test_index_reports_no_acp_token_when_acp_is_unavailable(client, monkeypatch)
     assert "var ACP_TOKEN = null" in resp.text
 
 
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces(mock_discover, mock_providers, mock_sessions, client, tmp_path):
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-    mock_sessions.return_value = [_make_session(cwd=workspace)]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert workspace in resp.text or Path(workspace).name in resp.text
-    assert "1</span>" in resp.text or "card-count" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_empty(mock_discover, mock_providers, mock_config, client):
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_discover.return_value = []
-    mock_providers.return_value = []
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "No workspaces found" in resp.text
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_stale(mock_discover, mock_providers, mock_sessions, client):
-    mock_discover.return_value = [("C:\\nonexistent\\path\\xyz", 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-    mock_sessions.return_value = [_make_session(cwd="C:\\nonexistent\\path\\xyz")]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "stale" in resp.text
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_error(mock_discover, mock_providers, client):
-    mock_discover.side_effect = RuntimeError("db unavailable")
-    mock_providers.return_value = []
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "Error" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_filters(mock_discover, mock_config, client, tmp_path):
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    workspace = str(tmp_path)
-    mock_discover.return_value = [
-        (workspace, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
-        ("C:\\other\\project", 1, "2026-01-01T00:00:00Z", "claude-code"),
-    ]
-
-    resp = client.get(f"/search?q={Path(workspace).name}")
-    assert resp.status_code == 200
-    assert Path(workspace).name in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_no_results(mock_discover, mock_config, client, tmp_path):
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "", "kiro-cli")]
-
-    resp = client.get("/search?q=zzzznotfound")
-    assert resp.status_code == 200
-    assert "No results" in resp.text
-
-
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_session_count_is_provider_aware(mock_discover, client, tmp_path):
-    """When provider filter is active, search returns provider-filtered session count.
-
-    The workspace has 2 kiro-cli sessions and 1 claude-code session (3 total).
-    With provider=kiro-cli, the card must show 2, not 3.
-    """
-    workspace = str(tmp_path)
-    # Simulate two provider rows for the same workspace: 2 kiro-cli, 1 claude-code
-    mock_discover.return_value = [
-        (workspace, 2, "2026-01-01T12:00:00Z", "kiro-cli"),
-        (workspace, 1, "2026-01-01T11:00:00Z", "claude-code"),
-    ]
-    folder_name = tmp_path.name
-
-    resp = client.get(f"/search?q={folder_name}&provider=kiro-cli")
-    assert resp.status_code == 200
-    html = resp.text
-    assert folder_name in html
-    # The session count shown must be 2 (kiro-cli only), not 3 (total).
-    # workspace_card.html renders session_count in a span with class "card-count".
-    # We look for "2" appearing and verify "3" does NOT appear as a count.
-    # Use a pattern that matches the count span value.
-    counts = re.findall(r'card-count[^>]*>\s*(\d+)', html)
-    assert counts, "Expected at least one card-count span in the response"
-    assert all(int(c) == 2 for c in counts), (
-        f"Expected all counts to be 2 (kiro-cli only), got: {counts}"
-    )
-
-
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_and_search_produce_same_session_count_for_provider_filter(
-    mock_discover, client, tmp_path
-):
-    """Both /partials/workspaces and /search return identical session_count when provider filter active.
-
-    Before the unification, search always used total_count while partials used a
-    provider-aware sum. This test pins that both now agree.
-    """
-    workspace = str(tmp_path)
-    mock_discover.return_value = [
-        (workspace, 3, "2026-01-01T12:00:00Z", "kiro-cli"),
-        (workspace, 2, "2026-01-01T11:00:00Z", "claude-code"),
-    ]
-    folder_name = tmp_path.name
-
-    r1 = client.get("/partials/workspaces?provider=kiro-cli")
-    r2 = client.get(f"/search?q={folder_name}&provider=kiro-cli")
-
-    assert r1.status_code == 200
-    assert r2.status_code == 200
-
-    counts_partials = re.findall(r'card-count[^>]*>\s*(\d+)', r1.text)
-    counts_search = re.findall(r'card-count[^>]*>\s*(\d+)', r2.text)
-
-    assert counts_partials, "Expected at least one count in /partials/workspaces response"
-    assert counts_search, "Expected at least one count in /search response"
-    # Both should show 3 (kiro-cli count), not 5 (total).
-    assert counts_partials == counts_search, (
-        f"Route counts differ: partials={counts_partials}, search={counts_search}"
-    )
-    assert all(int(c) == 3 for c in counts_search), (
-        f"Expected count 3 (kiro-cli sessions), got: {counts_search}"
-    )
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_pinned_session_count_is_provider_aware(
-    mock_discover, mock_providers, mock_config, client, tmp_path
-):
-    """Pinned workspace code path in _render_workspace_groups respects provider filter.
-
-    The workspace has 2 kiro-cli sessions and 1 claude-code session (3 total).
-    It is pinned. With provider=kiro-cli, the card must show 2, not 3.
-    """
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    folder_name = tmp_path.name
-    mock_config.return_value = Config(pinned_folders=[workspace])
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-    mock_discover.return_value = [
-        (workspace, 2, "2026-01-01T12:00:00Z", "kiro-cli"),
-        (workspace, 1, "2026-01-01T11:00:00Z", "claude-code"),
-    ]
-
-    resp = client.get("/partials/workspaces?provider=kiro-cli")
-    assert resp.status_code == 200
-    html = resp.text
-    assert folder_name in html
-    counts = re.findall(r'card-count[^>]*>\s*(\d+)', html)
-    assert counts, "Expected at least one card-count span in the response"
-    assert all(int(c) == 2 for c in counts), (
-        f"Expected count 2 (kiro-cli only, pinned path), got: {counts}"
-    )
-
-
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 def test_save_provider_settings(mock_load, mock_save, client):
@@ -458,38 +280,6 @@ def test_get_provider_settings_default(mock_load, client):
     assert body["enabled"] is True
 
 
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.discover_workspaces")
-def test_session_row_shows_all_fields(mock_discover, mock_sessions, client, tmp_path):
-    workspace = str(tmp_path)
-    mock_discover.return_value = [workspace]
-    mock_sessions.return_value = [_make_session(
-        cwd=workspace, title="my title",
-        first_prompt="first question", last_prompt="last question",
-        last_reply_tail="final answer",
-    )]
-
-    resp = client.get("/partials/sessions", params={"cwd": workspace})
-    assert "my title" in resp.text
-    assert "first question" in resp.text
-    assert "last question" in resp.text or "final answer" in resp.text  # new template shows last_reply not last_prompt
-    assert "final answer" in resp.text
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_folder_empty_sessions(mock_discover, mock_providers, mock_sessions, client, tmp_path):
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-    mock_sessions.return_value = []
-
-    resp = client.get("/partials/workspaces")
-    assert "Loading" in resp.text or "workspace-card" in resp.text
-
-
-
 @patch("power_atlas.web.save_config")
 @patch("power_atlas.web.load_config")
 @patch("power_atlas.web.data.get_sessions")
@@ -516,76 +306,6 @@ def test_unpin_session(mock_sessions, mock_config, mock_save, client):
     assert resp.status_code == 200
     saved = mock_save.call_args[0][0]
     assert "sess-1" not in saved.pinned_sessions
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_folders_merged(mock_discover, mock_sessions, mock_config, mock_providers, client, tmp_path):
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    pinned = "C:\\my-pinned-workspace"
-    mock_config.return_value = Config(pinned_folders=[pinned])
-    mock_discover.return_value = [(workspace, 0, "", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-    mock_sessions.return_value = []
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # Pinned workspace appears even though not in discovery results (0 sessions)
-    assert pinned in resp.text or "my-pinned-workspace" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_pinned_workspaces_provider_filter(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Provider filter on unified workspaces panel shows only matching pinned workspaces."""
-    from power_atlas.config import Config
-    ws_kiro = str(tmp_path / "kiro-proj")
-    ws_claude = str(tmp_path / "claude-proj")
-    mock_config.return_value = Config(pinned_folders=[ws_kiro, ws_claude])
-    mock_discover.return_value = [
-        (ws_kiro, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (ws_claude, 1, "2026-01-01T00:00:00Z", "claude-code"),
-    ]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    # Filter by kiro-cli — only kiro workspace should appear
-    resp = client.get("/partials/workspaces?provider=kiro-cli")
-    assert resp.status_code == 200
-    assert "kiro-proj" in resp.text
-    assert "claude-proj" not in resp.text
-
-    # Filter by claude-code — only claude workspace should appear
-    resp = client.get("/partials/workspaces?provider=claude-code")
-    assert resp.status_code == 200
-    assert "claude-proj" in resp.text
-    assert "kiro-proj" not in resp.text
-
-    # No filter (all) — both should appear
-    resp = client.get("/partials/workspaces?provider=all")
-    assert resp.status_code == 200
-    assert "kiro-proj" in resp.text
-    assert "claude-proj" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.discover_workspaces")
-def test_pinned_sessions_sorted_first(mock_discover, mock_sessions, mock_config, client, tmp_path):
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(pinned_sessions=["sess-2"])
-    mock_discover.return_value = [workspace]
-    mock_sessions.return_value = [
-        _make_session(session_id="sess-1", title="unpinned", cwd=workspace),
-        _make_session(session_id="sess-2", title="pinned", cwd=workspace),
-    ]
-    resp = client.get("/partials/sessions", params={"cwd": workspace})
-    assert resp.status_code == 200
-    # Pinned should appear before unpinned
-    assert resp.text.index("pinned") < resp.text.index("unpinned")
 
 
 # --- Phase 1: Simplified pin/unpin and provider=all sessions ---
@@ -642,61 +362,6 @@ def test_unpin_folder_not_present(mock_load, mock_save, client):
                        headers={"Origin": "http://127.0.0.1"})
     assert resp.status_code == 200
     mock_save.assert_not_called()
-
-
-@patch("power_atlas.web.data.PROVIDERS")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_sessions")
-def test_partials_sessions_provider_all(mock_get_sessions, mock_config, mock_providers, client, tmp_path):
-    """provider=all merges sessions from all providers sorted by updated_at."""
-    from power_atlas.config import Config
-    from unittest.mock import MagicMock
-
-    workspace = str(tmp_path)
-    mock_config.return_value = Config()
-
-    # Create mock providers
-    kiro_mod = MagicMock()
-    kiro_mod.is_available.return_value = True
-    claude_mod = MagicMock()
-    claude_mod.is_available.return_value = True
-
-    mock_providers.items.return_value = [("kiro-cli", kiro_mod), ("claude-code", claude_mod)]
-
-    # get_sessions returns different sessions per provider
-    def side_effect(cwd, prov):
-        if prov == "kiro-cli":
-            return [_make_session(session_id="k1", title="kiro session", updated_at="2026-06-17T14:00:00")]
-        elif prov == "claude-code":
-            return [_make_session(session_id="c1", title="claude session", updated_at="2026-06-17T15:00:00")]
-        return []
-
-    mock_get_sessions.side_effect = side_effect
-
-    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "all"})
-    assert resp.status_code == 200
-    # Both sessions present
-    assert "kiro session" in resp.text
-    assert "claude session" in resp.text
-    # Claude session (newer) should appear first
-    assert resp.text.index("claude session") < resp.text.index("kiro session")
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_sessions")
-def test_partials_sessions_single_provider(mock_get_sessions, mock_config, client, tmp_path):
-    """provider=kiro-cli still works (single provider mode)."""
-    from power_atlas.config import Config
-
-    workspace = str(tmp_path)
-    mock_config.return_value = Config()
-    mock_get_sessions.return_value = [
-        _make_session(session_id="k1", title="kiro only", cwd=workspace),
-    ]
-
-    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "kiro-cli"})
-    assert resp.status_code == 200
-    assert "kiro only" in resp.text
 
 
 class TestSaveSettingAllowlist:
@@ -788,127 +453,6 @@ def test_save_setting_port_zero_accepted(mock_load, mock_save, client):
     mock_load.return_value = Config()
     resp = client.post("/api/save-setting", json={"key": "port", "value": 0}, headers={"Origin": "http://127.0.0.1"})
     assert resp.json()["ok"] is True
-
-
-# --- Phase 4: session-tail endpoint ---
-
-
-@patch("power_atlas.web.data.session_cache")
-@patch("power_atlas.web.data.get_first_prompt", return_value="**hello** user")
-@patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_returns_messages(mock_tail, mock_first, mock_cache, client):
-    mock_tail.return_value = ["message one", "message two"]
-    mock_cache.get.return_value = [
-        Session(session_id="aabbccdd-1234-5678-abcd-ef0123456789", title="My Session", cwd="C:\\Projects\\myapp",
-                created_at="", updated_at="", first_prompt="", last_prompt="fix the bug", last_reply_tail=""),
-    ]
-    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789&cwd=C%3A%5CProjects%5Cmyapp")
-    assert resp.status_code == 200
-    assert "message one" in resp.text
-    assert "message two" in resp.text
-    assert "tail-line" in resp.text
-    assert "tail-header" in resp.text
-    assert "tail-workspace" in resp.text
-    assert "myapp" in resp.text
-    assert "tail-label" in resp.text
-    assert "My Session" in resp.text
-    assert "tail-session-id" in resp.text
-    assert "aabbccdd" in resp.text        # session_id[:8] rendered
-    assert "fix the bug" in resp.text     # last_prompt rendered
-    assert "User last message" in resp.text
-    assert "<p>" in resp.text             # mistune rendered markdown (not raw text)
-    assert "<strong>" in resp.text        # **hello** → <strong>hello</strong>
-
-
-@patch("power_atlas.web.data.session_cache")
-@patch("power_atlas.web.data.get_first_prompt", return_value="")
-@patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_renders_markdown_table(mock_tail, mock_first, mock_cache, client):
-    """Pipe tables reach the tooltip as a table, which needs mistune's `table` plugin.
-
-    Tables are GFM and not CommonMark, so `create_markdown()` alone leaves them
-    as literal pipes that `.tail-md`'s `white-space: normal` then collapses onto
-    one line — which is what an agent's benchmark table looked like in the
-    tooltip before the plugin was enabled. Asserting the delimiter row is gone
-    is the half that fails if the plugin is ever dropped: the cell text itself
-    survives either way.
-    """
-    mock_tail.return_value = [
-        "Here is the breakdown:\n\n"
-        "| model | p50 | p90 |\n"
-        "|---|---|---|\n"
-        "| claude-sonnet-4.6 | 1.46 | 2.85 |\n"
-    ]
-    mock_cache.get.return_value = None
-    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789&cwd=C%3A%5CTest")
-    assert resp.status_code == 200
-    assert "<table>" in resp.text
-    assert "<th>model</th>" in resp.text
-    assert "<td>claude-sonnet-4.6</td>" in resp.text
-    assert "|---|" not in resp.text        # delimiter row consumed, not shown as prose
-    assert "Here is the breakdown" in resp.text  # prose around the table survives
-
-
-@patch("power_atlas.web.data.session_cache")
-@patch("power_atlas.web.data.get_first_prompt", return_value="hello user")
-@patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_graceful_no_cache(mock_tail, mock_first, mock_cache, client):
-    """When session is not in cache, title is empty but tooltip still renders."""
-    mock_tail.return_value = ["agent reply"]
-    mock_cache.get.return_value = None  # Cache miss
-    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789&cwd=C%3A%5CProjects%5Cmyapp")
-    assert resp.status_code == 200
-    assert "agent reply" in resp.text
-    assert "tail-workspace" in resp.text  # workspace name from Path(cwd).name still shows
-    assert "myapp" in resp.text
-    assert "tail-title" not in resp.text  # no title when not in cache
-    assert "User last message" in resp.text
-    assert "\u2014" in resp.text  # em-dash fallback rendered for empty first_prompt and last_prompt
-
-
-@patch("power_atlas.web.data.session_cache")
-@patch("power_atlas.web.data.get_first_prompt", return_value="")
-@patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_empty(mock_tail, mock_first, mock_cache, client):
-    mock_tail.return_value = []
-    mock_cache.get.return_value = None
-    resp = client.get("/partials/session-tail?sid=aabbccdd-1234-5678-abcd-ef0123456789")
-    assert resp.status_code == 200
-    assert "tail-empty" in resp.text
-    assert "No recent output" in resp.text
-
-
-@patch("power_atlas.web.data.session_cache")
-@patch("power_atlas.web.data.get_first_prompt", return_value="<script>alert(1)</script>")
-@patch("power_atlas.web.data.get_session_tail")
-def test_session_tail_xss_stripped(mock_tail, mock_first, mock_cache, client):
-    """mistune escape=True entity-encodes raw HTML tags; JS-URL hrefs (javascript:) are sanitized via mistune's HTMLRenderer.safe_url() unconditionally. Output is safe for | safe filter.
-
-    The third message puts both payloads inside table cells. A new container is
-    exactly where an allowlist gets bypassed, so the guarantees are asserted on
-    the path the `table` plugin added rather than only on the paragraph path
-    they were first measured on.
-    """
-    mock_tail.return_value = [
-        "<script>evil()</script>",
-        "[click](javascript:alert(1))",
-        "| a | b |\n|---|---|\n| <script>cell()</script> | [x](javascript:alert(2)) |\n",
-    ]
-    mock_cache.get.return_value = None
-    resp = client.get("/partials/session-tail?sid=deadbeef-dead-beef-dead-beefdeadbeef&cwd=C%3A%5CTest")
-    assert resp.status_code == 200
-    assert "<script>" not in resp.text          # raw tags not present
-    assert "&lt;script&gt;" in resp.text        # entity-encoded form IS present (confirms _md was invoked)
-    assert "javascript:alert" not in resp.text  # mistune's HTMLRenderer.safe_url() replaces javascript: href with #harmful-link
-    assert "<td>" in resp.text                  # the table branch really ran, so the three assertions above cover it too
-    assert "&lt;script&gt;cell()" in resp.text  # the in-cell payload specifically, entity-encoded
-
-
-def test_session_tail_invalid_sid(client):
-    """Invalid sid format returns 400 without calling data functions."""
-    resp = client.get("/partials/session-tail?sid=not-a-uuid&cwd=C%3A%5CTest")
-    assert resp.status_code == 400
-    assert "Invalid session id" in resp.text
 
 
 # --- Phase 1c (dashboard/ACP merge): full transcript endpoint ---
@@ -1167,57 +711,6 @@ def test_row_origin_reads_the_snapshot():
     assert _row_origin(snap, SimpleNamespace(session_id="s2"), "claude-code") == ""
 
 
-def _render_session_row(**over):
-    """Render partials/session_row.html with the minimum viable context."""
-    from types import SimpleNamespace
-    from power_atlas.web import templates
-    ctx = dict(
-        request=None,
-        session=SimpleNamespace(session_id="s1", title="A session",
-                                updated_at="2026-08-04T12:00:00",
-                                first_prompt="", last_reply_tail="", cwd="C:\\p"),
-        cwd="C:\\p", stale=False, pinned_sessions=[], provider_name="claude-code",
-        provider_color="", show_workspace=False, workspace_name="",
-        status="working", waiting_detail=("", ""),
-    )
-    ctx.update(over)
-    return templates.get_template("partials/session_row.html").render(**ctx)
-
-
-def test_session_row_renders_the_origin_badge():
-    html = _render_session_row(origin="bg")
-    assert 'class="session-origin"' in html
-    assert ">bg<" in html
-    # The badge must not swallow the title beside it.
-    assert "A session" in html
-
-
-def test_session_row_omits_the_badge_for_interactive_sessions():
-    html = _render_session_row(origin="")
-    assert "session-origin" not in html
-    assert "A session" in html
-
-
-def test_session_row_survives_a_missing_origin_key():
-    """Every render site passes `origin`, but the template must not hard-depend.
-
-    Three call sites pass it today; a fourth added later that forgets would
-    otherwise raise at render time rather than simply omitting the badge.
-    """
-    from types import SimpleNamespace
-    from power_atlas.web import templates
-    html = templates.get_template("partials/session_row.html").render(
-        request=None,
-        session=SimpleNamespace(session_id="s1", title="A session",
-                                updated_at="", first_prompt="",
-                                last_reply_tail="", cwd=""),
-        cwd="", stale=True, pinned_sessions=[], provider_name="claude-code",
-        provider_color="", status="", waiting_detail=("", ""),
-    )
-    assert "session-origin" not in html
-    assert "A session" in html
-
-
 def test_origin_badge_class_is_styled():
     """The badge is typographic, so an unstyled one renders as stray text.
 
@@ -1410,75 +903,10 @@ def test_launcher_icon_serves_png(mock_has, mock_path, client, tmp_path):
 
 
 @patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_provider_filter(mock_discover, mock_providers, client, tmp_path):
-    """Filtering by provider shows only groups containing that provider, but preserves multi-provider info."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 3, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    resp = client.get("/partials/workspaces?provider=kiro-cli")
-    assert resp.status_code == 200
-    # Cards no longer have data-provider; verify the workspace is rendered with the provider icon
-    assert 'provider--kiro-cli' in resp.text
-    assert 'workspace-card' in resp.text
-    # Always discovers all providers, then filters post-grouping
-    mock_discover.assert_any_call(provider=None)
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_partials_workspaces_all_tab(mock_discover, mock_providers, client, tmp_path):
-    """All tab shows cards from all providers interleaved."""
-    ws1 = str(tmp_path / "proj1")
-    ws2 = str(tmp_path / "proj2")
-    ws3 = str(tmp_path / "proj3")
-    mock_discover.return_value = [
-        (ws1, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (ws2, 1, "2026-01-01T00:00:00Z", "claude-code"),
-        (ws3, 1, "2026-01-03T00:00:00Z", "kiro-ide"),
-    ]
-    mock_providers.return_value = ["kiro-cli", "claude-code", "kiro-ide"]
-
-    resp = client.get("/partials/workspaces?provider=all")
-    assert resp.status_code == 200
-    # Cards no longer have data-provider; verify all provider icons appear
-    assert 'provider--kiro-cli' in resp.text
-    assert 'provider--claude-code' in resp.text
-    assert 'provider--kiro-ide' in resp.text
-    # Verify discover was called with provider=None (all)
-    mock_discover.assert_any_call(provider=None)
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_tab_hidden_single_provider(mock_discover, mock_providers, client, tmp_path):
-    """When only one provider available, no tab bar rendered in partials (tabs now static in index.html)."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # Tab bar no longer rendered inline by partials_workspaces (moved to static HTML)
-    assert "provider-tabs" not in resp.text
-    assert "provider-filter" not in resp.text
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_tab_shown_multiple_providers(mock_discover, mock_providers, client, tmp_path):
+def test_tab_shown_multiple_providers(mock_providers, client):
     """When multiple providers available, /api/available-providers returns them for the static filter."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
     mock_providers.return_value = ["kiro-cli", "claude-code"]
 
-    # Tab bar no longer rendered inline by partials_workspaces
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "provider-tabs" not in resp.text
-
-    # Instead, /api/available-providers returns the provider list for JS-rendered filter
     resp = client.get("/api/available-providers")
     assert resp.status_code == 200
     providers = resp.json()
@@ -1486,95 +914,6 @@ def test_tab_shown_multiple_providers(mock_discover, mock_providers, client, tmp
     assert "kiro-cli" in names
     assert "claude-code" in names
     assert all("display" in p and "color" in p for p in providers)
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspace_card_has_data_provider(mock_discover, mock_providers, client, tmp_path):
-    """Workspace cards no longer have data-provider; they show provider icons and colored border."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "claude-code")]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # data-provider removed; card is workspace-level now
-    assert 'data-provider=' not in resp.text
-    # Provider color shown via gradient span (solid color for single provider)
-    assert "provider-gradient" in resp.text
-    assert "#c2590f" in resp.text
-    # Provider icon badge
-    assert "provider-icon-badge" in resp.text
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspace_card_has_provider_icon_img(mock_discover, mock_providers, client, tmp_path):
-    """Workspace cards include provider icon img tag with fallback badge."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert 'provider-icon-badge' in resp.text
-    assert 'src="/api/launcher-icon/provider--kiro-cli"' in resp.text
-    assert 'provider-badge-fallback' in resp.text
-    # Title now uses the display name
-    assert 'title="kiro-cli"' in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspace_card_uses_user_configured_color(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """When user sets a custom color in provider_settings, workspace card uses it."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(provider_settings={
-        "kiro-cli": {"default_args": "", "color": "#ff0000", "enabled": True},
-    })
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "#ff0000" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_empty_provider_tab_shows_helper(mock_discover, mock_providers, mock_config, client):
-    """When a filtered provider has no results, a helper message is shown."""
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_discover.return_value = []
-    mock_providers.return_value = ["kiro-cli", "claude-code", "kiro-ide"]
-
-    resp = client.get("/partials/workspaces?provider=claude-code")
-    assert resp.status_code == 200
-    assert "No Claude Code sessions found" in resp.text
-
-    resp = client.get("/partials/workspaces?provider=kiro-ide")
-    assert resp.status_code == 200
-    assert "No Kiro IDE sessions found" in resp.text
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_active_tab_class(mock_discover, mock_providers, client, tmp_path):
-    """Provider filter is now client-side (via /api/available-providers); tabs no longer in partials."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    # Request kiro-cli filtered view — no tab bar in response (tabs are static HTML now)
-    resp = client.get("/partials/workspaces?provider=kiro-cli")
-    assert resp.status_code == 200
-    assert "provider-tabs" not in resp.text
-    # The endpoint still filters correctly by provider
-    assert "workspace-card" in resp.text
 
 
 # --- Phase 4: Selection-aware launcher batch ---
@@ -1655,28 +994,6 @@ def test_launch_no_provider_settings_uses_empty_default_args(mock_load, mock_lau
     assert call_kwargs["default_args"] == ""
 
 
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_disabled_provider_hidden_from_tabs(mock_discover, mock_config, mock_providers, client, tmp_path):
-    """Disabling a provider via provider_settings hides it from the tab bar."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(provider_settings={
-        "claude-code": {"default_args": "", "color": "", "enabled": False},
-    })
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # claude-code tab should not be rendered
-    assert "provider=claude-code" not in resp.text
-    # kiro-cli tab should still be there (but single provider = no tabs)
-    # With only one enabled provider, no tab bar at all
-    assert "provider-tabs" not in resp.text
-
-
 # --- Phase 3 (unification): Provider-launcher tiles in grid ---
 
 
@@ -1731,19 +1048,6 @@ def test_disabled_provider_not_in_launcher_grid(mock_load, mock_providers, clien
     assert 'provider--kiro-cli' not in resp.text
 
 
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_tab_bar_no_gear_icons(mock_discover, mock_providers, client, tmp_path):
-    """Tab bar no longer has gear icons (no tab-gear class)."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "tab-gear" not in resp.text
-
-
 @patch("power_atlas.web.launcher.launch_custom_batch")
 @patch("power_atlas.web.load_config")
 def test_launcher_run_batch_passes_workspace_arg_for_non_terminal(mock_load, mock_batch, client):
@@ -1761,85 +1065,6 @@ def test_launcher_run_batch_passes_workspace_arg_for_non_terminal(mock_load, moc
     mock_batch.assert_called_once()
     call_kwargs = mock_batch.call_args
     assert call_kwargs.kwargs.get("pass_workspace_arg") is True or call_kwargs[1].get("pass_workspace_arg") is True
-
-
-# --- Phase 3: 3-provider gradient + resume button UX ---
-
-
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_three_provider_gradient_has_all_colors(mock_discover, mock_providers, client, tmp_path):
-    """Workspace card with 3 providers renders gradient with all three colors and gradient-3plus class."""
-    workspace = str(tmp_path)
-    mock_discover.return_value = [
-        (workspace, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (workspace, 1, "2026-01-01T00:00:00Z", "claude-code"),
-        (workspace, 1, "2026-01-01T00:00:00Z", "kiro-ide"),
-    ]
-    mock_providers.return_value = ["kiro-cli", "claude-code", "kiro-ide"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # All three provider colors present
-    assert "#7138cc" in resp.text  # kiro-cli
-    assert "#c2590f" in resp.text  # claude-code
-    assert "#8b5cf6" in resp.text  # kiro-ide
-    # Gradient class for 3+ providers
-    assert "gradient-3plus" in resp.text
-    # Multi-provider class present
-    assert "multi-provider" in resp.text
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_resume_button_kiro_ide_tooltip(mock_discover, mock_providers, mock_sessions, client, tmp_path):
-    """Kiro IDE sessions show 'Open workspace in Kiro IDE' tooltip; others show 'Resume session'."""
-    from power_atlas.data import Session
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-ide")]
-    mock_providers.return_value = ["kiro-ide"]
-    mock_sessions.return_value = [Session(
-        session_id="test-ide-session",
-        title="Test IDE Session",
-        cwd=workspace,
-        created_at="2026-01-01T00:00:00Z",
-        updated_at="2026-01-01T00:00:00Z",
-        first_prompt="Hello",
-        last_prompt="",
-        last_reply_tail="",
-    )]
-
-    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "kiro-ide"})
-    assert resp.status_code == 200
-    assert 'title="Open workspace in Kiro IDE"' in resp.text
-    assert 'aria-label="Open in Kiro IDE"' in resp.text
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_resume_button_terminal_provider_tooltip(mock_discover, mock_providers, mock_sessions, client, tmp_path):
-    """Terminal providers (kiro-cli, claude-code) show 'Resume session' tooltip."""
-    from power_atlas.data import Session
-    workspace = str(tmp_path)
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-    mock_sessions.return_value = [Session(
-        session_id="test-cli-session",
-        title="Test CLI Session",
-        cwd=workspace,
-        created_at="2026-01-01T00:00:00Z",
-        updated_at="2026-01-01T00:00:00Z",
-        first_prompt="Hello",
-        last_prompt="",
-        last_reply_tail="",
-    )]
-
-    resp = client.get("/partials/sessions", params={"cwd": workspace, "provider": "kiro-cli"})
-    assert resp.status_code == 200
-    assert 'title="Resume session"' in resp.text
-    assert 'aria-label="Resume"' in resp.text
 
 
 # --- /api/settings endpoint tests ---
@@ -2069,8 +1294,7 @@ class TestHostAllowlistCoversGetRequests:
 
     @pytest.mark.parametrize("host", ["evil.com", "testserver"])
     @pytest.mark.parametrize("path", [
-        "/", "/partials/workspaces", "/api/settings", "/search?q=a",
-        "/api/tags", "/partials/all-sessions",
+        "/", "/api/settings", "/api/tags",
     ])
     def test_get_rejected_for_non_loopback_host(self, raw_client, path, host):
         resp = raw_client.get(path, headers={"Host": host})
@@ -2086,18 +1310,6 @@ class TestHostAllowlistCoversGetRequests:
         mock_autostart.return_value = False
         resp = raw_client.get("/api/settings", headers={"Host": host})
         assert resp.status_code == 200, f"GET /api/settings should accept Host: {host}"
-
-    @patch("power_atlas.web.load_config")
-    @patch("power_atlas.web.data.available_providers")
-    @patch("power_atlas.web.data.discover_workspaces_with_counts")
-    def test_partials_workspaces_served_on_loopback(self, mock_discover, mock_providers,
-                                                    mock_config, raw_client):
-        from power_atlas.config import Config
-        mock_config.return_value = Config()
-        mock_discover.return_value = []
-        mock_providers.return_value = []
-        resp = raw_client.get("/partials/workspaces", headers={"Host": "localhost"})
-        assert resp.status_code == 200
 
 
 # --- ACP surface: DNS-rebinding and token-check regressions ---
@@ -5447,7 +4659,6 @@ class TestAcpLockPreflight:
         assert acp_mod._lock_holder("odd") is None
 
 
-
 class TestAcpSessionLoad:
     """``session/load`` is what reaches a session this process never created —
     one made in a terminal, or before a restart.
@@ -6675,56 +5886,21 @@ class TestAcpLoadStatesItsCeiling:
 
 
 class TestAcpDashboardRowAction:
-    """The control has to live inside ``.session-actions``: that container is
-    what the row's own ``onclick`` excludes, so anywhere else a click on it
-    toggles multi-select instead of opening the session. The same collision is
-    recorded at ``CLOSED_INVESTIGATIONS.md:90``.
+    """`openInAcp` opens the clicked row's session in `/acp`. It used to live
+    inside the old server-rendered session row's ``.session-actions``
+    container, which the row's own ``onclick`` excluded so a click there
+    toggled multi-select instead of opening the session (the same collision
+    is recorded at ``CLOSED_INVESTIGATIONS.md:90``); the dashboard/ACP-merge
+    Phase 4 rail replaced that DOM with `.acp-rail-menu-wrap`, a sibling of
+    the row rather than a descendant, for the same reason (a button cannot
+    nest inside a button) — `openInAcp` itself is unchanged.
     """
-
-    def _row(self) -> str:
-        from power_atlas.web import templates
-
-        class _Session:
-            session_id = "001b4195-ee19-4633-b1b2-488574cad044"
-            title = "t"
-            updated_at = "2026-07-26T10:00:00"
-            first_prompt = ""
-            last_reply_tail = ""
-
-        return templates.get_template("partials/session_row.html").render(
-            session=_Session(), cwd=r"C:\scratch", pinned_sessions=[],
-            provider_name="kiro-cli", provider_color="", stale=False,
-            status="closed", waiting_detail=("", ""))
-
-    def test_the_action_sits_inside_the_excluded_container(self):
-        html = self._row()
-        actions = html.split('<div class="session-actions">', 1)
-        assert len(actions) == 2, "the row lost its .session-actions block"
-        assert "openInAcp(this)" in actions[1].split("</div>", 1)[0]
 
     def test_the_action_opens_acp_for_this_row(self):
         from power_atlas.web import templates
         index = templates.env.loader.get_source(templates.env, "index.html")[0]
         assert "function openInAcp(btn)" in index
         assert "'/acp?sid='+encodeURIComponent(row.dataset.sid)" in index
-
-    def test_a_non_kiro_provider_gets_no_acp_action(self):
-        """`/acp` speaks ACP to kiro-cli; no other provider has a session it
-        could load, so offering the control would only ever fail."""
-        from power_atlas.web import templates
-
-        class _Session:
-            session_id = "abc"
-            title = "t"
-            updated_at = ""
-            first_prompt = ""
-            last_reply_tail = ""
-
-        html = templates.get_template("partials/session_row.html").render(
-            session=_Session(), cwd="", pinned_sessions=[],
-            provider_name="claude-code", provider_color="", stale=False,
-            status="closed", waiting_detail=("", ""))
-        assert "openInAcp" not in html
 
 
 # --- ACP phase 6: cancel, close, and context-window telemetry ---
@@ -7963,33 +7139,7 @@ def test_profile_metacharacter_name_roundtrip(mock_load, mock_save, client):
     assert saved.launch_profiles[1].name == xss_name
 
 
-
 # --- Phase 4 (findings fixes): disabled provider cards and unknown provider 404 ---
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_disabled_provider_hidden_from_cards(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Disabling a provider hides its workspace cards from the main listing."""
-    from power_atlas.config import Config
-    ws_kiro = str(tmp_path / "kiro-proj")
-    ws_claude = str(tmp_path / "claude-proj")
-    mock_config.return_value = Config(provider_settings={
-        "claude-code": {"default_args": "", "color": "", "enabled": False},
-    })
-    mock_discover.return_value = [
-        (ws_kiro, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (ws_claude, 3, "2026-01-01T00:00:00Z", "claude-code"),
-    ]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # kiro workspace should be visible
-    assert "kiro-proj" in resp.text
-    # claude workspace should be hidden because its only provider is disabled
-    assert "claude-proj" not in resp.text
 
 
 def test_get_provider_settings_unknown_404(client):
@@ -8153,295 +7303,6 @@ def test_save_provider_directory_control_chars(mock_load, mock_save, client):
     mock_save.assert_not_called()
 
 
-# --- Phase 3 (panel restructure): All-sessions endpoint ---
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_basic(mock_paginated, mock_config, client, tmp_path):
-    """Basic /partials/all-sessions returns session rows with workspace name."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config()
-    mock_paginated.return_value = (
-        [(_make_session(cwd=workspace, title="My Session"), "kiro-cli")],
-        False,
-    )
-    resp = client.get("/partials/all-sessions")
-    assert resp.status_code == 200
-    assert "My Session" in resp.text
-    assert tmp_path.name in resp.text  # workspace_name shown
-    assert "session-row" in resp.text
-    assert "load-more-btn" not in resp.text  # has_more=False
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_pagination(mock_paginated, mock_config, client, tmp_path):
-    """Load more button rendered when has_more=True."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config()
-    mock_paginated.return_value = (
-        [(_make_session(cwd=workspace, title="Page 1 Session"), "kiro-cli")],
-        True,
-    )
-    resp = client.get("/partials/all-sessions?page=1")
-    assert resp.status_code == 200
-    assert "Page 1 Session" in resp.text
-    assert "load-more-btn" in resp.text
-    assert "loadMoreSessions(2)" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_provider_filter(mock_paginated, mock_config, client, tmp_path):
-    """Provider filter is passed through to data layer."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config()
-    mock_paginated.return_value = (
-        [(_make_session(cwd=workspace, title="Claude Only"), "claude-code")],
-        False,
-    )
-    resp = client.get("/partials/all-sessions?provider=claude-code")
-    assert resp.status_code == 200
-    assert "Claude Only" in resp.text
-    # Verify provider filter was passed
-    call_kwargs = mock_paginated.call_args[1]
-    assert call_kwargs["provider"] == "claude-code"
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_search(mock_paginated, mock_config, client, tmp_path):
-    """Search filter on all-sessions filters by title/prompt/cwd."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config()
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=workspace, session_id="s1", title="matching title"), "kiro-cli"),
-            (_make_session(cwd=workspace, session_id="s2", title="other session"), "kiro-cli"),
-        ],
-        False,
-    )
-    resp = client.get("/partials/all-sessions?q=matching")
-    assert resp.status_code == 200
-    assert "matching title" in resp.text
-    assert "other session" not in resp.text
-    assert "load-more-btn" not in resp.text  # Search disables pagination
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_empty(mock_paginated, mock_config, client):
-    """Empty state when no sessions found."""
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_paginated.return_value = ([], False)
-    resp = client.get("/partials/all-sessions")
-    assert resp.status_code == 200
-    assert "No sessions found" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_pinned_at_top(mock_paginated, mock_config, client, tmp_path):
-    """Pinned sessions appear at top with pin icon."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(pinned_sessions=["pinned-sess"])
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=workspace, session_id="pinned-sess", title="Pinned One"), "kiro-cli"),
-            (_make_session(cwd=workspace, session_id="other-sess", title="Regular One"), "kiro-cli"),
-        ],
-        False,
-    )
-    resp = client.get("/partials/all-sessions")
-    assert resp.status_code == 200
-    assert "Pinned One" in resp.text
-    assert "Regular One" in resp.text
-    # Pinned session has pin indicator
-    assert "pinned-indicator" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_tag_filter(mock_paginated, mock_config, client, tmp_path):
-    """Tag filter returns only sessions from matching workspaces."""
-    from power_atlas.config import Config
-    ws_tagged = str(tmp_path / "tagged-proj")
-    ws_other = str(tmp_path / "other-proj")
-    (tmp_path / "tagged-proj").mkdir()
-    (tmp_path / "other-proj").mkdir()
-    mock_config.return_value = Config(
-        workspace_settings={ws_tagged: {"tags": ["frontend"], "color": ""}}
-    )
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=ws_tagged, session_id="s1", title="Tagged Session"), "kiro-cli"),
-            (_make_session(cwd=ws_other, session_id="s2", title="Other Session"), "kiro-cli"),
-        ],
-        True,
-    )
-    resp = client.get("/partials/all-sessions?tag=frontend")
-    assert resp.status_code == 200
-    assert "Tagged Session" in resp.text
-    assert "Other Session" not in resp.text
-    assert "load-more-btn" not in resp.text  # tag filter disables pagination
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_hidden_excluded_by_default(mock_paginated, mock_config, client, tmp_path):
-    """Sessions from hidden workspaces are excluded by default."""
-    from power_atlas.config import Config
-    ws_hidden = str(tmp_path / "hidden-proj")
-    ws_normal = str(tmp_path / "normal-proj")
-    (tmp_path / "hidden-proj").mkdir()
-    (tmp_path / "normal-proj").mkdir()
-    mock_config.return_value = Config(
-        workspace_settings={ws_hidden: {"tags": ["hidden"], "color": ""}}
-    )
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=ws_hidden, session_id="s1", title="Hidden Session"), "kiro-cli"),
-            (_make_session(cwd=ws_normal, session_id="s2", title="Normal Session"), "kiro-cli"),
-        ],
-        False,
-    )
-    resp = client.get("/partials/all-sessions")
-    assert resp.status_code == 200
-    assert "Hidden Session" not in resp.text
-    assert "Normal Session" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_time_filter(mock_paginated, mock_config, client, tmp_path):
-    """Time filter returns only sessions from matching time bucket."""
-    from power_atlas.config import Config
-    from datetime import datetime, timedelta
-    workspace = str(tmp_path)
-    today_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    old_iso = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
-    mock_config.return_value = Config()
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=workspace, session_id="s1", title="Today Session", updated_at=today_iso), "kiro-cli"),
-            (_make_session(cwd=workspace, session_id="s2", title="Old Session", updated_at=old_iso), "kiro-cli"),
-        ],
-        True,
-    )
-    resp = client.get("/partials/all-sessions?time_filter=today")
-    assert resp.status_code == 200
-    assert "Today Session" in resp.text
-    assert "Old Session" not in resp.text
-    assert "load-more-btn" not in resp.text  # time filter disables pagination
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_time_grouped(mock_paginated, mock_config, client, tmp_path):
-    """Sessions panel renders time-group headings."""
-    from power_atlas.config import Config
-    from datetime import datetime, timedelta
-    workspace = str(tmp_path)
-    today_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    old_iso = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
-    mock_config.return_value = Config()
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=workspace, session_id="s1", title="Today Session", updated_at=today_iso), "kiro-cli"),
-            (_make_session(cwd=workspace, session_id="s2", title="Old Session", updated_at=old_iso), "kiro-cli"),
-        ],
-        False,
-    )
-    resp = client.get("/partials/all-sessions")
-    assert resp.status_code == 200
-    assert "group-heading" in resp.text
-    assert "Today" in resp.text
-    assert "Older" in resp.text
-    # Empty group headings not rendered
-    assert "Yesterday" not in resp.text
-    assert "This week" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_pinned_above_time_groups(mock_paginated, mock_config, client, tmp_path):
-    """Pinned sessions render above time-group headings with separator."""
-    from power_atlas.config import Config
-    from datetime import datetime
-    workspace = str(tmp_path)
-    today_iso = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    mock_config.return_value = Config(pinned_sessions=["pinned-sess"])
-    mock_paginated.return_value = (
-        [
-            (_make_session(cwd=workspace, session_id="pinned-sess", title="Pinned One", updated_at=today_iso), "kiro-cli"),
-            (_make_session(cwd=workspace, session_id="other-sess", title="Regular One", updated_at=today_iso), "kiro-cli"),
-        ],
-        False,
-    )
-    resp = client.get("/partials/all-sessions")
-    assert resp.status_code == 200
-    # Pinned appears before time group headings
-    pinned_pos = resp.text.index("Pinned One")
-    sep_pos = resp.text.index("pinned-separator")
-    heading_pos = resp.text.index("group-heading")
-    regular_pos = resp.text.index("Regular One")
-    assert pinned_pos < sep_pos < heading_pos < regular_pos
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_tag_empty_state(mock_paginated, mock_config, client, tmp_path):
-    """Empty state shows tag-specific message."""
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_paginated.return_value = ([], False)
-    resp = client.get("/partials/all-sessions?tag=frontend")
-    assert resp.status_code == 200
-    assert "No sessions in workspaces tagged" in resp.text
-    assert "frontend" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_partials_all_sessions_time_filter_empty_state(mock_paginated, mock_config, client, tmp_path):
-    """Empty state shows time-specific message."""
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_paginated.return_value = ([], False)
-    resp = client.get("/partials/all-sessions?time_filter=today")
-    assert resp.status_code == 200
-    assert "No sessions active" in resp.text
-    assert "today" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspaces_includes_pinned_at_top(mock_discover, mock_config, client, tmp_path):
-    """Unified workspaces endpoint shows pinned workspaces at top, non-pinned below."""
-    from power_atlas.config import Config
-    ws_pinned = str(tmp_path / "pinned-proj")
-    ws_other = str(tmp_path / "other-proj")
-    mock_config.return_value = Config(pinned_folders=[ws_pinned])
-    mock_discover.return_value = [
-        (ws_pinned, 3, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (ws_other, 2, "2026-01-02T00:00:00Z", "kiro-cli"),
-    ]
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # Both workspaces appear
-    assert "pinned-proj" in resp.text
-    assert "other-proj" in resp.text
-    # Pinned workspace appears before non-pinned
-    assert resp.text.index("pinned-proj") < resp.text.index("other-proj")
-
-
 # --- Phase 5: open-folder, launch-terminal, terminal tile ---
 
 
@@ -8543,99 +7404,6 @@ def test_launch_terminal_failure_result(mock_config, mock_launch, client, tmp_pa
     assert resp.status_code == 200
     assert "No terminal found" in resp.text
     assert "error" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_separator_present_when_both_groups(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Separator div appears between pinned and non-pinned workspace cards."""
-    from power_atlas.config import Config
-    pinned_ws = str(tmp_path / "pinned-proj")
-    other_ws = str(tmp_path / "other-proj")
-    mock_config.return_value = Config(pinned_folders=[pinned_ws])
-    mock_discover.return_value = [
-        (pinned_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (other_ws, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert 'class="pinned-separator"' in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_separator_absent_when_only_pinned(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """No separator when all workspaces are pinned (no non-pinned group)."""
-    from power_atlas.config import Config
-    pinned_ws = str(tmp_path / "pinned-proj")
-    mock_config.return_value = Config(pinned_folders=[pinned_ws])
-    mock_discover.return_value = [
-        (pinned_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert 'class="pinned-separator"' not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_pinned_separator_absent_when_no_pinned(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """No separator when no workspaces are pinned."""
-    from power_atlas.config import Config
-    other_ws = str(tmp_path / "other-proj")
-    mock_config.return_value = Config(pinned_folders=[])
-    mock_discover.return_value = [
-        (other_ws, 2, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert 'class="pinned-separator"' not in resp.text
-
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_session_pinned_separator_present(mock_paginated, mock_config, client, tmp_path):
-    """Separator div appears between pinned and non-pinned sessions on page 1."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    pinned_session = _make_session(session_id="pinned-1", title="Pinned", cwd=workspace)
-    other_session = _make_session(session_id="other-1", title="Other", cwd=workspace)
-    mock_config.return_value = Config(pinned_sessions=["pinned-1"])
-    mock_paginated.return_value = (
-        [(pinned_session, "kiro-cli"), (other_session, "kiro-cli")],
-        False,
-    )
-    resp = client.get("/partials/all-sessions?page=1")
-    assert resp.status_code == 200
-    assert 'class="pinned-separator"' in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-def test_session_pinned_separator_absent_no_pinned(mock_paginated, mock_config, client, tmp_path):
-    """No separator when no sessions are pinned."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    session = _make_session(session_id="s1", title="Regular", cwd=workspace)
-    mock_config.return_value = Config(pinned_sessions=[])
-    mock_paginated.return_value = (
-        [(session, "kiro-cli")],
-        False,
-    )
-    resp = client.get("/partials/all-sessions?page=1")
-    assert resp.status_code == 200
-    assert 'class="pinned-separator"' not in resp.text
-
 
 
 # --- Phase 2 (Workspace Tags): Workspace settings API ---
@@ -8773,7 +7541,6 @@ def test_workspace_settings_save_deduplicates_normalized_path(mock_load, mock_sa
     assert saved.workspace_settings[cwd_upper]["color"] == "#22c55e"
 
 
-
 # --- Phase 3 (Workspace Tags): Color precedence ---
 
 
@@ -8839,66 +7606,6 @@ class TestResolveWorkspaceColor:
         assert _resolve_workspace_color("C:\\proj", config) == "#abc123"
 
 
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspace_card_uses_workspace_color_over_provider(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Workspace with explicit color renders that color instead of provider gradient."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(
-        workspace_settings={workspace: {"tags": [], "color": "#e11d48"}},
-    )
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # Workspace color is used instead of provider default
-    assert "#e11d48" in resp.text
-    assert "provider-gradient" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspace_card_uses_tag_color_when_no_explicit(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Workspace with no explicit color but colored tag uses tag's color."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(
-        workspace_settings={workspace: {"tags": ["frontend"], "color": ""}},
-        tag_settings={"frontend": {"color": "#3b82f6"}},
-    )
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "#3b82f6" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspace_card_falls_through_to_provider_gradient(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Workspace with no color and no colored tags shows provider gradient."""
-    from power_atlas.config import Config
-    workspace = str(tmp_path)
-    mock_config.return_value = Config(
-        workspace_settings={workspace: {"tags": ["plain"], "color": ""}},
-        tag_settings={"plain": {"color": ""}},
-    )
-    mock_discover.return_value = [(workspace, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    # Provider color is used (kiro-cli default)
-    assert "#7138cc" in resp.text
-
-
-
 # --- Phase 5 (Workspace Tags): Filters, time bucketing, group-by, /api/tags ---
 
 
@@ -8948,214 +7655,6 @@ class TestTimeBucket:
         assert _time_bucket(now) == "today"
 
 
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_hidden_tag_excluded_by_default(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Workspaces tagged 'hidden' are excluded from default view."""
-    from power_atlas.config import Config
-    visible_ws = str(tmp_path / "visible-proj")
-    hidden_ws = str(tmp_path / "hidden-proj")
-    mock_config.return_value = Config(
-        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
-    )
-    mock_discover.return_value = [
-        (visible_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "visible-proj" in resp.text
-    assert "hidden-proj" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_hidden_tag_filter_reveals_hidden(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Selecting 'hidden' tag filter reveals only hidden workspaces."""
-    from power_atlas.config import Config
-    visible_ws = str(tmp_path / "visible-proj")
-    hidden_ws = str(tmp_path / "hidden-proj")
-    mock_config.return_value = Config(
-        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
-    )
-    mock_discover.return_value = [
-        (visible_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?tag=hidden")
-    assert resp.status_code == 200
-    assert "hidden-proj" in resp.text
-    assert "visible-proj" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_tag_filter_shows_matching_workspaces(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Tag filter shows only workspaces that have the selected tag."""
-    from power_atlas.config import Config
-    frontend_ws = str(tmp_path / "frontend-proj")
-    backend_ws = str(tmp_path / "backend-proj")
-    mock_config.return_value = Config(
-        workspace_settings={
-            frontend_ws: {"tags": ["frontend"], "color": ""},
-            backend_ws: {"tags": ["backend"], "color": ""},
-        },
-    )
-    mock_discover.return_value = [
-        (frontend_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (backend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?tag=frontend")
-    assert resp.status_code == 200
-    assert "frontend-proj" in resp.text
-    assert "backend-proj" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_time_filter_today(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Time filter 'today' shows only workspaces updated today."""
-    from datetime import datetime, timezone
-    from power_atlas.config import Config
-    today_ws = str(tmp_path / "today-proj")
-    old_ws = str(tmp_path / "old-proj")
-    now_iso = datetime.now(timezone.utc).isoformat()
-    mock_config.return_value = Config()
-    mock_discover.return_value = [
-        (today_ws, 1, now_iso, "kiro-cli"),
-        (old_ws, 1, "2020-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?time_filter=today")
-    assert resp.status_code == 200
-    assert "today-proj" in resp.text
-    assert "old-proj" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_tag_filter_empty_state(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Tag filter with no matches shows appropriate empty state."""
-    from power_atlas.config import Config
-    ws = str(tmp_path / "proj")
-    mock_config.return_value = Config(
-        workspace_settings={ws: {"tags": ["backend"], "color": ""}},
-    )
-    mock_discover.return_value = [(ws, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?tag=nonexistent")
-    assert resp.status_code == 200
-    assert "No workspaces with tag" in resp.text
-    assert "nonexistent" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_time_filter_empty_state(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Time filter with no matches shows appropriate empty state."""
-    from power_atlas.config import Config
-    ws = str(tmp_path / "proj")
-    mock_config.return_value = Config()
-    mock_discover.return_value = [(ws, 1, "2020-01-01T00:00:00Z", "kiro-cli")]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces?time_filter=today")
-    assert resp.status_code == 200
-    assert "No workspaces active" in resp.text
-    assert "today" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_default_time_grouping_renders_headings(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Default rendering always time-groups with Today/Yesterday/This week/Older headings."""
-    from datetime import datetime, timezone, timedelta
-    from power_atlas.config import Config
-    today_ws = str(tmp_path / "today-proj")
-    old_ws = str(tmp_path / "old-proj")
-    now_iso = datetime.now(timezone.utc).isoformat()
-    mock_config.return_value = Config()
-    mock_discover.return_value = [
-        (today_ws, 1, now_iso, "kiro-cli"),
-        (old_ws, 1, "2020-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert 'class="group-heading"' in resp.text
-    assert "Today" in resp.text
-    assert "Older" in resp.text
-    assert "today-proj" in resp.text
-    assert "old-proj" in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_filters_compose_with_provider(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Tag filter composes with provider filter (AND logic)."""
-    from power_atlas.config import Config
-    kiro_ws = str(tmp_path / "kiro-proj")
-    claude_ws = str(tmp_path / "claude-proj")
-    mock_config.return_value = Config(
-        workspace_settings={
-            kiro_ws: {"tags": ["active"], "color": ""},
-            claude_ws: {"tags": ["active"], "color": ""},
-        },
-    )
-    mock_discover.return_value = [
-        (kiro_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (claude_ws, 1, "2026-01-01T00:00:00Z", "claude-code"),
-    ]
-    mock_providers.return_value = ["kiro-cli", "claude-code"]
-
-    # Tag=active AND provider=kiro-cli — only kiro workspace
-    resp = client.get("/partials/workspaces?tag=active&provider=kiro-cli")
-    assert resp.status_code == 200
-    assert "kiro-proj" in resp.text
-    assert "claude-proj" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_hidden_filter_applies_to_pinned(mock_discover, mock_providers, mock_config, client, tmp_path):
-    """Pinned workspaces tagged 'hidden' are also excluded from default view."""
-    from power_atlas.config import Config
-    hidden_pinned_ws = str(tmp_path / "hidden-pinned")
-    visible_ws = str(tmp_path / "visible-proj")
-    mock_config.return_value = Config(
-        pinned_folders=[hidden_pinned_ws],
-        workspace_settings={hidden_pinned_ws: {"tags": ["hidden"], "color": ""}},
-    )
-    mock_discover.return_value = [
-        (hidden_pinned_ws, 1, "2026-01-02T00:00:00Z", "kiro-cli"),
-        (visible_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_providers.return_value = ["kiro-cli"]
-
-    resp = client.get("/partials/workspaces")
-    assert resp.status_code == 200
-    assert "hidden-pinned" not in resp.text
-    assert "visible-proj" in resp.text
-
-
 # --- /api/tags endpoint ---
 
 
@@ -9201,232 +7700,6 @@ def test_api_tags_empty_when_no_tags(mock_load, client):
     resp = client.get("/api/tags")
     assert resp.status_code == 200
     assert resp.json() == []
-
-
-# --- Search endpoint with filters ---
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_excludes_hidden_by_default(mock_discover, mock_config, client, tmp_path):
-    """Search results exclude hidden workspaces by default."""
-    from power_atlas.config import Config
-    hidden_ws = str(tmp_path / "hidden-proj")
-    visible_ws = str(tmp_path / "visible-proj")
-    mock_config.return_value = Config(
-        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
-    )
-    mock_discover.return_value = [
-        (hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (visible_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    # Search for "proj" which matches both
-    resp = client.get(f"/search?q=proj")
-    assert resp.status_code == 200
-    assert "visible-proj" in resp.text
-    assert "hidden-proj" not in resp.text
-
-
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_with_tag_filter(mock_discover, mock_config, client, tmp_path):
-    """Search results respect tag filter."""
-    from power_atlas.config import Config
-    frontend_ws = str(tmp_path / "frontend-proj")
-    backend_ws = str(tmp_path / "backend-proj")
-    mock_config.return_value = Config(
-        workspace_settings={
-            frontend_ws: {"tags": ["frontend"], "color": ""},
-            backend_ws: {"tags": ["backend"], "color": ""},
-        },
-    )
-    mock_discover.return_value = [
-        (frontend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (backend_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    resp = client.get("/search?q=proj&tag=frontend")
-    assert resp.status_code == 200
-    assert "frontend-proj" in resp.text
-    assert "backend-proj" not in resp.text
-
-
-def _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path):
-    """Three same-named workspaces with different liveness and provider shapes.
-
-    ``mixed-proj`` is registered under both providers but only claude-code is
-    running in it, which is what separates a provider-scoped status query from
-    an unscoped one.
-    """
-    from power_atlas.config import Config
-    live_ws = str(tmp_path / "live-proj")
-    dead_ws = str(tmp_path / "dead-proj")
-    mixed_ws = str(tmp_path / "mixed-proj")
-    mock_config.return_value = Config()
-    mock_discover.return_value = [
-        (live_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (dead_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (mixed_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-        (mixed_ws, 1, "2026-01-01T00:00:00Z", "claude-code"),
-    ]
-    mock_snap.return_value = _snapshot(live_cwds={
-        ("kiro-cli", _normalize_path(live_ws)),
-        ("claude-code", _normalize_path(mixed_ws)),
-    })
-    mock_sessions.return_value = []
-    return live_ws, dead_ws, mixed_ws
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_with_status_filter(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
-    """Search results respect status filter (regression: surplus arg 500'd the endpoint)."""
-    _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path)
-
-    resp = client.get("/search?q=proj&status=working")
-    assert resp.status_code == 200
-    assert "live-proj" in resp.text
-    assert "mixed-proj" in resp.text
-    assert "dead-proj" not in resp.text
-    assert mock_snap.call_count == 1
-
-    # status=live goes through the _LIVE_STATUSES branch of _status_matches.
-    resp = client.get("/search?q=proj&status=live")
-    assert resp.status_code == 200
-    assert "live-proj" in resp.text
-    assert "mixed-proj" in resp.text
-    assert "dead-proj" not in resp.text
-    assert mock_snap.call_count == 2
-
-    # Provider-scoped: mixed-proj is a kiro-cli workspace whose only running
-    # process is claude-code, so it survives this filter exactly when
-    # _workspace_status is asked about every provider instead of kiro-cli.
-    resp = client.get("/search?q=proj&provider=kiro-cli&status=working")
-    assert resp.status_code == 200
-    assert "live-proj" in resp.text
-    assert "mixed-proj" not in resp.text
-    assert "dead-proj" not in resp.text
-    assert mock_snap.call_count == 3
-
-    # status=all and the no-status path skip the status *filter*, but still
-    # take one snapshot each: the per-card hover actions need workspace_status
-    # on every card, so get_snapshot moved out of the status guard to an
-    # unconditional call (web.py:1464). Two requests, two snapshots, 3 -> 5.
-    for url in ("/search?q=proj&status=all", "/search?q=proj"):
-        resp = client.get(url)
-        assert resp.status_code == 200
-        assert "live-proj" in resp.text
-        assert "dead-proj" in resp.text
-    assert mock_snap.call_count == 5
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_empty_state_names_the_filter(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
-    """A filter that removes every match says which filter, as /partials/workspaces does."""
-    _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path)
-
-    resp = client.get("/search?q=proj&status=errored")
-    assert resp.status_code == 200
-    assert "No errored workspaces right now." in resp.text
-    assert "No results for" not in resp.text
-
-    resp = client.get("/search?q=proj&tag=nope")
-    assert resp.status_code == 200
-    assert "No workspaces with tag" in resp.text and "nope" in resp.text
-
-    resp = client.get("/search?q=proj&time_filter=yesterday")
-    assert resp.status_code == 200
-    assert "No workspaces active yesterday" in resp.text
-
-    # A query that matches nothing at all still reports the query, not a
-    # filter — including when a filter is active, since no filter is at fault.
-    for url in ("/search?q=nothingmatchesthis",
-                "/search?q=nothingmatchesthis&status=working",
-                "/search?q=nothingmatchesthis&tag=nope"):
-        resp = client.get(url)
-        assert resp.status_code == 200
-        assert "No results for" in resp.text, url
-        assert "workspaces right now" not in resp.text, url
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_empty_state_when_hidden_tag_removes_every_match(
-        mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
-    """The default hidden-tag filter can empty a non-empty match set.
-
-    That is the only route to the cascade's last branch: the query matched,
-    but no explicit filter was named, so the wording falls back to the query.
-    """
-    from power_atlas.config import Config
-    hidden_ws = str(tmp_path / "hidden-proj")
-    mock_config.return_value = Config(
-        workspace_settings={hidden_ws: {"tags": ["hidden"], "color": ""}},
-    )
-    mock_discover.return_value = [(hidden_ws, 1, "2026-01-01T00:00:00Z", "kiro-cli")]
-    mock_snap.return_value = _snapshot()
-    mock_sessions.return_value = []
-
-    resp = client.get("/search?q=proj")
-    assert resp.status_code == 200
-    assert "No results for" in resp.text and "proj" in resp.text
-    assert "hidden-proj" not in resp.text
-    assert "workspaces right now" not in resp.text
-    # Asking for the hidden tag explicitly shows the same workspace.
-    resp = client.get("/search?q=proj&tag=hidden")
-    assert resp.status_code == 200
-    assert "hidden-proj" in resp.text
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_empty_state_names_the_provider(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
-    """A query that only matches other providers' workspaces says so.
-
-    /partials/workspaces answers "no sessions found — start one with claude",
-    which would be a lie here: the provider may well have sessions, just none
-    matching the query.
-    """
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_discover.return_value = [
-        (str(tmp_path / "kiro-only-proj"), 1, "2026-01-01T00:00:00Z", "kiro-cli"),
-    ]
-    mock_snap.return_value = _snapshot()
-    mock_sessions.return_value = []
-
-    resp = client.get("/search?q=proj&provider=claude-code")
-    assert resp.status_code == 200
-    assert "No Claude Code results for" in resp.text
-    assert "proj" in resp.text
-    assert "start one with" not in resp.text
-
-    # An unknown provider degrades to its raw name rather than erroring.
-    resp = client.get("/search?q=proj&provider=bogus")
-    assert resp.status_code == 200
-    assert "No bogus results for" in resp.text
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.load_config")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_search_empty_state_escapes_input(mock_discover, mock_config, mock_snap, mock_sessions, client, tmp_path):
-    """Filter values are reflected in the empty state, so they must be escaped."""
-    _search_status_fixture(mock_discover, mock_config, mock_snap, mock_sessions, tmp_path)
-
-    resp = client.get("/search", params={"q": "proj", "status": "<b>x</b>"})
-    assert resp.status_code == 200
-    assert "<b>x</b>" not in resp.text
-    assert "&lt;b&gt;x" in resp.text
 
 
 # --- Phase 6 (Tag Color Management): /api/tag/save ---
@@ -10006,89 +8279,6 @@ def test_classify_kiro_v3_skips_noise():
     ]
     # Should skip usage_summary and session_metadata, find user → working
     assert classify_kiro_v3(lines) == SemanticStatus.WORKING
-
-
-@patch("power_atlas.web.get_semantic_status")
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-@patch("power_atlas.web.load_config")
-def test_all_sessions_dot_and_status_filter(mock_config, mock_paginated, mock_snap, mock_semantic, client, tmp_path):
-    from power_atlas.config import Config
-    from power_atlas.status_classifier import SemanticStatus
-    mock_config.return_value = Config()
-    ws = str(tmp_path)
-    live_s = _make_session(session_id="live1", cwd=ws, updated_at=_recent_iso())
-    dead_s = _make_session(session_id="dead1", cwd=ws, updated_at=_recent_iso())
-    mock_paginated.return_value = ([(live_s, "claude-code"), (dead_s, "claude-code")], False)
-    mock_snap.return_value = _snapshot(live_sids={("claude-code", "live1")})
-    mock_semantic.return_value = SemanticStatus.WORKING
-
-    # No filter: both rows render; dot rendering depends on template (Phase 4).
-    resp = client.get("/partials/all-sessions?page=1")
-    assert resp.status_code == 200
-    assert 'data-sid="live1"' in resp.text and 'data-sid="dead1"' in resp.text
-
-    # status=live keeps only the live row.
-    resp2 = client.get("/partials/all-sessions?page=1&status=live")
-    assert 'data-sid="live1"' in resp2.text
-    assert 'data-sid="dead1"' not in resp2.text
-
-    # status=closed keeps only the non-live row.
-    resp3 = client.get("/partials/all-sessions?page=1&status=closed")
-    assert 'data-sid="dead1"' in resp3.text
-    assert 'data-sid="live1"' not in resp3.text
-
-
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspaces_status_filter_hides_dead_folders(mock_discover, mock_providers, mock_sessions, mock_snap, client, tmp_path):
-    live_dir = tmp_path / "liveproj"; live_dir.mkdir()
-    dead_dir = tmp_path / "deadproj"; dead_dir.mkdir()
-    recent = _recent_iso()
-    mock_discover.return_value = [
-        (str(live_dir), 1, recent, "claude-code"),
-        (str(dead_dir), 1, recent, "claude-code"),
-    ]
-    mock_providers.return_value = ["claude-code"]
-    mock_sessions.return_value = [_make_session(cwd=str(live_dir))]
-    mock_snap.return_value = _snapshot(live_cwds={("claude-code", _normalize_path(str(live_dir)))})
-
-    resp = client.get("/partials/workspaces?status=live")
-    assert resp.status_code == 200
-    assert "liveproj" in resp.text
-    assert "deadproj" not in resp.text
-
-
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.data.get_all_sessions_paginated")
-@patch("power_atlas.web.load_config")
-def test_all_sessions_status_empty_state_escapes_input(mock_config, mock_paginated, mock_snap, client):
-    from power_atlas.config import Config
-    mock_config.return_value = Config()
-    mock_paginated.return_value = ([], False)
-    mock_snap.return_value = _snapshot()
-    resp = client.get("/partials/all-sessions", params={"page": 1, "status": "<img src=x onerror=alert(1)>"})
-    assert resp.status_code == 200
-    assert "<img src=x" not in resp.text          # raw tag must not be reflected
-    assert "&lt;img" in resp.text                  # escaped instead
-
-
-@patch("power_atlas.web.presence.get_snapshot")
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.data.available_providers")
-@patch("power_atlas.web.data.discover_workspaces_with_counts")
-def test_workspaces_status_empty_state_escapes_input(mock_discover, mock_providers, mock_sessions, mock_snap, client, tmp_path):
-    d = tmp_path / "proj"; d.mkdir()
-    mock_discover.return_value = [(str(d), 1, _recent_iso(), "claude-code")]
-    mock_providers.return_value = ["claude-code"]
-    mock_sessions.return_value = [_make_session(cwd=str(d))]
-    mock_snap.return_value = _snapshot()  # nothing live -> status=working filters all out
-    resp = client.get("/partials/workspaces", params={"status": "<b>x</b>"})
-    assert resp.status_code == 200
-    assert "<b>x</b>" not in resp.text
-    assert "&lt;b&gt;x" in resp.text
 
 
 # --- Status classifier tests ---
@@ -10690,326 +8880,6 @@ class TestNotifications:
         assert "sess-100" in notifications._session_states
 
 
-# --- POST /api/session-status (lightweight status polling) ---
-
-
-class TestApiSessionStatus:
-    """Tests for the lightweight POST /api/session-status endpoint."""
-
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_empty_cwds_returns_empty_maps(self, mock_snap, client):
-        """Empty cwds list returns empty response immediately."""
-        resp = client.post(
-            "/api/session-status", json={"cwds": []},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body == {"sessions": {}, "workspaces": {}, "active_cwds": []}
-        # Snapshot never called for empty input
-        mock_snap.assert_not_called()
-
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_inactive_cwd_short_circuits(self, mock_snap, mock_cache, client):
-        """CWDs without a live process return 'closed' without iterating sessions."""
-        from power_atlas.presence import Snapshot
-        # Snapshot with no live processes
-        mock_snap.return_value = Snapshot(set(), set(), {})
-
-        resp = client.post(
-            "/api/session-status",
-            json={"cwds": ["C:\\projects\\myapp", "C:\\other"]},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["workspaces"]["C:\\projects\\myapp"] == "closed"
-        assert body["workspaces"]["C:\\other"] == "closed"
-        assert body["active_cwds"] == []
-        assert body["sessions"] == {}
-        # session_cache.get should NOT be called (short-circuit)
-        mock_cache.get.assert_not_called()
-
-    @patch("power_atlas.web.notifications.check_and_notify")
-    @patch("power_atlas.web.get_semantic_status")
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_active_cwd_returns_session_status_no_notifications(
-        self, mock_snap, mock_cache, mock_semantic, mock_notify, client
-    ):
-        """Active CWDs return per-session status; notifications are NOT triggered."""
-        from power_atlas.presence import Snapshot
-        from power_atlas.data import _normalize_path
-
-        cwd = "C:\\projects\\myapp"
-        norm_cwd = _normalize_path(cwd)
-
-        # Snapshot shows kiro-cli running in this cwd
-        mock_snap.return_value = Snapshot(
-            live_sids={("kiro-cli", "sess-1")},
-            live_cwds={("kiro-cli", norm_cwd)},
-            sid_to_cwd={("kiro-cli", "sess-1"): norm_cwd},
-        )
-
-        # Session cache returns one session
-        sess = _make_session(session_id="sess-1", cwd=cwd)
-        mock_cache.get.return_value = [sess]
-
-        # Semantic status returns WAITING
-        from power_atlas.status_classifier import SemanticStatus
-        mock_semantic.return_value = SemanticStatus.WAITING
-
-        resp = client.post(
-            "/api/session-status",
-            json={"cwds": [cwd]},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-
-        # Session status returned
-        assert body["sessions"]["sess-1"] == "waiting"
-        # Workspace-level status
-        assert body["workspaces"][cwd] == "waiting"
-        # Active cwds includes this one
-        assert cwd in body["active_cwds"]
-        # Notifications NOT triggered
-        mock_notify.assert_not_called()
-
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_skips_kiro_ide_provider(self, mock_snap, mock_cache, client):
-        """kiro-ide sessions are never processed by this endpoint."""
-        from power_atlas.presence import Snapshot
-        from power_atlas.data import _normalize_path
-
-        cwd = "C:\\projects\\myapp"
-        norm_cwd = _normalize_path(cwd)
-
-        # Only kiro-ide is running in this cwd — endpoint should see no active process
-        mock_snap.return_value = Snapshot(
-            live_sids=set(),
-            live_cwds={("kiro-ide", norm_cwd)},
-            sid_to_cwd={},
-        )
-
-        resp = client.post(
-            "/api/session-status",
-            json={"cwds": [cwd]},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-
-        # CWD treated as inactive (kiro-ide excluded from poll_providers)
-        assert body["workspaces"][cwd] == "closed"
-        assert body["active_cwds"] == []
-        # session_cache never accessed
-        mock_cache.get.assert_not_called()
-
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_mixed_active_inactive_cwds(self, mock_snap, mock_cache, client):
-        """Mix of active and inactive cwds: only active are iterated."""
-        from power_atlas.presence import Snapshot
-        from power_atlas.data import _normalize_path
-
-        active_cwd = "C:\\projects\\active"
-        inactive_cwd = "C:\\projects\\idle"
-        norm_active = _normalize_path(active_cwd)
-
-        mock_snap.return_value = Snapshot(
-            live_sids=set(),
-            live_cwds={("claude-code", norm_active)},
-            sid_to_cwd={},
-        )
-        # Cache returns None for both (no cached sessions)
-        mock_cache.get.return_value = None
-
-        resp = client.post(
-            "/api/session-status",
-            json={"cwds": [active_cwd, inactive_cwd]},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-
-        assert body["workspaces"][inactive_cwd] == "closed"
-        assert active_cwd in body["active_cwds"]
-        assert inactive_cwd not in body["active_cwds"]
-
-    @patch("power_atlas.web.get_semantic_status")
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_workspace_dot_comes_from_workspace_status(
-        self, mock_snap, mock_cache, mock_semantic, client
-    ):
-        """Card dot is _workspace_status, so a poll cannot contradict a render.
-
-        Divergence case: nothing is cached for the cwd, so the old per-session
-        aggregation could only ever answer "working"; _workspace_status reads
-        the tracked session id and reports the classifier's verdict instead.
-        """
-        from power_atlas.status_classifier import SemanticStatus
-
-        cwd = "C:\\projects\\myapp"
-        norm_cwd = _normalize_path(cwd)
-        snap = _snapshot(
-            live_sids={("kiro-cli", "sess-9")},
-            live_cwds={("kiro-cli", norm_cwd)},
-            sid_to_cwd={("kiro-cli", "sess-9"): norm_cwd},
-        )
-        mock_snap.return_value = snap
-        mock_cache.get.return_value = None
-        mock_semantic.return_value = SemanticStatus.ERRORED
-
-        resp = client.post(
-            "/api/session-status",
-            json={"cwds": [cwd]},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["workspaces"][cwd] == "errored"
-        assert body["sessions"] == {}   # nothing cached -> no per-row dots
-        # Same answer the render path would have produced for this cwd. An
-        # unfiltered page renders with providers=None, so that is what this
-        # compares against — not the {kiro-cli, claude-code} set the poll
-        # happens to build for "all".
-        assert body["workspaces"][cwd] == _workspace_status(snap, cwd, None)
-
-    @patch("power_atlas.status_classifier._resolve_jsonl_path")
-    @patch("power_atlas.web.get_semantic_status")
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_card_may_outrank_a_cached_untracked_row(
-        self, mock_snap, mock_cache, mock_semantic, mock_resolve, client, tmp_path
-    ):
-        """The card answers for the session presence proved live, not for every row.
-
-        A workspace holding a tracked session (working) plus a cached,
-        untracked, recently-written one (waiting) shows a working card over a
-        waiting row. That is deliberate: the untracked session's process is not
-        the live one, and this is the answer a full render has always given —
-        the poll now matches it rather than aggregating the rows itself.
-        """
-        from power_atlas.status_classifier import SemanticStatus
-
-        jsonl = tmp_path / "s2.jsonl"
-        jsonl.write_text("")
-        mock_resolve.return_value = str(jsonl)
-
-        cwd = "C:\\projects\\myapp"
-        norm_cwd = _normalize_path(cwd)
-        snap = _snapshot(
-            live_sids={("claude-code", "s1")},
-            live_cwds={("claude-code", norm_cwd)},
-            sid_to_cwd={("claude-code", "s1"): norm_cwd},
-        )
-        mock_snap.return_value = snap
-        s2 = _make_session(session_id="s2", cwd=cwd, updated_at=_recent_iso())
-        mock_cache.get.side_effect = lambda c, p: [s2] if p == "claude-code" else None
-        mock_semantic.side_effect = lambda sid, prov, c: (
-            SemanticStatus.WORKING if sid == "s1" else SemanticStatus.WAITING)
-
-        resp = client.post(
-            "/api/session-status",
-            json={"cwds": [cwd]},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["workspaces"][cwd] == "working"
-        assert body["sessions"]["s2"] == "waiting"
-        # No render/poll divergence: the render path says the same thing, and
-        # it asks with providers=None on an unfiltered page.
-        assert body["workspaces"][cwd] == _workspace_status(snap, cwd, None)
-
-    @patch("power_atlas.web.data.get_sessions")
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_provider_filter_travels_with_the_poll(
-        self, mock_snap, mock_cache, mock_sessions, client
-    ):
-        """A provider-filtered page polls about that provider only."""
-        cwd = "C:\\projects\\myapp"
-        mock_snap.return_value = _snapshot(
-            live_cwds={("claude-code", _normalize_path(cwd))})
-        mock_cache.get.return_value = None
-        mock_sessions.return_value = []
-
-        def poll(payload):
-            resp = client.post("/api/session-status", json=payload,
-                               headers={"Origin": "http://127.0.0.1"})
-            assert resp.status_code == 200
-            return resp.json()["workspaces"][cwd]
-
-        # Only claude-code is running, so a kiro-cli-filtered page must not
-        # light this card up — which is what the render path shows it.
-        assert poll({"cwds": [cwd], "provider": "kiro-cli"}) == "closed"
-        assert poll({"cwds": [cwd], "provider": "claude-code"}) == "working"
-        # "all" and a client that sends no provider both see every CLI provider.
-        assert poll({"cwds": [cwd], "provider": "all"}) == "working"
-        assert poll({"cwds": [cwd]}) == "working"
-
-    @patch("power_atlas.web.data.get_sessions")
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_response_keeps_request_order(
-        self, mock_snap, mock_cache, mock_sessions, client
-    ):
-        """Both maps echo the order the client asked in, live cwds included."""
-        cwds = ["C:\\projects\\ccc", "C:\\projects\\aaa", "C:\\projects\\bbb"]
-        mock_snap.return_value = _snapshot(live_cwds={
-            ("claude-code", _normalize_path(c)) for c in cwds})
-        mock_cache.get.return_value = None
-        mock_sessions.return_value = []
-
-        resp = client.post("/api/session-status", json={"cwds": cwds},
-                           headers={"Origin": "http://127.0.0.1"})
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["active_cwds"] == cwds
-        assert list(body["workspaces"]) == cwds
-
-    @patch("power_atlas.web.data.get_sessions")
-    @patch("power_atlas.web.data.session_cache")
-    @patch("power_atlas.web.presence.get_snapshot")
-    def test_non_string_provider_does_not_500(
-        self, mock_snap, mock_cache, mock_sessions, client
-    ):
-        """A provider of the wrong JSON shape degrades to "all", not a 500.
-
-        The value reaches a set literal, so an array or object would raise
-        TypeError: unhashable type outside the per-cwd guard and take the
-        whole endpoint down.
-        """
-        cwd = "C:\\projects\\myapp"
-        mock_snap.return_value = _snapshot(
-            live_cwds={("claude-code", _normalize_path(cwd))})
-        mock_cache.get.return_value = None
-        mock_sessions.return_value = []
-
-        for bogus in ([], {}, ["kiro-cli"], {"name": "kiro-cli"}, 7, True, None):
-            resp = client.post("/api/session-status",
-                               json={"cwds": [cwd], "provider": bogus},
-                               headers={"Origin": "http://127.0.0.1"})
-            assert resp.status_code == 200, bogus
-            assert resp.json()["workspaces"][cwd] == "working", bogus
-
-    def test_missing_cwds_key_returns_empty(self, client):
-        """Body without 'cwds' key returns empty response without error."""
-        resp = client.post(
-            "/api/session-status",
-            json={},
-            headers={"Origin": "http://127.0.0.1"},
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body == {"sessions": {}, "workspaces": {}, "active_cwds": []}
-
-
 # --- Path/status caching (260725_PARSE_AND_POLL_PERFORMANCE) ----------------
 
 
@@ -11267,26 +9137,6 @@ def test_waiting_detail_only_applies_to_waiting_sessions():
     # kiro-cli reports no reason at all; must not raise or invent one.
     bare = presence.Snapshot(set(), set(), {}, {}, {})
     assert _waiting_detail(bare, s, "kiro-cli", "waiting") == ("", "")
-
-
-def test_session_row_renders_the_waiting_reason():
-    from power_atlas.web import templates
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    tpl = templates.get_template("partials/session_row.html")
-
-    html = tpl.render(request=None, session=s, cwd="/w", stale=False,
-                      pinned_sessions=[], provider_name="claude-code",
-                      provider_color="", status="waiting",
-                      waiting_detail=("approval", "needs your approval"))
-    assert 'title="Waiting — needs your approval"' in html
-    assert 'data-waiting="approval"' in html
-
-    # Absent detail (kiro-cli, or an older snapshot) keeps the original text.
-    plain = tpl.render(request=None, session=s, cwd="/w", stale=False,
-                       pinned_sessions=[], provider_name="kiro-cli",
-                       provider_color="", status="waiting")
-    assert 'title="Waiting — needs your input"' in plain
-    assert "data-waiting" not in plain
 
 
 # --- ACP session lifecycle: activity stamps, inactivity ceiling, sweeper ---
@@ -13326,9 +11176,9 @@ class TestRemotePathAllowlistIsDefaultDeny:
     @pytest.mark.parametrize("path", [
         "/", "/api/launchers", "/api/settings", "/api/remote-access",
         "/api/remote-access/rotate",
-        "/api/save-setting", "/partials/workspaces", "/staticfoo",
+        "/api/save-setting", "/staticfoo",
         "/staticfoo/style.css", "/acp/", "/ws/acp/x", "/remote-authx",
-        "/api/save-launcher", "/api/run-launcher", "/partials/all-sessions",
+        "/api/save-launcher", "/api/run-launcher",
     ])
     def test_non_allowlisted_paths_are_refused(self, path, remote_enabled):
         status, body, _ = _peer_http(path, [_cookie_header()])
@@ -15892,8 +13742,8 @@ class TestAcpListingEndpoint:
 
     def test_no_env_launcher_or_action_field_appears_anywhere(self, client, acp_listing_store):
         """D18's reason for a new route rather than reusing
-        `/partials/all-sessions`: that partial renders the hover-driven launch
-        cluster. Substring-matched over the serialized body, so a nested
+        the old `/partials/all-sessions`: that partial rendered the hover-driven
+        launch cluster. Substring-matched over the serialized body, so a nested
         structure cannot hide one.
 
         The second row is untitled **on purpose**. `_acp_row_title` falls back
@@ -16095,7 +13945,7 @@ class TestAcpListingEndpoint:
     def test_a_hidden_workspace_is_excluded_and_unreachable_by_cwd(
             self, client, acp_listing_store, monkeypatch):
         """`hidden` is the user saying "not on my dashboard", and a phone is not
-        an exemption — `/partials/all-sessions` honours the tag and so does this.
+        an exemption — the old `/partials/all-sessions` honoured the tag and so does this.
 
         The exclusion was first skipped as "needs `load_config()`, which D15
         forbids on the loop". D15 forbids it **on the event loop**; `_acp_listing`
@@ -16708,7 +14558,7 @@ class TestDashboardListingEndpoint:
     def test_grouped_mode_merges_two_providers_at_the_same_workspace(
             self, client, grouped_multi_store):
         """The same folder touched by two providers is one row, not two --
-        the same merge /partials/sessions?provider=all already does per
+        the same merge the old /partials/sessions?provider=all did per
         workspace, applied here across a whole page via _group_workspaces."""
         grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
             _acp_row("v3s1", updated="2026-08-01T00:00:00Z")])
@@ -16735,7 +14585,7 @@ class TestDashboardListingEndpoint:
 
     def test_tag_filter_default_excludes_hidden(
             self, client, grouped_multi_store, monkeypatch):
-        """Preserves /partials/workspaces's default: no `tag` means hidden
+        """Preserves the old /partials/workspaces's default: no `tag` means hidden
         workspaces are left out, not merely deprioritized."""
         from power_atlas import config as config_mod
         grouped_multi_store["add"](r"C:\dev\secret", "kiro-cli-v3", [_acp_row("s1")])
@@ -20719,7 +18569,6 @@ class TestAcpSubscribeSnapshotGate:
             "subscribe snapshot must include toolCallId"
 
 
-
 class TestAcpFanOutIdFiltering:
     """BUG-3 fix: _subagents_payload filters to the current fan-out only.
 
@@ -21709,9 +19558,6 @@ class TestSupervisor:
         msg_written = written[0]
         assert 'error' in msg_written
         assert msg_written['error']['message'] == 'Token response format error'
-
-
-
 
     def test_fulfill_token_nonzero_exit(self):
         """Non-zero returncode -> error response written."""
