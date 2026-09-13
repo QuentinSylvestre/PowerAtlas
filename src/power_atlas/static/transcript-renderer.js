@@ -1901,3 +1901,76 @@ function clearTranscript() {
   // Reset prompt navigation state: the nav arrows track DOM rows that were
   // just cleared by textContent = '' above, so stale refs are cleared here.
 }
+
+// ---- feeding frames from outside a live socket ---------------------------
+//
+// renderTranscriptFrame(frame) covers exactly the frame shapes that have no
+// `replaying`-conditional behaviour in acp.html's live `handle()` dispatch
+// (chunk, rendered, tool_call, tool_update) -- each always renders the same
+// way whether the frame just arrived over the socket or is being replayed
+// from the session's history buffer. That happens to be exactly the frame
+// shape set transcript_translator.py's translate_transcript() produces for
+// a file-derived, non-live transcript (see that file), which is what makes
+// this function usable as the dashboard's whole rendering entry point: feed
+// it GET /api/session-transcript's `events` and nothing further is needed.
+//
+// Left out on purpose, and still handled only inline in acp.html's
+// `handle()`: thought (a live-only "still thinking" signal, explicitly
+// suppressed during replay), tool_output (broadcast-only, reaches live
+// viewers and nobody else, so meaningless off a live connection),
+// permission_request/permission_resolved (answerable only over a live
+// socket -- a later phase's concern once the dashboard gains live-attach),
+// agent_error and history_truncated (both tied to the live ring buffer).
+// None of these are ever produced by translate_transcript(), so the
+// dashboard's static panel has no need to feed them through here, and
+// acp.html's own dispatch for them is left untouched rather than routed
+// through a shared function that would gain a `replaying` parameter for no
+// caller that needs it yet.
+function renderTranscriptFrame(frame) {
+  var type = frame && frame.type;
+  var payload = (frame && frame.payload) || {};
+  if (type === 'chunk') {
+    hideThinking();
+    appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+    return;
+  }
+  if (type === 'rendered') {
+    // The bubble that just closed, reflowed from plain text into markup. It
+    // arrives once per bubble at the end of it, never per chunk: 156 of 184
+    // chunk boundaries in a measured turn fell *inside* an open code fence,
+    // so parsing as it streamed would have been parsing an unterminated
+    // document 85% of the time. Text streams exactly as it did before and
+    // reflows once when there is a whole document to parse.
+    renderMarkdown(payload.tokens);
+    return;
+  }
+  if (type === 'tool_call' || type === 'tool_update') {
+    hideThinking();
+    addToolCall(payload);
+    // logLine is page-specific (acp.html's own debug-log panel) and exposed
+    // as a window global there for exactly this guard, same as elsewhere in
+    // this file -- a page with no debug-log panel (the dashboard) just
+    // skips the line.
+    if (typeof logLine === 'function') {
+      logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
+                    ' [' + (payload.status || '') + ']');
+    }
+    return;
+  }
+}
+
+/** Replay a full ordered list of frames (e.g. the `events` array from
+ *  GET /api/session-transcript) into a freshly-cleared panel. Mirrors the
+ *  trailing steps of acp.html's own `history` frame handling: flush any
+ *  tool group the last frame left open (a file-derived transcript has no
+ *  closing `meta turn:end` to flush it, since the translator never
+ *  produces meta frames at all), then land the scroll position at the
+ *  bottom. This is the dashboard panel's whole entry point: initTranscriptDom(),
+ *  fetch the events, call this once. */
+function renderTranscriptHistory(frames) {
+  clearTranscript();
+  var events = frames || [];
+  for (var i = 0; i < events.length; i++) renderTranscriptFrame(events[i]);
+  if (toolGroup) flushToolGroups();
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}

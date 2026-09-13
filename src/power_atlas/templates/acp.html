@@ -5051,9 +5051,19 @@
       logLine('info', '← context window ' + payload.contextPercent + '%');
       return;
     }
-    if (type === 'chunk') {
-      hideThinking();
-      appendChunk(payload.role === 'user' ? 'user' : 'agent', payload.text || '');
+    // chunk/rendered/tool_call/tool_update: none of the four have any
+    // `replaying`-conditional behaviour (unlike thought/tool_output below),
+    // so they always do the same thing whether the frame arrived live over
+    // the socket or is being replayed from the session's history buffer.
+    // That also makes them exactly the frame shapes transcript_translator.py
+    // (Phase 1) produces for a file-derived, non-live transcript — so their
+    // dispatch lives once, in transcript-renderer.js's renderTranscriptFrame
+    // (Phase 2 slice 6), and both this live handler and the dashboard's
+    // static panel call the same function rather than each carrying its own
+    // copy that could drift.
+    if (type === 'chunk' || type === 'rendered' ||
+        type === 'tool_call' || type === 'tool_update') {
+      renderTranscriptFrame(frame);
       return;
     }
     if (type === 'thought') {
@@ -5062,29 +5072,12 @@
       if (!replaying) appendThought(payload.text || '');
       return;
     }
-    if (type === 'rendered') {
-      // The bubble that just closed, reflowed from plain text into markup. It
-      // arrives once per bubble at the end of it, never per chunk: 156 of 184
-      // chunk boundaries in a measured turn fell *inside* an open code fence,
-      // so parsing as it streamed would have been parsing an unterminated
-      // document 85% of the time. Text streams exactly as it did before and
-      // reflows once when there is a whole document to parse.
-      renderMarkdown(payload.tokens);
-      return;
-    }
     if (type === 'tool_output') {
       // Broadcast-only and never in the replay buffer, so this frame reaches
       // live viewers and nobody else — which is the whole point of it. It
       // arrives just before the `tool_update` carrying its digest.
       hideThinking();
       addToolOutput(payload);
-      return;
-    }
-    if (type === 'tool_call' || type === 'tool_update') {
-      hideThinking();
-      addToolCall(payload);
-      logLine('in', '← ' + type + ' ' + (payload.title || payload.kind || '') +
-                    ' [' + (payload.status || '') + ']');
       return;
     }
     if (type === 'history_truncated') {
