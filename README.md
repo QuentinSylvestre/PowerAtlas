@@ -1,6 +1,6 @@
 # PowerAtlas
 
-Desktop launcher and dashboard for kiro-cli, Claude Code, and Kiro IDE sessions. System tray icon with a web UI for discovering, resuming, and batch-launching AI coding assistant workspaces — plus, for kiro-cli, a built-in agent surface that creates and drives sessions over ACP without a terminal, optionally reachable from your phone over a NetBird network. See the *Agent sessions* and *Remote access* sections below.
+Desktop launcher and dashboard for kiro-cli, Claude Code, and Kiro IDE sessions. System tray icon with a web UI for discovering, resuming, batch-launching, and reading the full transcript of any session's conversation — plus, for kiro-cli, a built-in agent surface that creates and drives sessions over ACP without a terminal, optionally reachable from your phone over a NetBird network. See the *Agent sessions* and *Remote access* sections below.
 
 Supports **Windows** and **Linux**.
 
@@ -60,9 +60,14 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
   - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/` (scanned separately from v2)
 - Unified provider-launcher system with extracted icons and configurable colors
-- Inline provider filter next to search bar — filters workspaces and sessions panels simultaneously
-- Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — unified filtering applies to both workspaces and sessions panels with permanent time grouping (Today/Yesterday/This week/Older)
+- Inline provider filter next to the workspaces rail
+- Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — grouped by project, date (Today/Yesterday/This week/Older), or status
 - Resume sessions with one click (opens terminal with `--resume-id`)
+- Click any session in the dashboard's workspaces rail to open its full transcript in a persistent
+  panel next to the rail — works for every provider, reading straight from disk. For a kiro-cli v3
+  session that is already running live elsewhere, the panel auto-attaches and streams further output;
+  for one that is not, a composer lets you send a prompt to spawn it live, without leaving the
+  dashboard for `/acp`
 - Drive kiro-cli sessions from the browser at `/acp`, with no terminal — create a session or resume an
   exited one over ACP, stream the agent's output, cancel a turn, close the session, queue a prompt for
   after the current turn, or steer the agent mid-turn. Paste a screenshot
@@ -73,13 +78,13 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 - Optional remote access over NetBird — off by default. When enabled, `/acp` and its listing endpoint
   are reachable from your own devices behind a device secret, while the dashboard, launchers and
   settings stay loopback-only. See *Remote access* below
-- Live session status — sessions currently running in a terminal show a 🟢 Working (agent executing) or 🟡 Waiting (agent finished, your turn) or 🔴 Errored dot; workspace cards show the highest-priority status dot. A status filter (All / Working / Waiting / Errored) in the Sessions panel narrows both panels. Detected by matching the working directory of running `claude` / `kiro-cli` processes to session workspaces; also supports v3 kiro-cli sessions (`messages.jsonl` format). Opt-in toast notifications fire when a session transitions from Working to Waiting or Errored (Windows toast via WinRT, Linux via notify-send)
-- Multi-select and batch launch sessions
+- Live session status — sessions currently running in a terminal show a 🟢 Working (agent executing) or 🟡 Waiting (agent finished, your turn) or 🔴 Errored dot; workspace groups show the highest-priority status dot. A "Group by Status" mode in the workspaces rail's settings popover buckets sessions by status instead of by project or date. Detected by matching the working directory of running `claude` / `kiro-cli` processes to session workspaces; also supports v3 kiro-cli sessions (`messages.jsonl` format). Opt-in toast notifications fire when a session transitions from Working to Waiting or Errored (Windows toast via WinRT, Linux via notify-send)
+- Multi-select workspaces and batch-launch a provider or custom launcher across all of them at once
 - Per-provider settings with default args (e.g. trust-all-tools)
 - Pin folders and sessions for quick access
-- Quick actions on workspace cards: click folder icon to open in file explorer, hover to reveal terminal button
+- Quick actions on workspace rows: folder icon opens the workspace in your file explorer, terminal icon opens a shell there — both always visible, not hover-gated
 - Built-in terminal launcher tile opens a shell at selected workspaces or default directory
-- Search across all workspaces and sessions
+- A filter box narrows the workspaces rail to matching names/titles as you type (client-side, over whatever pages are currently loaded — paginate or clear the filter to reach the rest)
 - Custom launchers with inline args editing and one-click execution
 - Global launch profiles with configurable Windows Terminal profile and terminal command
 - Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
@@ -242,8 +247,7 @@ arrives; once the answer is complete the bubble is rebuilt with headings, lists,
 and pipe tables. A table is as wide as it wants to be until the window says otherwise: given the
 room it renders full width with every row on one line, and it starts wrapping only when the pane is
 narrower than that. When it does wrap, every column gives up width in proportion rather than one column
-absorbing all of it. (The dashboard's session tooltip keeps its own tables on one line and scrolls
-instead — it holds names and counts, where this holds prose.) A code block that names its language is
+absorbing all of it. A code block that names its language is
 syntax-highlighted and carries that name as a small label above it. Both come from the fence the
 agent wrote, so a block opened without a language — or indented rather than fenced — has neither.
 The highlighter is Prism, vendored under `static/` rather than fetched from a CDN so that code
