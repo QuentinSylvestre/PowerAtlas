@@ -4478,6 +4478,52 @@ async def api_session_transcript(sid: str = "", provider: str = "kiro-cli", cwd:
     return {"events": frames}
 
 
+@app.get("/api/session-availability")
+async def api_session_availability(response: Response, sid: str = "", cwd: str = ""):
+    """Cheap held/locked/available peek for ONE session, for the dashboard's
+    transcript panel to decide the composer's state without attaching.
+
+    Reuses `_acp_availability` exactly as `_acp_listing`/`api_acp_sessions`
+    do for the rail — zero ACP round-trip, same fail-open-to-`available`
+    contract, same `acp is None` degradation. Only ever meaningful for
+    kiro-cli-v3 (and, incidentally, retired-v2 kiro-cli — `_acp_availability`
+    branches on id shape) sessions; the panel should not call this for any
+    other provider, since they have no live-attach concept to be available
+    *for*.
+
+    `status` mirrors `_acp_status_for_held`'s own rule: `""` for a session
+    this PowerAtlas does not hold (a `locked`/`available` id has no local
+    transcript-tail reading worth doing), the resolved working/waiting/
+    errored verdict when it does. Requires `cwd` to compute a status for a
+    held session; without it the availability state alone is still returned.
+
+    `no-store`, same reasoning as `api_acp_sessions`: availability is a
+    liveness reading with a lifetime of seconds, not something to cache.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    if not re.fullmatch(r'(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
+        return JSONResponse({"error": "invalid session id"}, status_code=400)
+
+    def _compute() -> tuple[str, str]:
+        supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
+        held = frozenset(supervisor.sessions) if supervisor is not None else frozenset()
+        availability = _acp_availability([sid], held)
+        state = availability.get(sid, "available")
+        status = ""
+        if state == "held" and cwd:
+            try:
+                snapshot = presence.get_snapshot()
+                semantic = get_semantic_status(sid, _ACP_V3_LISTING_PROVIDER, cwd)
+                status = _resolved_session_status(snapshot, _ACP_V3_LISTING_PROVIDER, sid, semantic)
+            except Exception:
+                log.exception("session-availability: could not settle status for %s", sid)
+                status = "working"
+        return state, status
+
+    state, status = await asyncio.to_thread(_compute)
+    return {"sid": sid, "availability": state, "status": status}
+
+
 @app.get("/partials/sessions", response_class=HTMLResponse)
 async def partials_sessions(request: Request, cwd: str = "", provider: str = "all",
                             status: str = "", fresh: int = 0):

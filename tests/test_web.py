@@ -936,6 +936,86 @@ class TestSessionTranscriptAPI:
         mock_full.assert_called_once()
 
 
+class TestSessionAvailabilityAPI:
+    """`/api/session-availability` is the single-session equivalent of the
+    rail's batch `_acp_availability`/`_acp_status_for_held` — a cheap,
+    zero-attach peek the dashboard's transcript panel uses to decide the
+    composer's held/available/locked state."""
+
+    _PATH = "/api/session-availability"
+    _SID = "sess_aabbccdd-1234-5678-abcd-ef0123456789"
+
+    @pytest.fixture(autouse=True)
+    def _clean_supervisor(self):
+        from power_atlas import acp as acp_mod
+        yield
+        acp_mod._supervisor.sessions.pop(self._SID, None)
+
+    def test_invalid_sid_returns_400(self, client):
+        resp = client.get(f"{self._PATH}?sid=not-a-uuid")
+        assert resp.status_code == 400
+
+    def test_held_session_reports_held_and_a_status(self, client, monkeypatch):
+        from power_atlas import acp as acp_mod
+        from power_atlas import web as web_mod
+        from power_atlas import presence as presence_mod
+        from power_atlas.status_classifier import SemanticStatus
+
+        acp_mod._supervisor.sessions[self._SID] = {"cwd": "C:\\dev\\ws"}
+        monkeypatch.setattr(web_mod, "get_semantic_status", lambda *a, **k: SemanticStatus.WAITING)
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                             lambda *a, **k: presence_mod.Snapshot(set(), set()))
+
+        resp = client.get(f"{self._PATH}?sid={self._SID}&cwd=C%3A%5Cdev%5Cws")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["availability"] == "held"
+        assert body["status"] == "waiting"
+
+    def test_held_session_without_cwd_still_reports_held_with_empty_status(self, client):
+        from power_atlas import acp as acp_mod
+        acp_mod._supervisor.sessions[self._SID] = {"cwd": "C:\\dev\\ws"}
+
+        resp = client.get(f"{self._PATH}?sid={self._SID}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["availability"] == "held"
+        assert body["status"] == ""
+
+    def test_locked_session_reports_locked_with_no_status(self, client, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda *a, **k: 4242)
+
+        resp = client.get(f"{self._PATH}?sid={self._SID}&cwd=C%3A%5Cdev%5Cws")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["availability"] == "locked"
+        assert body["status"] == ""
+
+    def test_available_session_reports_available(self, client, monkeypatch):
+        from power_atlas import acp as acp_mod
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda *a, **k: None)
+
+        resp = client.get(f"{self._PATH}?sid={self._SID}")
+        assert resp.status_code == 200
+        assert resp.json()["availability"] == "available"
+
+    def test_acp_unavailable_degrades_to_available_not_error(self, client, monkeypatch):
+        """acp is optional/guarded-import prototype code (web.py's `try:
+        from . import acp`) -- a session-availability caller must not crash
+        the dashboard just because /acp itself failed to import."""
+        import power_atlas.web as web_mod
+        monkeypatch.setattr(web_mod, "acp", None)
+
+        resp = client.get(f"{self._PATH}?sid={self._SID}")
+        assert resp.status_code == 200
+        assert resp.json()["availability"] == "available"
+
+    def test_response_is_never_cached(self, client):
+        resp = client.get(f"{self._PATH}?sid={self._SID}")
+        assert resp.headers["cache-control"] == "no-store"
+
+
 # --- Phase 3: custom launcher CRUD ---
 
 
