@@ -178,6 +178,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .session-row { display: grid; grid-template-columns: 28px 1fr; align-items: center; padding: 10px 16px; gap: 10px; cursor: pointer; transition: background 0.1s; position: relative; background: var(--card-bg); border: 1px solid var(--card-border); }
 .session-row:hover { background: var(--surface-hover); }
 .session-row.selected { background: var(--surface-selected); }
+/* The one row whose transcript is currently shown in the right-hand panel
+   (dashboard/ACP-merge Phase 2) -- an outline rather than a background
+   change so it reads distinctly from `.selected`'s bulk-launch highlight;
+   a row can carry both at once. */
+.session-row.viewing { outline: 2px solid var(--accent); outline-offset: -2px; }
 .session-row + .session-row { border-top: none; margin-top: -1px; }
 .session-check { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; transition: all 0.12s; flex-shrink: 0; }
 .session-row:hover .session-check { border-color: var(--text-muted); }

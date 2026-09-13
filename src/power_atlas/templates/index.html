@@ -99,24 +99,38 @@
       <div class="skeleton-card"></div>
     </div>
   </div>
+  <!-- The transcript panel (dashboard/ACP-merge Phase 2): replaces what was a
+       second, flat "all sessions" list with its own status filter. Sessions
+       are still found and clicked from the Workspaces column's expandable
+       cards (partials/session_row.html, unchanged in that role) -- this
+       panel is only where clicking one now opens. The markup below mirrors
+       acp.html's `.acp-transcript-wrap` exactly, using the same style.css
+       rules (already shared by both pages via base.html) and the same
+       element roles transcript-renderer.js's initTranscriptDom() expects,
+       just under this page's own element ids. No composer: read-only until
+       Phase 3 wires live-attach. -->
   <section class="right-panel" id="sessions-panel">
-    <div class="section-label"><span>Sessions</span> <div class="session-filters" id="sessionFilters">
-      <select class="ws-filter-select" id="statusFilter" onchange="setStatusFilter(this.value)" title="Filter by status">
-        <option value="">All status</option>
-        <option value="working">🟢 Working</option>
-        <option value="waiting">🟡 Waiting</option>
-        <option value="errored">🔴 Errored</option>
-      </select>
-    </div></div>
-    <div id="all-sessions" aria-busy="true"
-         hx-get="/partials/all-sessions?page=1" hx-trigger="load" hx-swap="innerHTML"
-         hx-on::after-swap="this.removeAttribute('aria-busy')">
-      <div class="skeleton-card"></div>
-      <div class="skeleton-card"></div>
-      <div class="skeleton-card"></div>
+    <div class="section-label"><span>Transcript</span></div>
+    <div class="acp-transcript-wrap" id="dashTranscriptWrap">
+      <div class="acp-transcript" id="dashTranscript" role="log" aria-live="polite"
+           aria-label="Conversation">
+        <div class="acp-system-msg">Select a session to view its transcript.</div>
+      </div>
+      <div class="acp-prompt-nav" id="dashPromptNav" hidden>
+        <button class="acp-btn acp-prompt-nav-btn" id="dashPromptUp" type="button"
+                aria-label="Previous prompt">↑</button>
+        <button class="acp-btn acp-prompt-nav-btn" id="dashPromptDown" type="button"
+                aria-label="Next prompt or scroll to bottom">↓</button>
+      </div>
     </div>
   </section>
 </main>
+
+<!-- Shared with /acp (dashboard/ACP-merge Phase 2) -- see that file's script
+     tag and transcript-renderer.js's own header comment for why this must
+     load before any inline script that calls initTranscriptDom/
+     renderTranscriptHistory/openSessionTranscript below. -->
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/transcript-renderer.js"></script>
 
 <div class="action-bar" id="actionBar">
   <span class="selection-info"><strong id="selCount">0</strong> sessions selected</span>
@@ -190,8 +204,7 @@ function _statusQs(){return window._activeStatus?'&status='+encodeURIComponent(w
 // two failure modes are: `fetched` latches a dead server so a stream of
 // debounced keystrokes toasts once, `rendered` latches a broken swap.
 var _searchPanels={
-  cards:{target:'workspace-cards',fetchError:'Search failed',fetchFailed:false,renderFailed:false},
-  sessions:{target:'all-sessions',fetchError:'Failed to load sessions',fetchFailed:false,renderFailed:false}
+  cards:{target:'workspace-cards',fetchError:'Search failed',fetchFailed:false,renderFailed:false}
 };
 function _resetSearchFlags(){Object.keys(_searchPanels).forEach(function(k){_searchPanels[k].fetchFailed=false;_searchPanels[k].renderFailed=false})}
 function _errorToast(msg){showToast('<div class="toast toast-error">'+msg+'<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>')}
@@ -219,6 +232,51 @@ function _runSearchPanel(panel,url){
 var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
 function updateActionBar(){var sessionCount=document.querySelectorAll('.session-row.selected').length;var workspaceCount=document.querySelectorAll('.workspace-card.selected').length;document.getElementById('selCount').textContent=sessionCount+workspaceCount;document.getElementById('actionBar').classList.toggle('visible',sessionCount>0||workspaceCount>0);var launchBtn=document.querySelector('.action-btn.launch');if(launchBtn){launchBtn.disabled=sessionCount===0;launchBtn.title=sessionCount===0?'Select sessions to launch (use launcher tiles for workspaces)':''}updateLauncherBadges()}
+// transcript-renderer.js (shared with /acp, dashboard/ACP-merge Phase 2) has
+// no IIFE to work around here — this page's scripts are plain top-level
+// script tags, so initTranscriptDom/renderTranscriptHistory/clearTranscript
+// are already true globals once the external file loaded above has run; no
+// window.X = X exposure dance like acp.html's inline script needs.
+initTranscriptDom({
+  transcriptEl: document.getElementById('dashTranscript'),
+  promptNavEl: document.getElementById('dashPromptNav'),
+  promptUpBtn: document.getElementById('dashPromptUp'),
+  promptDownBtn: document.getElementById('dashPromptDown'),
+});
+// The sid of the transcript currently in flight or shown, so a slower
+// in-flight fetch for a row the user already clicked away from cannot land
+// after a newer one and show the wrong conversation.
+var _viewingSid = null;
+function openSessionTranscript(row){
+  var sid = row.dataset.sid;
+  if(!sid) return;
+  document.querySelectorAll('.session-row.viewing').forEach(function(r){r.classList.remove('viewing')});
+  row.classList.add('viewing');
+  _viewingSid = sid;
+  var el = document.getElementById('dashTranscript');
+  el.textContent = '';
+  var loading = document.createElement('div');
+  loading.className = 'acp-system-msg';
+  loading.textContent = 'Loading transcript…';
+  el.appendChild(loading);
+  var qs = 'sid=' + encodeURIComponent(sid) +
+    '&provider=' + encodeURIComponent(row.dataset.provider || '') +
+    '&cwd=' + encodeURIComponent(row.dataset.cwd || '');
+  fetch('/api/session-transcript?' + qs).then(function(r){
+    if(!r.ok) throw new Error(r.status);
+    return r.json();
+  }).then(function(data){
+    if(_viewingSid !== sid) return; // superseded by a later click
+    renderTranscriptHistory(data.events || []);
+  }).catch(function(){
+    if(_viewingSid !== sid) return;
+    el.textContent = '';
+    var err = document.createElement('div');
+    err.className = 'acp-system-msg';
+    err.textContent = 'Could not load this transcript.';
+    el.appendChild(err);
+  });
+}
 function toggleCard(card){card.classList.toggle('collapsed');var header=card.querySelector('.card-header');if(header)header.setAttribute('aria-expanded',!card.classList.contains('collapsed'));var body=card.querySelector('.card-body');if(!card.classList.contains('collapsed')&&body.dataset.loaded==='false'){body.dataset.loaded='true';var cwd=card.dataset.cwd;var provider=window._activeProvider||'all';fetch('/partials/sessions?cwd='+encodeURIComponent(cwd)+'&provider='+encodeURIComponent(provider)+_statusQs()).then(function(r){return r.text()}).then(function(html){body.innerHTML=html;if(window.htmx)htmx.process(body)}).catch(function(){body.innerHTML='<div class="new-session-inline">Failed to load</div>'})}}
 // CSS.escape handles backslashes in Windows paths; filesystem paths cannot contain literal '"'
 function _cardSelector(cwd){return '.workspace-card[data-cwd="'+CSS.escape(cwd)+'"]'}
@@ -240,9 +298,7 @@ function refreshCards(fresh){
   focusCwd = focusCwd ? focusCwd.cwd : null;
   var provQs = _buildWorkspaceQs();
   var wp = document.getElementById('workspace-cards');
-  var sp = document.getElementById('all-sessions');
   if(wp) wp.setAttribute('aria-busy','true');
-  if(sp) sp.setAttribute('aria-busy','true');
   // Workspace panel: preserve expanded cards, replace collapsed ones
   fetch('/partials/workspaces?' + provQs + qs).then(function(r){
     return r.text();
@@ -356,21 +412,7 @@ function refreshCards(fresh){
     // 8. On fetch error, DOM remains intact (no detachment before response)
     if(wp) wp.removeAttribute('aria-busy');
   });
-  // Sessions panel: full innerHTML (unchanged approach)
-  var sessQs = _buildWorkspaceQs();
-  fetch('/partials/all-sessions?page=1&' + sessQs + qs).then(function(r){
-    return r.text();
-  }).then(function(html){
-    var el = document.getElementById('all-sessions');
-    el.innerHTML = html;
-    if(window.htmx) htmx.process(el);
-    el.removeAttribute('aria-busy');
-    updateActionBar();
-  }).catch(function(){
-    if(sp) sp.removeAttribute('aria-busy');
-  });
 }
-function _refreshSessionsPanel(){var sessQs=_buildWorkspaceQs();fetch('/partials/all-sessions?page=1&'+sessQs+'&fresh=1').then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el);updateActionBar()})}
 function resetOverlays(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)modal.close();document.querySelectorAll('.session-tooltip-slot').forEach(_resetTooltipSlot);var toasts=document.getElementById('toastContainer');if(toasts){toasts.querySelectorAll('.toast').forEach(function(t){if(!t.dataset.ts||(Date.now()-parseInt(t.dataset.ts,10))>1000)t.remove()})}}
 function showToast(html){var c=document.getElementById('toastContainer');if(!c){c=document.createElement('div');c.id='toastContainer';c.className='toast-container';document.body.appendChild(c)}var d=document.createElement('div');d.innerHTML=html;var t=d.firstElementChild;if(!t){t=document.createElement('div');t.className='toast toast-success';t.textContent=html||'Done'}t.dataset.ts=Date.now();c.appendChild(t);if(!t.classList.contains('toast-persistent')){setTimeout(function(){t.remove()},4000)}}
 function resumeSession(btn){var row=btn.closest('.session-row');var card=row.closest('.workspace-card');var provider=row.dataset.provider||(card?card.dataset.provider||'':'');fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd,provider:provider})}).then(function(r){return r.text()}).then(showToast)}
@@ -379,7 +421,7 @@ function copySid(btn){var row=btn.closest('.session-row');navigator.clipboard.wr
 // window, where window.open lands somewhere the user did not ask for. /acp
 // carries a back link, and its own ?sid= is what survives a reload there.
 function openInAcp(btn){var row=btn.closest('.session-row');location.href='/acp?sid='+encodeURIComponent(row.dataset.sid)}
-function pinSession(btn){var row=btn.closest('.session-row');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-session':'/api/pin-session';btn.classList.toggle('pinned');var indicator=row.querySelector('.pinned-indicator');if(pinned){if(indicator)indicator.remove()}else{if(!indicator){var span=document.createElement('span');span.className='pinned-indicator';span.title='Pinned';span.textContent='\ud83d\udccc';var titleEl=row.querySelector('.session-title');if(titleEl)titleEl.prepend(span)}}var sid=row.dataset.sid;document.querySelectorAll('.session-row').forEach(function(r){if(r.dataset.sid===sid&&r!==row){var b=r.querySelector('.pin-btn');if(b){if(pinned)b.classList.remove('pinned');else b.classList.add('pinned')}var ind=r.querySelector('.pinned-indicator');if(pinned){if(ind)ind.remove()}else if(!ind){var s2=document.createElement('span');s2.className='pinned-indicator';s2.title='Pinned';s2.textContent='\ud83d\udccc';var t2=r.querySelector('.session-title');if(t2)t2.prepend(s2)}}});showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd})}).then(function(){_refreshSessionsPanel()}).catch(function(){btn.classList.toggle('pinned');showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
+function pinSession(btn){var row=btn.closest('.session-row');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-session':'/api/pin-session';btn.classList.toggle('pinned');var indicator=row.querySelector('.pinned-indicator');if(pinned){if(indicator)indicator.remove()}else{if(!indicator){var span=document.createElement('span');span.className='pinned-indicator';span.title='Pinned';span.textContent='\ud83d\udccc';var titleEl=row.querySelector('.session-title');if(titleEl)titleEl.prepend(span)}}var sid=row.dataset.sid;document.querySelectorAll('.session-row').forEach(function(r){if(r.dataset.sid===sid&&r!==row){var b=r.querySelector('.pin-btn');if(b){if(pinned)b.classList.remove('pinned');else b.classList.add('pinned')}var ind=r.querySelector('.pinned-indicator');if(pinned){if(ind)ind.remove()}else if(!ind){var s2=document.createElement('span');s2.className='pinned-indicator';s2.title='Pinned';s2.textContent='\ud83d\udccc';var t2=r.querySelector('.session-title');if(t2)t2.prepend(s2)}}});showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd})}).catch(function(){btn.classList.toggle('pinned');showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function pinWorkspace(btn){var card=btn.closest('.workspace-card');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-folder':'/api/pin-folder';btn.classList.toggle('pinned');var indicator=card.querySelector('.card-folder-name .pinned-indicator');if(pinned){if(indicator)indicator.remove()}else{if(!indicator){var span=document.createElement('span');span.className='pinned-indicator';span.title='Pinned';span.textContent='\ud83d\udccc';var folderName=card.querySelector('.card-folder-name');if(folderName)folderName.prepend(span)}}showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:card.dataset.cwd})}).catch(function(){btn.classList.toggle('pinned');showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function launchNew(btn,provider){var card=btn.closest('.workspace-card');fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:card.dataset.cwd,provider:provider})}).then(function(r){return r.text()}).then(showToast)}
 function launchCustomFromCard(btn,id){var card=btn.closest('.workspace-card');var cwd=card.dataset.cwd;fetch('/api/launcher/run-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,workspaces:[cwd]})}).then(function(r){return r.text()}).then(showToast)}
@@ -394,16 +436,14 @@ var searchInput=document.querySelector('input[name="q"]');if(searchInput){search
 // a successful search, so leaving them latched here would swallow the toast
 // for the next genuine failure.
 if(!q){_resetSearchFlags();refreshCards(false);return}
-_runSearchPanel(_searchPanels.cards,'/search?'+provQs+'&q='+encodeURIComponent(q));
-_runSearchPanel(_searchPanels.sessions,'/partials/all-sessions?page=1&'+provQs+'&q='+encodeURIComponent(q))},300))}
+_runSearchPanel(_searchPanels.cards,'/search?'+provQs+'&q='+encodeURIComponent(q))},300))}
 document.addEventListener('visibilitychange',function(){if(document.hidden){stopPolling();stopStatusPoll();stopActiveSessionPoll()}else{refreshSettings();refreshCards(true);initWorkspaceFilters();startPolling();startStatusPoll();startActiveSessionPoll()}});
 (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);refreshCards(true)}}).catch(function(){clearInterval(t)})},2000)})();
 });
 function _escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function debounce(fn,delay){var timer;return function(){var ctx=this,args=arguments;clearTimeout(timer);timer=setTimeout(function(){fn.apply(ctx,args)},delay)}}
-function loadMoreSessions(page){var btn=document.querySelector('.load-more-btn');if(btn){btn.disabled=true;btn.textContent='Loading...'}var qs=_buildWorkspaceQs();fetch('/partials/all-sessions?page='+page+'&'+qs).then(function(r){return r.text()}).then(function(html){var container=document.getElementById('all-sessions');if(btn)btn.remove();container.insertAdjacentHTML('beforeend',html);if(window.htmx)htmx.process(container);updateActionBar()}).catch(function(){if(btn){btn.disabled=false;btn.textContent='Load more';showToast('<div class="toast toast-error">Failed to load sessions<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')}})}
 function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
-function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});var qs='?'+_buildWorkspaceQs();fetch('/partials/workspaces'+qs).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el);loadExpandedCards();updateActionBar()});fetch('/partials/all-sessions?page=1&'+_buildWorkspaceQs()).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('all-sessions');el.innerHTML=html;if(window.htmx)htmx.process(el);updateActionBar()})}
+function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});var qs='?'+_buildWorkspaceQs();fetch('/partials/workspaces'+qs).then(function(r){return r.text()}).then(function(html){var el=document.getElementById('workspace-cards');el.innerHTML=html;if(window.htmx)htmx.process(el);loadExpandedCards();updateActionBar()})}
 // --- Unified background scheduler ---------------------------------------
 // One 5s tick drives all three background jobs, dispatched by counter, instead
 // of four independent setIntervals that drift into each other and can stack a
@@ -599,7 +639,6 @@ var _tagColorPalette=['#ef4444','#f97316','#eab308','#22c55e','#14b8a6','#06b6d4
 function toggleTagColorsPopover(){var existing=document.getElementById('tagColorsPopover');if(existing){existing.remove();return}var tags=window._tagColorData||[];var pop=document.createElement('div');pop.className='tag-colors-popover';pop.id='tagColorsPopover';var h='<div class="tag-colors-title">Tag Management</div>';tags.forEach(function(t){var eName=_escHtml(t.name);h+='<div class="tag-color-row" data-tag="'+eName+'">';h+='<span class="tag-color-name">'+eName+'</span>';h+='<div class="tag-color-swatches">';h+='<button type="button" class="tag-mini-swatch'+((!t.color)?' selected':'')+'" data-color="" style="background:var(--surface);border:1px dashed var(--border)" title="No color" aria-label="No color"></button>';_tagColorPalette.forEach(function(c){h+='<button type="button" class="tag-mini-swatch'+(t.color===c?' selected':'')+'" data-color="'+c+'" style="background:'+c+'" title="'+c+'" aria-label="'+c+'"></button>'});h+='</div>';if(t.name!=='hidden'){h+='<button type="button" class="tag-delete-btn" title="Delete tag" aria-label="Delete tag '+eName+'">\u00d7</button>'}h+='</div>'});h+='<div class="tag-add-row"><input type="text" class="tag-add-input" placeholder="New tag..." maxlength="64" aria-label="New tag name"><button type="button" class="tag-add-btn" title="Add tag" aria-label="Add tag">+</button></div>';pop.innerHTML=h;var btn=document.getElementById('wsTagColorsBtn');btn.parentElement.style.position='relative';btn.parentElement.appendChild(pop);pop.addEventListener('click',function(e){var del=e.target.closest('.tag-delete-btn');if(del){var row=del.closest('.tag-color-row');var tagName=row.dataset.tag;var tagObj=tags.find(function(x){return x.name===tagName});var cnt=tagObj?tagObj.count:0;var msg='Delete tag "'+tagName+'"?';if(cnt>0)msg+='\nThis will remove it from '+cnt+' workspace(s).';if(!confirm(msg))return;fetch('/api/tag/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tagName})}).then(function(r){if(!r.ok)throw new Error('failed');return r.text()}).then(function(t){showToast(t);if(window._activeTag===tagName){window._activeTag=null}pop.remove();initWorkspaceFilters().then(function(){refreshCards(false);toggleTagColorsPopover()})}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});return}var sw=e.target.closest('.tag-mini-swatch');if(!sw)return;var row=sw.closest('.tag-color-row');var tagName=row.dataset.tag;var color=sw.dataset.color;row.querySelectorAll('.tag-mini-swatch').forEach(function(s){s.classList.remove('selected')});sw.classList.add('selected');fetch('/api/tag/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tagName,color:color})}).then(function(r){return r.text()}).then(function(t){showToast(t);initWorkspaceFilters();refreshCards(false)}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})});function doAddTag(){var inp=pop.querySelector('.tag-add-input');var name=inp.value.trim();if(!name||name.length>64)return;if(tags.some(function(x){return x.name===name})){showToast('<div class="toast toast-warning">Tag already exists<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}fetch('/api/tag/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:name,color:''})}).then(function(r){if(!r.ok)throw new Error('failed');return r.text()}).then(function(t){showToast(t);pop.remove();initWorkspaceFilters().then(function(){toggleTagColorsPopover()})}).catch(function(){showToast('<div class="toast toast-error">Add failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}pop.querySelector('.tag-add-btn').addEventListener('click',doAddTag);pop.querySelector('.tag-add-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doAddTag()}});document.addEventListener('click',function closePopover(e){if(!pop.contains(e.target)&&e.target.id!=='wsTagColorsBtn'){pop.remove();document.removeEventListener('click',closePopover)}},{capture:true})}
 function setTagFilter(val){window._activeTag=val;_updateFilterUI();refreshCards(false)}
 function setTimeFilter(val){window._activeTimeFilter=val;_updateFilterUI();refreshCards(false)}
-function setStatusFilter(val){window._activeStatus=val;refreshCards(false)}
 function clearWorkspaceFilters(){window._activeTag='';window._activeTimeFilter='';var tagSel=document.getElementById('wsTagFilter');var timeSel=document.getElementById('wsTimeFilter');if(tagSel)tagSel.value='';if(timeSel)timeSel.value='';_updateFilterUI();refreshCards(false)}
 function _updateFilterUI(){var clearBtn=document.getElementById('wsClearFilters');if(clearBtn){var active=window._activeTag||window._activeTimeFilter;clearBtn.style.display=active?'inline-block':'none'}}
 // Gutter the tooltip must never cross on any window edge, and the gap it keeps
