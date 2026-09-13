@@ -1685,3 +1685,166 @@ function appendChunk(role, text) {
   var body = addMessage(role, text);
   agentBody = role === 'agent' ? body : null;
 }
+
+// ---- permission requests ----------------------------------------------
+
+/** Render an inbound `session/request_permission` (SC-9) as an interactive
+ *  choice in the transcript: the question, plus one button per option.
+ *
+ *  SECURITY: `title` and each option's `name` are agent-controlled text —
+ *  set via textContent only, matching addMessage/addSystemMessage's rule.
+ *  Never innerHTML.
+ *
+ *  Clicking a button sends `permission_response` with the chosen optionId
+ *  and disables every button in the row. That is a UX nicety only, not the
+ *  double-answer guard — the server's pop-before-write in
+ *  _handle_permission_response is what actually prevents answering the
+ *  same request twice; this only stops an obviously-confusing second click
+ *  in the same tab before the server's reply (if any) comes back.
+ *
+ *  `send` is optional: acp.html provides its own WS-send function as a
+ *  page global, but the dashboard's static/replayed transcript panel has
+ *  no live connection to answer through (Phase 3 of this merge, once it
+ *  exists, may change that only for a held kiro-cli-v3 session). Guarded
+ *  the same way logLine is above — a missing capability degrades the
+ *  button to a no-op click rather than throwing. */
+function addPermissionRequest(requestId, sid, title, options) {
+  var stick = stuckToBottom();
+  var row = document.createElement('div');
+  row.className = 'acp-msg acp-msg-permission';
+  // Threaded onto the DOM so a later `permission_resolved` frame (SC-9
+  // review fix) can find this exact row -- keyed by the same requestId the
+  // server keys `_pending_permission` by. `dataset` always stores strings,
+  // so the lookup side (findPermissionRequestRow) also stringifies before
+  // comparing, whether requestId arrives as a number or a string.
+  row.dataset.requestId = String(requestId);
+  var who = document.createElement('span');
+  who.className = 'acp-msg-role';
+  who.textContent = 'question';
+  var body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  var question = document.createElement('div');
+  question.className = 'acp-permission-question';
+  question.textContent = title;
+  body.appendChild(question);
+  var btnRow = document.createElement('div');
+  btnRow.className = 'acp-permission-options';
+  (options || []).forEach(function (opt) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'acp-btn acp-permission-option';
+    btn.textContent = (opt && opt.name) ? opt.name : ((opt && opt.optionId) || '');
+    btn.addEventListener('click', function () {
+      if (btn.disabled) return;
+      var buttons = btnRow.querySelectorAll('button');
+      for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+      btn.classList.add('acp-permission-chosen');
+      if (typeof send === 'function') {
+        send('permission_response',
+             {requestId: requestId, optionId: opt.optionId}, sid);
+      }
+    });
+    btnRow.appendChild(btn);
+  });
+  body.appendChild(btnRow);
+  row.appendChild(who);
+  row.appendChild(body);
+  transcriptEl.appendChild(row);
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  return row;
+}
+
+/** Find the transcript row `addPermissionRequest` built for `requestId`,
+ *  or null. A plain child scan rather than a CSS attribute-selector
+ *  lookup, so an unusual requestId value never needs escaping into a
+ *  selector string. `dataset.requestId` is always a string; `requestId`
+ *  here may arrive as either a string or a number (JSON-RPC ids are
+ *  typically small integers), so both sides are stringified before
+ *  comparing. */
+function findPermissionRequestRow(requestId) {
+  var want = String(requestId);
+  var rows = transcriptEl.querySelectorAll('.acp-msg-permission');
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].dataset.requestId === want) return rows[i];
+  }
+  return null;
+}
+
+/** Mark a permission-request row as no longer actionable (SC-9 review
+ *  fix): a `permission_resolved` frame means the pending state behind it
+ *  is gone, whether because it was answered or because the turn ended
+ *  while it was still pending. Disables every option button and dims the
+ *  row so it reads as settled, not fresh-and-clickable. Idempotent: a
+ *  row already marked resolved (e.g. the click handler already disabled
+ *  its own buttons before the server's echo arrives) is left alone. If no
+ *  matching row exists (this frame replayed without its own
+ *  `permission_request` still present, or the request was never rendered
+ *  in this tab), this is a silent no-op -- there is nothing to update. */
+function markPermissionResolved(requestId) {
+  var row = findPermissionRequestRow(requestId);
+  if (!row || row.classList.contains('acp-permission-resolved')) return;
+  row.classList.add('acp-permission-resolved');
+  var buttons = row.querySelectorAll('button');
+  for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
+}
+
+// ---- the "thinking…" placeholder ---------------------------------------
+
+// The currently-shown "thinking…" row ({row, body}), or null. Torn down the
+// moment something real arrives (a chunk, a tool call, turn end).
+var thinkingRow = null;
+
+/** Show the "thinking…" row, or do nothing if it is already showing.
+ *
+ *  Built like `addMessage` rather than through it: this row is not a
+ *  message, it is process chrome that gets torn back out the moment
+ *  something real arrives, and `addMessage` has no way to hand back the
+ *  row `hideThinking` needs to remove — only the body inside it.
+ *
+ *  Called once, from `setTurn(true)`'s live arm (`meta turn:start`) — a
+ *  turn is silent for certain in the instant it begins and there has been
+ *  nothing to say yet. It does not reappear between a tool call and the
+ *  agent's next words: nothing on the wire marks that gap as *renewed*
+ *  silence rather than an answer still being composed, and guessing with a
+ *  timer would show "thinking" over a bubble already mid-stream as often as
+ *  over a genuinely quiet turn. */
+function showThinking() {
+  if (thinkingRow) return;
+  var stick = stuckToBottom();
+  var row = document.createElement('div');
+  row.className = 'acp-msg acp-msg-thinking';
+  var who = document.createElement('span');
+  who.className = 'acp-msg-role';
+  var body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  body.textContent = 'thinking…';
+  row.appendChild(who);
+  row.appendChild(body);
+  transcriptEl.appendChild(row);
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  thinkingRow = { row: row, body: body };
+}
+
+/** Remove the "thinking…" row, or do nothing if none is showing. Called on
+ *  every frame that means the turn stopped being silent — a message chunk,
+ *  a tool call, the turn ending — so the row never survives past the thing
+ *  it was standing in for. */
+function hideThinking() {
+  if (!thinkingRow) return;
+  thinkingRow.row.remove();
+  thinkingRow = null;
+}
+
+/** Render `agent_thought_chunk` content in place of the placeholder text,
+ *  if the agent ever sends one. Unobserved in 1,200 measured runs across
+ *  every Claude and Qwen model and thinking configuration tried
+ *  (plans/ROADMAP.md) — this exists so a build that does send it is used
+ *  rather than silently dropped, not because it is known to fire. Never
+ *  called while replaying: a `thought` frame surviving in the ring buffer
+ *  from a turn long over has nothing live left to indicate. */
+function appendThought(text) {
+  if (!text) return;
+  showThinking();
+  if (thinkingRow.body.textContent === 'thinking…') thinkingRow.body.textContent = '';
+  thinkingRow.body.textContent += text;
+}

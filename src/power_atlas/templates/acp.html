@@ -733,6 +733,20 @@
     promptUpBtn: document.getElementById('acpPromptUp'),
     promptDownBtn: document.getElementById('acpPromptDown'),
   });
+  // send/logLine stay declared here (both are genuinely page-specific: send
+  // is the live WS wrapper, logLine writes to this page's own debug-log
+  // panel) rather than moving to transcript-renderer.js like the DOM refs
+  // above -- but two functions there (addPermissionRequest, mdColour) call
+  // them if present. A bare `typeof send === 'function'` check from inside
+  // transcript-renderer.js would NOT find this one: it is declared inside
+  // this whole script's `(function () { ... })();` wrapper, so it is private
+  // to that closure, not a true global, the same reason the DOM refs needed
+  // initTranscriptDom() in the first place (see that file's header comment).
+  // Exposing it here, once, is what makes the guard in the shared file find
+  // it. Safe to do before either function's own declaration further down —
+  // both are `function` declarations, fully hoisted within this script.
+  window.send = send;
+  window.logLine = logLine;
   var closeBtn = document.getElementById('acpClose');
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
@@ -807,14 +821,9 @@
   // True between the Stop button click and setTurn(false), so refreshComposerControls
   // cannot re-enable Stop while the cancel is still in-flight.
   var _stopInProgress = false;
-  // The transcript row showing "thinking…" while a live turn is silent, or
-  // null when nothing is shown. `{row, body}` rather than just the row: the
-  // one live thing to arrive that touches it (`thought`) rewrites `body`'s
-  // text, and looking that up through `row` on every frame would be the same
-  // query repeated for no reason. `clearTranscript` resets this to null
-  // alongside `agentBody`, since emptying `transcriptEl` detaches `row`
-  // without this page finding out on its own.
-  var thinkingRow = null;
+  // thinkingRow moved to /static/transcript-renderer.js (Phase 2 slice 4),
+  // alongside showThinking/hideThinking/appendThought. clearTranscript
+  // still resets it to null alongside agentBody, same as before.
   // The prompt handed to a `send` that has not yet been acknowledged by a
   // turn starting. Held so a refusal can put it back in the textarea.
   var pendingPrompt = null;
@@ -1874,96 +1883,8 @@
 
   // ---- slash command palette helpers ----------------------------------------
 
-  /** Render an inbound `session/request_permission` (SC-9) as an interactive
-   *  choice in the transcript: the question, plus one button per option.
-   *
-   *  SECURITY: `title` and each option's `name` are agent-controlled text —
-   *  set via textContent only, matching addMessage/addSystemMessage's rule.
-   *  Never innerHTML.
-   *
-   *  Clicking a button sends `permission_response` with the chosen optionId
-   *  and disables every button in the row. That is a UX nicety only, not the
-   *  double-answer guard — the server's pop-before-write in
-   *  _handle_permission_response is what actually prevents answering the
-   *  same request twice; this only stops an obviously-confusing second click
-   *  in the same tab before the server's reply (if any) comes back. */
-  function addPermissionRequest(requestId, sid, title, options) {
-    var stick = stuckToBottom();
-    var row = document.createElement('div');
-    row.className = 'acp-msg acp-msg-permission';
-    // Threaded onto the DOM so a later `permission_resolved` frame (SC-9
-    // review fix) can find this exact row -- keyed by the same requestId the
-    // server keys `_pending_permission` by. `dataset` always stores strings,
-    // so the lookup side (findPermissionRequestRow) also stringifies before
-    // comparing, whether requestId arrives as a number or a string.
-    row.dataset.requestId = String(requestId);
-    var who = document.createElement('span');
-    who.className = 'acp-msg-role';
-    who.textContent = 'question';
-    var body = document.createElement('div');
-    body.className = 'acp-msg-body';
-    var question = document.createElement('div');
-    question.className = 'acp-permission-question';
-    question.textContent = title;
-    body.appendChild(question);
-    var btnRow = document.createElement('div');
-    btnRow.className = 'acp-permission-options';
-    (options || []).forEach(function (opt) {
-      var btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'acp-btn acp-permission-option';
-      btn.textContent = (opt && opt.name) ? opt.name : ((opt && opt.optionId) || '');
-      btn.addEventListener('click', function () {
-        if (btn.disabled) return;
-        var buttons = btnRow.querySelectorAll('button');
-        for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
-        btn.classList.add('acp-permission-chosen');
-        send('permission_response',
-             {requestId: requestId, optionId: opt.optionId}, sid);
-      });
-      btnRow.appendChild(btn);
-    });
-    body.appendChild(btnRow);
-    row.appendChild(who);
-    row.appendChild(body);
-    transcriptEl.appendChild(row);
-    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    return row;
-  }
-
-  /** Find the transcript row `addPermissionRequest` built for `requestId`,
-   *  or null. A plain child scan rather than a CSS attribute-selector
-   *  lookup, so an unusual requestId value never needs escaping into a
-   *  selector string. `dataset.requestId` is always a string; `requestId`
-   *  here may arrive as either a string or a number (JSON-RPC ids are
-   *  typically small integers), so both sides are stringified before
-   *  comparing. */
-  function findPermissionRequestRow(requestId) {
-    var want = String(requestId);
-    var rows = transcriptEl.querySelectorAll('.acp-msg-permission');
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].dataset.requestId === want) return rows[i];
-    }
-    return null;
-  }
-
-  /** Mark a permission-request row as no longer actionable (SC-9 review
-   *  fix): a `permission_resolved` frame means the pending state behind it
-   *  is gone, whether because it was answered or because the turn ended
-   *  while it was still pending. Disables every option button and dims the
-   *  row so it reads as settled, not fresh-and-clickable. Idempotent: a
-   *  row already marked resolved (e.g. the click handler already disabled
-   *  its own buttons before the server's echo arrives) is left alone. If no
-   *  matching row exists (this frame replayed without its own
-   *  `permission_request` still present, or the request was never rendered
-   *  in this tab), this is a silent no-op -- there is nothing to update. */
-  function markPermissionResolved(requestId) {
-    var row = findPermissionRequestRow(requestId);
-    if (!row || row.classList.contains('acp-permission-resolved')) return;
-    row.classList.add('acp-permission-resolved');
-    var buttons = row.querySelectorAll('button');
-    for (var i = 0; i < buttons.length; i++) buttons[i].disabled = true;
-  }
+  // addPermissionRequest/findPermissionRequestRow/markPermissionResolved
+  // moved to /static/transcript-renderer.js (Phase 2 slice 4).
 
   /** Returns true when the slash command dropdown is currently visible. */
   function isCommandDropdownVisible() {
@@ -2195,66 +2116,14 @@
     updateCommandSelection();
   }
 
-  /** Show the "thinking…" row, or do nothing if it is already showing.
-   *
-   *  Built like `addMessage` rather than through it: this row is not a
-   *  message, it is process chrome that gets torn back out the moment
-   *  something real arrives, and `addMessage` has no way to hand back the
-   *  row `hideThinking` needs to remove — only the body inside it.
-   *
-   *  Called once, from `setTurn(true)`'s live arm (`meta turn:start`) — a
-   *  turn is silent for certain in the instant it begins and there has been
-   *  nothing to say yet. It does not reappear between a tool call and the
-   *  agent's next words: nothing on the wire marks that gap as *renewed*
-   *  silence rather than an answer still being composed, and guessing with a
-   *  timer would show "thinking" over a bubble already mid-stream as often as
-   *  over a genuinely quiet turn. */
-  function showThinking() {
-    if (thinkingRow) return;
-    var stick = stuckToBottom();
-    var row = document.createElement('div');
-    row.className = 'acp-msg acp-msg-thinking';
-    var who = document.createElement('span');
-    who.className = 'acp-msg-role';
-    var body = document.createElement('div');
-    body.className = 'acp-msg-body';
-    body.textContent = 'thinking…';
-    row.appendChild(who);
-    row.appendChild(body);
-    transcriptEl.appendChild(row);
-    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    thinkingRow = { row: row, body: body };
-  }
-
-  /** Remove the "thinking…" row, or do nothing if none is showing. Called on
-   *  every frame that means the turn stopped being silent — a message chunk,
-   *  a tool call, the turn ending — so the row never survives past the thing
-   *  it was standing in for. */
-  function hideThinking() {
-    if (!thinkingRow) return;
-    thinkingRow.row.remove();
-    thinkingRow = null;
-  }
-
-  /** Render `agent_thought_chunk` content in place of the placeholder text,
-   *  if the agent ever sends one. Unobserved in 1,200 measured runs across
-   *  every Claude and Qwen model and thinking configuration tried
-   *  (plans/ROADMAP.md) — this exists so a build that does send it is used
-   *  rather than silently dropped, not because it is known to fire. Never
-   *  called while replaying: a `thought` frame surviving in the ring buffer
-   *  from a turn long over has nothing live left to indicate. */
-  function appendThought(text) {
-    if (!text) return;
-    showThinking();
-    if (thinkingRow.body.textContent === 'thinking…') thinkingRow.body.textContent = '';
-    thinkingRow.body.textContent += text;
-  }
-
+  // showThinking/hideThinking/appendThought moved to
+  // /static/transcript-renderer.js (Phase 2 slice 4), alongside thinkingRow.
+  //
   // _makeToolToggle through flushToolGroups (the whole tool-call rendering
-  // subsystem), plus renderMarkdown/appendChunk, moved to
-  // /static/transcript-renderer.js (Phase 2 slice 3) -- along with the
-  // state they share (agentBody/toolRows/_toolTimers/toolGroup/
-  // _toolGroupSeq/TOOL_STATUS_LABEL, all declared there now).
+  // subsystem), plus renderMarkdown/appendChunk, moved there too (Phase 2
+  // slice 3) -- along with the state they share (agentBody/toolRows/
+  // _toolTimers/toolGroup/_toolGroupSeq/TOOL_STATUS_LABEL, all declared
+  // there now).
   //
   // ---- the agent's markdown: the security boundary, for context ---------
   //
