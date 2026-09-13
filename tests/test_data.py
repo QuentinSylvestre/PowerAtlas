@@ -1706,6 +1706,75 @@ class TestGetAllSessionsPaginated:
         ids = [s.session_id for s, _ in results]
         assert ids == ["sort-new", "sort-mid", "sort-old"]
 
+    def test_status_predicate_filters_before_pagination_not_after(self, mock_sessions, monkeypatch):
+        """The bug this parameter exists to avoid: filtering after pagination
+        forces has_more=False because a cut page can't know what a later page
+        would have matched. Filtering *during* collection means the early-stop
+        counts only matching sessions, so has_more stays meaningful."""
+        # 10 sessions alternating match/no-match; 5 match. page_size=3 with the
+        # predicate active must still find all 5 across 2 pages, has_more
+        # correctly reflecting the *matching* set, not the raw 10.
+        for i in range(10):
+            _write_session(mock_sessions, f"sp-{i:02d}", "C:\\Projects\\StatusPred",
+                            updated_at=f"2026-06-{i+1:02d}T00:00:00Z")
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [
+                ("C:\\Projects\\StatusPred", 10, "2026-06-10T00:00:00Z", "kiro-cli"),
+            ],
+        )
+        matching_ids = {f"sp-{i:02d}" for i in range(10) if i % 2 == 0}  # 5 of them
+
+        def _predicate(session, provider_name):
+            return session.session_id in matching_ids
+
+        page1, has_more1 = get_all_sessions_paginated(
+            page=1, page_size=3, enabled_providers={"kiro-cli"}, status_predicate=_predicate)
+        page2, has_more2 = get_all_sessions_paginated(
+            page=2, page_size=3, enabled_providers={"kiro-cli"}, status_predicate=_predicate)
+
+        assert len(page1) == 3
+        assert has_more1 is True
+        assert all(s.session_id in matching_ids for s, _ in page1)
+        assert len(page2) == 2
+        assert has_more2 is False
+        assert all(s.session_id in matching_ids for s, _ in page2)
+        # No overlap and no gaps: together the two pages are exactly the
+        # matching set, confirming the early-stop didn't quit collecting too
+        # soon (which would silently drop matches off the end of page 2).
+        assert {s.session_id for s, _ in page1} | {s.session_id for s, _ in page2} == matching_ids
+
+    def test_status_predicate_none_is_a_no_op(self, mock_sessions, monkeypatch):
+        _write_session(mock_sessions, "np-1", "C:\\Projects\\NoPred", updated_at="2026-06-01T00:00:00Z")
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [("C:\\Projects\\NoPred", 1, "2026-06-01T00:00:00Z", "kiro-cli")],
+        )
+        results, _ = get_all_sessions_paginated(
+            page=1, page_size=20, enabled_providers={"kiro-cli"}, status_predicate=None)
+        assert len(results) == 1
+
+    def test_status_predicate_also_excludes_a_non_matching_pinned_session(self, mock_sessions, monkeypatch):
+        """Matches /partials/all-sessions's existing behavior: its status
+        filter already runs before the pinned/non-pinned split today, so a
+        pinned session that doesn't match is excluded there too — this
+        parameter preserves that, just applied earlier (pre-pagination)."""
+        _write_session(mock_sessions, "pin-match", "C:\\Projects\\PinPred", updated_at="2026-06-02T00:00:00Z")
+        _write_session(mock_sessions, "pin-nomatch", "C:\\Projects\\PinPred", updated_at="2026-06-01T00:00:00Z")
+        session_cache.clear()
+        monkeypatch.setattr(
+            "power_atlas.data.discover_workspaces_with_counts",
+            lambda provider=None: [("C:\\Projects\\PinPred", 2, "2026-06-02T00:00:00Z", "kiro-cli")],
+        )
+        results, _ = get_all_sessions_paginated(
+            page=1, page_size=20, enabled_providers={"kiro-cli"},
+            pinned_sessions=["pin-match", "pin-nomatch"],
+            status_predicate=lambda s, p: s.session_id == "pin-match",
+        )
+        assert [s.session_id for s, _ in results] == ["pin-match"]
+
 
 # --- Live-session presence detection (presence.py) ---
 

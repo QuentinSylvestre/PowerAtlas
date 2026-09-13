@@ -434,6 +434,7 @@ def get_all_sessions_paginated(
     pinned_sessions: list[str] | None = None,
     enabled_providers: set[str] | None = None,
     exclude_cwds: set[str] | None = None,
+    status_predicate=None,
 ) -> tuple[list[tuple[Session, str]], bool]:
     """Return sessions across all workspaces, interleaved by updated_at.
 
@@ -457,6 +458,21 @@ def get_all_sessions_paginated(
             shorter than `page_size` and a `has_more` that no longer describes
             the data the caller is actually showing. Excluding here also skips
             the `get_sessions` disk read for a workspace nobody will see.
+        status_predicate: optional `(session, provider_name) -> bool`, applied
+            to every session as it is collected — same placement and same
+            reasoning as `exclude_cwds` above, and for the same bug it exists
+            to avoid: the dashboard's existing `/partials/all-sessions` route
+            filters by status *after* pagination and has to set `has_more =
+            False` because of it (a status filter over an already-cut page
+            cannot know what a later page would have matched). Applying it
+            here instead means the early-stop counts only matching sessions,
+            so `has_more` stays meaningful with a status filter active. Since
+            this runs before the pinned/non-pinned split, a pinned session
+            that does not match is excluded too — the same behavior
+            `/partials/all-sessions` already has today, just moved earlier.
+            This module has no liveness/presence concept of its own; building
+            the actual predicate (a `presence.get_snapshot()` + semantic-
+            status check) is the caller's job, in `web.py`.
 
     Returns:
         ([(session, provider_name), ...], has_more)
@@ -491,9 +507,15 @@ def get_all_sessions_paginated(
 
     def _collect(sessions: list[Session], prov_name: str) -> None:
         for s in sessions:
-            if s.session_id not in seen:
-                seen.add(s.session_id)
-                all_sessions.append((s, prov_name))
+            if s.session_id in seen:
+                continue
+            if status_predicate is not None and not status_predicate(s, prov_name):
+                # Not marked `seen`: a rejected session hasn't really been
+                # "collected" under this identity, so a later match for the
+                # same id (e.g. a different provider) is still considered.
+                continue
+            seen.add(s.session_id)
+            all_sessions.append((s, prov_name))
 
     # Pass 1: cache-only (no disk IO)
     # NOTE: pinned sessions are found here because warmup_all() pre-loads their
