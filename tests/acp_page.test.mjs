@@ -48,6 +48,20 @@ const DEFAULT_TEMPLATE = path.join(
 // repo's bundle against this repo's grammars.
 const PRISM_BUNDLE = path.join(
   HERE, "..", "src", "power_atlas", "static", "prism.js");
+// The shared transcript renderer (dashboard/ACP-merge plan, Phase 2) — loaded
+// by acp.html via <script src>, same as prism.js, so it must run in the same
+// sandbox as the inline script for the functions it defines (mdBuild and
+// friends, so far) to be callable from it, exactly as a browser would load
+// the two in document order.
+const TRANSCRIPT_RENDERER_BUNDLE = path.join(
+  HERE, "..", "src", "power_atlas", "static", "transcript-renderer.js");
+let TRANSCRIPT_RENDERER_SRC = null;
+function transcriptRendererSource() {
+  if (TRANSCRIPT_RENDERER_SRC === null) {
+    TRANSCRIPT_RENDERER_SRC = fs.readFileSync(TRANSCRIPT_RENDERER_BUNDLE, "utf8");
+  }
+  return TRANSCRIPT_RENDERER_SRC;
+}
 
 // Prism as the page sees it, built once and shared by every check.
 //
@@ -907,6 +921,14 @@ function loadPage(templatePath, opts = {}) {
   // not tell that from a hard dependency on it.
   if (opts.prism !== false) sandbox.Prism = prismGlobal();
   vm.createContext(sandbox);
+  // Runs first, in the same sandbox — not provided as a pre-built object the
+  // way Prism is above. Prism gets that treatment because bootstrapping it
+  // needs a real document this stand-in cannot fully provide; this file has
+  // no such needs, so running its actual source is what a browser loading
+  // <script src="/static/transcript-renderer.js"> before the inline <script>
+  // does, and measuring anything else would not be measuring the real page.
+  vm.runInContext(transcriptRendererSource(), sandbox,
+                  { filename: "transcript-renderer.js" });
   vm.runInContext(scriptBody, sandbox, { filename: `${templatePath}#inline-script` });
 
   Object.assign(page, {

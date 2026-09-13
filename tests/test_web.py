@@ -4994,8 +4994,11 @@ class TestAcpContentSecurityPolicy:
         # an inline one, which is why adding it needed no widening of
         # `script-src` — and why it is blanked just as silently without one.
         assert ('<script nonce="%s" src="/static/prism.js">' % nonce) in resp.text
+        # The shared transcript renderer (dashboard/ACP-merge plan, Phase 2) —
+        # same reasoning as prism.js above.
+        assert ('<script nonce="%s" src="/static/transcript-renderer.js">' % nonce) in resp.text
         tags = re.findall(r"<script\b[^>]*>", resp.text)
-        assert len(tags) == 3, "a script tag was added without a nonce: %s" % tags
+        assert len(tags) == 4, "a script tag was added without a nonce: %s" % tags
         # Every tag, not only the three named above. The count makes adding a
         # script a deliberate act; this makes a nonce-less one a failing test
         # rather than a feature that quietly does nothing in the browser.
