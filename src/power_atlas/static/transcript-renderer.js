@@ -4,23 +4,80 @@
 // identically instead of drifting apart as two separate implementations
 // (dashboard/ACP-merge plan, Phase 2).
 //
-// This first slice covers only the markdown-token-to-DOM converter: it is
-// the one piece of the transcript renderer with no dependency on the rest of
-// the page's transcript state (agentBody/toolRows/crews/etc. — see
-// clearTranscript() in acp.html, which resets all of that together). Later
-// phases move the rest (tool-call rendering, permission requests, thinking
-// placeholders, message/system rows) here too, once the split is designed
-// with the same care this piece got.
+// IMPORTANT — acp.html's inline script is wrapped whole in `(function () {
+// ... })();`, so a variable it declares is private to that closure, not a
+// true global a separately-loaded <script> can read or write. The state
+// this file owns below (transcriptEl, userMsgEls, agentBody, toolRows, …)
+// therefore has to be DECLARED here, not merely referenced here — moving a
+// `var`/`function` declaration's lexical position doesn't change how a bare
+// identifier elsewhere resolves it (JS walks the scope chain outward, and
+// finds whichever declaration is currently in scope), so acp.html's inline
+// script keeps reading and writing these exact same names, unqualified,
+// exactly as it always did, and now resolves to the single binding declared
+// here instead of a local one. What changed is only WHERE the declaration
+// lives — every read/write site elsewhere is untouched. A page-specific
+// piece of state that only acp.html's own lifecycle code needs (e.g.
+// `replaying`, `sessionId`) stays declared in its inline script, same as
+// before.
+//
+// DOM references are the one category that can't just move: the dashboard's
+// panel and acp.html don't share markup or element ids, so this file can't
+// look its own elements up. Each loading page calls `initTranscriptDom()`
+// once, early in its own inline script, with its own element references.
+//
+// Moved incrementally, one slice at a time, each verified against the full
+// tests/acp_page.test.mjs suite before landing — not as one big-bang
+// extraction, given how deep this coupling turned out to be.
 //
 // Depends on globals the loading page provides: `document`, `window.Prism`
 // (optional — colouring degrades to plain text without it, never fails),
 // `navigator.clipboard` (optional, code-block copy button), `setTimeout`,
-// and `logLine` (a page-provided log/status sink; called only if a Prism
-// grammar throws while tokenizing).
+// and `logLine` (an optional page-provided log/status sink — guarded, since
+// the dashboard panel has no debug log panel of its own).
 //
 // No innerHTML anywhere in this file, matching the rest of /acp's XSS
 // control: every node is built with createElement/createElementNS and filled
 // with textContent, never with a string of markup.
+
+// ---- shared DOM references and transcript state ---------------------------
+//
+// `null`/empty until `initTranscriptDom()` runs. Every function below that
+// reads one of these assumes it has already been called — true for both
+// pages, since each calls it synchronously near the top of its own inline
+// script, before anything can respond to a WS frame or a fetched transcript.
+var transcriptEl = null;
+var promptNavEl = null;
+var promptUpBtn = null;
+var promptDownBtn = null;
+
+/** Called once by each loading page's own inline script, with that page's
+ *  own element references — see the file header for why this can't be done
+ *  from in here. */
+function initTranscriptDom(refs) {
+  transcriptEl = refs.transcriptEl;
+  promptNavEl = refs.promptNavEl;
+  promptUpBtn = refs.promptUpBtn;
+  promptDownBtn = refs.promptDownBtn;
+}
+
+// DOM elements of user message rows, in order — drives the prompt nav arrows.
+var userMsgEls = [];
+
+function stuckToBottom() {
+  // Measured before the append, not after: once the node is in the DOM the
+  // pane is by definition no longer scrolled to the bottom, so a check made
+  // afterwards would never stick and a long answer would scroll away under
+  // anyone reading the top of it.
+  return transcriptEl.scrollHeight - transcriptEl.scrollTop
+           - transcriptEl.clientHeight < 60;
+}
+
+function _updateNavArrows() {
+  var atTop    = transcriptEl.scrollTop <= 0;
+  var atBottom = transcriptEl.scrollTop + transcriptEl.clientHeight >= transcriptEl.scrollHeight - 1;
+  promptUpBtn.classList.toggle('acp-prompt-nav-btn--dim', atTop);
+  promptDownBtn.classList.toggle('acp-prompt-nav-btn--dim', atBottom);
+}
 
 // Every map is `Object.create(null)` and every one of them is load-bearing
 // for the same reason `RAIL_AVAILABILITY` is: on an object literal every
@@ -333,8 +390,14 @@ function mdColour(code, text, word) {
   try {
     tokens = window.Prism.tokenize(text, grammar);
   } catch (err) {
-    logLine('error', 'highlighting a ' + word + ' block failed: ' +
-                     ((err && err.message) || err));
+    // `logLine` is optional: acp.html provides a debug-log panel, the
+    // dashboard's transcript panel has none, and a highlighting failure must
+    // not throw here either way (colouring is an upgrade to a block that
+    // already rendered correctly, same as acp.py's own _close_bubble rule).
+    if (typeof logLine === 'function') {
+      logLine('error', 'highlighting a ' + word + ' block failed: ' +
+                       ((err && err.message) || err));
+    }
     return false;
   }
   if (!tokens || typeof tokens.length !== 'number') return false;
@@ -575,4 +638,48 @@ function mdBuild(tokens) {
   mdAppend({ appendChild: function (node) { built.push(node); return node; } },
            tokens);
   return built;
+}
+
+// `role` is a literal at every call site, and `appendChunk` (still declared
+// in each loading page's own inline script, for now — it also needs
+// agentBody/toolGroup/flushToolGroups, not yet moved here) narrows the one
+// value that comes off the wire to a fixed pair before it gets here. That is
+// deliberate: this is the only place a class name is built by concatenation,
+// and a payload-derived one would be an attribute sink for a string the
+// agent wrote.
+function addMessage(role, text) {
+  var stick = stuckToBottom();
+  var row = document.createElement('div');
+  row.className = 'acp-msg acp-msg-' + role;
+  var who = document.createElement('span');
+  who.className = 'acp-msg-role';
+  who.textContent = role === 'user' ? 'user'
+    : (role === 'agent' ? 'agent' : (role === 'error' ? 'error' : (role === 'steer' ? 'user' : '')));
+  var body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  body.textContent = text;
+  row.appendChild(who);
+  row.appendChild(body);
+  transcriptEl.appendChild(row);
+  if (role === 'user') {
+    userMsgEls.push(row);
+    promptNavEl.hidden = userMsgEls.length < 2;
+    _updateNavArrows();
+  }
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  return body;
+}
+
+/** Append a non-bubble, lightly styled system row to the transcript.
+ *
+ *  Used for compaction status indicators and other ephemeral notices.
+ *  SECURITY: MUST use textContent / createTextNode — never innerHTML.
+ *  The `text` parameter comes from the server (agent-controlled). */
+function addSystemMessage(text) {
+  var stick = stuckToBottom();
+  var el = document.createElement('div');
+  el.className = 'acp-system-msg';
+  el.textContent = String(text);
+  transcriptEl.appendChild(el);
+  if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
 }

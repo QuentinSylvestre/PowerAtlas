@@ -679,7 +679,6 @@
   var pickerList = document.getElementById('acpPickerList');
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
-  var transcriptEl = document.getElementById('acpTranscript');
   var transcriptWrapEl = document.getElementById('acpTranscriptWrap');
   var subPanelEl = document.getElementById('acpSubPanel');
   var subBackBtn = document.getElementById('acpSubBack');
@@ -722,11 +721,18 @@
     if (liveRegion) liveRegion.textContent = 'Send mode: ' + label;
   }
   _applySendMode(_sendMode);
-  var promptNavEl = document.getElementById('acpPromptNav');
-  var promptUpBtn = document.getElementById('acpPromptUp');
-  var promptDownBtn = document.getElementById('acpPromptDown');
-  // DOM elements of user message rows, in order — drives the prompt nav arrows.
-  var userMsgEls = [];
+  // transcriptEl/promptNavEl/promptUpBtn/promptDownBtn/userMsgEls are declared
+  // in /static/transcript-renderer.js (Phase 2 slice 2) — the DOM refs are set
+  // by this call, since that file has no way to look its own elements up (see
+  // its header comment). Every other reference to these four names elsewhere
+  // in this script is unchanged and keeps working: moving where a `var` is
+  // declared does not change how a bare identifier resolves it.
+  initTranscriptDom({
+    transcriptEl: document.getElementById('acpTranscript'),
+    promptNavEl: document.getElementById('acpPromptNav'),
+    promptUpBtn: document.getElementById('acpPromptUp'),
+    promptDownBtn: document.getElementById('acpPromptDown'),
+  });
   var closeBtn = document.getElementById('acpClose');
   var contextEl = document.getElementById('acpContext');
   var contextFill = document.getElementById('acpContextFill');
@@ -1454,14 +1460,7 @@
       + 'every session its agent is still holding.');
   }
 
-  function stuckToBottom() {
-    // Measured before the append, not after: once the node is in the DOM the
-    // pane is by definition no longer scrolled to the bottom, so a check made
-    // afterwards would never stick and a long answer would scroll away under
-    // anyone reading the top of it.
-    return transcriptEl.scrollHeight - transcriptEl.scrollTop
-             - transcriptEl.clientHeight < 60;
-  }
+  // stuckToBottom moved to /static/transcript-renderer.js (Phase 2 slice 2).
 
   function elapsedText(startedAt, endAt) {
     if (typeof startedAt !== 'number' || !startedAt) return '';
@@ -1929,49 +1928,14 @@
     return chip;
   }
 
-  // `role` is a literal at every call site, and `appendChunk` narrows the one
-  // value that comes off the wire to a fixed pair before it gets here. That is
-  // deliberate: this is the only place a class name is built by concatenation,
-  // and a payload-derived one would be an attribute sink for a string the
-  // agent wrote.
-  function addMessage(role, text) {
-    var stick = stuckToBottom();
-    var row = document.createElement('div');
-    row.className = 'acp-msg acp-msg-' + role;
-    var who = document.createElement('span');
-    who.className = 'acp-msg-role';
-    who.textContent = role === 'user' ? 'user'
-      : (role === 'agent' ? 'agent' : (role === 'error' ? 'error' : (role === 'steer' ? 'user' : '')));
-    var body = document.createElement('div');
-    body.className = 'acp-msg-body';
-    body.textContent = text;
-    row.appendChild(who);
-    row.appendChild(body);
-    transcriptEl.appendChild(row);
-    if (role === 'user') {
-      userMsgEls.push(row);
-      promptNavEl.hidden = userMsgEls.length < 2;
-      _updateNavArrows();
-    }
-    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-    return body;
-  }
+  // addMessage/addSystemMessage moved to /static/transcript-renderer.js
+  // (Phase 2 slice 2). `role` is a literal at every call site in addMessage,
+  // and `appendChunk` (below) narrows the one value that comes off the wire
+  // to a fixed pair before it gets there — deliberate, since it is the only
+  // place a class name is built by concatenation, and a payload-derived one
+  // would be an attribute sink for a string the agent wrote.
 
   // ---- slash command palette helpers ----------------------------------------
-
-  /** Append a non-bubble, lightly styled system row to the transcript.
-   *
-   *  Used for compaction status indicators and other ephemeral notices.
-   *  SECURITY: MUST use textContent / createTextNode — never innerHTML.
-   *  The `text` parameter comes from the server (agent-controlled). */
-  function addSystemMessage(text) {
-    var stick = stuckToBottom();
-    var el = document.createElement('div');
-    el.className = 'acp-system-msg';
-    el.textContent = String(text);
-    transcriptEl.appendChild(el);
-    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
-  }
 
   /** Render an inbound `session/request_permission` (SC-9) as an interactive
    *  choice in the transcript: the question, plus one button per option.
@@ -7015,12 +6979,8 @@
   // Grey out an arrow when it has nowhere to go: ↑ when scrolled to the very
   // top, ↓ when scrolled to the very bottom. Called on scroll and whenever
   // userMsgEls changes (content added or cleared).
-  function _updateNavArrows() {
-    var atTop    = transcriptEl.scrollTop <= 0;
-    var atBottom = transcriptEl.scrollTop + transcriptEl.clientHeight >= transcriptEl.scrollHeight - 1;
-    promptUpBtn.classList.toggle('acp-prompt-nav-btn--dim', atTop);
-    promptDownBtn.classList.toggle('acp-prompt-nav-btn--dim', atBottom);
-  }
+  // _updateNavArrows itself moved to /static/transcript-renderer.js
+  // (Phase 2 slice 2); the event wiring stays here, page-specific.
   transcriptEl.addEventListener('scroll', _updateNavArrows);
   //
   // Up: scroll to the user message whose top is above the current scroll
