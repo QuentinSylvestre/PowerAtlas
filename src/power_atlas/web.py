@@ -1715,12 +1715,12 @@ async def ws_acp(ws: WebSocket) -> None:
 
 # --- The session browser's data source -----------------------------------
 #
-# A purpose-built read-only listing (D18) rather than a reuse of
-# `/partials/all-sessions`: that partial renders `partials/session_row.html`,
-# which is hover-driven and carries the launch-action cluster — dashboard
-# markup that is useless on a phone and undesirable on a surface intended to
-# leave loopback. A narrow route is also auditable against the remote
-# allowlist, which a partial that renders whatever the template grows is not.
+# A purpose-built read-only listing (D18) rather than a reuse of the
+# dashboard's old session-row partial (since removed): that partial rendered
+# hover-driven markup carrying the launch-action cluster — dashboard markup
+# that is useless on a phone and undesirable on a surface intended to leave
+# loopback. A narrow route is also auditable against the remote allowlist,
+# which a partial that renders whatever the template grows is not.
 #
 # **This path is on `_REMOTE_ALLOWED_PATHS` as of Phase 5b**, and was held off
 # it until then: registering a path before the route existed would have made it
@@ -2031,21 +2031,20 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                  tag: str = "", time_filter: str = "") -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
-    Paginated **independently at both levels** (D19). The existing listing
-    filters all set `has_more = False` (`partials_all_sessions`), i.e. they
-    filter the loaded page and then declare there is nothing after it —
-    inheriting that here would silently truncate a large workspace's session
-    list at whatever the first page happened to hold. So each group carries
-    its own `total`/`has_more` computed from its own session list, and the
-    group axis carries its own, and moving one does not move the other.
+    Paginated **independently at both levels** (D19). A post-pagination
+    filter that sets `has_more = False` filters the loaded page and then
+    declares there is nothing after it — inheriting that here would silently
+    truncate a large workspace's session list at whatever the first page
+    happened to hold. So each group carries its own `total`/`has_more`
+    computed from its own session list, and the group axis carries its own,
+    and moving one does not move the other.
 
     A `cwd` selects a single workspace and bypasses the group axis entirely:
     that is the shape the rail's per-group "show more" needs, and it is what
     makes paging a large workspace cost one workspace's sessions rather than
     the whole page's.
 
-    **Honours the `hidden` workspace tag and each provider's enabled flag**,
-    the same two config-driven exclusions `/partials/all-sessions` applies —
+    **Honours the `hidden` workspace tag and each provider's enabled flag** —
     a workspace the user hid from the dashboard has not asked to be visible
     from a phone, and a disabled provider is not a listing this route may
     serve. The config read costs an uncached TOML parse, which is exactly why
@@ -2061,12 +2060,11 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     byte-for-byte the same query it always ran — see this module's own
     docstring on that route for why it must never be repointed at a wider
     set. A caller passing more than one provider gets one row per *workspace*
-    rather than per (workspace, provider): `_group_workspaces` (already used
-    by `/partials/workspaces` for the same merge) folds same-path rows from
-    different providers together, and each merged workspace's sessions come
-    from every provider that touches it, interleaved by `updated_at` — the
-    same merge `/partials/sessions?provider=all` already does per workspace,
-    just applied across a whole page of them here.
+    rather than per (workspace, provider): `_group_workspaces` folds same-path
+    rows from different providers together, and each merged workspace's
+    sessions come from every provider that touches it, interleaved by
+    `updated_at` — the same per-workspace, cross-provider merge the dashboard
+    has always applied, just applied across a whole page of them here.
 
     `include_provider`, off by default: adds a `"provider"` field to every
     session dict (grouped and pinned alike). Left off for `/api/acp/sessions`
@@ -2081,12 +2079,12 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
     `tag`/`time_filter` (dashboard/ACP-merge Phase 4): the dashboard's
     existing tag-filter/tag-management feature and time filter, preserved
-    from `/partials/workspaces` rather than dropped when that route's rail
-    replaced it. `tag` is the same three-way rule that route already uses —
-    empty excludes `hidden` (the default), `"hidden"` shows only `hidden`,
-    anything else shows only workspaces carrying that exact tag — applied
-    here instead of the plain `"hidden" not in tags` check. `time_filter`
-    buckets by `latest_updated` exactly as that route's `_time_bucket` does.
+    across the move from the dashboard's old server-rendered workspace list
+    to its client-side rail. `tag` is the same three-way rule the dashboard
+    has always used — empty excludes `hidden` (the default), `"hidden"` shows
+    only `hidden`, anything else shows only workspaces carrying that exact
+    tag — applied here instead of the plain `"hidden" not in tags` check.
+    `time_filter` buckets by `latest_updated` exactly as `_time_bucket` does.
     Both apply before pagination, for the reason `get_all_sessions_paginated`
     already documents on `exclude_cwds`: filtering a page after the fact
     would cut it short and make `has_more` stop describing what is shown.
@@ -2169,7 +2167,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                 log.exception("ACP listing: could not read %s sessions for %s",
                               prov_name, ws_cwd)
         if len(ws_provs) > 1:
-            # Same interleave /partials/sessions?provider=all already uses.
+            # Same cross-provider interleave the dashboard has always used.
             tagged.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"),
                         reverse=True)
         ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
@@ -2471,18 +2469,18 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
 
     `provider`, `tag`, `time_filter`: the dashboard's existing workspace
     filters (provider tabs, tag filter/management, time filter), preserved
-    from `/partials/workspaces` rather than dropped when this route's rail
-    replaced it — see `_acp_listing`'s own docstring for the exact `tag`/
-    `time_filter` semantics. `provider=""` (the default) means every
-    enabled+available provider; a specific name narrows `providers` to just
-    that one, the same choice `/partials/workspaces`'s own `provider`
-    parameter makes.
+    across the move from the dashboard's old server-rendered workspace list
+    to its client-side rail — see `_acp_listing`'s own docstring for the
+    exact `tag`/`time_filter` semantics. `provider=""` (the default) means
+    every enabled+available provider; a specific name narrows `providers` to
+    just that one, the same choice the dashboard's provider tabs have always
+    made.
 
     Not scoped any differently than the rest of the dashboard: this app's
     `RemoteAccessGuard` middleware already covers every route including this
     one, and a session's title/path is no more exposed here than it already
-    is via `/partials/workspaces`/`/partials/sessions` — this is a second
-    reader of the same store, not a wider one.
+    was through the dashboard's old server-rendered listing — this is a
+    second reader of the same store, not a wider one.
     """
     response.headers["Cache-Control"] = "no-store"
     supervisor = getattr(acp, "_supervisor", None) if acp is not None else None
@@ -3411,527 +3409,6 @@ async def unpin_session(request: Request):
     return {"ok": True}
 
 
-def _poll_statuses(snapshot, cwds: list[str], poll_providers: set[str],
-                   active_norm_cwds: set[str]) -> tuple[dict, dict, list]:
-    """Compute the per-session and per-workspace status maps for one poll tick.
-
-    Runs whole in a single worker thread. Every branch below can reach the
-    filesystem — ``_session_status`` stats a JSONL file and ``_workspace_status``
-    falls back to loading session files on a cache miss — so a per-cwd hop would
-    cost one serialized thread round-trip per visible workspace on a 5s timer.
-    Iterating in ``cwds`` order also keeps the response identical to the
-    caller's request order.
-    """
-    from .data import _normalize_path
-
-    sessions_map: dict[str, str] = {}
-    workspaces_map: dict[str, str] = {}
-    active_cwds: list[str] = []
-
-    for cwd in cwds:
-        norm = _normalize_path(cwd)
-        # Short-circuit: if no live process in this cwd, everything is closed
-        if norm not in active_norm_cwds:
-            workspaces_map[cwd] = "closed"
-            continue
-
-        try:
-            active_cwds.append(cwd)
-            # Compute per-session status (no notifications)
-            for provider in poll_providers:
-                cached_sessions = data.session_cache.get(cwd, provider)
-                if cached_sessions is None:
-                    continue
-                for session in cached_sessions:
-                    status = _session_status(
-                        snapshot, session, provider, notify=False
-                    )
-                    if status != "closed":
-                        sessions_map[session.session_id] = status
-
-            # Card-level dot comes from the same aggregator the server renders
-            # with, so a poll cannot contradict the last full render.
-            workspaces_map[cwd] = _workspace_status(snapshot, cwd, poll_providers)
-        except Exception:
-            log.debug("Status poll failed for cwd %s", cwd)
-            workspaces_map[cwd] = "closed"
-
-    return sessions_map, workspaces_map, active_cwds
-
-
-@app.post("/api/session-status")
-async def api_session_status(request: Request):
-    """Lightweight status endpoint for background polling.
-
-    Accepts {"cwds": [...], "provider": "..."} and returns per-session and
-    per-workspace status without triggering notification side-effects.
-    Short-circuits cwds that have no live process.
-
-    ``provider`` is the filter the page currently has applied; it must reach
-    the status computation, or a poll answers about providers the render
-    deliberately excluded. Absent or "all" means every CLI provider, which
-    also keeps older clients working.
-    """
-    body = await request.json()
-    cwds = body.get("cwds", [])
-    if not cwds:
-        return JSONResponse({"sessions": {}, "workspaces": {}, "active_cwds": []})
-
-    provider_filter = body.get("provider")
-    # A JSON value of any other shape would land in a set below and raise
-    # (an array is unhashable), so anything that is not a usable name is
-    # treated as absent — the same answer an older client without the field
-    # gets. "all" narrows to the CLI providers, which is exactly what the
-    # render path's ``None`` resolves to. A "kiro-ide" filter is passed
-    # through and reports every cwd closed, because presence tracks no
-    # kiro-ide process — again the dot the render draws.
-    if not isinstance(provider_filter, str) or not provider_filter:
-        provider_filter = "all"
-    poll_providers = ({"kiro-cli", "claude-code", "kiro-cli-v3"} if provider_filter == "all"
-                      else {provider_filter})
-
-    # Get cached presence snapshot (3s TTL — very fast)
-    snapshot = await asyncio.to_thread(presence.get_snapshot)
-    active_norm_cwds = snapshot.live_cwds(poll_providers)
-
-    sessions_map, workspaces_map, active_cwds = await asyncio.to_thread(
-        _poll_statuses, snapshot, cwds, poll_providers, active_norm_cwds)
-
-    return JSONResponse({
-        "sessions": sessions_map,
-        "workspaces": workspaces_map,
-        "active_cwds": active_cwds,
-    })
-
-
-def _session_count_for_group(group: dict, provider: str) -> int:
-    if provider == "all":
-        return group["total_count"]
-    return sum(p["count"] for p in group["providers"] if p["name"] == provider)
-
-
-def _render_workspace_groups(
-    pinned_grouped: list[dict],
-    other_grouped: list[dict],
-    provider: str,
-    snap,
-    config,
-    request,
-) -> str:
-    """Render pinned-first then time-bucketed workspace card HTML.
-
-    Both partials_workspaces and search call this after their own filter chains.
-    Zero-session pinned folder injection stays in partials_workspaces's pre-processing.
-    session_count: provider-aware sum when provider != "all", else total_count.
-    prov_names: derived here from provider (None = all).
-    Returns "" (empty string) when both input lists are empty — callers own empty-state logic.
-    """
-    prov_names = None if provider == "all" else {provider}
-    hover_launchers = _all_hover_launchers(config)
-    cards_html = ""
-
-    for group in pinned_grouped:
-        cwd = group["cwd"]
-        session_count = _session_count_for_group(group, provider)
-        cards_html += templates.get_template("partials/workspace_card.html").render(
-            request=request, cwd=cwd, sessions=[], stale=not Path(cwd).exists(),
-            pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-            session_count=session_count, is_pinned=True,
-            last_updated=group["latest_updated"],
-            workspace_color=_resolve_workspace_color(cwd, config),
-            providers=group["providers"],
-            workspace_status=_workspace_status(snap, cwd, prov_names),
-            time_group="pinned",
-            hover_launchers=hover_launchers,
-        )
-
-    if pinned_grouped and other_grouped:
-        cards_html += '<div class="pinned-separator" aria-hidden="true"></div>'
-
-    time_groups: dict[str, list] = {
-        "today": [], "yesterday": [], "this_week": [], "before": []}
-    for ws in other_grouped:
-        time_groups[_time_bucket(ws["latest_updated"])].append(ws)
-    for key, label in [("today", "Today"), ("yesterday", "Yesterday"),
-                       ("this_week", "This week"), ("before", "Older")]:
-        if not time_groups[key]:
-            continue
-        cards_html += f'<div class="group-heading">{label}</div>'
-        for group in time_groups[key]:
-            cwd = group["cwd"]
-            session_count = _session_count_for_group(group, provider)
-            cards_html += templates.get_template("partials/workspace_card.html").render(
-                request=request, cwd=cwd, sessions=[], stale=not Path(cwd).exists(),
-                pinned_sessions=config.pinned_sessions, folder_name=group["folder_name"],
-                session_count=session_count, is_pinned=False,
-                last_updated=group["latest_updated"],
-                workspace_color=_resolve_workspace_color(cwd, config),
-                providers=group["providers"],
-                workspace_status=_workspace_status(snap, cwd, prov_names),
-                time_group=key,
-                hover_launchers=hover_launchers,
-            )
-    return cards_html
-
-
-@app.get("/partials/workspaces", response_class=HTMLResponse)
-async def partials_workspaces(
-    request: Request,
-    provider: str = "all",
-    tag: str = "",
-    time_filter: str = "",
-    status: str = "",
-    fresh: int = 0,
-):
-    """Render all workspaces: pinned at top (alphabetical), non-pinned below (by recency)."""
-    import asyncio
-    import time
-    t0 = time.perf_counter()
-    if fresh:
-        data._cache.pop("workspaces_with_counts:all", None)
-    try:
-        workspace_data = await asyncio.to_thread(
-            data.discover_workspaces_with_counts,
-            provider=None,
-        )
-        log.info("Discovered %d workspaces in %.2fs", len(workspace_data), time.perf_counter() - t0)
-    except Exception:
-        log.exception("Failed to discover workspaces")
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Error: could not load session data",
-            "level": "error",
-        })
-
-    config = load_config()
-
-    from .data import _normalize_path
-    from .config import get_workspace_settings
-    workspace_data = list(workspace_data)
-
-    # Build pinned set by normalized path only (workspace-level)
-    pinned_norm_paths: set[str] = set()
-    for folder in config.pinned_folders:
-        pinned_norm_paths.add(_normalize_path(folder))
-
-    # --- Pinned workspaces (at top, sorted alphabetically) ---
-    pinned_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) in pinned_norm_paths]
-    # Add pinned folders not found in discovery results (so they show even with 0 sessions)
-    all_existing_norms = {_normalize_path(c) for c, _, _, _ in workspace_data}
-    for folder in config.pinned_folders:
-        if _normalize_path(folder) not in all_existing_norms:
-            pinned_data.append((folder, 0, "", ""))
-    # Filter out disabled providers (keep entries with empty provider for zero-session pinned folders)
-    pinned_data = [(c, n, u, p) for c, n, u, p in pinned_data if not p or _enabled(config, p)]
-    pinned_grouped = _group_workspaces(pinned_data, config)
-    if provider != "all":
-        pinned_grouped = [g for g in pinned_grouped if any(prov["name"] == provider for prov in g["providers"])]
-    pinned_grouped.sort(key=lambda x: x["folder_name"].lower())
-
-    # --- Non-pinned workspaces (by recency) ---
-    other_data = [(c, n, u, p) for c, n, u, p in workspace_data if _normalize_path(c) not in pinned_norm_paths]
-    other_data = [(c, n, u, p) for c, n, u, p in other_data if _enabled(config, p)]
-    other_grouped = _group_workspaces(other_data, config)
-    if provider != "all":
-        other_grouped = [g for g in other_grouped if any(prov["name"] == provider for prov in g["providers"])]
-
-    # --- Tag filtering (applies uniformly to both pinned and other) ---
-    if not tag:
-        # Default: exclude workspaces tagged "hidden"
-        pinned_grouped = [g for g in pinned_grouped if "hidden" not in get_workspace_settings(config, g["cwd"])["tags"]]
-        other_grouped = [g for g in other_grouped if "hidden" not in get_workspace_settings(config, g["cwd"])["tags"]]
-    elif tag == "hidden":
-        pinned_grouped = [g for g in pinned_grouped if "hidden" in get_workspace_settings(config, g["cwd"])["tags"]]
-        other_grouped = [g for g in other_grouped if "hidden" in get_workspace_settings(config, g["cwd"])["tags"]]
-    else:
-        pinned_grouped = [g for g in pinned_grouped if tag in get_workspace_settings(config, g["cwd"])["tags"]]
-        other_grouped = [g for g in other_grouped if tag in get_workspace_settings(config, g["cwd"])["tags"]]
-
-    # --- Time filter ---
-    if time_filter:
-        pinned_grouped = [g for g in pinned_grouped if _time_bucket(g["latest_updated"]) == time_filter]
-        other_grouped = [g for g in other_grouped if _time_bucket(g["latest_updated"]) == time_filter]
-
-    # --- Live-status filter (cwd-level; shows cards containing matching activity) ---
-    snap = await asyncio.to_thread(presence.get_snapshot)
-    # local copy for the status filter; _render_workspace_groups derives its own from the same formula
-    prov_names = None if provider == "all" else {provider}
-
-    if status and status != "all":
-        def _ws_status_keep(g):
-            return _status_matches(status, _workspace_status(
-                snap, g["cwd"], prov_names))
-
-        pinned_grouped = [g for g in pinned_grouped if _ws_status_keep(g)]
-        other_grouped = [g for g in other_grouped if _ws_status_keep(g)]
-
-    # --- Render: pinned first, then time-grouped non-pinned ---
-    cards_html = _render_workspace_groups(pinned_grouped, other_grouped, provider, snap, config, request)
-
-    if not cards_html:
-        if status and status != "all":
-            cards_html += f'<div class="empty-state">No {html_mod.escape(status)} workspaces right now.</div>'
-        elif tag:
-            cards_html += f'<div class="empty-state">No workspaces with tag &quot;{html_mod.escape(tag)}&quot;</div>'
-        elif time_filter:
-            cards_html += f'<div class="empty-state">No workspaces active {html_mod.escape(time_filter.replace("_", " "))}</div>'
-        elif provider != "all" and provider:
-            empty_msgs = {
-                "claude-code": "No Claude Code sessions found \u2014 start one with <code>claude</code> to see it here.",
-                "kiro-cli": "No Kiro CLI sessions found \u2014 start one with <code>kiro-cli</code> to see it here.",
-                "kiro-ide": "No Kiro IDE sessions found \u2014 open a folder in Kiro IDE and start a conversation to see it here.",
-                "kiro-cli-v3": "No kiro-cli v3 sessions found \u2014 start one with <code>kiro-cli chat --agent-engine v3</code> to see it here.",
-            }
-            msg = empty_msgs.get(provider, f"No {provider} sessions found.")
-            cards_html += f'<div class="empty-state">{msg}</div>'
-        else:
-            cards_html += '<div class="empty-state">No workspaces found yet.</div>'
-
-    log.info("Rendered workspace cards in %.2fs total", time.perf_counter() - t0)
-    return HTMLResponse(cards_html)
-
-
-@app.get("/partials/all-sessions", response_class=HTMLResponse)
-async def partials_all_sessions(request: Request, page: int = 1, provider: str = "all",
-                                q: str = "", tag: str = "", time_filter: str = "", status: str = ""):
-    """Render paginated all-sessions panel. Pinned at top, then time-grouped."""
-    from .config import get_workspace_settings
-
-    config = load_config()
-
-    enabled = {p for p in data.PROVIDERS if _enabled(config, p)}
-    prov_filter = None if provider == "all" else provider
-
-    sessions_with_prov, has_more = await asyncio.to_thread(
-        data.get_all_sessions_paginated,
-        page=page,
-        page_size=20,
-        provider=prov_filter,
-        pinned_sessions=config.pinned_sessions,
-        enabled_providers=enabled,
-    )
-
-    # Apply search filter if q provided
-    if q:
-        query = q.strip().lower()
-        sessions_with_prov = [
-            (s, p) for s, p in sessions_with_prov
-            if query in (s.title or "").lower()
-            or query in (s.first_prompt or "").lower()
-            or query in (s.cwd or "").lower()
-        ]
-        has_more = False  # Search disables pagination
-
-    # Tag filtering — build workspace-tags lookup
-    cwd_tags_cache: dict[str, list[str]] = {}
-
-    def _get_ws_tags(cwd: str) -> list[str]:
-        if not cwd:
-            return []
-        if cwd not in cwd_tags_cache:
-            cwd_tags_cache[cwd] = get_workspace_settings(config, cwd)["tags"]
-        return cwd_tags_cache[cwd]
-
-    if tag:
-        if tag == "hidden":
-            sessions_with_prov = [(s, p) for s, p in sessions_with_prov if "hidden" in _get_ws_tags(s.cwd)]
-        else:
-            sessions_with_prov = [(s, p) for s, p in sessions_with_prov if tag in _get_ws_tags(s.cwd)]
-        has_more = False
-    else:
-        # Default: exclude sessions from hidden workspaces
-        sessions_with_prov = [(s, p) for s, p in sessions_with_prov if "hidden" not in _get_ws_tags(s.cwd)]
-
-    # Time filter
-    if time_filter:
-        sessions_with_prov = [
-            (s, p) for s, p in sessions_with_prov
-            if _time_bucket(s.updated_at) == time_filter
-        ]
-        has_more = False
-
-    # Live-status: annotate every row (for dots) and optionally filter.
-    snap = await asyncio.to_thread(presence.get_snapshot)
-    _notif_enabled = config.notifications.get("enabled", False)
-    row_status = {(s.session_id, p): _session_status(snap, s, p, _notif_enabled) for s, p in sessions_with_prov}
-    if status and status != "all":
-        sessions_with_prov = [
-            (s, p) for s, p in sessions_with_prov
-            if _status_matches(status, row_status[(s.session_id, p)])
-        ]
-        has_more = False  # status filter operates on the loaded page only
-
-    # Split pinned from non-pinned
-    pinned_set = set(config.pinned_sessions)
-    pinned_items = [(s, p) for s, p in sessions_with_prov if s.session_id in pinned_set]
-    non_pinned = [(s, p) for s, p in sessions_with_prov if s.session_id not in pinned_set]
-
-    # Exclude pinned from page > 1 (already shown on page 1)
-    if page > 1:
-        pinned_items = []
-
-    html = ""
-
-    # Render pinned section
-    for session, prov_name in pinned_items:
-        html += templates.get_template("partials/session_row.html").render(
-            request=request, session=session, cwd=session.cwd,
-            stale=not Path(session.cwd).exists(),
-            pinned_sessions=config.pinned_sessions,
-            provider_name=prov_name,
-            provider_color=_get_provider_color(prov_name, config),
-            show_workspace=True,
-            workspace_name=Path(session.cwd).name if session.cwd else "",
-            status=(_rs := row_status.get((session.session_id, prov_name), "closed")),
-            waiting_detail=_waiting_detail(snap, session, prov_name, _rs),
-            origin=_row_origin(snap, session, prov_name),
-        )
-    if pinned_items and non_pinned:
-        html += '<div class="pinned-separator" aria-hidden="true"></div>'
-
-    # Render time-grouped non-pinned
-    time_groups: dict[str, list] = {"today": [], "yesterday": [], "this_week": [], "before": []}
-    for s, p in non_pinned:
-        bucket = _time_bucket(s.updated_at)
-        time_groups[bucket].append((s, p))
-    time_labels = {"today": "Today", "yesterday": "Yesterday", "this_week": "This week", "before": "Older"}
-    for key in ["today", "yesterday", "this_week", "before"]:
-        if time_groups[key]:
-            html += f'<div class="group-heading">{time_labels[key]}</div>'
-            for session, prov_name in time_groups[key]:
-                html += templates.get_template("partials/session_row.html").render(
-                    request=request, session=session, cwd=session.cwd,
-                    stale=not Path(session.cwd).exists(),
-                    pinned_sessions=config.pinned_sessions,
-                    provider_name=prov_name,
-                    provider_color=_get_provider_color(prov_name, config),
-                    show_workspace=True,
-                    workspace_name=Path(session.cwd).name if session.cwd else "",
-                    status=(_rs := row_status.get((session.session_id, prov_name), "closed")),
-                    waiting_detail=_waiting_detail(snap, session, prov_name, _rs),
-            origin=_row_origin(snap, session, prov_name),
-                )
-
-    if not html:
-        if status and status != "all":
-            html = f'<div class="empty-state">No {html_mod.escape(status)} sessions right now.</div>'
-        elif tag:
-            html = f'<div class="empty-state">No sessions in workspaces tagged &quot;{html_mod.escape(tag)}&quot;</div>'
-        elif time_filter:
-            html = f'<div class="empty-state">No sessions active {html_mod.escape(time_filter.replace("_", " "))}</div>'
-        else:
-            html = '<div class="empty-state">No sessions found.</div>'
-
-    if has_more:
-        next_page = page + 1
-        html += f'<button class="load-more-btn" onclick="loadMoreSessions({next_page})">Load more</button>'
-
-    # Mark initialization after first render (prevents startup notification burst)
-    global _first_render_done
-    if not _first_render_done:
-        _first_render_done = True
-        notifications.mark_initialized()
-
-    return HTMLResponse(html)
-
-
-@app.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str = "", provider: str = "all",
-                 tag: str = "", time_filter: str = "", status: str = ""):
-    query = q.strip().lower()
-    if not query:
-        return await partials_workspaces(request, provider=provider, tag=tag,
-                                         time_filter=time_filter, status=status)
-
-    import asyncio
-    try:
-        workspace_data = await asyncio.to_thread(data.discover_workspaces_with_counts)
-    except Exception:
-        return templates.TemplateResponse(request, "partials/toast.html", {
-            "message": "Error: could not load session data",
-            "level": "error",
-        })
-
-    config = load_config()
-    matched = [(c, n, u, p) for c, n, u, p in workspace_data if query in c.lower()]
-    # Filter out disabled providers
-    matched = [(c, n, u, p) for c, n, u, p in matched if _enabled(config, p)]
-    query_matched = bool(matched)
-
-    from .data import _normalize_path
-    from .config import get_workspace_settings
-    pinned_norm_paths: set[str] = set()
-    for folder in config.pinned_folders:
-        pinned_norm_paths.add(_normalize_path(folder))
-
-    # Filter by provider if specified
-    if provider != "all":
-        matched = [(c, n, u, p) for c, n, u, p in matched if p == provider]
-
-    # Group matched workspaces
-    grouped = _group_workspaces(matched, config)
-    if provider != "all":
-        grouped = [g for g in grouped if any(prov["name"] == provider for prov in g["providers"])]
-
-    # Apply tag filtering
-    if not tag:
-        grouped = [g for g in grouped if "hidden" not in get_workspace_settings(config, g["cwd"])["tags"]]
-    elif tag == "hidden":
-        grouped = [g for g in grouped if "hidden" in get_workspace_settings(config, g["cwd"])["tags"]]
-    else:
-        grouped = [g for g in grouped if tag in get_workspace_settings(config, g["cwd"])["tags"]]
-
-    # Apply time filter
-    if time_filter:
-        grouped = [g for g in grouped if _time_bucket(g["latest_updated"]) == time_filter]
-
-    snap = await asyncio.to_thread(presence.get_snapshot)
-    # local copy for the status filter; _render_workspace_groups derives its own from the same formula
-    prov_names = None if provider == "all" else {provider}
-
-    # Apply live-status filter (skipped when nothing survived the earlier
-    # ones — the presence scan is the expensive step and cannot change an
-    # already-empty result).
-    if grouped and status and status != "all":
-        grouped = [g for g in grouped if _status_matches(
-            status, _workspace_status(snap, g["cwd"], prov_names))]
-
-    # Separate pinned from non-pinned results
-    pinned_results = [g for g in grouped if _normalize_path(g["cwd"]) in pinned_norm_paths]
-    other_results = [g for g in grouped if _normalize_path(g["cwd"]) not in pinned_norm_paths]
-
-    cards_html = _render_workspace_groups(pinned_results, other_results, provider, snap, config, request)
-
-    if not cards_html:
-        # One cascade decides the wording for every empty outcome, so two
-        # routes to an empty page cannot word themselves differently.
-        # The query branch comes first and the distinction it draws is
-        # deliberate: when the query matched nothing, no filter is at fault,
-        # and naming one would send the user to clear a filter that changes
-        # nothing. Past that, a filter removed every match — name the filter
-        # rather than the query. Branch order mirrors partials_workspaces; the
-        # provider wording does not, because here the truth is "the query
-        # matched nothing for that provider", not "you have no sessions for
-        # that provider at all".
-        if not query_matched:
-            message = f'No results for "{q}"'
-        elif status and status != "all":
-            message = f"No {status} workspaces right now."
-        elif tag:
-            message = f'No workspaces with tag "{tag}"'
-        elif time_filter:
-            message = f'No workspaces active {time_filter.replace("_", " ")}'
-        elif provider != "all" and provider:
-            display = PROVIDER_DISPLAY_NAMES.get(provider, provider)
-            message = f'No {display} results for "{q}"'
-        else:
-            message = f'No results for "{q}"'
-        return templates.TemplateResponse(request, "partials/empty_state.html", {
-            "message": message,
-        })
-
-    return HTMLResponse(cards_html)
-
-
 @app.post("/api/refresh")
 async def api_refresh():
     import asyncio
@@ -4602,47 +4079,6 @@ async def api_restart(response: Response):
     return {"ok": True}
 
 
-@app.get("/partials/session-tail", response_class=HTMLResponse)
-async def partials_session_tail(request: Request, sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
-    # Validate sid to a UUID-like pattern before passing to the data layer.
-    # Accept bare UUID (v2: aabbccdd-...) or sess_<uuid> (v3 prefix) formats.
-    if not re.fullmatch(r'(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
-        return HTMLResponse('<div class="tail-empty">Invalid session id</div>', status_code=400)
-    messages = await asyncio.to_thread(data.get_session_tail, sid, provider, cwd)
-    first_prompt = await asyncio.to_thread(data.get_first_prompt, sid, provider, cwd)
-    # Look up session title and last_prompt from cache
-    session_title = ""
-    last_prompt = ""
-    cached_sessions = data.session_cache.get(cwd, provider)
-    if cached_sessions:
-        for s in cached_sessions:
-            if s.session_id == sid:
-                session_title = s.title
-                last_prompt = (s.last_prompt or "").strip()
-                break
-    # Derive workspace name from cwd
-    workspace_name = Path(cwd).name if cwd else ""
-    # Guard: show empty-state if ALL content fields are absent
-    if not messages and not first_prompt and not last_prompt:
-        return HTMLResponse('<div class="tail-empty">No recent output</div>')
-    # Suppress last_prompt when it duplicates the beginning of first_prompt (dedup for single-exchange sessions).
-    # first_prompt from get_first_prompt() may be longer than last_prompt from session cache (200-char cap).
-    if last_prompt and first_prompt.startswith(last_prompt):
-        last_prompt = ""
-    # Render all text sections through mistune (escape=True entity-encodes raw HTML — safe for | safe filter)
-    first_prompt_html = _md(first_prompt) if first_prompt else ""
-    last_prompt_html = _md(last_prompt) if last_prompt else ""
-    messages_html = [_md(m) for m in messages]
-    return templates.TemplateResponse(request, "partials/session_tail.html", {
-        "first_prompt": first_prompt_html,
-        "last_prompt": last_prompt_html,
-        "messages": messages_html,
-        "session_title": session_title,
-        "workspace_name": workspace_name,
-        "session_id": sid,
-    })
-
-
 @app.get("/api/session-transcript")
 async def api_session_transcript(sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
     """Full transcript for the dashboard's static transcript panel (Phase 2).
@@ -4707,92 +4143,6 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
 
     state, status = await asyncio.to_thread(_compute)
     return {"sid": sid, "availability": state, "status": status}
-
-
-@app.get("/partials/sessions", response_class=HTMLResponse)
-async def partials_sessions(request: Request, cwd: str = "", provider: str = "all",
-                            status: str = "", fresh: int = 0):
-    """Lazy-load sessions for a workspace card. provider=all merges all providers."""
-    import asyncio
-    import time
-    t0 = time.perf_counter()
-    log.info("Loading sessions for %s", cwd[-40:])
-    config = load_config()
-
-    if provider == "all":
-        # Merge sessions from all providers, sorted by updated_at desc
-        all_sessions = []
-        for prov_name, mod in data.PROVIDERS.items():
-            if not mod.is_available():
-                continue
-            if not _enabled(config, prov_name):
-                continue
-            if fresh:
-                try:
-                    sessions, file_stats = await asyncio.to_thread(mod.load_sessions, cwd)
-                    data.session_cache.put(cwd, sessions, file_stats, prov_name)
-                except Exception:
-                    sessions = []
-            else:
-                try:
-                    sessions = await asyncio.to_thread(data.get_sessions, cwd, prov_name)
-                except Exception:
-                    sessions = []
-            for s in sessions:
-                all_sessions.append((s, prov_name))
-        # Sort interleaved by updated_at descending
-        # Normalize Z→+00:00 for consistent lexicographic sort across providers
-        all_sessions.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"), reverse=True)
-        sessions_with_provider = all_sessions
-    else:
-        # Single provider (existing behavior)
-        if fresh:
-            mod = data.PROVIDERS.get(provider)
-            if mod and mod.is_available():
-                try:
-                    sessions, file_stats = await asyncio.to_thread(mod.load_sessions, cwd)
-                    data.session_cache.put(cwd, sessions, file_stats, provider)
-                except Exception:
-                    sessions = []
-            else:
-                sessions = []
-        else:
-            try:
-                sessions = await asyncio.to_thread(data.get_sessions, cwd, provider)
-            except Exception:
-                sessions = []
-        sessions_with_provider = [(s, provider) for s in sessions]
-
-    log.info("Got %d sessions for %s in %.2fs", len(sessions_with_provider), Path(cwd).name, time.perf_counter() - t0)
-    # Flatten for pinned sort, then re-pair
-    flat_sessions = [s for s, _ in sessions_with_provider]
-    flat_sessions = _sort_pinned_first(flat_sessions, config.pinned_sessions)
-    # Rebuild provider mapping after sort
-    prov_map = {id(s): p for s, p in sessions_with_provider}
-
-    if not flat_sessions:
-        return HTMLResponse('<div class="new-session-inline">+ New session</div>')
-    stale = not Path(cwd).exists()
-    snap = await asyncio.to_thread(presence.get_snapshot)
-    _notif_enabled = config.notifications.get("enabled", False)
-    html = ""
-    for session in flat_sessions:
-        prov_name = prov_map.get(id(session), provider if provider != "all" else "kiro-cli")
-        sess_status = _session_status(snap, session, prov_name, _notif_enabled)
-        if status and status != "all" and not _status_matches(status, sess_status):
-            continue
-        html += templates.get_template("partials/session_row.html").render(
-            request=request, session=session, cwd=cwd, stale=stale,
-            pinned_sessions=config.pinned_sessions,
-            provider_name=prov_name,
-            provider_color=_get_provider_color(prov_name, config),
-            status=sess_status,
-            waiting_detail=_waiting_detail(snap, session, prov_name, sess_status),
-            origin=_row_origin(snap, session, prov_name),
-        )
-    if not html:
-        return HTMLResponse('<div class="new-session-inline">No matching sessions</div>')
-    return HTMLResponse(html)
 
 
 @app.post("/api/launch", response_class=HTMLResponse)

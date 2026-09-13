@@ -135,9 +135,9 @@
   </div>
   <!-- The transcript panel (dashboard/ACP-merge Phase 2): replaces what was a
        second, flat "all sessions" list with its own status filter. Sessions
-       are still found and clicked from the Workspaces column's expandable
-       cards (partials/session_row.html, unchanged in that role) -- this
-       panel is only where clicking one now opens. The markup below mirrors
+       are still found and clicked from the Workspaces rail's session rows
+       (dashboard/ACP-merge Phase 4) -- this panel is only where clicking one
+       now opens. The markup below mirrors
        acp.html's `.acp-transcript-wrap` exactly, using the same style.css
        rules (already shared by both pages via base.html) and the same
        element roles transcript-renderer.js's initTranscriptDom() expects,
@@ -1048,9 +1048,8 @@ function dashRailRowNode(session, flat, workspace){
   }
   // /acp speaks ACP to kiro-cli only; legacy v2 kiro-cli sessions show the
   // control (so it reads as retired rather than missing) but disabled, since
-  // v2 has no live-attach to open into -- same distinction session_row.html
-  // (still used by the now-dashboard-unreferenced /partials/sessions route)
-  // already draws.
+  // v2 has no live-attach to open into -- the same distinction the
+  // dashboard's session rows have always drawn.
   if (session.provider === '' || session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3') {
     var acpBtn = document.createElement('button');
     acpBtn.type = 'button';
@@ -1498,13 +1497,13 @@ function setTagFilter(val){window._activeTag=val;_updateFilterUI();dashRailReloa
 function setTimeFilter(val){window._activeTimeFilter=val;_updateFilterUI();dashRailReload()}
 function clearWorkspaceFilters(){window._activeTag='';window._activeTimeFilter='';var tagSel=document.getElementById('wsTagFilter');var timeSel=document.getElementById('wsTimeFilter');if(tagSel)tagSel.value='';if(timeSel)timeSel.value='';_updateFilterUI();dashRailReload()}
 function _updateFilterUI(){var clearBtn=document.getElementById('wsClearFilters');if(clearBtn){var active=window._activeTag||window._activeTimeFilter;clearBtn.style.display=active?'inline-block':'none'}}
-// The session hover-tooltip (loadTail et al.) is gone: it read
-// session_row.html's own DOM, which the dashboard no longer renders now
-// that the rail replaces the workspace column (dashboard/ACP-merge Phase
-// 4) -- the plan's own item for deleting it, done here as a side effect
-// rather than a separate pass. /partials/session-tail and
-// session_row.html stay on disk, unused by the dashboard, same as the
-// other retired partials/routes this merge leaves in place.
+// The session hover-tooltip (loadTail et al.) is gone: it read the old
+// server-rendered session row's own DOM, which the dashboard no longer
+// renders now that the rail replaces the workspace column (dashboard/ACP-
+// merge Phase 4) -- the plan's own item for deleting it, done here as a
+// side effect rather than a separate pass. The partials and routes it
+// depended on (/partials/session-tail among them) were removed along with
+// the rest of the dashboard's old server-rendered listing.
 </script>
 {% include "partials/launcher_modal.html" %}
 {% include "partials/workspace_settings_modal.html" %}

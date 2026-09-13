@@ -1757,10 +1757,10 @@ class TestGetAllSessionsPaginated:
         assert len(results) == 1
 
     def test_status_predicate_also_excludes_a_non_matching_pinned_session(self, mock_sessions, monkeypatch):
-        """Matches /partials/all-sessions's existing behavior: its status
-        filter already runs before the pinned/non-pinned split today, so a
-        pinned session that doesn't match is excluded there too — this
-        parameter preserves that, just applied earlier (pre-pagination)."""
+        """Matches the dashboard's existing status-filter behavior: that
+        filter already ran before the pinned/non-pinned split, so a pinned
+        session that doesn't match is excluded there too — this parameter
+        preserves that, just applied earlier (pre-pagination)."""
         _write_session(mock_sessions, "pin-match", "C:\\Projects\\PinPred", updated_at="2026-06-02T00:00:00Z")
         _write_session(mock_sessions, "pin-nomatch", "C:\\Projects\\PinPred", updated_at="2026-06-01T00:00:00Z")
         session_cache.clear()
