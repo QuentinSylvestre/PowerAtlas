@@ -4458,6 +4458,26 @@ async def partials_session_tail(request: Request, sid: str = "", provider: str =
     })
 
 
+@app.get("/api/session-transcript")
+async def api_session_transcript(sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
+    """Full transcript for the dashboard's static transcript panel (Phase 2).
+
+    Returns `{"events": [...]}` in the same shape as an ACP `history` frame's
+    event array (`acp.py`'s `_handle_subscribe`) — a client-side renderer
+    shared with the live ACP page (Phase 2) can feed both through one
+    dispatcher without knowing which produced them. Read once per panel-open
+    (not polled), so this does no caching of its own beyond whatever
+    `data.get_full_transcript`'s provider adapter already does.
+    """
+    if not re.fullmatch(r'(?:sess_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', sid):
+        return JSONResponse({"error": "invalid session id"}, status_code=400)
+    from . import transcript_translator
+
+    events = await asyncio.to_thread(data.get_full_transcript, sid, provider, cwd)
+    frames = transcript_translator.translate_transcript(events, sid)
+    return {"events": frames}
+
+
 @app.get("/partials/sessions", response_class=HTMLResponse)
 async def partials_sessions(request: Request, cwd: str = "", provider: str = "all",
                             status: str = "", fresh: int = 0):

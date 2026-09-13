@@ -889,6 +889,53 @@ def test_session_tail_invalid_sid(client):
     assert "Invalid session id" in resp.text
 
 
+# --- Phase 1c (dashboard/ACP merge): full transcript endpoint ---
+
+
+class TestSessionTranscriptAPI:
+    """`/api/session-transcript` feeds the dashboard's static transcript
+    panel: full events from `data.get_full_transcript`, translated into the
+    same wire-frame shapes an ACP `history` frame would carry."""
+
+    def test_returns_translated_frames(self, client):
+        from power_atlas.data import TranscriptEvent
+        with patch("power_atlas.web.data.get_full_transcript") as mock_full:
+            mock_full.return_value = [
+                TranscriptEvent(kind="user", text="hello"),
+                TranscriptEvent(kind="assistant", text="hi"),
+            ]
+            resp = client.get(
+                "/api/session-transcript"
+                "?sid=aabbccdd-1234-5678-abcd-ef0123456789&provider=kiro-cli-v3&cwd=C%3A%5CWork")
+        assert resp.status_code == 200
+        body = resp.json()
+        types = [f["type"] for f in body["events"]]
+        assert types[0] == "chunk"
+        assert body["events"][0]["payload"]["text"] == "hello"
+        mock_full.assert_called_once_with(
+            "aabbccdd-1234-5678-abcd-ef0123456789", "kiro-cli-v3", "C:\\Work")
+
+    def test_empty_transcript_returns_empty_events_list(self, client):
+        with patch("power_atlas.web.data.get_full_transcript", return_value=[]):
+            resp = client.get(
+                "/api/session-transcript?sid=aabbccdd-1234-5678-abcd-ef0123456789")
+        assert resp.status_code == 200
+        assert resp.json() == {"events": []}
+
+    def test_invalid_sid_returns_400_without_calling_data_layer(self, client):
+        with patch("power_atlas.web.data.get_full_transcript") as mock_full:
+            resp = client.get("/api/session-transcript?sid=not-a-uuid")
+        assert resp.status_code == 400
+        mock_full.assert_not_called()
+
+    def test_v3_sess_prefixed_sid_accepted(self, client):
+        with patch("power_atlas.web.data.get_full_transcript", return_value=[]) as mock_full:
+            resp = client.get(
+                "/api/session-transcript?sid=sess_aabbccdd-1234-5678-abcd-ef0123456789")
+        assert resp.status_code == 200
+        mock_full.assert_called_once()
+
+
 # --- Phase 3: custom launcher CRUD ---
 
 
