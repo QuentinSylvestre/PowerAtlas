@@ -2028,7 +2028,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                  capacity: dict,
                  providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
                  include_provider: bool = False,
-                 tag: str = "", time_filter: str = "") -> dict:
+                 tag: str = "", time_filter: str = "",
+                 sort: str = "recent") -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     Paginated **independently at both levels** (D19). A post-pagination
@@ -2093,6 +2094,14 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     — the dashboard's own Date grouping mode already buckets by day, which
     makes a separate time filter mostly redundant there; `_acp_flat_listing`
     does not take it.
+
+    `sort` (dashboard/ACP-merge QA follow-up): orders the workspace list
+    itself in Project grouping mode — `"recent"` (the default, and the only
+    value `/api/acp/sessions` ever asks for) by `latest_updated` descending,
+    `"alpha"` by folder name case-insensitively. Pinned workspaces still
+    surface first regardless of `sort`, exactly as before this parameter
+    existed — the two stable sorts below run in a fixed order (recency-or-
+    alpha, then pinned) for that reason, not the other way round.
     """
     from .config import get_workspace_settings
     from .data import _normalize_path
@@ -2131,6 +2140,22 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
     if time_filter:
         workspaces = [w for w in workspaces if _time_bucket(w[2]) == time_filter]
+
+    # Project-mode ordering (dashboard/ACP-merge QA follow-up): recent-first
+    # or alphabetical per `sort`, with pinned workspaces (config.pinned_folders
+    # — a dashboard-only concept /acp's own UI has no button for, so kept off
+    # its listing) surfaced ahead of that regardless of which. Stable sorts
+    # applied coarsest-last rather than one composite key: "pinned" is a
+    # coarser partition than "recency"/"alpha", and Python's sort is stable,
+    # so the pinned pass only reorders across the partition boundary and
+    # never disturbs the ordering already established within it.
+    if sort == "alpha":
+        workspaces.sort(key=lambda w: (Path(w[0]).name or w[0]).lower())
+    else:
+        workspaces.sort(key=lambda w: w[2] or "", reverse=True)
+    pinned_folders_norm = frozenset(_normalize_path(f) for f in config.pinned_folders)
+    if include_provider and pinned_folders_norm:
+        workspaces.sort(key=lambda w: _normalize_path(w[0]) not in pinned_folders_norm)
 
     if cwd:
         target = _normalize_path(cwd)
@@ -2185,14 +2210,17 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         sids.extend(s.session_id for s, _p in page_tagged)
         if ws_hash:
             hash_by_sid.update({s.session_id: ws_hash for s, _p in page_tagged})
-        rows.append(({
+        meta = {
             "cwd": ws_cwd,
             "name": ws_name,
             "total": total,
             "session_page": session_page,
             "has_more": s_start + session_size < total,
             "exists": exists_flags[index],
-        }, page_tagged))
+        }
+        if include_provider:
+            meta["pinned"] = _normalize_path(ws_cwd) in pinned_folders_norm
+        rows.append((meta, page_tagged))
 
     pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]
     availability = _acp_availability(sids + pinned_sids, held, workspace_hashes=hash_by_sid)
@@ -2456,7 +2484,7 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
                                  mode: str = "", page: int = 1,
                                  size: int = _ACP_FLAT_PAGE_SIZE,
                                  provider: str = "", tag: str = "",
-                                 time_filter: str = ""):
+                                 time_filter: str = "", project_sort: str = "recent"):
     """The dashboard's own rail feed (dashboard/ACP-merge Phase 4): every
     enabled, available provider, not only kiro-cli-v3. Same parameters,
     pagination, `hidden`-tag/disabled-provider exclusions and grouped/
@@ -2476,6 +2504,13 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
     just that one, the same choice the dashboard's provider tabs have always
     made.
 
+    `project_sort` (dashboard/ACP-merge QA follow-up): forwarded to
+    `_acp_listing`'s `sort` verbatim except for validation — anything other
+    than the two values it recognizes falls back to `"recent"` rather than
+    reaching a `.sort()` call with a key function that silently does nothing
+    a caller could notice. `/api/acp/sessions` has no equivalent parameter;
+    its Project-mode ordering is always `"recent"`.
+
     Not scoped any differently than the rest of the dashboard: this app's
     `RemoteAccessGuard` middleware already covers every route including this
     one, and a session's title/path is no more exposed here than it already
@@ -2491,6 +2526,7 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
     }
     available = frozenset(data.available_providers())
     providers = frozenset({provider}) & available if provider else available
+    sort = project_sort if project_sort in ("recent", "alpha") else "recent"
     if mode == "recent":
         return await asyncio.to_thread(
             _acp_flat_listing, max(1, page),
@@ -2500,7 +2536,7 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity, providers, True, tag, time_filter)
+        held, capacity, providers, True, tag, time_filter, sort)
 
 
 # --- The create flow's workspace list ------------------------------------

@@ -151,7 +151,17 @@
        full agent orchestrator page. Hidden until a selected session's
        availability peek says there is something live to talk to. -->
   <section class="right-panel" id="sessions-panel">
-    <div class="section-label"><span>Transcript</span></div>
+    <div class="section-label">
+      <span>Transcript</span>
+      <!-- Mirrors /acp's own #acpClose: same "hidden unless attached,
+           disabled under a live turn (the server refuses a close then
+           anyway)" rule, but independent of dashCloseIfAbandoned's
+           abandon-on-navigate logic below -- that one only auto-closes a
+           session the dashboard itself spawned and never sent a prompt
+           through; this button closes on request regardless of who
+           spawned it or whether anything was sent. -->
+      <button class="acp-btn acp-danger dash-close-btn" id="dashCloseSession" type="button" hidden>Close session</button>
+    </div>
     <div class="acp-transcript-wrap" id="dashTranscriptWrap">
       <div class="acp-transcript" id="dashTranscript" role="log" aria-live="polite"
            aria-label="Conversation">
@@ -375,6 +385,21 @@ var dashComposerEl = document.getElementById('dashComposer');
 var dashPromptInput = document.getElementById('dashPromptInput');
 var dashSendBtn = document.getElementById('dashSendBtn');
 var dashComposerNote = document.getElementById('dashComposerNote');
+var dashCloseBtn = document.getElementById('dashCloseSession');
+// Hidden unless attached to a live session, disabled under a live turn (the
+// server refuses a close then anyway, same as /acp's #acpClose) -- called
+// everywhere _dashAttachedSid or _dashTurnActive changes.
+function dashUpdateCloseButton(){
+  dashCloseBtn.hidden = !_dashAttachedSid;
+  dashCloseBtn.disabled = _dashTurnActive;
+  dashCloseBtn.textContent = 'Close session';
+}
+dashCloseBtn.addEventListener('click', function(){
+  if (!_dashAttachedSid) return;
+  if (!send('close', {}, _dashAttachedSid)) return;
+  dashCloseBtn.disabled = true;
+  dashCloseBtn.textContent = 'Closing…';
+});
 // _dashAttachedSid: the sid this socket is confirmed attached to (a `session`
 // frame answered for it) -- null until then, even while a subscribe/load is
 // in flight. _dashOrigin: 'joined' (subscribe — this page did not spend a
@@ -488,6 +513,7 @@ function dashCloseIfAbandoned(){
   _dashSent = false;
   _dashTurnActive = false;
   _dashPendingSend = null;
+  dashUpdateCloseButton();
 }
 window.addEventListener('pagehide', dashCloseIfAbandoned);
 
@@ -514,6 +540,7 @@ function dashHandle(frame){
     _dashLoadingSid = null;
     dashSetComposerNote('');
     dashRefreshSendButton();
+    dashUpdateCloseButton();
     return;
   }
   if (sid && sid !== _viewingSid) return; // stale frame for a session no longer on screen
@@ -534,8 +561,8 @@ function dashHandle(frame){
     dashRefreshSendButton();
     return;
   }
-  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); return; }
-  if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); return; }
+  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); dashUpdateCloseButton(); return; }
+  if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); dashUpdateCloseButton(); return; }
   if (type === 'chunk' || type === 'rendered' || type === 'tool_call' || type === 'tool_update') {
     renderTranscriptFrame(frame);
     return;
@@ -568,6 +595,8 @@ function dashHandle(frame){
     dashComposerEl.hidden = true;
     _dashAttachedSid = null;
     _dashOrigin = null;
+    _dashTurnActive = false;
+    dashUpdateCloseButton();
     return;
   }
   if (type === 'error') {
@@ -750,6 +779,12 @@ function dashRailStore(key, value){ try { localStorage.setItem(key, value); } ca
 var DASH_RAIL_MODE_KEY = 'pa_dash_rail_mode';
 var _dashStoredMode = dashRailStored(DASH_RAIL_MODE_KEY);
 var dashRailMode = _dashStoredMode === 'date' ? 'date' : _dashStoredMode === 'status' ? 'status' : 'project';
+// Project-mode-only ordering (dashboard/ACP-merge QA follow-up): the other
+// two modes already impose their own order (by day, by status), so this
+// preference is meaningless there and the settings menu only offers it
+// while dashRailMode === 'project'.
+var DASH_RAIL_SORT_KEY = 'pa_dash_project_sort';
+var dashRailProjectSort = dashRailStored(DASH_RAIL_SORT_KEY) === 'alpha' ? 'alpha' : 'recent';
 
 // ---- state ----------------------------------------------------------
 //
@@ -786,7 +821,7 @@ function dashRailMergeGroup(incoming){
     var fresh = {
       cwd: incoming.cwd, name: incoming.name, total: incoming.total,
       session_page: incoming.session_page, has_more: incoming.has_more,
-      exists: incoming.exists, sessions: [],
+      exists: incoming.exists, pinned: incoming.pinned, sessions: [],
     };
     dashRailMergeSessions(fresh, incoming.sessions);
     dashRailGroupsByCwd[key] = fresh;
@@ -796,6 +831,7 @@ function dashRailMergeGroup(incoming){
   dashRailMergeSessions(existing, incoming.sessions);
   existing.total = incoming.total;
   existing.exists = incoming.exists;
+  existing.pinned = incoming.pinned;
   // A repeat on a later group page carries session_page: 1 -- adopting it
   // would rewind a workspace already paged into further. Only move forward.
   if (incoming.session_page > existing.session_page) {
@@ -817,6 +853,7 @@ function loadGroupPage(page){
     session_page: 1, session_size: DASH_RAIL_SESSION_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
+    project_sort: dashRailProjectSort,
   }).then(function(data){
     dashRailBusy = false;
     (data.groups || []).forEach(dashRailMergeGroup);
@@ -1170,9 +1207,9 @@ function dashRailGroupNode(group){
   actions.appendChild(settingsBtn);
   var pinBtn = document.createElement('button');
   pinBtn.type = 'button';
-  pinBtn.className = 'row-btn pin-btn';
-  pinBtn.setAttribute('aria-label', 'Pin workspace');
-  pinBtn.title = 'Pin workspace';
+  pinBtn.className = 'card-pin-btn' + (group.pinned ? ' pinned' : '');
+  pinBtn.setAttribute('aria-label', group.pinned ? 'Unpin workspace' : 'Pin workspace');
+  pinBtn.title = group.pinned ? 'Unpin workspace' : 'Pin workspace';
   pinBtn.textContent = '📌';
   pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinWorkspace(pinBtn); });
   actions.appendChild(pinBtn);
@@ -1363,6 +1400,35 @@ function dashRailSetMode(mode){
   dashRenderRail();
   dashRailLoadFirstPage();
 }
+function dashRailSetProjectSort(sort){
+  var next = sort === 'alpha' ? 'alpha' : 'recent';
+  if (next === dashRailProjectSort) return;
+  dashRailProjectSort = next;
+  dashRailStore(DASH_RAIL_SORT_KEY, next);
+  dashRailGroups = []; dashRailGroupsByCwd = Object.create(null); dashRailGroupPage = 1; dashRailHasMore = false;
+  dashRenderRail();
+  dashRailLoadFirstPage();
+}
+function dashRailSortOption(sort, label){
+  var item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'acp-rail-menu-item acp-rail-setting';
+  item.setAttribute('role', 'menuitemradio');
+  item.setAttribute('aria-checked', dashRailProjectSort === sort ? 'true' : 'false');
+  var name = document.createElement('span');
+  name.textContent = label;
+  item.appendChild(name);
+  var tick = document.createElement('span');
+  tick.className = 'acp-rail-setting-tick';
+  tick.setAttribute('aria-hidden', 'true');
+  tick.textContent = dashRailProjectSort === sort ? '✓' : '';
+  item.appendChild(tick);
+  item.addEventListener('click', function(){
+    dashRailCloseMenus();
+    dashRailSetProjectSort(sort);
+  });
+  return item;
+}
 function dashRailSettingOption(mode, label){
   var item = document.createElement('button');
   item.type = 'button';
@@ -1393,6 +1459,20 @@ function dashRailSettingsRender(){
   dashRailSettingsMenu.appendChild(dashRailSettingOption('date', 'Date'));
   dashRailSettingsMenu.appendChild(dashRailSettingOption('project', 'Project'));
   dashRailSettingsMenu.appendChild(dashRailSettingOption('status', 'Status'));
+  // Meaningless in Date/Status mode, which already impose their own order
+  // (by day, by status) -- offered only where there is a workspace list left
+  // for it to reorder.
+  if (dashRailMode === 'project') {
+    var divider = document.createElement('div');
+    divider.className = 'acp-rail-menu-divider';
+    dashRailSettingsMenu.appendChild(divider);
+    var sortHead = document.createElement('div');
+    sortHead.className = 'acp-rail-menu-head';
+    sortHead.textContent = 'Sort by';
+    dashRailSettingsMenu.appendChild(sortHead);
+    dashRailSettingsMenu.appendChild(dashRailSortOption('recent', 'Recent activity'));
+    dashRailSettingsMenu.appendChild(dashRailSortOption('alpha', 'A–Z'));
+  }
 }
 var dashRailMenuGuard = false;
 function dashRailCloseMenus(){
