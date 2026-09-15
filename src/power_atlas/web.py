@@ -2102,6 +2102,17 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     surface first regardless of `sort`, exactly as before this parameter
     existed — the two stable sorts below run in a fixed order (recency-or-
     alpha, then pinned) for that reason, not the other way round.
+
+    **Lazy per-workspace loading** (dashboard/ACP-merge QA follow-up,
+    `include_provider`-only): an unpinned workspace's sessions are not
+    fetched at all on a plain group-page listing — its `meta` carries the
+    cheap `discover_workspaces_with_counts` total, `session_page: 0` and
+    `has_more: total > 0`, and the rail's existing "More in <workspace>"
+    control (already wired to a `cwd`-scoped follow-up request) is what
+    actually loads its first page. A pinned *folder*, a `cwd`-scoped request,
+    or a workspace found to hold an individually pinned *session* still gets
+    the full fetch unconditionally. See the `lazy_mode`/`force_cwds` block
+    below for the exact rule.
     """
     from .config import get_workspace_settings
     from .data import _normalize_path
@@ -2172,6 +2183,35 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
     pinned_set: set[str] = set(config.pinned_sessions)
 
+    # Lazy per-workspace loading (dashboard/ACP-merge QA follow-up): skips the
+    # full `get_sessions()` scan — a disk read and parse per provider per
+    # workspace, the expensive part `_ACP_WORKSPACES_PATH`'s own docstring
+    # measures at 975 of 1,210 sessions loaded for one 50x50 request — for a
+    # workspace that is neither pinned nor the explicit target of a `cwd`-
+    # scoped request. `include_provider` gates this exactly like the `pinned`
+    # field itself: `/api/acp/sessions` has no pinned-workspace concept and
+    # must keep paying for every group's sessions up front, unchanged. A
+    # `cwd`-scoped request — the rail's own "More in <workspace>" follow-up —
+    # always pays the full cost for that one workspace; it is an explicit ask
+    # for its sessions.
+    #
+    # A workspace holding an individually pinned *session* (`pinned_set`,
+    # distinct from a pinned *folder*) must still be fetched even while lazy,
+    # or that session would silently drop out of the rail's "Pinned" section
+    # until its workspace happened to be paged in some other way.
+    # `find_session_workspace` is the same cheap per-session directory probe
+    # `data.warmup_all` already runs at startup for this exact purpose — a
+    # stat per workspace per pinned id, not a full session load per workspace.
+    lazy_mode = include_provider and not cwd
+    force_cwds: frozenset[str] = frozenset()
+    if lazy_mode and pinned_set:
+        found_cwds = set()
+        for sid in pinned_set:
+            found = data._find_pinned_session_workspace(sid)
+            if found:
+                found_cwds.add(_normalize_path(found[0]))
+        force_cwds = frozenset(found_cwds)
+
     rows: list[tuple[dict, list]] = []  # (meta, [(session, provider), ...])
     sids: list[str] = []
     pinned_sessions_found: list[tuple[str, str, object, str]] = []  # (cwd, name, session, provider)
@@ -2180,7 +2220,24 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     # mapping, and every session in a group shares the group's own hash dir.
     hash_by_sid: dict[str, str] = {}
     exists_flags = _acp_exists_flags([w[0] for w in page_groups])
-    for index, (ws_cwd, _count, _updated, ws_provs) in enumerate(page_groups):
+    for index, (ws_cwd, ws_count, _updated, ws_provs) in enumerate(page_groups):
+        ws_norm = _normalize_path(ws_cwd)
+        is_pinned_folder = include_provider and ws_norm in pinned_folders_norm
+        ws_name = Path(ws_cwd).name or ws_cwd
+
+        if lazy_mode and not is_pinned_folder and ws_norm not in force_cwds:
+            meta = {
+                "cwd": ws_cwd,
+                "name": ws_name,
+                "total": ws_count,
+                "session_page": 0,
+                "has_more": ws_count > 0,
+                "exists": exists_flags[index],
+                "pinned": is_pinned_folder,
+            }
+            rows.append((meta, []))
+            continue
+
         # One fetch per provider touching this workspace — a 1-item `ws_provs`
         # (every existing caller) makes this the exact same single call the
         # pre-Phase-4 code made, with no merge and no re-sort applied after.
@@ -2196,7 +2253,6 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             tagged.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"),
                         reverse=True)
         ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
-        ws_name = Path(ws_cwd).name or ws_cwd
         if pinned_set:
             for s, prov_name in tagged:
                 if s.session_id in pinned_set:
@@ -2219,7 +2275,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             "exists": exists_flags[index],
         }
         if include_provider:
-            meta["pinned"] = _normalize_path(ws_cwd) in pinned_folders_norm
+            meta["pinned"] = is_pinned_folder
         rows.append((meta, page_tagged))
 
     pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]

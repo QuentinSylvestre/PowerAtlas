@@ -14559,12 +14559,17 @@ class TestDashboardListingEndpoint:
             self, client, grouped_multi_store):
         """The same folder touched by two providers is one row, not two --
         the same merge the old /partials/sessions?provider=all did per
-        workspace, applied here across a whole page via _group_workspaces."""
+        workspace, applied here across a whole page via _group_workspaces.
+
+        `cwd=` scopes the request to this one workspace, which is what keeps
+        this test exercising the merge regardless of the QA-follow-up lazy
+        skip below -- a `cwd`-scoped request always fetches that workspace's
+        sessions, pinned or not, because it is an explicit ask for them."""
         grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
             _acp_row("v3s1", updated="2026-08-01T00:00:00Z")])
         grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [
             _acp_row("ccs1", updated="2026-08-02T00:00:00Z")])
-        body = client.get(self._PATH).json()
+        body = client.get(self._PATH, params={"cwd": r"C:\dev\ws"}).json()
         assert len(body["groups"]) == 1
         group = body["groups"][0]
         assert group["cwd"] == r"C:\dev\ws"
@@ -14576,12 +14581,77 @@ class TestDashboardListingEndpoint:
     def test_provider_param_narrows_to_one_provider(
             self, client, grouped_multi_store):
         """The dashboard's provider tabs, preserved: ?provider=claude-code
-        must not also pull in kiro-cli-v3 rows for the same workspace."""
+        must not also pull in kiro-cli-v3 rows for the same workspace.
+        `cwd=` scoped for the same reason as the merge test above."""
         grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("v3s1")])
         grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("ccs1")])
-        body = client.get(self._PATH, params={"provider": "claude-code"}).json()
+        body = client.get(self._PATH, params={
+            "provider": "claude-code", "cwd": r"C:\dev\ws"}).json()
         group = body["groups"][0]
         assert [s["id"] for s in group["sessions"]] == ["ccs1"]
+
+    def test_unpinned_workspace_group_page_skips_the_session_fetch(
+            self, client, grouped_multi_store, monkeypatch):
+        """QA follow-up: a plain (non-`cwd`-scoped) group-page listing must
+        not call `get_sessions` at all for a workspace that is neither a
+        pinned folder nor host to a pinned session -- that per-provider disk
+        read/parse is the expensive part `_acp_workspaces`'s own docstring
+        measures, and the rail's "More in <workspace>" control (a `cwd`-
+        scoped follow-up) is what actually loads the first page on demand."""
+        from power_atlas import data as data_mod
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("s1")])
+        original = data_mod.get_sessions
+        calls = []
+        def _spy(cwd, provider="kiro-cli"):
+            calls.append((cwd, provider))
+            return original(cwd, provider)
+        monkeypatch.setattr(data_mod, "get_sessions", _spy)
+        body = client.get(self._PATH).json()
+        assert calls == []
+        group = body["groups"][0]
+        assert group["sessions"] == []
+        assert group["total"] == 1
+        assert group["session_page"] == 0
+        assert group["has_more"] is True
+        assert group["pinned"] is False
+
+    def test_pinned_workspace_group_page_still_preloads_its_sessions(
+            self, client, grouped_multi_store, monkeypatch):
+        """A pinned *folder* is the one case the lazy skip must not touch --
+        the whole point of pinning a workspace is seeing its sessions without
+        an extra click."""
+        import power_atlas.web as web_mod
+        from power_atlas.config import Config
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("s1")])
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: Config(pinned_folders=[r"C:\dev\ws"]))
+        body = client.get(self._PATH).json()
+        group = body["groups"][0]
+        assert [s["id"] for s in group["sessions"]] == ["s1"]
+        assert group["pinned"] is True
+
+    def test_a_workspace_holding_a_pinned_session_still_preloads(
+            self, client, grouped_multi_store, monkeypatch):
+        """An individually pinned *session* living in an unpinned workspace
+        must not silently drop out of the rail's "Pinned" section just
+        because its workspace was skipped by the lazy path."""
+        import power_atlas.web as web_mod
+        from power_atlas import data as data_mod
+        from power_atlas.config import Config
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [_acp_row("s1")])
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: Config(pinned_sessions=["s1"]))
+        monkeypatch.setattr(
+            data_mod, "_find_pinned_session_workspace",
+            lambda sid: (r"C:\dev\ws", "kiro-cli-v3") if sid == "s1" else None)
+        body = client.get(self._PATH).json()
+        assert [p["id"] for p in body["pinned"]] == ["s1"]
+        # Held out of its own group's list and its count, exactly as a
+        # pinned session already is on the non-lazy path -- proves the full
+        # fetch actually ran rather than the lazy `total` (which would still
+        # read 1, uncorrected) leaking through by coincidence.
+        assert body["groups"][0]["sessions"] == []
+        assert body["groups"][0]["total"] == 0
 
     def test_tag_filter_default_excludes_hidden(
             self, client, grouped_multi_store, monkeypatch):

@@ -117,7 +117,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Workspace card */
 .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); padding: 8px 0 4px; display: flex; align-items: center; gap: 8px; }
+/* The Workspaces panel's own section-label row also carries Refresh + the
+   settings gear now (dashboard/ACP-merge QA follow-up -- see index.html's
+   comment on the same markup for why). `position: relative` is this rail's
+   settings popover's anchor (`.acp-rail-settings` in the rail section below);
+   scoped to this one row rather than added to the bare `.section-label` rule
+   above so the Launchers/Transcript headers, which have no popover, are
+   unaffected. `flex-wrap` lets the trailing buttons drop to their own line
+   on a narrow window instead of squeezing the tag/time filters. */
+#workspaces-panel .section-label { position: relative; flex-wrap: wrap; row-gap: 4px; }
 .workspace-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* Pushes Refresh + settings to the row's right edge, past the tag/time
+   filters -- `#dashRailReload` is dashboard-only (/acp's own Refresh button
+   is `#acpRailReload`), so this cannot affect that page's `.acp-rail-head`
+   row, which still lays its own Refresh out left-to-right with no gap to
+   push across. */
+#dashRailReload { margin-left: auto; }
 .ws-filter-select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 3px 6px; font-size: 11px; outline: none; cursor: pointer; max-width: 120px; }
 .ws-filter-select:hover { border-color: var(--accent); color: var(--text); }
 .ws-filter-select:focus { border-color: var(--accent); }

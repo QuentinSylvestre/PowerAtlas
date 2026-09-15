@@ -101,29 +101,41 @@
        concern. Rendered by dashRenderRail(); empty here for the same
        no-innerHTML-writes-of-fetched-data reason acp.html's rail is. -->
   <div class="center-panel" id="workspaces-panel">
-    <div class="section-label"><span>Workspaces</span> <div class="workspace-filters" id="workspaceFilters"></div></div>
-    <aside class="acp-rail" id="dashRail" aria-label="Workspaces and sessions">
-      <div class="acp-rail-head">
-        <button class="acp-btn" id="dashRailReload" type="button">Refresh</button>
-        <div class="acp-rail-settings-wrap">
-          <button class="acp-btn acp-rail-settings-btn" id="dashRailSettings"
-                  type="button" aria-haspopup="menu" aria-expanded="false"
-                  aria-label="Session list settings">
-            <svg class="acp-rail-settings-icon" viewBox="0 0 16 16"
-                 aria-hidden="true" focusable="false">
-              <path d="M2 4.5h4.2M10.8 4.5h3.2M2 11.5h3.2M9.8 11.5h4.2"
-                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                    fill="none"/>
-              <circle cx="8.5" cy="4.5" r="2" stroke="currentColor"
-                      stroke-width="1.5" fill="none"/>
-              <circle cx="7.5" cy="11.5" r="2" stroke="currentColor"
-                      stroke-width="1.5" fill="none"/>
-            </svg>
-          </button>
-          <div class="acp-rail-menu acp-rail-settings" id="dashRailSettingsMenu"
-               role="menu" aria-label="Session list settings" hidden></div>
-        </div>
+    <!-- Refresh + the settings gear live on this line now, not their own
+         `.acp-rail-head` row below the rail's aside (dashboard/ACP-merge QA
+         follow-up) -- that row cost the actual workspace list a full line of
+         vertical space for two buttons this line has room for beside the
+         tag/time filters. `.acp-rail-head` itself (and its CSS) stays put
+         for /acp's own rail, which still needs it for its create/search
+         controls; only the dashboard's markup stops using it. The settings
+         popover now anchors off `#workspaces-panel .section-label`
+         (position:relative, see style.css) instead of `.acp-rail-head` --
+         same "full width whatever the row does" property that anchoring
+         choice was for, just off a different ancestor. -->
+    <div class="section-label">
+      <span>Workspaces</span>
+      <div class="workspace-filters" id="workspaceFilters"></div>
+      <button class="acp-btn" id="dashRailReload" type="button">Refresh</button>
+      <div class="acp-rail-settings-wrap">
+        <button class="acp-btn acp-rail-settings-btn" id="dashRailSettings"
+                type="button" aria-haspopup="menu" aria-expanded="false"
+                aria-label="Session list settings">
+          <svg class="acp-rail-settings-icon" viewBox="0 0 16 16"
+               aria-hidden="true" focusable="false">
+            <path d="M2 4.5h4.2M10.8 4.5h3.2M2 11.5h3.2M9.8 11.5h4.2"
+                  stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                  fill="none"/>
+            <circle cx="8.5" cy="4.5" r="2" stroke="currentColor"
+                    stroke-width="1.5" fill="none"/>
+            <circle cx="7.5" cy="11.5" r="2" stroke="currentColor"
+                    stroke-width="1.5" fill="none"/>
+          </svg>
+        </button>
+        <div class="acp-rail-menu acp-rail-settings" id="dashRailSettingsMenu"
+             role="menu" aria-label="Session list settings" hidden></div>
       </div>
+    </div>
+    <aside class="acp-rail" id="dashRail" aria-label="Workspaces and sessions">
       <div class="acp-rail-status" id="dashRailStatus" role="status" aria-live="polite"></div>
       <div class="acp-rail-groups" id="dashRailGroups" aria-busy="true">
         <div class="skeleton-card"></div>
@@ -712,7 +724,17 @@ function dashStatusBucketKey(session){
 
 var DASH_RAIL_API = '/api/dashboard/sessions';
 var DASH_RAIL_GROUP_SIZE = 10;
+// Status/Date mode's own default reveal count before "Show N more" --
+// unrelated to Project mode's per-workspace preload below, kept as its own
+// constant so shrinking the preload (QA follow-up) does not also shrink
+// those two unrelated flat lists' default page.
 var DASH_RAIL_SESSION_SIZE = 10;
+// Project mode's per-workspace page size, both for the group page's own
+// preload and for "More in <workspace>"'s follow-up pages -- deliberately
+// small since most workspaces are no longer preloaded at all (server-side
+// lazy skip, see _acp_listing's docstring) and 5 is enough to show a
+// workspace is alive without paying for its whole history up front.
+var DASH_RAIL_PROJECT_SESSION_SIZE = 5;
 var DASH_RAIL_FLAT_SIZE = 30;
 
 function dashRailUrl(params){
@@ -850,7 +872,7 @@ function loadGroupPage(page){
   }
   dashRailFetch({
     group_page: page, group_size: DASH_RAIL_GROUP_SIZE,
-    session_page: 1, session_size: DASH_RAIL_SESSION_SIZE,
+    session_page: 1, session_size: DASH_RAIL_PROJECT_SESSION_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
     project_sort: dashRailProjectSort,
@@ -907,7 +929,7 @@ function loadGroupSessions(group){
   if (dashRailBusy) return;
   dashRailBusy = true;
   var next = (group.session_page || 0) + 1;
-  dashRailFetch({cwd: group.cwd, session_page: next, session_size: DASH_RAIL_SESSION_SIZE})
+  dashRailFetch({cwd: group.cwd, session_page: next, session_size: DASH_RAIL_PROJECT_SESSION_SIZE})
     .then(function(data){
       dashRailBusy = false;
       var incoming = (data.groups || [])[0];
@@ -1540,7 +1562,7 @@ function dashRailRefresh(){
   if (dashRailBusy) return;
   dashRailFetch({
     group_page: 1, group_size: DASH_RAIL_GROUP_SIZE * Math.max(1, dashRailGroupPage),
-    session_page: 1, session_size: DASH_RAIL_SESSION_SIZE,
+    session_page: 1, session_size: DASH_RAIL_PROJECT_SESSION_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
   }).then(function(data){
