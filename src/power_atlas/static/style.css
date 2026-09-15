@@ -96,17 +96,56 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 
 /* Cards grid */
 .panels-container { display: flex; flex: 1; min-height: 0; overflow: hidden; }
-.left-panel { width: 280px; min-width: 240px; max-width: 340px; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; }
+/* Widths are custom properties now, not literal min/max-width (panel resize,
+   dashboard/ACP-merge QA follow-up): the JS below sets `--dash-left-w`/
+   `--dash-center-w` on the root element, clamped to the same [240,340] /
+   window-derived ranges a drag goes through, and these two `var(...)`
+   fallbacks are what the page looks like before that script runs at all --
+   280px and 50% are exactly today's pre-resize layout (fixed 280px rail,
+   the rest split evenly), so a page that never runs JS renders unchanged.
+   `.right-panel` keeps its bare `flex: 1` below and gets no variable of its
+   own -- it *is* "whatever the other two did not claim". */
+.left-panel { flex: 0 0 var(--dash-left-w, 280px); min-width: 0; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
 .left-panel::-webkit-scrollbar { width: 6px; }
 .left-panel::-webkit-scrollbar-track { background: transparent; }
 .left-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.center-panel { flex: 1; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
+.center-panel { flex: 0 0 var(--dash-center-w, 50%); min-width: 0; overflow-y: auto; padding: 16px 16px 80px; border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
 .center-panel::-webkit-scrollbar { width: 6px; }
 .center-panel::-webkit-scrollbar-track { background: transparent; }
 .center-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-.right-panel { flex: 1; overflow-y: auto; padding: 16px 16px 80px; display: flex; flex-direction: column; gap: 12px; }
+.right-panel { flex: 1; min-width: 0; overflow-y: auto; padding: 16px 16px 80px; display: flex; flex-direction: column; gap: 12px; }
+/* Same wasted-space fix as #workspaces-panel (rail QA follow-up), but this
+   panel's own padding-bottom cannot just drop to 16px the way that one
+   did: unlike the workspaces list, whose actual scroller is a descendant
+   (.acp-rail-groups) that can carry its own scroll-only clearance, this
+   panel's #actionBar clearance protects .acp-composer -- a flex-shrink:0
+   element sitting in the panel's own normal flow, not inside anything
+   that scrolls. Its resting position is however far the panel's own
+   padding-bottom pushes it up from the panel's bottom edge, full stop, so
+   that padding is the only place this clearance can live. Conditional on
+   :has() instead: 16px normally (matching the other two panels' non-
+   bottom sides), stepping back up only while #actionBar is actually
+   showing -- the one situation (workspaces selected while a session's
+   composer is visible) the clearance exists for in the first place. */
+#sessions-panel { padding-bottom: 16px; }
+body:has(.action-bar.visible) #sessions-panel { padding-bottom: 80px; }
 .right-panel::-webkit-scrollbar { width: 6px; }
 .right-panel::-webkit-scrollbar-track { background: transparent; }
+/* The two drag handles between the three panels. Same straddle-the-border
+   trick as /acp's own `.acp-rail-resize`: a 7px grab area centred on the
+   1px `border-right` the panel beside it already draws, so the boundary
+   does not visibly move when the handle appears. Unlike that page's handle,
+   these are not gated behind a `min-width: 768px` breakpoint -- this page
+   has no narrower single-pane layout to protect; it is always three
+   columns. */
+.dash-panel-resize { flex: 0 0 7px; margin: 0 -3px 0 -4px; position: relative; z-index: 2; cursor: col-resize; background: transparent; }
+.dash-panel-resize:hover, .dash-panel-resize:focus-visible { background: var(--accent); opacity: 0.5; }
+.dash-panel-resize:focus-visible { outline: none; }
+/* While dragging, the pointer is outside the 7px handle more often than
+   in it, so the cursor and the selection guard go on the document rather
+   than on the element under it -- without this, a fast drag across the
+   workspaces list or the transcript selects the text it crosses. */
+body.dash-panel-resizing { cursor: col-resize; user-select: none; }
 .right-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
 /* Load more button */
@@ -189,9 +228,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
    already owns the hover-reveal (see that class's own rule), so the button
    must start at full opacity or the two multiply to invisible. */
 .acp-rail-menu-wrap .pin-btn { opacity: 1; }
-.acp-rail-group-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.card-pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: all 0.1s; }
-.card-pin-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+/* Overlaid on the group-head row rather than kept in flex flow (rail QA
+   follow-up), the same fix already applied to session rows' own menu-wrap:
+   a normal flex sibling reserved its own width whether or not anything in
+   it was visible, permanently narrowing the title/count for buttons most
+   of the time nobody was pointing at. `.acp-rail-group-head`'s existing
+   `position: sticky` is this overlay's anchor -- any position other than
+   static establishes a containing block, sticky included.
+   No shared pill background/padding here unlike `.acp-rail-menu-wrap`
+   below -- each button in this group (.card-terminal-btn/.card-settings-
+   btn/.card-pin-btn) already draws its own border and background, and the
+   buttons hide individually rather than as one unit (the pinned exception
+   needs that), so a wrapper-level background would keep rendering a bare
+   box behind whichever buttons were currently invisible. */
+.acp-rail-group-actions { display: flex; align-items: center; gap: 4px; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 1; }
+/* No :hover rule here on purpose ("pin button: no change when hovered",
+   rail QA follow-up) -- folder/terminal/provider/settings still fill with
+   the accent color under a direct hover (.card-terminal-btn/.card-settings-
+   btn below), but the pin button's own look is meant to read purely from
+   whether the workspace is pinned, not from where the pointer happens to
+   be sitting. */
+.card-pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: opacity 0.1s; }
 .card-pin-btn.pinned { color: var(--accent); border-color: var(--accent); }
 .pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; opacity: 0; transition: all 0.1s; color: var(--text-muted); }
 .session-row:hover .pin-btn { opacity: 0.5; }
@@ -1382,6 +1439,37 @@ body:has(> .acp-shell) { height: 100dvh; }
    filter box and the show-more stay reachable however long the list gets. */
 .acp-rail-groups { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .acp-rail-more { flex-shrink: 0; }
+/* Dashboard-only (rail QA follow-up), scoped via #workspaces-panel rather
+   than changed on the bare classes above -- /acp shares both classes and
+   was not asked for either change.
+   Tighter gap: unpinned project groups now default to collapsed (see
+   dashRailIsCollapsed), so most rows in the list are a single header line,
+   and 10px between them read as far more margin than the same 10px did
+   between fully-expanded groups.
+   First attempt at "More workspaces" made the *button* flex:1, absorbing
+   whatever room a short group list left -- wrong direction, twice over:
+   the list should get that room (it is the actual content this panel
+   exists to show), and the button itself is not meant to change size at
+   all, bigger or smaller -- it stays exactly the plain .acp-btn it always
+   was. flex:1 stays on .acp-rail-groups (unchanged from the base rule);
+   .acp-rail-more gets no override here beyond the base rule's own
+   flex-shrink: 0.
+   The real source of "dead space at the bottom" the button-grows-to-fill
+   attempt was papering over: .center-panel's own padding-bottom (its base
+   rule above, 80px, shared with the other two panels as clearance for
+   #actionBar -- a `position: fixed; bottom: 0` bar every panel needs to
+   scroll clear of) is spent unconditionally on this panel, because
+   .acp-rail's only child that actually scrolls is .acp-rail-groups, not
+   .center-panel itself -- .acp-rail fits the height it is given via
+   flex: 1 and min-height: 0, so the outer padding never protects
+   anything here, it just shrinks that height by 80px before the rail
+   ever sees it. Cut back to the same 16px the other two sides already
+   use, and give the *scrolling* element (.acp-rail-groups) its own
+   bottom padding instead -- clearance that is only ever spent when a
+   viewer actually scrolls the list that far, not a permanent tax on the
+   whole panel. */
+#workspaces-panel { padding-bottom: 16px; }
+#workspaces-panel .acp-rail-groups { gap: 4px; padding-bottom: 56px; }
 .acp-rail-empty { font-size: 12px; line-height: 1.5; color: var(--text-dim); padding: 6px 2px; }
 .acp-rail-group { display: flex; flex-direction: column; gap: 2px; }
 /* Sticky, so the group you are reading stays named while its rows scroll past.
@@ -1392,6 +1480,14 @@ body:has(> .acp-shell) { height: 100dvh; }
 /* The whole header is the collapse control rather than the chevron alone. A
    10 px glyph is a 10 px target, and this rail is used with a thumb. */
 .acp-rail-group-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: inherit; font-family: inherit; font-size: 12px; text-align: left; padding: 3px 4px; cursor: pointer; }
+/* Room for the pin icon that stays visible without a hover (rail QA
+   follow-up: "pinned projects keep the button visible so we see it's
+   pinned"). Conditional on :has() rather than a flat padding on every
+   toggle -- an unpinned group's count can use the full row, since the
+   only thing that would overlap it there is the hover-revealed actions
+   overlay, and that overlap is already how the equivalent session-row
+   title/timestamp behave under their own hover reveal. */
+.acp-rail-group-head:has(.card-pin-btn.pinned) .acp-rail-group-toggle { padding-right: 32px; }
 .acp-rail-group-toggle:hover { background: var(--surface-hover); }
 .acp-rail-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* Trails the label rather than leading it, so a heading starts at the rail's
@@ -1542,6 +1638,28 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-rail-item:hover .acp-rail-menu-wrap,
   .acp-rail-item:focus-within .acp-rail-menu-wrap,
   .acp-rail-menu-wrap:has(> [aria-expanded="true"]) { opacity: 1; }
+
+  /* Workspace-group quick actions (rail QA follow-up): same reasoning as
+     the session row's own menu-wrap just above -- a viewer whose primary
+     input cannot hover must still be able to reach these, so the whole
+     block stays inert outside this query. Per-button rather than
+     per-wrapper opacity, unlike .acp-rail-menu-wrap: a pinned workspace's
+     pin button has to stay visible with no hover at all (that is the
+     point of pinning something -- seeing it is pinned at a glance), and a
+     wrapper-level opacity switch cannot make one child disagree with it --
+     an opacity:0 ancestor dims everything under it regardless of what a
+     descendant's own opacity says. */
+  .acp-rail-group-head .card-terminal-btn,
+  .acp-rail-group-head .card-settings-btn,
+  .acp-rail-group-head .card-pin-btn { opacity: 0; }
+  .acp-rail-group-head:hover .card-terminal-btn,
+  .acp-rail-group-head:hover .card-settings-btn,
+  .acp-rail-group-head:hover .card-pin-btn,
+  .acp-rail-group-actions:focus-within .card-terminal-btn,
+  .acp-rail-group-actions:focus-within .card-settings-btn,
+  .acp-rail-group-actions:focus-within .card-pin-btn { opacity: 1; }
+  /* The exception: pinned always wins regardless of hover. */
+  .card-pin-btn.pinned { opacity: 1; }
 }
 
 /* 40 px is a touch target and stays one wherever a thumb is the input. Where a

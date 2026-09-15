@@ -84,11 +84,22 @@
   <div class="provider-filter" id="providerFilter" role="tablist"></div>
 </div>
 
-<main class="panels-container">
+<main class="panels-container" id="panelsContainer">
   <aside class="left-panel" id="left-panel">
     <div class="section-label"><span>Launchers</span> <button class="launcher-add-btn" onclick="openNewLauncher()">+</button></div>
     <div id="launcher-tiles" class="launcher-grid" hx-get="/partials/launchers" hx-trigger="load" hx-swap="innerHTML"></div>
   </aside>
+  <!-- Three-way panel resize (Launchers | Workspaces | Sessions), added
+       after the panels themselves -- see the "panel widths" script section
+       below for the drag/keyboard/persistence mechanics, which mirror
+       /acp's own `.acp-rail-resize` handle. Two independent handles rather
+       than one: Launchers keeps a narrow width range around its original
+       fixed 280px, Workspaces claims a share of whatever is left, and
+       Sessions/Transcript is never given a width of its own -- `.right-
+       panel`'s plain `flex: 1` *is* "remaining". -->
+  <div class="dash-panel-resize" id="dashLeftResize" role="separator"
+       aria-orientation="vertical" aria-label="Launchers panel width"
+       tabindex="0" aria-valuenow="280" aria-valuemin="240" aria-valuemax="340"></div>
   <!-- The workspaces rail (dashboard/ACP-merge Phase 4): a client-side port
        of /acp's own `.acp-rail` (see that file's rail section, roughly
        lines 2542-4501), fed by /api/dashboard/sessions instead of
@@ -145,6 +156,9 @@
       <button class="acp-btn acp-rail-more" id="dashRailMore" type="button" hidden></button>
     </aside>
   </div>
+  <div class="dash-panel-resize" id="dashCenterResize" role="separator"
+       aria-orientation="vertical" aria-label="Workspaces panel width"
+       tabindex="0" aria-valuenow="0" aria-valuemin="260" aria-valuemax="0"></div>
   <!-- The transcript panel (dashboard/ACP-merge Phase 2): replaces what was a
        second, flat "all sessions" list with its own status filter. Sessions
        are still found and clicked from the Workspaces rail's session rows
@@ -294,6 +308,162 @@ function _buildWorkspaceQs(){var qs='provider='+encodeURIComponent(window._activ
 var _lastClicked=new WeakMap();
 function handleItemClick(item,event,selector){var container=item.parentElement;if(!container)return;if(event.shiftKey){var last=_lastClicked.get(container);if(last&&last!==item&&container.contains(last)){var items=Array.from(container.querySelectorAll(selector));var idxA=items.indexOf(last);var idxB=items.indexOf(item);if(idxA!==-1&&idxB!==-1){var start=Math.min(idxA,idxB);var end=Math.max(idxA,idxB);for(var i=start;i<=end;i++){items[i].classList.add('selected')}}updateActionBar();return}}_lastClicked.set(container,item);item.classList.toggle('selected');updateActionBar()}
 function updateActionBar(){var workspaceCount=document.querySelectorAll('.acp-rail-group.selected').length;document.getElementById('selCount').textContent=workspaceCount;document.getElementById('actionBar').classList.toggle('visible',workspaceCount>0);updateLauncherBadges()}
+
+// ---- panel widths (Launchers | Workspaces | Sessions, panel resize) -----
+//
+// Two independent drag handles rather than one shared budget: Launchers
+// keeps the same [240,340] range and 280px default it always rendered at,
+// now just adjustable within it instead of fixed; Workspaces claims a share
+// of whatever is left after Launchers; Sessions/Transcript is never given a
+// tracked width at all -- `.right-panel`'s plain `flex: 1` in style.css
+// already means "whatever the other two did not claim", so there is nothing
+// to compute or persist for it. Mirrors /acp's own `.acp-rail-resize`
+// (pointer drag with capture, arrow-key stepping, localStorage persistence,
+// reclamp on window resize) under a `pa_dash_` prefix -- the two rails
+// already use that prefix for their own independent preferences, and these
+// widths are a third, unrelated one.
+//
+// `dashRailStored`/`dashRailStore` (defined further down, but a `function`
+// declaration is hoisted for the whole script regardless of where it sits
+// in the file -- the rail's own boot call below already relies on that same
+// hoisting for functions defined later still) are reused rather than
+// duplicated: they are plain localStorage wrappers, not rail-specific
+// despite the name.
+var DASH_LEFT_W_KEY = 'pa_dash_left_w';
+var DASH_CENTER_W_KEY = 'pa_dash_center_w';
+var DASH_LEFT_W_MIN = 240, DASH_LEFT_W_MAX = 340, DASH_LEFT_W_DEFAULT = 280;
+// No default constant for the center pane -- its default is "half of
+// whatever is left", computed once at boot from the container's actual
+// width rather than hard-coded, so it is still correct on a window this
+// page has never rendered at before.
+var DASH_CENTER_W_MIN = 260;
+// The transcript pane's own floor. Enforced as a ceiling on the *center*
+// handle (there is nothing to clamp on `.right-panel` itself, which has no
+// tracked width) -- dragging Workspaces wider stops leaving Sessions this
+// much room rather than crushing it to nothing.
+var DASH_RIGHT_W_MIN = 280;
+var DASH_PANEL_HANDLE_W = 7;
+
+var dashPanelsEl = document.getElementById('panelsContainer');
+var dashLeftResize = document.getElementById('dashLeftResize');
+var dashCenterResize = document.getElementById('dashCenterResize');
+
+function dashPanelsWidth(){
+  var box = dashPanelsEl && dashPanelsEl.getBoundingClientRect ? dashPanelsEl.getBoundingClientRect() : null;
+  return (box && box.width) || (typeof window !== 'undefined' && window.innerWidth) || 0;
+}
+function dashLeftWidthNow(){ return Number(dashLeftResize.getAttribute('aria-valuenow')) || DASH_LEFT_W_DEFAULT; }
+function dashCenterWidthNow(){ return Number(dashCenterResize.getAttribute('aria-valuenow')) || DASH_CENTER_W_MIN; }
+
+// Derived at every use rather than stored beside the width, exactly like
+// /acp's own `railWidthCeiling` -- a width saved on one monitor and
+// restored on a narrower one must still fit, which only works if the ceiling
+// is recomputed on read and on resize, not only while dragging.
+function dashCenterWidthCeiling(){
+  var total = dashPanelsWidth();
+  if (!total) return DASH_CENTER_W_MIN;
+  var remaining = total - dashLeftWidthNow() - (DASH_PANEL_HANDLE_W * 2);
+  return Math.max(DASH_CENTER_W_MIN, remaining - DASH_RIGHT_W_MIN);
+}
+function dashCenterDefaultWidth(){
+  var total = dashPanelsWidth();
+  if (!total) return DASH_CENTER_W_MIN;
+  var remaining = total - dashLeftWidthNow() - (DASH_PANEL_HANDLE_W * 2);
+  return Math.max(DASH_CENTER_W_MIN, Math.floor(remaining / 2));
+}
+
+function dashSetLeftWidth(px, persist){
+  var w = Math.round(Number(px));
+  if (w !== w) return; // NaN guard: a mangled stored value leaves the width alone rather than resolving to no width at all.
+  w = Math.max(DASH_LEFT_W_MIN, Math.min(DASH_LEFT_W_MAX, w));
+  var root = document.documentElement && document.documentElement.style;
+  if (root && root.setProperty) root.setProperty('--dash-left-w', w + 'px');
+  dashLeftResize.setAttribute('aria-valuenow', String(w));
+  if (persist) dashRailStore(DASH_LEFT_W_KEY, String(w));
+  // The center handle's ceiling depends on the left width -- a left drag
+  // that eats into the center pane's room must be able to push center back
+  // into bounds immediately, the same as a window resize does below.
+  dashSetCenterWidth(dashCenterWidthNow(), false);
+}
+function dashSetCenterWidth(px, persist){
+  var w = Math.round(Number(px));
+  if (w !== w) return;
+  w = Math.max(DASH_CENTER_W_MIN, Math.min(dashCenterWidthCeiling(), w));
+  var root = document.documentElement && document.documentElement.style;
+  if (root && root.setProperty) root.setProperty('--dash-center-w', w + 'px');
+  dashCenterResize.setAttribute('aria-valuenow', String(w));
+  dashCenterResize.setAttribute('aria-valuemax', String(dashCenterWidthCeiling()));
+  if (persist) dashRailStore(DASH_CENTER_W_KEY, String(w));
+}
+
+function dashPanelDragClass(on){
+  var body = document.body;
+  if (!body) return;
+  var base = String(body.className || '').replace(/\s*dash-panel-resizing/g, '');
+  body.className = on ? (base + ' dash-panel-resizing') : base;
+}
+// One wiring function for both handles -- they differ only in which getter/
+// setter/bounds they close over, not in drag mechanics.
+function dashWirePanelResize(handle, getWidth, setWidth, min, maxFn){
+  var dragFrom = 0, dragWidth = 0, dragging = false;
+  handle.addEventListener('pointerdown', function(ev){
+    dragging = true;
+    dragFrom = ev.clientX || 0;
+    dragWidth = getWidth();
+    // Capture, so the drag keeps tracking once the pointer outruns a seven
+    // pixel handle -- which it does on every drag that is not slow.
+    if (handle.setPointerCapture && ev.pointerId !== undefined) handle.setPointerCapture(ev.pointerId);
+    dashPanelDragClass(true);
+    if (ev.preventDefault) ev.preventDefault();
+  });
+  handle.addEventListener('pointermove', function(ev){
+    if (!dragging) return;
+    setWidth(dragWidth + ((ev.clientX || 0) - dragFrom), false);
+  });
+  function dragEnd(ev){
+    if (!dragging) return;
+    dragging = false;
+    if (handle.releasePointerCapture && ev && ev.pointerId !== undefined) {
+      try { handle.releasePointerCapture(ev.pointerId); } catch (e) { /* gone */ }
+    }
+    dashPanelDragClass(false);
+    // Written once, at the end -- a synchronous storage write on every
+    // pointermove would fire at 60Hz for a value only meaningful once the
+    // user stops moving.
+    setWidth(getWidth(), true);
+  }
+  handle.addEventListener('pointerup', dragEnd);
+  handle.addEventListener('pointercancel', dragEnd);
+  handle.addEventListener('keydown', function(ev){
+    // The whole reason the handle is focusable: a seven pixel target is not
+    // reachable by everyone, and a width only a drag can set is a setting
+    // some readers simply do not have.
+    var step = ev.shiftKey ? 64 : 16;
+    var key = ev.key;
+    if (key === 'ArrowLeft') setWidth(getWidth() - step, true);
+    else if (key === 'ArrowRight') setWidth(getWidth() + step, true);
+    else if (key === 'Home') setWidth(min, true);
+    else if (key === 'End') setWidth(maxFn(), true);
+    else return;
+    if (ev.preventDefault) ev.preventDefault();
+  });
+}
+dashWirePanelResize(dashLeftResize, dashLeftWidthNow, dashSetLeftWidth, DASH_LEFT_W_MIN, function(){ return DASH_LEFT_W_MAX; });
+dashWirePanelResize(dashCenterResize, dashCenterWidthNow, dashSetCenterWidth, DASH_CENTER_W_MIN, dashCenterWidthCeiling);
+
+// Restored through the same clamps a drag goes through: a stored width is
+// whatever was true on another monitor. Center has no stored-or-default
+// fallback constant -- an absent stored value computes today's true half-
+// of-remaining rather than some other width guessed in advance.
+(function dashPanelsBoot(){
+  dashSetLeftWidth(Number(dashRailStored(DASH_LEFT_W_KEY)) || DASH_LEFT_W_DEFAULT, false);
+  var storedCenter = Number(dashRailStored(DASH_CENTER_W_KEY));
+  dashSetCenterWidth(storedCenter || dashCenterDefaultWidth(), false);
+})();
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('resize', function(){ dashSetLeftWidth(dashLeftWidthNow(), false); });
+}
+
 // transcript-renderer.js (shared with /acp, dashboard/ACP-merge Phase 2) has
 // no IIFE to work around here — this page's scripts are plain top-level
 // script tags, so initTranscriptDom/renderTranscriptHistory/clearTranscript
@@ -643,6 +813,11 @@ function pinSession(btn){var row=btn.closest('[data-sid]');var pinned=btn.classL
 function pinWorkspace(btn){var group=btn.closest('[data-cwd]');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-folder':'/api/pin-folder';btn.classList.toggle('pinned');showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:group.dataset.cwd})}).then(function(){dashRailRefreshSoon()}).catch(function(){btn.classList.toggle('pinned');showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function openFolder(cwd){fetch('/api/open-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:cwd})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to open folder<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function openTerminal(btn){var group=btn.closest('[data-cwd]');fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:group.dataset.cwd})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to open terminal<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
+// The workspace row's per-provider quick launch (rail QA follow-up): the
+// same one-click "start fresh here" /api/new-session already used by the
+// launcher tiles, just aimed at a specific workspace + provider instead of
+// whatever tiles + selected-workspace state the left panel is carrying.
+function newSessionInWorkspace(btn,provider){var group=btn.closest('[data-cwd]');fetch('/api/new-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:group.dataset.cwd,provider:provider})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to launch session<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){profileBtn.textContent='\u2699\ufe0f '+active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
@@ -656,7 +831,12 @@ document.addEventListener('DOMContentLoaded',function(){
 function _escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function debounce(fn,delay){var timer;return function(){var ctx=this,args=arguments;clearTimeout(timer);timer=setTimeout(function(){fn.apply(ctx,args)},delay)}}
 var _providerColors=Object.create(null);
-function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){(providers||[]).forEach(function(p){if(p.color)_providerColors[p.name]=p.color});var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
+// Kept beyond initProviderFilter's own use (the provider tabs, hidden below
+// 2 providers) because the workspace rail's per-row provider quick-launch
+// buttons need the same list regardless of tab count -- a single-provider
+// machine still benefits from one launch icon beside the terminal one.
+window._availableProviders=[];
+function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){window._availableProviders=providers||[];(providers||[]).forEach(function(p){if(p.color)_providerColors[p.name]=p.color});var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
 function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});dashRailReload()}
 // ---- The workspaces rail (dashboard/ACP-merge Phase 4) --------------------
 //
@@ -826,6 +1006,15 @@ var dashRailPinned = [];
 var dashRailBusy = false;
 var dashRailRevealed = Object.create(null);
 var dashRailCollapsed = Object.create(null);
+// A key present here always means an explicit user toggle -- absence means
+// "never touched", which is what lets a per-group default (unpinned project
+// groups start folded, rail QA follow-up) apply without that default
+// clobbering a user's own click on a later render (dashRenderRail rebuilds
+// every node from scratch, so the DOM's own expanded/collapsed state cannot
+// be read back from itself).
+function dashRailIsCollapsed(key, defaultCollapsed){
+  return Object.prototype.hasOwnProperty.call(dashRailCollapsed, key) ? dashRailCollapsed[key] : !!defaultCollapsed;
+}
 
 function dashRailMergeSessions(group, rows){
   var seen = Object.create(null);
@@ -1150,7 +1339,12 @@ function dashRailHeadNode(key, label, countText, opts){
   toggle.type = 'button';
   toggle.className = 'acp-rail-group-toggle';
   toggle.dataset.head = key;
-  var expanded = !dashRailCollapsed[key];
+  // `opts.defaultCollapsed` lets one caller (an unpinned project group) start
+  // folded without changing the others (status/date buckets, the Pinned
+  // section) -- a key present in dashRailCollapsed always wins, so a user's
+  // own toggle is never overridden by this default on the next render.
+  var collapsed = dashRailIsCollapsed(key, opts && opts.defaultCollapsed);
+  var expanded = !collapsed;
   toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
   var name = document.createElement('span');
   name.className = 'acp-rail-group-name';
@@ -1167,7 +1361,7 @@ function dashRailHeadNode(key, label, countText, opts){
   count.textContent = countText;
   toggle.appendChild(count);
   toggle.addEventListener('click', function(){
-    dashRailCollapsed[key] = !dashRailCollapsed[key];
+    dashRailCollapsed[key] = !collapsed;
     dashRailFocus = {head: key};
     dashRenderRail();
   });
@@ -1188,7 +1382,8 @@ function dashRailGroupNode(group){
     badge.textContent = 'MISSING';
     badge.title = 'This folder no longer exists on disk.';
   }
-  var head = dashRailHeadNode('g:' + group.cwd, group.name || group.cwd, countText, {title: group.cwd, badge: badge});
+  var head = dashRailHeadNode('g:' + group.cwd, group.name || group.cwd, countText,
+    {title: group.cwd, badge: badge, defaultCollapsed: !group.pinned});
 
   // Selection checkbox + row actions live beside the toggle, as siblings --
   // the toggle above is itself a <button>, so these cannot nest inside it.
@@ -1219,6 +1414,25 @@ function dashRailGroupNode(group){
   termBtn.textContent = '>_';
   termBtn.addEventListener('click', function(e){ e.stopPropagation(); openTerminal(termBtn); });
   actions.appendChild(termBtn);
+  // One quick-launch icon per available provider (rail QA follow-up) --
+  // the same set the provider tabs above the rail are built from, so a
+  // provider hidden there (disabled, or the machine only has one) is
+  // consistently hidden here too rather than the two lists drifting.
+  (window._availableProviders || []).forEach(function(p){
+    var provBtn = document.createElement('button');
+    provBtn.type = 'button';
+    provBtn.className = 'card-terminal-btn card-provider-btn';
+    provBtn.setAttribute('aria-label', 'New ' + (p.display || p.name) + ' session');
+    provBtn.title = 'New ' + (p.display || p.name) + ' session';
+    var provIcon = document.createElement('img');
+    provIcon.className = 'session-provider-icon';
+    provIcon.src = '/api/launcher-icon/provider--' + encodeURIComponent(p.name);
+    provIcon.alt = '';
+    provIcon.onerror = function(){ this.remove(); };
+    provBtn.appendChild(provIcon);
+    provBtn.addEventListener('click', function(e){ e.stopPropagation(); newSessionInWorkspace(provBtn, p.name); });
+    actions.appendChild(provBtn);
+  });
   var settingsBtn = document.createElement('button');
   settingsBtn.type = 'button';
   settingsBtn.className = 'card-settings-btn';
@@ -1238,7 +1452,7 @@ function dashRailGroupNode(group){
   head.appendChild(actions);
 
   wrap.appendChild(head);
-  if (!dashRailCollapsed['g:' + group.cwd]) {
+  if (!dashRailIsCollapsed('g:' + group.cwd, !group.pinned)) {
     matched.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, false, group)); });
     if (group.has_more) {
       var more = document.createElement('button');
@@ -1347,10 +1561,18 @@ function renderRailProject(){
   var any = shown > 0;
   dashRailGroups.forEach(function(group, idx){
     var matched = group.sessions.filter(function(s){ return dashRailMatches(group, s); });
+    // A lazy group (server-side lazy skip, _acp_listing) starts with zero
+    // sessions loaded, so `matched` is always empty for it regardless of
+    // what the filter text is -- there is nothing in `group.sessions` to
+    // check `dashRailMatches` against. Without this, typing a workspace's
+    // own name would hide the workspace that name belongs to, because the
+    // only thing a session-scoped match could ever find here is nothing.
+    var nameMatchesFilter = !!dashRailFilter &&
+      ((group.name || '') + ' ' + (group.cwd || '')).toLowerCase().indexOf(dashRailFilter) !== -1;
     // A workspace the server still says has sessions keeps its header even
     // when a filter (or a deletion) leaves none of them loaded -- otherwise
     // the only control that could reach its unfetched pages disappears too.
-    if (!matched.length && (dashRailFilter || !group.total)) return;
+    if (!matched.length && !nameMatchesFilter && (dashRailFilter || !group.total)) return;
     if (shown && idx === 0) {
       var sep = document.createElement('div');
       sep.className = 'pinned-separator';
