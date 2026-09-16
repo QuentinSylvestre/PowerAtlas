@@ -1,7 +1,7 @@
 # ACP v3 Follow-up Features
 
 > **Date**: 2026-09-11
-> **Status**: Draft
+> **Status**: In Progress — Phase 1 code/tests complete, blocked on user decisions (2 escalated review findings, 1 user-approved restart) before its manual-verification criterion can close; Phase 2 complete (confirmed-working), Phase 3 gate open
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Mode-switcher UI, v3 self-orphan-lock suppression fix, and a research spike (with contingent implementation) on the 3 unreachable steering-type slash commands.
 > **Estimated effort**: 2-4 days (higher if either live-probe spike needs iteration or turns up a negative finding requiring a design pivot)
@@ -201,13 +201,24 @@ Negligible, one-time, non-recurring — not literally "None" (review finding, Re
 5. `memory/MEMORY.md`: append a new `**Update (<implementation date>, 260911_ACP_V3_FOLLOWUP_FEATURES)**:` paragraph to the `_publish_live` entry (heading `### acp.py and presence.py may not import each other — wiring goes through web.py`, `memory/MEMORY.md:245`) immediately after its current last line (`memory/MEMORY.md:251`, the `2026-09-12` cutover update) and before the blank line at `:252` that separates it from the next entry — confirmed via this session's own doc-impact grep as the exact current end of the entry.
 
 **Exit criteria**:
-- [ ] `_Supervisor._publish_live()` passes `self.agent_pid()`, not a hardcoded sentinel
-- [ ] `presence._scan()`'s D32 guard checks `provider in _KIRO_PROVIDERS`
-- [ ] `test_supervisor_publish_live_sentinel_pid` rewritten/renamed, covering both the unbound-pid-is-None and bound-pid-is-real cases
-- [ ] `test_presence_does_not_hide_a_v3_agent_orphaned_lock` inverted/renamed to assert suppression now happens
-- [ ] `memory/MEMORY.md`'s `_publish_live` entry gets a new dated Update paragraph
-- [ ] `pytest tests/test_web.py tests/test_data.py --timeout=300` passes
-- [ ] Manual live verification (after a user-approved restart — this touches `acp.py`/`presence.py`, never restart autonomously per `AGENTS.md:5`): trigger a failed `session/load` or an abrupt close on a v3 session, confirm the dashboard's live dot correctly reflects the orphaned lock now being suppressed
+- [x] `_Supervisor._publish_live()` passes `self.agent_pid()`, not a hardcoded sentinel
+- [x] `presence._scan()`'s D32 guard checks `provider in _KIRO_PROVIDERS`
+- [x] `test_supervisor_publish_live_sentinel_pid` rewritten/renamed, covering both the unbound-pid-is-None and bound-pid-is-real cases
+- [x] `test_presence_does_not_hide_a_v3_agent_orphaned_lock` inverted/renamed to assert suppression now happens
+- [x] `memory/MEMORY.md`'s `_publish_live` entry gets a new dated Update paragraph
+- [x] `pytest tests/test_web.py tests/test_data.py --timeout=300` passes
+- [x] `plans/ROADMAP.md:45`'s D32 bullet closed out per §8 Documentation Updates (added as an exit criterion during Step 5 review — the original phase text omitted an explicit line item for this doc-table row)
+- [ ] Manual live verification (after a user-approved restart — this touches `acp.py`/`presence.py`, never restart autonomously per `AGENTS.md:5`): trigger a failed `session/load` or an abrupt close on a v3 session, confirm the dashboard's live dot correctly reflects the orphaned lock now being suppressed — **blocked on user-approved restart, see Review Log**
+
+Implementation (2026-09-16, code: pending)
+
+Closed D32's v3 self-orphan-lock suppression gap by fixing both halves of the mechanism together, per Phase 1 of `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`. In `src/power_atlas/acp.py`, `_Supervisor._publish_live()` (near line 4868, confirmed by direct read) now calls `hook(frozenset(self.sessions), self.agent_pid())` instead of hardcoding the `pid=0` sentinel; its docstring was rewritten to drop the stale F11/hand-off language and instead note that publishing the real pid closes D32 for v3, since post-cutover there is exactly one supervisor and one hook so the pid unambiguously names the current agent. In `src/power_atlas/presence.py`, `_scan()`'s D32 guard (near line 760, confirmed by direct read) now checks `provider in _KIRO_PROVIDERS` instead of `provider == "kiro-cli"` alone, matching the other three sidecar-reconciliation checks in the same function; the long explanatory comment above it (formerly describing why widening would be structurally unsafe, and still referencing the pre-cutover `_SupervisorV3` class) was rewritten to describe the current closed state and cross-reference `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 by name, including a pointer to the one earlier attempt (`plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md` Phase 1 cycle 2) that widened the same guard in isolation, found inert, and was reverted.
+
+Test coverage was updated to match. In `tests/test_web.py`, `test_supervisor_publish_live_sentinel_pid` was renamed to `test_supervisor_publish_live_uses_the_real_agent_pid` and rewritten to construct `_Supervisor()` via its real `__init__` (rather than `__new__`, which skipped it), asserting `_publish_live()` emits `pid=None` while `_proc` is unbound and then, after binding `types.SimpleNamespace(pid=4321)` to `sup._proc`, asserting a second call emits the real pid `4321`. In `tests/test_data.py`, `test_presence_does_not_hide_a_v3_agent_orphaned_lock` was inverted and renamed to `test_presence_hides_a_v3_agent_orphaned_lock`, flipping the final assertion to `is False` and rewriting the docstring to mirror `test_presence_hides_a_lock_our_own_agent_orphaned`'s shape. `memory/MEMORY.md`'s `_publish_live` entry gained a new dated Update paragraph (2026-09-16) appended immediately after the existing 2026-09-12 cutover update.
+
+Verification: `pytest tests/test_web.py tests/test_data.py --timeout=300` passes (1662 passed), and `_check_test_names.py` reports all 9 scanned test files clean. Exit criterion 7 (manual live verification) was deliberately left unticked — it requires a live PowerAtlas restart, forbidden autonomously per `AGENTS.md:5`; see the Review Log entry below for the blocker.
+
+**Auto-fix pass (same date, 1 review cycle per explicit user instruction — see Review Log):** rewrote `plans/ROADMAP.md:45`'s D32 bullet from an open-issue framing to a closure record citing this plan and Phase 1. Refined `_publish_live()`'s docstring to note the published pid is also `None` after `_detach()` clears `_proc` post-crash/post-close, not only before the agent starts. Extended `agent_pid()`'s pre-existing docstring to name its new second consumer (`presence.py`'s D32 guard) and that consumer's different failure stakes (over-suppression risk vs. a merely less-specific message). Re-ran `pytest tests/test_web.py tests/test_data.py --timeout=300`: still 1662 passed.
 
 ### Phase 2: Mode-activation live-probe spike [P:1]
 
@@ -226,10 +237,41 @@ Negligible, one-time, non-recurring — not literally "None" (review finding, Re
 > **Rejected:** Building the mode-switcher UI directly against `modeId` without first confirming activation. — `modeId` is currently *always* hardcoded to `"kiro_default"` in every code path that exists today, so there is zero existing evidence PowerAtlas has ever exercised any other value; shipping a UI atop an unverified field risks a control that silently does nothing. **Use instead:** this spike, gating Phase 3.
 
 **Exit criteria**:
-- [ ] Probe findings recorded (in this plan's §9 Implementation Divergences) for at least `kiro_default` vs `spec`, with a clear verdict: confirmed-working / confirmed-no-observable-difference / inconclusive
-- [ ] `session/load`'s effect (or lack thereof) on an already-created non-default-mode session is recorded
-- [ ] If confirmed-working: the exact literal wire values for all four modes are settled (confirmed to be `spec`/`quick-spec`/`bug-fix`/`plan`, or corrected if the probe surfaces different literal values)
-- [ ] If not confirmed-working: `plans/ROADMAP.md`'s mode-switcher bullet is updated with the negative/inconclusive finding, filed under this plan's Follow-up Work (Deferred) rather than closed as done, and Phase 3 is skipped per its own gate
+- [x] Probe findings recorded (in this plan's §9 Implementation Divergences) for at least `kiro_default` vs `spec`, with a clear verdict: confirmed-working / confirmed-no-observable-difference / inconclusive
+- [x] `session/load`'s effect (or lack thereof) on an already-created non-default-mode session is recorded
+- [x] If confirmed-working: the exact literal wire values for all four modes are settled (confirmed to be `spec`/`quick-spec`/`bug-fix`/`plan`, or corrected if the probe surfaces different literal values)
+- [ ] If not confirmed-working: `plans/ROADMAP.md`'s mode-switcher bullet is updated with the negative/inconclusive finding, filed under this plan's Follow-up Work (Deferred) rather than closed as done, and Phase 3 is skipped per its own gate — **N/A: Phase 2 confirmed-working for all four modes, see §9**
+
+Implementation (2026-09-16, code: none — research spike, no code changes)
+
+Built a standalone, throwaway Python probe speaking newline-delimited JSON-RPC 2.0 directly to a disposable `kiro-cli acp --agent-engine v3` subprocess, copying the exact shapes from a read-only reading of `acp.py` (`ACP_ARGS`, `_build_kas_session_params`, `_request`'s envelope, `initialize`/`session/new`/`session/load`/`session/prompt` params). Never imported `power_atlas.acp` or touched any repo source file; all work happened under a session scratch directory; all subprocess `cwd`s were disposable scratch dirs.
+
+**Finding: `modeId` is a real, working activation mechanism, high confidence.** Confirmed three independent ways for `kiro_default` vs `spec`: the `session/new` response's own `_meta.agentMode` and `modes.currentModeId` fields directly echo the sent value; the on-disk `session.json`'s `agentMode` field matches; and a `_kiro/tools/didChange` notification shows the built-in tool-tag set genuinely differs (`kiro_default`: `read, write, shell, web`; `spec`: `read, shell, web, spec` — `write` dropped, `spec` added), corroborated by the agent's own freeform reply ("I don't write or run code directly at this stage" in spec mode). This refines `plans/ROADMAP.md`'s existing claim that spec mode "only adds a spec tag" — it also removes `write`. `quick-spec`, `bug-fix`, and `plan` all round-tripped cleanly and each reflected its own value in `agentMode`/`currentModeId` (no full chat-turn characterization needed for these three, per Phase 2 step 4's scope).
+
+Full per-mode verdict table:
+
+| Mode | modeId sent | `result._meta.agentMode` | `result.modes.currentModeId` | Verdict |
+|---|---|---|---|---|
+| kiro_default (baseline) | `kiro_default` | `kiro_default` | `kiro_default` | confirmed-working |
+| spec | `spec` | `spec` | `spec` | confirmed-working (full behavioral characterization: tool-tag diff + chat-turn persona difference) |
+| quick-spec | `quick-spec` | `quick-spec` | `quick-spec` | confirmed-working (structural round-trip) |
+| bug-fix | `bug-fix` | `bug-fix` | `bug-fix` | confirmed-working (structural round-trip) |
+| plan | `plan` | `plan` | `plan` | confirmed-working (structural round-trip) |
+| (bonus) invalid `__bogus_mode_zzz__` | `__bogus_mode_zzz__` | `vibe` | `vibe` | no error — silently coerces to `vibe`, not the `kiro_default` default |
+
+**`session/load` effect, empirically settled: none.** Two tests were run. A same-process test (load a `spec` session from the process that created it) was ambiguous by construction — it can't distinguish "kiro-cli ignores `modeId`" from "kiro-cli just returns its in-memory record." A second, fresh-process test closed that gap: created a `spec` session in process A, killed process A entirely (simulating a PowerAtlas restart), spawned a brand-new process B with no prior knowledge of the session, and called `session/load` with PowerAtlas's exact hardcoded `modeId: "kiro_default"` payload. The response and on-disk state both still showed `agentMode: "spec"` — this is the scenario that matches PowerAtlas's real `load_session()` code path (it only wire-calls `session/load` for a session not already in the live supervisor's memory), and it conclusively confirms mode is fixed at creation; `session/load`'s `modeId` parameter has no observable effect on an existing session (kiro-cli 2.21.4).
+
+**Two divergences from the plan's assumptions, relevant to Phase 3's design:**
+1. kiro-cli's actual mode list has **8** values, not the 5 Phase 3 assumed (`kiro_default`, `spec`, `quick-spec`, `bug-fix`, `plan`) — `session/new`'s response also carries `vibe`, `autonomous`, and `semantic_reviewer` in both `modes.availableModes` and `configOptions[id="mode"].options`. Phase 3's backend validation set should be reconciled against this full list (or a live lookup) rather than the plan's original 5-value closed set, or it will reject 3 modes kiro-cli itself considers valid.
+2. `kiro_default` — the value PowerAtlas hardcodes today — is reported by kiro-cli as `source: "global", origin: "user"`, i.e. a user-authored global agent config on this machine, not a kiro-cli builtin (every other mode is `source: "bundled"`). A machine without that global agent configured would have no `kiro_default` mode at all, and combined with the bogus-modeId finding above (invalid values silently fall back to `vibe`, not `kiro_default`), a fresh machine or CI environment could see every PowerAtlas session silently land in `vibe` with no error. Flagged for whoever owns portability/onboarding; out of this spike's own scope to fix.
+
+Total conversational (LLM) turns sent to the live agent: 2 (well under the ~8 budget) — one each for the baseline and spec chat-turn characterization; the other three modes and the load test needed no chat turn since the structural response fields already gave an unambiguous signal.
+
+**Cleanup**: 7 probe `sess_<uuid>` directories were created and all 7 individually verified-present then deleted (baseline, spec, quick-spec, bug-fix, plan, the invalid-mode bonus test, and the fresh-process-load test session). No broader sweep of `~/.kiro/sessions/` was performed, per instruction.
+
+**Gate resolution**: Phase 2 confirmed-working for all four target modes — **Phase 3's gate is open**, confirmed-working branch, subject to the two divergences above informing its design.
+
+### Phase 3: Mode-switcher UI [QA] (gated on Phase 2 confirming the mechanism works)
 
 ### Phase 3: Mode-switcher UI [QA] (gated on Phase 2 confirming the mechanism works)
 
@@ -331,7 +373,13 @@ File scope and design depend on which hypothesis won:
 Confirmed via this session's dedicated doc-impact grep sub-agent (all tracked `*.md` repo-wide excluding `plans/done/`, plus `docs/KNOWLEDGE.md` and `README.md`): no hits for any of the searched terms (`_publish_live`, `_build_kas_session_params`, `modeId`, `agentMode`, `commands_execute`, `contextQuery`, `_kiro/knowledge`, "D32", "mode-switcher", "steering-palette") in `README.md` or `docs/KNOWLEDGE.md` beyond the rows above — confirms all three items are internal-mechanism or in-page-UI changes with no install/usage-surface impact per `AGENTS.md`'s README update criterion. One incidental hit worth noting for implementer awareness (not a required update): `README.md:389` already describes `GET /api/acp/workspaces` as "the workspace list ... the create picker reads" — the same `#acpPicker` modal Phase 3 adds a control to; if Phase 3's UI change makes this description inaccurate (e.g. the picker's purpose broadens beyond "where"), revisit that line, but the endpoint itself is unchanged so no update is mandated up front.
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation. Phase 2 and Phase 4's probe findings belong here.>
+
+**Phase 2 (mode-activation probe) — confirmed-working, plus two design-relevant divergences.** Full evidence and methodology are in Phase 2's own implementation notes above; summary here per this section's role as the plan-wide divergence record:
+
+- `modeId` confirmed as a real activation mechanism for all four target modes (`spec`, `quick-spec`, `bug-fix`, `plan`), high confidence — three independent signals for `spec` (response fields, on-disk state, tool-tag diff + chat-turn persona difference), structural round-trip confirmation for the other three. `session/load`'s `modeId` has no effect on an existing session (fresh-process-tested, not just inferred) — mode is fixed at creation, confirming the plan's Design Decisions table row on this point empirically rather than by inference alone.
+- **Divergence 1**: kiro-cli's real mode list has 8 values (`vibe`, `spec`, `quick-spec`, `bug-fix`, `plan`, `autonomous`, `semantic_reviewer`, `kiro_default`), not the 5-value closed set Phase 3's design assumed. Phase 3's backend validation must be reconciled against this fuller list.
+- **Divergence 2**: `kiro_default` is a user-global custom agent config on this machine (`source: "global"`), not a kiro-cli builtin — a portability/onboarding consideration outside this plan's scope, noted for whoever picks it up. An invalid `modeId` silently falls back to `vibe`, not `kiro_default`, reinforcing the same concern.
+- **Phase 3's gate is open** (confirmed-working branch, all four modes).
 
 ## Follow-up Work (Deferred)
 
@@ -359,5 +407,32 @@ Confirmed via this session's dedicated doc-impact grep sub-agent (all tracked `*
 
 All three personas independently verified the plan's file:line citations against live source (20+ spot-checks each, zero fabricated or stale citations found beyond the two Low nits above) and confirmed no reintroduction of either failure class from `plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md`'s Phase 1 incident history (the crashed-process-permanently-held bug, and the once-reverted `_KIRO_PROVIDERS` widening this plan's Phase 1 now makes effective rather than repeating). Pre-fix confidence scores: Architect 78%, Senior engineer 85%, Reliability engineer did not state a numeric score but raised no blocking objection. No unresolved High or Medium findings remain.
 
+### 2026-09-16 -- Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer)
+
+Implementation health: Yellow (one unresolved Medium finding pending user decision; no unresolved High).
+6 findings (1 High, 2 Medium, 3 Low). **Cycle cap override**: this project runs a 1-cycle review max per phase, per explicit user instruction (default is up to 2 cycles) — one review dispatch, one auto-fix pass, no cycle-2 re-review. Regression detection for this cycle's auto-fixes is deferred to Step 9's holistic review.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | Senior engineer: qvalidate's phase-count check found 0 ticked exit-criteria boxes against the implementer's reported 6 — plan file untouched by either sub-agent. | Fixed — not a code defect: exit-criteria ticking is deliberately deferred to orchestrator Step 7 for parallel-dispatch phases; ticked in this same project-file update. |
+| 2 | Medium | Senior engineer: `plans/ROADMAP.md:45`'s D32 bullet, assigned to Phase 1 in §8 Documentation Updates, was left describing the pre-fix state as still-open. | Fixed — bullet rewritten to a closure record citing this plan and Phase 1; added as an exit criterion. |
+| 3 | Medium | Reliability engineer: `agent_pid()`'s no-`poll()` liveness gate, now consumed by the widened D32 guard, could in a narrow compound scenario (crash + undetected window + exact OS pid reuse) over-suppress a legitimate foreign v3 session. | Escalated — see options below; not auto-fixed (design trade-off, no cycle-2 re-review to verify a mitigation this cycle). |
+| 4 | Low | Reliability engineer: the D32 guard's suppression `continue` (presence.py) has no log line, so an incorrect suppression is undiagnosable after the fact; matches the loop's existing silent-`continue` pattern. | Escalated — see options below (adding logging to only this branch would itself be an inconsistency Senior engineer's own standard would flag). |
+| 5 | Low | Reliability engineer: `_publish_live()`'s rewritten docstring said pid is `None` only "before one has started," omitting the post-`_detach()` case. | Fixed — clause added noting pid is also `None` after detachment. |
+| 6 | Low | Reliability engineer: `agent_pid()`'s pre-existing docstring wasn't updated to note its new sole-consumer, `_publish_live()`, and that consumer's different failure stakes. | Fixed — paragraph added naming the new consumer and the over-suppression stakes. |
+
+**Mutation-test verification** (Senior engineer): reverted `_publish_live()`'s pid fix and the guard's provider-check fix independently, confirmed each rewritten test fails without its corresponding fix and passes with it, then restored both to the implemented state — `git diff --stat` confirmed no residual mutation artifacts.
+
+**Findings 3 and 4 — open, pending your decision:**
+- **Finding 3** (Medium, recycled-pid over-suppression): this specific risk class already existed for v2/`kiro-cli` sessions before this phase (v2's `_publish_live()` already published a real pid pre-cutover) — Phase 1 extends the same pre-existing surface to the `kiro-cli-v3` label too, it does not introduce a new hazard class. The plan's own Risk Assessment (row: "D32 fix's widened guard could theoretically over-suppress...") already named this risk but its mitigation text doesn't fully engage the pid-recycling case `agent_pid()`'s own docstring warns about. Options: **(a)** accept as a documented, low-probability residual risk unchanged from its pre-existing v2 shape (recommended by the Reliability engineer's own severity tie-break reasoning — compound, low-probability, but real); **(b)** add a `psutil.pid_exists(acp_pid)` (or equivalent) liveness re-check to the guard before this ships further; **(c)** something else.
+- **Finding 4** (Low, no suppression log line): options: **(a)** leave as-is, matching the pre-existing silent-`continue` pattern used by the loop's other three checks (recommended — Low severity, and singling out just this branch for logging would itself read as an inconsistency); **(b)** add a `log.debug(...)` line to this branch only; **(c)** file as a Follow-up Work item to add logging to all four `continue`s uniformly, out of this plan's scope.
+
+### 2026-09-16 -- Implementation Review (after Phase 2) — deferred to Step 9
+
+Phase 2 produced zero repository file changes (a pure research spike — its only artifact is this project file's own §9/implementation-notes write-up, produced by the orchestrator from the probe sub-agent's returned evidence). Per `/qdev` Step 5's Skip rule ("no new executable code" — literally true here, `changed_files: []`), a fresh-context reviewer has no implementation diff to evaluate at this checkpoint; a review dispatched now would be reviewing the orchestrator's own not-yet-written prose, inverting the intended order. Deferred to Step 9's holistic review, which will assess the §9 write-up's fidelity to the sub-agent's raw evidence (saved under the probe's scratch directory) as part of the full-implementation pass. This is a judgment-call application of the Skip rule's spirit, not a byte-exact match to its three listed shapes (mechanical parity / ≤30 LOC prose edit / SKILL.md section update) — noted here for traceability.
+
 ## Harness Improvement Opportunities
-<Reserved -- appended during /qexplore, /qplan and /qdev when harness friction is felt.>
+
+- Phase 1's `[QA]` annotation correctly auto-invoked `/qqa`, which returned BLOCKED because the live PowerAtlas process (confirmed running, pid 8592, started 2026-09-16 12:01) holds pre-fix `acp.py`/`presence.py` bytecode and this project forbids autonomous restarts — cost: no wasted dispatch this time (the block was determined from process/governance facts without needing a sub-agent), but this outcome is fully predictable at `/qplan` time for any phase whose only runtime surface is a Python change requiring a live-server restart — suggested change: `/qplan`'s `[QA]` annotation guidance could note when a phase's QA is expected to BLOCK on a restart gate, so `/qdev` doesn't have to rediscover it, and so the plan can consider sequencing the restart request earlier.
+- The `docs(<plan-slug>): phase N progress (code: <sha>)` commit-message convention assumes every phase produces a code commit; Phase 2 (a pure research spike) produced none — cost: a few minutes of orchestrator judgment to decide the citation should read `(code: none — research spike)` rather than stall on a missing SHA — suggested change: `/qdev`'s Step 7 commit-message spec could name the code-less-phase citation form explicitly, alongside the existing `(code: <sha>)` example.
+- The "per-phase commit-pairing constraint" (each `[P:N]` group phase must get its own separate `docs` commit) assumes phase edits are commit-separable; here both Phase 1 and Phase 2's plan-file edits landed in the same single project file with no intervening commit, and splitting them cleanly requires `git add -p`/interactive staging, which governance bans outright (`shared/AGENTS.md § Commit Safety`) — cost: one combined `docs` commit was used instead, with both phases' progress cited explicitly in its body rather than as two separate commits — suggested change: the constraint could explicitly name "single shared project file, no interactive staging available" as a documented exception producing one combined commit, rather than leaving the resolution to per-session judgment.
