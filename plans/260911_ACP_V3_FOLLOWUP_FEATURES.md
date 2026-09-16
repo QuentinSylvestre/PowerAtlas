@@ -275,8 +275,6 @@ Total conversational (LLM) turns sent to the live agent: 2 (well under the ~8 bu
 
 ### Phase 3: Mode-switcher UI [QA] (gated on Phase 2 confirming the mechanism works)
 
-### Phase 3: Mode-switcher UI [QA] (gated on Phase 2 confirming the mechanism works)
-
 **Goal**: let a user pick a mode when creating a new `/acp` session, wiring the choice through to the `modeId` param Phase 2 confirmed is real.
 
 **Gate**: implement this phase only if Phase 2's finding is confirmed-working for at least one mode. If Phase 2 found no observable difference or was inconclusive for **all four** modes: do not build speculative UI atop an unconfirmed mechanism — update `plans/ROADMAP.md`'s mode-switcher bullet to record the negative finding, close this plan's mode-switcher Success Criterion as "spiked, not shippable — see Phase 2 finding," and stop; skip the rest of this phase. **Partial confirmation** (some modes confirmed, others not — Phase 2 step 7): proceed with this phase, but the picker offers only the confirmed subset; a mode Phase 2 could not confirm is omitted from the picker's option list (not shipped as a guess) and filed under Follow-up Work (Deferred) rather than blocking the modes that did confirm.
