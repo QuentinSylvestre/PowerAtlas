@@ -4901,13 +4901,13 @@ class _Supervisor:
         hook = sessions_changed_hook
         if hook is None:
             return
-        pid = self.agent_pid()
-        if pid is not None and self._proc is not None and self._proc.poll() is not None:
-            # Our process has already exited but _detach() hasn't cleared
-            # _proc yet -- don't publish a pid the OS may already be free to
-            # recycle onto an unrelated process.
-            pid = None
         try:
+            pid = self.agent_pid()
+            if pid is not None and self._proc is not None and self._proc.poll() is not None:
+                # Our process has already exited but _detach() hasn't cleared
+                # _proc yet -- don't publish a pid the OS may already be free to
+                # recycle onto an unrelated process.
+                pid = None
             hook(frozenset(self.sessions), pid)
         except Exception:
             log.exception("ACP: publishing the live session set failed")
