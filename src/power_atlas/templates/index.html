@@ -909,12 +909,15 @@ var DASH_RAIL_GROUP_SIZE = 10;
 // constant so shrinking the preload (QA follow-up) does not also shrink
 // those two unrelated flat lists' default page.
 var DASH_RAIL_SESSION_SIZE = 10;
-// Project mode's per-workspace page size, both for the group page's own
-// preload and for "More in <workspace>"'s follow-up pages -- deliberately
-// small since most workspaces are no longer preloaded at all (server-side
-// lazy skip, see _acp_listing's docstring) and 5 is enough to show a
-// workspace is alive without paying for its whole history up front.
-var DASH_RAIL_PROJECT_SESSION_SIZE = 5;
+// Project mode's per-workspace page size -- split in two (regression/feature
+// follow-up) because the two callers want different sizes: a *pinned*
+// workspace preloads eagerly on every group-page load (deliberately small,
+// most workspaces are lazy-skipped entirely -- see _acp_listing's docstring),
+// while "More in <workspace>" (and the auto-load-on-expand below, which
+// calls the same function) is a deliberate ask for more history and can
+// afford a bigger page.
+var DASH_RAIL_PROJECT_PRELOAD_SIZE = 3;
+var DASH_RAIL_PROJECT_PAGE_SIZE = 10;
 var DASH_RAIL_FLAT_SIZE = 30;
 
 function dashRailUrl(params){
@@ -1032,7 +1035,8 @@ function dashRailMergeGroup(incoming){
     var fresh = {
       cwd: incoming.cwd, name: incoming.name, total: incoming.total,
       session_page: incoming.session_page, has_more: incoming.has_more,
-      exists: incoming.exists, pinned: incoming.pinned, sessions: [],
+      exists: incoming.exists, pinned: incoming.pinned,
+      active: incoming.active, sessions: [],
     };
     dashRailMergeSessions(fresh, incoming.sessions);
     dashRailGroupsByCwd[key] = fresh;
@@ -1043,6 +1047,7 @@ function dashRailMergeGroup(incoming){
   existing.total = incoming.total;
   existing.exists = incoming.exists;
   existing.pinned = incoming.pinned;
+  existing.active = incoming.active;
   // A repeat on a later group page carries session_page: 1 -- adopting it
   // would rewind a workspace already paged into further. Only move forward.
   if (incoming.session_page > existing.session_page) {
@@ -1061,7 +1066,7 @@ function loadGroupPage(page){
   }
   dashRailFetch({
     group_page: page, group_size: DASH_RAIL_GROUP_SIZE,
-    session_page: 1, session_size: DASH_RAIL_PROJECT_SESSION_SIZE,
+    session_page: 1, session_size: DASH_RAIL_PROJECT_PRELOAD_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
     project_sort: dashRailProjectSort,
@@ -1117,8 +1122,17 @@ function dashRailLoadFirstPage(){
 function loadGroupSessions(group){
   if (dashRailBusy) return;
   dashRailBusy = true;
-  var next = (group.session_page || 0) + 1;
-  dashRailFetch({cwd: group.cwd, session_page: next, session_size: DASH_RAIL_PROJECT_SESSION_SIZE})
+  // Page number is computed against the *increment* size, not counted up by
+  // one call per click -- a pinned group's preload (3) and this function's
+  // own page size (10) disagree, and (page-1)*size must match what's already
+  // loaded or the slice skips or re-overlaps. Flooring what's loaded against
+  // the increment size lands on the right page regardless of how it got
+  // there: a preloaded group of 3 computes page 1 (re-fetching those 3,
+  // harmlessly deduped by dashRailMergeSessions, alongside 7 new ones), and
+  // every call after that is already size-10-aligned.
+  var size = DASH_RAIL_PROJECT_PAGE_SIZE;
+  var next = Math.floor((group.sessions.length || 0) / size) + 1;
+  dashRailFetch({cwd: group.cwd, session_page: next, session_size: size})
     .then(function(data){
       dashRailBusy = false;
       var incoming = (data.groups || [])[0];
@@ -1128,6 +1142,7 @@ function loadGroupSessions(group){
       group.session_page = incoming.session_page;
       group.has_more = incoming.has_more;
       group.total = incoming.total;
+      group.active = incoming.active;
       dashRailFocus = {cwd: group.cwd};
       dashRenderRail();
     }).catch(function(){ dashRailBusy = false; });
@@ -1202,13 +1217,22 @@ function dashRailRowHoverText(session, workspace){
   return parts.join(' - ');
 }
 function dashRailDotClass(session){
-  if (dashRailAvailability(session.availability) !== 'held') return null;
-  var status = dashRailRowStatus(session.status);
-  if (status === 'errored') return 'status-errored';
-  if (status === 'waiting') return 'status-waiting';
-  if (status === 'working') return 'status-thinking';
-  if (status === 'idle') return 'status-idle';
-  return 'status-thinking';
+  if (dashRailAvailability(session.availability) === 'held') {
+    var status = dashRailRowStatus(session.status);
+    if (status === 'errored') return 'status-errored';
+    if (status === 'waiting') return 'status-waiting';
+    if (status === 'working') return 'status-thinking';
+    if (status === 'idle') return 'status-idle';
+    return 'status-thinking';
+  }
+  // Not held by this PowerAtlas -- no working/waiting/errored classification
+  // (that costs a transcript-tail read server-side, reserved for held rows),
+  // but `session.live` is a cheap all-provider "is a process running" signal
+  // and still earns a dot: a neutral one, since there is no richer verdict
+  // to show. Absent entirely on routes that never asked for it (session.live
+  // is undefined, not false -- see `include_provider` server-side).
+  if (session.live) return 'status-live';
+  return null;
 }
 
 // ---- the session row -------------------------------------------------
@@ -1346,6 +1370,18 @@ function dashRailHeadNode(key, label, countText, opts){
   var collapsed = dashRailIsCollapsed(key, opts && opts.defaultCollapsed);
   var expanded = !collapsed;
   toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  // opts.dot: a project group's only liveness signal while collapsed and
+  // lazily-skipped (see loadGroupSessions's onExpand) -- it has no session
+  // rows loaded yet for the rail to put a per-session dot on, so the group
+  // header carries its own, using the exact same class the row-level dot
+  // does (dashRailDotClass's `status-live` case) rather than inventing a
+  // second "this thing is alive" visual language.
+  if (opts && opts.dot) {
+    var headDot = document.createElement('span');
+    headDot.className = 'session-status status-live acp-rail-group-dot';
+    headDot.setAttribute('aria-hidden', 'true');
+    toggle.appendChild(headDot);
+  }
   var name = document.createElement('span');
   name.className = 'acp-rail-group-name';
   if (opts && opts.title) name.title = opts.title;
@@ -1361,8 +1397,14 @@ function dashRailHeadNode(key, label, countText, opts){
   count.textContent = countText;
   toggle.appendChild(count);
   toggle.addEventListener('click', function(){
+    var wasCollapsed = collapsed;
     dashRailCollapsed[key] = !collapsed;
     dashRailFocus = {head: key};
+    // opts.onExpand fires only on a collapsed-to-expanded transition, never
+    // on the reverse or on a render that merely reflects an already-expanded
+    // state -- only project groups use it (auto-load-on-expand), and only a
+    // real click should trigger a fetch.
+    if (wasCollapsed && opts && opts.onExpand) opts.onExpand();
     dashRenderRail();
   });
   head.appendChild(toggle);
@@ -1383,7 +1425,13 @@ function dashRailGroupNode(group){
     badge.title = 'This folder no longer exists on disk.';
   }
   var head = dashRailHeadNode('g:' + group.cwd, group.name || group.cwd, countText,
-    {title: group.cwd, badge: badge, defaultCollapsed: !group.pinned});
+    {title: group.cwd, badge: badge, dot: !!group.active, defaultCollapsed: !group.pinned, onExpand: function(){
+      // A lazily-skipped group (server-side lazy skip, never paged) has never
+      // been fetched -- session_page is still its initial 0. Load its first
+      // page immediately on expand instead of making the user find and click
+      // a separate "More in <workspace>" button afterward.
+      if (!group.session_page && group.has_more) loadGroupSessions(group);
+    }});
 
   // Selection checkbox + row actions live beside the toggle, as siblings --
   // the toggle above is itself a <button>, so these cannot nest inside it.
@@ -1769,6 +1817,10 @@ function dashRailRefreshStates(incoming){
       s.status = fresh.status;
       changed = true;
     }
+    if (!!s.live !== !!fresh.live) {
+      s.live = fresh.live;
+      changed = true;
+    }
     if (dashRailTitleText(s) !== dashRailTitleText(fresh)) {
       s.title = fresh.title;
       changed = true;
@@ -1784,7 +1836,12 @@ function dashRailRefresh(){
   if (dashRailBusy) return;
   dashRailFetch({
     group_page: 1, group_size: DASH_RAIL_GROUP_SIZE * Math.max(1, dashRailGroupPage),
-    session_page: 1, session_size: DASH_RAIL_PROJECT_SESSION_SIZE,
+    // Refreshes every visible group's *first* page in one shared-size request
+    // -- an approximation regardless of each group's own loaded count (a
+    // group expanded past this size keeps its extra rows, just unrefreshed
+    // until the next full reload). The page size, not the smaller preload
+    // size, since more groups now sit at 10-loaded than at 3 once expanded.
+    session_page: 1, session_size: DASH_RAIL_PROJECT_PAGE_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
   }).then(function(data){

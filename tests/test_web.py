@@ -14791,6 +14791,98 @@ class TestDashboardListingEndpoint:
         assert body["groups"][0]["sessions"] == []
         assert body["groups"][0]["total"] == 0
 
+    def test_a_live_process_in_the_workspace_marks_the_row_live(
+            self, client, grouped_multi_store, monkeypatch):
+        """The cheap all-provider liveness dot (regression follow-up): a
+        workspace with a live claude-code process marks its session
+        `live: true` even though nothing here is held by this ACP --
+        `availability` stays "available" and the richer working/waiting/
+        errored `status` stays "" (no transcript-tail classify spent on a
+        row this ACP doesn't hold), but the binary liveness signal is no
+        longer scoped to kiro-cli-v3 alone."""
+        from power_atlas import presence as presence_mod
+        grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("s1")])
+        # An explicit session-id match (--resume-id on a process cmdline) --
+        # the fast path _session_is_live checks first, same as the existing
+        # _session_status tests use, so this exercises the field without
+        # also depending on a real JSONL file's mtime (the cwd+recency
+        # fallback path's own gate, covered by test_no_live_process_*
+        # trivially failing it instead).
+        monkeypatch.setattr(
+            presence_mod, "get_snapshot",
+            lambda *a, **k: presence_mod.Snapshot({("claude-code", "s1")}, set()))
+        body = client.get(self._PATH, params={"cwd": r"C:\dev\ws"}).json()
+        row = body["groups"][0]["sessions"][0]
+        assert row["availability"] == "available"
+        assert row["status"] == ""
+        assert row["live"] is True
+
+    def test_no_live_process_leaves_the_row_not_live(
+            self, client, grouped_multi_store, monkeypatch):
+        from power_atlas import presence as presence_mod
+        grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("s1")])
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+        body = client.get(self._PATH, params={"cwd": r"C:\dev\ws"}).json()
+        assert body["groups"][0]["sessions"][0]["live"] is False
+
+    def test_an_active_workspace_sorts_above_recency_below_pinned(
+            self, client, grouped_multi_store, monkeypatch):
+        """The new active-workspace partition (regression follow-up): a
+        workspace with a live process floats to the top of Project mode,
+        above plain recency ordering but still below a pinned folder -- the
+        same coarsest-last stable-sort scheme the pinned pass already uses."""
+        from power_atlas import presence as presence_mod
+        from power_atlas.config import Config
+        import power_atlas.web as web_mod
+        from power_atlas.data import _normalize_path
+        grouped_multi_store["add"](r"C:\dev\old-but-active", "claude-code",
+                                    [_acp_row("s1")], updated="2026-07-01T00:00:00Z")
+        grouped_multi_store["add"](r"C:\dev\recent", "claude-code",
+                                    [_acp_row("s2")], updated="2026-08-01T00:00:00Z")
+        grouped_multi_store["add"](r"C:\dev\pinned", "claude-code",
+                                    [_acp_row("s3")], updated="2026-06-01T00:00:00Z")
+        monkeypatch.setattr(
+            presence_mod, "get_snapshot",
+            lambda *a, **k: presence_mod.Snapshot(
+                set(), {("claude-code", _normalize_path(r"C:\dev\old-but-active"))}))
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: Config(pinned_folders=[r"C:\dev\pinned"]))
+        body = client.get(self._PATH).json()
+        assert [g["cwd"] for g in body["groups"]] == [
+            r"C:\dev\pinned", r"C:\dev\old-but-active", r"C:\dev\recent"]
+
+    def test_a_lazily_skipped_group_still_carries_its_own_active_flag(
+            self, client, grouped_multi_store, monkeypatch):
+        """Regression: an active workspace sorts to the top even while lazy
+        (unpinned, session_page: 0, no session rows), so the row-level `live`
+        dot -- which needs a loaded session to attach to -- can't show it.
+        The group's own `meta["active"]` is what the collapsed header uses
+        instead; this is the field, proven on the exact lazy-skip shape
+        (`test_unpinned_workspace_group_page_skips_the_session_fetch`'s own
+        scenario) that a live-but-never-expanded project needs it on."""
+        from power_atlas import presence as presence_mod
+        from power_atlas.data import _normalize_path
+        grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("s1")])
+        monkeypatch.setattr(
+            presence_mod, "get_snapshot",
+            lambda *a, **k: presence_mod.Snapshot(
+                set(), {("claude-code", _normalize_path(r"C:\dev\ws"))}))
+        body = client.get(self._PATH).json()
+        group = body["groups"][0]
+        assert group["session_page"] == 0
+        assert group["sessions"] == []
+        assert group["active"] is True
+
+    def test_an_inactive_lazy_group_carries_active_false(
+            self, client, grouped_multi_store, monkeypatch):
+        from power_atlas import presence as presence_mod
+        grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("s1")])
+        monkeypatch.setattr(presence_mod, "get_snapshot",
+                            lambda *a, **k: presence_mod.Snapshot(set(), set()))
+        body = client.get(self._PATH).json()
+        assert body["groups"][0]["active"] is False
+
     def test_tag_filter_default_excludes_hidden(
             self, client, grouped_multi_store, monkeypatch):
         """Preserves the old /partials/workspaces's default: no `tag` means hidden

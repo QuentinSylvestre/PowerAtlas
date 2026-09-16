@@ -329,58 +329,59 @@ def _row_origin(snapshot, session, provider: str) -> str:
                            snapshot.session_entrypoint(provider, sid))
 
 
+def _session_is_live(snapshot, session, provider: str) -> bool:
+    """Cheap liveness gate: is a process for this exact session running.
+
+    Two signals, no transcript read: (a) the session_id is on a process
+    cmdline (--resume-id), OR (b) a provider process is running in the
+    session's cwd AND the session's JSONL was written recently (a single
+    mtime stat, not a parse) — recency avoids false-positive dots on an old
+    session that happens to share a workspace with an unrelated running
+    process. Factored out of `_session_status` so a caller that only needs
+    "is it alive", not the richer working/waiting/errored verdict, can skip
+    the expensive transcript-tail classify entirely — that classify, not
+    this gate, is what `_acp_status_for_held` reserves for held sessions
+    only.
+    """
+    if snapshot.is_live(provider, session.cwd, session.session_id):
+        return True
+    from .data import _normalize_path
+    norm_cwd = _normalize_path(session.cwd)
+    if norm_cwd not in snapshot.live_cwds({provider}):
+        return False
+    from .status_classifier import _resolve_jsonl_path
+    import os, time as _time
+    jsonl_path = _resolve_jsonl_path(session.session_id, provider, session.cwd)
+    if jsonl_path is None:
+        return False
+    try:
+        return (_time.time() - os.path.getmtime(jsonl_path)) <= 300
+    except OSError:
+        return False
+
+
 def _session_status(snapshot, session, provider: str,
                     notifications_enabled: bool = False, *,
                     notify: bool = True) -> str:
     """Return semantic status for a session.
 
-    Detection gate: a session is live if either (a) its session_id is on a
-    process cmdline (--resume-id), OR (b) a provider process is running in
-    the session's cwd AND the session was recently updated (within 5 min).
-    Gate (b) uses recency to avoid false-positive dots on old sessions that
-    happen to share a workspace with a running process.
+    Detection gate: see `_session_is_live`. A "not live" verdict there short-
+    circuits straight to "closed" here, before any transcript read.
 
     Args:
         notify: When False, skip the notification side-effect entirely.
                 Used by the lightweight status-polling endpoint to avoid toasts.
     """
-    # 1. Check explicit live (session id on cmdline) — fast path
-    is_explicitly_live = snapshot.is_live(provider, session.cwd, session.session_id)
+    is_live = _session_is_live(snapshot, session, provider)
 
-    # 2. Check if a provider process runs in this workspace's cwd
-    from .data import _normalize_path
-    norm_cwd = _normalize_path(session.cwd)
-    has_process = norm_cwd in snapshot.live_cwds({provider})
-
-    # Resolve JSONL path (used for recency gate and fallback classification)
-    from .status_classifier import _resolve_jsonl_path
-    import os, time as _time
-    jsonl_path = _resolve_jsonl_path(session.session_id, provider, session.cwd) if (has_process or is_explicitly_live) else None
-
-    # 3. Recency gate: only classify via cwd if session's JSONL was written recently
-    #    (avoids false-positive dots on old sessions sharing the same workspace)
-    #    Uses JSONL file mtime (actual agent activity) not metadata updated_at
-    #    (which only reflects user interaction timestamps).
-    if has_process and not is_explicitly_live:
-        if jsonl_path is not None:
-            try:
-                mtime_age = _time.time() - os.path.getmtime(jsonl_path)
-                if mtime_age > 300:  # 5 minutes since last JSONL write
-                    has_process = False
-            except OSError:
-                has_process = False
-        else:
-            # No JSONL file found — can't classify, treat as closed
-            has_process = False
-
-    # 4. Here a non-empty report wins outright, including over a richer-looking
-    #    classifier verdict: it is first-hand and current, while the classifier
-    #    reads a transcript tail that lags an in-flight turn. See
-    #    _map_reported_status for the mapping and for why "idle" yields nothing.
+    # A non-empty report wins outright, including over a richer-looking
+    # classifier verdict: it is first-hand and current, while the classifier
+    # reads a transcript tail that lags an in-flight turn. See
+    # _map_reported_status for the mapping and for why "idle" yields nothing.
     reported = _map_reported_status(
         snapshot.reported_status(provider, session.session_id))
 
-    if not is_explicitly_live and not has_process:
+    if not is_live:
         status_value = "closed"
     elif reported:
         status_value = reported
@@ -705,6 +706,17 @@ templates = Jinja2Templates(
         autoescape=True,
     )
 )
+# StaticFiles serves /static/style.css with an ETag/Last-Modified but no
+# Cache-Control, so a browser's own heuristic caching can keep serving a
+# pre-restart copy indefinitely -- the URL never changes, so nothing tells it
+# to revalidate (observed directly: a CSS-only fix landed, the server
+# restarted, and the rail's dot stayed invisible in an already-open tab until
+# a hard reload). A `?v=` query string busts that cache on every edit,
+# computed once at import time from the file's own mtime -- process restart
+# is already required for any static-asset change to reach a running
+# PowerAtlas, so a value fixed for the process lifetime is exactly as fresh
+# as the file it points at.
+templates.env.globals["static_version"] = str(int((_STATIC_DIR / "style.css").stat().st_mtime))
 
 
 # Loopback host names the server is legitimately reached by. Validating the Host
@@ -1861,17 +1873,20 @@ def _acp_availability(session_ids, held,
     return out
 
 
-def _acp_status_for_held(sessions) -> dict[str, str]:
+def _acp_status_for_held(sessions, snapshot=None) -> dict[str, str]:
     """The dashboard's verdict for the sessions this PowerAtlas is driving.
 
     Blocking — a transcript-tail classify per session — so this runs inside
     `_acp_listing`'s thread hop, beside `_acp_availability`.
 
     **Held sessions and no others, which is also what bounds the cost.** The
-    rail draws a dot only where this ACP holds the session, so a row nothing
-    here holds needs no verdict: a `locked` one is live in a foreign process
-    this cannot ask, and an `available` one has no live process at all. That
-    caps the work at `MAX_SESSIONS` (8) however many rows the page shows.
+    rich working/waiting/errored verdict costs a transcript-tail classify per
+    row, so it stays scoped to the sessions this ACP holds — the cap is
+    `MAX_SESSIONS` (8) however many rows the page shows. A `locked` or plain
+    `available` row can still be live in a foreign process (`_session_is_live`
+    answers that cheaply, without a classify — see the `"live"` field the
+    listing routes attach for exactly those rows); it just never gets the
+    richer verdict this function produces.
 
     `_resolved_session_status`, and deliberately not `_session_status`. The
     latter opens with a liveness gate that asks `presence` whether a process is
@@ -1881,10 +1896,15 @@ def _acp_status_for_held(sessions) -> dict[str, str]:
     takes liveness as given and settles among errored/waiting/working, the same
     precedence `session_row.html` settles its own dot through, so the two
     surfaces cannot disagree about a session both of them are showing.
+
+    `snapshot`, when the caller already has one (both listing routes do, for
+    the `"live"` field above), is reused rather than taking a second — see
+    that field's own computation site.
     """
     if not sessions:
         return {}
-    snapshot = presence.get_snapshot()
+    if snapshot is None:
+        snapshot = presence.get_snapshot()
     out: dict[str, str] = {}
     for session in sessions:
         try:
@@ -2098,10 +2118,16 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     `sort` (dashboard/ACP-merge QA follow-up): orders the workspace list
     itself in Project grouping mode — `"recent"` (the default, and the only
     value `/api/acp/sessions` ever asks for) by `latest_updated` descending,
-    `"alpha"` by folder name case-insensitively. Pinned workspaces still
-    surface first regardless of `sort`, exactly as before this parameter
-    existed — the two stable sorts below run in a fixed order (recency-or-
-    alpha, then pinned) for that reason, not the other way round.
+    `"alpha"` by folder name case-insensitively. A workspace with a live
+    process in it (any provider, `include_provider`-only — see below) surfaces
+    next, ahead of that ordering; pinned workspaces surface ahead of that in
+    turn, regardless of `sort`. The three stable sorts below run in a fixed
+    order (recency-or-alpha, then active, then pinned) for that reason, not
+    the other way round. Each group's own `meta` also carries this verdict as
+    `"active"` (`include_provider`-only, alongside `"pinned"`) — a lazily-
+    skipped group (see below) carries no session rows for the rail to put a
+    per-session liveness dot on, so this is the only signal its collapsed
+    header has to show.
 
     **Lazy per-workspace loading** (dashboard/ACP-merge QA follow-up,
     `include_provider`-only): an unpinned workspace's sessions are not
@@ -2119,6 +2145,10 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     from . import data_kiro_v3
 
     config = load_config()
+    # Fetched once and threaded through to the active-workspace sort below and
+    # to `_row_dict`'s `"live"` field / `_acp_status_for_held`, rather than
+    # each reaching for its own — same cached scan either way, one fewer call.
+    snapshot = presence.get_snapshot()
 
     def _tag_keep(ws_cwd: str) -> bool:
         tags = get_workspace_settings(config, ws_cwd)["tags"]
@@ -2153,17 +2183,30 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         workspaces = [w for w in workspaces if _time_bucket(w[2]) == time_filter]
 
     # Project-mode ordering (dashboard/ACP-merge QA follow-up): recent-first
-    # or alphabetical per `sort`, with pinned workspaces (config.pinned_folders
-    # — a dashboard-only concept /acp's own UI has no button for, so kept off
-    # its listing) surfaced ahead of that regardless of which. Stable sorts
-    # applied coarsest-last rather than one composite key: "pinned" is a
-    # coarser partition than "recency"/"alpha", and Python's sort is stable,
-    # so the pinned pass only reorders across the partition boundary and
-    # never disturbs the ordering already established within it.
+    # or alphabetical per `sort`, with active workspaces surfaced ahead of
+    # that and pinned workspaces (config.pinned_folders — a dashboard-only
+    # concept /acp's own UI has no button for, so kept off its listing) ahead
+    # of that in turn, regardless of which. Stable sorts applied coarsest-last
+    # rather than one composite key: "pinned" is coarser than "active", which
+    # is coarser than "recency"/"alpha", and Python's sort is stable, so each
+    # later pass only reorders across its own partition boundary and never
+    # disturbs the ordering already established within it.
     if sort == "alpha":
         workspaces.sort(key=lambda w: (Path(w[0]).name or w[0]).lower())
     else:
         workspaces.sort(key=lambda w: w[2] or "", reverse=True)
+    if include_provider:
+        # Any live provider process, not just the ones this row's own
+        # `providers` column names — a workspace with something running in it
+        # is what "active" means here, regardless of which agent it is.
+        # Reused below (unconditionally computed, like `pinned_folders_norm`
+        # just after it) to mark each group `"active"` in its own meta dict —
+        # a lazily-skipped group carries no session rows to put a liveness
+        # dot on, so this is the only signal the rail's collapsed header has.
+        active_cwds = snapshot.live_cwds(None)
+        workspaces.sort(key=lambda w: _normalize_path(w[0]) not in active_cwds)
+    else:
+        active_cwds = frozenset()
     pinned_folders_norm = frozenset(_normalize_path(f) for f in config.pinned_folders)
     if include_provider and pinned_folders_norm:
         workspaces.sort(key=lambda w: _normalize_path(w[0]) not in pinned_folders_norm)
@@ -2223,6 +2266,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     for index, (ws_cwd, ws_count, _updated, ws_provs) in enumerate(page_groups):
         ws_norm = _normalize_path(ws_cwd)
         is_pinned_folder = include_provider and ws_norm in pinned_folders_norm
+        is_active = ws_norm in active_cwds
         ws_name = Path(ws_cwd).name or ws_cwd
 
         if lazy_mode and not is_pinned_folder and ws_norm not in force_cwds:
@@ -2234,6 +2278,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                 "has_more": ws_count > 0,
                 "exists": exists_flags[index],
                 "pinned": is_pinned_folder,
+                "active": is_active,
             }
             rows.append((meta, []))
             continue
@@ -2276,6 +2321,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         }
         if include_provider:
             meta["pinned"] = is_pinned_folder
+            meta["active"] = is_active
         rows.append((meta, page_tagged))
 
     pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]
@@ -2283,7 +2329,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
     all_page_sessions = [s for _meta, page_tagged in rows for s, _p in page_tagged]
     statuses = _acp_status_for_held([
         s for s in all_page_sessions + [s for _c, _n, s, _p in pinned_sessions_found]
-        if availability.get(s.session_id) == "held"])
+        if availability.get(s.session_id) == "held"], snapshot)
 
     def _row_dict(s, prov_name: str) -> dict:
         d = {
@@ -2295,6 +2341,11 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         }
         if include_provider:
             d["provider"] = prov_name
+            # Cheap all-provider liveness dot (dashboard-only, see
+            # _session_is_live): a row this ACP doesn't hold still gets a
+            # binary alive/dead signal, just not the richer classified
+            # verdict `status` carries for held rows.
+            d["live"] = _session_is_live(snapshot, s, prov_name)
         return d
 
     groups = []
@@ -2378,6 +2429,9 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
     if not enabled:
         return {"sessions": [], "pinned": [], "page": page, "has_more": False,
                 "capacity": capacity}
+    # See `_acp_listing`'s identical fetch: shared across the "live" field
+    # below and `_acp_status_for_held`, one cached scan either way.
+    snapshot = presence.get_snapshot()
 
     pinned_set = set(config.pinned_sessions)
     workspaces_list = (
@@ -2434,7 +2488,7 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
     availability = _acp_availability(all_sids, held)
     statuses = _acp_status_for_held(
         [s for s in sessions + pinned_sessions_list
-         if availability.get(s.session_id) == "held"])
+         if availability.get(s.session_id) == "held"], snapshot)
 
     order = list(dict.fromkeys(s.cwd for s in sessions + pinned_sessions_list))
     flags = dict(zip(order, _acp_exists_flags(order)))
@@ -2452,6 +2506,8 @@ def _acp_flat_listing(page: int, size: int, held, capacity: dict,
         }
         if include_provider:
             d["provider"] = prov_name
+            # See _acp_listing's identical field for what this is and why.
+            d["live"] = _session_is_live(snapshot, s, prov_name)
         return d
 
     return {
