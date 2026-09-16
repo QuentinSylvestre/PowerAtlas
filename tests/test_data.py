@@ -2738,18 +2738,18 @@ def test_presence_leaves_a_foreign_kiro_lock_alone(tmp_path):
     assert snap.is_live("kiro-cli", "C:/work/proj", "sess-terminal") is True
 
 
-def test_presence_does_not_hide_a_v3_agent_orphaned_lock(tmp_path):
-    """D32's own-agent orphan-lock suppression (`pid == acp_pid`) is scoped to
-    `provider == "kiro-cli"` only, not the widened `_KIRO_PROVIDERS` family
-    the other three sidecar-reconciliation checks use (Phase 1 cycle-2 review
-    fix). `acp_pid` always comes from `_Supervisor._publish_live()` — the v2
-    supervisor's own pid, never `_SupervisorV3`'s (`_SupervisorV3.
-    _publish_live()` is dead code, F10) — so `pid == acp_pid` can never
-    genuinely mean "our v3 agent," regardless of provider widening. This
-    documents the known, currently-unaddressed gap (see the comment above the
-    D32 guard in `_scan()`, and Follow-up Work #6): a v3 session orphaned by
-    our own agent is NOT suppressed today, unlike v2's equivalent case
-    (test_presence_hides_a_lock_our_own_agent_orphaned, above).
+def test_presence_hides_a_v3_agent_orphaned_lock(tmp_path):
+    """D32, closed for v3 too (Phase 1 of
+    plans/260911_ACP_V3_FOLLOWUP_FEATURES.md). `_Supervisor._publish_live()`
+    now publishes `self.agent_pid()` -- the real spawned process's pid, not
+    the `pid=0` sentinel it used to -- and the D32 guard in `_scan()` checks
+    `provider in _KIRO_PROVIDERS` rather than `provider == "kiro-cli"` alone.
+    With exactly one supervisor and one hook post-cutover, `acp_pid`
+    unambiguously names the current agent regardless of whether a session's
+    lock is labeled "kiro-cli" or "kiro-cli-v3" -- so a v3 session orphaned
+    by our own agent is now suppressed exactly like v2's equivalent case
+    (test_presence_hides_a_lock_our_own_agent_orphaned, above), closing the
+    gap this test used to document.
     """
     v3_sid = "sess_orphan00-0000-0000-0000-000000000000"
     _write_kiro_lock(tmp_path, v3_sid, 500, "2026-07-24T10:00:01Z",
@@ -2758,14 +2758,14 @@ def test_presence_does_not_hide_a_v3_agent_orphaned_lock(tmp_path):
     agent = _FakeProc("kiro-cli.exe",
                       ["kiro-cli.exe", "acp", "--agent-engine", "v3"],
                       pid=500, create_time=started - 600.0)
-    # acp_pid (published by _Supervisor._publish_live -- v2's own pid)
-    # happens to equal this process's pid, and the agent holds a different
-    # session -- exactly the shape that suppresses a v2 orphan. It must NOT
-    # suppress a v3-labeled one, since acp_pid never actually names v3's own
-    # agent.
+    # acp_pid (published by _Supervisor._publish_live -- the single
+    # post-cutover agent's real pid) equals this process's pid, and the
+    # agent holds a different session -- exactly the shape that suppresses a
+    # v2 orphan. It must now also suppress this v3-labeled one, since
+    # acp_pid genuinely names v3's own agent post-cutover.
     with _acp_published({"sess-other"}, 500):
         snap = _scan_with([agent], kiro_dir=tmp_path)
-    assert snap.is_live("kiro-cli-v3", "C:/work/proj", v3_sid) is True
+    assert snap.is_live("kiro-cli-v3", "C:/work/proj", v3_sid) is False
 
 
 def test_presence_leaves_a_foreign_v3_kiro_lock_alone(tmp_path):

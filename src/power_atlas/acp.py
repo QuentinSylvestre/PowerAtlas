@@ -2819,6 +2819,12 @@ class _Supervisor:
         lock hint. A pid that has been recycled between the agent's death and
         ``_detach`` unbinding it can therefore cost a more specific message and
         nothing else — it can never grant a load that should have been refused.
+
+        ``_publish_live()`` is this method's sole call site, and it also
+        publishes this value for ``presence.py``'s D32 self-orphan-lock guard.
+        That consumer's stakes differ: an unnoticed recycled pid there could,
+        in a narrow, compound scenario, cause the guard to over-suppress a
+        legitimate session rather than merely produce a less-specific message.
         """
         proc = self._proc
         return None if proc is None else proc.pid
@@ -4868,18 +4874,22 @@ class _Supervisor:
     def _publish_live(self) -> None:
         """Tell whoever is listening which sessions this agent holds.
 
-        Passes pid=0 rather than ``agent_pid()`` (F11): using the real pid
-        here could cause false liveness results in presence.py, which matches
-        pids against running processes. Left as-is post-cutover (Phase 1 step
-        8) — this is shared ground with ``plans/260911_ACP_V3_FOLLOWUP_FEATURES.md``'s
-        orphan-lock fix (D32), which targets this same sentinel; whichever
-        plan lands second must re-read this method's then-current state.
+        Publishes ``self.agent_pid()`` — the real spawned kiro-cli process's
+        pid, or ``None`` before one has started, or again after it has been
+        detached (``_detach`` clears ``_proc`` back to ``None`` on crash or
+        close) — closing D32 for v3
+        (``plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`` Phase 1). With exactly
+        one supervisor and one hook post-cutover, this pid unambiguously
+        names the current agent, so the historical false-liveness concern
+        (scoped to the pre-cutover dual-supervisor union, where a single
+        shared pid slot could not safely name either side) no longer
+        applies.
         """
         hook = sessions_changed_hook
         if hook is None:
             return
         try:
-            hook(frozenset(self.sessions), 0)
+            hook(frozenset(self.sessions), self.agent_pid())
         except Exception:
             log.exception("ACP: publishing the live session set failed")
 

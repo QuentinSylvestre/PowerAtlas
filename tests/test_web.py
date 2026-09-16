@@ -19753,17 +19753,23 @@ class TestSupervisor:
     # _Supervisor._publish_live — publishes its own sessions
     # ------------------------------------------------------------------
 
-    def test_supervisor_publish_live_sentinel_pid(self):
-        """_Supervisor._publish_live() emits its own sessions with pid=0
-        (the sentinel D1/Phase 1 left as-is -- see plans/260911_ACP_V3_
-        FOLLOWUP_FEATURES.md's orphan-lock fix for the follow-up tracked
-        separately). This replaces the pre-cutover
+    def test_supervisor_publish_live_uses_the_real_agent_pid(self):
+        """_Supervisor._publish_live() emits `self.agent_pid()`, not a
+        hardcoded sentinel: `None` while the agent process is unbound
+        (`_proc is None`, a fresh supervisor's real starting state), and the
+        real spawned process's pid once bound. This closes D32 for v3 (see
+        plans/260911_ACP_V3_FOLLOWUP_FEATURES.md's Phase 1) -- with exactly
+        one supervisor and one hook post-cutover, presence.py's orphan-lock
+        guard can now trust this pid to unambiguously name the current
+        agent. This replaces the pre-cutover
         `test_supervisor_v3_publish_live_union`, which asserted a union with
-        a separately-mocked "v2 supervisor" -- Phase 1 step 8 removed that
-        union outright (there is only one engine's sessions to publish
-        now), so the union half of that assertion is gone along with the
-        code it pinned; this keeps the still-true pid=0 coverage."""
+        a separately-mocked "v2 supervisor" -- Phase 1 step 8 (of the
+        cutover plan) removed that union outright (there is only one
+        engine's sessions to publish now), so the union half of that
+        assertion is gone along with the code it pinned; this covers the
+        pid the fix now publishes instead of the sentinel it used to."""
         from unittest.mock import patch
+        import types
         from power_atlas import acp as acp_mod
 
         hook_calls = []
@@ -19774,14 +19780,20 @@ class TestSupervisor:
         sid = 'sess_v3-0000-0000-0000-000000000001'
 
         with patch.object(acp_mod, 'sessions_changed_hook', hook):
-            sup = acp_mod._Supervisor.__new__(acp_mod._Supervisor)
+            sup = acp_mod._Supervisor()
             sup.sessions = {sid: {}}
             sup._publish_live()
 
-        assert len(hook_calls) == 1, f'hook called {len(hook_calls)} times, expected 1'
+            sup._proc = types.SimpleNamespace(pid=4321)
+            sup._publish_live()
+
+        assert len(hook_calls) == 2, f'hook called {len(hook_calls)} times, expected 2'
         published, pid = hook_calls[0]
         assert published == frozenset({sid})
-        assert pid == 0, 'publish_live must pass pid=0'
+        assert pid is None, 'publish_live must pass None while the agent process is unbound'
+        published2, pid2 = hook_calls[1]
+        assert published2 == frozenset({sid})
+        assert pid2 == 4321, 'publish_live must pass the real agent pid once bound'
 
     # ------------------------------------------------------------------
     # SC-11 baseline coverage: load_session, _handle_subscribe,

@@ -735,29 +735,31 @@ def _scan() -> Snapshot:
             # residual it replaces is the opposite direction and worse: a live
             # dot on a card for a session nothing can open.
             #
-            # Scoped to "kiro-cli" only, not the widened _KIRO_PROVIDERS family
-            # the three checks above use. `_SupervisorV3._publish_live()` IS
-            # called -- v3's own mutation sites (new_session/load_session/
-            # close_session) call `self._publish_live()`, and ordinary Python
-            # method dispatch routes that to this override, not the base
-            # class's (F10 only removed the *redundant* extra call the sweep
-            # backstop used to make on top of those mutation-site calls, not
-            # the mutation-site calls themselves). What defeats this guard is
-            # what the override publishes, not whether it runs: it always
-            # passes the sentinel `pid=0` (see `_SupervisorV3._publish_live`'s
-            # own docstring) -- deliberately, since using the v3 process's pid
-            # for the unioned v2+v3 set could cause false liveness results
-            # here -- never a real pid. So `pid == acp_pid` can never be true
-            # for a "kiro-cli-v3"-labeled record no matter which supervisor's
-            # publish ran last -- widening the provider condition to
-            # _KIRO_PROVIDERS would read as though it protects v3 self-orphans
-            # the way it protects v2's, but structurally cannot. A v3 session
-            # orphaned by our own agent is therefore a known, currently-
-            # unaddressed gap, not something this check can close by widening
-            # its provider condition alone — see Follow-up Work (Deferred) for
-            # the actual fix (publish `_supervisor_v3`'s own agent pid, not
-            # the pid=0 sentinel, for its own sessions).
-            if (provider == "kiro-cli" and acp_pid is not None
+            # Covers both `_KIRO_PROVIDERS` members ("kiro-cli" and
+            # "kiro-cli-v3"), same as the three checks above — not
+            # "kiro-cli" alone, which is how this guard used to read.
+            # Historically it was narrowed deliberately: pre-cutover,
+            # `_SupervisorV3._publish_live()`'s own override always passed a
+            # sentinel `pid=0` rather than its real agent pid (the unioned
+            # v2+v3 session set made one shared pid slot unsafe to use for
+            # either side), so `pid == acp_pid` could never be true for a
+            # "kiro-cli-v3"-labeled record no matter which supervisor
+            # published last — widening the provider check alone would have
+            # read as though it protected v3 self-orphans the way it
+            # protects v2's, while structurally being unable to.
+            # Post-cutover there is exactly one supervisor and one hook:
+            # `_Supervisor._publish_live()` now publishes `self.agent_pid()`,
+            # the real spawned process's pid, for every session regardless of
+            # which provider label its lock carries. `acp_pid` therefore
+            # unambiguously names the current agent, and the widened check
+            # here is correct rather than misleading. Closed by
+            # `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 — see that
+            # plan's §1 "Item 2" for the full history, including the one
+            # earlier attempt
+            # (`plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md` Phase 1
+            # cycle 2) that widened this same check without first fixing the
+            # sentinel, found inert, and was reverted.
+            if (provider in _KIRO_PROVIDERS and acp_pid is not None
                     and pid == acp_pid and sid not in acp_sids):
                 continue
             key = (provider, sid)
