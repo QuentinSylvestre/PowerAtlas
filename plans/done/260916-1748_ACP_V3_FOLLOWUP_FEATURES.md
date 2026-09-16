@@ -1,10 +1,30 @@
 # ACP v3 Follow-up Features
 
 > **Date**: 2026-09-11
-> **Status**: In Progress — all 5 phases reached terminal disposition (1, 3 shipped; 2, 4 completed as research spikes; 5 skipped per its own gate); Step 9 final review complete, all findings resolved, live QA passed for both shipped surfaces. Ready for `/qclose`.
-> **Last Updated**: <set by /qclose at archival>
+> **Status**: Complete
+> **Last Updated**: 2026-09-16
 > **Scope**: Mode-switcher UI, v3 self-orphan-lock suppression fix, and a research spike (with contingent implementation) on the 3 unreachable steering-type slash commands.
 > **Estimated effort**: 2-4 days (higher if either live-probe spike needs iteration or turns up a negative finding requiring a design pivot)
+
+## Completion Summary
+
+Both shippable items landed: the D32 self-orphan-lock fix (Phase 1) and the mode-switcher UI (Phases 2-3, 6 task modes including one added after a Step 9 follow-up probe). The steering-palette investigation (Phases 4-5) concluded in a documented, conclusive negative finding — no working mechanism found among 3 tested hypotheses — recorded in `plans/ROADMAP.md` with two concrete leads for a future revisit. All review findings across every phase and the final holistic review resolved; live QA passed for both shipped surfaces via direct browser verification.
+
+### Acknowledged at archival
+
+**Follow-up Work (Deferred)** — carried in the plan body's own `## Follow-up Work (Deferred)` section, not re-duplicated here; summarized at `/qclose` hand-off: D32's corollary last-writer-wins residual (accepted, pre-existing); two steering-palette investigation leads; `presence.py`'s D32 guard's `kiro-cli-v3` branch is dead code in practice (open question: remove vs. keep as forward-compatible); `kiro_default`'s portability risk (no durable owner yet, flagged for whoever owns onboarding).
+
+**Harness Improvement Opportunities** (8 items, all decided 2026-09-16):
+- Accepted (harness opportunity): Phase 1's `[QA]` BLOCKED-on-restart outcome was predictable at `/qplan` time; `[QA]` annotation guidance could flag this.
+- Accepted (harness opportunity): the `docs(<slug>): phase N progress (code: <sha>)` convention has no defined form for a code-less research-spike phase.
+- Accepted (harness opportunity): `/qplan`'s mandatory doc-impact grep doesn't search `plans/done/` or code comments for mechanism names a plan's design assumes, only changed identifiers — cost this session 1-2 hours of live QA re-discovering an already-documented fact.
+- Accepted (harness opportunity): commit `64fa866`'s subject doesn't literally contain "phase 1"; `commit-pairing`'s phase-number regex doesn't match "findings resolved"/"follow-up" style subjects.
+- **Promoted**: `AGENTS.md`'s stale "every `.acp-*` rule lives in `style.css`" claim corrected to name the known inline-`<style>`-block exceptions (commit `5634f95`).
+- Accepted (harness opportunity): `tests/acp_page.test.mjs`'s DOM-stand-in harness never nests statically-authored child elements, silently producing an empty `querySelectorAll` for the new picker's buttons until caught.
+- Accepted (harness opportunity): the per-phase commit-pairing constraint assumes phase edits are commit-separable; two phases sharing one project file with no intervening commit required a combined commit instead (interactive staging is banned).
+- Accepted (harness opportunity): Phase 2's probe-harness template named the `_kiro/auth/getAccessToken` inbound-request handler as background context rather than a required step, costing Phase 4's probe one wasted attempt (90s hang) before finding and fixing it.
+
+Pass 4 (documentation-ripple sweep): zero findings — no stale references to this plan's renamed identifiers (the two renamed test functions) found anywhere outside the plan file itself.
 
 ---
 
@@ -242,7 +262,7 @@ Verification: `pytest tests/test_web.py tests/test_data.py --timeout=300` passes
 - [x] Probe findings recorded (in this plan's §9 Implementation Divergences) for at least `kiro_default` vs `spec`, with a clear verdict: confirmed-working / confirmed-no-observable-difference / inconclusive
 - [x] `session/load`'s effect (or lack thereof) on an already-created non-default-mode session is recorded
 - [x] If confirmed-working: the exact literal wire values for all four modes are settled (confirmed to be `spec`/`quick-spec`/`bug-fix`/`plan`, or corrected if the probe surfaces different literal values)
-- [ ] If not confirmed-working: `plans/ROADMAP.md`'s mode-switcher bullet is updated with the negative/inconclusive finding, filed under this plan's Follow-up Work (Deferred) rather than closed as done, and Phase 3 is skipped per its own gate — **N/A: Phase 2 confirmed-working for all four modes, see §9**
+- **N/A** — the "if not confirmed-working" branch this criterion covers didn't trigger: Phase 2 confirmed-working for all four modes (see §9). The criterion it names (a negative-finding ROADMAP.md update) was never applicable.
 
 Implementation (2026-09-16, code: none — research spike, no code changes)
 
@@ -366,14 +386,7 @@ File scope and design depend on which hypothesis won:
 - **If H2 won**: `acp.py:4150-4165` filter change only — the existing `commands_execute` click path (`acp.html:2109`, `_handle_commands_execute` at `acp.py:6166-6240`) already works unchanged once the entries are visible and in `valid_names`.
 - **If H3 won**: `acp.py:4150-4165` filter change, a new `_Supervisor` outbound RPC method for `_kiro/knowledge` (mirroring `acp.py:3939-3967`), and a new `confirmCommandSelection()` branch (`acp.html:2066-2110`) that awaits the resolution RPC before inserting text, including a loading/pending state in the UI while resolution is in flight.
 
-**Exit criteria** (adapt to the winning hypothesis):
-- [ ] The 3 steering entries (`architecture-selection`, `quick-spec`, `bug-fix`) are visible and clickable in the `/acp` command palette
-- [ ] Selecting one produces the correct agent-side behavior (per whichever mechanism Phase 4 confirmed)
-- [ ] Existing palette behavior for all other entry types is unchanged — regression check that the filter change does not accidentally admit `"prompt"`/`"custom-agent"`-type entries too
-- [ ] `tests/test_web.py` gains coverage for the filter change and (if H2/H3) the new dispatch path
-- [ ] `node tests/acp_page.test.mjs` passes
-- [ ] `plans/ROADMAP.md`'s steering-palette bullet updated to record the plan as closed, citing the winning mechanism
-- [ ] Manual live verification in `/acp`: click all 3 entries from the palette and confirm each produces the intended steering behavior — requires a user-approved PowerAtlas restart first, since this phase touches `acp.py` (never restart autonomously, `AGENTS.md:5`)
+**Exit criteria** (would have adapted to the winning hypothesis — **N/A, none apply**): Phase 4's gate closed with all three hypotheses failed, so this phase never started. The 7 criteria this section would have tracked (palette visibility, correct agent-side behavior, a regression check on other entry types, `tests/test_web.py` and `node tests/acp_page.test.mjs` coverage, `plans/ROADMAP.md`'s bullet closure, and a live-verification restart) are moot — no code was written for any of them. `plans/ROADMAP.md`'s steering-palette bullet was instead updated with Phase 4's negative finding (Phase 4's own doing, not this phase's).
 
 ## 6) Risk Assessment
 
