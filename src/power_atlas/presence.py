@@ -82,6 +82,10 @@ _PROVIDER_SPECS: dict[str, tuple[tuple[str, ...], str]] = {
 # record's provider against the argv-derived provider for the same pid, so a
 # v3 lock file correctly relabelled "kiro-cli-v3" by _sidecar_records() is not
 # silently dropped for failing to match "kiro-cli".
+# Empirical caveat (2026-09-16, kiro-cli v3 build 2.21.4): the "kiro-cli-v3"
+# label's `.lock`-file detection path is currently unreachable, since the
+# installed build never writes a `.lock` file for a v3 session; see
+# `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 Review Log.
 _KIRO_PROVIDERS: frozenset[str] = frozenset({"kiro-cli", "kiro-cli-v3"})
 
 _SNAPSHOT_TTL = 3.0  # seconds; many partials render per refresh — reuse one scan
@@ -759,6 +763,16 @@ def _scan() -> Snapshot:
             # (`plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md` Phase 1
             # cycle 2) that widened this same check without first fixing the
             # sentinel, found inert, and was reverted.
+            #
+            # Empirical caveat (live QA, 2026-09-16): kiro-cli v3 (confirmed
+            # through build 2.21.4) does not write a `.lock` file under
+            # `~/.kiro/sessions/cli/` for any ACP session, so this widened
+            # `kiro-cli-v3` branch currently has no reachable input. The
+            # operative v3 session-availability/self-orphan-recovery
+            # mechanism is `_lock_holder_v3()` (`acp.py`), which reads
+            # `session.json`'s own `status` field with independent
+            # mtime-staleness self-heal, no pid involved. See
+            # `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 Review Log.
             if (provider in _KIRO_PROVIDERS and acp_pid is not None
                     and pid == acp_pid and sid not in acp_sids):
                 continue

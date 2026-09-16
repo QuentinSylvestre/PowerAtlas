@@ -2750,6 +2750,13 @@ def test_presence_hides_a_v3_agent_orphaned_lock(tmp_path):
     by our own agent is now suppressed exactly like v2's equivalent case
     (test_presence_hides_a_lock_our_own_agent_orphaned, above), closing the
     gap this test used to document.
+
+    Note: the `.lock` file below is synthesized by `_write_kiro_lock()`, not
+    produced by a real agent. Per the plan's live QA finding, the installed
+    kiro-cli v3 build does not currently write a `.lock` file for any v3
+    session, so this exact scenario does not occur in practice today -- this
+    test still correctly pins the guard's logic for if/when that precondition
+    arises.
     """
     v3_sid = "sess_orphan00-0000-0000-0000-000000000000"
     _write_kiro_lock(tmp_path, v3_sid, 500, "2026-07-24T10:00:01Z",

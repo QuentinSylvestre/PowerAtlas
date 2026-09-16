@@ -385,6 +385,7 @@
           <button class="acp-taskmode-option" id="acpPickerTaskModeOptQuickSpec" data-value="quick-spec" role="menuitem" aria-current="false">Quick spec</button>
           <button class="acp-taskmode-option" id="acpPickerTaskModeOptBugFix" data-value="bug-fix" role="menuitem" aria-current="false">Bug fix</button>
           <button class="acp-taskmode-option" id="acpPickerTaskModeOptPlan" data-value="plan" role="menuitem" aria-current="false">Plan</button>
+          <button class="acp-taskmode-option" id="acpPickerTaskModeOptSemanticReviewer" data-value="semantic_reviewer" role="menuitem" aria-current="false">Semantic reviewer</button>
         </div>
       </div>
     </div>
@@ -783,7 +784,7 @@
     ? Array.prototype.slice.call(taskModeMenu.querySelectorAll('.acp-taskmode-option'))
     : [];
   // name -> label shown on the toggle button once picked; keys are exactly
-  // the wire modeId values acp.py's _VALID_TASK_MODES accepts for these 5
+  // the wire modeId values acp.py's _VALID_TASK_MODES accepts for these 6
   // UI-offered modes (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
   var TASK_MODE_LABELS = {
     kiro_default: 'Default',
@@ -791,6 +792,7 @@
     'quick-spec': 'Quick spec',
     'bug-fix': 'Bug fix',
     plan: 'Plan',
+    semantic_reviewer: 'Semantic reviewer',
   };
   var pickedTaskMode = 'kiro_default';
   var reconnectBtn = document.getElementById('acpReconnect');

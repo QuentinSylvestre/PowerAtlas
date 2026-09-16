@@ -2831,11 +2831,11 @@ class _Supervisor:
     def agent_pid(self) -> int | None:
         """The pid of the process this supervisor is bound to, if any.
 
-        Deliberately not gated on ``poll()``: this is read from a worker thread
-        (``_lock_holder``) and the only thing it is used for is *suppressing* a
-        lock hint. A pid that has been recycled between the agent's death and
-        ``_detach`` unbinding it can therefore cost a more specific message and
-        nothing else — it can never grant a load that should have been refused.
+        Deliberately not gated on ``poll()``: the only thing it is used for is
+        *suppressing* a lock hint. A pid that has been recycled between the
+        agent's death and ``_detach`` unbinding it can therefore cost a more
+        specific message and nothing else — it can never grant a load that
+        should have been refused.
 
         ``_publish_live()`` is this method's sole call site, and it also
         publishes this value for ``presence.py``'s D32 self-orphan-lock guard.
@@ -4774,8 +4774,8 @@ class _Supervisor:
             self._reserved -= 1
             if self._pending_commands is not None:
                 self._pending_commands = None
-        log.info("ACP session created: %s (cwd %s); %d live",
-                 session_id, cwd, len(self.sessions))
+        log.info("ACP session created: %s (cwd %s, mode %s); %d live",
+                 session_id, cwd, mode or "kiro_default", len(self.sessions))
         return {"sessionId": session_id, "cwd": cwd}
 
     async def load_session(self, session_id: str, cwd: str) -> dict:
