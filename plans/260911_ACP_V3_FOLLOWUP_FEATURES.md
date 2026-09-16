@@ -1,7 +1,7 @@
 # ACP v3 Follow-up Features
 
 > **Date**: 2026-09-11
-> **Status**: In Progress — Phase 1 code/tests complete and restarted-in; blocked on one user decision (exit criterion 7's disposition — its precondition was found empirically absent on the installed kiro-cli build, see Review Log finding 8); Phase 2 complete (confirmed-working), Phase 3 gate open
+> **Status**: In Progress — Phase 1 complete (code/tests/restart done, exit criterion 7 retired by user decision, see Review Log finding 8); Phase 2 complete (confirmed-working); Phase 3 gate open, not yet started
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Mode-switcher UI, v3 self-orphan-lock suppression fix, and a research spike (with contingent implementation) on the 3 unreachable steering-type slash commands.
 > **Estimated effort**: 2-4 days (higher if either live-probe spike needs iteration or turns up a negative finding requiring a design pivot)
@@ -210,7 +210,7 @@ Negligible, one-time, non-recurring — not literally "None" (review finding, Re
 - [x] `memory/MEMORY.md`'s `_publish_live` entry gets a new dated Update paragraph
 - [x] `pytest tests/test_web.py tests/test_data.py --timeout=300` passes
 - [x] `plans/ROADMAP.md:45`'s D32 bullet closed out per §8 Documentation Updates (added as an exit criterion during Step 5 review — the original phase text omitted an explicit line item for this doc-table row)
-- [ ] Manual live verification (after a user-approved restart — this touches `acp.py`/`presence.py`, never restart autonomously per `AGENTS.md:5`): trigger a failed `session/load` or an abrupt close on a v3 session, confirm the dashboard's live dot correctly reflects the orphaned lock now being suppressed — **BLOCKED, not on the restart (that happened and the fix is live) but on the criterion's own precondition: a live QA probe (2026-09-16, restart done, PowerAtlas pid 37892 confirmed running the fix) found that kiro-cli v3 (build 2.21.4) never writes a `.lock` file under `_KIRO_LOCK_DIR` for any ACP session — verified across a full real session lifecycle (create, chat turn, close), zero writes to `~/.kiro/sessions/cli/`. The D32 guard this criterion asks to observe can only ever fire on a `.lock`-file record; with none ever produced, there is nothing to suppress to observe. See §9 and the Review Log for full detail and the three-way disposition question.**
+- [x] Manual live verification — **RETIRED (2026-09-16, user decision)**, not performed. The criterion's own precondition does not hold: kiro-cli v3 never writes a `.lock` file for any ACP session (live-confirmed, and already documented before this plan existed — `plans/done/260908-1636_ACP_V3_SPIKE.md`, `acp.py`'s `_lock_holder_v3()` comment). `presence.py`'s D32 guard is not the mechanism that drives v3 session availability — `_lock_holder_v3`'s independent `session.json`-based mtime-staleness self-heal is, and it was unaffected by the pre-fix bug and by this fix either way. Ticked as satisfied-by-retirement: the phase's actual correctness exit criteria (code, tests, docs) are all independently met; this one asked for a live confirmation of a scenario now known not to arise. See §9 and the Review Log's finding 8 for full detail.
 
 Implementation (2026-09-16, code: pending)
 
@@ -419,7 +419,7 @@ All three personas independently verified the plan's file:line citations against
 
 ### 2026-09-16 -- Implementation Review (after Phase 1, persona: Senior engineer, Reliability engineer)
 
-Implementation health: Yellow (updated again 2026-09-16 after the live QA pass surfaced finding #8, an unresolved Medium pending user decision; findings 1-7 below are all resolved — see their own resolutions).
+Implementation health: Green (updated 2026-09-16 — finding #8, the live QA pass's precondition-absent finding, is now resolved by user decision: retire exit criterion 7; all 8 findings resolved, none outstanding).
 8 findings (1 High, 3 Medium, 3 Low; finding #8 added by the live QA pass, after the restart, below the table). **Cycle cap override**: this project runs a 1-cycle review max per phase, per explicit user instruction (default is up to 2 cycles) — one review dispatch, one auto-fix pass, no cycle-2 re-review. Regression detection for this cycle's auto-fixes is deferred to Step 9's holistic review.
 
 | # | Severity | Finding (one line) | Resolution (one line) |
@@ -431,7 +431,7 @@ Implementation health: Yellow (updated again 2026-09-16 after the live QA pass s
 | 5 | Low | Reliability engineer: `_publish_live()`'s rewritten docstring said pid is `None` only "before one has started," omitting the post-`_detach()` case. | Fixed — clause added noting pid is also `None` after detachment. |
 | 6 | Low | Reliability engineer: `agent_pid()`'s pre-existing docstring wasn't updated to note its new sole-consumer, `_publish_live()`, and that consumer's different failure stakes. | Fixed — paragraph added naming the new consumer and the over-suppression stakes. |
 | 7 | Low | Reliability engineer (finding-3 fix verification pass, 2026-09-16): the new `agent_pid()`/`poll()` calls in `_publish_live()` sit outside the function's existing `try/except`, narrowing its defensive net; no demonstrated consequence, matches an existing unguarded-`.poll()` pattern elsewhere in the file. | Orchestrator: proposed-accept — pending user decision; verdict from the verifying reviewer was "ready to commit as-is," no behavioral consequence observed. |
-| 8 | Medium | `/qqa` live QA pass (post-restart, 2026-09-16): kiro-cli v3 (build 2.21.4) never writes a `.lock` file for any ACP session, so exit criterion 7's D32-suppression scenario cannot arise in practice — the fix is correct but currently unobservable/inert. | Orchestrator: proposed-accept — pending user decision (retire criterion 7 / keep deferred / other); see QA verdict and disposition options below. |
+| 8 | Medium | `/qqa` live QA pass (post-restart, 2026-09-16): kiro-cli v3 (build 2.21.4) never writes a `.lock` file for any ACP session, so exit criterion 7's D32-suppression scenario cannot arise in practice — the fix is correct but currently unobservable/inert. | User: accepted — retire exit criterion 7 (2026-09-16). Follow-up trace found the real v3 availability mechanism (`_lock_holder_v3`) was never gated by this, and the `.lock`-file gap was already documented pre-plan; see Follow-up Work item 4 for the dead-code question left open. |
 
 **Mutation-test verification** (Senior engineer): reverted `_publish_live()`'s pid fix and the guard's provider-check fix independently, confirmed each rewritten test fails without its corresponding fix and passes with it, then restored both to the implemented state — `git diff --stat` confirmed no residual mutation artifacts.
 
