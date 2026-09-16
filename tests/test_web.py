@@ -6888,6 +6888,144 @@ class TestAcpSessionRecordHoldsNoDeadState:
         assert acp_mod._valid_session_id(info["sessionId"])
 
 
+class TestAcpTaskModeSelection:
+    """Phase 3, plans/260911_ACP_V3_FOLLOWUP_FEATURES.md: Phase 2's live probe
+    confirmed ``modeId`` is a real kiro-cli task-mode activation mechanism, so
+    an optional ``payload["mode"]`` on ``session/new`` is now threaded end to
+    end: client picker -> ``send('new', ...)`` -> ``_handle_new`` validation
+    -> ``_supervisor.new_session(cwd, mode=...)`` ->
+    ``_build_kas_session_params(mode_id=...)``. Validation uses the full
+    8-value set kiro-cli's own session/new response enumerates (Phase 2
+    divergence 1) -- wider than the 5 modes the UI picker itself offers,
+    since 3 of the 8 (vibe, autonomous, semantic_reviewer) were only observed
+    to exist and never behaviorally characterized.
+    """
+
+    def test_new_session_threads_a_mode_into_modeid(self, acp_store):
+        acp_mod, store = acp_store
+        seen = {}
+
+        async def captured(self, method, params, timeout=None):
+            seen["params"] = params
+            return {"_meta": {"id": "taskmode-0001"}}
+
+        try:
+            with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                    patch.object(acp_mod._Supervisor, "_request", captured):
+                asyncio.run(acp_mod._supervisor.new_session(str(store), mode="spec"))
+        finally:
+            acp_mod._supervisor.sessions.pop("taskmode-0001", None)
+            acp_mod._supervisor.history.pop("taskmode-0001", None)
+        assert seen["params"]["_meta"]["kiro"]["modeId"] == "spec"
+
+    def test_new_session_omitting_mode_still_sends_kiro_default(self, acp_store):
+        """Backwards compatibility (Phase 3's own requirement): no ``mode``
+        argument at all must reproduce today's exact default, unchanged."""
+        acp_mod, store = acp_store
+        seen = {}
+
+        async def captured(self, method, params, timeout=None):
+            seen["params"] = params
+            return {"_meta": {"id": "taskmode-0002"}}
+
+        try:
+            with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                    patch.object(acp_mod._Supervisor, "_request", captured):
+                asyncio.run(acp_mod._supervisor.new_session(str(store)))
+        finally:
+            acp_mod._supervisor.sessions.pop("taskmode-0002", None)
+            acp_mod._supervisor.history.pop("taskmode-0002", None)
+        assert seen["params"]["_meta"]["kiro"]["modeId"] == "kiro_default"
+
+    def test_new_session_explicit_none_mode_also_sends_kiro_default(self, acp_store):
+        """``mode=None`` (what ``_handle_new`` passes when the client omits
+        the key) behaves identically to omitting the argument entirely."""
+        acp_mod, store = acp_store
+        seen = {}
+
+        async def captured(self, method, params, timeout=None):
+            seen["params"] = params
+            return {"_meta": {"id": "taskmode-0003"}}
+
+        try:
+            with patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn), \
+                    patch.object(acp_mod._Supervisor, "_request", captured):
+                asyncio.run(acp_mod._supervisor.new_session(str(store), mode=None))
+        finally:
+            acp_mod._supervisor.sessions.pop("taskmode-0003", None)
+            acp_mod._supervisor.history.pop("taskmode-0003", None)
+        assert seen["params"]["_meta"]["kiro"]["modeId"] == "kiro_default"
+
+    @pytest.mark.parametrize("mode", [
+        "vibe", "spec", "quick-spec", "bug-fix", "plan",
+        "autonomous", "semantic_reviewer", "kiro_default",
+    ])
+    def test_handle_new_accepts_every_valid_task_mode(
+            self, acp_store, tmp_path, mode):
+        """All 8 modes kiro-cli's own session/new response enumerates (Phase 2
+        divergence 1) are accepted by the backend -- not just the 5 the UI
+        picker itself offers (vibe/autonomous/semantic_reviewer are backend
+        robustness only, per Phase 3's design)."""
+        acp_mod, _store = acp_store
+        conn = _acp_conn(acp_mod)
+        seen = {}
+
+        async def fake_new_session(self, cwd, mode=None):
+            seen["mode"] = mode
+            return {"sessionId": "taskmode-000x", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": mode}))
+        assert seen["mode"] == mode
+        errors = [f["payload"].get("code") for f in _queued(conn)
+                  if f.get("type") == "error"]
+        assert not errors, errors
+
+    def test_handle_new_omitted_mode_passes_none_through(
+            self, acp_store, tmp_path):
+        acp_mod, _store = acp_store
+        conn = _acp_conn(acp_mod)
+        seen = {}
+
+        async def fake_new_session(self, cwd, mode=None):
+            seen["mode"] = mode
+            return {"sessionId": "taskmode-000y", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            asyncio.run(acp_mod._handle_new(conn, {"cwd": str(tmp_path)}))
+        assert seen["mode"] is None
+
+    @pytest.mark.parametrize("bad_mode", [
+        "", "KIRO_DEFAULT", "spec ", "Spec", "not-a-mode",
+        17, ["spec"], {"x": 1},
+    ])
+    def test_handle_new_rejects_unrecognized_mode(
+            self, acp_store, tmp_path, bad_mode):
+        """An invalid ``mode`` -- wrong case, whitespace, unknown name, or the
+        wrong type entirely (including an unhashable one, which a naive
+        ``in``-on-a-frozenset check would crash on instead of refusing
+        cleanly) -- is rejected with ``bad_payload`` and never reaches
+        ``new_session()``, mirroring the existing ``raw_cwd`` type check in
+        the same function."""
+        acp_mod, _store = acp_store
+        conn = _acp_conn(acp_mod)
+        called = []
+
+        async def should_not_run(self, cwd, mode=None):
+            called.append(mode)
+            return {"sessionId": "should-not-exist", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", should_not_run):
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": bad_mode}))
+        assert called == [], "an invalid mode must never reach new_session()"
+        frames = _queued(conn)
+        assert frames, "no frame was sent for a rejected payload"
+        assert frames[0]["type"] == "error"
+        assert frames[0]["payload"]["code"] == "bad_payload"
+
+
 class TestAcpPageHarnessIsCommitted:
     """``acp.html`` carries the XSS control, the turn state machine, reconnect
     and the auto-load loop, and every Python assertion on it is a substring
@@ -19954,11 +20092,13 @@ class TestSupervisor:
              "kind": "other", "status": "in_progress"},
             sid)
 
-        async def fake_new_session(self, cwd):
+        async def fake_new_session(self, cwd, mode=None):
             # Mirrors what the real new_session() does before this handler
             # ever runs: commit sessions/history, with the early frame
             # already recorded into history by the SC-1 buffer-and-replay
-            # path.
+            # path. `mode` accepted (unused) because _handle_new now always
+            # calls new_session(cwd, mode=raw_mode) — Phase 3,
+            # plans/260911_ACP_V3_FOLLOWUP_FEATURES.md.
             self.sessions[sid] = {"cwd": cwd, "created": 0.0}
             self.history[sid] = acp_mod._History()
             self.history[sid].append(buffered)
@@ -19996,7 +20136,8 @@ class TestSupervisor:
         commands = [{"name": "compact", "description": "Compact the session"}]
         skills = [{"name": "qexplore", "description": "Exploration skill"}]
 
-        async def fake_new_session(self, cwd):
+        async def fake_new_session(self, cwd, mode=None):
+            # `mode` accepted (unused) — see the history test above.
             self.sessions[sid] = {"cwd": cwd, "created": 0.0,
                                    "commands": commands, "skills": skills}
             self.history[sid] = acp_mod._History()
@@ -20032,7 +20173,8 @@ class TestSupervisor:
         sv3 = self._sv3(monkeypatch)
         sid = "sess_newctx000-0000-0000-0000-000000000001"
 
-        async def fake_new_session(self, cwd):
+        async def fake_new_session(self, cwd, mode=None):
+            # `mode` accepted (unused) — see the history test above.
             self.sessions[sid] = {"cwd": cwd, "created": 0.0,
                                    "contextPercent": 42.4}
             self.history[sid] = acp_mod._History()

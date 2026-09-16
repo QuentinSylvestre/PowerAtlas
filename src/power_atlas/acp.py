@@ -672,6 +672,23 @@ _OVERLAY_STEERING: tuple[dict[str, str], ...] = (
 )
 
 
+# Full set of modeId values kiro-cli's own session/new response enumerates
+# (modes.availableModes / configOptions[id="mode"].options), confirmed via a
+# disposable live probe against kiro-cli 2.21.4 (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md
+# Phase 2). Used by _handle_new to validate an incoming task-mode selection —
+# an unrecognized modeId silently falls back to "vibe" agent-side rather than
+# erroring, so PowerAtlas rejects anything outside this set up front instead
+# of forwarding a typo into a surprising mode. Only 5 of these 8 are offered
+# in the /acp UI's own picker (Phase 3) — the other 3 (vibe, autonomous,
+# semantic_reviewer) were only observed to exist, never behaviorally
+# characterized, so they are accepted here for backend robustness but not
+# exposed as UI options.
+_VALID_TASK_MODES: Final[frozenset[str]] = frozenset({
+    "vibe", "spec", "quick-spec", "bug-fix", "plan",
+    "autonomous", "semantic_reviewer", "kiro_default",
+})
+
+
 def _build_kas_session_params(mode_id: str = "kiro_default") -> dict[str, Any]:
     """Build the _meta.kiro fragment for session/new and session/load requests.
 
@@ -4690,12 +4707,17 @@ class _Supervisor:
             # Do not leave KAS waiting on an unanswered request.
             self._discard("Token delivery failed: could not write auth response")
 
-    async def new_session(self, cwd: str) -> dict:
+    async def new_session(self, cwd: str, mode: str | None = None) -> dict:
         """Create one session.
 
         Deviates from the standard ACP session/new response shape: this
         engine returns the session id at result._meta.id, NOT result.sessionId
         (Phase 0 finding, 2026-08-19).
+
+        ``mode`` is an optional kiro-cli task-mode id (e.g. "spec") threaded
+        into the _meta.kiro.modeId field of the session/new call; omitting it
+        (or passing None) reproduces the pre-Phase-3 default of "kiro_default"
+        unchanged (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
         """
         if self.at_capacity():
             raise SessionLimit(_session_limit_message())
@@ -4703,7 +4725,7 @@ class _Supervisor:
         self._reserved += 1
         try:
             await self.ensure_started()
-            params = _build_kas_session_params()
+            params = _build_kas_session_params(mode_id=mode or "kiro_default")
             params["cwd"] = cwd
             params["mcpServers"] = []
             result = await self._request("session/new", params)
@@ -5693,6 +5715,15 @@ async def _handle_new(conn, payload):
     if raw_cwd is not None and not isinstance(raw_cwd, str):
         conn.send(error_frame("bad_payload", "'cwd' must be a string."))
         return
+    raw_mode = payload.get("mode")
+    if raw_mode is not None and (
+            not isinstance(raw_mode, str) or raw_mode not in _VALID_TASK_MODES):
+        # isinstance-gated the same way as raw_cwd above: an unhashable
+        # payload value (list/dict) would otherwise raise TypeError out of
+        # the `in` check below, uncaught, since this runs before the try/
+        # except further down.
+        conn.send(error_frame("bad_payload", "'mode' is not a recognized task mode."))
+        return
     if _supervisor.at_capacity():
         conn.send(error_frame(SessionLimit.code, _session_limit_message()))
         log.warning("ACP session/new refused: [%s] at the session cap",
@@ -5701,7 +5732,7 @@ async def _handle_new(conn, payload):
     conn.send(envelope("meta", {"pending": "new"}))
     try:
         cwd = await asyncio.to_thread(_resolve_session_cwd, raw_cwd)
-        info = await _supervisor.new_session(cwd)
+        info = await _supervisor.new_session(cwd, mode=raw_mode)
     except AcpError as exc:
         log.warning("ACP session/new refused: [%s] %s", exc.code, exc)
         conn.send(error_frame(exc.code, str(exc)))

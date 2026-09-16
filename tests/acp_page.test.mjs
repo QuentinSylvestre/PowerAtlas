@@ -682,6 +682,30 @@ function loadPage(templatePath, opts = {}) {
     if (/\bhidden\b/.test(attrs)) el.hidden = true;
     byId.set(id[1], el);
   }
+  // `byId` has stayed leaf-only until now: every `container.querySelectorAll`
+  // the page runs is over children the page appended itself at runtime (rail
+  // rows, the command dropdown, the delete modal), so a flat map of id'd
+  // elements was enough. The task-mode picker (plans/260911_ACP_V3_FOLLOWUP_
+  // FEATURES.md Phase 3) is the first static-subtree query --
+  // `taskModeMenu.querySelectorAll('.acp-taskmode-option')` over markup that
+  // is already there on load, never appended by the script -- so this nests
+  // exactly that one relationship rather than teaching `byId` to parse nesting
+  // in general. Matched on class rather than scoped to the menu's own inner
+  // HTML with a regex, so it survives the options being reordered. Nothing
+  // else on this page queries this menu, so it is inert for every other check.
+  const taskModeMenu = byId.get("acpPickerTaskModeMenu");
+  for (const btn of markup.matchAll(/<button\b([^>]*)>/g)) {
+    const attrs = btn[1];
+    const cls = /\bclass="([^"]*)"/.exec(attrs);
+    if (!cls || !cls[1].split(/\s+/).includes("acp-taskmode-option")) continue;
+    const optId = /\bid="([^"]+)"/.exec(attrs);
+    const opt = optId && byId.get(optId[1]);
+    if (!opt || !taskModeMenu) continue;
+    opt.className = cls[1];
+    const val = /\bdata-value="([^"]*)"/.exec(attrs);
+    if (val) opt.dataset.value = val[1];
+    taskModeMenu.appendChild(opt);
+  }
   ACTIVE = null;
 
   const sockets = [];
@@ -4309,6 +4333,64 @@ check("cancelling the picker creates nothing and leaves the page alone", async (
   page.fireDoc("keydown", { key: "Escape" });
   assertEqual(page.el("acpPicker").hidden, true, "Escape left the picker open");
   assertEqual(page.sentOf("new").length, 0, "Escape created a session");
+});
+
+// ---------------------------------------------------- picker task-mode wiring --
+//
+// The task-mode control inside #acpPicker (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md
+// Phase 3) lets a user pick a mode at create time. The two `send('new', ...)`
+// call sites are not symmetric: the immediate-create path threads the picked
+// mode directly, but the deferred close-then-create path can only carry it
+// through `pendingCreate` -- review caught exactly this gap once already
+// (pendingCreate built as `{ cwd: cwd }` with `mode` silently dropped), so the
+// second check below is written to fail again if that regresses.
+
+check("picking a task mode reaches send('new', ...) on the immediate-create path",
+      async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  await page.openPicker();
+  page.click("acpPickerTaskModeOptSpec");
+  page.click("acpPickerNeutral");
+  const sent = page.sentOf("new");
+  assertEqual(sent.length, 1, "picking a task mode and creating made no create call");
+  assertEqual(sent[0].payload.mode, "spec",
+              "the picked task mode did not reach send('new', ...) on the " +
+              "immediate-create path");
+});
+
+check("a picked task mode survives the deferred close-then-create path", async (tpl) => {
+  // The exact bug class review caught once already: pendingCreate built as
+  // `{ cwd: cwd }` with `mode` silently dropped, so pickerRunPending()'s later
+  // send('new', ...) call would lose the mode the user actually picked.
+  const { page, live } = connected(tpl, { sid: "sess-w0-s0" });
+  await page.settle();
+  await page.openPicker();
+  page.click("acpPickerTaskModeOptBugFix");
+  page.el("acpPickerCloseCurrent").checked = true;
+  page.click("acpPickerNeutral");
+  assertEqual(page.sentOf("close").length, 1, "nothing was closed");
+  assertEqual(page.sentOf("new").length, 0,
+              "the create went out before the close landed");
+  page.deliver({ type: "session_closed", sessionId: live,
+                 payload: { sessionId: live, message: "This session was closed." } });
+  const sent = page.sentOf("new");
+  assertEqual(sent.length, 1, "the close landed and the deferred create never ran");
+  assertEqual(sent[0].payload.mode, "bug-fix",
+              "the picked task mode did not survive pendingCreate through to the " +
+              "deferred send('new', ...) call -- this is the exact interface-" +
+              "contract bug review already caught once, before implementation");
+});
+
+check("leaving the task-mode picker untouched sends today's kiro_default, unchanged",
+      async (tpl) => {
+  const page = await railed(tpl, { store: fakeStore({ workspaces: 1, sessions: 1 }) });
+  await page.openPicker();
+  page.click("acpPickerNeutral");
+  const sent = page.sentOf("new");
+  assertEqual(sent.length, 1, "creating with the default task mode made no create call");
+  assertEqual(sent[0].payload.mode, "kiro_default",
+              "omitting/defaulting the task-mode picker did not reproduce today's " +
+              "exact kiro_default behavior");
 });
 
 // --------------------------------------------------------- deleting a session --

@@ -353,6 +353,41 @@
     <!-- Carries the cap, the reason creation is refused, or nothing at all.
          Reserves no space when empty. -->
     <div class="acp-picker-note" id="acpPickerNote" role="status" aria-live="polite"></div>
+    <!-- Task-mode picker (create-time only, plans/260911_ACP_V3_FOLLOWUP_FEATURES.md
+         Phase 3): lets the user pick which kiro-cli task mode the new session
+         starts in. Reuses the button + popover-menu interaction pattern
+         established for #acpModeToggle/#acpModeMenu (the send-mode picker in
+         the composer toolbar) but is a separate, independent control — that
+         one persists a per-turn Steer/Queue choice across the whole session;
+         this one is set once here and has no meaning afterward, so it gets
+         its own classes/ids rather than reusing those elements. Offers only
+         the 5 modes Phase 2's live probe individually confirmed working
+         (kiro_default plus spec/quick-spec/bug-fix/plan) — 3 further modes
+         kiro-cli itself reports (vibe, autonomous, semantic_reviewer) were
+         only observed to exist, never behaviorally characterized, so the
+         backend accepts them (robustness) but this picker does not offer
+         them (unconfirmed). -->
+    <div class="acp-picker-taskmode" id="acpPickerTaskModeRow">
+      <span class="acp-picker-taskmode-label" id="acpPickerTaskModeLabel">Task mode</span>
+      <div class="acp-taskmode-picker">
+        <button class="acp-btn acp-taskmode-toggle" id="acpPickerTaskModeToggle" type="button"
+                aria-haspopup="menu" aria-expanded="false"
+                aria-label="Choose a task mode for the new session"
+                data-task-mode="kiro_default">
+          <span id="acpPickerTaskModeToggleText">Default</span>
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="acp-taskmode-menu" id="acpPickerTaskModeMenu" hidden role="menu" aria-label="Task mode">
+          <button class="acp-taskmode-option" id="acpPickerTaskModeOptDefault" data-value="kiro_default" role="menuitem" aria-current="true">Default</button>
+          <button class="acp-taskmode-option" id="acpPickerTaskModeOptSpec" data-value="spec" role="menuitem" aria-current="false">Spec</button>
+          <button class="acp-taskmode-option" id="acpPickerTaskModeOptQuickSpec" data-value="quick-spec" role="menuitem" aria-current="false">Quick spec</button>
+          <button class="acp-taskmode-option" id="acpPickerTaskModeOptBugFix" data-value="bug-fix" role="menuitem" aria-current="false">Bug fix</button>
+          <button class="acp-taskmode-option" id="acpPickerTaskModeOptPlan" data-value="plan" role="menuitem" aria-current="false">Plan</button>
+        </div>
+      </div>
+    </div>
     <!-- Shown only when this page is holding a session. Pressing New used to
          leave that session open, holding one of the eight slots and ~161 MB for
          the full idle TTL, and say nothing about it — the transcript simply
@@ -611,6 +646,67 @@
   outline: 2px solid var(--accent, #6c8cff);
   outline-offset: -2px;
 }
+/* ---- task-mode picker (inside #acpPicker, create-time only) --------------- */
+/* Independent from the .acp-mode-* rules above (send-mode picker): same
+   button + popover-menu interaction pattern, but its own classes since the
+   two features have different lifecycles and live in different parts of the
+   page — this one opens downward from a row near the top of a modal rather
+   than upward from a composer button pinned to the bottom of the screen. */
+.acp-picker-taskmode { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; font-size: 11px; color: var(--text-muted, #8b95b0); padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.acp-picker-taskmode-label { font-weight: 600; }
+.acp-taskmode-picker { position: relative; flex-shrink: 0; }
+.acp-taskmode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text, #c8d0e7);
+  border-radius: var(--radius-sm, 6px);
+}
+.acp-taskmode-toggle svg { width: 12px; height: 12px; flex-shrink: 0; }
+.acp-taskmode-toggle[aria-expanded="true"] {
+  border-color: var(--accent, #6c8cff);
+  color: var(--accent, #6c8cff);
+}
+.acp-taskmode-toggle:focus-visible {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: -2px;
+}
+.acp-taskmode-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  background: var(--surface, #1e2030);
+  border: 1px solid var(--border, #2d3150);
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+  min-width: 120px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.acp-taskmode-menu[hidden] { display: none; }
+.acp-taskmode-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--text, #c8d0e7);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.acp-taskmode-option:hover,
+.acp-taskmode-option[aria-current="true"] {
+  background: var(--surface-hover, #252840);
+  color: var(--text, #c8d0e7);
+}
+.acp-taskmode-option:focus-visible {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: -2px;
+}
 /* Screen-reader-only visually hidden utility — used for aria-live regions */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
@@ -677,6 +773,26 @@
   var pickerNeutral = document.getElementById('acpPickerNeutral');
   var pickerSearch = document.getElementById('acpPickerSearch');
   var pickerList = document.getElementById('acpPickerList');
+  // Task-mode picker (create-time only, independent of the send-mode picker
+  // above — see the acp-picker-taskmode markup comment for why it is a
+  // separate control rather than a reuse of #acpModeToggle/#acpModeMenu).
+  var taskModeToggle = document.getElementById('acpPickerTaskModeToggle');
+  var taskModeToggleText = document.getElementById('acpPickerTaskModeToggleText');
+  var taskModeMenu = document.getElementById('acpPickerTaskModeMenu');
+  var taskModeOptions = taskModeMenu
+    ? Array.prototype.slice.call(taskModeMenu.querySelectorAll('.acp-taskmode-option'))
+    : [];
+  // name -> label shown on the toggle button once picked; keys are exactly
+  // the wire modeId values acp.py's _VALID_TASK_MODES accepts for these 5
+  // UI-offered modes (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
+  var TASK_MODE_LABELS = {
+    kiro_default: 'Default',
+    spec: 'Spec',
+    'quick-spec': 'Quick spec',
+    'bug-fix': 'Bug fix',
+    plan: 'Plan',
+  };
+  var pickedTaskMode = 'kiro_default';
   var reconnectBtn = document.getElementById('acpReconnect');
   var reloadBtn = document.getElementById('acpReload');
   var transcriptWrapEl = document.getElementById('acpTranscriptWrap');
@@ -4602,6 +4718,29 @@
   // being refused by a limit that was about to have room.
   var pendingCreate = null;
 
+  // Task-mode picker: toggle button opens/closes the menu, mirroring the
+  // send-mode picker's _closeModeMenu()/click-handler pattern (see below in
+  // this script) but fully independent of it — own DOM refs, own state
+  // (pickedTaskMode), own listeners, no shared elements.
+  function _closeTaskModeMenu() {
+    if (!taskModeMenu) return;
+    taskModeMenu.hidden = true;
+    if (taskModeToggle) taskModeToggle.setAttribute('aria-expanded', 'false');
+  }
+  function _applyTaskMode(value) {
+    pickedTaskMode = value;
+    var label = TASK_MODE_LABELS[value] || value;
+    if (taskModeToggleText) taskModeToggleText.textContent = label;
+    if (taskModeToggle) {
+      taskModeToggle.setAttribute('data-task-mode', value);
+      taskModeToggle.setAttribute('aria-label', 'Task mode: ' + label
+        + ' — change the task mode for the new session');
+    }
+    taskModeOptions.forEach(function (opt) {
+      opt.setAttribute('aria-current', opt.dataset.value === value ? 'true' : 'false');
+    });
+  }
+
   function pickerOpen(cwd) {
     if (ACP_ERROR) return;
     picker.hidden = false;
@@ -4618,6 +4757,11 @@
     pickerFilter = preset.toLowerCase();
     pickerSearch.value = preset;
     pickerCloseCurrent.checked = false;
+    // Reset the task-mode choice every time the modal opens — a picker left
+    // on a non-default mode from a previous creation would silently apply it
+    // to an unrelated later session otherwise.
+    _applyTaskMode('kiro_default');
+    _closeTaskModeMenu();
     pickerRenderKeepRow();
     pickerNote.textContent = 'loading workspaces…';
     pickerRender();
@@ -4629,6 +4773,7 @@
 
   function pickerClose() {
     picker.hidden = true;
+    _closeTaskModeMenu();
   }
 
   function pickerRenderKeepRow() {
@@ -4768,16 +4913,24 @@
     }
     var wantsClose = !pickerKeepRow.hidden && pickerCloseCurrent.checked
                      && !!sessionId && !turnActive;
+    // Captured before pickerClose() (which only hides the menu, not the
+    // selection) so both branches below send the task mode the user actually
+    // picked, not whatever the picker resets to on its next open.
+    var taskMode = pickedTaskMode;
     pickerClose();
     if (!wantsClose) {
-      send('new', { cwd: cwd }, null);
+      send('new', { cwd: cwd, mode: taskMode }, null);
       setView('chat');
       return;
     }
     // Close, then create when the close lands. `session_closed` is the frame
     // that says the slot is free; `close_in_progress` is the other way this
-    // ends and is handled on the same latch.
-    pendingCreate = { cwd: cwd };
+    // ends and is handled on the same latch. `taskMode` is threaded through
+    // pendingCreate rather than referenced directly here, since a bare
+    // `taskMode`/`pickedTaskMode` closure reference would be out of scope by
+    // the time pickerRunPending() actually runs the deferred create (review
+    // finding, see plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3).
+    pendingCreate = { cwd: cwd, mode: taskMode };
     if (!send('close', {}, sessionId)) {
       pendingCreate = null;
       return;
@@ -4793,7 +4946,7 @@
     var want = pendingCreate;
     pendingCreate = null;
     if (!want) return;
-    send('new', { cwd: want.cwd }, null);
+    send('new', { cwd: want.cwd, mode: want.mode }, null);
   }
 
   /** Put a just-created session into the rail, without a full reload.
@@ -5772,6 +5925,30 @@
   document.addEventListener('click', function () { _closeModeMenu(); });
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') _closeModeMenu();
+  });
+  // Task-mode picker (inside #acpPicker): same toggle-button/outside-click/Esc
+  // wiring pattern as the send-mode picker just above, but its own listeners
+  // against its own elements — see _closeTaskModeMenu()/_applyTaskMode() for
+  // why this stays a separate, independent control.
+  if (taskModeToggle) {
+    taskModeToggle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var open = !taskModeMenu.hidden;
+      if (open) { _closeTaskModeMenu(); } else {
+        taskModeMenu.hidden = false;
+        taskModeToggle.setAttribute('aria-expanded', 'true');
+      }
+    });
+  }
+  taskModeOptions.forEach(function (opt) {
+    opt.addEventListener('click', function () {
+      _applyTaskMode(opt.dataset.value);
+      _closeTaskModeMenu();
+    });
+  });
+  document.addEventListener('click', function () { _closeTaskModeMenu(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') _closeTaskModeMenu();
   });
   sendModeBtn.addEventListener('click', function () {
     var text = promptInput.value.trim();
