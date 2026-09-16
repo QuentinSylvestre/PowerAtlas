@@ -19784,7 +19784,9 @@ class TestSupervisor:
             sup.sessions = {sid: {}}
             sup._publish_live()
 
-            sup._proc = types.SimpleNamespace(pid=4321)
+            # poll() returns None while the stand-in process is still
+            # "running" -- matches subprocess.Popen's own convention.
+            sup._proc = types.SimpleNamespace(pid=4321, poll=lambda: None)
             sup._publish_live()
 
         assert len(hook_calls) == 2, f'hook called {len(hook_calls)} times, expected 2'
@@ -19794,6 +19796,45 @@ class TestSupervisor:
         published2, pid2 = hook_calls[1]
         assert published2 == frozenset({sid})
         assert pid2 == 4321, 'publish_live must pass the real agent pid once bound'
+
+    def test_supervisor_publish_live_suppresses_pid_of_an_exited_process(self):
+        """Phase 1 review finding 3 (Reliability engineer, Medium):
+        `agent_pid()` deliberately doesn't gate on `poll()` -- see its own
+        docstring -- because its original consumer (a session-load-refusal
+        check) is safe either way. `_publish_live()` is a different
+        consumer: publishing a stale pid for a process that has already
+        exited (but whose `_proc` `_detach()` hasn't cleared yet -- an async
+        handoff gap) risks presence.py's D32 guard over-suppressing an
+        unrelated, genuinely-foreign `kiro-cli-v3` session if the OS recycles
+        that exact pid before the next scan. `_publish_live()` now re-checks
+        `self._proc.poll()` itself and publishes `None` instead of the stale
+        pid when the process has already exited."""
+        from unittest.mock import patch
+        import types
+        from power_atlas import acp as acp_mod
+
+        hook_calls = []
+
+        def hook(session_ids, pid):
+            hook_calls.append((frozenset(session_ids), pid))
+
+        sid = 'sess_v3-0000-0000-0000-000000000002'
+
+        with patch.object(acp_mod, 'sessions_changed_hook', hook):
+            sup = acp_mod._Supervisor()
+            sup.sessions = {sid: {}}
+            # Simulates a process that has already exited (poll() returns
+            # its exit code, not None) while _detach() hasn't run yet.
+            sup._proc = types.SimpleNamespace(pid=4321, poll=lambda: 0)
+            sup._publish_live()
+
+        assert len(hook_calls) == 1, f'hook called {len(hook_calls)} times, expected 1'
+        published, pid = hook_calls[0]
+        assert published == frozenset({sid})
+        assert pid is None, (
+            'publish_live must not publish a pid for a process that has '
+            'already exited, even if _detach() has not cleared _proc yet'
+        )
 
     # ------------------------------------------------------------------
     # SC-11 baseline coverage: load_session, _handle_subscribe,

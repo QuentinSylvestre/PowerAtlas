@@ -4884,12 +4884,31 @@ class _Supervisor:
         (scoped to the pre-cutover dual-supervisor union, where a single
         shared pid slot could not safely name either side) no longer
         applies.
+
+        Additional staleness guard (Phase 1 review finding 3, same plan):
+        ``agent_pid()`` deliberately does not gate on ``poll()`` (see its own
+        docstring), so between an agent crash and the async ``_detach()``
+        handoff that clears ``_proc``, it can still return the dead
+        process's pid. This call site is the one consumer for which that
+        matters — a recycled pid published here could let presence.py's D32
+        guard over-suppress an unrelated, genuinely-foreign ``kiro-cli-v3``
+        session that happens to land on the same OS pid. We re-check
+        ``self._proc.poll()`` here, at the publish call site, rather than
+        inside ``agent_pid()`` itself, so ``agent_pid()``'s existing
+        contract for its original consumer (safe either way) stays
+        undisturbed.
         """
         hook = sessions_changed_hook
         if hook is None:
             return
+        pid = self.agent_pid()
+        if pid is not None and self._proc is not None and self._proc.poll() is not None:
+            # Our process has already exited but _detach() hasn't cleared
+            # _proc yet -- don't publish a pid the OS may already be free to
+            # recycle onto an unrelated process.
+            pid = None
         try:
-            hook(frozenset(self.sessions), self.agent_pid())
+            hook(frozenset(self.sessions), pid)
         except Exception:
             log.exception("ACP: publishing the live session set failed")
 
