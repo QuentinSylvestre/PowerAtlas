@@ -562,13 +562,16 @@ Apply all 28 hits from the doc-impact summary table: update provider names from 
 - Update provider count from "four" to "three" (line 33): `three — claude-code, kiro-ide, and kiro-cli-v3`.
 
 **Exit criteria**:
-- [ ] `grep -r '"kiro-cli"' README.md` returns no hits.
-- [ ] `grep "provider_settings.kiro-cli" README.md` returns no hits.
-- [ ] `grep "scanned separately from v2" README.md` returns no hits.
-- [ ] `grep "data_kiro" docs/KNOWLEDGE.md` returns no hits.
-- [ ] `docs/KNOWLEDGE.md` contains a section heading "kiro-cli v2 store (historical".
-- [ ] `grep "trust_all_tools" plans/tests/260701_POWERATLAS.md` returns no hits (section 5.4 deleted).
-- [ ] `grep "data_kiro.py" plans/tests/260701_POWERATLAS.md` returns no hits (section 1.9 and header updated).
+- [x] `grep -r '"kiro-cli"' README.md` returns no hits.
+- [x] `grep "provider_settings.kiro-cli" README.md` returns no hits.
+- [x] `grep "scanned separately from v2" README.md` returns no hits.
+- [x] `grep "data_kiro" docs/KNOWLEDGE.md` returns no hits.
+- [x] `docs/KNOWLEDGE.md` contains a section heading "kiro-cli v2 store (historical".
+- [x] `grep "trust_all_tools" plans/tests/260701_POWERATLAS.md` returns no hits (section 5.4 deleted).
+- [x] `grep "data_kiro.py" plans/tests/260701_POWERATLAS.md` returns no hits (section 1.9 and header updated).
+
+Implementation (2026-09-17, code: 3e51380)
+Updated `README.md` (removed `[provider_settings.kiro-cli]` block and "scanned separately from v2"); `docs/KNOWLEDGE.md` (removed v2 diff-backfill paragraph, added v2 store historical section); `memory/MEMORY.md` (updated atomic-write entry to v3 path, removed `data_kiro._cwd_to_files` reference, removed two v2 clauses); `plans/ROADMAP.md` (updated v2 path notes); `plans/tests/260701_POWERATLAS.md` (deleted sections 1.9/5.3/5.4, updated provider names); `plans/tests/HARNESS.md` (removed kiro-session-data and kiro-cli-sqlite rows, updated provider count). Fixup commit 9e19666: reordered KNOWLEDGE.md follow-on bullets before the v2 historical section.
 
 ## 6) Risk Assessment
 
@@ -623,9 +626,25 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 
 1. **`test_presence_claude_sidecar_outside_window_is_not_live` loses its discriminating companion.** After deleting `test_presence_kiro_lock_far_newer_than_its_process_is_live`, the forward-skew discriminating pair in presence tests is broken; the surviving test's docstring explicitly names the deleted test as its complement. The forward-skew guard's mutation coverage is reduced. Source: review finding 24 (Low). No v3 equivalent test exists yet.
 
-2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
+2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class was written using v3 fixture infrastructure in fixup 037e1a7.
+
+3. **`plans/tests/260701_POWERATLAS.md` test plan sections 1.2/1.8/1.10 still describe v2 extraction mechanics** (`.history`-preferred first prompt, `Prompt`-kind scan, `toolUse`-entries-skipped, `~/.kiro/sessions/cli` availability path). These sections need updating to describe v3 behavior. Deferred from Phase 9 review. Low severity — test plan stale but no runtime impact.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 9, persona: Senior engineer)
+
+Implementation health: Yellow (after fixup).
+6 findings (0 High, 1 Medium, 5 Low). M1 fixed; L2-L4 are test plan updates deferred to follow-up.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | KNOWLEDGE.md follow-on bullets appeared under the v2 historical section instead of before it. | Fixed — reordered in fixup 9e19666. |
+| 2 | Low | `260701_POWERATLAS.md` section 1.10 still describes v2 `.history`/`Prompt`-kind extraction. | User: accepted — test plan section 1.10 stale; deferred to Follow-up Work. |
+| 3 | Low | `260701_POWERATLAS.md` section 1.2 `what` references `~/.kiro/sessions/cli` for v3 availability check. | User: accepted — stale path; deferred to Follow-up Work. |
+| 4 | Low | `260701_POWERATLAS.md` section 1.8 oracle references v2 `.history` / `toolUse` artifacts. | User: accepted — deferred to Follow-up Work. |
+| 5 | Low | `260701_POWERATLAS.md` sections 5.2/1.2 had additional stale kiro-cli references. | Fixed — sub-agent cleaned these in 3e51380. |
+| 6 | Low | Double blank line left between sections 5.2 and 5.5 in 260701_POWERATLAS.md. | User: accepted — cosmetic; no impact. |
 
 ### 2026-09-17 — Implementation Review (after Phase 8, persona: Senior engineer)
 
