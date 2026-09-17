@@ -8764,7 +8764,7 @@ class TestGetSemanticStatus:
 
     def test_returns_none_for_missing_file(self):
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=None):
-            result = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
+            result = get_semantic_status("sess-1", "kiro-cli-v3", "C:\\proj")
             assert result is None
 
     def test_caches_result_and_returns_on_same_mtime(self, tmp_path):
@@ -8826,13 +8826,13 @@ class TestGetSemanticStatus:
         # File doesn't exist, but _resolve_jsonl_path returns it
         # (simulates race condition)
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=fake_path):
-            result = get_semantic_status("sess-3", "kiro-cli", "C:\\proj")
+            result = get_semantic_status("sess-3", "kiro-cli-v3", "C:\\proj")
             assert result is None
 
     def test_never_raises(self):
         """get_semantic_status swallows all exceptions."""
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", side_effect=RuntimeError("boom")):
-            result = get_semantic_status("sess-4", "kiro-cli", "C:\\proj")
+            result = get_semantic_status("sess-4", "kiro-cli-v3", "C:\\proj")
             assert result is None
 
 

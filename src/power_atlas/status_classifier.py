@@ -37,7 +37,7 @@ class SemanticStatus(str, Enum):
 # ---------------------------------------------------------------------------
 
 
-# Only the kiro-cli / kiro-cli-v3 branch is memoized: its v3 fallback walks
+# Only the kiro-cli-v3 branch is memoized: its fallback walks
 # every workspace directory, and this runs per-session inside the 5s status
 # poll, so an uncached miss costs O(sessions x workspace_dirs) stat calls per
 # tick. The claude-code branch is two syscalls and not worth caching.
@@ -498,8 +498,7 @@ def _classify_from_path(
         return classify_kiro_v3(tail_lines)
     elif provider == "claude-code":
         return classify_claude(tail_lines)
-    else:
-        return classify_kiro_v3(tail_lines)
+    return None
 
 
 def classify_session(
