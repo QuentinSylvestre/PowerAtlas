@@ -1,7 +1,7 @@
 # Remove kiro-cli v2 from PowerAtlas
 
 > **Date**: 2026-09-17
-> **Status**: In Progress — implementation complete, restart pending for live surface verification
+> **Status**: Complete — implementation, tests, and live QA verified
 > **Scope**: Delete the kiro-cli v2 provider (launcher, session history, ACP v2 paths, presence lock scan, status classifier v2 branch) and all associated code, tests, and docs.
 > **Estimated effort**: 1–2 days
 
@@ -789,7 +789,7 @@ SC-1 achieved; PROVIDERS registry clean; `acp.py` isolation boundary intact (exa
 Overall implementation health: Green.
 Personas: Senior engineer, Maintainability reviewer, Reliability engineer, Architect.
 6 findings (1 High, 0 Medium, 5 Low). High finding fixed; all 5 Lows addressed or accepted.
-QA verification: BLOCKED (1 surface: live dashboard requires PowerAtlas restart — user must restart to verify SC-2).
+QA verification: PASS (3 surfaces verified: API, browser, library; 4 probes).
 
 All 11 success criteria met in code and tests:
 - SC-1 through SC-11 verified by persona sub-agents and test suite (1896 passed, 2 skipped).
