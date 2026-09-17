@@ -22,9 +22,6 @@ logger = logging.getLogger(__name__)
 
 _CACHE_TTL = 5.0  # seconds
 
-# Replicate path constant (avoids circular import through data_kiro → data → data_kiro)
-SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
-
 
 class SemanticStatus(str, Enum):
     """Semantic state of a live session."""
@@ -63,10 +60,10 @@ def _resolve_jsonl_path(
 
     Returns None if the file does not exist on disk.
     """
-    if provider not in ("kiro-cli", "kiro-cli-v3"):
+    if provider != "kiro-cli-v3":
         return _resolve_jsonl_path_uncached(session_id, provider, cwd)
 
-    cache_key = (session_id, provider, str(SESSION_DIR), str(_V3_SESSIONS_ROOT))
+    cache_key = (session_id, provider, str(_V3_SESSIONS_ROOT))
     with _path_cache_lock:
         cached = _path_cache.get(cache_key)
         if cached is not None:
@@ -97,26 +94,7 @@ def _resolve_jsonl_path_uncached(
     session_id: str, provider: str, cwd: str
 ) -> Path | None:
     """Locate the JSONL transcript file for a session, hitting the filesystem."""
-    if provider == "kiro-cli":
-        # v2 path
-        path = SESSION_DIR / f"{session_id}.jsonl"
-        if path.is_file():
-            return path
-        # v3 path: ~/.kiro/sessions/<workspace-hash>/sess_<session_id>/messages.jsonl
-        if _V3_SESSIONS_ROOT.is_dir():
-            # session_id may or may not have sess_ prefix
-            sid = session_id if session_id.startswith("sess_") else f"sess_{session_id}"
-            try:
-                for ws_dir in _V3_SESSIONS_ROOT.iterdir():
-                    if not ws_dir.is_dir() or ws_dir.name == "cli":
-                        continue
-                    v3_path = ws_dir / sid / "messages.jsonl"
-                    if v3_path.is_file():
-                        return v3_path
-            except OSError:
-                return None
-        return None
-    elif provider == "kiro-cli-v3":
+    if provider == "kiro-cli-v3":
         # Go directly to workspace-hash scan (no v2 store check)
         if not _V3_SESSIONS_ROOT.is_dir():
             return None
@@ -212,41 +190,6 @@ def _read_tail_lines(path: Path, max_bytes: int = 65536, file_size: int | None =
 # Per-provider classifiers
 # ---------------------------------------------------------------------------
 
-
-def classify_kiro_v2(tail_lines: list[str]) -> Optional[SemanticStatus]:
-    """Classify session status from kiro-cli v2 JSONL tail.
-
-    Format: ``{"version":"v1","kind":"<kind>","data":{...}}``
-    """
-    # Walk in reverse to find the last parseable message
-    for line in reversed(tail_lines):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-
-        kind = obj.get("kind")
-        if kind is None:
-            continue
-
-        if kind == "Prompt":
-            return SemanticStatus.WORKING
-        if kind == "ToolResults":
-            return SemanticStatus.WORKING
-        if kind == "AssistantMessage":
-            data = obj.get("data", {})
-            content = data.get("content", [])
-            # content is a list; check if any item is a toolUse
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("kind") == "toolUse":
-                        return SemanticStatus.WORKING
-            return SemanticStatus.WAITING
-
-    return None
 
 
 # Conversation lines. Everything else Claude Code writes (mode, attachment,
@@ -449,23 +392,6 @@ def classify_kiro_v3(tail_lines: list[str]) -> Optional[SemanticStatus]:
     return last_meaningful
 
 
-def _is_v3_format(tail_lines: list[str]) -> bool:
-    """Detect whether JSONL lines are v3 format (payload.type field)."""
-    for line in tail_lines[-5:]:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
-            continue
-        # v3 has "payload" with "type" field; v2 has "kind" at top level
-        if "payload" in obj and isinstance(obj.get("payload"), dict) and "type" in obj["payload"]:
-            return True
-        if "kind" in obj:
-            return False
-    return False
-
 
 # ---------------------------------------------------------------------------
 # Cache and public API
@@ -569,13 +495,7 @@ def _classify_from_path(
         return None
 
     if provider == "kiro-cli-v3":
-        # kiro-cli-v3 sessions always use the v3 format; skip auto-detection
         return classify_kiro_v3(tail_lines)
-    if provider == "kiro-cli":
-        # kiro-cli v2 sessions may be v2 or v3 format depending on kiro-cli version
-        if _is_v3_format(tail_lines):
-            return classify_kiro_v3(tail_lines)
-        return classify_kiro_v2(tail_lines)
     elif provider == "claude-code":
         return classify_claude(tail_lines)
     else:

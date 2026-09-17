@@ -8431,7 +8431,6 @@ from power_atlas.status_classifier import (
     _resolve_jsonl_path,
     _status_cache,
     classify_claude,
-    classify_kiro_v2,
     classify_kiro_v3,
     get_semantic_status,
 )
@@ -8447,17 +8446,20 @@ class TestSemanticStatusEnum:
 
 
 class TestResolveJsonlPath:
-    def test_kiro_v2_returns_none_for_nonexistent(self, tmp_path):
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path / "v3_empty"):
-            result = _resolve_jsonl_path("nonexistent-id", "kiro-cli", "C:\\proj")
+    def test_kiro_v3_returns_none_for_nonexistent(self, tmp_path):
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path / "v3_empty"):
+            result = _resolve_jsonl_path("sess_nonexistent-id", "kiro-cli-v3", "C:\\proj")
             assert result is None
 
-    def test_kiro_v2_returns_path_when_exists(self, tmp_path):
-        session_file = tmp_path / "my-session.jsonl"
+    def test_kiro_v3_returns_path_when_exists(self, tmp_path):
+        ws_hash_dir = tmp_path / "hash1"
+        ws_hash_dir.mkdir()
+        sess_dir = ws_hash_dir / "sess_my-session"
+        sess_dir.mkdir()
+        session_file = sess_dir / "messages.jsonl"
         session_file.write_text("")
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path):
-            result = _resolve_jsonl_path("my-session", "kiro-cli", "C:\\proj")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            result = _resolve_jsonl_path("sess_my-session", "kiro-cli-v3", "C:\\proj")
             assert result == session_file
 
     def test_claude_code_returns_none_when_no_project_folder(self):
@@ -8476,7 +8478,7 @@ class TestResolveJsonlPath:
         result = _resolve_jsonl_path("sess-1", "unknown-provider", "C:\\proj")
         assert result is None
 
-    def test_kiro_v3_returns_path_when_exists(self, tmp_path):
+    def test_kiro_v3_finds_messages_jsonl(self, tmp_path):
         """v3 session found under sessions/<hash>/sess_<id>/messages.jsonl."""
         ws_hash_dir = tmp_path / "abc123"
         ws_hash_dir.mkdir()
@@ -8484,9 +8486,8 @@ class TestResolveJsonlPath:
         sess_dir.mkdir()
         messages_file = sess_dir / "messages.jsonl"
         messages_file.write_text("")
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
-            result = _resolve_jsonl_path("my-session", "kiro-cli", "C:\\proj")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            result = _resolve_jsonl_path("sess_my-session", "kiro-cli-v3", "C:\\proj")
             assert result == messages_file
 
     def test_kiro_v3_with_sess_prefix(self, tmp_path):
@@ -8497,9 +8498,8 @@ class TestResolveJsonlPath:
         sess_dir.mkdir()
         messages_file = sess_dir / "messages.jsonl"
         messages_file.write_text("")
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
-            result = _resolve_jsonl_path("sess_uuid-here", "kiro-cli", "C:\\proj")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            result = _resolve_jsonl_path("sess_uuid-here", "kiro-cli-v3", "C:\\proj")
             assert result == messages_file
 
 
@@ -8511,8 +8511,7 @@ class TestResolveJsonlPath:
         sess_dir.mkdir()
         messages_file = sess_dir / "messages.jsonl"
         messages_file.write_text("")
-        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path), \
-             _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"):
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
             result = _resolve_jsonl_path("sess_v3session", "kiro-cli-v3", "C:\\proj")
             assert result == messages_file
 
@@ -8530,29 +8529,29 @@ class TestResolveJsonlPath:
             result = _resolve_jsonl_path("sess_xyz", "kiro-cli-v3", "C:\\proj")
             assert result is None
 
-    def test_kiro_v3_cache_key_isolated_from_v2(self, tmp_path):
-        """kiro-cli and kiro-cli-v3 with same session_id get distinct cache entries (4-tuple key)."""
+    def test_kiro_v3_cache_key_isolated_by_session_id(self, tmp_path):
+        """Two different v3 session IDs get distinct cache entries."""
         from power_atlas import status_classifier
-        # v2 session
-        v2_file = tmp_path / "cli" / "shared-id.jsonl"
-        (tmp_path / "cli").mkdir(parents=True)
-        v2_file.write_text("")
-        # v3 session
-        hash_dir = tmp_path / "hash1"
-        sess_dir = hash_dir / "sess_shared-id"
-        sess_dir.mkdir(parents=True)
-        v3_file = sess_dir / "messages.jsonl"
-        v3_file.write_text("")
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+        # First v3 session
+        hash_dir1 = tmp_path / "hash1"
+        sess_dir1 = hash_dir1 / "sess_id-one"
+        sess_dir1.mkdir(parents=True)
+        v3_file1 = sess_dir1 / "messages.jsonl"
+        v3_file1.write_text("")
+        # Second v3 session
+        hash_dir2 = tmp_path / "hash2"
+        sess_dir2 = hash_dir2 / "sess_id-two"
+        sess_dir2.mkdir(parents=True)
+        v3_file2 = sess_dir2 / "messages.jsonl"
+        v3_file2.write_text("")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
             from power_atlas.status_classifier import _path_cache
             _path_cache.clear()
-            r_v2 = _resolve_jsonl_path("shared-id", "kiro-cli", "C:\\proj")
-            r_v3 = _resolve_jsonl_path("sess_shared-id", "kiro-cli-v3", "C:\\proj")
-            # Both resolved, to different paths
-            assert r_v2 == v2_file
-            assert r_v3 == v3_file
-            assert r_v2 != r_v3
+            r1 = _resolve_jsonl_path("sess_id-one", "kiro-cli-v3", "C:\\proj")
+            r2 = _resolve_jsonl_path("sess_id-two", "kiro-cli-v3", "C:\\proj")
+            assert r1 == v3_file1
+            assert r2 == v3_file2
+            assert r1 != r2
 
 
 class TestReadTailLines:
@@ -8589,51 +8588,6 @@ class TestReadTailLines:
         assert "line2" in lines
 
 
-class TestClassifyKiroV2:
-    def _make_line(self, kind, data=None):
-        return _json.dumps({"version": "v1", "kind": kind, "data": data or {}})
-
-    def test_prompt_returns_active(self):
-        lines = [self._make_line("Prompt", {"content": "hello"})]
-        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
-
-    def test_tool_results_returns_active(self):
-        lines = [self._make_line("ToolResults", {"results": []})]
-        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
-
-    def test_assistant_with_tool_use_returns_active(self):
-        data = {"content": [{"kind": "toolUse", "data": {"name": "fs_read"}}]}
-        lines = [self._make_line("AssistantMessage", data)]
-        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
-
-    def test_assistant_without_tool_use_returns_idle(self):
-        data = {"content": [{"kind": "text", "data": {"text": "Done."}}]}
-        lines = [self._make_line("AssistantMessage", data)]
-        assert classify_kiro_v2(lines) == SemanticStatus.WAITING
-
-    def test_last_message_wins_reverse_order(self):
-        """When multiple messages exist, the last (most recent) one determines status."""
-        lines = [
-            self._make_line("Prompt", {"content": "hello"}),
-            self._make_line("AssistantMessage", {"content": [{"kind": "text", "data": {}}]}),
-        ]
-        # Last line is AssistantMessage without toolUse → IDLE
-        assert classify_kiro_v2(lines) == SemanticStatus.WAITING
-
-    def test_empty_lines_returns_none(self):
-        assert classify_kiro_v2([]) is None
-
-    def test_invalid_json_returns_none(self):
-        assert classify_kiro_v2(["not json at all", "{broken"]) is None
-
-    def test_skips_unparseable_finds_valid(self):
-        """Skips garbage lines and classifies from the last valid one."""
-        lines = [
-            self._make_line("Prompt", {"content": "hello"}),
-            "garbage line",
-        ]
-        # Reverse walk: skip garbage, find Prompt → ACTIVE
-        assert classify_kiro_v2(lines) == SemanticStatus.WORKING
 
 
 class TestClassifyClaude:
@@ -8815,25 +8769,25 @@ class TestGetSemanticStatus:
 
     def test_caches_result_and_returns_on_same_mtime(self, tmp_path):
         session_file = tmp_path / "sess-1.jsonl"
-        line = _json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "hi"}})
+        line = _json.dumps({"id": "m1", "timestamp": "2026-01-01T00:00:00Z", "payload": {"type": "user", "content": "hi"}})
         session_file.write_text(line + "\n")
 
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=session_file):
             # First call — classifies
-            result1 = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
+            result1 = get_semantic_status("sess-1", "kiro-cli-v3", "C:\\proj")
             assert result1 == SemanticStatus.WORKING
 
             # Second call — hits cache (same mtime)
-            result2 = get_semantic_status("sess-1", "kiro-cli", "C:\\proj")
+            result2 = get_semantic_status("sess-1", "kiro-cli-v3", "C:\\proj")
             assert result2 == SemanticStatus.WORKING
 
             # Verify cache was populated
-            assert ("kiro-cli", "sess-1") in _status_cache
+            assert ("kiro-cli-v3", "sess-1") in _status_cache
 
     def test_cache_invalidated_on_mtime_change(self, tmp_path):
         session_file = tmp_path / "sess-2.jsonl"
-        # Write initial content -> ACTIVE
-        line_active = _json.dumps({"version": "v1", "kind": "Prompt", "data": {"content": "hi"}})
+        # Write initial content -> WORKING
+        line_active = _json.dumps({"id": "m1", "timestamp": "2026-01-01T00:00:00Z", "payload": {"type": "user", "content": "hi"}})
         session_file.write_text(line_active + "\n")
 
         # Use a controlled monotonic clock so we can expire the TTL
@@ -8847,13 +8801,13 @@ class TestGetSemanticStatus:
 
         with _patch("power_atlas.status_classifier._resolve_jsonl_path", return_value=session_file), \
              _patch("power_atlas.status_classifier.time.monotonic", side_effect=fake_monotonic):
-            result1 = get_semantic_status("sess-2", "kiro-cli", "C:\\proj")
+            result1 = get_semantic_status("sess-2", "kiro-cli-v3", "C:\\proj")
             assert result1 == SemanticStatus.WORKING
 
-            # Write new content (IDLE) and force a different mtime
+            # Write new content (WAITING) and force a different mtime
             line_idle = _json.dumps({
-                "version": "v1", "kind": "AssistantMessage",
-                "data": {"content": [{"kind": "text", "data": {"text": "Done."}}]},
+                "id": "m2", "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {"type": "assistant", "content": "Done."},
             })
             session_file.write_text(line_idle + "\n")
             import os as _os
@@ -8864,7 +8818,7 @@ class TestGetSemanticStatus:
             call_count[0] = 10
 
             # Next call: TTL expired + mtime changed -> reclassifies
-            result2 = get_semantic_status("sess-2", "kiro-cli", "C:\\proj")
+            result2 = get_semantic_status("sess-2", "kiro-cli-v3", "C:\\proj")
             assert result2 == SemanticStatus.WAITING
 
     def test_returns_none_on_stat_failure(self, tmp_path):
@@ -9034,14 +8988,13 @@ class TestResolveJsonlPathCaching:
         ws.mkdir(parents=True)
         (ws / "messages.jsonl").write_text("")
 
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
-            first = _resolve_jsonl_path("cached-id", "kiro-cli", "C:\\proj")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            first = _resolve_jsonl_path("sess_cached-id", "kiro-cli-v3", "C:\\proj")
             assert first == ws / "messages.jsonl"
 
             with _patch("power_atlas.status_classifier._resolve_jsonl_path_uncached",
                         side_effect=AssertionError("should not rescan")):
-                second = _resolve_jsonl_path("cached-id", "kiro-cli", "C:\\proj")
+                second = _resolve_jsonl_path("sess_cached-id", "kiro-cli-v3", "C:\\proj")
             assert second == first
 
     def test_deleted_file_reresolves(self, tmp_path):
@@ -9051,11 +9004,10 @@ class TestResolveJsonlPathCaching:
         target = ws / "messages.jsonl"
         target.write_text("")
 
-        with _patch("power_atlas.status_classifier.SESSION_DIR", tmp_path / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
-            assert _resolve_jsonl_path("gone-id", "kiro-cli", "C:\\proj") == target
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", tmp_path):
+            assert _resolve_jsonl_path("sess_gone-id", "kiro-cli-v3", "C:\\proj") == target
             target.unlink()
-            assert _resolve_jsonl_path("gone-id", "kiro-cli", "C:\\proj") is None
+            assert _resolve_jsonl_path("sess_gone-id", "kiro-cli-v3", "C:\\proj") is None
 
     def test_different_roots_do_not_collide(self, tmp_path):
         """The cache key carries the roots, so rebinding them re-resolves."""
@@ -9066,12 +9018,10 @@ class TestResolveJsonlPathCaching:
         (root_b / "h2" / "sess_same-id").mkdir(parents=True)
         (root_b / "h2" / "sess_same-id" / "messages.jsonl").write_text("")
 
-        with _patch("power_atlas.status_classifier.SESSION_DIR", root_a / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", root_a):
-            a = _resolve_jsonl_path("same-id", "kiro-cli", "C:\\proj")
-        with _patch("power_atlas.status_classifier.SESSION_DIR", root_b / "cli"), \
-             _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", root_b):
-            b = _resolve_jsonl_path("same-id", "kiro-cli", "C:\\proj")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", root_a):
+            a = _resolve_jsonl_path("sess_same-id", "kiro-cli-v3", "C:\\proj")
+        with _patch("power_atlas.status_classifier._V3_SESSIONS_ROOT", root_b):
+            b = _resolve_jsonl_path("sess_same-id", "kiro-cli-v3", "C:\\proj")
 
         assert a == root_a / "h" / "sess_same-id" / "messages.jsonl"
         assert b == root_b / "h2" / "sess_same-id" / "messages.jsonl"
@@ -9094,7 +9044,7 @@ class TestStatusCacheLRU:
         from power_atlas.status_classifier import SemanticStatus
         sc._status_cache.clear()
         for i in range(sc._MAX_CACHE_ENTRIES + 50):
-            sc._status_cache[("kiro-cli", f"s{i}")] = (float(i), 0.0, SemanticStatus.WORKING)
+            sc._status_cache[("kiro-cli-v3", f"s{i}")] = (float(i), 0.0, SemanticStatus.WORKING)
             sc._evict_oldest()
         assert len(sc._status_cache) == sc._MAX_CACHE_ENTRIES
 
@@ -9103,13 +9053,13 @@ class TestStatusCacheLRU:
         from power_atlas.status_classifier import SemanticStatus
         sc._status_cache.clear()
         for i in range(sc._MAX_CACHE_ENTRIES):
-            sc._status_cache[("kiro-cli", f"s{i}")] = (float(i), 0.0, SemanticStatus.WORKING)
+            sc._status_cache[("kiro-cli-v3", f"s{i}")] = (float(i), 0.0, SemanticStatus.WORKING)
         # Touch the oldest so it is no longer the eviction candidate
-        sc._status_cache.move_to_end(("kiro-cli", "s0"))
-        sc._status_cache[("kiro-cli", "new")] = (999.0, 0.0, SemanticStatus.WAITING)
+        sc._status_cache.move_to_end(("kiro-cli-v3", "s0"))
+        sc._status_cache[("kiro-cli-v3", "new")] = (999.0, 0.0, SemanticStatus.WAITING)
         sc._evict_oldest()
-        assert ("kiro-cli", "s0") in sc._status_cache
-        assert ("kiro-cli", "s1") not in sc._status_cache
+        assert ("kiro-cli-v3", "s0") in sc._status_cache
+        assert ("kiro-cli-v3", "s1") not in sc._status_cache
 
     def test_every_cache_operation_holds_the_lock(self, tmp_path, monkeypatch):
         """The status poll reaches this cache from a worker thread while a
@@ -9122,7 +9072,7 @@ class TestStatusCacheLRU:
         from power_atlas import status_classifier as sc
 
         jsonl = tmp_path / "sess.jsonl"
-        jsonl.write_text('{"version":"v1","kind":"Prompt","data":{}}\n')
+        jsonl.write_text('{"id":"m1","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"user","content":"hi"}}\n')
 
         class _LockChecked(OrderedDict):
             def __init__(self):
@@ -9154,9 +9104,9 @@ class TestStatusCacheLRU:
         monkeypatch.setattr(sc, "_MAX_CACHE_ENTRIES", 1)
         monkeypatch.setattr(sc, "_resolve_jsonl_path", lambda sid, prov, cwd: jsonl)
 
-        assert sc.get_semantic_status("s1", "kiro-cli", "/w") is not None  # miss: write
-        assert sc.get_semantic_status("s1", "kiro-cli", "/w") is not None  # hit: read
-        sc.get_semantic_status("s2", "kiro-cli", "/w")                     # forces eviction
+        assert sc.get_semantic_status("s1", "kiro-cli-v3", "/w") is not None  # miss: write
+        assert sc.get_semantic_status("s1", "kiro-cli-v3", "/w") is not None  # hit: read
+        sc.get_semantic_status("s2", "kiro-cli-v3", "/w")                     # forces eviction
         assert cache.unlocked_ops == []
 
 
