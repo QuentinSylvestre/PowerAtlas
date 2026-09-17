@@ -79,21 +79,18 @@ def detect_terminal(terminal_command: str = "") -> str | None:
 
 
 _PROVIDER_DISPLAY = {
-    "kiro-cli": "kiro-cli",
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
     "kiro-cli-v3": "kiro-cli v3",
 }
 
 _PROVIDER_BINARY = {
-    "kiro-cli": "kiro-cli",
     "claude-code": "claude",
     "kiro-ide": "kiro",
     "kiro-cli-v3": "kiro-cli",
 }
 
 _PROVIDER_TERMINAL = {
-    "kiro-cli": True,
     "claude-code": True,
     "kiro-ide": False,
     "kiro-cli-v3": True,
@@ -115,10 +112,8 @@ def _build_provider_args(provider: str, binary: str, session_id: str | None) -> 
         args = [binary, "chat", "--agent-engine", "v3", "--trust-tools", "*"]
         if session_id:
             args += ["--resume-id", session_id]
-    else:  # kiro-cli
-        args = [binary, "chat"]
-        if session_id:
-            args += ["--resume-id", session_id]
+    else:
+        raise ValueError(f"Unknown provider: {provider}")
     return args
 
 
@@ -142,7 +137,7 @@ def _is_windows_terminal(terminal: str) -> bool:
 def launch_session(
     cwd: str,
     session_id: str | None = None,
-    provider: str = "kiro-cli",
+    provider: str = "kiro-cli-v3",
     default_args: str = "",
     launch_profile: LaunchProfile | None = None,
     session_title: str = "",
@@ -250,7 +245,7 @@ def launch_batch(
         if workspace == "<unknown>":
             results.append(LaunchResult(False, s.get("session_id"), workspace, error="Missing 'workspace' key"))
             continue
-        provider = s.get("provider") or "kiro-cli"
+        provider = s.get("provider") or "kiro-cli-v3"
         if provider_settings:
             args = provider_settings.get(provider, {}).get("default_args", "")
         else:
