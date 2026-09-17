@@ -2,8 +2,18 @@
 
 > **Date**: 2026-09-17
 > **Status**: Complete — implementation, tests, and live QA verified
+> **Last Updated**: 2026-09-17 22:45
 > **Scope**: Delete the kiro-cli v2 provider (launcher, session history, ACP v2 paths, presence lock scan, status classifier v2 branch) and all associated code, tests, and docs.
 > **Estimated effort**: 1–2 days
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- **Accepted**: Per-phase review log "Escalated — Phase N" entries (Phases 5, 6, 7 review logs). These record orchestrator-to-future-phase deferrals; all were resolved by their target phases. Suite is green (1896 passed), QA PASS verified.
+- **Accepted**: Temporary scaffolding `semantic-review/2026-09-17-review-remove-kiro-cli-v2.md` (untracked sub-agent review artifact) — deleted at archival.
+- **Follow-up plan intended**: `test_presence_claude_sidecar_outside_window_is_not_live` loses its forward-skew discriminating companion after `test_presence_kiro_lock_far_newer_than_its_process_is_live` deletion. Mutation coverage on the forward-skew guard is reduced. No v3 equivalent test written yet.
+- **Follow-up plan intended**: `plans/tests/260701_POWERATLAS.md` sections 1.2/1.8/1.10 still describe v2 extraction mechanics (`.history`-preferred first prompt, `Prompt`-kind scan, v2 availability path). Low severity — no runtime impact, test plan only.
 
 ---
 
