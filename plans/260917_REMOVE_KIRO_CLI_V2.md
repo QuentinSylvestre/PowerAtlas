@@ -413,8 +413,11 @@ Removed `"kiro-cli"` from 4 provider dicts, deleted `_ACP_LISTING_PROVIDER`, `_A
 6. Update `launch_batch` default: `provider = s.get("provider") or "kiro-cli"` → `or "kiro-cli-v3"` (`launcher.py:253`).
 
 **Exit criteria**:
-- [ ] `grep '"kiro-cli"' src/power_atlas/launcher.py` returns no hits (only `"kiro-cli-v3"` remains).
-- [ ] `grep "# kiro-cli" src/power_atlas/launcher.py` returns no hits (the `else: # kiro-cli` comment is gone).
+- [x] `grep '"kiro-cli"' src/power_atlas/launcher.py | grep -v '"kiro-cli-v3"'` returns no hits (the binary name value `"kiro-cli"` inside the `"kiro-cli-v3"` entry is expected to remain).
+- [x] `grep "# kiro-cli" src/power_atlas/launcher.py` returns no hits (the `else: # kiro-cli` comment is gone).
+
+Implementation (2026-09-17, code: 89dc338)
+Removed `"kiro-cli"` from `_PROVIDER_DISPLAY`, `_PROVIDER_BINARY`, `_PROVIDER_TERMINAL`; replaced `else: # kiro-cli` branch in `_build_provider_args` with `raise ValueError(f"Unknown provider: {provider}")`; updated `launch_session` and `launch_batch` defaults to `"kiro-cli-v3"`. 117 launcher tests pass; 14 fail from Phase 8 cleanup targets (tests passing `provider="kiro-cli"`).
 
 ---
 
@@ -620,6 +623,17 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 7, persona: Maintainability reviewer)
+
+Implementation health: Green.
+3 findings (0 High, 0 Medium, 3 Low). All cosmetic or Phase 8 forward-work.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | Exit criterion EC-1 grep matched `"kiro-cli-v3": "kiro-cli"` binary value — wording was too literal. | Fixed — updated grep pattern to `grep -v "kiro-cli-v3"` in plan. |
+| 2 | Low | 14 launcher test failures from `provider="kiro-cli"` — confirmed all Phase 8 cleanup targets. | Escalated — Phase 8 will green the suite. |
+| 3 | Low | Module docstring says "kiro-cli sessions" — stale after v3-only. | User: accepted — update during Phase 8 cleanup pass. |
 
 ### 2026-09-17 — Implementation Review (after Phase 6, persona: Reliability engineer + Architect)
 
