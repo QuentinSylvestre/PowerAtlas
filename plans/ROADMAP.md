@@ -141,7 +141,7 @@ own reopen condition).
 
 - **Chained launches** — when a session finishes, automatically start the next one; works for sessions PowerAtlas drives, not for terminal sessions.
   - *For ACP sessions* — `get_semantic_status` returns `WAITING` when an assistant turn completes. PowerAtlas can watch for that transition and immediately send the next prompt. No open technical question for ACP-driven sessions.
-  - *For terminal sessions* — the session status is detected via `~/.kiro/sessions/cli/<id>.jsonl` tail, but PowerAtlas has no way to inject a new prompt into a terminal session it did not start. This half remains closed.
+  - *For terminal sessions* — the session status is detected via `messages.jsonl` tail in the v3 session store, but PowerAtlas has no way to inject a new prompt into a terminal session it did not start. This half remains closed.
 
 - **Skills support spike** — understand how argument passing works in both kiro-cli and Claude Code, unblocking three items above.
 
@@ -167,7 +167,7 @@ own reopen condition).
 
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext in `config.toml`; shape (a) is an OS keystore reference, shape (b) is an encrypted-at-rest blob. Both require a UI decision about how the user enters/updates credentials.
 
-- **[P2b] Session stores PowerAtlas cannot see** — 11 classic sqlite conversations in `conversations_v2` (`%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`) have no file on disk and appear in neither candidate. PowerAtlas already merges their *cwds* for workspace discovery but not the sessions themselves. `kiro-cli chat --list-sessions -f json` is the only source that unifies all three stores (`v2`/`v3`/`classic`), tagging each entry with `source` — cost ~2.13 s per query, cwd-scoped (not global), so covering 58 workspaces means 58 spawns. *(v3 sessions now covered by the `kiro-cli-v3` provider, shipped 2026-08-18.)*
+- **[P2b] Session stores PowerAtlas cannot see** — "classic" sqlite conversations in `conversations_v2` (`%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`) have no file on disk. PowerAtlas does not read this store (v2 support removed 2026-09-17); `kiro-cli chat --list-sessions -f json` remains the only surface that exposes these sessions, tagging each entry with `source: "classic"` — cost ~2.13 s per query, cwd-scoped (not global). *(v3 sessions covered by the `kiro-cli-v3` provider, shipped 2026-08-18.)*
 
 ---
 

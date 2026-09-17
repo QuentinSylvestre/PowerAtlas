@@ -9,7 +9,7 @@ scope: automatable-only (native tray/peek clicks and Linux-specific paths are sc
 
 PowerAtlas (internally `power-atlas`; formerly `kiro-orchestrator`) is a cross-platform desktop
 system-tray app + FastAPI/htmx web dashboard that discovers, resumes, and batch-launches AI-coding
-sessions from two providers: **kiro-cli** and **Claude Code**. This plan reflects the current
+sessions from two providers: **kiro-cli-v3** and **Claude Code**. This plan reflects the current
 (2026-07-01) source: multi-provider data layer, three-panel UI, custom launchers, extracted icons,
 peek overlay, and per-provider settings.
 
@@ -28,7 +28,7 @@ peek overlay, and per-provider settings.
   state before, restore after. No reboot needed (existence-only check).
 - **Main/Lifecycle** is process-level (named mutex `PowerAtlasMutex`, PID file, port binding) — isolate;
   do not run against a live user instance.
-- **Real provider data** on disk (read-only): kiro-cli at `~/.kiro/sessions/cli/` + `%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`;
+- **Real provider data** on disk (read-only): kiro-cli-v3 at `~/.kiro/sessions/<workspace-hash>/sess_*/`;
   Claude Code at `~/.claude/projects/` + `~/.claude/history.jsonl`. Never modify or delete.
 - **Existing unit coverage is strong** (254 test functions in `tests/`). Runtime testing targets what unit
   tests can't reach: interaction gates, cross-provider behavior, real-data quirks, and the risk hotspots below.
@@ -41,7 +41,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
   `pinned_folders` as `list[str]`; the load-time migration then hardcodes every entry to `kiro-cli`.
   A pinned Claude Code folder should silently revert to kiro-cli on reload. (`config.py:60-62`, `web.py:130`, `web.py:497-514`)
 - **H2 — Cross-provider cache asymmetry (Data, Med).** Kiro tail (5s) + first-prompt (60s) are cached;
-  the Claude adapter caches neither — identical hover tooltips differ in cost/freshness. (`data_kiro.py:254-336` vs `data_claude.py:327-402`)
+  the Claude adapter caches neither — identical hover tooltips differ in cost/freshness. (`data_kiro_v3.py` vs `data_claude.py:327-402`)
 - **H3 — Unlocked `_cache` race (Data, Med).** The module-level 30s discovery cache has no lock; htmx
   requests, the 30s background refresh, and the warmup thread all touch it. (`data.py:15,144-178`)
 - **H4 — cmd.exe injection surface (Launcher, Med).** Only `cwd` is metachar-guarded; joined command
@@ -59,11 +59,11 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 
 ---
 
-## 1. Data layer (`data.py`, `data_kiro.py`, `data_claude.py`)
+## 1. Data layer (`data.py`, `data_kiro_v3.py`, `data_claude.py`)
 
 ### 1.1 Cross-provider workspace discovery with counts
 - **what**: `discover_workspaces_with_counts(provider)` merges kiro + claude workspaces into `(cwd, count, updated_at, provider)` tuples, cached 30s.
-- **how-to-reach**: `data.discover_workspaces_with_counts()` directly; or `GET /partials/workspaces?provider=all|kiro-cli|claude-code`.
+- **how-to-reach**: `data.discover_workspaces_with_counts()` directly; or `GET /partials/workspaces?provider=all|kiro-cli-v3|claude-code`.
 - **probes**: provider=None (all) vs single provider; both providers present; one provider's dir absent; verify 30s cache hit returns same result then re-scan after TTL; concurrent calls during background refresh (H3); a provider raising inside `discover_workspaces` (bare `except: continue` → 0 workspaces, indistinguishable from empty).
 - **oracle**: sorted by `updated_at` desc; unavailable providers skipped; results cached per `workspaces_with_counts:<provider|all>` key.
 - **risks**: H3 unlocked `_cache`; H10 lexical cross-provider sort; 30s stale window hides just-created workspaces; broken provider silently yields zero.
@@ -72,7 +72,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **what**: `available_providers()` filters the registry by each adapter's `is_available()` (kiro: `~/.kiro/sessions/cli` is a dir; claude: `~/.claude/projects` is a dir with ≥1 entry).
 - **how-to-reach**: `data.available_providers()`; drives provider-tab rendering and launcher tiles.
 - **probes**: both available; kiro dir missing; claude dir empty vs non-empty; claude `iterdir` OSError (returns False → provider vanishes); verify tab bar only renders when >1 provider available.
-- **oracle**: only providers with on-disk data appear; order follows registry insertion (kiro-cli, claude-code).
+- **oracle**: only providers with on-disk data appear; order follows registry insertion (kiro-cli-v3, claude-code).
 - **risks**: re-stats disk every call (no memoization) — OneDrive latency; transient unreadable dir silently drops a provider.
 
 ### 1.3 Compound-keyed SessionCache
@@ -117,12 +117,6 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **oracle**: oldest-first assistant messages; kiro `.history`-preferred first prompt; not-found → `[]`/`""`. `session_id` and `last_prompt` passed to template; all text fields HTML-entity-encoded via mistune before template rendering; output safe for Jinja2 `| safe` filter.
 - **risks**: H2 asymmetric caching; inconsistent cwd contract; textual `"toolUse"` heuristic fragility; negative-cache blanks kiro tooltip for 60s.
 
-### 1.9 Kiro discovery (metadata + sqlite union)
-- **what**: `data_kiro.discover_workspaces` globs `*.json` metadata + unions `conversations_v2` sqlite keys; filters sub-agents (`parent_session_id`); 1MB skip guard.
-- **how-to-reach**: via 1.1 with provider=kiro-cli.
-- **probes**: sub-agent session excluded; sqlite-only workspace shows count 0; DB locked by kiro-cli (5s `busy_timeout` block — time it, UI stall risk); DB missing; metadata >1MB skipped; corrupt JSON dropped; string `updated_at` compared non-lexicographically (mis-order).
-- **oracle**: read-only sqlite (`mode=ro`), never raises; sub-agents never counted.
-- **risks**: 5s DB stall on discovery; raw-string timestamp ordering; OneDrive read_text drops files silently.
 
 ### 1.10 Kiro prompt/content extraction
 - **what**: `.history` first line preferred for first_prompt, else first-50-line `Prompt` scan; tail via `deque(maxlen=100)`; multi-format `_extract_content` (str / list-of-blocks / nested data).
@@ -227,9 +221,9 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 ### 2.8 Pin / unpin workspace folder
 - **what**: toggles a `{folder, provider}` entry in `pinned_folders`; pinned workspaces render in the center panel.
 - **how-to-reach**: hover card → click pin; `POST /api/pin-folder` / `/api/unpin-folder`.
-- **probes**: pin → center panel; unpin → back to right; pin a stale folder (count 0, "missing" badge); dedup per `(folder, provider)`; pin same folder under both providers; **then open Settings and Save — verify the pinned Claude folder does NOT revert to kiro-cli (H1)**.
+- **probes**: pin → center panel; unpin → back to right; pin a stale folder (count 0, "missing" badge); dedup per `(folder, provider)`; pin same folder under both providers; **then open Settings and Save — verify the pinned Claude folder does NOT revert to kiro-cli-v3 (H1)**.
 - **oracle**: `{folder, provider}` appended if not duplicate; stale merged with count 0.
-- **risks**: H1 provider loss via settings save; provider defaults kiro-cli when missing.
+- **risks**: H1 provider loss via settings save; provider defaults kiro-cli-v3 when missing.
 
 ### 2.9 Workspace icon emoji picker
 - **what**: sets a per-workspace emoji/custom icon stored in `workspace_icons` keyed by normalized path.
@@ -248,7 +242,7 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 ### 2.11 Provider-settings modal (gear)
 - **what**: edit a provider's `default_args`, `color`, `enabled` via a locked-field modal reusing the launcher modal.
 - **how-to-reach**: click provider-tile gear; `GET /api/provider/{key}` → `POST /api/provider/save`.
-- **probes**: change default_args (e.g. `-a`) → affects subsequent launches; change color → tile + cards recolor; disable provider → its tab + tile + workspaces hidden; verify readonly fields restored on modal close; **saving any provider_settings permanently suppresses the trust_all_tools migration** (H1 sibling).
+- **probes**: change default_args (e.g. `-a`) → affects subsequent launches; change color → tile + cards recolor; disable provider → its tab + tile + workspaces hidden; verify readonly fields restored on modal close.
 - **oracle**: `provider_settings[key]` replaced wholesale + saved.
 - **risks**: disabling hides a provider's data everywhere; no schema validation of enabled/color.
 
@@ -467,25 +461,12 @@ These are behaviors whose code structure predicts a defect. Confirm or refute du
 - **risks**: corrupt=first-run indistinguishable; shallow validation; per-process lock only.
 
 ### 5.2 Atomic save
-- **what**: `save_config` `.tmp`→fsync→`os.replace`; pops legacy `trust_all_tools`; cleans `.tmp` on failure.
+- **what**: `save_config` `.tmp`→fsync→`os.replace`; cleans `.tmp` on failure.
 - **how-to-reach**: every mutating endpoint.
 - **probes**: normal save (no `.tmp` left); write failure preserves original + removes `.tmp`; valid TOML after save; **cross-process race: two load-modify-save cycles (web + tray) last-writer-wins drops a pin/setting**; OneDrive `os.replace` contention.
 - **oracle**: atomic replace; legacy key never written.
 - **risks**: no backup; cross-process last-writer-wins; OneDrive replace failures.
 
-### 5.3 pinned_folders migration list[str]→list[dict] (H1)
-- **what**: on load, a legacy `list[str]` becomes `[{folder, provider:"kiro-cli"}]`.
-- **how-to-reach**: load a config with `pinned_folders = ["/a","/b"]`; **or trigger it live via a settings save**.
-- **probes**: **migration IS reachable** (shallow type filter validates only the outer list); provider hardcoded kiro-cli; guard inspects only element [0] (mixed/empty-first-element edge cases); **H1: `/api/settings` + `/api/save-setting` write list[str] every save → a pinned Claude folder reverts to kiro-cli on next load**.
-- **oracle**: legacy list → dict list, provider=kiro-cli.
-- **risks**: H1 active provider loss; element-[0]-only guard.
-
-### 5.4 trust_all_tools migration
-- **what**: legacy `trust_all_tools=true` (with no provider_settings) → `provider_settings["kiro-cli"].default_args="-a"`.
-- **how-to-reach**: load a config with `trust_all_tools = true` and no `provider_settings`.
-- **probes**: reachable (read from raw dict, not filtered kwargs); suppressed if ANY provider_settings exists (even claude-only) → trust intent lost; once loaded+saved, legacy key popped so migration never re-runs; verify the client migration toast fires once (localStorage-gated).
-- **oracle**: adds kiro-cli entry only when provider_settings empty.
-- **risks**: suppressed by unrelated provider settings; one-shot.
 
 ### 5.5 Type validation, unknown-key round-trip, path capture
 - **what**: shallow isinstance check; unknown keys dropped on load + lost on save; CONFIG_PATH captured at import.

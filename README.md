@@ -58,7 +58,7 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 
 - Auto-discovers workspaces from kiro-cli, Claude Code, and Kiro IDE session data
   - Kiro IDE sessions: `%APPDATA%\Kiro\User\globalStorage\...` (Windows) / `~/.config/Kiro/User/globalStorage/...` (Linux)
-  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/` (scanned separately from v2)
+  - kiro-cli v3 sessions: `~/.kiro/sessions/<workspace-hash>/sess_*/`
 - Unified provider-launcher system with extracted icons and configurable colors
 - Inline provider filter next to the workspaces rail
 - Workspace tags with configurable colors, unified tag management (add/delete from popover), multi-workspace bulk tag assignment via gear icon during multi-select, tag/time filtering, and hidden workspaces — grouped by project, date (Today/Yesterday/This week/Older), or status
@@ -126,16 +126,6 @@ acp_prompt_silence_seconds = 1800  # 60-86400. A turn is cancelled after this mu
                                   # agent — not this much total time — so a long turn that keeps
                                   # streaming is never cut off. A 24-hour absolute ceiling still
                                   # applies, so one chunk per window cannot run forever.
-
-[provider_settings.kiro-cli]
-default_args = "-a"  # e.g. trust-all-tools.
-                     # The `/acp` agent is always started with `-a`, independently of this setting,
-                     # so a session PowerAtlas drives executes tools without asking. Treat anything
-                     # that can reach `/acp` as able to run commands as you — which is what the
-                     # device secret in "Remote access" below exists to prevent.
-color = ""
-enabled = true
-default_directory = ""  # Per-provider override (empty = use global)
 
 [provider_settings.claude-code]
 default_args = ""
