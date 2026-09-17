@@ -1837,17 +1837,11 @@ def _acp_availability(session_ids, held,
     **Fails open to `available`.** A wrongly-greyed session is unreachable from
     the UI with no way for the user to find out why; a wrongly-available one
     costs one click and gets the agent's own typed in-use refusal at load. The
-    hint may only add a refusal, never grant one — the same rule
-    `acp._lock_holder` states for itself.
+    hint may only add a refusal, never grant one.
 
     A `sess_`-prefixed id routes to `acp._lock_holder_v3` (session.json's
-    `status` field, zero round-trip) instead of `acp._lock_holder` (v2's lock
-    file) — the two id shapes never collide (SC-7, plan Phase 1). Deliberately
-    *not* the same fail-open contract in one respect: `_lock_holder_v3` fails
-    toward `held` when a session.json exists but cannot be read/parsed (a
-    crash-in-progress signature), and fails a stale "held" status back to
-    "available" using its own mtime-staleness corroboration — see
-    `_lock_holder_v3`'s own docstring for the full reasoning.
+    `status` field, zero round-trip). Non-`sess_`-prefixed ids (v2 bare UUIDs)
+    are treated as always available — v2 sessions are no longer in the store.
 
     `workspace_hashes`, when the caller has it (e.g. `_acp_listing`, which
     already knows each row's workspace), maps `session_id -> hash-dir name`
@@ -1862,15 +1856,11 @@ def _acp_availability(session_ids, held,
             continue
         state = "available"
         try:
-            if acp is None:
-                pass
-            elif sid.startswith("sess_"):
+            if acp is not None:
                 wh = workspace_hashes.get(sid) if workspace_hashes else None
                 holder = acp._lock_holder_v3(sid, wh) if wh else acp._lock_holder_v3(sid)
                 if holder is not None:
                     state = "locked"
-            elif acp._lock_holder(sid) is not None:
-                state = "locked"
         except Exception:
             state = "available"
         out[sid] = state
@@ -3054,15 +3044,8 @@ def _acp_sessions_for_workspace(cwd: str, include_v3: bool = False) -> list[str]
     from .data import _normalize_path
     norm = _normalize_path(cwd)
     result = []
-    for meta_path in acp.KIRO_SESSION_DIR.glob("*.json"):
-        if not meta_path.is_file():
-            continue
-        sid = meta_path.stem
-        if not acp._valid_session_id(sid):  # check before I/O to skip non-session files
-            continue
-        stored = acp._stored_session_cwd(sid)
-        if stored and _normalize_path(stored) == norm:
-            result.append(sid)
+    # v2 enumeration removed (Phase 5: KIRO_SESSION_DIR deleted from acp.py).
+    # Phase 6 will delete this function entirely; only the v3 path is used.
     if include_v3:
         from . import data_kiro_v3
         v3_sessions, _file_stats = data_kiro_v3.load_sessions(cwd)

@@ -4483,13 +4483,12 @@ def _lock_time(when) -> str:
 
 @pytest.fixture
 def acp_store(tmp_path, monkeypatch):
-    """An empty kiro-cli session store, and a supervisor left clean after.
+    """A supervisor left clean after the test.
 
     The supervisor and registry are module globals: a load test that left a
     session registered would make the next test's ``subscribe`` answer from it.
     """
     from power_atlas import acp as acp_mod
-    monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", tmp_path)
     try:
         yield acp_mod, tmp_path
     finally:
@@ -4574,10 +4573,8 @@ class TestAcpSessionIdValidation:
         acp_mod, _ = acp_store
         touched = []
         conn = _acp_conn(acp_mod)
-        with patch.object(acp_mod, "_lock_holder",
-                          lambda sid: touched.append(("lock", sid))), \
-                patch.object(acp_mod._Supervisor, "_request",
-                             lambda *a, **k: touched.append(("wire",))):
+        with patch.object(acp_mod._Supervisor, "_request",
+                          lambda *a, **k: touched.append(("wire",))):
             asyncio.run(acp_mod._handle_load(conn, "../../etc/passwd"))
         frames = _queued(conn)
         assert [f["type"] for f in frames] == ["error"]
@@ -13564,7 +13561,7 @@ class _LoopBoundSessions(dict):
 def acp_listing_store(monkeypatch):
     """A synthetic kiro-cli store behind the listing endpoint.
 
-    Patches the two data-layer entry points the route uses and `_lock_holder`,
+    Patches the two data-layer entry points the route uses and `_lock_holder_v3`,
     recording every lock read so "availability is computed only for returned
     rows" is a **count** rather than a shape assertion — a response-shape check
     passes whether the endpoint walked 30 rows or all 1,207.
@@ -13588,9 +13585,9 @@ def acp_listing_store(monkeypatch):
     def _get_sessions(cwd, provider=_ACP_V3_LISTING_PROVIDER):
         return list(state["sessions"].get(cwd, []))
 
-    def _holder(sid):
+    def _holder_v3(sid, workspace_hash=None):
         state["lock_calls"].append(sid)
-        return 4242 if sid in state["locked"] else None
+        return acp_mod._V3_HOLDER_PID_UNKNOWN if sid in state["locked"] else None
 
     def _add(cwd, sessions, updated="2026-07-31T00:00:00Z"):
         state["workspaces"].append((cwd, len(sessions), updated, _ACP_V3_LISTING_PROVIDER))
@@ -13599,7 +13596,7 @@ def acp_listing_store(monkeypatch):
     state["add"] = _add
     monkeypatch.setattr(data_mod, "discover_workspaces_with_counts", _discover)
     monkeypatch.setattr(data_mod, "get_sessions", _get_sessions)
-    monkeypatch.setattr(acp_mod, "_lock_holder", _holder)
+    monkeypatch.setattr(acp_mod, "_lock_holder_v3", _holder_v3)
     monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
     return state
 
@@ -13931,10 +13928,10 @@ class TestAcpListingEndpoint:
         one click and gets the agent's own typed in-use refusal at load."""
         from power_atlas import acp as acp_mod
 
-        def _boom(sid):
+        def _boom(sid, workspace_hash=None):
             raise OSError("psutil is having a day")
 
-        monkeypatch.setattr(acp_mod, "_lock_holder", _boom)
+        monkeypatch.setattr(acp_mod, "_lock_holder_v3", _boom)
         acp_listing_store["add"]("C:\\dev\\ws", [_acp_row("s1"), _acp_row("s2")])
         response = client.get(self._PATH)
         assert response.status_code == 200
@@ -14249,9 +14246,10 @@ def acp_store_dir(tmp_path, monkeypatch):
     Returns a callable that writes one session's full set — `.json`, `.jsonl`,
     `.history`, `.lock` and the `<id>/tasks/` subtree the live store carries —
     and hands back the paths it wrote.
+
+    NOTE: This fixture creates v2-format session files. Tests using it are
+    Phase 8 cleanup targets.
     """
-    from power_atlas import acp as acp_mod
-    monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", tmp_path)
 
     def _make(session_id, cwd="C:\\dev\\ws", *, lock=True, history=True):
         written = []
@@ -14296,12 +14294,7 @@ class TestAcpAvailabilityV3:
 
         sid = "sess_11111111-1111-1111-1111-111111111111"
         monkeypatch.setattr(acp_mod, "_lock_holder_v3",
-                             lambda s: acp_mod._V3_HOLDER_PID_UNKNOWN)
-
-        def _v2_holder_must_not_be_called(s):
-            raise AssertionError("_lock_holder (v2) called for a v3 id")
-
-        monkeypatch.setattr(acp_mod, "_lock_holder", _v2_holder_must_not_be_called)
+                             lambda s, workspace_hash=None: acp_mod._V3_HOLDER_PID_UNKNOWN)
 
         result = web_mod._acp_availability([sid], held=set())
         assert result[sid] == "locked"
@@ -14333,22 +14326,6 @@ class TestAcpAvailabilityV3:
         result = web_mod._acp_availability([sid], held={sid})
         assert result[sid] == "held"
 
-    def test_a_v2_id_still_routes_to_the_v2_lock_holder(self, monkeypatch):
-        """Regression: a bare-uuid (v2) id must not be routed to
-        `_lock_holder_v3`."""
-        from power_atlas import acp as acp_mod
-        from power_atlas import web as web_mod
-
-        sid = "v2-bare-uuid-0001"
-        monkeypatch.setattr(acp_mod, "_lock_holder", lambda s: 4242)
-
-        def _v3_holder_must_not_be_called(s):
-            raise AssertionError("_lock_holder_v3 called for a v2 id")
-
-        monkeypatch.setattr(acp_mod, "_lock_holder_v3", _v3_holder_must_not_be_called)
-
-        result = web_mod._acp_availability([sid], held=set())
-        assert result[sid] == "locked"
 
     def test_workspace_hash_is_threaded_to_lock_holder_v3(self, monkeypatch):
         """When a caller (e.g. `_acp_listing`) supplies a
@@ -15789,10 +15766,6 @@ class TestAcpDeleteManyV3Dispatch:
         paths = acp_store_dir_v3(sid, status="in_progress")
         sess_dir = paths[-1]
 
-        def _v2_holder_must_not_be_called(s):
-            raise AssertionError("_lock_holder (v2) called for a v3 id")
-        monkeypatch.setattr(acp_mod, "_lock_holder", _v2_holder_must_not_be_called)
-
         result = _acp_delete_many([sid], held=frozenset())
 
         assert result["deleted"] == []
@@ -15920,11 +15893,7 @@ class TestAcpDeleteEndpointForV3Ids:
         """Regression for a previously-silent blindness: workspace delete
         must both find AND actually remove v3 sessions, not merely report
         them as found."""
-        from power_atlas import acp as acp_mod
         self._sup(monkeypatch)
-        v2_dir = tmp_path / "v2store"
-        v2_dir.mkdir()
-        monkeypatch.setattr(acp_mod, "KIRO_SESSION_DIR", v2_dir)
 
         target_cwd = r"C:\dev\v3-only-ws"
         sid1 = "sess_wsdelete-0001"

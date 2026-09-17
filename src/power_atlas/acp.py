@@ -826,11 +826,6 @@ _INACTIVITY = object()
 # cannot obtain a job object refuses to spawn at all rather than degrading.
 KILL_WAIT_SECONDS = 3.0
 
-# kiro-cli's own session store. `load` names a session id that arrived from the
-# browser and this is the directory it is joined into, so the id is validated
-# against `_SESSION_ID_RE` before it ever forms a path.
-KIRO_SESSION_DIR = Path.home() / ".kiro" / "sessions" / "cli"
-
 # The cap `launcher.py` applies alongside `_SESSION_ID_RE`. Both halves are
 # needed and neither implies the other: the pattern refuses separators and dots
 # (so no traversal), the cap refuses a path component no filesystem accepts.
@@ -889,25 +884,6 @@ def set_sessions_changed_hook(hook) -> None:
 # whole, behind a cache this module deliberately cannot reach.
 SESSION_JSON_PREFIX_BYTES = 16 * 1024
 
-# How much of a lock file is read before giving up on it. A lock is a JSON
-# object holding a pid and a timestamp — ~100 bytes in this machine's store —
-# and the directory it sits in is written by the agent, whose writes into it
-# are not ours to gate, so its size is not ours to assume. A whole-file read
-# has no ceiling and ``MemoryError`` is not in any caught set on this path.
-LOCK_MAX_BYTES = 4 * 1024
-
-# How far after its own timestamp a lock file's holder may have started before
-# the lock is judged stale rather than live. A session writes its lock *after*
-# its process starts, so the honest relation is `create_time <= started_at`;
-# this only tolerates two clocks disagreeing.
-#
-# It is not decoration. Measured on this machine's store: 803 lock files, 22 of
-# which name a pid that still exists — and all 22 are recycled pids belonging
-# to svchost, firefox, RuntimeBroker and friends, every one created weeks after
-# the lock was written. A pre-flight resting on `pid_exists` alone would have
-# refused 22 perfectly loadable sessions and been wrong every time it fired.
-LOCK_START_SKEW_SECONDS = 5.0
-
 # What the agent says when the session is open somewhere else. Matched on the
 # message because the code it arrives with is -32603, "internal error", which
 # says no more than "something went wrong" — and this particular something is
@@ -922,25 +898,6 @@ _IN_USE_MARKER = "active in another process"
 # happened nor what to do. Matched against the string `_on_response` builds,
 # which is this module's own format rather than the agent's.
 _OPAQUE_REFUSAL_MARKER = "(code -32603)"
-
-# The lock's own timestamp, to second resolution — a prefix match feeding a
-# fixed `strptime` rather than `datetime.fromisoformat`.
-#
-# Not because fromisoformat cannot read the value. It can: kiro-cli writes RFC
-# 3339 with *nanoseconds* ("2026-06-01T21:19:24.509198600Z") and on this
-# project's interpreter (3.13.13, checked directly) fromisoformat parses that
-# string, truncating the fraction to microseconds. The three-or-six-digit
-# restriction was lifted in an earlier release than the one that runs here.
-#
-# The reason is that this file belongs to another program. It is written by
-# kiro-cli into kiro-cli's own store, its format is not ours to depend on, and
-# a whole-string parser answers any change in the tail — a different offset
-# spelling, a suffix, a trailing space — with `ValueError`, which becomes
-# `None`, which `_lock_holder` reads as "no identifiable holder" and lets a
-# genuinely held session through the pre-flight. Matching only as far as the
-# seconds field makes everything after it irrelevant. Seconds are ample against
-# LOCK_START_SKEW_SECONDS, so the precision the prefix discards costs nothing.
-_LOCK_TIME_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)")
 
 # `cwd` as it appears in a session's stored metadata, with JSON's own escaping
 # left intact so `json.loads` can undo it — Windows paths are full of `\\`.
@@ -1261,7 +1218,7 @@ def _tool_locations(update: dict, backfill: dict | None = None) -> list:
     on the wire and means "the whole file" when absent, which is a different
     statement from line 0.
 
-    ``backfill`` is the same `data_kiro.get_tool_diffs()` map `_tool_diff`
+    ``backfill`` is the same `_get_tool_diffs_v3` map `_tool_diff`
     reads — see its docstring. Consulted only when this frame carries no
     `locations` of its own: a `session/load` replay's `tool_call` frame
     reconstructs `title`/`kind` from kiro-cli's own stored tool name but not
@@ -1426,7 +1383,7 @@ def _tool_diff(update: dict, backfill: dict | None = None) -> dict | None:
     reliable signal here and is used instead of trusting the wire's
     `oldText` on a create.
 
-    ``backfill`` is `data_kiro.get_tool_diffs()`'s output for the session
+    ``backfill`` is `_get_tool_diffs_v3`'s output for the session
     this update belongs to — kiro-cli's own on-disk transcript, keyed by
     `toolCallId`. Consulted only when this frame itself carries no diff
     `content`: a `session/load` replay's `tool_call_update`s never do
@@ -2165,9 +2122,7 @@ def _valid_session_id(session_id) -> bool:
 
     The same rule ``launcher.py`` applies before an id reaches a command line,
     imported rather than restated so the two cannot drift. ``^[\\w\\-]+$``
-    admits no separator and no ``.``, so no form of traversal survives it —
-    which is what this id needs before it is joined into ``KIRO_SESSION_DIR``
-    and then handed to the agent process.
+    admits no separator and no ``.``, so no form of traversal survives it.
 
     ``fullmatch``, not ``match``: Python's ``$`` also matches immediately
     before a trailing newline, so the shared pattern used with ``match`` — as
@@ -2177,112 +2132,6 @@ def _valid_session_id(session_id) -> bool:
     return (isinstance(session_id, str)
             and 0 < len(session_id) <= MAX_SESSION_ID_CHARS
             and _SESSION_ID_RE.fullmatch(session_id) is not None)
-
-
-def _lock_started_at(raw: dict) -> float | None:
-    """The lock's own timestamp as a POSIX time, or ``None`` if unreadable."""
-    match = _LOCK_TIME_RE.match(str(raw.get("started_at", "")))
-    if match is None:
-        return None
-    try:
-        return datetime.strptime(
-            match.group(1), "%Y-%m-%dT%H:%M:%S"
-        ).replace(tzinfo=timezone.utc).timestamp()
-    except ValueError:
-        return None
-
-
-def _lock_holder(session_id: str) -> int | None:
-    """The pid of the process holding a session's lock, if there is one.
-
-    Blocking — a bounded file read plus a ``psutil`` query — so call it off the
-    loop, the way its neighbour ``_stored_session_cwd`` is called.
-
-    A hint and never the gate, per the plan: nothing removes a lock file on a
-    hard exit, so the store is full of locks whose pid died months ago and has
-    since been recycled onto something unrelated. The authority is the agent's
-    own typed refusal, measured at 0.73-0.84 s. This exists to answer in
-    roughly no time in the common case, not to be right in every case.
-
-    Every branch that cannot *establish* a holder returns ``None``. A hint may
-    only add a refusal; it may never grant one, because the thing it would be
-    granting against is the agent's answer.
-
-    Not ``presence.Snapshot.is_live()``: that also requires a provider-name
-    match and a start-time skew window, so it reports not-live for sessions the
-    agent still refuses.
-    """
-    if psutil is None:
-        # `os.kill(pid, 0)` is not the fallback it looks like on Windows: it
-        # calls TerminateProcess, so the liveness probe would kill the process
-        # it asked about.
-        return None
-    try:
-        with open(KIRO_SESSION_DIR / f"{session_id}.lock", "rb") as fh:
-            prefix = fh.read(LOCK_MAX_BYTES)
-    except OSError:
-        return None
-    try:
-        raw = json.loads(prefix.decode("utf-8", "replace"))
-    except ValueError:
-        return None
-    if not isinstance(raw, dict):
-        return None
-    pid = raw.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        return None
-    started = _lock_started_at(raw)
-    if started is None:
-        return None
-    try:
-        created = psutil.Process(pid).create_time()
-    except (psutil.Error, OSError):
-        return None
-    if created > started + LOCK_START_SKEW_SECONDS:
-        # The pid exists but belongs to something that started long after this
-        # lock was written — a recycled pid, not the session's holder.
-        return None
-    return pid
-
-
-def _stored_session_cwd(session_id: str) -> str:
-    """The directory a session was created against, from its stored metadata.
-
-    A bounded prefix read rather than a whole-file parse: see
-    ``SESSION_JSON_PREFIX_BYTES``. Returns ``""`` whenever the file is missing,
-    unreadable, or carries no ``cwd`` in that prefix.
-    """
-    try:
-        with open(KIRO_SESSION_DIR / f"{session_id}.json", "rb") as fh:
-            prefix = fh.read(SESSION_JSON_PREFIX_BYTES)
-    except OSError:
-        return ""
-    match = _STORED_CWD_RE.search(prefix.decode("utf-8", "replace"))
-    if match is None:
-        return ""
-    try:
-        value = json.loads(match.group(1))
-    except ValueError:
-        return ""
-    return value if isinstance(value, str) else ""
-
-
-def _load_session_cwd(session_id: str) -> str:
-    """The cwd a ``session/load`` runs against. Blocking; call off the loop.
-
-    The session's own directory when it still exists, because that is where a
-    prompt after the load would expect its tools to run. The agent's neutral
-    cwd otherwise — a workspace that has been moved or deleted does not make
-    the conversation unreadable, and refusing the load over it would.
-    """
-    stored = _stored_session_cwd(session_id)
-    if not stored:
-        return str(_neutral_cwd())
-    try:
-        return _resolve_session_cwd(stored)
-    except BadCwd:
-        log.info("ACP load: stored cwd %r is gone; using the neutral cwd", stored)
-        return str(_neutral_cwd())
 
 
 def _session_limit_message() -> str:
@@ -2446,12 +2295,12 @@ def _stored_session_cwd_v3(session_id: str) -> str:
 # v3 has no lock file with a pid the way v2 does (Current State: concurrent
 # `session/load` still succeeds despite v3 now writing `.lock` files, so
 # lock-file-based checking is the wrong signal regardless). `_lock_holder_v3`
-# answers the same "is this held elsewhere" question `_lock_holder` answers
-# for v2, but from `session.json`'s own `status` field instead, and has no
+# answers the same "is this held elsewhere" question for v2 sessions that
+# v3 answers from `session.json`'s own `status` field instead, and has no
 # real pid to report when held — `session.json` carries none. This sentinel
 # stands in for one: negative so it can never be mistaken for a real pid,
 # non-zero so a stray truthiness check can't drop it. Callers must test
-# `is not None`, exactly as `_acp_availability` already does for `_lock_holder`.
+# `is not None`, exactly as `_acp_availability` already does for `_lock_holder_v3`.
 _V3_HOLDER_PID_UNKNOWN: Final[int] = -1
 
 # session.json `status` values that mean another process is actively driving
@@ -2459,8 +2308,8 @@ _V3_HOLDER_PID_UNKNOWN: Final[int] = -1
 # 260908-1636_ACP_V3_SPIKE.md): "idle"/"failed"/absent mean not held; KAS
 # writes "idle" at turn-end, so "in_progress" only sticks past a turn if the
 # process crashed mid-turn -- corroborated below against session.json's own
-# mtime, since there is no pid here to check liveness against the way v2's
-# _lock_holder checks its lock's pid.
+# mtime, since there is no pid here to check liveness against (v3 stores no
+# pid in session.json).
 _V3_HELD_STATUSES: Final[frozenset[str]] = frozenset({"in_progress", "waiting_on_user"})
 
 # How stale session.json's mtime must be, while status still reads held,
@@ -2493,7 +2342,7 @@ def _lock_holder_v3(session_id: str, workspace_hash: str | None = None) -> int |
     Zero ACP round-trip, per the SC-7 approach (plan Design Decisions). Not a
     real pid -- v3's session.json carries none -- so a held session answers
     with `_V3_HOLDER_PID_UNKNOWN` rather than `None`; callers must only test
-    `is not None`, the same contract `_lock_holder` documents for itself.
+    `is not None`.
 
     Validates session_id against _SESSION_ID_RE before any path construction,
     mirroring _stored_session_cwd_v3 / _get_tool_diffs_v3.
@@ -2511,19 +2360,18 @@ def _lock_holder_v3(session_id: str, workspace_hash: str | None = None) -> int |
     external process legitimately parked on an unanswered
     `session/request_permission` question (`"waiting_on_user"`) for longer
     than the window flips to "available" too -- accepted under the same
-    "hint, never the gate" rule `_lock_holder` states for itself: the user
-    clicks in, and gets the agent's own typed refusal if it is in fact still
-    live.
+    "hint, never the gate" rule: the user clicks in, and gets the agent's own
+    typed refusal if it is in fact still live.
 
     Distinguishes "session.json is missing entirely" from "session.json
-    exists but could not be read/parsed": unlike the general fail-open rule
-    `_lock_holder` documents for itself, a file that exists but is truncated
-    or malformed is the signature of a process caught mid-write -- the same
-    crash scenario the mtime check above corroborates against -- so it fails
-    toward `_V3_HOLDER_PID_UNKNOWN` (held) rather than `None` (available). The
-    same mtime staleness corroboration applies here too, not just to a valid
-    stuck status: a malformed file is only trustworthy evidence of an
-    in-progress write for as long as `_V3_SESSION_STALE_SECONDS` says a write
+    exists but could not be read/parsed": unlike the general fail-open rule,
+    a file that exists but is truncated or malformed is the signature of a
+    process caught mid-write -- the same crash scenario the mtime check above
+    corroborates against -- so it fails toward `_V3_HOLDER_PID_UNKNOWN` (held)
+    rather than `None` (available). The same mtime staleness corroboration
+    applies here too, not just to a valid stuck status: a malformed file is
+    only trustworthy evidence of an in-progress write for as long as
+    `_V3_SESSION_STALE_SECONDS` says a write
     could plausibly still be underway. A malformed file whose mtime is older
     than that recovers to `None` (not held) exactly like a stale valid status
     does -- otherwise a session.json that got corrupted once and never
@@ -2760,7 +2608,7 @@ class _Supervisor:
         # "a metadata frame arrived" is not enough, and why elapsed time
         # rather than a `contextPercent` drop is the gate.
         self._compaction_started_at: dict[str, float] = {}
-        # One session's worth of `data_kiro.get_tool_diffs()`, populated by
+        # One session's worth of `_get_tool_diffs_v3`, populated by
         # `load_session` right before the `session/load` round trip so it is
         # ready the moment the replay's `tool_call_update` notifications
         # start arriving. See `_tool_diff`'s own docstring for why ACP's own
@@ -5346,8 +5194,8 @@ def _in_use_message(pid: int) -> str:
 def _unattributed_in_use_message() -> str:
     """What is known when the agent refuses and no lock can name a holder.
 
-    ``_lock_holder`` has eight ways to answer ``None`` — psutil missing, the
-    lock absent, unreadable, not a JSON object, no pid, an unparseable
+    There are eight ways the liveness check answers ``None`` — psutil missing,
+    the lock absent, unreadable, not a JSON object, no pid, an unparseable
     timestamp, a psutil error, a recycled pid — and every one of them used to
     land here on the agent's own word for it, which on kiro-cli 2.14.2 is the
     bare string "Internal error". State the cause that has actually been
