@@ -2765,7 +2765,7 @@ def _acp_delete_session(session_id: str) -> tuple[str, str]:
     if result is None:
         return "not_found", "Session not found in the kiro-cli store."
     if result is False:
-        return "delete_error", "Could not delete all session files (partial delete logged)."
+        return "in_use", "A process still has this session's files open. Close it there, then try again."
     return "", ""
 
 
@@ -3113,7 +3113,7 @@ async def api_acp_v3_delete_sessions(request: Request):
         # Enumerate v3 session IDs for this workspace (off the event loop).
         # `data_kiro_v3.load_sessions(cwd)` returns (list[Session], dict) — unpack correctly.
         # `acp._supervisor.sessions` already carries every live id regardless of shape.
-        # already carries every live id regardless of shape.
+
         deleted_total: list[str] = []
         failed_total: list[dict] = []
         while all_ids:
