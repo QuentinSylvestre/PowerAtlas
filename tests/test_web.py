@@ -14784,12 +14784,12 @@ class TestDashboardListingEndpoint:
             lambda sid: (r"C:\dev\ws", "kiro-cli-v3") if sid == "s1" else None)
         body = client.get(self._PATH).json()
         assert [p["id"] for p in body["pinned"]] == ["s1"]
-        # Held out of its own group's list and its count, exactly as a
-        # pinned session already is on the non-lazy path -- proves the full
-        # fetch actually ran rather than the lazy `total` (which would still
-        # read 1, uncorrected) leaking through by coincidence.
-        assert body["groups"][0]["sessions"] == []
-        assert body["groups"][0]["total"] == 0
+        # The session now also stays in its own workspace group so the user
+        # can see it in context (with the pin button active). Total reflects
+        # the real count and the row carries pinned=True.
+        assert body["groups"][0]["total"] == 1
+        assert body["groups"][0]["sessions"][0]["id"] == "s1"
+        assert body["groups"][0]["sessions"][0]["pinned"] is True
 
     def test_a_live_process_in_the_workspace_marks_the_row_live(
             self, client, grouped_multi_store, monkeypatch):

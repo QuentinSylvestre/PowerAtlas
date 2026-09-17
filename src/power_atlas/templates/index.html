@@ -369,7 +369,7 @@ function dashCenterDefaultWidth(){
   var total = dashPanelsWidth();
   if (!total) return DASH_CENTER_W_MIN;
   var remaining = total - dashLeftWidthNow() - (DASH_PANEL_HANDLE_W * 2);
-  return Math.max(DASH_CENTER_W_MIN, Math.floor(remaining / 2));
+  return Math.max(DASH_CENTER_W_MIN, Math.min(DASH_LEFT_W_DEFAULT * 2, remaining - DASH_RIGHT_W_MIN));
 }
 
 function dashSetLeftWidth(px, persist){
@@ -458,7 +458,24 @@ dashWirePanelResize(dashCenterResize, dashCenterWidthNow, dashSetCenterWidth, DA
 (function dashPanelsBoot(){
   dashSetLeftWidth(Number(dashRailStored(DASH_LEFT_W_KEY)) || DASH_LEFT_W_DEFAULT, false);
   var storedCenter = Number(dashRailStored(DASH_CENTER_W_KEY));
-  dashSetCenterWidth(storedCenter || dashCenterDefaultWidth(), false);
+  if (storedCenter) {
+    dashSetCenterWidth(storedCenter, false);
+  } else {
+    // No stored value: compute from actual container width. If the container
+    // has no width yet (e.g. peek window created at 1x1 and not yet resized),
+    // fall back to the minimum and recompute on the first resize event.
+    var computed = dashCenterDefaultWidth();
+    dashSetCenterWidth(computed, false);
+    if (computed <= DASH_CENTER_W_MIN) {
+      // Width was not measurable yet — recompute once the window has real dimensions.
+      var _onFirstResize = function(){
+        if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('resize', _onFirstResize);
+        var w = dashCenterDefaultWidth();
+        if (w > DASH_CENTER_W_MIN) dashSetCenterWidth(w, true);
+      };
+      if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('resize', _onFirstResize);
+    }
+  }
 })();
 if (typeof window !== 'undefined' && window.addEventListener) {
   window.addEventListener('resize', function(){ dashSetLeftWidth(dashLeftWidthNow(), false); });
@@ -809,8 +826,87 @@ function resumeSession(btn){var row=btn.closest('[data-sid]');fetch('/api/launch
 // window, where window.open lands somewhere the user did not ask for. /acp
 // carries a back link, and its own ?sid= is what survives a reload there.
 function openInAcp(btn){var row=btn.closest('[data-sid]');location.href='/acp?sid='+encodeURIComponent(row.dataset.sid)}
-function pinSession(btn){var row=btn.closest('[data-sid]');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-session':'/api/pin-session';btn.classList.toggle('pinned');showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd})}).then(function(){dashRailRefreshSoon()}).catch(function(){btn.classList.toggle('pinned');showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function pinWorkspace(btn){var group=btn.closest('[data-cwd]');var pinned=btn.classList.contains('pinned');var url=pinned?'/api/unpin-folder':'/api/pin-folder';btn.classList.toggle('pinned');showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:group.dataset.cwd})}).then(function(){dashRailRefreshSoon()}).catch(function(){btn.classList.toggle('pinned');showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
+function pinSession(btn){
+  var row=btn.closest('[data-sid]');
+  var pinned=btn.classList.contains('pinned');
+  var url=pinned?'/api/unpin-session':'/api/pin-session';
+  var sid=row.dataset.sid;
+  // Optimistic DOM update on the button
+  btn.classList.toggle('pinned');
+  btn.setAttribute('aria-label', pinned ? 'Pin session' : 'Unpin session');
+  btn.title = pinned ? 'Pin session' : 'Unpin session';
+  // Update in-memory data and re-render immediately
+  if (pinned) {
+    dashRailPinned = dashRailPinned.filter(function(s){ return s.id !== sid; });
+  } else {
+    // Find the session object from groups or flat list and add to pinned
+    var found = null;
+    for (var gi = 0; gi < dashRailGroups.length && !found; gi++) {
+      for (var si = 0; si < dashRailGroups[gi].sessions.length && !found; si++) {
+        if (dashRailGroups[gi].sessions[si].id === sid) found = dashRailGroups[gi].sessions[si];
+      }
+    }
+    if (!found) { for (var fi = 0; fi < dashRailFlat.length && !found; fi++) { if (dashRailFlat[fi].id === sid) found = dashRailFlat[fi]; } }
+    if (found) {
+      found.pinned = true;
+      dashRailPinned = dashRailPinned.concat([found]);
+    }
+  }
+  // Keep session.pinned flag in sync across groups and flat list
+  (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = !pinned; }); })(dashRailFlat);
+  dashRailGroups.forEach(function(g){ g.sessions.forEach(function(s){ if (s.id === sid) s.pinned = !pinned; }); });
+  dashRenderRail();
+  showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
+  fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sid,workspace:row.dataset.cwd})})
+    .then(function(){ dashRailRefreshSoon(); })
+    .catch(function(){
+      // Revert
+      btn.classList.toggle('pinned');
+      btn.setAttribute('aria-label', pinned ? 'Unpin session' : 'Pin session');
+      btn.title = pinned ? 'Unpin session' : 'Pin session';
+      if (!pinned) {
+        dashRailPinned = dashRailPinned.filter(function(s){ return s.id !== sid; });
+      }
+      (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); })(dashRailFlat);
+      dashRailGroups.forEach(function(g){ g.sessions.forEach(function(s){ if (s.id === sid) s.pinned = pinned; }); });
+      dashRenderRail();
+      showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
+    });
+}
+function pinWorkspace(btn){
+  var group=btn.closest('[data-cwd]');
+  var pinned=btn.classList.contains('pinned');
+  var url=pinned?'/api/unpin-folder':'/api/pin-folder';
+  var cwd=group.dataset.cwd;
+  // Optimistic DOM update on the button
+  btn.classList.toggle('pinned');
+  // Update in-memory group and re-render immediately
+  dashRailGroups.forEach(function(g){ if (g.cwd === cwd) g.pinned = !pinned; });
+  if (!pinned) {
+    // Move to front of dashRailGroups
+    var idx = dashRailGroups.findIndex ? dashRailGroups.findIndex(function(g){ return g.cwd === cwd; })
+      : (function(){ for (var i=0;i<dashRailGroups.length;i++) if (dashRailGroups[i].cwd===cwd) return i; return -1; })();
+    if (idx > 0) { dashRailGroups.unshift(dashRailGroups.splice(idx, 1)[0]); }
+  } else {
+    // Move out of pinned position — re-sort: pinned first, then active, then by latest_updated desc
+    dashRailGroups.sort(function(a, b){
+      if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      return (b.latest_updated || '') < (a.latest_updated || '') ? -1 : 1;
+    });
+  }
+  dashRenderRail();
+  showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
+  fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:cwd})})
+    .then(function(){ dashRailRefreshSoon(); })
+    .catch(function(){
+      // Revert
+      btn.classList.toggle('pinned');
+      dashRailGroups.forEach(function(g){ if (g.cwd === cwd) g.pinned = pinned; });
+      dashRenderRail();
+      showToast('<div class="toast toast-error">Failed to '+(pinned?'unpin':'pin')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
+    });
+}
 function openFolder(cwd){fetch('/api/open-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:cwd})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to open folder<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 function openTerminal(btn){var group=btn.closest('[data-cwd]');fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:group.dataset.cwd})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to open terminal<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 // The workspace row's per-provider quick launch (rail QA follow-up): the
@@ -1314,9 +1410,9 @@ function dashRailRowNode(session, flat, workspace){
   actions.className = 'acp-rail-menu-wrap';
   var pinBtn = document.createElement('button');
   pinBtn.type = 'button';
-  pinBtn.className = 'row-btn pin-btn';
-  pinBtn.setAttribute('aria-label', 'Pin session');
-  pinBtn.title = 'Pin session';
+  pinBtn.className = 'row-btn pin-btn' + (session.pinned ? ' pinned' : '');
+  pinBtn.setAttribute('aria-label', session.pinned ? 'Unpin session' : 'Pin session');
+  pinBtn.title = session.pinned ? 'Unpin session' : 'Pin session';
   pinBtn.textContent = '📌';
   pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinSession(pinBtn); });
   actions.appendChild(pinBtn);
@@ -1540,7 +1636,7 @@ function dashRenderPinnedSection(){
   var wrap = document.createElement('div');
   wrap.className = 'acp-rail-group';
   wrap.dataset.day = 'pinned';
-  wrap.appendChild(dashRailHeadNode('p:pinned', 'Pinned', String(matched.length), null));
+  wrap.appendChild(dashRailHeadNode('p:pinned', 'Pinned sessions', String(matched.length), null));
   if (!dashRailCollapsed['p:pinned']) {
     matched.forEach(function(s){ wrap.appendChild(dashRailRowNode(s, true, s)); });
   }

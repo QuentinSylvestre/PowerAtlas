@@ -2304,7 +2304,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                     pinned_sessions_found.append((ws_cwd, ws_name, s, prov_name))
                     if ws_hash:
                         hash_by_sid[s.session_id] = ws_hash
-            tagged = [(s, p) for s, p in tagged if s.session_id not in pinned_set]
+            # Pinned sessions remain in the workspace rows (so they appear both
+            # in the "Pinned sessions" section and under their workspace) — the
+            # client marks the pin button active via the `pinned` flag below.
         total = len(tagged)
         s_start = (session_page - 1) * session_size
         page_tagged = tagged[s_start:s_start + session_size]
@@ -2331,7 +2333,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         s for s in all_page_sessions + [s for _c, _n, s, _p in pinned_sessions_found]
         if availability.get(s.session_id) == "held"], snapshot)
 
-    def _row_dict(s, prov_name: str) -> dict:
+    def _row_dict(s, prov_name: str, pinned: bool = False) -> dict:
         d = {
             "id": s.session_id,
             "title": _acp_row_title(s),
@@ -2339,6 +2341,8 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             "availability": availability.get(s.session_id, "available"),
             "status": statuses.get(s.session_id, ""),
         }
+        if pinned:
+            d["pinned"] = True
         if include_provider:
             d["provider"] = prov_name
             # Cheap all-provider liveness dot (dashboard-only, see
@@ -2350,13 +2354,13 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
 
     groups = []
     for meta, page_tagged in rows:
-        meta["sessions"] = [_row_dict(s, p) for s, p in page_tagged]
+        meta["sessions"] = [_row_dict(s, p, pinned=s.session_id in pinned_set) for s, p in page_tagged]
         groups.append(meta)
 
     pinned_cwds = list(dict.fromkeys(cwd for cwd, _n, _s, _p in pinned_sessions_found))
     pinned_exists = dict(zip(pinned_cwds, _acp_exists_flags(pinned_cwds)))
     pinned: list[dict] = [
-        {**_row_dict(s, prov_name), "cwd": cwd, "name": name,
+        {**_row_dict(s, prov_name, pinned=True), "cwd": cwd, "name": name,
          "exists": pinned_exists.get(cwd, True)}
         for cwd, name, s, prov_name in pinned_sessions_found
     ]
