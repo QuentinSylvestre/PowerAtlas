@@ -40,7 +40,7 @@ def _bump_mtime(*paths: Path) -> None:
 
 
 
-def _reset_kiro_caches():
+def _reset_v3_caches():
     """Drop data_kiro_v3's process-global parse caches and cwd index.
 
     In production the session roots are fixed for the life of the process, so
@@ -74,11 +74,11 @@ def _clear_cache():
     from power_atlas import data
     session_cache.clear()
     data._cache.clear()
-    _reset_kiro_caches()
+    _reset_v3_caches()
     yield
     session_cache.clear()
     data._cache.clear()
-    _reset_kiro_caches()
+    _reset_v3_caches()
 
 
 
@@ -1637,5 +1637,6 @@ def test_read_tail_lines_discards_partial_first_line(tmp_path):
     p.write_text('{"first":"' + "y" * 500 + '"}\n{"second":2}\n', encoding="utf-8")
     lines = _read_tail_lines(p, max_bytes=64)
     assert lines == ['{"second":2}']
+
 
 

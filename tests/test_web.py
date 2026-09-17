@@ -4700,10 +4700,9 @@ class TestAcpSessionLoad:
         docstring for why the ACP reply alone cannot supply this (a
         `session/load` reply's replayed updates carry no diff content of
         their own). `_get_tool_diffs_v3` reads the v3 messages.jsonl shape
-        (`payload.type`/`toolName`/`args`), not the v2 `.jsonl` transcript
-        this class's own `_stored` helper writes into `KIRO_SESSION_DIR`, so
-        the fixture session is registered through `acp_store_dir_v3` and its
-        `messages.jsonl` is overwritten with a real v3-shaped tool call."""
+        (`payload.type`/`toolName`/`args`), so the fixture session is
+        registered through `acp_store_dir_v3` and its `messages.jsonl` is
+        overwritten with a real v3-shaped tool call."""
         acp_mod, store = acp_store
         sid = "load-backfill-01"
         paths = acp_store_dir_v3(sid, cwd=str(store))

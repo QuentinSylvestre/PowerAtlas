@@ -1392,3 +1392,32 @@ class TestLoadSessionsSkipsStagedDeletes:
         sessions, _ = dv3.load_sessions("C:\\MyProject")
 
         assert sessions == []
+
+
+
+# --- data.get_full_transcript dispatch for kiro-cli-v3 ---
+
+class TestGetFullTranscriptDispatch:
+    """data.get_full_transcript() routes to the correct provider module."""
+
+    def test_dispatches_to_kiro_v3(self, tmp_path, monkeypatch):
+        """provider='kiro-cli-v3' routes to data_kiro_v3.get_full_transcript."""
+        from power_atlas import data
+
+        called_with = {}
+
+        def _fake_v3_transcript(session_id, cwd):
+            called_with["session_id"] = session_id
+            called_with["cwd"] = cwd
+            return []
+
+        monkeypatch.setattr("power_atlas.data_kiro_v3.get_full_transcript", _fake_v3_transcript)
+        data.get_full_transcript("sess_abc", provider="kiro-cli-v3", cwd="C:\\proj")
+        assert called_with == {"session_id": "sess_abc", "cwd": "C:\\proj"}
+
+    def test_unknown_provider_returns_empty_list(self, tmp_path):
+        """An unrecognised provider returns [] rather than raising."""
+        from power_atlas import data
+
+        result = data.get_full_transcript("sess_xyz", provider="no-such-provider", cwd="C:\\proj")
+        assert result == []

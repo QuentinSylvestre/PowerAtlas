@@ -134,6 +134,8 @@ class TestLaunchSession:
         assert "chat" in cmd_str
         assert "--resume-id" in cmd_str
         assert "sess_1abc" in cmd_str
+        assert "--agent-engine" in cmd_str
+        assert "--trust-tools" in cmd_str
         kwargs = mock_popen.call_args.kwargs
         assert kwargs["env"]["POWER_ATLAS_SESSION"] == "1"
         assert "CLAUDECODE" not in kwargs["env"]
