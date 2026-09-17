@@ -1854,6 +1854,11 @@ def _acp_availability(session_ids, held,
         if sid in held:
             out[sid] = "held"
             continue
+        # Non-sess_-prefixed IDs are v2 bare UUIDs; they are no longer in the
+        # store, so treat them as always available without scanning.
+        if not sid.startswith("sess_"):
+            out[sid] = "available"
+            continue
         state = "available"
         try:
             if acp is not None:

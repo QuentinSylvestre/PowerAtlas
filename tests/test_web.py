@@ -6723,8 +6723,7 @@ class TestAcpLoadFloor:
         async def boom(self, method, params, timeout=None):
             raise acp_mod.AgentTimeout("the agent did not answer")
 
-        with patch.object(acp_mod, "_lock_holder", counting), \
-                patch.object(acp_mod._Supervisor, "_request", boom), \
+        with patch.object(acp_mod._Supervisor, "_request", boom), \
                 patch.object(acp_mod._Supervisor, "ensure_started", _no_spawn):
             asyncio.run(acp_mod._handle_load(conn, "floor-0001"))
             first = len(reads)
@@ -14615,7 +14614,6 @@ class TestDashboardListingEndpoint:
         monkeypatch.setattr(data_mod, "get_sessions", _get_sessions)
         monkeypatch.setattr(data_mod, "available_providers",
                             lambda: ["kiro-cli-v3", "claude-code"])
-        monkeypatch.setattr(acp_mod, "_lock_holder", lambda sid: None)
         monkeypatch.setattr(acp_mod, "_lock_holder_v3", lambda sid, wh=None: None)
         monkeypatch.setattr(acp_mod._supervisor, "sessions", {})
         return state
