@@ -261,9 +261,12 @@ Removed `_KIRO_LOCK_DIR`, `_kiro_session_cwd`, the kiro `.lock` sidecar enumerat
 7. Add `_LOCK_TIME_RE` to the deletion list alongside the other lock constants: `_LOCK_TIME_RE` is used only by `_lock_started_at`, which is used only by `_lock_holder` (both deleted in Phase 5). Delete `_LOCK_TIME_RE` in Phase 4 as it conceptually belongs with the status classifier's store-path changes — but if it only appears in `acp.py`, handle it in Phase 5.
 
 **Exit criteria**:
-- [ ] `grep "classify_kiro_v2\|SESSION_DIR\|_is_v3_format" src/power_atlas/status_classifier.py` returns no hits.
-- [ ] `grep '"kiro-cli"' src/power_atlas/status_classifier.py` returns no hits (only `"kiro-cli-v3"` remains).
-- [ ] `grep "_is_v3_format" src/power_atlas/status_classifier.py` returns either no hits (deleted) or only the function definition with a documented remaining caller.
+- [x] `grep "classify_kiro_v2\|SESSION_DIR\|_is_v3_format" src/power_atlas/status_classifier.py` returns no hits.
+- [x] `grep '"kiro-cli"' src/power_atlas/status_classifier.py` returns no hits (only `"kiro-cli-v3"` remains).
+- [x] `grep "_is_v3_format" src/power_atlas/status_classifier.py` returns either no hits (deleted) or only the function definition with a documented remaining caller.
+
+Implementation (2026-09-17, code: eee8eae)
+Removed `SESSION_DIR` constant, `classify_kiro_v2()`, `_is_v3_format()`, the `kiro-cli` branch in `_resolve_jsonl_path_uncached`, and the v2 auto-detect block in `_classify_from_path`. Cache key for `_resolve_jsonl_path` updated from 4-tuple (dropping `SESSION_DIR`) to 3-tuple. `_LOCK_TIME_RE` confirmed as `acp.py`-only — left for Phase 5. Sub-agent also updated `tests/test_web.py` to remove `TestClassifyKiroV2` and `SESSION_DIR`-patching tests (Phase 8 pull-forward). Fixup commit 7b99812: corrected `_classify_from_path` else-clause (`else: return classify_kiro_v3` \u2192 `return None`), fixed stale comment, updated 3 test literals from `"kiro-cli"` to `"kiro-cli-v3"`. 30 classifier tests pass.
 
 ---
 
@@ -611,6 +614,17 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 4, persona: Senior engineer)
+
+Implementation health: Yellow (after auto-fix).
+Initial health: Yellow (M1 plan-spec deviation). After fixup: Green.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `_classify_from_path` else-clause dispatched to `classify_kiro_v3` for unknown providers instead of `return None` (plan spec). | Fixed — changed to `return None` in fixup 7b99812. |
+| 2 | Low | Three test literals in `test_web.py` used `"kiro-cli"` provider inside mocked `get_semantic_status` calls. | Fixed — replaced with `"kiro-cli-v3"` in fixup 7b99812. |
+| 3 | Low | Stale comment at `status_classifier.py:40` referenced `"kiro-cli / kiro-cli-v3"`. | Fixed — updated to `"kiro-cli-v3"` in fixup 7b99812. |
 
 ### 2026-09-17 — Implementation Review (after Phase 3, persona: Reliability engineer)
 
