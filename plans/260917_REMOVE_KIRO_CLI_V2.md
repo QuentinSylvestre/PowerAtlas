@@ -295,8 +295,11 @@ Removed `SESSION_DIR` constant, `classify_kiro_v2()`, `_is_v3_format()`, the `ki
 7. Remove the constants `LOCK_MAX_BYTES`, `LOCK_START_SKEW_SECONDS`, `_LOCK_TIME_RE`, and the `_lock_started_at()` helper — all are used only by the deleted `_lock_holder`. Verified: `_lock_holder_v3` uses `_V3_SESSION_STALE_SECONDS` and its own path logic; it does not use any of these four names. Delete them unconditionally.
 
 **Exit criteria**:
-- [ ] `grep "data_kiro\|KIRO_SESSION_DIR\|_lock_holder\b\|_stored_session_cwd\b\|_load_session_cwd\|LOCK_MAX_BYTES\|LOCK_START_SKEW\|_LOCK_TIME_RE\|_lock_started_at" src/power_atlas/acp.py` returns no hits (except `_lock_holder_v3` and `_stored_session_cwd_v3` which are kept).
-- [ ] The module-level isolation-boundary comment in `acp.py` still names exactly two guarded imports: `config.CONFIG_DIR` and `launcher._SESSION_ID_RE`.
+- [x] `grep "data_kiro\|KIRO_SESSION_DIR\|_lock_holder\b\|_stored_session_cwd\b\|_load_session_cwd\|LOCK_MAX_BYTES\|LOCK_START_SKEW\|_LOCK_TIME_RE\|_lock_started_at" src/power_atlas/acp.py` returns no hits (except `_lock_holder_v3` and `_stored_session_cwd_v3` which are kept).
+- [x] The module-level isolation-boundary comment in `acp.py` still names exactly two guarded imports: `config.CONFIG_DIR` and `launcher._SESSION_ID_RE`.
+
+Implementation (2026-09-17, code: 487d1b7)
+Removed `KIRO_SESSION_DIR`, `LOCK_MAX_BYTES`, `LOCK_START_SKEW_SECONDS`, `_LOCK_TIME_RE`, `_lock_started_at`, `_lock_holder`, `_stored_session_cwd`, and `_load_session_cwd` from `acp.py`. Updated three docstring references from `data_kiro.get_tool_diffs()` to `_get_tool_diffs_v3`. Updated comments in `_lock_holder_v3` and `_unattributed_in_use_message` that referenced the deleted `_lock_holder`. Isolation boundary confirmed: exactly `config.CONFIG_DIR` and `launcher._SESSION_ID_RE`. Pull-forwards in the same commit: (1) `web.py` `_acp_availability` — removed `acp._lock_holder(sid)` call for v2 IDs (replaced with `acp._lock_holder_v3` for all IDs) since `_lock_holder` no longer exists; (2) `_acp_sessions_for_workspace` — removed v2 KIRO_SESSION_DIR loop (function body Phase-6 deletion target); (3) `tests/test_web.py` — updated `acp_store` and `acp_store_dir` fixtures (removed `KIRO_SESSION_DIR` monkeypatches), `acp_listing_store` (now patches `_lock_holder_v3`), and 5 tests that directly referenced `_lock_holder`. Fixup commit cd8584b: removed stale `_lock_holder` patches from `grouped_multi_store` and `TestAcpLoadFloor` fixtures; added v2-uuid short-circuit in `_acp_availability` to match docstring. Note: `_acp_delete_many` and `_acp_session_paths` still have dead references to deleted symbols (`acp._lock_holder` and `acp.KIRO_SESSION_DIR`) — both are Phase 6 deletion targets.
 
 ---
 
@@ -614,6 +617,19 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 5, persona: Senior engineer)
+
+Implementation health: Yellow (after fixup).
+Initial health: Yellow (3 High, 1 Medium, 1 Low). After fixup commit cd8584b: reduced to Yellow (H1/H2 are Phase 6 targets, acknowledged).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `web.py` `_acp_delete_many` calls `acp._lock_holder(session_id)` — deleted symbol, masked by `except Exception`. | Escalated — Phase 6 deletion target; `_acp_delete_many` v2 branch removal covers this. Documented in Phase 6. |
+| 2 | High | `web.py` `_acp_session_paths` uses `acp.KIRO_SESSION_DIR` — deleted symbol, crashes with 500 on v2 id delete. | Escalated — Phase 6 deletion target; `_acp_session_paths` itself is deleted in Phase 6. Documented. |
+| 3 | High | 16 tests broken: `grouped_multi_store` fixture and `TestAcpLoadFloor` patched deleted `_lock_holder`. | Fixed — removed the stale patches in fixup cd8584b. |
+| 4 | Medium | `_acp_availability` called `_lock_holder_v3` for all IDs including v2 bare UUIDs; docstring said v2 is always available. | Fixed — added v2-uuid short-circuit in fixup cd8584b. |
+| 5 | Low | `_unattributed_in_use_message` docstring listed 8 v2 lock failure modes that no longer apply. | Accepted — docstring-only; deferred to Phase 9 documentation pass. |
 
 ### 2026-09-17 — Implementation Review (after Phase 4, persona: Senior engineer)
 
