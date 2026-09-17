@@ -63,30 +63,15 @@ except Exception as _e:  # pragma: no cover - import guard
 
 
 # provider -> (executable basenames that indicate the process, resume flag)
-# kiro-cli and kiro-cli-v3 share the same binary. _match_provider() returns on
-# first dict iteration, so it always resolves to "kiro-cli" for either engine;
-# _scan() reroutes to "kiro-cli-v3" afterwards for a sess_-prefixed resumed id.
-# See plans/260908_ACP_V3_PRODUCTION_HARDENING.md Phase 1 (SC-6).
 _PROVIDER_SPECS: dict[str, tuple[tuple[str, ...], str]] = {
     "claude-code": (("claude", "claude.exe", "claude.cmd"), "--resume"),
-    "kiro-cli": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
     "kiro-cli-v3": (("kiro-cli", "kiro-cli.exe", "kiro-cli.cmd"), "--resume-id"),
 }
 
-# kiro-cli and kiro-cli-v3 write their lock/sidecar files into the same
-# directory (_KIRO_LOCK_DIR) and PowerAtlas's own long-lived v3 ACP agent
-# process never carries --resume-id on argv (it is spawned once, not resumed
-# per-session) -- so the first-pass argv scan can only ever label that
-# process's own pid "kiro-cli", even while it holds a v3 (sess_-prefixed)
-# session. Treated as one family wherever _scan() cross-checks a sidecar
-# record's provider against the argv-derived provider for the same pid, so a
-# v3 lock file correctly relabelled "kiro-cli-v3" by _sidecar_records() is not
-# silently dropped for failing to match "kiro-cli".
-# Empirical caveat (2026-09-16, kiro-cli v3 build 2.21.4): the "kiro-cli-v3"
-# label's `.lock`-file detection path is currently unreachable, since the
-# installed build never writes a `.lock` file for a v3 session; see
-# `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 Review Log.
-_KIRO_PROVIDERS: frozenset[str] = frozenset({"kiro-cli", "kiro-cli-v3"})
+# kiro-cli-v3 is the only remaining kiro provider. _KIRO_PROVIDERS exists as a
+# family set so the D32 guard (below) can check membership without naming the
+# provider string twice.
+_KIRO_PROVIDERS: frozenset[str] = frozenset({"kiro-cli-v3"})
 
 _SNAPSHOT_TTL = 3.0  # seconds; many partials render per refresh — reuse one scan
 _cached_snapshot: "Snapshot | None" = None
@@ -95,52 +80,28 @@ _cached_at = 0.0
 # --- Sidecar identity files -------------------------------------------------
 # Neither CLI puts its session id on argv, so argv matching only ever succeeds
 # for sessions PowerAtlas launched itself (launcher.py passes --resume /
-# --resume-id). Both providers do write a per-process sidecar naming the
-# session, which is the only local way to attribute a terminal-started session
-# to a live process:
+# --resume-id). claude-code writes a per-process sidecar naming the session,
+# which is the only local way to attribute a terminal-started session to a
+# live process:
 #
-#   kiro-cli     ~/.kiro/sessions/cli/<session-id>.lock   {"pid", "started_at"}
 #   claude-code  ~/.claude/sessions/<pid>.json            {"pid","sessionId","cwd",
 #                                                          "startedAt","status",...}
 #
-# A sidecar's presence does NOT mean the session is live. Neither provider
-# reliably removes them, so pids get recycled onto unrelated processes: of 785
-# kiro lock files observed on one machine, 21 named a live pid and exactly one
-# was genuine — the rest had been inherited by svchost, firefox, and friends.
-# Liveness therefore requires the pid to be alive AND its start time to be
-# consistent with the sidecar's.
+# A sidecar's presence does NOT mean the session is live. Pids get recycled
+# onto unrelated processes; liveness requires the pid to be alive AND its
+# start time to be consistent with the sidecar's.
 #
 # Forward upper bound — claude-code ONLY, not a universal rule. One `claude`
 # process owns one session and writes its sidecar just after spawn; observed
 # deltas are +1.1s to +1.6s and the nearest false match was ~9500s off, so
-# 120s is generous and still leaves ~80x margin. It is deliberately not
-# applied to kiro-cli: PowerAtlas's ACP agent (`acp.py`) is spawned once and
-# serves sessions for the whole lifetime of the app, so its locks are
-# legitimately minutes or hours newer than the process that wrote them —
-# measured 2026-07-31, +1.88s and +23.77s for two sessions opened 21.5s apart,
-# with the lock's pid equal to the agent's. Any ceiling short enough to be
-# useful against recycled pids would hide every session opened past it.
+# 120s is generous and still leaves ~80x margin.
 _SIDECAR_SKEW_S = 120.0
 # Backward bound — both providers, and the check that actually rejects a
 # recycled pid. A sidecar is never written before its own process starts, so a
 # negative delta means a *different* process held this pid earlier: pid
 # exclusivity guarantees the recycled writer ran before the live process
-# existed. That is why kiro-cli can safely go without an upper bound. The
-# small allowance covers clock-source jitter between the provider's timestamp
-# and psutil's create_time, nothing more.
-#
-# That guarantee is conditional on a monotone, same-machine clock. started_at
-# is stamped from the wall clock when the lock is written, while create_time
-# derives from the process's absolute creation FILETIME — so if the clock steps
-# *backward* between a stale write and the recycling process's spawn (NTP
-# correction, VM resume, dual-boot with a local-time RTC), the delta comes out
-# positive and the kiro-cli branch admits a lock the 120s ceiling used to
-# reject. Accepted rather than overlooked: plan
-# 260731_ACP_REMOTE_CLIENT_PRODUCTIZATION D10 and its risk row "Clock skew
-# stamping a lock in the future is no longer rejected once the upper bound is
-# dropped" (rated Low). D32 records the other accepted residual — a lock our
-# own long-lived ACP agent orphaned reads live for that agent's lifetime. The
-# guard set is deliberately good enough, not airtight.
+# existed. The small allowance covers clock-source jitter between the
+# provider's timestamp and psutil's create_time, nothing more.
 _SIDECAR_BACKWARD_SKEW_S = 5.0
 
 # claude-code's sidecar carries `procStart`, a Windows creation FILETIME
@@ -237,7 +198,6 @@ def publish_acp_sessions(session_ids, agent_pid) -> None:
     _acp_live = (ids, agent_pid if isinstance(agent_pid, int) else None)
 
 
-_KIRO_LOCK_DIR = Path.home() / ".kiro" / "sessions" / "cli"
 _CLAUDE_SESSION_DIR = Path.home() / ".claude" / "sessions"
 
 # path -> (mtime, size, parsed|None). Most sidecars do not change between
@@ -355,23 +315,6 @@ def _sidecar_records() -> list[_Sidecar]:
     """
     out: list[_Sidecar] = []
 
-    for lock, st in _list_sidecars(_KIRO_LOCK_DIR, ".lock"):
-        data = _load_json_cached(Path(lock), st)
-        if not data:
-            continue
-        pid = data.get("pid")
-        started = _epoch_from_iso(str(data.get("started_at", "")))
-        if not isinstance(pid, int) or started is None:
-            continue
-        # cwd lives in the sibling metadata; only worth reading for a
-        # candidate, which the caller has not filtered yet — defer it.
-        # kiro-cli's lock carries `{pid, started_at}` and nothing else, so it
-        # has no equivalent of claude-code's `kind`/`entrypoint`.
-        sid = Path(lock).stem
-        provider = "kiro-cli-v3" if sid.startswith("sess_") else "kiro-cli"
-        out.append(_Sidecar(provider, pid, sid, started,
-                            "", "", "", "", ""))
-
     for meta, st in _list_sidecars(_CLAUDE_SESSION_DIR, ".json"):
         data = _load_json_cached(Path(meta), st)
         if not data:
@@ -408,12 +351,6 @@ def _sidecar_records() -> list[_Sidecar]:
                             _filetime_to_epoch(data.get("procStart"))))
 
     return out
-
-
-def _kiro_session_cwd(session_id: str) -> str:
-    """cwd for a kiro-cli session, from the metadata beside its lock file."""
-    data = _load_json_cached(_KIRO_LOCK_DIR / f"{session_id}.json")
-    return (data or {}).get("cwd", "") or ""
 
 
 def is_available() -> bool:
@@ -625,15 +562,6 @@ def _scan() -> Snapshot:
             pid = info.get("pid")
             _binaries, flag = _PROVIDER_SPECS[provider]
             sid = _extract_session_id(cmdline, flag)
-            # _match_provider() cannot tell "kiro-cli" from "kiro-cli-v3" —
-            # both share a binary — so it always answers "kiro-cli" (first
-            # dict match). Reroute here, before provider_pids/live_sids are
-            # written, using the resumed session id's own shape: only v3
-            # session ids are "sess_"-prefixed. Done before the provider_pids
-            # write so a terminal-resumed v3 process (--resume-id sess_...)
-            # is recorded correctly on the first pass, not just in live_sids.
-            if provider == "kiro-cli" and sid and sid.startswith("sess_"):
-                provider = "kiro-cli-v3"
             if pid is not None:
                 try:
                     provider_pids[pid] = (provider, proc.create_time())
@@ -677,15 +605,9 @@ def _scan() -> Snapshot:
         # the pre-sidecar behaviour of matching nothing.
         try:
             live = provider_pids.get(pid)
-            # kiro-cli / kiro-cli-v3 count as the same provider here: the
-            # first pass can only reroute a pid to "kiro-cli-v3" when its own
-            # argv carries --resume-id sess_... — PowerAtlas's long-lived v3
-            # ACP agent never does (it is spawned once, not resumed
-            # per-session), so its provider_pids entry stays "kiro-cli" even
-            # while a v3 lock file it wrote is correctly labelled
-            # "kiro-cli-v3" by _sidecar_records(). Without this, that record
-            # would fail the match and be silently dropped rather than
-            # merely mislabelled.
+            # _KIRO_PROVIDERS is a family set: the D32 guard below uses it,
+            # and future providers sharing a binary can be added here without
+            # touching the guard. Currently a singleton {"kiro-cli-v3"}.
             if live is None or (live[0] != provider and not (
                     live[0] in _KIRO_PROVIDERS and provider in _KIRO_PROVIDERS)):
                 continue
@@ -723,56 +645,13 @@ def _scan() -> Snapshot:
                 # makes kiro-cli's case for it. See _SIDECAR_SKEW_S.
                 if provider not in _KIRO_PROVIDERS and delta > _SIDECAR_SKEW_S:
                     continue
-            # D32, closed. A lock naming *our own* ACP agent for a session that
-            # agent no longer holds is an orphan it left behind — a failed
-            # `session/load`, or a close whose terminate raised. Dropping the
-            # forward ceiling above is what made those permanent: the pid is
-            # genuinely live and the delta is genuinely forward, so every other
-            # check here passes.
-            #
-            # Read once, outside the try, so a scan cannot see one tuple for
-            # one record and a newer one for the next.
-            #
-            # Only ever *removes* a claim, and only for a pid we own. A foreign
-            # kiro-cli's lock is untouched — its pid is not the agent's — and a
-            # session the agent really holds is in the published set. The
-            # residual it replaces is the opposite direction and worse: a live
-            # dot on a card for a session nothing can open.
-            #
-            # Covers both `_KIRO_PROVIDERS` members ("kiro-cli" and
-            # "kiro-cli-v3"), same as the three checks above — not
-            # "kiro-cli" alone, which is how this guard used to read.
-            # Historically it was narrowed deliberately: pre-cutover,
-            # `_SupervisorV3._publish_live()`'s own override always passed a
-            # sentinel `pid=0` rather than its real agent pid (the unioned
-            # v2+v3 session set made one shared pid slot unsafe to use for
-            # either side), so `pid == acp_pid` could never be true for a
-            # "kiro-cli-v3"-labeled record no matter which supervisor
-            # published last — widening the provider check alone would have
-            # read as though it protected v3 self-orphans the way it
-            # protects v2's, while structurally being unable to.
-            # Post-cutover there is exactly one supervisor and one hook:
-            # `_Supervisor._publish_live()` now publishes `self.agent_pid()`,
-            # the real spawned process's pid, for every session regardless of
-            # which provider label its lock carries. `acp_pid` therefore
-            # unambiguously names the current agent, and the widened check
-            # here is correct rather than misleading. Closed by
-            # `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 — see that
-            # plan's §1 "Item 2" for the full history, including the one
-            # earlier attempt
-            # (`plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md` Phase 1
-            # cycle 2) that widened this same check without first fixing the
-            # sentinel, found inert, and was reverted.
-            #
-            # Empirical caveat (live QA, 2026-09-16): kiro-cli v3 (confirmed
-            # through build 2.21.4) does not write a `.lock` file under
-            # `~/.kiro/sessions/cli/` for any ACP session, so this widened
-            # `kiro-cli-v3` branch currently has no reachable input. The
-            # operative v3 session-availability/self-orphan-recovery
-            # mechanism is `_lock_holder_v3()` (`acp.py`), which reads
-            # `session.json`'s own `status` field with independent
-            # mtime-staleness self-heal, no pid involved. See
-            # `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1 Review Log.
+            # D32, closed. A sidecar naming *our own* ACP agent for a session
+            # that agent no longer holds is an orphan. Only ever *removes* a
+            # claim, and only for a pid we own — a session the agent really
+            # holds is in the published set. `_KIRO_PROVIDERS` membership is
+            # checked for forward-compatibility; post-cutover there is exactly
+            # one kiro provider ("kiro-cli-v3") and `_Supervisor._publish_live()`
+            # publishes `self.agent_pid()` unambiguously for every session.
             if (provider in _KIRO_PROVIDERS and acp_pid is not None
                     and pid == acp_pid and sid not in acp_sids):
                 continue
@@ -786,8 +665,6 @@ def _scan() -> Snapshot:
                 sid_kind[key] = rec.kind
             if rec.entrypoint:
                 sid_entrypoint[key] = rec.entrypoint
-            if not cwd and provider in _KIRO_PROVIDERS:
-                cwd = _kiro_session_cwd(sid)
             if cwd:
                 norm = _normalize_path(cwd)
                 sid_to_cwd[key] = norm
