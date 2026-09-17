@@ -402,17 +402,12 @@ def load_config() -> Config:
                     paths.append(folder)
             config.pinned_folders = paths
         # Already list[str] — no migration needed
-        # Migration: trust_all_tools=true → provider_settings["kiro-cli"].default_args = "-a"
-        if data.get("trust_all_tools") is True and "kiro-cli" not in config.provider_settings:
-            config.provider_settings["kiro-cli"] = {
-                "default_args": "-a",
-                "color": "",
-                "enabled": True,
-            }
         # Sanitize nested types: drop entries that aren't the expected type
         config.pinned_folders = [x for x in config.pinned_folders if isinstance(x, str)]
         config.pinned_sessions = [x for x in config.pinned_sessions if isinstance(x, str)]
         config.custom_launchers = [x for x in config.custom_launchers if isinstance(x, dict)]
+        # Drop the retired v2 provider key if still present in config.toml
+        config.provider_settings.pop("kiro-cli", None)
         config.provider_settings = {k: v for k, v in config.provider_settings.items() if isinstance(v, dict)}
 
         # Sanitize workspace_settings: drop non-dict values, validate keys, normalize inner fields

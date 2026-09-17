@@ -405,7 +405,7 @@ def test_peek_hotkey_round_trip():
 def test_provider_settings_round_trip():
     """provider_settings dict persists through save/load cycle."""
     settings = {
-        "kiro-cli": {"default_args": "-a --verbose", "color": "#4a6ede", "enabled": True},
+        "kiro-cli-v3": {"default_args": "-a --verbose", "color": "#4a6ede", "enabled": True},
         "claude-code": {"default_args": "", "color": "#c2590f", "enabled": False},
     }
     cfg = Config(provider_settings=settings)
@@ -414,38 +414,17 @@ def test_provider_settings_round_trip():
     assert loaded.provider_settings == settings
 
 
-def test_trust_all_tools_migration(tmp_path):
-    """trust_all_tools=true migrates to provider_settings['kiro-cli'].default_args='-a'."""
-    _write_toml(tmp_path, {"trust_all_tools": True})
+def test_kiro_cli_v2_key_dropped_on_load(tmp_path):
+    """A config.toml with [provider_settings.kiro-cli] has that key stripped on load."""
+    _write_toml(tmp_path, {
+        "provider_settings": {
+            "kiro-cli": {"default_args": "-a", "color": "", "enabled": True},
+            "claude-code": {"default_args": "", "color": "", "enabled": True},
+        }
+    })
     cfg = load_config()
-    assert cfg.provider_settings == {"kiro-cli": {"default_args": "-a", "color": "", "enabled": True}}
-
-
-def test_trust_all_tools_no_migration_when_provider_settings_exist(tmp_path):
-    """trust_all_tools=true adds kiro-cli when only OTHER providers exist, but NOT when kiro-cli already exists."""
-    # Case 1: Other providers exist but no kiro-cli → kiro-cli IS added
-    existing = {"claude-code": {"default_args": "--dangerously-skip-permissions", "color": "", "enabled": True}}
-    _write_toml(tmp_path, {"trust_all_tools": True, "provider_settings": existing})
-    cfg = load_config()
-    assert "kiro-cli" in cfg.provider_settings
-    assert cfg.provider_settings["kiro-cli"]["default_args"] == "-a"
-    assert cfg.provider_settings["claude-code"] == existing["claude-code"]
-
-    # Case 2: kiro-cli already exists → NOT overwritten
-    existing_with_kiro = {
-        "kiro-cli": {"default_args": "--custom", "color": "#111", "enabled": True},
-        "claude-code": {"default_args": "", "color": "", "enabled": True},
-    }
-    _write_toml(tmp_path, {"trust_all_tools": True, "provider_settings": existing_with_kiro})
-    cfg = load_config()
-    assert cfg.provider_settings["kiro-cli"]["default_args"] == "--custom"
-
-
-def test_trust_all_tools_false_no_migration(tmp_path):
-    """trust_all_tools=false does not trigger migration."""
-    _write_toml(tmp_path, {"trust_all_tools": False})
-    cfg = load_config()
-    assert cfg.provider_settings == {}
+    assert "kiro-cli" not in cfg.provider_settings
+    assert "claude-code" in cfg.provider_settings
 
 
 def test_save_config_drops_trust_all_tools():
