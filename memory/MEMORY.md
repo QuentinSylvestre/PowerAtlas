@@ -355,3 +355,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 - "Two-phase cache design prevents O(n) stat scan on every `_cwd_to_sessions()` call" — declined 2026-08-18
 - "Sub-agent autofix commits can silently wipe test files — verify test count after every sub-agent code commit" — declined 2026-08-18
 - "kiro-cli v3 provider: `--trust-tools *` is a built-in launcher arg, shown read-only in settings; `default_args` is empty" — declined 2026-08-18
+
+- "_supervisor_v3 getattr silent null — rename singletons by string ref too" — declined 2026-09-17
+- "Large removal plans accumulate sub-agent pull-forwards — add import-check exit criterion per phase" — declined 2026-09-17
+- "4-persona high-effort holistic review catches cross-module silent regressions that per-phase review misses" — declined 2026-09-17
