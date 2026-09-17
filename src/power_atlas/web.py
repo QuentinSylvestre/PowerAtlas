@@ -748,10 +748,6 @@ _ACP_PATH = "/acp"
 # The WebSocket transport for the ACP page — the first-ever named constant for
 # this path. Previously a bare `"/ws/acp"` literal on the route decorator and
 # inside `_REMOTE_ALLOWED_PATHS`; named now for the same reason its HTTP
-# siblings below are, and because a second engine briefly needed a name to
-# disambiguate from (now retired).
-_ACP_WS_PATH = "/ws/acp"
-
 # The secret-exchange surface: one path, GET renders the form and POST trades
 # the device secret for the cookie. Named once because three things must agree
 # about it — the routes, the remote path allowlist, and the cookie exemption.
@@ -1802,7 +1798,7 @@ _ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"
 def _acp_row_title(session) -> str:
     """The rail's label for a session.
 
-    `data_kiro` stamps `"<untitled>"` when the store carries no title, and the
+    `data_kiro_v3` stamps `"<untitled>"` when the store carries no title, and the
     `session-tab-title` steering rework that would populate it is out of scope
     for this plan — so the honest fallback is the raw first prompt, which is
     what the user actually typed and what they will recognise.
@@ -2734,8 +2730,8 @@ async def api_acp_workspaces(response: Response):
 # --- The session browser's delete action ---------------------------------
 #
 # **The first thing in PowerAtlas that writes to kiro-cli's store.** Everything
-# else that touches `~/.kiro/sessions/cli` reads it: `data_kiro` parses and
-# caches, `acp._lock_holder` reads a bounded `.lock` prefix, and the listing
+# else that touches `~/.kiro/sessions/` reads it: `data_kiro_v3` parses and
+# caches, `acp._lock_holder_v3` reads `session.json` status, and the listing
 # route above says "Read-only" in its first line. That is worth stating once,
 # here, because it is the property a reviewer would otherwise assume still held.
 #
@@ -2968,7 +2964,7 @@ async def api_acp_delete_sessions(request: Request):
         failed_total: list[dict] = []
         while all_ids:
             batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
-            sv3 = getattr(acp, "_supervisor_v3", None)
+            sv3 = getattr(acp, "_supervisor", None)
             held = (frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
                     | frozenset(sv3.sessions if sv3 is not None else ()))
             result = await asyncio.to_thread(_acp_delete_many, batch, held)
@@ -3021,7 +3017,7 @@ async def api_acp_delete_sessions(request: Request):
     # Cross-engine held-set union (Step 9 final review fix, High): the
     # per-session-ID path never got the same union the workspace-cwd path
     # above already has — see that comment for the full rationale.
-    sv3 = getattr(acp, "_supervisor_v3", None)
+    sv3 = getattr(acp, "_supervisor", None)
     held = (frozenset(acp._supervisor.sessions)
             | frozenset(sv3.sessions if sv3 is not None else ()))
     result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
@@ -3038,7 +3034,7 @@ async def api_acp_delete_sessions(request: Request):
 #
 # Mirrors of the v2 listing, workspaces, and delete endpoints for the
 # ``/acp-v3`` surface. Same security posture; supervisor calls route to
-# ``acp._supervisor_v3`` instead of ``acp._supervisor``.
+# ``acp._supervisor`` instead of ``acp._supervisor``.
 
 
 @app.get(_ACP_LISTING_PATH)
@@ -3049,9 +3045,9 @@ async def api_acp_v3_sessions(response: Response, cwd: str = "",
                               session_size: int = _ACP_SESSIONS_PER_GROUP,
                               mode: str = "", page: int = 1,
                               size: int = _ACP_FLAT_PAGE_SIZE):
-    """v3 session listing. Mirrors ``api_acp_sessions`` with ``_supervisor_v3``."""
+    """v3 session listing. Mirrors ``api_acp_sessions`` with ``_supervisor``."""
     response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
+    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
     held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
     capacity = {
         "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
@@ -3072,7 +3068,7 @@ async def api_acp_v3_sessions(response: Response, cwd: str = "",
 async def api_acp_v3_workspaces(response: Response):
     """v3 workspace list for the create picker. Mirrors ``api_acp_workspaces``."""
     response.headers["Cache-Control"] = "no-store"
-    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
+    sv3 = getattr(acp, "_supervisor", None) if acp is not None else None
     held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
     capacity = {
         "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
@@ -3083,16 +3079,16 @@ async def api_acp_v3_workspaces(response: Response):
 
 @app.post(_ACP_DELETE_PATH)
 async def api_acp_v3_delete_sessions(request: Request):
-    """v3 session delete. Mirrors ``api_acp_delete_sessions`` with ``_supervisor_v3``.
+    """v3 session delete. Mirrors ``api_acp_delete_sessions`` with ``_supervisor``.
 
     Uses the same workspace-level and per-session delete paths as the v2
-    endpoint, but snapshots ``_supervisor_v3.sessions`` for the held set.
+    endpoint, but snapshots ``_supervisor.sessions`` for the held set.
     """
     if acp is None:
         return JSONResponse(
             {"error": "The ACP module is not loaded, so its store is not "
                       "reachable from here."}, status_code=503)
-    sv3 = getattr(acp, "_supervisor_v3", None)
+    sv3 = getattr(acp, "_supervisor", None)
     try:
         body = await request.json()
     except Exception:

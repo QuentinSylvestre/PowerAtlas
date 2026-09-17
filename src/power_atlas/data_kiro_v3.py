@@ -5,8 +5,9 @@ Reads sessions from the kiro-cli v3 store:
         session.json   -- session metadata (workspacePaths, createdAt, etc.)
         messages.jsonl -- conversation (v3 envelope: {id, timestamp, payload})
 
-The v3 store lives under V3_SESSIONS_ROOT and coexists with the v2 "cli/"
-subdirectory. Hash-dir names that appear in _V3_EXCLUDED_NAMES are skipped.
+The v3 store lives under V3_SESSIONS_ROOT. Hash-dir names in _V3_EXCLUDED_NAMES
+(e.g. "cli/") are skipped. PowerAtlas removed v2 support 2026-09-17; the
+"cli/" directory may still exist on disk but is no longer read.
 """
 
 import collections

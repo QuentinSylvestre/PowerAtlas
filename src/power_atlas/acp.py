@@ -2314,9 +2314,9 @@ _V3_HELD_STATUSES: Final[frozenset[str]] = frozenset({"in_progress", "waiting_on
 
 # How stale session.json's mtime must be, while status still reads held,
 # before _lock_holder_v3 stops trusting it. An independent constant rather
-# than a reference to PROMPT_SILENCE_SECONDS -- that one is v2's rebindable
-# prompt-timeout knob (apply_config rebinds it; Final here would contradict
-# that), and this is a different question (file staleness, not RPC silence)
+# than a reference to PROMPT_SILENCE_SECONDS -- the rebindable prompt-timeout
+# knob (apply_config rebinds it; Final here would contradict that), and this
+# is a different question (file staleness, not RPC silence)
 # that happens to warrant the same order of magnitude: it is sized to match
 # PROMPT_SILENCE_SECONDS's own default (1800s / 30min), the window
 # _Supervisor already uses elsewhere in this module to judge a turn dead from

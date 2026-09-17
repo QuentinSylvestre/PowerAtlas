@@ -173,7 +173,10 @@ def launch_session(
 
     # Non-terminal providers: launch directly without a terminal
     if not _PROVIDER_TERMINAL.get(provider, True):
-        cli_args = _build_provider_args(provider, binary, session_id)
+        try:
+            cli_args = _build_provider_args(provider, binary, session_id)
+        except ValueError as e:
+            return LaunchResult(False, session_id, cwd, error=str(e))
         if default_args:
             cli_args += extra_args
         # Append workspace path if a real workspace was specified
@@ -209,7 +212,10 @@ def launch_session(
             msg = "No terminal found. Install kitty, alacritty, gnome-terminal, konsole, or xterm \u2014 or configure a custom terminal in Settings."
         return LaunchResult(False, session_id, cwd, error=msg)
 
-    cli_args = _build_provider_args(provider, binary, session_id)
+    try:
+        cli_args = _build_provider_args(provider, binary, session_id)
+    except ValueError as e:
+        return LaunchResult(False, session_id, cwd, error=str(e))
     if default_args:
         cli_args += extra_args
 

@@ -186,10 +186,10 @@ class TestCompoundCacheKey:
         cache = SessionCache()
         s_kiro = Session("k1", "kiro session", "C:\\Work", "", "", "", "", "")
         s_claude = Session("c1", "claude session", "C:\\Work", "", "", "", "", "")
-        cache.put("C:\\Work", [s_kiro], {}, provider="kiro-cli")
+        cache.put("C:\\Work", [s_kiro], {}, provider="kiro-cli-v3")
         cache.put("C:\\Work", [s_claude], {}, provider="claude-code")
 
-        kiro_result = cache.get("C:\\Work", provider="kiro-cli")
+        kiro_result = cache.get("C:\\Work", provider="kiro-cli-v3")
         claude_result = cache.get("C:\\Work", provider="claude-code")
 
         assert len(kiro_result) == 1
@@ -202,11 +202,11 @@ class TestCompoundCacheKey:
         cache = SessionCache()
         s1 = Session("s1", "t", "C:\\A", "", "", "", "", "")
         s2 = Session("s2", "t", "C:\\B", "", "", "", "", "")
-        cache.put("C:\\A", [s1], {}, provider="kiro-cli")
+        cache.put("C:\\A", [s1], {}, provider="kiro-cli-v3")
         cache.put("C:\\B", [s2], {}, provider="claude-code")
 
         from power_atlas.data import _normalize_path
-        kiro_cwds = cache.get_loaded_cwds("kiro-cli")
+        kiro_cwds = cache.get_loaded_cwds("kiro-cli-v3")
         claude_cwds = cache.get_loaded_cwds("claude-code")
         all_cwds = cache.get_loaded_cwds()
 
