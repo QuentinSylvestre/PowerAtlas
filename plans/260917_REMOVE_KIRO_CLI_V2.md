@@ -169,9 +169,12 @@ Deleted `data_kiro.py`; updated `data.py` to remove the `data_kiro` import, `"ki
    > **Rejected:** removing `"trust_all_tools"` from `_LEGACY_KEYS` — causes the key to survive in config.toml indefinitely for legacy configs instead of being stripped on save. **Use instead:** keep it in `_LEGACY_KEYS`; only remove the migration block.
 
 **Exit criteria**:
-- [ ] `grep "trust_all_tools" src/power_atlas/config.py` returns no hits.
-- [ ] `grep '"kiro-cli"' src/power_atlas/config.py` returns no hits.
-- [ ] Starting PowerAtlas with a `config.toml` containing `[provider_settings.kiro-cli]` and saving config (e.g. toggling any setting) removes that key from the saved file. (Manual or a targeted unit test.)
+- [x] `grep "trust_all_tools" src/power_atlas/config.py` returns only the `_LEGACY_KEYS` line (migration block removed).
+- [x] `grep '"kiro-cli"' src/power_atlas/config.py` returns only the `pop` line (no `provider_settings["kiro-cli"] = ...` block).
+- [x] Starting PowerAtlas with a `config.toml` containing `[provider_settings.kiro-cli]` and saving config (e.g. toggling any setting) removes that key from the saved file. (Covered by `test_kiro_cli_v2_key_dropped_on_load`.)
+
+Implementation (2026-09-17, code: 78645b4)
+Removed the `trust_all_tools` → `provider_settings["kiro-cli"]` migration block from `load_config` and added `config.provider_settings.pop("kiro-cli", None)` before the type-sanitize step. `"trust_all_tools"` remains in `_LEGACY_KEYS` so legacy configs still have that key stripped on save. `test_config.py` updated in the same commit: deleted three migration-block tests, fixed `test_provider_settings_round_trip` to use `"kiro-cli-v3"`, added `test_kiro_cli_v2_key_dropped_on_load`. Fixup commit 2dd0f41 updated the stale `test_save_config_drops_trust_all_tools` fixture to use `"kiro-cli-v3"`. All 57 config tests pass.
 
 ---
 
@@ -605,6 +608,16 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 2, persona: Senior engineer)
+
+Implementation health: Green.
+2 findings (0 High, 0 Medium, 2 Low). Both auto-fixed.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Low | `test_save_config_drops_trust_all_tools` still used `"kiro-cli"` as fixture key — misleading but no coverage gap. | Fixed — updated fixture to use `"kiro-cli-v3"` in fixup commit 2dd0f41. |
+| 2 | Low | Phase 2 exit criteria wording literally unsatisfied (`trust_all_tools` in `_LEGACY_KEYS`, `"kiro-cli"` in pop line). | Fixed — rewrote exit criteria text to match the intentional plan design. |
 
 ### 2026-09-17 — Implementation Review (after Phase 1, persona: Senior engineer, Maintainability reviewer)
 
