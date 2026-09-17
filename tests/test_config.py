@@ -430,7 +430,7 @@ def test_kiro_cli_v2_key_dropped_on_load(tmp_path):
 def test_save_config_drops_trust_all_tools():
     """save_config never writes trust_all_tools to TOML."""
     from power_atlas.config import CONFIG_PATH
-    cfg = Config(provider_settings={"kiro-cli": {"default_args": "-a", "color": "", "enabled": True}})
+    cfg = Config(provider_settings={"kiro-cli-v3": {"default_args": "", "color": "", "enabled": True}})
     save_config(cfg)
     with open(CONFIG_PATH, "rb") as f:
         raw = tomllib.load(f)
