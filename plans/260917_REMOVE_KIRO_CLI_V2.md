@@ -1,7 +1,7 @@
 # Remove kiro-cli v2 from PowerAtlas
 
 > **Date**: 2026-09-17
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Delete the kiro-cli v2 provider (launcher, session history, ACP v2 paths, presence lock scan, status classifier v2 branch) and all associated code, tests, and docs.
 > **Estimated effort**: 1–2 days
 
@@ -120,10 +120,13 @@ None.
    - Update the `invalidate_workspace_counts` docstring that says "a deletion changes the count of exactly one workspace" — remove the sentence mentioning `provider="kiro-cli"` as an example cache key.
 
 **Exit criteria**:
-- [ ] `src/power_atlas/data_kiro.py` is absent from the working tree (`git status` shows it deleted).
-- [ ] `grep -r "data_kiro" src/power_atlas/data.py` returns no hits.
-- [ ] `grep '"kiro-cli"' src/power_atlas/data.py` returns no hits.
-- [ ] `python -c "from power_atlas import data; print(list(data.PROVIDERS.keys()))"` returns `['claude-code', 'kiro-ide', 'kiro-cli-v3']`.
+- [x] `src/power_atlas/data_kiro.py` is absent from the working tree (`git status` shows it deleted).
+- [x] `grep -r "data_kiro" src/power_atlas/data.py` returns no hits.
+- [x] `grep '"kiro-cli"' src/power_atlas/data.py` returns no hits.
+- [x] `python -c "from power_atlas import data; print(list(data.PROVIDERS.keys()))"` returns `['claude-code', 'kiro-ide', 'kiro-cli-v3']`.
+
+Implementation (2026-09-17, code: 3e15b29)
+Deleted `data_kiro.py`; updated `data.py` to remove the `data_kiro` import, `"kiro-cli"` PROVIDERS entry, `SESSION_DIR` re-export, `discover_workspaces()` wrapper, and all method defaults from `"kiro-cli"` to `"kiro-cli-v3"`. The `from . import data_kiro` removal in `acp.py` was pulled forward from Phase 5 because `data_kiro.py` deletion made `acp.py` fail to import at runtime. Fixup commit 9ed9b80 removed two collection-blocking `data_kiro` imports from `test_data.py`. Known forward-work test failures: `test_get_provider_settings` (4 tests — Phase 8 cleanup), `test_close_session_releases_the_diff_backfill` (Phase 8), `test_trust_all_tools_migration` (Phase 2/8). Non-v2 suite: 1816 passed, 2 skipped.
 
 ---
 
@@ -475,6 +478,11 @@ Delete:
 - Do **NOT** delete `test_pinned_folders_dict_to_str_migration` — it tests the `list[dict]` → `list[str]` conversion migration which is unrelated to v2 removal and still active.
 - Update `test_provider_settings_round_trip` (correct test name — the test function is `test_provider_settings_round_trip`, not `test_provider_settings_persists`) (`test_config.py:~405`): the fixture uses `"kiro-cli"` as a provider_settings key; after Phase 2 adds `provider_settings.pop("kiro-cli", None)` to `load_config`, loading a config with `"kiro-cli"` strips it. Update the fixture to use `"kiro-cli-v3"` and `"claude-code"` keys only.
 
+**Additional Phase 8 scope (identified in Phase 1 review):**
+- `test_web.py::test_close_session_releases_the_diff_backfill` — imports `from power_atlas import data_kiro` (line ~4804). Delete this test or redirect it to v3 (it tests ACP diff-backfill cleanup; the diff-backfill path moved to `data_kiro_v3`).
+- `test_data.py` non-v2 tests that use `provider="kiro-cli"` as a cache key (e.g., `TestSessionCacheIsolation` at lines 469, 472, 485, 489) — audit these and update to `"kiro-cli-v3"`.
+- `test_web.py` `test_get_provider_settings` tests that call `/api/provider/kiro-cli` (4 tests) — update to use `"kiro-cli-v3"` or delete.
+
 **Exit criteria**:
 - [ ] `grep "data_kiro\b" tests/test_data.py` returns no hits.
 - [ ] `grep '"kiro-cli"' tests/test_launcher.py` returns no hits (only `"kiro-cli-v3"` if present).
@@ -586,7 +594,9 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 | `plans/tests/HARNESS.md` | Remove `kiro-session-data` and `kiro-cli-sqlite` rows; update provider count | 9 |
 
 ## 9) Implementation Divergences from Plan
-*(Reserved — filled during implementation)*
+
+- **Phase 1 pull-forward**: `from . import data_kiro` removal from `acp.py` (originally Phase 5) was pulled into Phase 1 because deleting `data_kiro.py` caused an `ImportError` when importing `acp.py`. All other Phase 5 items (`KIRO_SESSION_DIR`, `_lock_holder`, etc.) remain deferred. The `acp.py` isolation boundary is still exactly 2 guarded imports.
+- **Phase 8 scope additions** (identified in Phase 1 review): `test_web.py::test_close_session_releases_the_diff_backfill` imports `data_kiro` directly — must be deleted/redirected in Phase 8. `test_config.py` trust_all_tools migration tests and `provider="kiro-cli"` occurrences in non-v2 `test_data.py` test classes also need cleanup in Phase 8.
 
 ## Follow-up Work (Deferred)
 
@@ -595,6 +605,23 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 1, persona: Senior engineer, Maintainability reviewer)
+
+Implementation health: Yellow.
+7 findings (3 High, 2 Medium, 2 Low).
+
+SC-1 achieved; PROVIDERS registry clean; `acp.py` isolation boundary intact (exactly 2 guarded imports); all `SessionCache`/dispatch defaults updated to `"kiro-cli-v3"`. Yellow rating is for test failures that are known forward-work.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `test_data.py` collection-blocked by stale `discover_workspaces` and `data_kiro` imports at lines 17/381. | Fixed — removed the two blocking import lines in fixup commit 9ed9b80. |
+| 2 | High | `test_web.py::test_close_session_releases_the_diff_backfill` imports `data_kiro` directly — not in Phase 8 list. | Fixed — added to Phase 8 scope via Divergences note and Phase 8 instructions below. |
+| 3 | High | Four `test_get_provider_settings` tests now 404 (use `"kiro-cli"` provider which is no longer in PROVIDERS). | Escalated — expected forward-work gap; Phase 6/8 clean-up. Documented in Divergences. |
+| 4 | Medium | Three `acp.py` docstring lines still reference deleted `data_kiro.get_tool_diffs()`. | Escalated — correctly deferred to Phase 5; Phase 5 exit criteria cover these lines. |
+| 5 | Medium | `test_config.py` trust_all_tools migration tests will break after Phase 2; not in Phase 8 scope. | Fixed — added to Phase 8 scope via Divergences note. |
+| 6 | Medium | `test_data.py` `TestSessionCacheIsolation` and others use `provider="kiro-cli"` as key — not enumerated in Phase 8. | Fixed — added audit instruction to Phase 8 Divergences note. |
+| 7 | Low | Three extra blank lines in `data.py` after SESSION_DIR removal. | Fixed — normalized in fixup commit 9ed9b80. |
 
 ### 2026-09-17 — Plan Creation (via /qplan, high-effort 4-persona review)
 
