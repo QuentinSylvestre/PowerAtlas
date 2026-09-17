@@ -784,6 +784,10 @@ _ACP_DELETE_PATH = "/api/acp/sessions/delete"
 # route and its rationale are further down near the other remote-access routes.
 _ACP_RESTART_PATH = "/api/restart"
 
+# The ACP websocket transport. Defined up here, far from its own route, for
+# the same mechanical reason as the paths above: `_REMOTE_ALLOWED_PATHS` names
+# it and that dict is built at import time.
+_ACP_WS_PATH = "/ws/acp"
 
 def set_remote_host(address: str) -> None:
     """Teach `_ALLOWED_HOSTS` the one non-loopback address we bind. Startup only.
@@ -3159,6 +3163,165 @@ async def api_acp_delete_sessions(request: Request):
         return JSONResponse(
             {"error": "The ACP module is not loaded, so its store is not "
                       "reachable from here."}, status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Expected a JSON body."}, status_code=400)
+
+    # --- Workspace-level delete path ---
+    # Handled first so the existing `session_ids` guard never sees a `cwd` request.
+    cwd: str | None = body.get("cwd") if isinstance(body, dict) else None
+    delete_folder: bool = (
+        bool(body.get("delete_folder", False)) if isinstance(body, dict) else False
+    )
+    if cwd is not None:
+        if not isinstance(cwd, str) or not cwd.strip():
+            return JSONResponse(
+                {"error": "'cwd' must be a non-empty string."}, status_code=400)
+        # Enumerate all session IDs for this workspace (off the event loop).
+        all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
+        # Batch delete, D9: re-snapshot `held` on the event loop before each
+        # thread hop, because `_supervisor.sessions` is loop-owned and unlocked.
+        #
+        # Cross-engine held-set union (2026-09-09 fix, Senior engineer
+        # finding): `all_ids` here is v2-only (this call omits `include_v3`),
+        # but the held set is still unioned with `_supervisor_v3.sessions`
+        # for symmetry with the v3 endpoint's identical fix below — a v2 id
+        # can never collide with a v3-held id in practice (id shapes never
+        # overlap), so this union is a no-op for THIS endpoint's own
+        # behavior today, but keeps both endpoints' held-set construction
+        # identical rather than silently diverging, and protects against a
+        # future call site that widens `all_ids` to include v3 ids without
+        # remembering to widen this too.
+        deleted_total: list[str] = []
+        failed_total: list[dict] = []
+        while all_ids:
+            batch, all_ids = all_ids[:_ACP_MAX_DELETE_IDS], all_ids[_ACP_MAX_DELETE_IDS:]
+            sv3 = getattr(acp, "_supervisor_v3", None)
+            held = (frozenset(acp._supervisor.sessions)  # event-loop snapshot (D9)
+                    | frozenset(sv3.sessions if sv3 is not None else ()))
+            result = await asyncio.to_thread(_acp_delete_many, batch, held)
+            deleted_total.extend(result["deleted"])
+            failed_total.extend(result["failed"])
+        response: dict = {
+            "deleted": deleted_total,
+            "failed": failed_total,
+            "total_found": len(deleted_total) + len(failed_total),
+        }
+        # Folder delete: loopback-only guard — irreversible local filesystem
+        # operation must not be triggerable from a remote device.
+        # D26: use scope["client"] (transport-level peer IP) not the Host header,
+        # which is attacker-controlled and would let a remote peer spoof loopback.
+        if delete_folder:
+            peer_ip = (request.scope.get("client") or (None,))[0]
+            if _is_remote_peer(peer_ip):
+                response["folder_deleted"] = False
+                response["folder_error"] = (
+                    "Folder deletion is not available from remote access."
+                )
+            else:
+                try:
+                    folder_deleted, folder_error = await asyncio.to_thread(
+                        _acp_delete_workspace_folder, cwd
+                    )
+                except Exception as exc:
+                    folder_deleted = False
+                    folder_error = f"Folder delete failed unexpectedly: {exc}"
+                response["folder_deleted"] = folder_deleted
+                response["folder_error"] = folder_error
+        return JSONResponse(response)
+
+    # --- Per-session delete path (existing, unchanged) ---
+    raw = body.get("session_ids") if isinstance(body, dict) else None
+    if not isinstance(raw, list) or not raw:
+        return JSONResponse(
+            {"error": "'session_ids' must be a non-empty list."},
+            status_code=400)
+    if len(raw) > _ACP_MAX_DELETE_IDS:
+        return JSONResponse(
+            {"error": f"At most {_ACP_MAX_DELETE_IDS} sessions per request."},
+            status_code=400)
+    session_ids = [s for s in raw if isinstance(s, str)]
+    # **On the loop, before the thread hop** (D9), exactly as the listing route
+    # snapshots it. `_reserved` is deliberately not counted here: it bounds
+    # *creation*, and a session still being created holds no store files a
+    # delete could reach.
+    #
+    # Cross-engine held-set union (Step 9 final review fix, High): the
+    # per-session-ID path never got the same union the workspace-cwd path
+    # above already has — see that comment for the full rationale.
+    sv3 = getattr(acp, "_supervisor_v3", None)
+    held = (frozenset(acp._supervisor.sessions)
+            | frozenset(sv3.sessions if sv3 is not None else ()))
+    result = await asyncio.to_thread(_acp_delete_many, session_ids, held)
+    return JSONResponse({
+        "deleted": result["deleted"],
+        "failed": result["failed"],
+        "total_found": len(session_ids),
+    })
+
+
+
+
+# --- v3 ACP session browser endpoints ---------------------------------
+#
+# Mirrors of the v2 listing, workspaces, and delete endpoints for the
+# ``/acp-v3`` surface. Same security posture; supervisor calls route to
+# ``acp._supervisor_v3`` instead of ``acp._supervisor``.
+
+
+@app.get(_ACP_LISTING_PATH)
+async def api_acp_v3_sessions(response: Response, cwd: str = "",
+                              group_page: int = 1,
+                              group_size: int = _ACP_GROUPS_PER_PAGE,
+                              session_page: int = 1,
+                              session_size: int = _ACP_SESSIONS_PER_GROUP,
+                              mode: str = "", page: int = 1,
+                              size: int = _ACP_FLAT_PAGE_SIZE):
+    """v3 session listing. Mirrors ``api_acp_sessions`` with ``_supervisor_v3``."""
+    response.headers["Cache-Control"] = "no-store"
+    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    capacity = {
+        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
+    if mode == "recent":
+        return await asyncio.to_thread(
+            _acp_flat_listing_v3, max(1, page),
+            max(1, min(size, _ACP_MAX_FLAT_PAGE_SIZE)), held, capacity)
+    return await asyncio.to_thread(
+        _acp_listing_v3, cwd,
+        max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
+        max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
+        held, capacity)
+
+
+@app.get(_ACP_WORKSPACES_PATH)
+async def api_acp_v3_workspaces(response: Response):
+    """v3 workspace list for the create picker. Mirrors ``api_acp_workspaces``."""
+    response.headers["Cache-Control"] = "no-store"
+    sv3 = getattr(acp, "_supervisor_v3", None) if acp is not None else None
+    held = frozenset(sv3.sessions) if sv3 is not None else frozenset()
+    capacity = {
+        "held": ((len(held) + sv3._reserved) if sv3 is not None else 0),
+        "max": acp.MAX_SESSIONS if acp is not None else 0,
+    }
+    return await asyncio.to_thread(_acp_workspaces_v3, capacity)
+
+
+@app.post(_ACP_DELETE_PATH)
+async def api_acp_v3_delete_sessions(request: Request):
+    """v3 session delete. Mirrors ``api_acp_delete_sessions`` with ``_supervisor_v3``.
+
+    Uses the same workspace-level and per-session delete paths as the v2
+    endpoint, but snapshots ``_supervisor_v3.sessions`` for the held set.
+    """
+    if acp is None:
+        return JSONResponse(
+            {"error": "The ACP module is not loaded, so its store is not "
+                      "reachable from here."}, status_code=503)
+    sv3 = getattr(acp, "_supervisor_v3", None)
     try:
         body = await request.json()
     except Exception:
