@@ -213,11 +213,14 @@ Removed the `trust_all_tools` → `provider_settings["kiro-cli"]` migration bloc
 7. Update the comment block at `presence.py:64-88` to remove references to `_KIRO_LOCK_DIR`, the dual-provider setup, and the `_match_provider` reroute rationale. Keep only the `_KIRO_PROVIDERS` family-tolerance explanation for the D32 guard.
 
 **Exit criteria**:
-- [ ] `grep "_KIRO_LOCK_DIR\|_kiro_session_cwd" src/power_atlas/presence.py` returns no hits.
-- [ ] `grep '"kiro-cli"' src/power_atlas/presence.py | grep -v "kiro-cli-v3"` returns no hits.
-- [ ] `grep '"kiro-cli"' src/power_atlas/presence.py` returns hits only for `"kiro-cli-v3"`.
-- [ ] `python -c "from power_atlas.presence import _KIRO_PROVIDERS; print(_KIRO_PROVIDERS)"` prints `frozenset({'kiro-cli-v3'})`.
-- [ ] `grep '"kiro-cli"' src/power_atlas/presence.py | grep -v "kiro-cli-v3"` returns no hits (both `_PROVIDER_SPECS` and `_KIRO_PROVIDERS` entries verified).
+- [x] `grep "_KIRO_LOCK_DIR\|_kiro_session_cwd" src/power_atlas/presence.py` returns no hits.
+- [x] `grep '"kiro-cli"' src/power_atlas/presence.py | grep -v "kiro-cli-v3"` returns no hits.
+- [x] `grep '"kiro-cli"' src/power_atlas/presence.py` returns hits only for `"kiro-cli-v3"`.
+- [x] `python -c "from power_atlas.presence import _KIRO_PROVIDERS; print(_KIRO_PROVIDERS)"` prints `frozenset({'kiro-cli-v3'})`.
+- [x] `grep '"kiro-cli"' src/power_atlas/presence.py | grep -v "kiro-cli-v3"` returns no hits (both `_PROVIDER_SPECS` and `_KIRO_PROVIDERS` entries verified).
+
+Implementation (2026-09-17, code: 2e42cdf)
+Removed `_KIRO_LOCK_DIR`, `_kiro_session_cwd`, the kiro `.lock` sidecar enumeration block from `_sidecar_records()`, the `_scan()` reroute block, and `"kiro-cli"` from `_PROVIDER_SPECS` and `_KIRO_PROVIDERS`. Updated comment block. Fixup commit 1dc456b: removed kiro lock test infrastructure from `test_data.py` (14 lock tests + `_write_kiro_lock` helper, `_scan_with` kiro_dir param, `data_kiro` refs in `_reset_kiro_caches`); also resolved merge conflict markers in `web.py` introduced by the Phase 3 sub-agent. Suite: 1920 passed, 2 skipped; remaining errors/failures all Phase 8 cleanup targets.
 
 ---
 
@@ -608,6 +611,18 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 3, persona: Reliability engineer)
+
+Implementation health: Yellow (after auto-fix).
+Initial health: Red (2 High). After fixup: all high findings resolved.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `_scan_with()` in `test_data.py` still patched deleted `_KIRO_LOCK_DIR` — `AttributeError` on every presence test. | Fixed — removed `kiro_dir` param and `_KIRO_LOCK_DIR` patch line from `_scan_with()` in fixup 1dc456b. |
+| 2 | High | 14 presence tests use `_write_kiro_lock`/`kiro_dir=` — fail or pass vacuously post-removal. All are Phase 8 deletion targets. | Fixed — deleted all 14 kiro lock tests and `_write_kiro_lock` helper in fixup 1dc456b. |
+| 3 | Medium | `test_presence_matches_kiro_resume_id_flag` asserted `"kiro-cli"` provider; after removing `"kiro-cli"` from `_PROVIDER_SPECS` it should assert `"kiro-cli-v3"`. | Fixed — updated assertion in fixup 1dc456b. |
+| 4 | Low | Two stale comments in `presence.py` still reference kiro lock structure post-removal. | Fixed — updated in fixup 1dc456b. |
 
 ### 2026-09-17 — Implementation Review (after Phase 2, persona: Senior engineer)
 
