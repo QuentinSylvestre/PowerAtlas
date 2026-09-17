@@ -1,7 +1,7 @@
 # Remove kiro-cli v2 from PowerAtlas
 
 > **Date**: 2026-09-17
-> **Status**: In Progress
+> **Status**: In Progress — implementation complete, restart pending for live surface verification
 > **Scope**: Delete the kiro-cli v2 provider (launcher, session history, ACP v2 paths, presence lock scan, status classifier v2 branch) and all associated code, tests, and docs.
 > **Estimated effort**: 1–2 days
 
@@ -782,3 +782,39 @@ SC-1 achieved; PROVIDERS registry clean; `acp.py` isolation boundary intact (exa
 
 ## Harness Improvement Opportunities
 *(Reserved)*
+
+
+### 2026-09-17 — Post-Implementation Review
+
+Overall implementation health: Green.
+Personas: Senior engineer, Maintainability reviewer, Reliability engineer, Architect.
+6 findings (1 High, 0 Medium, 5 Low). High finding fixed; all 5 Lows addressed or accepted.
+QA verification: BLOCKED (1 surface: live dashboard requires PowerAtlas restart — user must restart to verify SC-2).
+
+All 11 success criteria met in code and tests:
+- SC-1 through SC-11 verified by persona sub-agents and test suite (1896 passed, 2 skipped).
+- `data.PROVIDERS` = `['claude-code', 'kiro-ide', 'kiro-cli-v3']` confirmed.
+- acp.py isolation boundary intact: exactly `config.CONFIG_DIR` and `launcher._SESSION_ID_RE`.
+
+#### Test execution summary
+
+| Phase | Tests | QA | Notes |
+|---|---|---|---|
+| 1: Delete data_kiro.py, update data.py | pass | PASS | 1894 passed after fixup |
+| 2: Update config.py | pass | PASS | 57 config tests pass |
+| 3: Update presence.py | pass | PASS | 8 presence tests pass |
+| 4: Update status_classifier.py | pass | PASS | 30 classifier tests pass |
+| 5: Update acp.py | pass | PASS | 650 acp tests pass |
+| 6: Update web.py | pass | PASS | 1426 tests pass |
+| 7: Update launcher.py | pass | PASS | 129 launcher tests pass |
+| 8: Update tests | pass | PASS | 1896 passed, 2 skipped |
+| 9: Update documentation | not_run | SKIP | documentation-only |
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `launch_session` with unknown provider raised `ValueError` instead of returning `LaunchResult(False)`. | Fixed — wrapped in try/except in fixup dd70871. |
+| 2 | Low | `_supervisor_v3` getattr pattern in web.py v3 routes always returned `None` — held set was always empty. | Fixed — replaced with `_supervisor` in fixup dd70871. |
+| 3 | Low | `_ACP_WS_PATH` defined twice in web.py with a stale comment on the first definition. | Fixed — removed first definition in fixup dd70871. |
+| 4 | Low | Stale v2 comments in acp.py, web.py, data_kiro_v3.py. | Fixed — updated in fixup dd70871. |
+| 5 | Low | `_acp_delete_session` 3-way return contract lacked dedicated unit tests. | User: accepted — 4 existing tests in `TestAcpDeleteSessionV3Dispatch` already cover all 3 return codes. |
+| 6 | Low | `test_data.py` `TestSessionCache` used `"kiro-cli"` as cache key (phantom provider). | Fixed — updated to `"kiro-cli-v3"` in fixup dd70871. |
