@@ -79,7 +79,6 @@ from typing import Any, Final
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import data_kiro
 from .config import CONFIG_DIR
 from .launcher import _SESSION_ID_RE
 

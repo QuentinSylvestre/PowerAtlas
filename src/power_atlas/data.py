@@ -1,7 +1,7 @@
 """Provider-aware session data orchestrator.
 
 Shared types (Session, _FileInfo) and the compound-keyed SessionCache live here.
-Provider adapters (data_kiro, data_claude) handle discovery and parsing.
+Provider adapters (data_claude, data_kiro_ide, data_kiro_v3) handle discovery and parsing.
 """
 
 import sys
@@ -126,12 +126,11 @@ class BoundedCache:
 
 
 # Import provider modules AFTER defining shared types to avoid circular import
-from . import data_kiro, data_claude, data_kiro_ide, data_kiro_v3  # noqa: E402
+from . import data_claude, data_kiro_ide, data_kiro_v3  # noqa: E402
 
 
 # Provider registry: name -> module
 PROVIDERS: dict[str, object] = {
-    "kiro-cli": data_kiro,
     "claude-code": data_claude,
     "kiro-ide": data_kiro_ide,
     "kiro-cli-v3": data_kiro_v3,
@@ -154,13 +153,13 @@ class SessionCache:
         self._original_cwds: dict[tuple[str, str], str] = {}
         self.last_refresh: str = ""
 
-    def get(self, cwd: str, provider: str = "kiro-cli") -> list[Session] | None:
+    def get(self, cwd: str, provider: str = "kiro-cli-v3") -> list[Session] | None:
         key = (provider, _normalize_path(cwd))
         with self._lock:
             sessions = self._sessions.get(key)
             return list(sessions) if sessions is not None else None
 
-    def put(self, cwd: str, sessions: list[Session], file_stats: dict[str, _FileInfo], provider: str = "kiro-cli") -> None:
+    def put(self, cwd: str, sessions: list[Session], file_stats: dict[str, _FileInfo], provider: str = "kiro-cli-v3") -> None:
         key = (provider, _normalize_path(cwd))
         with self._lock:
             self._sessions[key] = sessions
@@ -185,12 +184,12 @@ class SessionCache:
                 return {cwd for _, cwd in self._loaded_keys}
             return {cwd for p, cwd in self._loaded_keys if p == provider}
 
-    def get_file_stats(self, cwd: str, provider: str = "kiro-cli") -> dict[str, _FileInfo]:
+    def get_file_stats(self, cwd: str, provider: str = "kiro-cli-v3") -> dict[str, _FileInfo]:
         key = (provider, _normalize_path(cwd))
         with self._lock:
             return self._file_stats.get(key, {}).copy()
 
-    def forget(self, cwd: str, provider: str = "kiro-cli") -> None:
+    def forget(self, cwd: str, provider: str = "kiro-cli-v3") -> None:
         """Drop one workspace's entry so the next get_sessions re-reads it.
 
         For a caller that has just changed the store on purpose. The polling
@@ -227,8 +226,7 @@ def invalidate_workspace_counts() -> None:
     Its key is per provider plus an "all" bucket, and a deletion changes the
     count of exactly one workspace — but the cached value is the whole sorted
     list, so there is nothing finer to invalidate than the entry. Dropping every
-    variant is correct rather than lazy: `provider=None` and `provider="kiro-cli"`
-    are separate entries holding the same now-stale count.
+    variant is correct rather than lazy.
 
     Without this, a deleted session keeps its workspace's "3 of 47" header
     honest for up to _CACHE_TTL seconds after the row it counted has gone.
@@ -236,20 +234,6 @@ def invalidate_workspace_counts() -> None:
     for key in [k for k in _cache if k.startswith("workspaces_with_counts:")]:
         _cache.pop(key, None)
 
-
-# --- Legacy API (kiro-cli only, retained for external/test use) ---
-
-# Re-export constants for backward compatibility
-SESSION_DIR = data_kiro.SESSION_DIR
-
-
-def discover_workspaces() -> list[str]:
-    """Discover workspaces from kiro-cli session metadata + sqlite. Returns unique cwds sorted by recency.
-
-    Unused in production — prefer discover_workspaces_with_counts(). Retained for external/test use.
-    """
-    results = data_kiro.discover_workspaces()
-    return [cwd for cwd, _, _ in results]
 
 
 # --- Provider-aware API ---
@@ -308,7 +292,7 @@ def discover_workspaces_with_counts(provider: str | None = None) -> list[tuple[s
         return list(results)
 
 
-def get_sessions(cwd: str, provider: str = "kiro-cli") -> list[Session]:
+def get_sessions(cwd: str, provider: str = "kiro-cli-v3") -> list[Session]:
     """Return sessions for a workspace from a specific provider. Cached."""
     cached = session_cache.get(cwd, provider)
     if cached is not None:
@@ -397,7 +381,7 @@ def warmup_all(pinned_folders: list[str], pinned_sessions: list[str] | None = No
     warmup_done.set()
 
 
-def get_session_tail(session_id: str, provider: str = "kiro-cli", cwd: str = "", max_lines: int = 15) -> list[str]:
+def get_session_tail(session_id: str, provider: str = "kiro-cli-v3", cwd: str = "", max_lines: int = 15) -> list[str]:
     """Extract last N assistant message texts from a session. Dispatches to provider."""
     mod = PROVIDERS.get(provider)
     if mod is None:
@@ -405,7 +389,7 @@ def get_session_tail(session_id: str, provider: str = "kiro-cli", cwd: str = "",
     return mod.get_session_tail(session_id, cwd, max_lines)
 
 
-def get_first_prompt(session_id: str, provider: str = "kiro-cli", cwd: str = "") -> str:
+def get_first_prompt(session_id: str, provider: str = "kiro-cli-v3", cwd: str = "") -> str:
     """Extract first_prompt for tooltip display. Dispatches to provider."""
     mod = PROVIDERS.get(provider)
     if mod is None:
@@ -413,7 +397,7 @@ def get_first_prompt(session_id: str, provider: str = "kiro-cli", cwd: str = "")
     return mod.get_first_prompt(session_id, cwd)
 
 
-def get_full_transcript(session_id: str, provider: str = "kiro-cli", cwd: str = "") -> list["TranscriptEvent"]:
+def get_full_transcript(session_id: str, provider: str = "kiro-cli-v3", cwd: str = "") -> list["TranscriptEvent"]:
     """Full ordered transcript (every user/assistant/tool event, not just a tail).
 
     Dispatches to the provider adapter's own `get_full_transcript`, mirroring
