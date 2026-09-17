@@ -83,25 +83,21 @@ except Exception:  # noqa: BLE001
         return f"<p>{_html.escape(text)}</p>"
 
 PROVIDER_COLORS = {
-    "kiro-cli": "#7138cc",
     "claude-code": "#c2590f",
     "kiro-ide": "#8b5cf6",
     "kiro-cli-v3": "#7138cc",
 }
 PROVIDER_DISPLAY_NAMES = {
-    "kiro-cli": "kiro-cli",
     "claude-code": "Claude Code",
     "kiro-ide": "Kiro IDE",
     "kiro-cli-v3": "kiro-cli v3",
 }
 PROVIDER_BADGES = {
-    "kiro-cli": "K",
     "claude-code": "C",
     "kiro-ide": "I",
     "kiro-cli-v3": "V",  # V for v3; unused today but kept for consistency
 }
 _PROVIDER_BINARY_DISPLAY = {
-    "kiro-cli": "kiro-cli chat",
     "claude-code": "claude",
     "kiro-ide": "kiro",
     "kiro-cli-v3": "kiro-cli chat --agent-engine v3 --trust-tools *",
@@ -461,7 +457,7 @@ def _workspace_status(snapshot, cwd: str,
     best = "working"  # at minimum, a process is running
     found_any = False
     # Try to get semantic classification for sessions in this cwd
-    for prov in (providers or {"kiro-cli", "claude-code", "kiro-cli-v3"}):
+    for prov in (providers or {"claude-code", "kiro-cli-v3"}):
         sids = snapshot.live_session_ids_for_cwd(prov, cwd)
         for sid in sids:
             semantic = get_semantic_status(sid, prov, cwd)
@@ -478,7 +474,7 @@ def _workspace_status(snapshot, cwd: str,
         from . import data
         from .status_classifier import _resolve_jsonl_path
         import os, time as _time
-        for prov in (providers or {"kiro-cli", "claude-code", "kiro-cli-v3"}):
+        for prov in (providers or {"claude-code", "kiro-cli-v3"}):
             sessions = data.get_sessions(cwd=cwd, provider=prov)
             checked = 0
             for recent in sessions:
@@ -1798,10 +1794,6 @@ _ACP_MAX_FLAT_PAGE_SIZE = 100
 # prompt can be thousands of characters, and neither belongs in a rail row.
 _ACP_TITLE_MAX_CHARS = 120
 
-# kiro-cli only, and not by omission: ACP is v2-only (see the plan's scope
-# boundaries), so a row this endpoint served for another provider would be a
-# session the browser cannot resume.
-_ACP_LISTING_PROVIDER = "kiro-cli"
 # kiro-cli-v3 is registered as a provider in data.PROVIDERS so the generic
 # data.discover_workspaces_with_counts and data.get_sessions calls work with it.
 _ACP_V3_LISTING_PROVIDER = "kiro-cli-v3"
@@ -2760,172 +2752,21 @@ async def api_acp_workspaces(response: Response):
 # same reason `_ACP_LISTING_PATH` and `_ACP_WORKSPACES_PATH` are — module-level
 # dict built at import time.)
 
-# Everything one session owns in the store — measured against the live store on
-# 2026-08-03, not inferred from the loader: 13,993 entries made of 5,958 `.json`,
-# 5,958 `.jsonl`, 708 `.history`, 861 `.lock` and ~500 `<id>/` directories (each
-# holding a `tasks/` subtree). `data_kiro.load_sessions` opens only the first
-# three, so a delete written from the loader's point of view would leave the
-# `.lock` and the directory behind: invisible to PowerAtlas, still on disk, and
-# — for the `.lock` — still able to make a *reused* id read as `locked`.
-_ACP_SESSION_SUFFIXES = (".json", ".jsonl", ".history", ".lock")
-
-# What a path is renamed to before anything is unlinked. Chosen so the staged
-# name cannot be picked up as a session again: `data_kiro._iter_meta_files`
-# selects on `entry.name.endswith(".json")`, which `<id>.json.pa-deleting-ab12`
-# does not satisfy.
-_ACP_DELETE_STAGING = ".pa-deleting"
-
-# ERROR_SHARING_VIOLATION. **Measured, not assumed** (Windows 11, Python 3.13,
-# 2026-08-03): with a second handle open on a file, `os.unlink` AND `os.replace`
-# both raise `winerror=32` / `errno=13`. The second half is what this whole
-# design rests on — see `_acp_delete_session`.
-_ACP_SHARING_VIOLATION = 32
-
 # A caller-supplied list is a loop bound, so it is capped. The UI sends exactly
 # one; the list form exists so that adding bulk deletion later is a change to
 # the page rather than to the protocol.
 _ACP_MAX_DELETE_IDS = 200
 
 
-def _acp_session_paths(session_id: str) -> list[Path]:
-    """Every path in the store belonging to one session, existing ones only.
-
-    `Path.exists()` rather than the `os.stat` dance `_acp_cwd_exists` argues
-    for, and the difference is the input: that function is handed a workspace
-    path the agent wrote, which can be an unreachable UNC host. This one only
-    ever joins a `_valid_session_id` onto `KIRO_SESSION_DIR`, which is under
-    `Path.home()` — local, always answerable, and nothing here is a remote mount.
-    """
-    base = acp.KIRO_SESSION_DIR
-    found = [base / f"{session_id}{suffix}" for suffix in _ACP_SESSION_SUFFIXES]
-    out = [path for path in found if path.exists()]
-    directory = base / session_id
-    if directory.is_dir():
-        out.append(directory)
-    return out
-
-
 def _acp_delete_session(session_id: str) -> tuple[str, str]:
-    """Remove one session from the store. Blocking; runs off the loop.
-
-    Returns ``("", "")`` on success, or ``(code, message)``.
-
-    **Dispatches by id shape first.** A `sess_`-prefixed id is a v3 session —
-    a single directory tree under `~/.kiro/sessions/<hash>/`, not up to five
-    sibling files under `KIRO_SESSION_DIR` — so it routes to
-    `data_kiro_v3.delete_session`, which implements its own equivalent of the
-    rename-staging design documented below directly against that directory,
-    and reports its own three-way outcome (`None`/`False`/`True`) directly —
-    this function no longer runs a separate `_find_v3_session_dir` pre-check
-    to distinguish "not found" from "in use" (2026-09-09 fix: that pre-check
-    plus the delete itself was two separate scans of the same directory,
-    a TOCTOU window where a concurrent change between them could produce a
-    misleading result; `delete_session`'s own return value is now the single
-    source of truth for which of the three outcomes occurred). Everything
-    from here down is v2's original implementation, unchanged.
-
-    **Rename first, unlink second, and that ordering is the correctness
-    argument rather than a style.** A session is up to five separate paths, and
-    the naive loop — unlink each in turn — has no way to fail cleanly: measured
-    above, Windows refuses to unlink a file another process holds open, so a
-    delete racing a live holder removes the `.json`, then trips on the `.jsonl`,
-    and leaves a store entry that nothing in this repo can parse. The rail would
-    show a session whose transcript is gone; `data_kiro.load_sessions` would
-    skip it silently; the bytes would stay forever.
-
-    `os.replace` is refused by the *same* sharing violation, and — this is the
-    part that makes it useful — a refused rename changes nothing at all. So
-    every path is staged to a name first, and only once all of them have moved
-    is anything destroyed. A holder anywhere in the set aborts the whole
-    operation, and the renames already made are put back.
-
-    **This is a second line of defence, not the first.** The route refuses a
-    session that is `held` or `locked` before reaching here. What this catches
-    is the gap those checks cannot close: `acp._lock_holder` is explicitly "a
-    hint and never the gate" (`acp.py:1175`) and the store carries 861 `.lock`
-    files whose pids died long ago, so a live holder with an unreadable lock
-    passes the hint. The rename is what stops that becoming a corrupt entry.
-
-    **The one degradation it accepts.** If a rename succeeds and the unlink that
-    follows fails, the session is gone as far as every reader is concerned — the
-    staged names match no loader pattern — but the bytes remain. That is logged
-    loudly rather than reported to the user, because from the caller's point of
-    view the delete did happen, and an error naming a file they cannot act on
-    would be worse than a log line an operator can grep for.
-    """
-    if session_id.startswith("sess_"):
-        from . import data_kiro_v3
-        result = data_kiro_v3.delete_session(session_id)
-        if result is None:
-            return ("not_found",
-                    "Nothing left to delete — the store has no files for this "
-                    "session.")
-        if result is False:
-            # The staging rename itself was refused (most likely a locked
-            # file inside the directory) — nothing on disk changed, the
-            # directory is exactly as it was.
-            return ("in_use",
-                    "A process still has this session's files open. Close it "
-                    "there, then try again.")
-        # result is True: the delete is committed. This also covers the case
-        # where the staging rename succeeded but a later rmtree only
-        # partially completed — data_kiro_v3.delete_session logs that
-        # degradation itself and still reports success here, the same
-        # accepted-degradation philosophy this function's own docstring
-        # describes for v2 below: a partial result is disclosed via a log
-        # line an operator can grep for, never hidden behind a claim that
-        # nothing happened.
-        return ("", "")
-
-    paths = _acp_session_paths(session_id)
-    if not paths:
-        return ("not_found",
-                "Nothing left to delete — the store has no files for this "
-                "session.")
-
-    # Distinguishes one delete's staging names from another's, so two deletions
-    # racing on ids that share a prefix cannot collide on a staged name.
-    token = secrets.token_hex(4)
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for path in paths:
-            target = path.with_name(f"{path.name}{_ACP_DELETE_STAGING}-{token}")
-            os.replace(path, target)
-            staged.append((target, path))
-    except OSError as exc:
-        for target, original in reversed(staged):
-            try:
-                os.replace(target, original)
-            except OSError:
-                # The rollback itself failed, which leaves this session
-                # half-staged: readers skip it, and no later call will find it
-                # under its own name. Nothing here can fix that, so it is
-                # recorded with the exact paths an operator would need.
-                log.exception("ACP delete: could not restore %s to %s",
-                              target, original)
-        if getattr(exc, "winerror", None) == _ACP_SHARING_VIOLATION:
-            return ("in_use",
-                    "A process still has this session's files open. Close it "
-                    "there, then try again.")
-        log.warning("ACP delete: staging failed for session=%s: %s",
-                    session_id, exc)
-        return ("failed", f"Could not delete this session: {exc}")
-
-    leftover: list[str] = []
-    for target, _original in staged:
-        try:
-            if target.is_dir():
-                shutil.rmtree(target)
-            else:
-                target.unlink()
-        except OSError as exc:
-            leftover.append(f"{target} ({exc})")
-    if leftover:
-        log.warning(
-            "ACP delete: session=%s is gone from the store's readable names, "
-            "but %d staged path(s) could not be removed and are still on disk: "
-            "%s", session_id, len(leftover), "; ".join(leftover))
-    return ("", "")
+    """Delete one session from kiro-cli's store. Returns (error_code, message) or ("", "")."""
+    from . import data_kiro_v3
+    result = data_kiro_v3.delete_session(session_id)
+    if result is None:
+        return "not_found", "Session not found in the kiro-cli store."
+    if result is False:
+        return "delete_error", "Could not delete all session files (partial delete logged)."
+    return "", ""
 
 
 def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
@@ -2940,25 +2781,18 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
     supervisor to snapshot.
 
     Every other per-id check below dispatches on id shape, exactly like
-    `_acp_availability` already does: a `sess_`-prefixed id is v3, routed to
-    `acp._lock_holder_v3` / `acp._stored_session_cwd_v3` /
-    `_acp_delete_session`'s own v3 branch; anything else is v2, routed to the
-    original `acp._lock_holder` / `acp._stored_session_cwd` /
-    `_acp_delete_session`'s v2 branch, completely unchanged. Without this
-    dispatch, a v3 id reaching this function would be checked against v2's
-    lock-file mechanism (which always reads "not held" for a `sess_`-shaped
-    id — see `_lock_holder_v3`'s own docstring) and would still resolve to
-    `_acp_session_paths`' v2 layout even once `_acp_delete_session` itself
-    knew better, since the "held elsewhere" and "which workspace does this
-    belong to" checks happen here, one level up.
+    `_acp_availability` already does: all remaining session IDs are v3
+    (`sess_`-prefixed), routed to `acp._lock_holder_v3` /
+    `acp._stored_session_cwd_v3` / `_acp_delete_session`. A non-`sess_`-prefixed
+    id passed by a browser returns gracefully: `_lock_holder_v3` returns `None`,
+    `_stored_session_cwd_v3` returns `""`, and `_acp_delete_session` returns
+    `"not_found"`.
     """
     deleted: list[str] = []
     failed: list[dict] = []
-    touched_v2: set[str] = set()
     touched_v3: set[str] = set()
 
     for session_id in session_ids:
-        is_v3 = session_id.startswith("sess_")
         if not acp._valid_session_id(session_id):
             # Before anything joins it to a path. The same guard the `load`
             # path applies, and the reason it exists: this string becomes a
@@ -2974,8 +2808,7 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
                            "conversation pane and press Close first."})
             continue
         try:
-            holder = (acp._lock_holder_v3(session_id) if is_v3
-                      else acp._lock_holder(session_id))
+            holder = acp._lock_holder_v3(session_id)
         except Exception:
             # Same fail-open reading `_acp_availability` takes: the hint may
             # add a refusal, never grant one — so a hint that could not be read
@@ -2992,70 +2825,29 @@ def _acp_delete_many(session_ids: list[str], held: frozenset) -> dict:
         # Read *before* the delete: it is the session's own metadata file that
         # says which workspace it belongs to, and after the delete there is
         # nothing left to ask.
-        cwd = (acp._stored_session_cwd_v3(session_id) if is_v3
-               else acp._stored_session_cwd(session_id))
+        cwd = acp._stored_session_cwd_v3(session_id)
         code, message = _acp_delete_session(session_id)
         if code:
             failed.append({"id": session_id, "code": code, "message": message})
             continue
         deleted.append(session_id)
         if cwd:
-            (touched_v3 if is_v3 else touched_v2).add(cwd)
+            touched_v3.add(cwd)
 
     if deleted:
-        # The store has changed under caches that key on it. `data_kiro`'s own
-        # index keys on the directory's mtime and self-invalidates, but
+        # The store has changed under caches that key on it.
         # `session_cache` holds the parsed list per workspace and
         # `discover_workspaces_with_counts` holds the counts for 30 s — so
-        # without these two the deleted row comes back on the next Refresh and
-        # the workspace header keeps counting it. Forgotten under each engine's
-        # own provider key — a v3 delete must not leave the v2-keyed cache
-        # entry (or vice versa) serving a workspace whose v3-only row just
-        # disappeared from disk.
-        for cwd in touched_v2:
-            data.session_cache.forget(cwd, _ACP_LISTING_PROVIDER)
+        # without these the deleted row comes back on the next Refresh and
+        # the workspace header keeps counting it.
         for cwd in touched_v3:
             data.session_cache.forget(cwd, _ACP_V3_LISTING_PROVIDER)
         data.invalidate_workspace_counts()
         log.info("ACP delete: removed %d session(s) across %d workspace(s)",
-                 len(deleted), len(touched_v2 | touched_v3))
+                 len(deleted), len(touched_v3))
 
     return {"deleted": deleted, "failed": failed}
 
-
-def _acp_sessions_for_workspace(cwd: str, include_v3: bool = False) -> list[str]:
-    """Return all v2 (and, if asked, v3) session IDs that belong to *cwd*.
-
-    Scans the store directly (not the paged listing). A session belongs to
-    this workspace when its stored cwd matches after normalization.
-
-    Performance note: reads up to 16 KB per .json file (via _stored_session_cwd).
-    At ~6,000 sessions this is 1–3 s on a warm cache; may be slower on cold
-    cache or network-backed paths. Called off the event loop via
-    asyncio.to_thread.
-
-    `include_v3`, when True, also enumerates v3 session IDs for *cwd* —
-    alongside the v2 enumeration below, not instead of it — via
-    `data_kiro_v3.load_sessions(cwd)`, that module's own direct-scan
-    equivalent of the v2 loop above (it reads `session.json` under
-    `~/.kiro/sessions/<hash>/sess_*/` rather than the paged/cached listing).
-    `api_acp_delete_sessions`'s workspace-delete branch passes
-    `include_v3=True`, so a folder delete reaches both the historical v2
-    entries and the live v3 sessions for that workspace. Defaults to False so
-    a caller that only cares about the historical v2 store — none exists in
-    this file today, but the parameter is kept opt-in rather than folded away —
-    is not charged the extra `data_kiro_v3` scan.
-    """
-    from .data import _normalize_path
-    norm = _normalize_path(cwd)
-    result = []
-    # v2 enumeration removed (Phase 5: KIRO_SESSION_DIR deleted from acp.py).
-    # Phase 6 will delete this function entirely; only the v3 path is used.
-    if include_v3:
-        from . import data_kiro_v3
-        v3_sessions, _file_stats = data_kiro_v3.load_sessions(cwd)
-        result.extend(s.session_id for s in v3_sessions)
-    return result
 
 
 def _remove_workspace_from_config(cwd: str, config) -> None:
@@ -3167,20 +2959,11 @@ async def api_acp_delete_sessions(request: Request):
             return JSONResponse(
                 {"error": "'cwd' must be a non-empty string."}, status_code=400)
         # Enumerate all session IDs for this workspace (off the event loop).
-        all_ids = await asyncio.to_thread(_acp_sessions_for_workspace, cwd)
+        from . import data_kiro_v3
+        _v3_sessions, _ = await asyncio.to_thread(data_kiro_v3.load_sessions, cwd)
+        all_ids = [s.session_id for s in _v3_sessions]
         # Batch delete, D9: re-snapshot `held` on the event loop before each
         # thread hop, because `_supervisor.sessions` is loop-owned and unlocked.
-        #
-        # Cross-engine held-set union (2026-09-09 fix, Senior engineer
-        # finding): `all_ids` here is v2-only (this call omits `include_v3`),
-        # but the held set is still unioned with `_supervisor_v3.sessions`
-        # for symmetry with the v3 endpoint's identical fix below — a v2 id
-        # can never collide with a v3-held id in practice (id shapes never
-        # overlap), so this union is a no-op for THIS endpoint's own
-        # behavior today, but keeps both endpoints' held-set construction
-        # identical rather than silently diverging, and protects against a
-        # future call site that widens `all_ids` to include v3 ids without
-        # remembering to widen this too.
         deleted_total: list[str] = []
         failed_total: list[dict] = []
         while all_ids:
@@ -3324,12 +3107,12 @@ async def api_acp_v3_delete_sessions(request: Request):
         if not isinstance(cwd, str) or not cwd.strip():
             return JSONResponse(
                 {"error": "'cwd' must be a non-empty string."}, status_code=400)
-        all_ids = await asyncio.to_thread(
-            _acp_sessions_for_workspace, cwd, include_v3=True)
-        # `_acp_sessions_for_workspace(cwd, include_v3=True)` enumerates both
-        # the historical v2 file-store ids and the live ids for this
-        # workspace, so the held set below must cover both shapes — it does,
-        # since `acp._supervisor` is the sole supervisor and its `.sessions`
+        from . import data_kiro_v3
+        _v3_sessions, _ = await asyncio.to_thread(data_kiro_v3.load_sessions, cwd)
+        all_ids = [s.session_id for s in _v3_sessions]
+        # Enumerate v3 session IDs for this workspace (off the event loop).
+        # `data_kiro_v3.load_sessions(cwd)` returns (list[Session], dict) — unpack correctly.
+        # `acp._supervisor.sessions` already carries every live id regardless of shape.
         # already carries every live id regardless of shape.
         deleted_total: list[str] = []
         failed_total: list[dict] = []
@@ -4383,7 +4166,7 @@ async def api_restart(response: Response):
 
 
 @app.get("/api/session-transcript")
-async def api_session_transcript(sid: str = "", provider: str = "kiro-cli", cwd: str = ""):
+async def api_session_transcript(sid: str = "", provider: str = "kiro-cli-v3", cwd: str = ""):
     """Full transcript for the dashboard's static transcript panel (Phase 2).
 
     Returns `{"events": [...]}` in the same shape as an ACP `history` frame's
@@ -4452,7 +4235,7 @@ async def api_session_availability(response: Response, sid: str = "", cwd: str =
 async def api_launch(request: Request):
     body = await request.json()
     config = load_config()
-    provider = body.get("provider") or "kiro-cli"
+    provider = body.get("provider") or "kiro-cli-v3"
     cwd = _resolve_launch_cwd(body.get("workspace", ""), config, provider)
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     session_id = body.get("session_id")
@@ -4491,7 +4274,7 @@ async def api_launch_batch(request: Request):
     sessions = body["sessions"]
     for s in sessions:
         if not s.get("workspace"):
-            s["workspace"] = _resolve_launch_cwd("", config, s.get("provider", "kiro-cli"))
+            s["workspace"] = _resolve_launch_cwd("", config, s.get("provider", "kiro-cli-v3"))
     results = launcher.launch_batch(
         sessions=sessions,
         launch_profile=get_active_launch_profile(config),
@@ -4518,7 +4301,7 @@ async def api_launch_batch(request: Request):
 async def api_new_session(request: Request):
     body = await request.json()
     config = load_config()
-    provider = body.get("provider") or "kiro-cli"
+    provider = body.get("provider") or "kiro-cli-v3"
     cwd = _resolve_launch_cwd(body.get("workspace", ""), config, provider)
     default_args = config.provider_settings.get(provider, {}).get("default_args", "")
     result = launcher.launch_session(
