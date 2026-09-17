@@ -385,9 +385,12 @@ Removed `KIRO_SESSION_DIR`, `LOCK_MAX_BYTES`, `LOCK_START_SKEW_SECONDS`, `_LOCK_
     - `web.py:4366` area: `provider = body.get("provider") or "kiro-cli"` → `or "kiro-cli-v3"`
 
 **Exit criteria**:
-- [ ] `grep '"kiro-cli"' src/power_atlas/web.py` returns no hits (only `"kiro-cli-v3"` remains).
-- [ ] `grep "_acp_session_paths\|_acp_sessions_for_workspace\|_ACP_SESSION_SUFFIXES\|_ACP_LISTING_PROVIDER\|touched_v2" src/power_atlas/web.py` returns no hits.
-- [ ] The two fallback provider set literals at `web.py` near `_workspace_status` do not contain `"kiro-cli"`.
+- [x] `grep '"kiro-cli"' src/power_atlas/web.py` returns no hits (only `"kiro-cli-v3"` remains).
+- [x] `grep "_acp_session_paths\|_acp_sessions_for_workspace\|_ACP_SESSION_SUFFIXES\|_ACP_LISTING_PROVIDER\|touched_v2" src/power_atlas/web.py` returns no hits.
+- [x] The two fallback provider set literals at `web.py` near `_workspace_status` do not contain `"kiro-cli"`.
+
+Implementation (2026-09-17, code: 18684e3)
+Removed `"kiro-cli"` from 4 provider dicts, deleted `_ACP_LISTING_PROVIDER`, `_ACP_SESSION_SUFFIXES`, `_ACP_DELETE_STAGING`, `_ACP_SHARING_VIOLATION`, `_acp_session_paths`, `_acp_sessions_for_workspace`, and the v2 branch of `_acp_delete_session`; simplified `_acp_delete_session` to v3-only with 3-way return semantics (not_found/in_use/success); inlined `data_kiro_v3.load_sessions(cwd)` at both call sites (2 sites, not 1 as planned); cleaned `_acp_delete_many` of `touched_v2`/`is_v3`; updated `_workspace_status` fallback sets, `api_session_transcript`, `api_launch`, `api_new_session`, and `api_batch_launch` defaults. Also a third `"kiro-cli"` found in `api_batch_launch` not listed in the plan. Fixup commit d2255ac: restored `"in_use"` return code (plan snippet had `"delete_error"` — contradiction resolved in favor of plan prose), removed duplicate comment fragment. ~48 additional test failures introduced — all Phase 8 cleanup targets (TestAcpDeleteEndpoint, TestAcpLockPreflight, TestAcpSessionsForWorkspaceV3, etc.).
 
 ---
 
@@ -617,6 +620,19 @@ Manual spot-check: start PowerAtlas, open dashboard, confirm no "kiro-cli" provi
 2. **`test_data_kiro_v3.py` `TestGetFullTranscriptDispatch` addition.** Phase 8 moves `TestGetFullTranscriptDispatch` to `test_data_kiro_v3.py`; the class needs to be written using existing v3 fixtures. This is implementation work, not a deferral — capturing here as a reminder that the moved class needs net-new v3 fixture code, not just a function rename.
 
 ## Review Log
+
+### 2026-09-17 — Implementation Review (after Phase 6, persona: Reliability engineer + Architect)
+
+Implementation health: Yellow (after fixup).
+5 findings (2 High, 1 Medium, 2 Low). H1/M3 fixed by d2255ac; H2 documented as Phase 8 scope expansion.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `_acp_delete_session` returned `"delete_error"` for `result is False`; plan prose required `"in_use"`. | Fixed — restored `"in_use"` in fixup d2255ac. |
+| 2 | High | ~48 test failures from stale test classes (`TestAcpDeleteEndpoint`, `TestAcpLockPreflight`, etc.) not in Phase 8 list. | Escalated — added to Phase 8 scope; documented in Divergences. All are deletion/update targets. |
+| 3 | Medium | Duplicate comment fragment `"# already carries every live id regardless of shape."` left in api_acp_v3_delete_sessions. | Fixed — removed in fixup d2255ac. |
+| 4 | Low | Phase 6 exit criteria lack a test-run criterion; 48 new failures not documented as forward-work. | Fixed — added note in Implementation Notes above. |
+| 5 | Low | `_acp_delete_session` simplified docstring omits what error codes are possible. | User: accepted — docstring clarification deferred to Phase 9. |
 
 ### 2026-09-17 — Implementation Review (after Phase 5, persona: Senior engineer)
 
