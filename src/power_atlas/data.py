@@ -235,7 +235,6 @@ def invalidate_workspace_counts() -> None:
         _cache.pop(key, None)
 
 
-
 # --- Provider-aware API ---
 
 

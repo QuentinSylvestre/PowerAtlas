@@ -14,9 +14,8 @@ import pytest
 
 from power_atlas.data import (
     Session, SessionCache, _FileInfo,
-    discover_workspaces, get_sessions, session_cache,
+    get_sessions, session_cache,
 )
-from power_atlas import data_kiro
 
 
 @pytest.fixture
@@ -379,7 +378,6 @@ class TestNormalizePath:
 # --- Phase 4: get_session_tail ---
 
 from power_atlas.data import get_session_tail
-from power_atlas.data_kiro import _tail_cache
 
 
 class TestGetSessionTail:
