@@ -148,12 +148,16 @@
        lines 2542-4501), fed by /api/dashboard/sessions instead of
        /api/acp/sessions -- same `.acp-rail*` classes from the shared
        style.css, same three grouping modes (Project/Date/Status), same
-       pagination, filter-box and settings-popover mechanics. Not ported:
-       the create-session picker (the dashboard has its own launcher
-       tiles), capacity gating, session/workspace delete, the row kebab
-       menu, and the resize-drag handle -- none of those are this phase's
-       concern. Rendered by dashRenderRail(); empty here for the same
-       no-innerHTML-writes-of-fetched-data reason acp.html's rail is. -->
+       pagination, filter-box and settings-popover mechanics. Session/
+       workspace delete were ported later (see dashDeleteSession/
+       dashDeleteWorkspace below), reusing /acp's same /api/acp/sessions/
+       delete endpoint and .acp-ws-delete-modal CSS verbatim -- restricted to
+       kiro-cli-v3 rows, since that endpoint only ever touches that store.
+       Still not ported: the create-session picker (the dashboard has its
+       own launcher tiles), capacity gating, and the resize-drag handle --
+       none of those are this phase's concern. Rendered by dashRenderRail();
+       empty here for the same no-innerHTML-writes-of-fetched-data reason
+       acp.html's rail is. -->
   <div class="center-panel" id="workspaces-panel">
     <!-- Refresh + the settings gear live on this line now, not their own
          `.acp-rail-head` row below the rail's aside (dashboard/ACP-merge QA
@@ -1027,9 +1031,10 @@ function switchProvider(provider){window._activeProvider=provider;document.query
 // section, roughly lines 2542-4501, and the plan's Phase 4 research) --
 // same three grouping modes, same independent pagination on both axes, same
 // filter-box/settings-popover mechanics, fed by /api/dashboard/sessions
-// instead of /api/acp/sessions. Not ported: the create-session picker (the
-// dashboard has its own launcher tiles for that), capacity gating, session/
-// workspace delete, the row kebab menu, and the resize-drag handle.
+// instead of /api/acp/sessions. Session/workspace delete are ported too
+// (dashDeleteSession/dashDeleteWorkspace, further down), kiro-cli-v3 rows
+// only. Still not ported: the create-session picker (the dashboard has its
+// own launcher tiles for that) and capacity gating.
 //
 // Everything here is createElement + textContent, matching acp.html's own
 // no-innerHTML-for-fetched-data discipline on this same kind of content --
@@ -1086,6 +1091,28 @@ var RAIL_ICON = {
     ['circle', {cx: '12', cy: '5.5', r: '1.7', fill: 'currentColor', stroke: 'none'}],
     ['circle', {cx: '12', cy: '12', r: '1.7', fill: 'currentColor', stroke: 'none'}],
     ['circle', {cx: '12', cy: '18.5', r: '1.7', fill: 'currentColor', stroke: 'none'}]
+  ]); },
+  // A 2x2 grid of rounded tiles -- the generic "apps" glyph, distinguishing a
+  // custom launcher (a user's own app) from a built-in AI provider below.
+  apps: function(){ return dashRailBuildIcon([
+    ['rect', {x: '3.5', y: '3.5', width: '7', height: '7', rx: '1.5'}],
+    ['rect', {x: '13.5', y: '3.5', width: '7', height: '7', rx: '1.5'}],
+    ['rect', {x: '3.5', y: '13.5', width: '7', height: '7', rx: '1.5'}],
+    ['rect', {x: '13.5', y: '13.5', width: '7', height: '7', rx: '1.5'}]
+  ]); },
+  // The four-point sparkle -- the glyph AI products (Gemini, Copilot,
+  // Perplexity) have converged on, so "built-in AI" reads as a category at a
+  // glance rather than needing its trigger's title tooltip to say so.
+  sparkle: function(){ return dashRailBuildIcon([
+    ['path', {d: 'M12 3 L14.5 9.5 L21 12 L14.5 14.5 L12 21 L9.5 14.5 L3 12 L9.5 9.5 Z',
+      fill: 'currentColor', stroke: 'none'}]
+  ]); },
+  trash: function(){ return dashRailBuildIcon([
+    ['path', {d: 'M4 7h16'}],
+    ['path', {d: 'M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2'}],
+    ['path', {d: 'M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13'}],
+    ['path', {d: 'M10 11v6'}],
+    ['path', {d: 'M14 11v6'}]
   ]); }
 };
 // Resume shows the session's own provider icon rather than a generic glyph
@@ -1562,20 +1589,12 @@ function dashRailRowNode(session, flat, workspace){
   wrap.appendChild(row);
 
   var actions = document.createElement('div');
-  actions.className = 'acp-rail-menu-wrap';
-  var pinBtn = document.createElement('button');
-  pinBtn.type = 'button';
-  pinBtn.className = 'row-btn pin-btn' + (session.pinned ? ' pinned' : '');
-  pinBtn.setAttribute('aria-label', session.pinned ? 'Unpin session' : 'Pin session');
-  pinBtn.title = session.pinned ? 'Unpin session' : 'Pin session';
-  pinBtn.appendChild(RAIL_ICON.pin());
-  pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinSession(pinBtn); });
-  actions.appendChild(pinBtn);
+  actions.className = 'acp-rail-menu-wrap acp-rail-menu-wrap-ghost';
   if (state !== 'locked' && (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
       session.provider === 'claude-code' || session.provider === 'kiro-ide')) {
     var resumeBtn = document.createElement('button');
     resumeBtn.type = 'button';
-    resumeBtn.className = 'row-btn primary terminal-btn';
+    resumeBtn.className = 'acp-rail-ghost-btn acp-rail-ghost-primary';
     resumeBtn.setAttribute('aria-label', 'Resume session');
     resumeBtn.title = session.provider === 'kiro-ide' ? 'Open workspace in Kiro IDE' : 'Resume session';
     resumeBtn.appendChild(dashRailProviderIcon(session.provider));
@@ -1589,7 +1608,7 @@ function dashRailRowNode(session, flat, workspace){
   if (session.provider === '' || session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3') {
     var acpBtn = document.createElement('button');
     acpBtn.type = 'button';
-    acpBtn.className = 'row-btn acp-open-btn';
+    acpBtn.className = 'acp-rail-ghost-btn';
     acpBtn.setAttribute('aria-label', 'Open in Agent orchestrator');
     if (session.provider === 'kiro-cli') {
       acpBtn.disabled = true;
@@ -1601,7 +1620,91 @@ function dashRailRowNode(session, flat, workspace){
     acpBtn.addEventListener('click', function(e){ e.stopPropagation(); openInAcp(acpBtn); });
     actions.appendChild(acpBtn);
   }
+  // Every row gets this ⋯ now (pin-redesign follow-up): Pin/Unpin used to
+  // be its own always-in-the-row button; it's a menu item here instead, so
+  // the trigger can no longer be conditional on kiro-cli-v3 the way the
+  // delete-only kebab it replaces was. Delete stays conditional beneath it
+  // -- ported from /acp's own per-row ⋯ menu, reusing the same
+  // /api/acp/sessions/delete endpoint, kiro-cli-v3 only since that's the
+  // only store the endpoint ever touches (a v2/claude-code/kiro-ide id comes
+  // back "not found", which would read as a bogus error here). Uses this
+  // page's own hover-menu wiring (_wireRailActionMenu), not /acp's
+  // click-toggle railMenuNode -- the dashboard already has one hover-menu
+  // mechanism and every other row/group action here goes through it.
+  var moreBtn = document.createElement('button');
+  moreBtn.type = 'button';
+  moreBtn.className = 'acp-rail-ghost-btn';
+  moreBtn.setAttribute('aria-haspopup', 'menu');
+  moreBtn.setAttribute('aria-expanded', 'false');
+  moreBtn.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
+  moreBtn.title = 'More';
+  moreBtn.appendChild(RAIL_ICON.more());
+  var moreMenu = document.createElement('div');
+  moreMenu.className = 'acp-rail-menu acp-rail-action-menu';
+  moreMenu.setAttribute('role', 'menu');
+  moreMenu.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
+  moreMenu.hidden = true;
+  var pinItem = document.createElement('button');
+  pinItem.type = 'button';
+  pinItem.className = 'acp-rail-menu-item acp-rail-action-item' + (session.pinned ? ' pinned' : '');
+  pinItem.setAttribute('role', 'menuitem');
+  pinItem.appendChild(RAIL_ICON.pin());
+  var pinLabel = document.createElement('span');
+  pinLabel.textContent = session.pinned ? 'Unpin session' : 'Pin session';
+  pinItem.appendChild(pinLabel);
+  pinItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); pinSession(pinItem); });
+  moreMenu.appendChild(pinItem);
+  if (ACP_TOKEN && session.provider === 'kiro-cli-v3') {
+    var deleteDivider = document.createElement('div');
+    deleteDivider.className = 'acp-rail-menu-divider';
+    moreMenu.appendChild(deleteDivider);
+    var delItem = document.createElement('button');
+    delItem.type = 'button';
+    delItem.className = 'acp-rail-menu-item acp-rail-action-item acp-rail-menu-danger';
+    delItem.setAttribute('role', 'menuitem');
+    delItem.appendChild(RAIL_ICON.trash());
+    var delLabel = document.createElement('span');
+    delLabel.textContent = 'Delete session';
+    delItem.appendChild(delLabel);
+    // A hint, not the gate -- `state` is read at fetch time and can be
+    // stale by the time it's clicked; the server re-checks held/locked on
+    // its own authority and refuses on its own terms either way.
+    if (state === 'held') {
+      delItem.disabled = true;
+      delItem.title = 'PowerAtlas has this session open. Close it in the transcript panel first.';
+    } else if (state === 'locked') {
+      delItem.disabled = true;
+      delItem.title = 'Another process is using this session.';
+    }
+    delItem.addEventListener('click', function(e){
+      e.stopPropagation();
+      if (delItem.disabled) return;
+      _closeAllRailActionMenus();
+      dashDeleteSession(session);
+    });
+    moreMenu.appendChild(delItem);
+  }
+  _wireRailActionMenu(moreBtn, moreMenu);
+  actions.appendChild(moreBtn);
+  // Appended to `wrap`, not `actions`: `.acp-rail-menu-wrap` carries the
+  // same `transform: translateY(-50%)` centering trick
+  // `.acp-rail-group-actions` does above, which would misplace this
+  // `position: fixed` menu's viewport-relative coordinates. `wrap`
+  // (`.acp-rail-item`) has only `position: relative`, so it's a safe
+  // containing block for the menu while the trigger stays inside `actions`
+  // beside its sibling row buttons.
+  wrap.appendChild(moreMenu);
   wrap.appendChild(actions);
+  // The static pin indicator: sits in the exact slot `moreBtn` occupies,
+  // visible only while nothing is hovered (see .acp-rail-pin-indicator in
+  // style.css) -- so it's only ever worth creating for a pinned session.
+  if (session.pinned) {
+    var pinIndicator = document.createElement('span');
+    pinIndicator.className = 'acp-rail-pin-indicator';
+    pinIndicator.setAttribute('aria-hidden', 'true');
+    pinIndicator.appendChild(RAIL_ICON.pin());
+    wrap.appendChild(pinIndicator);
+  }
   return wrap;
 }
 
@@ -1797,39 +1900,85 @@ function dashRailGroupNode(group){
   folderBtn.appendChild(RAIL_ICON.folder());
   folderBtn.addEventListener('click', function(e){ e.stopPropagation(); openFolder(group.cwd); });
   actions.appendChild(folderBtn);
-  // New session: one dropdown (Terminal + one row per available provider --
-  // the same set the provider tabs above the rail are built from, so a
-  // provider hidden there is consistently hidden here too) behind a single
-  // terminal-icon trigger, replacing what used to be a same-sized button per
-  // provider sitting always-visible in this row.
-  var newSessionBtn = document.createElement('button');
-  newSessionBtn.type = 'button';
-  newSessionBtn.className = 'acp-rail-ghost-btn';
-  newSessionBtn.setAttribute('aria-haspopup', 'menu');
-  newSessionBtn.setAttribute('aria-expanded', 'false');
-  newSessionBtn.setAttribute('aria-label', 'New session');
-  newSessionBtn.title = 'New session';
-  newSessionBtn.appendChild(RAIL_ICON.terminal());
-  var newSessionMenu = document.createElement('div');
-  newSessionMenu.className = 'acp-rail-menu acp-rail-action-menu';
-  newSessionMenu.setAttribute('role', 'menu');
-  newSessionMenu.setAttribute('aria-label', 'New session');
-  newSessionMenu.hidden = true;
-  var termItem = document.createElement('button');
-  termItem.type = 'button';
-  termItem.className = 'acp-rail-menu-item acp-rail-action-item';
-  termItem.setAttribute('role', 'menuitem');
-  termItem.appendChild(RAIL_ICON.terminal());
-  var termLabel = document.createElement('span');
-  termLabel.textContent = 'Open terminal';
-  termItem.appendChild(termLabel);
-  termItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); openTerminal(termItem); });
-  newSessionMenu.appendChild(termItem);
-  if ((window._availableProviders || []).length) {
-    var newSessionDivider = document.createElement('div');
-    newSessionDivider.className = 'acp-rail-menu-divider';
-    newSessionMenu.appendChild(newSessionDivider);
+  // Terminal: its own always-visible icon, beside folder -- both are "open a
+  // plain tool here" actions, as opposed to the two dropdowns below, which
+  // are both "start an agent/app session here". Previously the first item of
+  // the AI-providers dropdown; pulled out to top level (hover-actions
+  // redesign) once that dropdown split in two and "Open terminal" no longer
+  // had an obvious home in either half.
+  var terminalBtn = document.createElement('button');
+  terminalBtn.type = 'button';
+  terminalBtn.className = 'acp-rail-ghost-btn';
+  terminalBtn.setAttribute('aria-label', 'Open terminal');
+  terminalBtn.title = 'Open terminal';
+  terminalBtn.appendChild(RAIL_ICON.terminal());
+  terminalBtn.addEventListener('click', function(e){ e.stopPropagation(); openTerminal(terminalBtn); });
+  actions.appendChild(terminalBtn);
+  // Quick custom workspace apps: one dropdown listing every custom launcher
+  // marked both "Use selected workspaces" and "Show in workspace card quick
+  // actions" in its edit modal (launcherUseSelected + launcherShowInHover,
+  // see saveLauncher) -- the same pair `_all_hover_launchers` in web.py
+  // encodes server-side for the old (now-removed) workspace-card hover row.
+  // Filtered client-side from `_launchers` rather than a fetch: identical to
+  // how the AI-providers dropdown below already reads `window._availableProviders`
+  // with no round trip. Hidden entirely when nothing qualifies, rather than
+  // an always-visible button opening onto an empty menu.
+  var hoverLaunchers = (window._launchers || []).filter(function(l){
+    return l.use_selected_workspaces && l.show_in_workspace_hover;
+  });
+  if (hoverLaunchers.length) {
+    var appsBtn = document.createElement('button');
+    appsBtn.type = 'button';
+    appsBtn.className = 'acp-rail-ghost-btn';
+    appsBtn.setAttribute('aria-haspopup', 'menu');
+    appsBtn.setAttribute('aria-expanded', 'false');
+    appsBtn.setAttribute('aria-label', 'Open with a custom app');
+    appsBtn.title = 'Open with a custom app';
+    appsBtn.appendChild(RAIL_ICON.apps());
+    var appsMenu = document.createElement('div');
+    appsMenu.className = 'acp-rail-menu acp-rail-action-menu';
+    appsMenu.setAttribute('role', 'menu');
+    appsMenu.setAttribute('aria-label', 'Open with a custom app');
+    appsMenu.hidden = true;
+    hoverLaunchers.forEach(function(l){
+      var appItem = document.createElement('button');
+      appItem.type = 'button';
+      appItem.className = 'acp-rail-menu-item acp-rail-action-item';
+      appItem.setAttribute('role', 'menuitem');
+      var appIcon = document.createElement('img');
+      appIcon.className = 'session-provider-icon';
+      appIcon.src = '/api/launcher-icon/' + encodeURIComponent(l.id);
+      appIcon.alt = '';
+      appIcon.onerror = function(){ this.remove(); };
+      appItem.appendChild(appIcon);
+      var appLabel = document.createElement('span');
+      appLabel.textContent = l.name || l.id;
+      appItem.appendChild(appLabel);
+      appItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); runLauncherInWorkspace(appItem, l.id); });
+      appsMenu.appendChild(appItem);
+    });
+    _wireRailActionMenu(appsBtn, appsMenu);
+    actions.appendChild(appsBtn);
+    head.appendChild(appsMenu); // see the aiMenu comment below for why this goes on `head`, not `actions`
   }
+  // Quick built-in: one dropdown, one row per installed+enabled AI provider
+  // (the same set the provider tabs above the rail are built from, so a
+  // provider hidden there is consistently hidden here too) behind a single
+  // sparkle-icon trigger -- the built-in counterpart to the custom-apps
+  // dropdown above.
+  var aiBtn = document.createElement('button');
+  aiBtn.type = 'button';
+  aiBtn.className = 'acp-rail-ghost-btn';
+  aiBtn.setAttribute('aria-haspopup', 'menu');
+  aiBtn.setAttribute('aria-expanded', 'false');
+  aiBtn.setAttribute('aria-label', 'New AI session');
+  aiBtn.title = 'New AI session';
+  aiBtn.appendChild(RAIL_ICON.sparkle());
+  var aiMenu = document.createElement('div');
+  aiMenu.className = 'acp-rail-menu acp-rail-action-menu';
+  aiMenu.setAttribute('role', 'menu');
+  aiMenu.setAttribute('aria-label', 'New AI session');
+  aiMenu.hidden = true;
   (window._availableProviders || []).forEach(function(p){
     var provItem = document.createElement('button');
     provItem.type = 'button';
@@ -1845,10 +1994,10 @@ function dashRailGroupNode(group){
     provLabel.textContent = 'New ' + (p.display || p.name) + ' session';
     provItem.appendChild(provLabel);
     provItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); newSessionInWorkspace(provItem, p.name); });
-    newSessionMenu.appendChild(provItem);
+    aiMenu.appendChild(provItem);
   });
-  _wireRailActionMenu(newSessionBtn, newSessionMenu);
-  actions.appendChild(newSessionBtn);
+  _wireRailActionMenu(aiBtn, aiMenu);
+  actions.appendChild(aiBtn);
   // Appended to `head`, not `actions`: `.acp-rail-group-actions` carries a
   // `transform` (its own vertical-centering trick), and a `transform` on any
   // ancestor becomes the containing block for a `position: fixed`
@@ -1858,18 +2007,13 @@ function dashRailGroupNode(group){
   // that transformed box instead and come out wildly off. `head` has no
   // transform (only `position: sticky`, which fixed positioning ignores),
   // and is still inside `wrap` -- so `.closest('[data-cwd]')` in
-  // openTerminal/newSessionInWorkspace/openWorkspaceSettings keeps working.
-  head.appendChild(newSessionMenu);
-  var pinBtn = document.createElement('button');
-  pinBtn.type = 'button';
-  pinBtn.className = 'acp-rail-ghost-btn' + (group.pinned ? ' acp-rail-ghost-pinned' : '');
-  pinBtn.setAttribute('aria-label', group.pinned ? 'Unpin workspace' : 'Pin workspace');
-  pinBtn.title = group.pinned ? 'Unpin workspace' : 'Pin workspace';
-  pinBtn.appendChild(RAIL_ICON.pin());
-  pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinWorkspace(pinBtn); });
-  actions.appendChild(pinBtn);
-  // Overflow menu: just Settings for now (room to grow without this row
-  // gaining another always-visible icon per addition).
+  // openTerminal/newSessionInWorkspace/openWorkspaceSettings/
+  // runLauncherInWorkspace keeps working.
+  head.appendChild(aiMenu);
+  // Overflow menu: Pin/Unpin, Settings, and (further below) Delete. Pin used
+  // to be its own always-visible-when-pinned icon (pin-redesign follow-up);
+  // it's a menu item now, and a plain glyph (.acp-rail-pin-indicator, added
+  // below) takes over showing "this is pinned" at rest instead.
   var moreBtn = document.createElement('button');
   moreBtn.type = 'button';
   moreBtn.className = 'acp-rail-ghost-btn';
@@ -1883,6 +2027,16 @@ function dashRailGroupNode(group){
   moreMenu.setAttribute('role', 'menu');
   moreMenu.setAttribute('aria-label', 'More actions');
   moreMenu.hidden = true;
+  var pinItem = document.createElement('button');
+  pinItem.type = 'button';
+  pinItem.className = 'acp-rail-menu-item acp-rail-action-item' + (group.pinned ? ' pinned' : '');
+  pinItem.setAttribute('role', 'menuitem');
+  pinItem.appendChild(RAIL_ICON.pin());
+  var pinLabel = document.createElement('span');
+  pinLabel.textContent = group.pinned ? 'Unpin workspace' : 'Pin workspace';
+  pinItem.appendChild(pinLabel);
+  pinItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); pinWorkspace(pinItem); });
+  moreMenu.appendChild(pinItem);
   var settingsItem = document.createElement('button');
   settingsItem.type = 'button';
   settingsItem.className = 'acp-rail-menu-item acp-rail-action-item';
@@ -1893,10 +2047,41 @@ function dashRailGroupNode(group){
   settingsItem.appendChild(settingsLabel);
   settingsItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); openWorkspaceSettings(settingsItem); });
   moreMenu.appendChild(settingsItem);
+  // Delete: ported from /acp's own workspace-⋯ menu, reusing the same
+  // /api/acp/sessions/delete endpoint. Gated on ACP_TOKEN, not on a
+  // provider check on `group` -- a lazily-skipped or paginated group's
+  // loaded `sessions` never reliably says whether it holds any kiro-cli-v3
+  // rows, so the item always renders; the confirmation modal below is
+  // explicit that only kiro-cli sessions are touched.
+  if (ACP_TOKEN) {
+    var deleteWsDivider = document.createElement('div');
+    deleteWsDivider.className = 'acp-rail-menu-divider';
+    moreMenu.appendChild(deleteWsDivider);
+    var deleteWsItem = document.createElement('button');
+    deleteWsItem.type = 'button';
+    deleteWsItem.className = 'acp-rail-menu-item acp-rail-action-item acp-rail-menu-danger';
+    deleteWsItem.setAttribute('role', 'menuitem');
+    deleteWsItem.appendChild(RAIL_ICON.trash());
+    var deleteWsLabel = document.createElement('span');
+    deleteWsLabel.textContent = 'Delete kiro-cli sessions…';
+    deleteWsItem.appendChild(deleteWsLabel);
+    deleteWsItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); dashDeleteWorkspace(group); });
+    moreMenu.appendChild(deleteWsItem);
+  }
   _wireRailActionMenu(moreBtn, moreMenu);
   actions.appendChild(moreBtn);
-  head.appendChild(moreMenu); // see the newSessionMenu comment above for why this goes on `head`, not `actions`
+  head.appendChild(moreMenu); // see the aiMenu comment above for why this goes on `head`, not `actions`
   head.appendChild(actions);
+  // The static pin indicator: sits in the exact slot `moreBtn` occupies,
+  // visible only while nothing is hovered (see .acp-rail-pin-indicator in
+  // style.css) -- so it's only ever worth creating for a pinned workspace.
+  if (group.pinned) {
+    var pinIndicator = document.createElement('span');
+    pinIndicator.className = 'acp-rail-pin-indicator';
+    pinIndicator.setAttribute('aria-hidden', 'true');
+    pinIndicator.appendChild(RAIL_ICON.pin());
+    head.appendChild(pinIndicator);
+  }
 
   wrap.appendChild(head);
   if (!dashRailIsCollapsed('g:' + group.cwd, !group.pinned)) {
@@ -1912,6 +2097,236 @@ function dashRailGroupNode(group){
   }
   return wrap;
 }
+
+// ---- custom-launcher quick launch, session/workspace delete ---------------
+//
+// Delete is ported from /acp's own rail (railDeleteSession/railDeleteWorkspace/
+// buildWorkspaceDeleteModal/trapFocus/closeModal), reusing its exact
+// /api/acp/sessions/delete endpoint and .acp-ws-delete-modal/.acp-rail-menu-*
+// CSS (shared/style.css, already loaded by this page) rather than inventing a
+// second copy of either. Two deliberate departures from the source, both
+// forced by this rail being multi-provider where /acp's is kiro-cli-v3 only:
+// per-session delete is offered only on kiro-cli-v3 rows (dashRailRowNode),
+// and the workspace modal below names no session count, since `group.total`
+// mixes providers the delete endpoint never touches.
+var DASH_DELETE_PATH = '/api/acp/sessions/delete';
+var dashDeleting = false; // one delete in flight at a time, same guard /acp uses
+
+// The batch endpoint, not /api/launcher/run, and a one-element `workspaces`
+// list rather than this row's `cwd` alone -- every launcher in
+// `hoverLaunchers` has `use_selected_workspaces` true by construction (see
+// dashRailGroupNode's filter), and that flag is exactly what
+// `launcher_run_batch` (web.py) reads to decide `pass_workspace_arg`: for a
+// non-terminal launcher (Zed/VS Code/PyCharm all set `terminal: false`),
+// only that path appends the folder as a command-line argument. /api/launcher/run
+// never sets that flag, so it would launch the app with no folder open. Also
+// resolves the stored entry by id server-side rather than trusting
+// command/custom_args/terminal sent back from the browser.
+function runLauncherInWorkspace(btn, launcherId){
+  var group = btn.closest('[data-cwd]');
+  fetch('/api/launcher/run-batch', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: launcherId, workspaces: [group.dataset.cwd]})})
+    .then(function(r){ return r.text(); }).then(showToast)
+    .catch(function(){ showToast('<div class="toast toast-error">Failed to launch<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>'); });
+}
+
+/** Drop a deleted session from every in-memory list the rail draws from. */
+function dashRailForgetSession(sid){
+  dashRailPinned = dashRailPinned.filter(function(s){ return s.id !== sid; });
+  dashRailFlat = dashRailFlat.filter(function(s){ return s.id !== sid; });
+  dashRailGroups.forEach(function(g){
+    var before = g.sessions.length;
+    g.sessions = g.sessions.filter(function(s){ return s.id !== sid; });
+    if (g.sessions.length !== before && typeof g.total === 'number') {
+      g.total = Math.max(g.sessions.length, g.total - 1);
+    }
+  });
+  if (_viewingSid === sid) {
+    _viewingSid = null;
+    dashCloseIfAbandoned();
+    var el = document.getElementById('dashTranscript');
+    el.textContent = '';
+    var msg = document.createElement('div');
+    msg.className = 'acp-system-msg';
+    msg.textContent = 'This session was deleted.';
+    el.appendChild(msg);
+    dashComposerEl.hidden = true;
+  }
+}
+
+function dashDeleteSession(session){
+  if (dashDeleting) return;
+  var label = dashRailTitleText(session);
+  // confirm(), not an in-page dialog -- same reasoning as this page's other
+  // destructive actions (secret rotation, batch launch): the one control a
+  // click aimed at the row underneath cannot click through.
+  if (!confirm('Delete "' + label + '" permanently?\n\n'
+      + 'This erases the conversation from kiro-cli’s own store — the '
+      + 'transcript, its metadata and its task files. It cannot be undone.')) {
+    return;
+  }
+  dashDeleting = true;
+  fetch(DASH_DELETE_PATH, {method: 'POST', headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin', cache: 'no-store',
+    body: JSON.stringify({session_ids: [session.id]})})
+    .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(data){
+      dashDeleting = false;
+      var deleted = (data && data.deleted) || [];
+      var failed = (data && data.failed) || [];
+      if (deleted.indexOf(session.id) === -1) {
+        var why = failed.length && failed[0].message ? failed[0].message : 'the server refused the deletion';
+        showToast('<div class="toast toast-error">Not deleted: ' + _escHtml(why) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+        return;
+      }
+      dashRailForgetSession(session.id);
+      dashRenderRail();
+      showToast('<div class="toast toast-success">Deleted “' + _escHtml(label) + '”<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+    })
+    .catch(function(){
+      dashDeleting = false;
+      showToast('<div class="toast toast-error">Could not delete the session<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+    });
+}
+
+/** Trap focus within a modal; close on Escape. Ported verbatim from /acp. */
+function dashTrapFocus(modal, onClose){
+  var btns = modal.querySelectorAll('button');
+  var inputs = modal.querySelectorAll('input');
+  var focusable = [];
+  for (var i = 0; i < inputs.length; i++) { if (!inputs[i].disabled) focusable.push(inputs[i]); }
+  for (var j = 0; j < btns.length; j++) { if (!btns[j].disabled) focusable.push(btns[j]); }
+  var first = focusable[0];
+  var last = focusable[focusable.length - 1];
+  modal.addEventListener('keydown', function(e){
+    if (e.key === 'Escape') { dashCloseModal(modal); if (onClose) onClose(); return; }
+    if (e.key !== 'Tab') return;
+    var active = document.activeElement;
+    if (!e.shiftKey && active === last) { e.preventDefault(); if (first) first.focus(); }
+    else if (e.shiftKey && active === first) { e.preventDefault(); if (last) last.focus(); }
+  });
+}
+function dashCloseModal(modal){ if (modal.parentNode) modal.parentNode.removeChild(modal); }
+
+/** Build the workspace-delete confirmation modal. Adapted from /acp's
+ *  buildWorkspaceDeleteModal: no session count in the copy (see the section
+ *  comment above for why), and the wording is explicit that this only
+ *  touches kiro-cli sessions, since this rail's workspaces are frequently
+ *  not single-provider the way /acp's always are. */
+function dashBuildWorkspaceDeleteModal(cwd, folderName, onConfirm, onCancel){
+  var modal = document.createElement('div');
+  modal.className = 'acp-ws-delete-modal';
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+
+  var body = document.createElement('div');
+  body.className = 'acp-ws-delete-modal-body';
+
+  var heading = document.createElement('h2');
+  heading.textContent = 'Delete kiro-cli sessions';
+  body.appendChild(heading);
+
+  var info = document.createElement('p');
+  info.className = 'acp-ws-delete-info';
+  info.textContent = 'Permanently removes every kiro-cli conversation stored for '
+    + folderName + '. Sessions from other providers in this workspace are not affected.';
+  body.appendChild(info);
+
+  var folderRow = document.createElement('label');
+  folderRow.className = 'acp-ws-delete-check-row';
+  var folderCb = document.createElement('input');
+  folderCb.type = 'checkbox';
+  folderCb.className = 'acp-ws-delete-folder-cb';
+  var folderLabelWrap = document.createElement('span');
+  var folderLabelText = document.createElement('span');
+  folderLabelText.textContent = 'Delete folder from filesystem';
+  var folderWarn = document.createElement('span');
+  folderWarn.className = 'acp-ws-delete-warn';
+  folderWarn.textContent = '⚠️ Irreversible — permanently removes ' + folderName + ' from disk';
+  folderLabelWrap.appendChild(folderLabelText);
+  folderLabelWrap.appendChild(folderWarn);
+  folderRow.appendChild(folderCb);
+  folderRow.appendChild(folderLabelWrap);
+  body.appendChild(folderRow);
+
+  var input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'acp-ws-delete-name-input';
+  input.setAttribute('placeholder', 'Type folder name to confirm');
+  input.setAttribute('autocomplete', 'off');
+  input.setAttribute('aria-label', 'Type folder name to confirm: ' + folderName);
+  body.appendChild(input);
+
+  var btnRow = document.createElement('div');
+  btnRow.className = 'acp-ws-delete-btns';
+  var confirmBtn = document.createElement('button');
+  confirmBtn.type = 'button';
+  confirmBtn.textContent = 'Delete';
+  confirmBtn.disabled = true;
+  confirmBtn.className = 'acp-btn acp-ws-delete-confirm';
+  input.addEventListener('input', function(){
+    confirmBtn.disabled = input.value.trim() !== folderName.trim();
+  });
+  confirmBtn.addEventListener('click', function(){
+    if (confirmBtn.disabled) return;
+    confirmBtn.disabled = true;
+    onConfirm(folderCb.checked);
+  });
+  var cancelBtn = document.createElement('button');
+  cancelBtn.type = 'button';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.className = 'acp-btn acp-ws-delete-cancel';
+  cancelBtn.addEventListener('click', function(){ dashCloseModal(modal); if (onCancel) onCancel(); });
+  btnRow.appendChild(confirmBtn);
+  btnRow.appendChild(cancelBtn);
+  body.appendChild(btnRow);
+  modal.appendChild(body);
+  return modal;
+}
+
+function dashDeleteWorkspace(group){
+  if (document.querySelector('.acp-ws-delete-modal')) return;
+  var trigger = document.activeElement;
+  var folderName = group.name || group.cwd;
+  var modal = dashBuildWorkspaceDeleteModal(group.cwd, folderName, function onConfirm(deleteFolder){
+    var body = {cwd: group.cwd};
+    if (deleteFolder) body.delete_folder = true;
+    fetch(DASH_DELETE_PATH, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin', cache: 'no-store', body: JSON.stringify(body)})
+      .then(function(r){ if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function(data){
+        dashCloseModal(modal);
+        if (trigger && trigger.focus) trigger.focus();
+        var deleted = (data && data.deleted) || [];
+        var failed = (data && data.failed) || [];
+        deleted.forEach(dashRailForgetSession);
+        if (deleted.length) dashRenderRail();
+        var msg = 'Deleted ' + deleted.length + ' session' + (deleted.length !== 1 ? 's' : '') + '.';
+        if (failed.length) msg += ' ' + failed.length + ' could not be deleted (held or locked).';
+        if (data.folder_deleted) msg += ' Folder removed from disk.';
+        else if (data.folder_error && data.folder_error !== 'folder_already_gone') msg += ' Folder: ' + data.folder_error;
+        var level = failed.length && !deleted.length ? 'error' : 'success';
+        showToast('<div class="toast toast-' + level + '">' + _escHtml(msg) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+        // Folder-delete (or a workspace this rail can no longer account for
+        // session-by-session) is exactly what dashRailRefreshSoon reconciles
+        // against the server's own listing, the same as pinWorkspace's
+        // optimistic update does above.
+        dashRailRefreshSoon();
+      })
+      .catch(function(){
+        dashCloseModal(modal);
+        if (trigger && trigger.focus) trigger.focus();
+        showToast('<div class="toast toast-error">Could not delete the workspace sessions<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+      });
+  }, function onCancel(){
+    if (trigger && trigger.focus) trigger.focus();
+  });
+  document.body.appendChild(modal);
+  dashTrapFocus(modal, function(){ if (trigger && trigger.focus) trigger.focus(); });
+  var input = modal.querySelector('.acp-ws-delete-name-input');
+  if (input) input.focus();
+}
+
 function dashRailBucketNode(bucket){
   var wrap = document.createElement('div');
   wrap.className = 'acp-rail-group';

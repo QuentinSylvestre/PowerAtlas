@@ -326,11 +326,6 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
 .acp-rail-group-head:hover .card-check { border-color: var(--text-muted); }
 .acp-rail-group.selected .card-check { border-color: var(--accent); background: var(--accent); }
 .acp-rail-group.selected .card-check::after { content: '✓'; color: white; font-size: 11px; font-weight: 700; }
-/* .pin-btn's opacity:0 default targets .session-row:hover, which the rail's
-   session rows are not -- inside .acp-rail-menu-wrap the wrapper itself
-   already owns the hover-reveal (see that class's own rule), so the button
-   must start at full opacity or the two multiply to invisible. */
-.acp-rail-menu-wrap .pin-btn { opacity: 1; }
 /* Overlaid on the group-head row rather than kept in flex flow (rail QA
    follow-up), the same fix already applied to session rows' own menu-wrap:
    a normal flex sibling reserved its own width whether or not anything in
@@ -340,28 +335,51 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
    static establishes a containing block, sticky included.
    No shared pill background/padding here unlike `.acp-rail-menu-wrap`
    below -- each button in this group (.acp-rail-ghost-btn, all four of
-   them) already draws its own hover halo, and the buttons hide
-   individually rather than as one unit (the pinned exception needs that),
-   so a wrapper-level background would keep rendering a bare box behind
-   whichever buttons were currently invisible. */
+   them) already draws its own hover halo, and a wrapper-level background
+   would keep rendering a bare box behind whichever buttons were currently
+   invisible. */
 .acp-rail-group-actions { display: flex; align-items: center; gap: 4px; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 1; }
 /* Ghost icons -- transparent at rest, a soft neutral halo plus a slight
-   grow on hover -- for the workspace row's four hover-revealed actions
-   (folder, new-session dropdown trigger, pin, overflow "more" trigger).
+   grow on hover -- for the workspace row's hover-revealed actions (folder,
+   terminal, custom-apps dropdown, built-in-AI dropdown, overflow "more"
+   trigger), and (button-style-alignment follow-up) the session row's own
+   resume/open-in-ACP/overflow actions, replacing their earlier bordered
+   `.row-btn` look so both row kinds share one action-button language.
    Matches the prototype (PROTOTYPE_hover_buttons.html, variant E, .bc-btn)
    the user picked this design from; `[aria-expanded="true"]` keeps a
    dropdown trigger's halo lit while its own menu is open, same as the
    halo a hover already gives it. */
 .acp-rail-ghost-btn { width: 28px; height: 28px; border-radius: 50%; border: none; background: transparent; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: transform 120ms cubic-bezier(.34,1.56,.64,1), background 120ms, color 120ms; }
 .acp-rail-ghost-btn:hover, .acp-rail-ghost-btn[aria-expanded="true"] { transform: scale(1.1); background: rgba(139, 144, 160, 0.16); color: var(--text); }
-/* No hover-only rule here on purpose ("pin button: no change when
-   hovered", rail QA follow-up, still true under the ghost-icon restyle) --
-   the pin button's own look is meant to read purely from whether the
-   workspace is pinned, not from where the pointer happens to be sitting;
-   its `:hover` rule below only changes the *halo color* to match the
-   pinned amber, not whether it's tinted at all. */
-.acp-rail-ghost-btn.acp-rail-ghost-pinned { color: var(--amber); }
-.acp-rail-ghost-btn.acp-rail-ghost-pinned:hover { background: rgba(245, 158, 11, 0.18); color: var(--amber); }
+/* .row-btn's own `:disabled` state (opacity 0.45, cursor default) had no
+   ghost-btn equivalent because nothing that used to be a ghost-btn could be
+   disabled -- the session row's "Open in Agent orchestrator" button, now a
+   ghost-btn too, still can be (a retired v2 session). */
+.acp-rail-ghost-btn:disabled { opacity: 0.45; cursor: default; }
+/* The session row's primary action (Resume) keeps a color of its own, the
+   ghost-btn equivalent of `.row-btn.primary`'s accent tint -- everything
+   else in either row (folder/terminal/apps/AI/more, and the session row's
+   own open-in-ACP/more) reads as one neutral, equally-weighted set. */
+.acp-rail-ghost-btn.acp-rail-ghost-primary { color: var(--accent); }
+.acp-rail-ghost-btn.acp-rail-ghost-primary:hover { background: rgba(108, 140, 255, 0.18); color: var(--accent); }
+/* The static "pinned" indicator: overlays the exact slot the group/row's
+   own ⋯ trigger occupies (same right:4px/top:50%/translateY(-50%) anchor
+   as .acp-rail-group-actions/.acp-rail-menu-wrap -- both .acp-rail-group-head
+   and .acp-rail-item establish the containing block it resolves against),
+   replacing that trigger while nothing is hovered. Pin/unpin itself now
+   lives as a menu item inside the ⋯ menu (pinWorkspace/pinSession), not a
+   button of its own -- this glyph is decorative only, hence
+   `pointer-events: none` (never receives a click, shown or not) and no
+   `:hover` rule.
+   `opacity: 0` at rest (here, outside the hover-capable media query below)
+   rather than the element simply not existing when unpinned is not the
+   point -- it genuinely doesn't exist then (dashRailGroupNode/
+   dashRailRowNode only create it for a pinned group/session). This zero is
+   for the *other* case a pinned one still needs to disappear in: any device
+   with no `hover: hover` already shows the real ⋯ trigger permanently (see
+   that media query), so a second glyph in the same spot would double up on
+   it there instead of replacing it. */
+.acp-rail-pin-indicator { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; color: var(--amber); pointer-events: none; z-index: 2; opacity: 0; }
 .pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; opacity: 0; transition: all 0.1s; color: var(--text-muted); }
 .session-row:hover .pin-btn { opacity: 0.5; }
 .pin-btn:hover { opacity: 1 !important; background: var(--accent); border-color: var(--accent); color: white; }
@@ -424,12 +442,6 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
 .session-last .label { font-size: 10px; text-transform: uppercase; margin-right: 3px; font-style: normal; }
 .session-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface-hover); padding-left: 8px; }
 .session-row:hover .session-actions { opacity: 1; }
-.row-btn { font-size: 11px; padding: 0; width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: var(--radius-sm); border: 1px solid var(--border); background: transparent; color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.1s; }
-.row-btn:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); color: white; }
-.row-btn:disabled { opacity: 0.45; cursor: default; }
-.row-btn.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
-.terminal-btn { font-family: monospace; font-weight: 600; }
-.row-btn.primary:hover { background: var(--accent); color: white; }
 .new-session-inline { padding: 8px 16px 10px 54px; font-size: 12px; color: var(--text-dim); cursor: pointer; transition: color 0.12s; border-top: 1px solid rgba(45,50,68,0.4); }
 .new-session-inline:hover { color: var(--accent); }
 
@@ -772,8 +784,8 @@ script { display: none; }
 }
 .acp-rail-row-icon { flex-shrink: 0; border-radius: 3px; }
 /* Workspace/session row action buttons (RAIL_ICON in index.html): stroke
-   is currentColor, so existing hover/pinned color rules on the buttons
-   that hold these (.card-*-btn, .row-btn, .pin-btn) apply automatically. */
+   is currentColor, so existing hover color rules on the buttons that hold
+   these (.acp-rail-ghost-btn) apply automatically. */
 .rail-icon { width: 15px; height: 15px; display: block; flex-shrink: 0; }
 
 /* Pinned/non-pinned separator */
@@ -1689,14 +1701,16 @@ body:has(> .acp-shell) { height: 100dvh; }
 /* The whole header is the collapse control rather than the chevron alone. A
    10 px glyph is a 10 px target, and this rail is used with a thumb. */
 .acp-rail-group-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: inherit; font-family: inherit; font-size: 12px; text-align: left; padding: 3px 4px; cursor: pointer; }
-/* Room for the pin icon that stays visible without a hover (rail QA
-   follow-up: "pinned projects keep the button visible so we see it's
-   pinned"). Conditional on :has() rather than a flat padding on every
-   toggle -- an unpinned group's count can use the full row, since the
-   only thing that would overlap it there is the hover-revealed actions
-   overlay, and that overlap is already how the equivalent session-row
-   title/timestamp behave under their own hover reveal. */
-.acp-rail-group-head:has(.acp-rail-ghost-pinned) .acp-rail-group-toggle { padding-right: 32px; }
+/* Room for the pin indicator that stays visible without a hover (rail QA
+   follow-up: "pinned projects keep something visible so we see it's
+   pinned" -- now a plain glyph in the ⋯ slot, not a button of its own;
+   see .acp-rail-pin-indicator). Conditional on :has() rather than a flat
+   padding on every toggle -- an unpinned group's count can use the full
+   row, since the only thing that would overlap it there is the
+   hover-revealed actions overlay, and that overlap is already how the
+   equivalent session-row title/timestamp behave under their own hover
+   reveal. */
+.acp-rail-group-head:has(.acp-rail-pin-indicator) .acp-rail-group-toggle { padding-right: 32px; }
 .acp-rail-group-toggle:hover { background: var(--surface-hover); }
 .acp-rail-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* Trails the label rather than leading it, so a heading starts at the rail's
@@ -1766,6 +1780,19 @@ body:has(> .acp-shell) { height: 100dvh; }
    without /acp's own kebab menu): unset, a block-level wrap stacked those
    three vertically rather than laying them out side by side. */
 .acp-rail-menu-wrap { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: 4px; background: var(--surface-hover); border-radius: var(--radius-sm); padding: 2px; z-index: 1; }
+/* Dashboard session rows only (button-style-alignment follow-up) -- /acp's
+   own kebab (.acp-rail-menu-btn above) keeps the base rule's pill
+   unmodified, since that button is `background: transparent` at rest and
+   leans on the wrap's own background for its resting "chip" look. This
+   page's session-row buttons are `.acp-rail-ghost-btn` instead, exactly
+   like the workspace row's action buttons, which have no wrapper
+   background at all -- so here the inherited pill just doubled the row's
+   own `:hover` background as a second, differently-rounded, 4px-taller box
+   (2px padding top and bottom around a 28px icon vs. the row's own 28px
+   height) sitting behind otherwise-transparent circles. A second class
+   rather than editing `.acp-rail-menu-wrap` itself, so /acp's rendering
+   doesn't move. */
+.acp-rail-menu-wrap.acp-rail-menu-wrap-ghost { background: transparent; padding: 0; }
 .acp-rail-menu-btn { min-height: 40px; width: 32px; padding: 0; line-height: 1; background: transparent; border-color: transparent; color: var(--text-dim); }
 .acp-rail-menu-btn:hover { background: var(--surface-hover); color: var(--text); }
 .acp-rail-menu-btn[aria-expanded="true"] { background: var(--surface-hover); color: var(--text); border-color: var(--border); }
@@ -1862,24 +1889,54 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-rail-menu-wrap { opacity: 0; }
   .acp-rail-item:hover .acp-rail-menu-wrap,
   .acp-rail-item:focus-within .acp-rail-menu-wrap,
-  .acp-rail-menu-wrap:has(> [aria-expanded="true"]),
-  .acp-rail-item:has(.pin-btn.pinned) .acp-rail-menu-wrap { opacity: 1; }
+  .acp-rail-menu-wrap:has(> [aria-expanded="true"]) { opacity: 1; }
+
+  /* The last-activity timestamp ("15:29") sits at the row's own right edge,
+     a normal flex child after the title rather than overlaid the way the
+     workspace count is -- but the hover-revealed .acp-rail-menu-wrap still
+     lands on top of it, since *that* is absolutely positioned to the same
+     right: 4px edge regardless of the row's own flow. Same fix as the
+     workspace count below: hidden while the actions it would collide with
+     are visible, rather than reserving space for both. */
+  .acp-rail-item:hover .acp-rail-row-when,
+  .acp-rail-item:focus-within .acp-rail-row-when,
+  .acp-rail-item:has(.acp-rail-menu-wrap > [aria-expanded="true"]) .acp-rail-row-when { opacity: 0; }
 
   /* Workspace-group quick actions (rail QA follow-up): same reasoning as
      the session row's own menu-wrap just above -- a viewer whose primary
      input cannot hover must still be able to reach these, so the whole
-     block stays inert outside this query. Per-button rather than
-     per-wrapper opacity, unlike .acp-rail-menu-wrap: a pinned workspace's
-     pin button has to stay visible with no hover at all (that is the
-     point of pinning something -- seeing it is pinned at a glance), and a
-     wrapper-level opacity switch cannot make one child disagree with it --
-     an opacity:0 ancestor dims everything under it regardless of what a
-     descendant's own opacity says. */
+     block stays inert outside this query. */
   .acp-rail-group-head .acp-rail-ghost-btn { opacity: 0; }
   .acp-rail-group-head:hover .acp-rail-ghost-btn,
   .acp-rail-group-actions:focus-within .acp-rail-ghost-btn { opacity: 1; }
-  /* The exception: pinned always wins regardless of hover. */
-  .acp-rail-ghost-btn.acp-rail-ghost-pinned { opacity: 1; }
+
+  /* The count ("3 of 38") sits at the toggle's own right edge
+     (`.acp-rail-group-count`'s `margin-left: auto`), the same spot the
+     hover-revealed actions overlay lands on top of (`.acp-rail-group-actions`
+     is `position: absolute; right: 4px`, floating over the toggle rather
+     than sharing its flex flow) -- so revealing one used to mean drawing it
+     straight over the other. Hidden here rather than given room: the actions
+     row is up to six icons wide, and reserving that much padding on every
+     toggle to avoid an overlap that only exists while the icons are already
+     covering that space anyway would just waste it back. */
+  .acp-rail-group-head:hover .acp-rail-group-count,
+  .acp-rail-group-head:focus-within .acp-rail-group-count,
+  .acp-rail-group-head:has(.acp-rail-group-actions [aria-expanded="true"]) .acp-rail-group-count { opacity: 0; }
+
+  /* The pin indicator is the mirror image of the ⋯ trigger it overlaps
+     (same slot -- see .acp-rail-pin-indicator's own rule): shown by default
+     here, since a hover-capable device can afford a persistent "this is
+     pinned" glyph that costs nothing until the pointer arrives, and hidden
+     the instant the row/group offers its real actions instead -- hover,
+     keyboard focus, or an already-open ⋯ menu (pointer moved off the
+     trigger onto its own popup, the same condition .acp-rail-menu-wrap's
+     own `:has` arm above keeps *it* visible for). */
+  .acp-rail-pin-indicator { opacity: 1; }
+  .acp-rail-group-head:hover .acp-rail-pin-indicator,
+  .acp-rail-group-head:focus-within .acp-rail-pin-indicator,
+  .acp-rail-item:hover .acp-rail-pin-indicator,
+  .acp-rail-item:focus-within .acp-rail-pin-indicator,
+  .acp-rail-item:has(.acp-rail-menu-wrap > [aria-expanded="true"]) .acp-rail-pin-indicator { opacity: 0; }
 }
 
 /* 40 px is a touch target and stays one wherever a thumb is the input. Where a

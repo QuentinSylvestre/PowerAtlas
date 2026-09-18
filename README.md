@@ -81,8 +81,16 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 - Live session status — sessions currently running in a terminal show a 🟢 Working (agent executing) or 🟡 Waiting (agent finished, your turn) or 🔴 Errored dot; workspace groups show the highest-priority status dot. A "Group by Status" mode in the workspaces rail's settings popover buckets sessions by status instead of by project or date. Detected by matching the working directory of running `claude` / `kiro-cli` processes to session workspaces; also supports v3 kiro-cli sessions (`messages.jsonl` format). Opt-in toast notifications fire when a session transitions from Working to Waiting or Errored (Windows toast via WinRT, Linux via notify-send)
 - Multi-select workspaces and batch-launch a provider or custom launcher across all of them at once
 - Per-provider settings with default args (e.g. trust-all-tools)
-- Pin folders and sessions for quick access
-- Quick actions on workspace rows: folder icon opens the workspace in your file explorer, terminal icon opens a shell there — both always visible, not hover-gated
+- Pin folders and sessions for quick access — a pinned row shows a small pin glyph in place of its `⋯`
+  trigger while nothing is hovered; hovering swaps it back for the row's real actions, `⋯` included.
+  Pin/Unpin itself lives inside that `⋯` menu rather than as a button of its own
+- Quick actions on a workspace row, revealed on hover: folder icon opens the workspace in your file
+  explorer; terminal icon opens a shell there; a custom-apps dropdown launches any configured launcher
+  marked "Use selected workspaces" + "Show in workspace card quick actions" (e.g. an editor) directly in
+  that folder; a built-in-AI dropdown starts a new session there with any installed provider. A kiro-cli
+  v3 session row's own `⋯` menu can permanently delete just that session, and the workspace row's `⋯`
+  menu can delete every kiro-cli session in that workspace at once (optionally the folder too, typed-name
+  confirmation required) — the same store and endpoint `/acp`'s own per-session delete uses
 - Built-in terminal launcher tile opens a shell at selected workspaces or default directory
 - A filter box narrows the workspaces rail to matching names/titles as you type (client-side, over whatever pages are currently loaded — paginate or clear the filter to reach the rest)
 - Custom launchers with inline args editing and one-click execution
