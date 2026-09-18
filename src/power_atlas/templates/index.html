@@ -1081,6 +1081,11 @@ var RAIL_ICON = {
   ]); },
   chat: function(){ return dashRailBuildIcon([
     ['path', {d: 'M21 12a8 8 0 0 1-11.5 7.2L4 20l1.1-4.4A8 8 0 1 1 21 12Z'}]
+  ]); },
+  more: function(){ return dashRailBuildIcon([
+    ['circle', {cx: '12', cy: '5.5', r: '1.7', fill: 'currentColor', stroke: 'none'}],
+    ['circle', {cx: '12', cy: '12', r: '1.7', fill: 'currentColor', stroke: 'none'}],
+    ['circle', {cx: '12', cy: '18.5', r: '1.7', fill: 'currentColor', stroke: 'none'}]
   ]); }
 };
 // Resume shows the session's own provider icon rather than a generic glyph
@@ -1656,6 +1661,90 @@ function dashRailHeadNode(key, label, countText, opts){
   head.appendChild(toggle);
   return head;
 }
+// Per-workspace-row dropdown menus (new-session, overflow "more"). Hover
+// opens them, no click required (prototype: PROTOTYPE_hover_buttons.html,
+// variant E, `.bc-overflow:hover .bc-dropdown`) -- the whole point being a
+// pointer already resting on the row shouldn't need a second, separate
+// click just to see what's in the menu. Click is kept only as the opening
+// gesture touch and keyboard get instead, since neither has a hover state
+// to open it with; on a real hover it just toggles a menu that's already
+// showing. Unlike the page's other .acp-rail-menu triggers (filters,
+// group/sort), which are each one fixed element with its own id,
+// dashRailGroupNode builds a fresh pair of these for every row on every
+// render, so open state is tracked as a list of currently-visible pairs
+// rather than a single per-id global.
+var _railOpenActionMenus = []; // [{btn, menu}, ...], hover can leave more than one open mid-transition
+function _closeRailActionMenuEntry(entry){
+  entry.menu.hidden = true;
+  entry.btn.setAttribute('aria-expanded', 'false');
+  var i = _railOpenActionMenus.indexOf(entry);
+  if (i !== -1) _railOpenActionMenus.splice(i, 1);
+}
+function _closeAllRailActionMenus(){
+  while (_railOpenActionMenus.length) _closeRailActionMenuEntry(_railOpenActionMenus[_railOpenActionMenus.length - 1]);
+}
+// position:fixed (see .acp-rail-action-menu in style.css for why), so this
+// has no anchor of its own -- computed fresh on every open from the
+// trigger's current position, same approach as positionLauncherTooltip
+// below.
+function _positionRailActionMenu(btn, menu){
+  var margin = 4, edge = 4;
+  var r = btn.getBoundingClientRect();
+  var mw = menu.offsetWidth, mh = menu.offsetHeight;
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var left = r.right - mw; // right-aligned to the trigger, like .acp-rail-settings
+  var top = r.bottom + margin;
+  if (top + mh > vh - edge) top = r.top - mh - margin; // no room below: flip above
+  if (left < edge) left = edge;
+  if (left + mw > vw - edge) left = vw - mw - edge;
+  if (top < edge) top = edge;
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+function _wireRailActionMenu(btn, menu){
+  var entry = {btn: btn, menu: menu};
+  var closeTimer = null;
+  function openNow(){
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+    if (!menu.hidden) return;
+    menu.hidden = false;
+    _positionRailActionMenu(btn, menu);
+    btn.setAttribute('aria-expanded', 'true');
+    _railOpenActionMenus.push(entry);
+  }
+  // A short delay, not an immediate close, so crossing the gap from the
+  // trigger down into its own dropdown doesn't flicker it shut first.
+  function scheduleClose(){
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = setTimeout(function(){ closeTimer = null; _closeRailActionMenuEntry(entry); }, 200);
+  }
+  btn.addEventListener('mouseenter', openNow);
+  btn.addEventListener('mouseleave', scheduleClose);
+  menu.addEventListener('mouseenter', function(){ if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; } });
+  menu.addEventListener('mouseleave', scheduleClose);
+  btn.addEventListener('click', function(e){
+    e.stopPropagation();
+    if (menu.hidden) { _railActionClickGuard = true; openNow(); }
+    else { _closeRailActionMenuEntry(entry); }
+  });
+}
+var _railActionClickGuard = false;
+document.addEventListener('click', function(){
+  if (_railActionClickGuard) { _railActionClickGuard = false; return; }
+  _closeAllRailActionMenus();
+});
+document.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' && _railOpenActionMenus.length) _closeAllRailActionMenus();
+});
+// dashRailGroupsEl itself is never replaced (only its children, on every
+// render), so this survives every re-render the same way the launcher
+// tiles' delegated mouseover listener does -- registered once here rather
+// than re-bound per row. Scrolling the list invalidates a fixed-position
+// menu's on-open coordinates immediately, and there is no scroll-anchored
+// reposition-on-scroll here; a wheel-scroll also doesn't fire mouseleave on
+// its own (the pointer never moved), so without this a menu opened by
+// hover could survive its own trigger scrolling out from under it.
+dashRailGroupsEl.addEventListener('scroll', function(){ _closeAllRailActionMenus(); }, {passive: true});
 function dashRailGroupNode(group){
   var wrap = document.createElement('div');
   wrap.className = 'acp-rail-group' + (group.exists === false ? ' acp-rail-group-gone' : '');
@@ -1702,55 +1791,111 @@ function dashRailGroupNode(group){
   actions.className = 'acp-rail-group-actions';
   var folderBtn = document.createElement('button');
   folderBtn.type = 'button';
-  folderBtn.className = 'card-terminal-btn';
+  folderBtn.className = 'acp-rail-ghost-btn';
   folderBtn.setAttribute('aria-label', 'Open folder');
   folderBtn.title = 'Open folder';
   folderBtn.appendChild(RAIL_ICON.folder());
   folderBtn.addEventListener('click', function(e){ e.stopPropagation(); openFolder(group.cwd); });
   actions.appendChild(folderBtn);
-  var termBtn = document.createElement('button');
-  termBtn.type = 'button';
-  termBtn.className = 'card-terminal-btn';
-  termBtn.setAttribute('aria-label', 'Open terminal');
-  termBtn.title = 'Open terminal';
-  termBtn.appendChild(RAIL_ICON.terminal());
-  termBtn.addEventListener('click', function(e){ e.stopPropagation(); openTerminal(termBtn); });
-  actions.appendChild(termBtn);
-  // One quick-launch icon per available provider (rail QA follow-up) --
+  // New session: one dropdown (Terminal + one row per available provider --
   // the same set the provider tabs above the rail are built from, so a
-  // provider hidden there (disabled, or the machine only has one) is
-  // consistently hidden here too rather than the two lists drifting.
+  // provider hidden there is consistently hidden here too) behind a single
+  // terminal-icon trigger, replacing what used to be a same-sized button per
+  // provider sitting always-visible in this row.
+  var newSessionBtn = document.createElement('button');
+  newSessionBtn.type = 'button';
+  newSessionBtn.className = 'acp-rail-ghost-btn';
+  newSessionBtn.setAttribute('aria-haspopup', 'menu');
+  newSessionBtn.setAttribute('aria-expanded', 'false');
+  newSessionBtn.setAttribute('aria-label', 'New session');
+  newSessionBtn.title = 'New session';
+  newSessionBtn.appendChild(RAIL_ICON.terminal());
+  var newSessionMenu = document.createElement('div');
+  newSessionMenu.className = 'acp-rail-menu acp-rail-action-menu';
+  newSessionMenu.setAttribute('role', 'menu');
+  newSessionMenu.setAttribute('aria-label', 'New session');
+  newSessionMenu.hidden = true;
+  var termItem = document.createElement('button');
+  termItem.type = 'button';
+  termItem.className = 'acp-rail-menu-item acp-rail-action-item';
+  termItem.setAttribute('role', 'menuitem');
+  termItem.appendChild(RAIL_ICON.terminal());
+  var termLabel = document.createElement('span');
+  termLabel.textContent = 'Open terminal';
+  termItem.appendChild(termLabel);
+  termItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); openTerminal(termItem); });
+  newSessionMenu.appendChild(termItem);
+  if ((window._availableProviders || []).length) {
+    var newSessionDivider = document.createElement('div');
+    newSessionDivider.className = 'acp-rail-menu-divider';
+    newSessionMenu.appendChild(newSessionDivider);
+  }
   (window._availableProviders || []).forEach(function(p){
-    var provBtn = document.createElement('button');
-    provBtn.type = 'button';
-    provBtn.className = 'card-terminal-btn card-provider-btn';
-    provBtn.setAttribute('aria-label', 'New ' + (p.display || p.name) + ' session');
-    provBtn.title = 'New ' + (p.display || p.name) + ' session';
+    var provItem = document.createElement('button');
+    provItem.type = 'button';
+    provItem.className = 'acp-rail-menu-item acp-rail-action-item';
+    provItem.setAttribute('role', 'menuitem');
     var provIcon = document.createElement('img');
     provIcon.className = 'session-provider-icon';
     provIcon.src = '/api/launcher-icon/provider--' + encodeURIComponent(p.name);
     provIcon.alt = '';
     provIcon.onerror = function(){ this.remove(); };
-    provBtn.appendChild(provIcon);
-    provBtn.addEventListener('click', function(e){ e.stopPropagation(); newSessionInWorkspace(provBtn, p.name); });
-    actions.appendChild(provBtn);
+    provItem.appendChild(provIcon);
+    var provLabel = document.createElement('span');
+    provLabel.textContent = 'New ' + (p.display || p.name) + ' session';
+    provItem.appendChild(provLabel);
+    provItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); newSessionInWorkspace(provItem, p.name); });
+    newSessionMenu.appendChild(provItem);
   });
-  var settingsBtn = document.createElement('button');
-  settingsBtn.type = 'button';
-  settingsBtn.className = 'card-settings-btn';
-  settingsBtn.setAttribute('aria-label', 'Workspace settings');
-  settingsBtn.title = 'Settings';
-  settingsBtn.appendChild(RAIL_ICON.gear());
-  settingsBtn.addEventListener('click', function(e){ e.stopPropagation(); openWorkspaceSettings(settingsBtn); });
-  actions.appendChild(settingsBtn);
+  _wireRailActionMenu(newSessionBtn, newSessionMenu);
+  actions.appendChild(newSessionBtn);
+  // Appended to `head`, not `actions`: `.acp-rail-group-actions` carries a
+  // `transform` (its own vertical-centering trick), and a `transform` on any
+  // ancestor becomes the containing block for a `position: fixed`
+  // descendant exactly the way a `position: relative` ancestor does for an
+  // `absolute` one -- so the menu's own left/top, computed in
+  // _positionRailActionMenu against the viewport, would land relative to
+  // that transformed box instead and come out wildly off. `head` has no
+  // transform (only `position: sticky`, which fixed positioning ignores),
+  // and is still inside `wrap` -- so `.closest('[data-cwd]')` in
+  // openTerminal/newSessionInWorkspace/openWorkspaceSettings keeps working.
+  head.appendChild(newSessionMenu);
   var pinBtn = document.createElement('button');
   pinBtn.type = 'button';
-  pinBtn.className = 'card-pin-btn' + (group.pinned ? ' pinned' : '');
+  pinBtn.className = 'acp-rail-ghost-btn' + (group.pinned ? ' acp-rail-ghost-pinned' : '');
   pinBtn.setAttribute('aria-label', group.pinned ? 'Unpin workspace' : 'Pin workspace');
   pinBtn.title = group.pinned ? 'Unpin workspace' : 'Pin workspace';
   pinBtn.appendChild(RAIL_ICON.pin());
   pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinWorkspace(pinBtn); });
   actions.appendChild(pinBtn);
+  // Overflow menu: just Settings for now (room to grow without this row
+  // gaining another always-visible icon per addition).
+  var moreBtn = document.createElement('button');
+  moreBtn.type = 'button';
+  moreBtn.className = 'acp-rail-ghost-btn';
+  moreBtn.setAttribute('aria-haspopup', 'menu');
+  moreBtn.setAttribute('aria-expanded', 'false');
+  moreBtn.setAttribute('aria-label', 'More actions');
+  moreBtn.title = 'More';
+  moreBtn.appendChild(RAIL_ICON.more());
+  var moreMenu = document.createElement('div');
+  moreMenu.className = 'acp-rail-menu acp-rail-action-menu';
+  moreMenu.setAttribute('role', 'menu');
+  moreMenu.setAttribute('aria-label', 'More actions');
+  moreMenu.hidden = true;
+  var settingsItem = document.createElement('button');
+  settingsItem.type = 'button';
+  settingsItem.className = 'acp-rail-menu-item acp-rail-action-item';
+  settingsItem.setAttribute('role', 'menuitem');
+  settingsItem.appendChild(RAIL_ICON.gear());
+  var settingsLabel = document.createElement('span');
+  settingsLabel.textContent = 'Settings';
+  settingsItem.appendChild(settingsLabel);
+  settingsItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); openWorkspaceSettings(settingsItem); });
+  moreMenu.appendChild(settingsItem);
+  _wireRailActionMenu(moreBtn, moreMenu);
+  actions.appendChild(moreBtn);
+  head.appendChild(moreMenu); // see the newSessionMenu comment above for why this goes on `head`, not `actions`
   head.appendChild(actions);
 
   wrap.appendChild(head);

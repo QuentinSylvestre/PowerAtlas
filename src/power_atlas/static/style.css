@@ -16,6 +16,7 @@ html, body { height: 100%; overflow: hidden; }
   --accent-hover: #8ba4ff;
   --accent-dim: rgba(108, 140, 255, 0.12);
   --success: #4ade80;
+  --amber: #f59e0b;
   --radius: 12px;
   --radius-sm: 6px;
   --topbar-bg: #01070e; /* must match banner right-edge color */
@@ -313,8 +314,8 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
 .badge-stale { font-size: 10px; color: #f87171; background: rgba(248,113,113,0.12); padding: 2px 8px; border-radius: 10px; }
 .card-actions { display: flex; align-items: center; gap: 4px; opacity: 0; transition: opacity 0.1s; position: absolute; right: 16px; top: 50%; transform: translateY(-50%); background: var(--surface-hover); padding-left: 8px; }
 .card-header:hover .card-actions { opacity: 1; }
-.card-new-btn, .card-terminal-btn { background: var(--surface-hover); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 600; font-family: monospace; transition: all 0.1s; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
-.card-new-btn:hover, .card-terminal-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+.card-new-btn { background: var(--surface-hover); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 600; font-family: monospace; transition: all 0.1s; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); }
+.card-new-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
 .card-check { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid var(--border); display: flex; align-items: center; justify-content: center; transition: all 0.12s; flex-shrink: 0; cursor: pointer; }
 .card-header:hover .card-check { border-color: var(--text-muted); }
 .workspace-card.selected .card-check { border-color: var(--accent); background: var(--accent); }
@@ -338,20 +339,29 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
    `position: sticky` is this overlay's anchor -- any position other than
    static establishes a containing block, sticky included.
    No shared pill background/padding here unlike `.acp-rail-menu-wrap`
-   below -- each button in this group (.card-terminal-btn/.card-settings-
-   btn/.card-pin-btn) already draws its own border and background, and the
-   buttons hide individually rather than as one unit (the pinned exception
-   needs that), so a wrapper-level background would keep rendering a bare
-   box behind whichever buttons were currently invisible. */
+   below -- each button in this group (.acp-rail-ghost-btn, all four of
+   them) already draws its own hover halo, and the buttons hide
+   individually rather than as one unit (the pinned exception needs that),
+   so a wrapper-level background would keep rendering a bare box behind
+   whichever buttons were currently invisible. */
 .acp-rail-group-actions { display: flex; align-items: center; gap: 4px; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 1; }
-/* No :hover rule here on purpose ("pin button: no change when hovered",
-   rail QA follow-up) -- folder/terminal/provider/settings still fill with
-   the accent color under a direct hover (.card-terminal-btn/.card-settings-
-   btn below), but the pin button's own look is meant to read purely from
-   whether the workspace is pinned, not from where the pointer happens to
-   be sitting. */
-.card-pin-btn { background: var(--surface-hover); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: opacity 0.1s; }
-.card-pin-btn.pinned { color: var(--accent); border-color: var(--accent); }
+/* Ghost icons -- transparent at rest, a soft neutral halo plus a slight
+   grow on hover -- for the workspace row's four hover-revealed actions
+   (folder, new-session dropdown trigger, pin, overflow "more" trigger).
+   Matches the prototype (PROTOTYPE_hover_buttons.html, variant E, .bc-btn)
+   the user picked this design from; `[aria-expanded="true"]` keeps a
+   dropdown trigger's halo lit while its own menu is open, same as the
+   halo a hover already gives it. */
+.acp-rail-ghost-btn { width: 28px; height: 28px; border-radius: 50%; border: none; background: transparent; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: transform 120ms cubic-bezier(.34,1.56,.64,1), background 120ms, color 120ms; }
+.acp-rail-ghost-btn:hover, .acp-rail-ghost-btn[aria-expanded="true"] { transform: scale(1.1); background: rgba(139, 144, 160, 0.16); color: var(--text); }
+/* No hover-only rule here on purpose ("pin button: no change when
+   hovered", rail QA follow-up, still true under the ghost-icon restyle) --
+   the pin button's own look is meant to read purely from whether the
+   workspace is pinned, not from where the pointer happens to be sitting;
+   its `:hover` rule below only changes the *halo color* to match the
+   pinned amber, not whether it's tinted at all. */
+.acp-rail-ghost-btn.acp-rail-ghost-pinned { color: var(--amber); }
+.acp-rail-ghost-btn.acp-rail-ghost-pinned:hover { background: rgba(245, 158, 11, 0.18); color: var(--amber); }
 .pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; opacity: 0; transition: all 0.1s; color: var(--text-muted); }
 .session-row:hover .pin-btn { opacity: 0.5; }
 .pin-btn:hover { opacity: 1 !important; background: var(--accent); border-color: var(--accent); color: white; }
@@ -777,9 +787,6 @@ script { display: none; }
 .workspace-settings-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 420px; width: 90vw; }
 .workspace-settings-modal::backdrop { background: rgba(0,0,0,0.5); }
 .workspace-settings-modal h3 { margin-bottom: 12px; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card-settings-btn { background: var(--surface-hover); border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: all 0.1s; }
-.card-settings-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
-
 /* Tag chip input */
 .ws-tags-field { margin-bottom: 12px; }
 .ws-tags-label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 4px; }
@@ -1689,7 +1696,7 @@ body:has(> .acp-shell) { height: 100dvh; }
    only thing that would overlap it there is the hover-revealed actions
    overlay, and that overlap is already how the equivalent session-row
    title/timestamp behave under their own hover reveal. */
-.acp-rail-group-head:has(.card-pin-btn.pinned) .acp-rail-group-toggle { padding-right: 32px; }
+.acp-rail-group-head:has(.acp-rail-ghost-pinned) .acp-rail-group-toggle { padding-right: 32px; }
 .acp-rail-group-toggle:hover { background: var(--surface-hover); }
 .acp-rail-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* Trails the label rather than leading it, so a heading starts at the rail's
@@ -1777,6 +1784,22 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-menu-item:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-menu-danger:not(:disabled) { color: #f87171; }
 .acp-rail-menu-danger:hover:not(:disabled) { background: rgba(248, 113, 113, 0.12); }
+/* Icon + label rows (new-session's Terminal/provider list, the overflow
+   menu's Settings entry) -- the plain `.acp-rail-menu-item` above is
+   label-only. */
+.acp-rail-action-item { display: flex; align-items: center; gap: 8px; }
+.acp-rail-action-item .session-provider-icon { flex-shrink: 0; }
+/* `.acp-rail-menu`'s own absolute/right:0 anchors it to a positioned
+   ancestor that never scrolls (the header). A workspace row's own trigger
+   sits inside `.acp-rail-groups`, which does scroll (`overflow-y: auto`),
+   so that anchor would get clipped the moment the row it belongs to isn't
+   near the top of the list. Fixed positioning, computed on open from the
+   trigger's own getBoundingClientRect (same fix already used for
+   .launcher-tooltip/positionLauncherTooltip), sidesteps the clipping
+   entirely; the two extra classes give this rule the specificity to win
+   over the plain `.acp-rail-menu` position without depending on source
+   order. */
+.acp-rail-menu.acp-rail-action-menu { position: fixed; top: 0; left: 0; right: auto; }
 /* The list's settings popup. Anchored to its own button rather than to the
    scrolling list, so it opens against the control that summoned it. Reuses
    `.acp-rail-menu` for the panel itself — same surface, same border, same
@@ -1852,17 +1875,11 @@ body:has(> .acp-shell) { height: 100dvh; }
      wrapper-level opacity switch cannot make one child disagree with it --
      an opacity:0 ancestor dims everything under it regardless of what a
      descendant's own opacity says. */
-  .acp-rail-group-head .card-terminal-btn,
-  .acp-rail-group-head .card-settings-btn,
-  .acp-rail-group-head .card-pin-btn { opacity: 0; }
-  .acp-rail-group-head:hover .card-terminal-btn,
-  .acp-rail-group-head:hover .card-settings-btn,
-  .acp-rail-group-head:hover .card-pin-btn,
-  .acp-rail-group-actions:focus-within .card-terminal-btn,
-  .acp-rail-group-actions:focus-within .card-settings-btn,
-  .acp-rail-group-actions:focus-within .card-pin-btn { opacity: 1; }
+  .acp-rail-group-head .acp-rail-ghost-btn { opacity: 0; }
+  .acp-rail-group-head:hover .acp-rail-ghost-btn,
+  .acp-rail-group-actions:focus-within .acp-rail-ghost-btn { opacity: 1; }
   /* The exception: pinned always wins regardless of hover. */
-  .card-pin-btn.pinned { opacity: 1; }
+  .acp-rail-ghost-btn.acp-rail-ghost-pinned { opacity: 1; }
 }
 
 /* 40 px is a touch target and stays one wherever a thumb is the input. Where a
