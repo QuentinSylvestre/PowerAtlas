@@ -580,6 +580,45 @@ initTranscriptDom({
   promptUpBtn: document.getElementById('dashPromptUp'),
   promptDownBtn: document.getElementById('dashPromptDown'),
 });
+// ---- prompt navigation arrows ---------------------------------------------
+//
+// acp.html wires its own copy of this (same shared transcriptEl/promptUpBtn/
+// promptDownBtn globals, per that file's "_updateNavArrows moved to
+// transcript-renderer.js, the event wiring stays here, page-specific"
+// comment) -- this panel never got the click/scroll listeners at all, only
+// the DOM refs above, so the arrows rendered (and un-dimmed) but did nothing.
+// Mirrors acp.html's block verbatim.
+transcriptEl.addEventListener('scroll', _updateNavArrows);
+promptUpBtn.addEventListener('click', function() {
+  if (!userMsgEls.length) return;
+  var threshold = transcriptEl.scrollTop;
+  var target = userMsgEls[0];
+  for (var i = userMsgEls.length - 1; i >= 0; i--) {
+    if (userMsgEls[i].offsetTop < threshold - 10) {
+      target = userMsgEls[i];
+      break;
+    }
+  }
+  target.scrollIntoView({behavior: 'smooth', block: 'start'});
+});
+promptDownBtn.addEventListener('click', function() {
+  if (!userMsgEls.length) return;
+  var threshold = transcriptEl.scrollTop + 10;
+  var target = null;
+  for (var i = 0; i < userMsgEls.length; i++) {
+    if (userMsgEls[i].offsetTop > threshold) {
+      target = userMsgEls[i];
+      break;
+    }
+  }
+  if (target) {
+    target.scrollIntoView({behavior: 'smooth', block: 'start'});
+  } else {
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    promptDownBtn.disabled = true;
+    setTimeout(function() { promptDownBtn.disabled = false; }, 400);
+  }
+});
 // The sid of the transcript currently in flight or shown, so a slower
 // in-flight fetch for a row the user already clicked away from cannot land
 // after a newer one and show the wrong conversation.
@@ -1959,7 +1998,7 @@ function dashRailGroupNode(group){
     });
     _wireRailActionMenu(appsBtn, appsMenu);
     actions.appendChild(appsBtn);
-    head.appendChild(appsMenu); // see the aiMenu comment below for why this goes on `head`, not `actions`
+    wrap.appendChild(appsMenu); // see the aiMenu comment below for why this goes on `wrap`, not `head`/`actions`
   }
   // Quick built-in: one dropdown, one row per installed+enabled AI provider
   // (the same set the provider tabs above the rail are built from, so a
@@ -1998,18 +2037,32 @@ function dashRailGroupNode(group){
   });
   _wireRailActionMenu(aiBtn, aiMenu);
   actions.appendChild(aiBtn);
-  // Appended to `head`, not `actions`: `.acp-rail-group-actions` carries a
-  // `transform` (its own vertical-centering trick), and a `transform` on any
-  // ancestor becomes the containing block for a `position: fixed`
-  // descendant exactly the way a `position: relative` ancestor does for an
-  // `absolute` one -- so the menu's own left/top, computed in
-  // _positionRailActionMenu against the viewport, would land relative to
-  // that transformed box instead and come out wildly off. `head` has no
-  // transform (only `position: sticky`, which fixed positioning ignores),
-  // and is still inside `wrap` -- so `.closest('[data-cwd]')` in
-  // openTerminal/newSessionInWorkspace/openWorkspaceSettings/
-  // runLauncherInWorkspace keeps working.
-  head.appendChild(aiMenu);
+  // Appended to `wrap`, not `actions` or `head`. Not `actions`:
+  // `.acp-rail-group-actions` carries a `transform` (its own
+  // vertical-centering trick), and a `transform` on any ancestor becomes the
+  // containing block for a `position: fixed` descendant exactly the way a
+  // `position: relative` ancestor does for an `absolute` one -- so the
+  // menu's own left/top, computed in _positionRailActionMenu against the
+  // viewport, would land relative to that transformed box instead and come
+  // out wildly off. Not `head` either: `.acp-rail-group-head` has no
+  // transform, so `head` was never a containing-block problem -- but it
+  // does carry `position: sticky` with an explicit `z-index: 1`, and any
+  // positioned element with a non-auto z-index establishes a stacking
+  // context regardless of which `position` value it uses. A menu appended
+  // there paints and hit-tests inside *that* context, at head's own z-index
+  // (1) relative to everything outside it, not at the menu's own z-index
+  // (5) -- so wherever this fixed-position menu visually overlapped a
+  // session row further down the list, the row's own (DOM-later, same
+  // z-index-1) `.acp-rail-menu-wrap` action buttons -- invisible at rest via
+  // `opacity: 0`, not `display: none`, so still hit-testable -- won the tie
+  // and silently ate hover/clicks meant for the dropdown, most visibly its
+  // "Resume session" quick action. `wrap` (`.acp-rail-group`) has no
+  // position/transform/z-index of its own, so it neither breaks the fixed
+  // child's viewport-relative math nor traps its z-index inside a
+  // lower-value stacking context -- and it's still `.closest('[data-cwd]')`
+  // for openTerminal/newSessionInWorkspace/openWorkspaceSettings/
+  // runLauncherInWorkspace.
+  wrap.appendChild(aiMenu);
   // Overflow menu: Pin/Unpin, Settings, and (further below) Delete. Pin used
   // to be its own always-visible-when-pinned icon (pin-redesign follow-up);
   // it's a menu item now, and a plain glyph (.acp-rail-pin-indicator, added
@@ -2070,7 +2123,7 @@ function dashRailGroupNode(group){
   }
   _wireRailActionMenu(moreBtn, moreMenu);
   actions.appendChild(moreBtn);
-  head.appendChild(moreMenu); // see the aiMenu comment above for why this goes on `head`, not `actions`
+  wrap.appendChild(moreMenu); // see the aiMenu comment above for why this goes on `wrap`, not `head`/`actions`
   head.appendChild(actions);
   // The static pin indicator: sits in the exact slot `moreBtn` occupies,
   // visible only while nothing is hovered (see .acp-rail-pin-indicator in

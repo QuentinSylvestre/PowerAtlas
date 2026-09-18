@@ -1908,7 +1908,16 @@ body:has(> .acp-shell) { height: 100dvh; }
      block stays inert outside this query. */
   .acp-rail-group-head .acp-rail-ghost-btn { opacity: 0; }
   .acp-rail-group-head:hover .acp-rail-ghost-btn,
-  .acp-rail-group-actions:focus-within .acp-rail-ghost-btn { opacity: 1; }
+  .acp-rail-group-actions:focus-within .acp-rail-ghost-btn,
+  /* The apps/AI/more dropdown panels live on `.acp-rail-group` now, not
+     `head` (stacking-context fix, dashRailGroupNode), so hovering an open
+     one no longer keeps `head:hover` true once the pointer leaves head's own
+     box for the panel further down the list. `aria-expanded` still lives on
+     the trigger button itself, inside `.acp-rail-group-actions`, inside
+     `head` -- unaffected by where its panel moved -- so this mirrors the
+     `:has` arm the group-count rule just below already uses for the same
+     "a trigger's own menu is open" condition. */
+  .acp-rail-group-head:has(.acp-rail-group-actions [aria-expanded="true"]) .acp-rail-ghost-btn { opacity: 1; }
 
   /* The count ("3 of 38") sits at the toggle's own right edge
      (`.acp-rail-group-count`'s `margin-left: auto`), the same spot the
@@ -1934,6 +1943,12 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-rail-pin-indicator { opacity: 1; }
   .acp-rail-group-head:hover .acp-rail-pin-indicator,
   .acp-rail-group-head:focus-within .acp-rail-pin-indicator,
+  /* Same gap the ghost-btn rule above just picked up its own `:has` arm
+     for, and the same fix: the group's pin indicator sits in the ⋯
+     trigger's own slot, so it must stay hidden for as long as that
+     trigger's menu is open, not just while the pointer is still over
+     `head`. */
+  .acp-rail-group-head:has(.acp-rail-group-actions [aria-expanded="true"]) .acp-rail-pin-indicator,
   .acp-rail-item:hover .acp-rail-pin-indicator,
   .acp-rail-item:focus-within .acp-rail-pin-indicator,
   .acp-rail-item:has(.acp-rail-menu-wrap > [aria-expanded="true"]) .acp-rail-pin-indicator { opacity: 0; }
