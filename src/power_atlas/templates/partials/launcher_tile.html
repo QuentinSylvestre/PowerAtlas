@@ -1,9 +1,13 @@
-<div class="launcher-tile{% if launcher.is_provider %} provider-tile{% endif %}" data-id="{{ launcher.id }}" onclick="runLauncherById('{{ launcher.id }}')"{% if launcher.color %} style="border-left: 3px solid {{ launcher.color }}"{% endif %}>
-  {% if launcher.is_provider %}<span class="launcher-lock" title="System launcher">&#128274;</span>{% endif %}
+<div class="launcher-tile{% if launcher.is_provider %} provider-tile{% endif %}" data-id="{{ launcher.id }}" onclick="runLauncherById('{{ launcher.id }}')"{% if launcher.color %} style="--stripe: {{ launcher.color }}"{% endif %}>
+  {% if launcher.is_provider %}
+  <svg class="launcher-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" title="System launcher"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+  {% endif %}
   {% if launcher.use_selected_workspaces %}<span class="launcher-badge" id="badge-{{launcher.id}}"></span>{% endif %}
   <img class="launcher-icon" src="/api/launcher-icon/{{ launcher.id }}" alt="" aria-hidden="true">
   <span class="launcher-name">{{ launcher.name }}</span>
-  <button class="launcher-gear-btn" onclick="event.stopPropagation();editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">&#9881;&#65039;</button>
+  <button class="launcher-gear-btn" onclick="event.stopPropagation();editLauncher('{{ launcher.id }}')" aria-label="Edit {{ launcher.name }}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z"/></svg>
+  </button>
   <div class="launcher-tooltip">
     <div class="launcher-tooltip-row"><strong>Command:</strong> {{ launcher.command }}{% if launcher.custom_args %} {{ launcher.custom_args }}{% endif %}</div>
     {% if launcher.cwd %}<div class="launcher-tooltip-row"><strong>Cwd:</strong> {{ launcher.cwd }}</div>{% endif %}

@@ -1412,7 +1412,7 @@ class TestTheDashboardLinksToTheAgentPage:
             "the dashboard topbar has no link to /acp, so the agent surface is "
             "reachable only by typing the path")
         attrs, label = found[0]
-        assert "topbar-profile-btn" in attrs, (
+        assert "topbar-nav-pill" in attrs, (
             "the link does not wear the topbar's control shape, so it reads as "
             "stray text beside two pill buttons")
         assert "aria-label=" in attrs, "the link is unlabelled for a screen reader"
@@ -14343,7 +14343,7 @@ class TestAcpFlatListing:
                                     "kiro-cli")])
         monkeypatch.setattr(
             config_mod, "get_workspace_settings",
-            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else []})
+            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else [], "color": ""})
 
         client.get(self._PATH, params={"mode": "recent"})
         assert collector["exclude_cwds"] == {r"C:\ws\secret"}
@@ -14691,7 +14691,7 @@ class TestDashboardListingEndpoint:
         grouped_multi_store["add"](r"C:\dev\open", "kiro-cli-v3", [_acp_row("s2")])
         monkeypatch.setattr(
             config_mod, "get_workspace_settings",
-            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else []})
+            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else [], "color": ""})
         body = client.get(self._PATH).json()
         assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\open"]
 
@@ -14702,7 +14702,7 @@ class TestDashboardListingEndpoint:
         grouped_multi_store["add"](r"C:\dev\open", "kiro-cli-v3", [_acp_row("s2")])
         monkeypatch.setattr(
             config_mod, "get_workspace_settings",
-            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else []})
+            lambda cfg, cwd: {"tags": ["hidden"] if "secret" in cwd else [], "color": ""})
         body = client.get(self._PATH, params={"tag": "hidden"}).json()
         assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\secret"]
 
@@ -14713,7 +14713,7 @@ class TestDashboardListingEndpoint:
         grouped_multi_store["add"](r"C:\dev\backend", "kiro-cli-v3", [_acp_row("s2")])
         monkeypatch.setattr(
             config_mod, "get_workspace_settings",
-            lambda cfg, cwd: {"tags": ["frontend"] if "frontend" in cwd else []})
+            lambda cfg, cwd: {"tags": ["frontend"] if "frontend" in cwd else [], "color": ""})
         body = client.get(self._PATH, params={"tag": "frontend"}).json()
         assert [g["cwd"] for g in body["groups"]] == [r"C:\dev\frontend"]
 

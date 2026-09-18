@@ -118,7 +118,12 @@ def _resolve_launch_cwd(workspace: str, config, provider: str = "") -> str:
 
 
 def _resolve_workspace_color(cwd: str, config) -> str:
-    """Resolve accent color: workspace explicit > first tag color > empty (use provider gradient)."""
+    """Resolve a workspace's own accent color: explicit workspace color, else
+    its first tag's color, else "" (the rail then draws no stripe at all --
+    dashboard/ACP-merge QA follow-up, the group's `color` field in
+    `_acp_listing`'s `meta`). Deliberately not a provider color: a
+    workspace's sessions can span several providers, so no single provider
+    color would represent the group, only its own tags meaningfully can."""
     from .config import get_workspace_settings
     ws = get_workspace_settings(config, cwd)
     if ws["color"]:
@@ -2266,6 +2271,10 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                 "exists": exists_flags[index],
                 "pinned": is_pinned_folder,
                 "active": is_active,
+                # lazy_mode implies include_provider (see its definition
+                # above), so this needs no separate guard the way the
+                # non-lazy meta dict's color field does below.
+                "color": _resolve_workspace_color(ws_cwd, config),
             }
             rows.append((meta, []))
             continue
@@ -2311,6 +2320,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         if include_provider:
             meta["pinned"] = is_pinned_folder
             meta["active"] = is_active
+            meta["color"] = _resolve_workspace_color(ws_cwd, config)
         rows.append((meta, page_tagged))
 
     pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]

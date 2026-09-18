@@ -272,7 +272,12 @@ def get_workspace_settings(config: Config, cwd: str) -> dict:
     found = norm_map.get(_normalize_path(cwd))
     if found is None:
         return {"tags": [], "color": ""}
-    return {"tags": list(found["tags"]), "color": found["color"]}
+    # .get(), not [] -- load_config's own sanitization pass always sets both
+    # keys, but an entry that reached here some other way (a test's raw
+    # Config, or an older config.toml this build didn't sanitize) should not
+    # 500 the listing route over a missing key this function already knows
+    # the right default for.
+    return {"tags": list(found.get("tags", [])), "color": found.get("color", "")}
 
 
 def get_active_launch_profile(config: Config) -> LaunchProfile:

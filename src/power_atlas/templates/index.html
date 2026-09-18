@@ -11,77 +11,120 @@
        (profile, remote access, autostart, last refresh), so a page link sitting
        in it read as one more setting and was missed. The top-left corner is
        where a reader looks to answer "where am I, and where else can I go". -->
-  <a class="topbar-profile-btn topbar-link topbar-nav" href="/acp"
+  <a class="topbar-nav-pill topbar-nav topbar-link" href="/acp"
      title="Agent sessions: create and drive kiro-cli sessions over ACP, without a terminal"
-     aria-label="ACP agent sessions">🤖 ACP</a>
+     aria-label="ACP agent sessions">
+    <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>
+    ACP
+  </a>
   <div class="topbar-spacer"></div>
-  <div class="topbar-cluster">
-    <button id="profileNameBtn" class="topbar-profile-btn" onclick="openProfileModal()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
-      ⚙️ {{ active_launch_profile.name }}
+  <div class="refresh-group" title="Last data refresh time">
+    <span class="refresh-time" id="refreshTime"></span>
+    <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions" title="Refresh all sessions now">
+      <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
     </button>
-    <button class="topbar-profile-btn" onclick="openRemoteModal()" title="Remote access: the URL and device secret a phone needs, and which settings need a restart" aria-label="Remote access">
-      📡 Remote
-    </button>
-    <div class="topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
-      <span class="trust-dot"></span>Autostart
-    </div>
-    <div class="refresh-group" title="Last data refresh time">
-      <span class="refresh-time" id="refreshTime"></span>
-      <button class="refresh-btn" onclick="doRefresh()" aria-label="Refresh sessions" title="Refresh all sessions now">↻</button>
-    </div>
   </div>
-  <span class="topbar-separator" aria-hidden="true"></span>
-  <div class="topbar-cluster">
-    <div class="peek-hotkey-group" title="Global hotkey to show/hide the peek overlay window">
-      <label class="peek-label" for="peekHotkey">Peek</label>
-      <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
-        <span class="hotkey-icon">⌨</span>
-        <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
-               onfocus="this.parentElement.classList.add('focused')"
-               onblur="this.parentElement.classList.remove('focused')"
-               onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
-        <!-- The `.then(loadRestartKeys)` is load-bearing now that the badge is
-             conditional. This field is the only restart-only control that
-             saves and stays on the page: `savePortAndRestart` restarts and
-             navigates away, and the bind address already refreshes. Without
-             it, saving a hotkey leaves the badge absent until a reload — the
-             field accepting a value and behaving as though nothing happened,
-             which is the exact failure the badge exists to prevent. -->
+  <!-- Settings menu: everything below used to live directly in this row as
+       separate pills (Profile / Remote / Autostart / Peek hotkey / Port).
+       Moved here so only Refresh -- the one control worth a click without a
+       menu in the way -- keeps a permanent seat in the bar. Every element
+       below keeps its original id/onclick/onchange untouched; only its
+       container and visual treatment changed, so markRestartInputs/
+       loadRestartKeys (further down this file) still find `.peek-hotkey-
+       group` and `.port-group` exactly where they always have. -->
+  <div class="topbar-settings-wrap">
+    <button id="topbarSettingsBtn" class="topbar-settings-btn" aria-expanded="false" aria-haspopup="true" title="Settings" aria-label="Settings">
+      <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z"/></svg>
+      <span id="topbarPendingDot" class="topbar-pending-dot" hidden title="Some settings need a restart to take effect"></span>
+    </button>
+    <div id="topbarSettingsMenu" class="acp-rail-menu topbar-settings-menu" hidden>
+      <div class="topbar-menu-section-label">Profile</div>
+      <button id="profileNameBtn" class="topbar-menu-row" onclick="openProfileModal();closeTopbarSettings()" title="Manage launch profiles (window mode, autostart, terminal)" aria-label="Manage launch profiles">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z"/></svg>
+        <span class="topbar-menu-label">{{ active_launch_profile.name }}</span>
+        <svg class="topbar-ic topbar-menu-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+      <button class="topbar-menu-row" onclick="openRemoteModal();closeTopbarSettings()" title="Remote access: the URL and device secret a phone needs, and which settings need a restart" aria-label="Remote access">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><circle cx="7" cy="6" r=".6" fill="currentColor" stroke="none"/></svg>
+        <span class="topbar-menu-label">Remote access</span>
+        <svg class="topbar-ic topbar-menu-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+
+      <div class="topbar-menu-divider"></div>
+      <div class="topbar-menu-section-label">Startup</div>
+      <div class="topbar-menu-row topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>
+        <span class="topbar-menu-label">Autostart on login</span>
+        <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
       </div>
-    </div>
-  </div>
-  <span class="topbar-separator" aria-hidden="true"></span>
-  <div class="topbar-cluster">
-    <div class="port-group">
-      <label class="port-label" for="portMode">Port</label>
-      <select class="port-mode" id="portMode" onchange="togglePortInput(this.value);markPortDirty()">
-        <option value="random" {% if not port %}selected{% endif %}>Random</option>
-        <option value="static" {% if port %}selected{% endif %}>Static</option>
-      </select>
-      <input type="number" id="portValue" class="port-input" min="1024" max="65535"
-             aria-label="Port number"
-             value="{{ port if port else '' }}"
-             style="display:{% if port %}inline-block{% else %}none{% endif %}"
-             placeholder="e.g. 49152"
-             oninput="markPortDirty()"
-             onkeydown="if(event.key==='Enter')savePort()">
-      <button class="port-randomize" id="portRandomize" onclick="randomizePort()"
-              aria-label="Randomize port"
-              style="display:{% if port %}inline-block{% else %}none{% endif %}"
-              title="Pick a random port">&#x1f504;</button>
-      <button class="port-save-btn" id="portSave" onclick="savePort()"
-              title="Apply port change (restarts server)"
-              style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
+      <div class="topbar-menu-row peek-hotkey-group" title="Global hotkey to show/hide the peek overlay window">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h.01M11 9h.01M15 9h.01M7 13h10"/></svg>
+        <label class="topbar-menu-label peek-label" for="peekHotkey">Peek hotkey</label>
+        <div class="hotkey-field" onclick="document.getElementById('peekHotkey').focus()">
+          <input type="text" id="peekHotkey" class="peek-input" value="{{ peek_hotkey }}" placeholder="Press keys…"
+                 onfocus="this.parentElement.classList.add('focused')"
+                 onblur="this.parentElement.classList.remove('focused')"
+                 onchange="var v=this.value.trim().toLowerCase();fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'peek_hotkey',value:v})}).then(loadRestartKeys)">
+          <!-- The `.then(loadRestartKeys)` is load-bearing now that the badge is
+               conditional. This field is the only restart-only control that
+               saves and stays on the page: `savePortAndRestart` restarts and
+               navigates away, and the bind address already refreshes. Without
+               it, saving a hotkey leaves the badge absent until a reload — the
+               field accepting a value and behaving as though nothing happened,
+               which is the exact failure the badge exists to prevent. -->
+        </div>
+      </div>
+      <div class="topbar-menu-row topbar-menu-row-stack port-group">
+        <div class="topbar-menu-row-head">
+          <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v4"/><path d="M15 2v4"/><path d="M6 6h12v4a6 6 0 0 1-6 6 6 6 0 0 1-6-6Z"/><path d="M12 16v5"/></svg>
+          <label class="topbar-menu-label port-label" for="portMode">Port</label>
+        </div>
+        <div class="topbar-menu-row-controls">
+          <select class="port-mode" id="portMode" onchange="togglePortInput(this.value);markPortDirty()">
+            <option value="random" {% if not port %}selected{% endif %}>Random</option>
+            <option value="static" {% if port %}selected{% endif %}>Static</option>
+          </select>
+          <input type="number" id="portValue" class="port-input" min="1024" max="65535"
+                 aria-label="Port number"
+                 value="{{ port if port else '' }}"
+                 style="display:{% if port %}inline-block{% else %}none{% endif %}"
+                 placeholder="e.g. 49152"
+                 oninput="markPortDirty()"
+                 onkeydown="if(event.key==='Enter')savePort()">
+          <button class="port-randomize" id="portRandomize" onclick="randomizePort()"
+                  aria-label="Randomize port"
+                  style="display:{% if port %}inline-block{% else %}none{% endif %}"
+                  title="Pick a random port">&#x1f504;</button>
+          <button class="port-save-btn" id="portSave" onclick="savePort()"
+                  title="Apply port change (restarts server)"
+                  style="display:{% if port %}inline-block{% else %}none{% endif %}">Apply</button>
+        </div>
+      </div>
+
+      <div id="topbarRestartDivider" class="topbar-menu-divider" hidden></div>
+      <div id="topbarRestartNote" class="topbar-restart-note" hidden>
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.5 17a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+        <span id="topbarRestartText"></span>
+      </div>
+      <button id="topbarRestartBtn" class="topbar-restart-btn" onclick="restartPowerAtlas()" title="Restart PowerAtlas now to apply pending settings" hidden>
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
+        Restart PowerAtlas
+      </button>
     </div>
   </div>
 </div>
 
 <div class="search-area">
-  <div class="command-bar">
-    <span class="search-icon">⌕</span>
-    <input type="search" name="q" placeholder="Search sessions, folders..." aria-label="Search workspaces">
-  </div>
+  <!-- Provider-first, search-reveal: chips lead (the control touched more
+       once mid-workflow) and the search box is a compact pill that only
+       claims more of the row on focus, rather than search always owning
+       the row's full width up front. -->
   <div class="provider-filter" id="providerFilter" role="tablist"></div>
+  <div class="search-area-spacer"></div>
+  <div class="command-bar">
+    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    <input type="search" name="q" placeholder="Search..." aria-label="Search workspaces">
+  </div>
 </div>
 
 <main class="panels-container" id="panelsContainer">
@@ -122,28 +165,59 @@
          popover now anchors off `#workspaces-panel .section-label`
          (position:relative, see style.css) instead of `.acp-rail-head` --
          same "full width whatever the row does" property that anchoring
-         choice was for, just off a different ancestor. -->
+         choice was for, just off a different ancestor.
+
+         Filters redesign: the tag/time <select> pair, the tag-manage
+         button, the hidden-count badge and the "Clear" button all folded
+         into one icon-only trigger (workspace-panel-filters round) --
+         grouped with Refresh and the settings gear as one consistent
+         `.ws-icon-btn` cluster instead of a wordy filter pill (or, before
+         that, two native <select>s) sitting apart from two quiet icons.
+         The hidden-count badge specifically isn't carried forward as its
+         own element: "hidden" is itself one of the tag rows the menu
+         already lists, so its count is visible there without a second,
+         redundant indicator. -->
     <div class="section-label">
       <span>Workspaces</span>
-      <div class="workspace-filters" id="workspaceFilters"></div>
-      <button class="acp-btn" id="dashRailReload" type="button">Refresh</button>
-      <div class="acp-rail-settings-wrap">
-        <button class="acp-btn acp-rail-settings-btn" id="dashRailSettings"
-                type="button" aria-haspopup="menu" aria-expanded="false"
-                aria-label="Session list settings">
-          <svg class="acp-rail-settings-icon" viewBox="0 0 16 16"
-               aria-hidden="true" focusable="false">
-            <path d="M2 4.5h4.2M10.8 4.5h3.2M2 11.5h3.2M9.8 11.5h4.2"
-                  stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                  fill="none"/>
-            <circle cx="8.5" cy="4.5" r="2" stroke="currentColor"
-                    stroke-width="1.5" fill="none"/>
-            <circle cx="7.5" cy="11.5" r="2" stroke="currentColor"
-                    stroke-width="1.5" fill="none"/>
-          </svg>
+      <div class="ws-header-spacer"></div>
+      <div class="ws-icon-group">
+        <div class="ws-filter-wrap">
+          <button class="ws-icon-btn" id="wsFilterBtn" type="button"
+                  aria-haspopup="menu" aria-expanded="false"
+                  aria-label="Filter workspaces" title="Filters">
+            <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true"><path d="M4 5h16l-6 8v6l-4-2v-4Z"/></svg>
+            <span class="ws-filter-dot" id="wsFilterDot" hidden
+                  title="A filter is active"></span>
+          </button>
+          <div class="acp-rail-menu ws-filter-menu" id="wsFilterMenu" role="menu"
+               aria-label="Filter workspaces" hidden></div>
+        </div>
+        <button class="ws-icon-btn" id="dashRailReload" type="button"
+                aria-label="Refresh workspaces" title="Refresh">
+          <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
         </button>
-        <div class="acp-rail-menu acp-rail-settings" id="dashRailSettingsMenu"
-             role="menu" aria-label="Session list settings" hidden></div>
+        <div class="acp-rail-settings-wrap">
+          <button class="ws-icon-btn acp-rail-settings-btn" id="dashRailSettings"
+                  type="button" aria-haspopup="menu" aria-expanded="false"
+                  aria-label="Session list settings" title="Group and sort">
+            <svg class="acp-rail-settings-icon" viewBox="0 0 16 16"
+                 aria-hidden="true" focusable="false">
+              <path d="M2 4.5h4.2M10.8 4.5h3.2M2 11.5h3.2M9.8 11.5h4.2"
+                    stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
+                    fill="none"/>
+              <circle cx="8.5" cy="4.5" r="2" stroke="currentColor"
+                      stroke-width="1.5" fill="none"/>
+              <circle cx="7.5" cy="11.5" r="2" stroke="currentColor"
+                      stroke-width="1.5" fill="none"/>
+            </svg>
+          </button>
+          <div class="acp-rail-menu acp-rail-settings" id="dashRailSettingsMenu"
+               role="menu" aria-label="Session list settings" hidden></div>
+        </div>
       </div>
     </div>
     <aside class="acp-rail" id="dashRail" aria-label="Workspaces and sessions">
@@ -195,9 +269,19 @@
       </div>
       <div class="acp-prompt-nav" id="dashPromptNav" hidden>
         <button class="acp-btn acp-prompt-nav-btn" id="dashPromptUp" type="button"
-                aria-label="Previous prompt">↑</button>
+                aria-label="Previous prompt">
+          <svg class="acp-prompt-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+               stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 12V4M4.5 7.5 8 4l3.5 3.5"/>
+          </svg>
+        </button>
         <button class="acp-btn acp-prompt-nav-btn" id="dashPromptDown" type="button"
-                aria-label="Next prompt or scroll to bottom">↓</button>
+                aria-label="Next prompt or scroll to bottom">
+          <svg class="acp-prompt-nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+               stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 4v8M4.5 8.5 8 12l3.5-3.5"/>
+          </svg>
+        </button>
       </div>
     </div>
     <div class="acp-composer" id="dashComposer" hidden>
@@ -914,7 +998,7 @@ function openTerminal(btn){var group=btn.closest('[data-cwd]');fetch('/api/launc
 // launcher tiles, just aimed at a specific workspace + provider instead of
 // whatever tiles + selected-workspace state the left panel is carrying.
 function newSessionInWorkspace(btn,provider){var group=btn.closest('[data-cwd]');fetch('/api/new-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:group.dataset.cwd,provider:provider})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to launch session<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){profileBtn.textContent='\u2699\ufe0f '+active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();
@@ -926,13 +1010,16 @@ document.addEventListener('DOMContentLoaded',function(){
 });
 function _escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function debounce(fn,delay){var timer;return function(){var ctx=this,args=arguments;clearTimeout(timer);timer=setTimeout(function(){fn.apply(ctx,args)},delay)}}
-var _providerColors=Object.create(null);
 // Kept beyond initProviderFilter's own use (the provider tabs, hidden below
 // 2 providers) because the workspace rail's per-row provider quick-launch
 // buttons need the same list regardless of tab count -- a single-provider
 // machine still benefits from one launch icon beside the terminal one.
 window._availableProviders=[];
-function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){window._availableProviders=providers||[];(providers||[]).forEach(function(p){if(p.color)_providerColors[p.name]=p.color});var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
+// Provider chips carry the same real per-provider icon (extracted app icon,
+// or the endpoint's own colored-glyph fallback) as the rail's quick-launch
+// buttons and resume icons -- one icon convention across the whole page
+// rather than reinventing it here as a second, text-only style.
+function initProviderFilter(){fetch('/api/available-providers').then(function(r){return r.json()}).then(function(providers){window._availableProviders=providers||[];var container=document.getElementById('providerFilter');if(!providers||providers.length<2){container.style.display='none';return}var html='<button class="provider-filter-btn active" data-provider="all" role="tab" aria-selected="true" onclick="switchProvider(\'all\')">All</button>';providers.forEach(function(p){html+='<button class="provider-filter-btn" data-provider="'+p.name+'" role="tab" aria-selected="false" onclick="switchProvider(\''+p.name+'\')"><img class="provider-filter-icon" alt="" src="/api/launcher-icon/provider--'+encodeURIComponent(p.name)+'" onerror="this.remove()">'+p.display+'</button>'});container.innerHTML=html;container.addEventListener('keydown',function(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){var btns=Array.from(this.querySelectorAll('.provider-filter-btn'));var idx=btns.indexOf(document.activeElement);if(idx<0)return;var next=e.key==='ArrowRight'?(idx+1)%btns.length:(idx-1+btns.length)%btns.length;btns[next].focus();e.preventDefault()}})})}
 function switchProvider(provider){window._activeProvider=provider;document.querySelectorAll('.provider-filter-btn').forEach(function(b){b.classList.toggle('active',b.dataset.provider===provider);b.setAttribute('aria-selected',b.dataset.provider===provider?'true':'false')});dashRailReload()}
 // ---- The workspaces rail (dashboard/ACP-merge Phase 4) --------------------
 //
@@ -948,6 +1035,65 @@ function switchProvider(provider){window._activeProvider=provider;document.query
 // no-innerHTML-for-fetched-data discipline on this same kind of content --
 // titles and folder names are user-authored text, and the transcript panel
 // (Phase 2) already carries that rule for exactly the same reason.
+//
+// RAIL_ICON follows the same discipline for its own static, hardcoded icon
+// markup: built with createElementNS (the SVG analogue of createElement),
+// never innerHTML, so nothing in this file ever needs a "but this one
+// string is trusted" exception to the rule above.
+
+var SVG_NS = 'http://www.w3.org/2000/svg';
+function dashRailBuildIcon(shapes){
+  var svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('rail-icon');
+  shapes.forEach(function(shape){
+    var el = document.createElementNS(SVG_NS, shape[0]);
+    var attrs = shape[1];
+    for (var key in attrs) { if (Object.prototype.hasOwnProperty.call(attrs, key)) el.setAttribute(key, attrs[key]); }
+    svg.appendChild(el);
+  });
+  return svg;
+}
+// Each entry is a factory (not a shared node) -- a DOM node can only live in
+// one parent at a time, and every call site below needs its own instance.
+var RAIL_ICON = {
+  folder: function(){ return dashRailBuildIcon([
+    ['path', {d: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z'}]
+  ]); },
+  terminal: function(){ return dashRailBuildIcon([
+    ['rect', {x: '3.5', y: '4.5', width: '17', height: '15', rx: '1.5'}],
+    ['path', {d: 'm7.5 9.5 3 2.5-3 2.5'}],
+    ['path', {d: 'M13 15h4'}]
+  ]); },
+  gear: function(){ return dashRailBuildIcon([
+    ['circle', {cx: '12', cy: '12', r: '3'}],
+    ['path', {d: 'M19.4 13a7.97 7.97 0 0 0 0-2l1.9-1.5-2-3.4-2.2.9a8 8 0 0 0-1.7-1L15 3h-4l-.4 2.9a8 8 0 0 0-1.7 1l-2.2-.9-2 3.4L6.6 11a7.97 7.97 0 0 0 0 2l-1.9 1.5 2 3.4 2.2-.9a8 8 0 0 0 1.7 1L10.6 21h4l.4-2.9a8 8 0 0 0 1.7-1l2.2.9 2-3.4-1.9-1.5Z'}]
+  ]); },
+  pin: function(){ return dashRailBuildIcon([
+    ['path', {d: 'M12 17v5'}],
+    ['path', {d: 'M9 3h6l.9 6.2 3.1 2.8v2H5v-2l3.1-2.8L9 3Z'}]
+  ]); },
+  chat: function(){ return dashRailBuildIcon([
+    ['path', {d: 'M21 12a8 8 0 0 1-11.5 7.2L4 20l1.1-4.4A8 8 0 1 1 21 12Z'}]
+  ]); }
+};
+// Resume shows the session's own provider icon rather than a generic glyph
+// (same <img> pattern as the header's per-provider quick-launch buttons
+// below, sharing their fallback: an icon-less button beats a broken one).
+function dashRailProviderIcon(providerName){
+  var img = document.createElement('img');
+  img.className = 'session-provider-icon';
+  img.alt = '';
+  img.src = '/api/launcher-icon/provider--' + encodeURIComponent(providerName);
+  img.onerror = function(){ this.remove(); };
+  return img;
+}
 
 var dashRailEl = document.getElementById('dashRail');
 var dashRailGroupsEl = document.getElementById('dashRailGroups');
@@ -1132,7 +1278,7 @@ function dashRailMergeGroup(incoming){
       cwd: incoming.cwd, name: incoming.name, total: incoming.total,
       session_page: incoming.session_page, has_more: incoming.has_more,
       exists: incoming.exists, pinned: incoming.pinned,
-      active: incoming.active, sessions: [],
+      active: incoming.active, color: incoming.color, sessions: [],
     };
     dashRailMergeSessions(fresh, incoming.sessions);
     dashRailGroupsByCwd[key] = fresh;
@@ -1144,6 +1290,7 @@ function dashRailMergeGroup(incoming){
   existing.exists = incoming.exists;
   existing.pinned = incoming.pinned;
   existing.active = incoming.active;
+  existing.color = incoming.color;
   // A repeat on a later group page carries session_page: 1 -- adopting it
   // would rewind a workspace already paged into further. Only move forward.
   if (incoming.session_page > existing.session_page) {
@@ -1353,9 +1500,12 @@ function dashRailRowNode(session, flat, workspace){
   row.dataset.sid = session.id;
   row.dataset.cwd = wrap.dataset.cwd;
   row.dataset.provider = wrap.dataset.provider;
-  if (_providerColors[session.provider]) {
-    row.style.boxShadow = 'inset 3px 0 0 0 ' + _providerColors[session.provider];
-  }
+  // No provider-color bar here (dropped, workspace-cards refinement): the
+  // provider icon a few lines down already says which provider this is,
+  // unambiguously, so a color bar beside it repeated the same fact in a
+  // second visual language on every single row. The workspace's own group
+  // now carries a color instead (see dashRailGroupNode), from its tags --
+  // a workspace-level fact with no per-session equivalent to collide with.
   if (_viewingSid === session.id) row.classList.add('viewing');
   if (state === 'locked') {
     row.disabled = true;
@@ -1413,7 +1563,7 @@ function dashRailRowNode(session, flat, workspace){
   pinBtn.className = 'row-btn pin-btn' + (session.pinned ? ' pinned' : '');
   pinBtn.setAttribute('aria-label', session.pinned ? 'Unpin session' : 'Pin session');
   pinBtn.title = session.pinned ? 'Unpin session' : 'Pin session';
-  pinBtn.textContent = '📌';
+  pinBtn.appendChild(RAIL_ICON.pin());
   pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinSession(pinBtn); });
   actions.appendChild(pinBtn);
   if (state !== 'locked' && (session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3' ||
@@ -1423,7 +1573,7 @@ function dashRailRowNode(session, flat, workspace){
     resumeBtn.className = 'row-btn primary terminal-btn';
     resumeBtn.setAttribute('aria-label', 'Resume session');
     resumeBtn.title = session.provider === 'kiro-ide' ? 'Open workspace in Kiro IDE' : 'Resume session';
-    resumeBtn.textContent = '▶';
+    resumeBtn.appendChild(dashRailProviderIcon(session.provider));
     resumeBtn.addEventListener('click', function(e){ e.stopPropagation(); resumeSession(resumeBtn); });
     actions.appendChild(resumeBtn);
   }
@@ -1442,7 +1592,7 @@ function dashRailRowNode(session, flat, workspace){
     } else {
       acpBtn.title = 'Open in Agent orchestrator';
     }
-    acpBtn.textContent = '💬';
+    acpBtn.appendChild(RAIL_ICON.chat());
     acpBtn.addEventListener('click', function(e){ e.stopPropagation(); openInAcp(acpBtn); });
     actions.appendChild(acpBtn);
   }
@@ -1510,6 +1660,14 @@ function dashRailGroupNode(group){
   var wrap = document.createElement('div');
   wrap.className = 'acp-rail-group' + (group.exists === false ? ' acp-rail-group-gone' : '');
   wrap.dataset.cwd = group.cwd;
+  // The workspace's own color (its explicit color, else its first tag's --
+  // see _resolve_workspace_color), not a provider color: this group's own
+  // sessions can span several providers, so no single provider color could
+  // represent it the way it can represent one session row. CSS sets the
+  // border's width/style unconditionally (.acp-rail-group); an untagged,
+  // uncolored workspace just never gets this line reached, so it keeps
+  // that base rule's transparent color exactly like today.
+  if (group.color) wrap.style.borderLeftColor = group.color;
 
   var matched = dashRailFilter ? group.sessions.filter(function(s){ return dashRailMatches(group, s); }) : group.sessions;
   var countText = dashRailFilter ? (matched.length + ' matching') : (group.sessions.length + ' of ' + group.total);
@@ -1547,7 +1705,7 @@ function dashRailGroupNode(group){
   folderBtn.className = 'card-terminal-btn';
   folderBtn.setAttribute('aria-label', 'Open folder');
   folderBtn.title = 'Open folder';
-  folderBtn.textContent = '📁';
+  folderBtn.appendChild(RAIL_ICON.folder());
   folderBtn.addEventListener('click', function(e){ e.stopPropagation(); openFolder(group.cwd); });
   actions.appendChild(folderBtn);
   var termBtn = document.createElement('button');
@@ -1555,7 +1713,7 @@ function dashRailGroupNode(group){
   termBtn.className = 'card-terminal-btn';
   termBtn.setAttribute('aria-label', 'Open terminal');
   termBtn.title = 'Open terminal';
-  termBtn.textContent = '>_';
+  termBtn.appendChild(RAIL_ICON.terminal());
   termBtn.addEventListener('click', function(e){ e.stopPropagation(); openTerminal(termBtn); });
   actions.appendChild(termBtn);
   // One quick-launch icon per available provider (rail QA follow-up) --
@@ -1582,7 +1740,7 @@ function dashRailGroupNode(group){
   settingsBtn.className = 'card-settings-btn';
   settingsBtn.setAttribute('aria-label', 'Workspace settings');
   settingsBtn.title = 'Settings';
-  settingsBtn.textContent = '⚙';
+  settingsBtn.appendChild(RAIL_ICON.gear());
   settingsBtn.addEventListener('click', function(e){ e.stopPropagation(); openWorkspaceSettings(settingsBtn); });
   actions.appendChild(settingsBtn);
   var pinBtn = document.createElement('button');
@@ -1590,7 +1748,7 @@ function dashRailGroupNode(group){
   pinBtn.className = 'card-pin-btn' + (group.pinned ? ' pinned' : '');
   pinBtn.setAttribute('aria-label', group.pinned ? 'Unpin workspace' : 'Pin workspace');
   pinBtn.title = group.pinned ? 'Unpin workspace' : 'Pin workspace';
-  pinBtn.textContent = '📌';
+  pinBtn.appendChild(RAIL_ICON.pin());
   pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinWorkspace(pinBtn); });
   actions.appendChild(pinBtn);
   head.appendChild(actions);
@@ -1979,14 +2137,186 @@ function dashRailInit(){
 // refresh now (dashRailInit's 60s poll + visibilitychange, matching
 // /acp's own RAIL_REFRESH_MS cadence -- see that file's reasoning on why
 // 60s: it matches the idle sweeper's own cadence, not an arbitrary choice).
-function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.textContent='...';fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshSettings();dashRailReload()}).finally(function(){btn.disabled=false;btn.textContent='\u21BB'})}
-function initWorkspaceFilters(){return fetch('/api/tags').then(function(r){return r.json()}).then(function(tags){var container=document.getElementById('workspaceFilters');if(!container)return;var hiddenCount=0;tags.forEach(function(t){if(t.name==='hidden')hiddenCount=t.count});var html='<select class="ws-filter-select" id="wsTagFilter" onchange="setTagFilter(this.value)" title="Filter by tag">';html+='<option value="">All tags</option>';if(!tags.length){html+='<option disabled>No tags yet \u2014 use the settings gear on a workspace to add one.</option>'}tags.forEach(function(t){var eName=_escHtml(t.name);html+='<option value="'+eName+'"'+(t.color?' style="border-left:3px solid '+_escHtml(t.color)+'"':'')+'>'+eName+' ('+t.count+')</option>'});html+='</select>';if(tags.length){html+=' <button class="ws-tag-colors-btn" id="wsTagColorsBtn" onclick="toggleTagColorsPopover()" title="Manage tags" aria-label="Manage tags">&#127991;&#65039;</button>'}html+=' <select class="ws-filter-select" id="wsTimeFilter" onchange="setTimeFilter(this.value)" title="Filter by time">';html+='<option value="">Any time</option>';html+='<option value="today">Today</option>';html+='<option value="yesterday">Yesterday</option>';html+='<option value="this_week">This week</option>';html+='<option value="before">Older</option>';html+='</select>';if(hiddenCount>0){html+=' <span class="ws-hidden-badge" title="'+hiddenCount+' hidden workspace(s)">('+hiddenCount+' hidden)</span>'}html+=' <button class="ws-clear-filters" id="wsClearFilters" onclick="clearWorkspaceFilters()" style="display:none" title="Clear all filters">\u00d7 Clear</button>';container.innerHTML=html;window._tagColorData=tags}).catch(function(){})}
+// `btn.textContent='...'` used to say "loading" by replacing the glyph; now
+// that the button holds an SVG icon rather than a text glyph, that same
+// assignment would silently wipe the icon out. A `.spinning` class animating
+// the icon says the same thing without touching its children.
+function doRefresh(){var btn=document.querySelector('.refresh-btn');btn.disabled=true;btn.classList.add('spinning');fetch('/api/refresh',{method:'POST'}).then(function(r){return r.json()}).then(function(d){document.getElementById('refreshTime').textContent=d.last_refresh;refreshSettings();dashRailReload()}).finally(function(){btn.disabled=false;btn.classList.remove('spinning')})}
+
+// ---- topbar settings menu (Profile/Remote/Autostart/Peek/Port + Restart) --
+//
+// Same open/close pattern as the rail's own dashRailSettingsBtn/
+// dashRailSettingsMenu further down this file: a guard flag absorbs the
+// button's own click before it bubbles to the document-level closer, so one
+// click doesn't open and immediately close the menu.
+var topbarSettingsBtn = document.getElementById('topbarSettingsBtn');
+var topbarSettingsMenu = document.getElementById('topbarSettingsMenu');
+var topbarMenuGuard = false;
+function closeTopbarSettings(){
+  topbarSettingsMenu.hidden = true;
+  topbarSettingsBtn.setAttribute('aria-expanded', 'false');
+}
+topbarSettingsBtn.addEventListener('click', function(){
+  topbarMenuGuard = true;
+  var opening = topbarSettingsMenu.hidden;
+  closeTopbarSettings();
+  if (opening) {
+    topbarSettingsMenu.hidden = false;
+    topbarSettingsBtn.setAttribute('aria-expanded', 'true');
+    loadRestartKeys();
+  }
+});
+document.addEventListener('click', function(){
+  if (topbarMenuGuard) { topbarMenuGuard = false; return; }
+  if (!topbarSettingsMenu.hidden) closeTopbarSettings();
+});
+document.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' && !topbarSettingsMenu.hidden) closeTopbarSettings();
+});
+// Fires the same /api/restart the port-change flow already uses
+// (savePortAndRestart), just without a setting to save first. Reuses
+// showRestartOverlay(0) too: 0 means "no new port", so the overlay polls
+// and redirects back to the current origin, which is correct here since a
+// plain restart doesn't change what port the server comes back up on.
+function restartPowerAtlas(){
+  closeTopbarSettings();
+  showRestartOverlay(0);
+  fetch('/api/restart', {method: 'POST'}).catch(function(){});
+}
+// ---- workspace filter menu (icon-only trigger; workspace-panel-filters
+// round) -- everything createElement/textContent, same discipline the rail
+// itself follows, since a tag's name is user-authored and this is the only
+// place it interpolated into markup as a string before (via a manual
+// _escHtml() escape that this rewrite makes unnecessary rather than kept).
+function _wsFilterOptionRow(labelText, dotColor, checked, onClick){
+  var item = document.createElement('button');
+  item.type = 'button';
+  item.className = 'acp-rail-menu-item acp-rail-setting';
+  item.setAttribute('role', 'menuitemradio');
+  item.setAttribute('aria-checked', checked ? 'true' : 'false');
+  var left = document.createElement('span');
+  left.className = 'ws-filter-item-label';
+  if (dotColor) {
+    var dot = document.createElement('span');
+    dot.className = 'ws-filter-dot-swatch';
+    dot.style.background = dotColor;
+    left.appendChild(dot);
+  }
+  var text = document.createElement('span');
+  text.textContent = labelText;
+  left.appendChild(text);
+  item.appendChild(left);
+  var tick = document.createElement('span');
+  tick.className = 'acp-rail-setting-tick';
+  tick.setAttribute('aria-hidden', 'true');
+  tick.textContent = checked ? '\u2713' : '';
+  item.appendChild(tick);
+  item.addEventListener('click', function(){ closeWsFilterMenu(); onClick(); });
+  return item;
+}
+function renderWorkspaceFilterMenu(){
+  var menu = document.getElementById('wsFilterMenu');
+  if (!menu) return;
+  var tags = window._tagColorData || [];
+  menu.textContent = '';
+  var tagHead = document.createElement('div');
+  tagHead.className = 'acp-rail-menu-head';
+  tagHead.textContent = 'Tag';
+  menu.appendChild(tagHead);
+  menu.appendChild(_wsFilterOptionRow('All tags', null, !window._activeTag,
+    function(){ setTagFilter(''); }));
+  if (!tags.length) {
+    var empty = document.createElement('div');
+    empty.className = 'ws-filter-empty-note';
+    empty.textContent = 'No tags yet \u2014 use the settings gear on a workspace to add one.';
+    menu.appendChild(empty);
+  }
+  // "hidden" is not excluded from this list -- it is itself a real, selectable
+  // filter (shows only hidden-tagged workspaces), and its count here is also
+  // this menu's only indicator of how many are hidden right now, replacing
+  // the separate always-on "(N hidden)" badge the old row carried: the same
+  // fact, in the one place it was already going to be read anyway.
+  tags.forEach(function(t){
+    menu.appendChild(_wsFilterOptionRow(t.name + ' (' + t.count + ')', t.color || null,
+      window._activeTag === t.name, function(){ setTagFilter(t.name); }));
+  });
+  if (tags.length) {
+    var manage = document.createElement('button');
+    manage.type = 'button';
+    manage.className = 'acp-rail-menu-item ws-filter-manage';
+    manage.id = 'wsManageTagsBtn';
+    manage.textContent = 'Manage tags';
+    manage.addEventListener('click', function(e){
+      e.stopPropagation();
+      closeWsFilterMenu();
+      toggleTagColorsPopover();
+    });
+    menu.appendChild(manage);
+  }
+  var divider1 = document.createElement('div');
+  divider1.className = 'acp-rail-menu-divider';
+  menu.appendChild(divider1);
+  var timeHead = document.createElement('div');
+  timeHead.className = 'acp-rail-menu-head';
+  timeHead.textContent = 'Time';
+  menu.appendChild(timeHead);
+  [['', 'Any time'], ['today', 'Today'], ['yesterday', 'Yesterday'],
+   ['this_week', 'This week'], ['before', 'Older']].forEach(function(pair){
+    var value = pair[0], label = pair[1];
+    menu.appendChild(_wsFilterOptionRow(label, null,
+      (window._activeTimeFilter || '') === value, function(){ setTimeFilter(value); }));
+  });
+  if (window._activeTag || window._activeTimeFilter) {
+    var divider2 = document.createElement('div');
+    divider2.className = 'acp-rail-menu-divider';
+    menu.appendChild(divider2);
+    var clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'ws-filter-clear';
+    clear.textContent = 'Clear filters';
+    clear.addEventListener('click', function(){ closeWsFilterMenu(); clearWorkspaceFilters(); });
+    menu.appendChild(clear);
+  }
+}
+function initWorkspaceFilters(){return fetch('/api/tags').then(function(r){return r.json()}).then(function(tags){window._tagColorData=tags;_updateFilterUI()}).catch(function(){})}
+var wsFilterBtn = document.getElementById('wsFilterBtn');
+var wsFilterMenu = document.getElementById('wsFilterMenu');
+var wsFilterMenuGuard = false;
+function closeWsFilterMenu(){
+  wsFilterMenu.hidden = true;
+  wsFilterBtn.setAttribute('aria-expanded', 'false');
+}
+wsFilterBtn.addEventListener('click', function(){
+  wsFilterMenuGuard = true;
+  var opening = wsFilterMenu.hidden;
+  closeWsFilterMenu();
+  if (opening) {
+    renderWorkspaceFilterMenu();
+    wsFilterMenu.hidden = false;
+    wsFilterBtn.setAttribute('aria-expanded', 'true');
+  }
+});
+document.addEventListener('click', function(){
+  if (wsFilterMenuGuard) { wsFilterMenuGuard = false; return; }
+  if (!wsFilterMenu.hidden) closeWsFilterMenu();
+});
+document.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' && !wsFilterMenu.hidden) closeWsFilterMenu();
+});
 var _tagColorPalette=['#ef4444','#f97316','#eab308','#22c55e','#14b8a6','#06b6d4','#3b82f6','#6366f1','#8b5cf6','#d946ef','#ec4899','#64748b'];
-function toggleTagColorsPopover(){var existing=document.getElementById('tagColorsPopover');if(existing){existing.remove();return}var tags=window._tagColorData||[];var pop=document.createElement('div');pop.className='tag-colors-popover';pop.id='tagColorsPopover';var h='<div class="tag-colors-title">Tag Management</div>';tags.forEach(function(t){var eName=_escHtml(t.name);h+='<div class="tag-color-row" data-tag="'+eName+'">';h+='<span class="tag-color-name">'+eName+'</span>';h+='<div class="tag-color-swatches">';h+='<button type="button" class="tag-mini-swatch'+((!t.color)?' selected':'')+'" data-color="" style="background:var(--surface);border:1px dashed var(--border)" title="No color" aria-label="No color"></button>';_tagColorPalette.forEach(function(c){h+='<button type="button" class="tag-mini-swatch'+(t.color===c?' selected':'')+'" data-color="'+c+'" style="background:'+c+'" title="'+c+'" aria-label="'+c+'"></button>'});h+='</div>';if(t.name!=='hidden'){h+='<button type="button" class="tag-delete-btn" title="Delete tag" aria-label="Delete tag '+eName+'">\u00d7</button>'}h+='</div>'});h+='<div class="tag-add-row"><input type="text" class="tag-add-input" placeholder="New tag..." maxlength="64" aria-label="New tag name"><button type="button" class="tag-add-btn" title="Add tag" aria-label="Add tag">+</button></div>';pop.innerHTML=h;var btn=document.getElementById('wsTagColorsBtn');btn.parentElement.style.position='relative';btn.parentElement.appendChild(pop);pop.addEventListener('click',function(e){var del=e.target.closest('.tag-delete-btn');if(del){var row=del.closest('.tag-color-row');var tagName=row.dataset.tag;var tagObj=tags.find(function(x){return x.name===tagName});var cnt=tagObj?tagObj.count:0;var msg='Delete tag "'+tagName+'"?';if(cnt>0)msg+='\nThis will remove it from '+cnt+' workspace(s).';if(!confirm(msg))return;fetch('/api/tag/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tagName})}).then(function(r){if(!r.ok)throw new Error('failed');return r.text()}).then(function(t){showToast(t);if(window._activeTag===tagName){window._activeTag=null}pop.remove();initWorkspaceFilters().then(function(){dashRailReload();toggleTagColorsPopover()})}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});return}var sw=e.target.closest('.tag-mini-swatch');if(!sw)return;var row=sw.closest('.tag-color-row');var tagName=row.dataset.tag;var color=sw.dataset.color;row.querySelectorAll('.tag-mini-swatch').forEach(function(s){s.classList.remove('selected')});sw.classList.add('selected');fetch('/api/tag/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tagName,color:color})}).then(function(r){return r.text()}).then(function(t){showToast(t);initWorkspaceFilters();dashRailReload()}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})});function doAddTag(){var inp=pop.querySelector('.tag-add-input');var name=inp.value.trim();if(!name||name.length>64)return;if(tags.some(function(x){return x.name===name})){showToast('<div class="toast toast-warning">Tag already exists<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}fetch('/api/tag/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:name,color:''})}).then(function(r){if(!r.ok)throw new Error('failed');return r.text()}).then(function(t){showToast(t);pop.remove();initWorkspaceFilters().then(function(){toggleTagColorsPopover()})}).catch(function(){showToast('<div class="toast toast-error">Add failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}pop.querySelector('.tag-add-btn').addEventListener('click',doAddTag);pop.querySelector('.tag-add-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doAddTag()}});document.addEventListener('click',function closePopover(e){if(!pop.contains(e.target)&&e.target.id!=='wsTagColorsBtn'){pop.remove();document.removeEventListener('click',closePopover)}},{capture:true})}
+function toggleTagColorsPopover(){var existing=document.getElementById('tagColorsPopover');if(existing){existing.remove();return}var tags=window._tagColorData||[];var pop=document.createElement('div');pop.className='tag-colors-popover';pop.id='tagColorsPopover';var h='<div class="tag-colors-title">Tag Management</div>';tags.forEach(function(t){var eName=_escHtml(t.name);h+='<div class="tag-color-row" data-tag="'+eName+'">';h+='<span class="tag-color-name">'+eName+'</span>';h+='<div class="tag-color-swatches">';h+='<button type="button" class="tag-mini-swatch'+((!t.color)?' selected':'')+'" data-color="" style="background:var(--surface);border:1px dashed var(--border)" title="No color" aria-label="No color"></button>';_tagColorPalette.forEach(function(c){h+='<button type="button" class="tag-mini-swatch'+(t.color===c?' selected':'')+'" data-color="'+c+'" style="background:'+c+'" title="'+c+'" aria-label="'+c+'"></button>'});h+='</div>';if(t.name!=='hidden'){h+='<button type="button" class="tag-delete-btn" title="Delete tag" aria-label="Delete tag '+eName+'">\u00d7</button>'}h+='</div>'});h+='<div class="tag-add-row"><input type="text" class="tag-add-input" placeholder="New tag..." maxlength="64" aria-label="New tag name"><button type="button" class="tag-add-btn" title="Add tag" aria-label="Add tag">+</button></div>';pop.innerHTML=h;var btn=document.getElementById('wsFilterBtn');btn.parentElement.style.position='relative';btn.parentElement.appendChild(pop);pop.addEventListener('click',function(e){var del=e.target.closest('.tag-delete-btn');if(del){var row=del.closest('.tag-color-row');var tagName=row.dataset.tag;var tagObj=tags.find(function(x){return x.name===tagName});var cnt=tagObj?tagObj.count:0;var msg='Delete tag "'+tagName+'"?';if(cnt>0)msg+='\nThis will remove it from '+cnt+' workspace(s).';if(!confirm(msg))return;fetch('/api/tag/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tagName})}).then(function(r){if(!r.ok)throw new Error('failed');return r.text()}).then(function(t){showToast(t);if(window._activeTag===tagName){window._activeTag=null}pop.remove();initWorkspaceFilters().then(function(){dashRailReload();toggleTagColorsPopover()})}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});return}var sw=e.target.closest('.tag-mini-swatch');if(!sw)return;var row=sw.closest('.tag-color-row');var tagName=row.dataset.tag;var color=sw.dataset.color;row.querySelectorAll('.tag-mini-swatch').forEach(function(s){s.classList.remove('selected')});sw.classList.add('selected');fetch('/api/tag/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:tagName,color:color})}).then(function(r){return r.text()}).then(function(t){showToast(t);initWorkspaceFilters();dashRailReload()}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})});function doAddTag(){var inp=pop.querySelector('.tag-add-input');var name=inp.value.trim();if(!name||name.length>64)return;if(tags.some(function(x){return x.name===name})){showToast('<div class="toast toast-warning">Tag already exists<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}fetch('/api/tag/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tag:name,color:''})}).then(function(r){if(!r.ok)throw new Error('failed');return r.text()}).then(function(t){showToast(t);pop.remove();initWorkspaceFilters().then(function(){toggleTagColorsPopover()})}).catch(function(){showToast('<div class="toast toast-error">Add failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}pop.querySelector('.tag-add-btn').addEventListener('click',doAddTag);pop.querySelector('.tag-add-input').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();doAddTag()}});document.addEventListener('click',function closePopover(e){if(!pop.contains(e.target)){pop.remove();document.removeEventListener('click',closePopover)}},{capture:true})}
 function setTagFilter(val){window._activeTag=val;_updateFilterUI();dashRailReload()}
 function setTimeFilter(val){window._activeTimeFilter=val;_updateFilterUI();dashRailReload()}
-function clearWorkspaceFilters(){window._activeTag='';window._activeTimeFilter='';var tagSel=document.getElementById('wsTagFilter');var timeSel=document.getElementById('wsTimeFilter');if(tagSel)tagSel.value='';if(timeSel)timeSel.value='';_updateFilterUI();dashRailReload()}
-function _updateFilterUI(){var clearBtn=document.getElementById('wsClearFilters');if(clearBtn){var active=window._activeTag||window._activeTimeFilter;clearBtn.style.display=active?'inline-block':'none'}}
+function clearWorkspaceFilters(){window._activeTag='';window._activeTimeFilter='';_updateFilterUI();dashRailReload()}
+function _updateFilterUI(){
+  var dot = document.getElementById('wsFilterDot');
+  var btn = document.getElementById('wsFilterBtn');
+  var active = !!(window._activeTag || window._activeTimeFilter);
+  if (dot) dot.hidden = !active;
+  if (btn) btn.classList.toggle('has-filter', active);
+  var menu = document.getElementById('wsFilterMenu');
+  if (menu && !menu.hidden) renderWorkspaceFilterMenu();
+}
 // The session hover-tooltip (loadTail et al.) is gone: it read the old
 // server-rendered session row's own DOM, which the dashboard no longer
 // renders now that the rail replaces the workspace column (dashboard/ACP-
@@ -2029,6 +2359,36 @@ document.getElementById('launcherModal').addEventListener('close',function(){var
 var _launchers={{launchers|tojson}};
 function getSelectedWorkspaceCwds(){var seen={};var cwds=[];document.querySelectorAll('.acp-rail-group.selected').forEach(function(c){var key=c.dataset.cwd.toLowerCase();if(!seen[key]){seen[key]=1;cwds.push(c.dataset.cwd)}});return cwds}
 function updateLauncherBadges(){var count=getSelectedWorkspaceCwds().length;_launchers.forEach(function(l){if(!l.use_selected_workspaces)return;var badge=document.getElementById('badge-'+l.id);if(!badge)return;if(count>0){badge.textContent=count;badge.classList.add('visible')}else{badge.textContent='';badge.classList.remove('visible')}});document.querySelectorAll('.provider-tile .launcher-badge').forEach(function(badge){if(count>0){badge.textContent=count;badge.classList.add('visible')}else{badge.textContent='';badge.classList.remove('visible')}})}
+// The tooltip is `position: fixed` (see .launcher-tooltip in style.css for
+// why) and so has no tile-relative anchor of its own the way the old
+// `position: absolute` one did -- this computes one on every hover, since
+// which tile it belongs to, and where that tile sits, changes with the
+// grid's own column count as the panel is resized. CSS :hover still owns
+// show/hide; this only ever runs while the tooltip is already visible.
+function positionLauncherTooltip(tile){
+  var tooltip = tile.querySelector('.launcher-tooltip');
+  if (!tooltip) return;
+  var margin = 6, edge = 4;
+  var tileRect = tile.getBoundingClientRect();
+  var tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var left = tileRect.left + tileRect.width / 2 - tw / 2;
+  var top = tileRect.top - th - margin;
+  if (top < edge) top = tileRect.bottom + margin; // no room above: flip below
+  if (left < edge) left = edge;
+  if (left + tw > vw - edge) left = vw - tw - edge;
+  if (top + th > vh - edge) top = vh - th - edge;
+  if (top < edge) top = edge;
+  tooltip.style.left = left + 'px';
+  tooltip.style.top = top + 'px';
+}
+// Delegated on the container HTMX swaps `innerHTML` into (not the tiles
+// themselves, which that swap replaces) so this survives every reload of
+// the launcher list without needing to be re-bound.
+document.getElementById('launcher-tiles').addEventListener('mouseover', function(e){
+  var tile = e.target.closest('.launcher-tile');
+  if (tile) positionLauncherTooltip(tile);
+});
 function runLauncherById(id){if(id==='builtin--terminal'){var selected=getSelectedWorkspaceCwds();if(selected.length>0){selected.forEach(function(w){fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:w})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Terminal launch failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})});}else{fetch('/api/launch-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:''})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Terminal launch failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')});}return;}if(id.startsWith('provider--')){var key=id.slice('provider--'.length);var selected=getSelectedWorkspaceCwds();if(selected.length>0){var sessions=selected.map(function(w){return{workspace:w,provider:key}});fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:sessions})}).then(function(r){return r.text()}).then(showToast)}else{var provDir=(_providerSettings[key]||{}).default_directory||'';var globalDir=_globalDefaultDirectory||'';var fallbackDir=provDir||globalDir||'';fetch('/api/launch-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessions:[{workspace:fallbackDir,provider:key}]})}).then(function(r){return r.text()}).then(showToast)}return}var l=_launchers.find(function(x){return x.id===id});if(!l)return;if(l.use_selected_workspaces){var selected=getSelectedWorkspaceCwds();if(selected.length>0){fetch('/api/launcher/run-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:l.id,workspaces:selected})}).then(function(r){return r.text()}).then(showToast);return}}var cwd=l.cwd||'';fetch('/api/launcher/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:l.id,command:l.command,custom_args:l.custom_args||'',cwd:cwd,name:l.name,terminal:l.terminal})}).then(function(r){return r.text()}).then(showToast)}
 function openNewLauncher(){var m=document.getElementById('launcherModal');document.getElementById('launcherId').value='';document.getElementById('launcherName').value='';document.getElementById('launcherCommand').value='';document.getElementById('launcherArgs').value='';document.getElementById('launcherCwd').value='';document.getElementById('launcherEnv').value='';document.getElementById('launcherColor').value='';document.getElementById('launcherTerminal').checked=true;document.getElementById('launcherUseSelected').checked=false;document.getElementById('launcherShowInHoverRow').style.display='none';document.getElementById('launcherShowInHover').checked=false;document.getElementById('launcherDeleteBtn').style.display='none';document.getElementById('launcherModalTitle').textContent='New Launcher';document.querySelectorAll('.color-swatch').forEach(function(s){s.classList.remove('selected')});m.showModal();m.querySelector('input[type=text]').focus()}
 // `env` is deliberately absent from every launcher payload this page is served -- it holds
@@ -2053,10 +2413,10 @@ var _launchProfiles={{launch_profiles|tojson}};
 var _activeLaunchProfile={{active_launch_profile.id|tojson}};
 function openProfileModal(){var m=document.getElementById('profileModal');renderProfileList();document.getElementById('profileForm').style.display='none';m.showModal()}
 function renderProfileList(){var list=document.getElementById('profileList');var html='';_launchProfiles.forEach(function(p){var isActive=p.id===_activeLaunchProfile;var cls='profile-item'+(isActive?' active':'');html+='<div class="'+cls+'" data-id="'+p.id+'">';html+='<span class="profile-item-name"></span>';html+='<span class="profile-item-actions">';if(!isActive)html+='<button type="button" class="btn-sm" onclick="activateProfile(\''+p.id+'\')">Activate</button>';html+=' <button type="button" class="btn-sm" onclick="editProfile(\''+p.id+'\')">Edit</button>';html+='</span></div>'});list.innerHTML=html;list.querySelectorAll('.profile-item-name').forEach(function(el,i){el.textContent=_launchProfiles[i].name})}
-function activateProfile(id){fetch('/api/launch-profile/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){_activeLaunchProfile=id;renderProfileList();var btn=document.querySelector('.topbar-profile-btn');var p=_launchProfiles.find(function(x){return x.id===id});if(btn&&p)btn.textContent='\u2699\ufe0f '+p.name}}).catch(function(){})}
+function activateProfile(id){fetch('/api/launch-profile/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.json()}).then(function(d){if(d.ok){_activeLaunchProfile=id;renderProfileList();var btn=document.getElementById('profileNameBtn');var p=_launchProfiles.find(function(x){return x.id===id});if(btn&&p){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=p.name}}}).catch(function(){})}
 function editProfile(id){var form=document.getElementById('profileForm');form.style.display='';var isNew=id==='__new__';var p=isNew?{id:'__new__',name:'',terminal_command:'wt new-tab --title {title} -p {wt_profile} -d {cwd} -- pwsh -NoExit -Command {pscmd}',wt_profile:'PowerShell'}:_launchProfiles.find(function(x){return x.id===id});if(!p)return;document.getElementById('profileId').value=p.id;document.getElementById('profileName').value=p.name;document.getElementById('profileTerminal').value=p.terminal_command;document.getElementById('profileWtProfile').value=p.wt_profile||'PowerShell';document.getElementById('profileDefaultDir').value=_globalDefaultDirectory||'';var delBtn=document.getElementById('profileDeleteBtn');delBtn.style.display=isNew||_launchProfiles.length<=1?'none':'';if(_launchProfiles.length<=1)delBtn.title='Cannot delete the last profile';else delBtn.title=''}
-function saveProfile(){var payload={id:document.getElementById('profileId').value,name:document.getElementById('profileName').value,terminal_command:document.getElementById('profileTerminal').value,wt_profile:document.getElementById('profileWtProfile').value};var newDefaultDir=document.getElementById('profileDefaultDir').value;fetch('/api/launch-profile/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);if(newDefaultDir!==_globalDefaultDirectory){return fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'default_directory',value:newDefaultDir})}).then(function(r){return r.json()}).then(function(d){if(d.ok)_globalDefaultDirectory=newDefaultDir;else showToast('<div class="toast toast-error">Failed to save default directory<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')}).catch(function(){showToast('<div class="toast toast-error">Failed to save default directory<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}}).then(function(){return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();var btn=document.querySelector('.topbar-profile-btn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active)btn.textContent='\u2699\ufe0f '+active.name}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function deleteProfile(){var id=document.getElementById('profileId').value;if(!id||id==='__new__')return;if(_launchProfiles.length<=1){showToast('<div class="toast toast-error">Cannot delete the last profile<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}if(id===_activeLaunchProfile&&!confirm('This is the active profile. Delete and switch to another?'))return;fetch('/api/launch-profile/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();document.getElementById('profileForm').style.display='none';var btn=document.querySelector('.topbar-profile-btn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active)btn.textContent='\u2699\ufe0f '+active.name}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
+function saveProfile(){var payload={id:document.getElementById('profileId').value,name:document.getElementById('profileName').value,terminal_command:document.getElementById('profileTerminal').value,wt_profile:document.getElementById('profileWtProfile').value};var newDefaultDir=document.getElementById('profileDefaultDir').value;fetch('/api/launch-profile/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.text()}).then(function(t){showToast(t);if(newDefaultDir!==_globalDefaultDirectory){return fetch('/api/save-setting',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'default_directory',value:newDefaultDir})}).then(function(r){return r.json()}).then(function(d){if(d.ok)_globalDefaultDirectory=newDefaultDir;else showToast('<div class="toast toast-error">Failed to save default directory<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')}).catch(function(){showToast('<div class="toast toast-error">Failed to save default directory<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}}).then(function(){return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();var btn=document.getElementById('profileNameBtn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}).catch(function(){showToast('<div class="toast toast-error">Save failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
+function deleteProfile(){var id=document.getElementById('profileId').value;if(!id||id==='__new__')return;if(_launchProfiles.length<=1){showToast('<div class="toast toast-error">Cannot delete the last profile<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');return}if(id===_activeLaunchProfile&&!confirm('This is the active profile. Delete and switch to another?'))return;fetch('/api/launch-profile/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id})}).then(function(r){return r.text()}).then(function(t){showToast(t);return fetch('/api/settings')}).then(function(r){return r.json()}).then(function(d){_launchProfiles=d.launch_profiles;_activeLaunchProfile=d.active_launch_profile;renderProfileList();document.getElementById('profileForm').style.display='none';var btn=document.getElementById('profileNameBtn');var active=_launchProfiles.find(function(p){return p.id===_activeLaunchProfile});if(btn&&active){var lbl=btn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}).catch(function(){showToast('<div class="toast toast-error">Delete failed<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
 </script>
 <script>
 var _wsAllTags=[];
@@ -2484,6 +2844,30 @@ function renderRestartKeys(settings) {
   });
   body.appendChild(list);
   markRestartInputs(pending);
+  markTopbarRestart(pending);
+}
+
+// The topbar's own reading of `pending`: a dot on the settings gear (so the
+// menu doesn't have to be open to notice), and inside the menu, why plus the
+// Restart action itself -- shown only while something genuinely disagrees
+// with the running process, never as a standing "just in case" button.
+function markTopbarRestart(pending) {
+  var dot = document.getElementById('topbarPendingDot');
+  var divider = document.getElementById('topbarRestartDivider');
+  var note = document.getElementById('topbarRestartNote');
+  var text = document.getElementById('topbarRestartText');
+  var btn = document.getElementById('topbarRestartBtn');
+  if (!dot || !divider || !note || !text || !btn) return;
+  var has = pending.length > 0;
+  dot.hidden = !has;
+  divider.hidden = !has;
+  note.hidden = !has;
+  btn.hidden = !has;
+  if (has) {
+    text.textContent = pending.length === 1
+      ? '1 change needs a restart to take effect'
+      : pending.length + ' changes need a restart to take effect';
+  }
 }
 
 // The two keys with a live control in the topbar. Without this the hotkey field

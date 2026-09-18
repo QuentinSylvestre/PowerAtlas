@@ -25,10 +25,26 @@
         <button type="button" class="color-swatch" data-color="#64748b" style="background:#64748b" aria-label="Slate"></button>
       </div>
     </div>
-    <label class="launcher-checkbox"><input type="checkbox" id="launcherTerminal" checked> Open in terminal</label>
-    <label class="launcher-checkbox"><input type="checkbox" id="launcherUseSelected"> Use selected workspaces</label>
-    <label class="launcher-checkbox" id="launcherShowInHoverRow" style="display:none"><input type="checkbox" id="launcherShowInHover"> Show in workspace card quick actions</label>
-    <label class="launcher-checkbox" id="launcherEnabledRow" style="display:none"><input type="checkbox" id="launcherEnabled" checked> Enabled</label>
+    <label class="launcher-checkbox">
+      <input type="checkbox" id="launcherTerminal" checked class="launcher-toggle-input">
+      <span class="launcher-checkbox-label">Open in terminal</span>
+      <span class="launcher-toggle-track"><span class="launcher-toggle-knob"></span></span>
+    </label>
+    <label class="launcher-checkbox">
+      <input type="checkbox" id="launcherUseSelected" class="launcher-toggle-input">
+      <span class="launcher-checkbox-label">Use selected workspaces</span>
+      <span class="launcher-toggle-track"><span class="launcher-toggle-knob"></span></span>
+    </label>
+    <label class="launcher-checkbox" id="launcherShowInHoverRow" style="display:none">
+      <input type="checkbox" id="launcherShowInHover" class="launcher-toggle-input">
+      <span class="launcher-checkbox-label">Show in workspace card quick actions</span>
+      <span class="launcher-toggle-track"><span class="launcher-toggle-knob"></span></span>
+    </label>
+    <label class="launcher-checkbox" id="launcherEnabledRow" style="display:none">
+      <input type="checkbox" id="launcherEnabled" checked class="launcher-toggle-input">
+      <span class="launcher-checkbox-label">Enabled</span>
+      <span class="launcher-toggle-track"><span class="launcher-toggle-knob"></span></span>
+    </label>
     <div class="modal-actions">
       <button type="button" class="modal-delete-btn" id="launcherDeleteBtn" onclick="deleteLauncher()">Delete</button>
       <span class="topbar-spacer"></span>

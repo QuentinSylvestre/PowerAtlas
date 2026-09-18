@@ -32,7 +32,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .topbar-banner { height: 47px; width: auto; flex-shrink: 0; }
 .topbar-spacer { flex: 1; }
 .topbar-cluster { display: flex; align-items: center; gap: 8px; }
-.topbar-separator { width: 1px; height: 28px; background: var(--border); opacity: 0.6; flex-shrink: 0; }
 .trust-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); cursor: pointer; padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); transition: all 0.2s; }
 .trust-toggle:hover { border-color: var(--accent); color: var(--text); }
 .trust-toggle.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
@@ -46,35 +45,111 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
 .refresh-btn:disabled { opacity: 0.5; cursor: wait; }
 .topbar-select:hover { border-color: var(--accent); color: var(--text); }
-.topbar-profile-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; color: var(--text-muted); padding: 6px 12px; font-size: 12px; cursor: pointer; transition: all 0.2s; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
-.topbar-profile-btn:hover { border-color: var(--accent); color: var(--text); }
-/* `.topbar-profile-btn` was written for <button>, whose UA styles already give
-   it a box and no underline. An <a> wearing any of this file's button classes
-   — that one on `/`, `.acp-btn` on `/acp` — needs both back, or the pill's
-   padding does not lay out and the label renders underlined. */
+/* An <a> wearing one of this file's button/pill classes needs both `display`
+   and underline-removal back, since it gets neither of a <button>'s UA
+   styles — `.topbar-nav-pill` on `/`, `.acp-btn` on `/acp`. */
 .topbar-link { display: inline-flex; align-items: center; text-decoration: none; }
-/* The cross-surface switch: `ACP` on `/`. One
-   control, so it is tinted apart from the pills it sits beside —
-   on `/` those are settings and state (profile, remote, autostart, refresh),
-   and a page link that looked identical to them was read as one more setting
-   and missed. The colour reinforces; the label is what carries the meaning, so
-   nothing is lost where the tint does not resolve. */
-.topbar-nav { color: var(--accent); flex-shrink: 0; }
-/* Both base classes set `color` on `:hover` — a two-class selector that would
-   otherwise win on specificity and drop the tint on the way to being clicked. */
-.topbar-nav:hover { color: var(--accent); }
-/* The `flex-shrink: 0` above is the dashboard's half, and it is load-bearing
-   there in a way it is not here. `/`'s topbar is a banner that does not shrink
-   and three clusters that sit at min-content, so the moment this link became a
-   direct child of that row it was the only item in it that *could* give — and
-   it gave everything: measured at 42 px of a 65 px pill at 1280 px and 26 px
-   at 1100 px, i.e. a robot emoji and the letter A. That row has always been
-   wider than a narrow window and has always clipped on the right when it did
-   not fit; what it must not do is silently eat the one control that was added
-   to make the agent surface findable. `/acp` overrides the factor for its own
-   row further down, where the order of sacrifice is stated in full. */
+/* `.topbar-nav` is a bare cross-surface marker, not a visual style of its
+   own (`.topbar-nav-pill` above owns the look on `/`) -- kept alongside it
+   on the same <a> because /acp's stylesheet keys off this exact class name
+   via `:has(.topbar-nav)` (wordmark hiding, its own link's left margin at
+   narrow widths) independent of whatever `/` styles the link with.
+   flex-shrink: 0 is this page's own shrink floor for it: this row has
+   always clipped on the right at narrow widths, and the ACP link -- the
+   one control added to make `/acp` findable -- must not be the thing that
+   quietly gives first. `/acp` overrides this with its own factor via
+   `.acp-btn.topbar-nav` further down, where its row's order of sacrifice
+   is spelled out in full. */
+.topbar-nav { flex-shrink: 0; }
 .trust-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s; }
 .trust-toggle.active .trust-dot, .topbar-toggle.active .trust-dot { background: var(--success); }
+
+/* Topbar redesign: only ACP + Refresh keep a permanent seat in the row;
+   Profile/Remote/Autostart/Peek/Port moved into the settings menu below. */
+.topbar-ic { width: 14px; height: 14px; display: block; flex-shrink: 0; }
+/* This is the visual restyle only -- the bare `.topbar-nav` class (with its
+   own flex-shrink:0 and the cross-surface :has() contract /acp's stylesheet
+   keys off) still rides alongside this one on the same <a>, unchanged. */
+.topbar-nav-pill {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  font-size: 12px; font-weight: 600; color: var(--accent);
+  background: rgba(108, 140, 255, 0.1); border: 1px solid rgba(108, 140, 255, 0.3);
+  padding: 6px 12px; border-radius: 8px; text-decoration: none;
+}
+.topbar-nav-pill:hover { background: rgba(108, 140, 255, 0.16); }
+.refresh-btn { display: flex; align-items: center; justify-content: center; }
+.refresh-btn.spinning svg { animation: topbar-spin 0.8s linear infinite; }
+@keyframes topbar-spin { to { transform: rotate(360deg); } }
+
+.topbar-settings-wrap { position: relative; flex-shrink: 0; }
+.topbar-settings-btn {
+  width: 28px; height: 28px; padding: 0; position: relative;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 50%;
+  color: var(--text-muted); cursor: pointer; transition: all 0.2s;
+}
+.topbar-settings-btn:hover { border-color: var(--accent); color: var(--accent); }
+.topbar-settings-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.topbar-pending-dot {
+  position: absolute; top: -2px; right: -2px; width: 9px; height: 9px;
+  border-radius: 50%; background: var(--amber); border: 2px solid var(--topbar-bg);
+}
+/* Extends .acp-rail-menu (shared dropdown chrome: bg/border/radius/shadow)
+   with this menu's own width and offset -- .acp-rail-settings's `top: calc(100%
+   - 2px)` assumes an anchor as tall as its whole row; here the anchor
+   (.topbar-settings-wrap) is only as tall as the button itself. */
+.topbar-settings-menu { top: calc(100% + 8px); right: 0; min-width: 280px; padding: 6px; gap: 0; }
+.topbar-menu-section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim); padding: 8px 10px 4px; }
+.topbar-menu-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border-radius: 6px; border: none; background: transparent;
+  font-family: inherit; font-size: 12.5px; color: var(--text); text-align: left; cursor: pointer;
+}
+.topbar-menu-row:hover { background: var(--surface-hover); }
+.topbar-menu-row svg.topbar-ic { color: var(--text-muted); }
+.topbar-menu-label { flex: 1; min-width: 0; }
+.topbar-menu-chevron { color: var(--text-dim); }
+.topbar-menu-divider { height: 1px; background: var(--border); margin: 6px 4px; }
+/* Resets .topbar-toggle's own pill shape (border-radius:20px, its own
+   padding/border/background) back to a plain menu row -- two classes beat
+   one on specificity, so this wins regardless of the two rules' order in
+   the file. Only the switch below should change color when `.active`. */
+.topbar-menu-row.topbar-toggle { border-radius: 6px; padding: 8px 10px; border: none; background: transparent; color: var(--text); }
+.topbar-menu-row.topbar-toggle:hover { background: var(--surface-hover); }
+.topbar-menu-row.topbar-toggle.active { background: transparent; color: var(--text); }
+.topbar-switch { width: 30px; height: 18px; border-radius: 999px; background: var(--border); position: relative; flex-shrink: 0; transition: background 0.2s; }
+.topbar-switch-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-muted); transition: left 0.2s, background 0.2s; }
+.topbar-toggle.active .topbar-switch { background: var(--success); }
+.topbar-toggle.active .topbar-switch-knob { left: 14px; background: #fff; }
+/* Same specificity fix as .topbar-toggle above: .peek-hotkey-group's own
+   base rule (gap: 8px, defined for its old standalone-pill life) is
+   overridden by this two-class selector rather than depending on which
+   comes first in the file. */
+.topbar-menu-row.peek-hotkey-group { cursor: default; }
+.topbar-menu-row.peek-hotkey-group .hotkey-field { margin-left: auto; }
+/* Port keeps its label on one line and its (select/input/randomize/apply)
+   controls on the next, indented under the label rather than the icon --
+   the real control cluster is wider than this menu at 280px, so it wraps
+   most of the time regardless; this just makes the wrap look intentional. */
+.topbar-menu-row.topbar-menu-row-stack.port-group { flex-direction: column; align-items: stretch; gap: 6px; cursor: default; }
+.topbar-menu-row-head { display: flex; align-items: center; gap: 10px; }
+.topbar-menu-row-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-left: 24px; }
+
+.topbar-restart-note { display: flex; align-items: center; gap: 8px; padding: 6px 10px 8px; font-size: 11px; color: var(--amber); }
+.topbar-restart-note svg { color: var(--amber); }
+.topbar-restart-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; margin-top: 2px; padding: 8px 10px; border-radius: 6px;
+  font-size: 12.5px; font-weight: 600; font-family: inherit; cursor: pointer;
+  color: var(--amber); background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.35);
+}
+.topbar-restart-btn:hover { background: rgba(245, 158, 11, 0.16); }
+/* Same fix as .acp-rail-menu[hidden] elsewhere in this file: an author rule
+   setting `display` always outranks the UA stylesheet's `[hidden] {
+   display: none }`, `hidden` attribute or not -- caught by the pending-dot
+   correctly hiding (no explicit `display` of its own) while these two,
+   which do set one, stayed visible with `hidden` set. */
+.topbar-restart-note[hidden], .topbar-restart-btn[hidden] { display: none; }
 
 /* Peek hotkey group */
 .peek-hotkey-group { display: flex; align-items: center; gap: 8px; }
@@ -86,13 +161,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sa
 .peek-input { background: none; border: none; color: var(--text); font-size: 12px; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; width: 14ch; outline: none; padding: 0; }
 .peek-input::placeholder { color: var(--text-dim); font-style: italic; }
 
-/* Search */
-.search-area { display: flex; gap: 12px; align-items: center; padding: 8px 16px; flex-shrink: 0; }
-.command-bar { position: relative; flex: 1; min-width: 0; }
-.command-bar input { width: 100%; padding: 12px 16px 12px 40px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 14px; outline: none; transition: border-color 0.2s; }
-.command-bar input:focus { border-color: var(--accent); }
+/* Search + provider filter: provider-first, search-reveal. Chips lead (the
+   control touched more once mid-workflow) at equal visual weight to a real
+   button rather than a muted tab; search is a compact pill that only grows
+   on focus instead of owning the row's full width up front. */
+.search-area { display: flex; gap: 8px; align-items: center; padding: 8px 16px; flex-shrink: 0; }
+.search-area-spacer { flex: 1; }
+.command-bar {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  width: 220px; padding: 8px 14px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  transition: width 0.2s, border-color 0.2s;
+}
+.command-bar:focus-within { width: 320px; border-color: var(--accent); }
+.command-bar input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--text); font-size: 13px; padding: 0; }
 .command-bar input::placeholder { color: var(--text-dim); }
-.command-bar .search-icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--text-dim); font-size: 14px; }
+.command-bar .search-icon { width: 14px; height: 14px; display: block; flex-shrink: 0; stroke: currentColor; fill: none; color: var(--text-dim); }
 
 /* Cards grid */
 .panels-container { display: flex; flex: 1; min-height: 0; overflow: hidden; }
@@ -165,21 +249,39 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
    unaffected. `flex-wrap` lets the trailing buttons drop to their own line
    on a narrow window instead of squeezing the tag/time filters. */
 #workspaces-panel .section-label { position: relative; flex-wrap: wrap; row-gap: 4px; }
-.workspace-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-/* Pushes Refresh + settings to the row's right edge, past the tag/time
-   filters -- `#dashRailReload` is dashboard-only (/acp's own Refresh button
-   is `#acpRailReload`), so this cannot affect that page's `.acp-rail-head`
-   row, which still lays its own Refresh out left-to-right with no gap to
-   push across. */
-#dashRailReload { margin-left: auto; }
-.ws-filter-select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 3px 6px; font-size: 11px; outline: none; cursor: pointer; max-width: 120px; }
-.ws-filter-select:hover { border-color: var(--accent); color: var(--text); }
-.ws-filter-select:focus { border-color: var(--accent); }
-.ws-clear-filters { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 2px 8px; font-size: 11px; cursor: pointer; transition: all 0.2s; }
-.ws-clear-filters:hover { border-color: var(--accent); color: var(--accent); }
-.ws-hidden-badge { font-size: 10px; color: var(--text-dim); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 1px 6px; }
-.ws-tag-colors-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 2px 6px; font-size: 12px; cursor: pointer; transition: all 0.2s; line-height: 1; }
-.ws-tag-colors-btn:hover { border-color: var(--accent); color: var(--accent); }
+/* Pushes the icon group (filter / refresh / settings) to the row's right
+   edge. Replaces the old `#dashRailReload { margin-left: auto }` trick, which
+   stopped working once Refresh moved inside `.ws-icon-group` alongside the
+   other two buttons -- an auto-margin on one flex child inside that inner
+   row would have shoved just Refresh away from Filters/Settings instead of
+   moving the whole cluster. */
+.ws-header-spacer { flex: 1 1 auto; }
+.ws-icon-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* One shared 32px square button for Filters / Refresh / Group-and-sort, so
+   the three read as one control cluster instead of a text pill next to two
+   quiet icons (workspace-panel-filters redesign). Same metrics as the older
+   `.acp-rail-settings-btn`, which `#dashRailSettings` still also carries for
+   its menu-specific rules below -- this class now owns the button chrome
+   `.acp-btn` used to provide, so `#dashRailSettings` no longer needs `.acp-btn`
+   too. */
+.ws-icon-btn { position: relative; width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; transition: all 0.15s; }
+.ws-icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ws-icon-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+.ws-icon-btn.has-filter { border-color: var(--accent); color: var(--accent); }
+.ws-icon { width: 15px; height: 15px; display: block; }
+.ws-filter-wrap { position: relative; }
+/* Small accent dot in the corner -- same "something here needs attention"
+   convention the topbar settings gear's `#topbarPendingDot` already uses --
+   so a filter reads as active even while the menu is closed. */
+.ws-filter-dot { position: absolute; top: -3px; right: -3px; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+.ws-filter-dot[hidden] { display: none; }
+.ws-filter-menu { top: calc(100% - 2px); right: 0; min-width: 200px; }
+.ws-filter-item-label { display: flex; align-items: center; gap: 9px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-filter-dot-swatch { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ws-filter-empty-note { font-size: 11px; color: var(--text-dim); padding: 4px 10px 6px; line-height: 1.4; max-width: 190px; }
+.ws-filter-manage { color: var(--text-dim); font-size: 11px; }
+.ws-filter-clear { width: 100%; text-align: center; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); font-family: inherit; font-size: 11.5px; font-weight: 600; color: var(--text-muted); padding: 7px; cursor: pointer; }
+.ws-filter-clear:hover { background: rgba(248, 113, 113, 0.1); color: #f87171; }
 .tag-colors-popover { position: absolute; top: 100%; left: 0; z-index: 1000; background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; min-width: 260px; max-height: 300px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3); margin-top: 4px; }
 .tag-colors-title { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
 .tag-color-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
@@ -412,23 +514,73 @@ script { display: none; }
 
 
 /* Launcher section */
-.launcher-grid { display: grid; grid-template-columns: 1fr; gap: 8px; }
+/* Compact icon grid (launcher panel redesign): 3 columns fit the real
+   280px .left-panel comfortably at ~79px per tile. Vertical layout (icon
+   over name) instead of the old horizontal row. */
+/* auto-fill, not a fixed count: the panel is user-resizable (240-340px,
+   dashLeftResize) and this reacts to that live -- 2 columns at the 280px
+   default (90px minimum keeps a 3rd from squeezing in there), same as a
+   narrower resize, but a wide enough resize gets a 3rd column for free,
+   with no JS involved on this half of the feature. auto-fill over auto-fit:
+   with few launchers, unfilled tracks stay empty space rather than
+   stretching the existing tiles to an oversized width. */
+.launcher-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 6px; }
 .launcher-add-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); font-size: 14px; width: 22px; height: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 .launcher-add-btn:hover { border-color: var(--accent); color: var(--accent); }
-.launcher-tile { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 0; padding: 8px 12px; transition: border-color 0.2s, background 0.2s; cursor: pointer; display: flex; align-items: center; gap: 8px; position: relative; }
+.launcher-tile {
+  background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
+  padding: 8px 4px 6px; transition: border-color 0.2s, background 0.2s; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center;
+  position: relative;
+}
 .launcher-tile:hover { border-color: var(--accent); background: var(--surface); }
-.launcher-name { font-size: 13px; font-weight: 500; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.launcher-icon { width: 20px; height: 20px; flex-shrink: 0; object-fit: contain; }
-.launcher-gear-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; padding: 4px 6px; font-size: 12px; flex-shrink: 0; }
-.launcher-gear-btn:hover { border-color: var(--accent); color: var(--accent); }
-.launcher-tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; font-size: 11px; color: var(--text-muted); white-space: nowrap; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,0.3); pointer-events: none; }
+/* The color stripe moves from a left border to a short inset bar at the
+   top: a narrow grid tile has no stable "left" the way the old full-width
+   row did. `--stripe` is set inline per-launcher in partials/launcher_tile.html;
+   `transparent` here means an uncolored launcher reserves no visible space. */
+.launcher-tile::before { content: ''; position: absolute; top: 0; left: 8px; right: 8px; height: 2px; border-radius: 0 0 2px 2px; background: var(--stripe, transparent); }
+.launcher-name { font-size: 10px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; line-height: 1.3; }
+.launcher-icon { width: 20px; height: 20px; flex-shrink: 0; object-fit: contain; border-radius: 4px; }
+/* Hover-revealed, matching the hover-action language the rest of this
+   redesign already uses (rail buttons, session rows) -- the gear used to
+   be always visible, which a tile this small has no room to spare for. */
+.launcher-gear-btn {
+  position: absolute; bottom: 2px; right: 2px; width: 16px; height: 16px;
+  background: none; border: none; border-radius: 4px; color: var(--text-dim);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  opacity: 0; transition: opacity 0.12s;
+}
+.launcher-tile:hover .launcher-gear-btn { opacity: 1; }
+.launcher-gear-btn:hover { color: var(--accent); }
+.launcher-gear-btn svg { width: 12px; height: 12px; display: block; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* Centered under the tile rather than left-anchored: a narrow grid tile's
+   own left edge is not a meaningful anchor the way the old full-width
+   row's was. */
+/* position: fixed (not absolute): .left-panel needs overflow-y for its own
+   scroll, and per the CSS overflow spec, setting overflow on one axis
+   computes the *other* axis to `auto` too even when never set explicitly --
+   so an absolutely-positioned tooltip was always silently clipped to the
+   panel's own bounds, truncating on anything wider than it. Fixed
+   positioning escapes that (no ancestor here sets transform/filter/
+   will-change, so it stays relative to the viewport, not some clipped
+   ancestor), which is also what lets it sit above the other panels rather
+   than under them. left/top are no longer set here -- positionLauncherTooltip
+   (index.html) computes and clamps them to the actual viewport on hover,
+   since a fixed element has no tile-relative anchor of its own the way an
+   absolute one does. z-index 1000 matches this app's other fixed-position
+   overlay convention (tag-colors-popover, the delete-confirm modal). */
+.launcher-tooltip { display: none; position: fixed; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 10px; font-size: 10.5px; color: var(--text-muted); white-space: nowrap; z-index: 1000; box-shadow: 0 8px 20px rgba(0,0,0,0.4); pointer-events: none; text-align: left; }
 .launcher-tile:hover .launcher-tooltip { display: block; }
 .launcher-tooltip-row { margin-bottom: 3px; }
 .launcher-tooltip-row:last-child { margin-bottom: 0; }
 .launcher-badge { position: absolute; top: -4px; right: -4px; font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 10px; background: var(--accent, #4a6ede); color: #fff; display: none; }
 .launcher-badge.visible { display: block; }
 .provider-tile { position: relative; }
-.launcher-lock { position: absolute; top: 4px; right: 4px; font-size: 10px; opacity: 0.5; }
+/* Moved from top-right to top-left: on a provider tile, the selection-count
+   badge above also claims top-right (a provider is always selection-aware
+   -- see updateLauncherBadges' separate `.provider-tile .launcher-badge`
+   pass), and this tile is now too small for the two to share a corner. */
+.launcher-lock { position: absolute; top: 4px; left: 4px; width: 11px; height: 11px; display: block; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: var(--text-dim); opacity: 0.65; }
 
 /* Launcher modal */
 .launcher-modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); padding: 20px; max-width: 420px; width: 90vw; }
@@ -437,6 +589,24 @@ script { display: none; }
 .launcher-modal label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
 .launcher-checkbox { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .launcher-checkbox input { margin: 0; }
+.launcher-checkbox-label { flex: 1; }
+/* The real checkbox stays in the DOM with its id/checked/disabled wired
+   exactly as before (saveLauncher, editLauncher, openProviderLauncherModal
+   all read/write these by id) -- only visually replaced by a track+knob
+   pair, same 30x18/14x14 metrics as the topbar's own Autostart switch
+   (.topbar-switch/.topbar-switch-knob), so this modal's four checkboxes
+   read as the same toggle language instead of a bare native checkbox.
+   Higher specificity than `.launcher-modal input` (which sets width:100%
+   etc. for the text/textarea fields in this same modal) is required here,
+   not just source order, so this wins regardless of file position. */
+.launcher-checkbox .launcher-toggle-input { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; }
+.launcher-toggle-track { width: 30px; height: 18px; border-radius: 999px; background: var(--border); position: relative; flex-shrink: 0; transition: background 0.2s; }
+.launcher-toggle-knob { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-muted); transition: left 0.2s, background 0.2s; }
+.launcher-toggle-input:checked ~ .launcher-toggle-track { background: var(--success); }
+.launcher-toggle-input:checked ~ .launcher-toggle-track .launcher-toggle-knob { left: 14px; background: #fff; }
+.launcher-toggle-input:disabled ~ .launcher-checkbox-label { opacity: 0.6; }
+.launcher-toggle-input:disabled ~ .launcher-toggle-track { opacity: 0.5; }
+.launcher-toggle-input:focus-visible ~ .launcher-toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 .launcher-modal input, .launcher-modal textarea { display: block; width: 100%; margin-top: 4px; padding: 6px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; outline: none; }
 .launcher-modal input:focus, .launcher-modal textarea:focus { border-color: var(--accent); }
 .modal-actions { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
@@ -512,16 +682,22 @@ script { display: none; }
 .btn-sm { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); padding: 3px 8px; font-size: 11px; cursor: pointer; }
 .btn-sm:hover { border-color: var(--accent); color: var(--text); }
 
-/* Provider filter (inline with search bar) */
-.provider-filter { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+/* Provider filter (inline with search bar): real buttons carrying equal
+   visual weight to the search box beside them, not muted tabs -- 8px
+   radius matches .topbar-nav-pill rather than the old 12px, and there is
+   no longer a 999px full-pill shape anywhere in this row. */
+.provider-filter { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .provider-filter-btn {
-  padding: 4px 12px; border: none; border-radius: 12px;
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--card-bg); color: var(--text-muted); cursor: pointer;
-  font-size: 12px; transition: background 0.15s, color 0.15s;
+  font-family: inherit; font-size: 12.5px; font-weight: 600;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
   white-space: nowrap;
 }
 .provider-filter-btn:hover { background: var(--surface-hover); }
-.provider-filter-btn.active { background: var(--accent); color: #fff; }
+.provider-filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.provider-filter-icon { width: 14px; height: 14px; object-fit: contain; border-radius: 3px; flex-shrink: 0; display: block; }
 .provider-filter-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* Provider icon badge on workspace cards */
@@ -585,6 +761,10 @@ script { display: none; }
   vertical-align: middle;
 }
 .acp-rail-row-icon { flex-shrink: 0; border-radius: 3px; }
+/* Workspace/session row action buttons (RAIL_ICON in index.html): stroke
+   is currentColor, so existing hover/pinned color rules on the buttons
+   that hold these (.card-*-btn, .row-btn, .pin-btn) apply automatically. */
+.rail-icon { width: 15px; height: 15px; display: block; flex-shrink: 0; }
 
 /* Pinned/non-pinned separator */
 .pinned-separator {
@@ -830,6 +1010,12 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    makes it the containing block for the absolutely-placed nav. */
 .acp-transcript-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 .acp-transcript { flex: 1; min-height: 0; overflow-y: auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.65; display: flex; flex-direction: column; gap: 10px; }
+/* /acp styles this class inline (its own <style> block, not this shared
+   sheet) for real in-conversation system/compaction messages; the dashboard
+   never picked up the equivalent rule, so both that case and the "Select a
+   session..." empty state rendered as plain unstyled body text here. Matches
+   /acp's rule verbatim. */
+.acp-system-msg { padding: 4px 14px; font-size: 11px; font-style: italic; color: var(--text-dim); text-align: center; }
 /* Floating prompt navigation arrows — positioned at bottom-left of the transcript.
    Hidden when fewer than 2 user messages are present (see addMessage in acp.html). */
 .acp-prompt-nav {
@@ -844,8 +1030,14 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
 .acp-prompt-nav-btn {
   padding: 0.25rem 0.5rem;
   opacity: 0.7;
-  font-size: 0.875rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
+/* Was literal "↑"/"↓" text glyphs -- the one control left using a
+   text-character icon instead of the stroke-SVG language the rest of the
+   dashboard's redesign pass moved to. */
+.acp-prompt-nav-icon { width: 13px; height: 13px; display: block; }
 .acp-prompt-nav-btn:hover { opacity: 1; }
 .acp-prompt-nav-btn--dim { opacity: 0.25; cursor: default; }
 .acp-prompt-nav-btn--dim:hover { opacity: 0.25; }
@@ -1476,7 +1668,12 @@ body:has(> .acp-shell) { height: 100dvh; }
 #workspaces-panel { padding-bottom: 16px; }
 #workspaces-panel .acp-rail-groups { gap: 4px; padding-bottom: 56px; }
 .acp-rail-empty { font-size: 12px; line-height: 1.5; color: var(--text-dim); padding: 6px 2px; }
-.acp-rail-group { display: flex; flex-direction: column; gap: 2px; }
+/* border-left is structural here (width/style, transparent by default);
+   dashRailGroupNode sets only the *color* when the workspace has one
+   (its own explicit color, else its first tag's) -- an untagged workspace
+   keeps this transparent default, same footprint either way so the row
+   doesn't shift depending on whether a color was set. */
+.acp-rail-group { display: flex; flex-direction: column; gap: 2px; border-left: 3px solid transparent; border-radius: 0 8px 8px 0; }
 /* Sticky, so the group you are reading stays named while its rows scroll past.
    `.acp-rail-groups` is the rail's only scroller, so this sticks against that
    container rather than against the page. The background must be opaque —
