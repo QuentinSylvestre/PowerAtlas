@@ -2983,7 +2983,7 @@
     return railIndex()['s:' + sid] || null;
   }
 
-  function railRefreshStates(incoming) {
+  function railRefreshStates(incoming, seenIds) {
     // Availability, a held row's status, and the row's title. Timestamps and
     // the workspace's own fields stay out: they are not what goes stale in
     // seconds, and rewriting them would let a background poll reorder a row
@@ -3019,11 +3019,21 @@
     // has a `cwd`-keyed container to be found through. The poll's job is
     // identical in both shapes: write today's availability, status and title
     // onto whichever row is already drawn for that id.
+    //
+    // `seenIds`, when given, collects every row id this call touches so the
+    // caller can evict `_prevSessionStatus` once across an entire refresh
+    // cycle. This function is called once per workspace group plus once more
+    // for the pinned list (see `railRefresh`), so evicting from inside a
+    // single call used to delete the very entries a sibling call in the same
+    // tick had just written — an empty pinned list, in particular, "saw"
+    // neither session and wiped both on every tick, before a status change
+    // ever had a second tick to be noticed against.
     var rows = incoming.sessions || [];
     var byId = railIndex();
     var changed = false;
     for (var i = 0; i < rows.length; i++) {
       var found = byId['s:' + rows[i].id];
+      if (seenIds) seenIds[rows[i].id] = true;
       // Unread tracking: when a held non-current session transitions from
       // working to non-working, mark it unread (turn just ended while elsewhere).
       var prevStatus = _prevSessionStatus[rows[i].id];
@@ -3066,12 +3076,6 @@
         row.title = rows[i].title;
         changed = true;
       }
-    }
-    // Evict sessions no longer in the rail to prevent unbounded growth
-    var seenIds = Object.create(null);
-    rows.forEach(function(s) { seenIds[s.id] = true; });
-    for (var k in _prevSessionStatus) {
-      if (!seenIds[k]) delete _prevSessionStatus[k];
     }
     return changed;
   }
@@ -3117,12 +3121,21 @@
       railBusy = false;
       var groups = (data && data.groups) || [];
       var changed = false;
+      // Shared across every call this tick (once per group, plus pinned below)
+      // so evicting stale `_prevSessionStatus` entries happens once, against
+      // everything the tick actually saw — not once per call against that
+      // call's own narrow slice, which used to delete a status a sibling call
+      // had just written (see `railRefreshStates`'s own comment on this).
+      var seenIds = Object.create(null);
       for (var i = 0; i < groups.length; i++) {
-        if (railRefreshStates(groups[i])) changed = true;
+        if (railRefreshStates(groups[i], seenIds)) changed = true;
       }
       // Refresh pinned rows the same way — wrap as a synthetic group so the
       // same function handles the state writes.
-      if (railRefreshStates({ sessions: (data && data.pinned) || [] })) changed = true;
+      if (railRefreshStates({ sessions: (data && data.pinned) || [] }, seenIds)) changed = true;
+      for (var k in _prevSessionStatus) {
+        if (!seenIds[k]) delete _prevSessionStatus[k];
+      }
       // The counter moves with the dots or it contradicts them. Every other
       // loader already ends in `railSetCapacity`; this one did not, so the
       // sweeper reclaiming a session turned its row green on the next tick
