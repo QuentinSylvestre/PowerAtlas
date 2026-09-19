@@ -1,35 +1,5 @@
 # Test Harness
-last_run: 2026-09-19
-
-## Run notes (2026-09-19, plan mode for 260919_KIRO_CLI_V3_LIVENESS_ACP)
-- **A live PowerAtlas instance was running (PID 41776) and idle** at plan time, supervising `kiro-cli.exe acp
-  --agent-engine v3` (PID 37024) with one idle ACP session. Per user decision, this run uses the live instance
-  directly for all probing, including a controlled kill of the supervised `kiro-cli.exe` child to test
-  crash-recovery — but never restarts PowerAtlas itself (absolute rule, see `AGENTS.md`).
-- **Never send `_kiro.dev/commands/options` with `command: ""` to a live/working instance** — project memory
-  records this exits kiro-cli with code 0, no stderr. Useful as a deterministic crash probe on an already-idle
-  instance; never send it to a session mid-turn.
-- Config bounds for the three ACP tunables (`acp_max_sessions`, `acp_idle_ttl_seconds`,
-  `acp_prompt_silence_seconds`) live in two places that must be kept in sync: `web.py::_SETTING_BOUNDS` (write
-  path) and `acp.py::apply_config`'s `_clamped(...)` calls (load path, startup-only). Was drifted for
-  `acp_prompt_silence_seconds` (60-86400 vs 60-7200) — fixed this run, see
-  `plans/tests/260919_KIRO_CLI_V3_LIVENESS_ACP.md` §2.5.
-- **Reachable read-only probe recipe for the live ACP instance**: fetch `GET /acp`, regex out
-  `var ACP_TOKEN = "..."` from the page, then connect to `ws://127.0.0.1:<port>/ws/acp?t=<token>` with only an
-  `Origin: http://127.0.0.1:<port>` header set (do NOT also set an explicit `Host` header — duplicate Host headers
-  cause a 400 before the app's own auth checks run). Send `{"type":"load","sessionId":"<id>","payload":{}}` to
-  resume a session read-mostly (no prompt), then `{"type":"close","sessionId":"<id>","payload":{}}` to release it
-  again. Confirmed working against kiro-cli 2.22.0 / websockets 16.1.1 in the project venv.
-- **Killing the supervised `kiro-cli.exe` directly does not trigger `_on_agent_death` promptly** — its child
-  `node.exe` (the real `@kiro/agent` ACP server, spawned with inherited stdio) keeps the stdout pipe's write end
-  open, so the reader thread's blocking read never sees EOF. Recovery only happens lazily, on the next
-  request's `ensure_started()` check (which polls the exact PID directly, unaffected by the pipe). Confirmed via
-  direct process-tree inspection (`Get-CimInstance Win32_Process`) — see
-  `plans/tests/260919_KIRO_CLI_V3_LIVENESS_ACP.md` for the full writeup. Useful, repeatable crash-recovery test
-  recipe for future runs; expect the orphaned `node.exe` to persist (growing RSS) until the next ACP request.
-- **Bisecting a suspected regression**: a plain `git worktree add --detach --no-checkout <path> <rev>` followed by
-  `git sparse-checkout init --cone` + `set <dirs>` + `git checkout <rev> -- .` avoids Windows "filename too long"
-  errors from this repo's `_proto/` asset directories, which a full checkout of any historical commit hits.
+last_run: 2026-07-01
 
 ## Run notes (2026-07-01, deep run of 260701_POWERATLAS)
 - Confirmed live: both provider datasets on disk; web server starts via `python -m uvicorn power_atlas.web:app` on a fixed port (no tray/peek needed) — used :8899.
