@@ -365,19 +365,19 @@ function dashCloseIfAbandoned() {
 **Init on DOM load**: In `DOMContentLoaded` (or equivalent boot sequence), call `dashPickerInitTaskMode()`.
 
 **Exit criteria:**
-- [ ] `dashPickerOpen(cwd)` shows `#dashPicker`, resets task mode to `kiro_default`, pre-fills filter when `cwd` given, focuses search, loads workspaces
-- [ ] `#dashPickerNote` shows correct capacity string after load (e.g. "3 workspaces · 2/8 sessions open")
-- [ ] Workspace rows disabled when at capacity; `#dashPickerNeutral` disabled at capacity
-- [ ] `dashPickerCreate('')` (neutral option) sends `{type:'new', payload:{cwd:'', mode:'kiro_default'}}` over `_dashWs`
-- [ ] `dashPickerCreate(cwd)` with `wantsClose` true sends `close` then creates after `session_closed`
-- [ ] `#dashPickerKeepRow` hidden when `_dashAttachedSid` is null; shown when non-null
-- [ ] `dashPickerClose()` clears `_dashPendingCreate` and closes task-mode submenu
-- [ ] Focus is trapped within `#dashPicker` while it is open; Tab wraps correctly; focus released on close
-- [ ] Escape closes task-mode submenu first, then picker on second press
-- [ ] `dashPickerLoad()` calls `dashPickerRenderKeepRow()` after updating `_dashPickerCapacity`
-- [ ] `dashPickerRunPending()` re-checks capacity before sending `new` frame; shows note if at cap
-- [ ] `close_in_progress` error → `dashPickerRunPending()` called; `turn_in_progress` / `not_subscribed` → `_dashPendingCreate = null` + note shown
-- [ ] `node tests/acp_page.test.mjs` exits 0
+- [x] `dashPickerOpen(cwd)` shows `#dashPicker`, resets task mode to `kiro_default`, pre-fills filter when `cwd` given, focuses search, loads workspaces
+- [x] `#dashPickerNote` shows correct capacity string after load (e.g. "3 workspaces · 2/8 sessions open")
+- [x] Workspace rows disabled when at capacity; `#dashPickerNeutral` disabled at capacity
+- [x] `dashPickerCreate('')` (neutral option) sends `{type:'new', payload:{cwd:'', mode:'kiro_default'}}` over `_dashWs`
+- [x] `dashPickerCreate(cwd)` with `wantsClose` true sends `close` then creates after `session_closed`
+- [x] `#dashPickerKeepRow` hidden when `_dashAttachedSid` is null; shown when non-null
+- [x] `dashPickerClose()` clears `_dashPendingCreate` and closes task-mode submenu
+- [x] Focus is trapped within `#dashPicker` while it is open; Tab wraps correctly; focus released on close
+- [x] Escape closes task-mode submenu first, then picker on second press
+- [x] `dashPickerLoad()` calls `dashPickerRenderKeepRow()` after updating `_dashPickerCapacity`
+- [x] `dashPickerRunPending()` re-checks capacity before sending `new` frame; shows note if at cap
+- [x] `close_in_progress` error → `dashPickerRunPending()` called; `turn_in_progress` / `not_subscribed` → `_dashPendingCreate = null` + note shown
+- [x] `node tests/acp_page.test.mjs` exits 0 (no new failures — same 5 pre-existing)
 
 **Covers**: SC-2, SC-3 (partial — creation sent), SC-5, SC-6
 
@@ -643,3 +643,13 @@ Exits 0 on pass.
 ## Harness Improvement Opportunities
 
 - Dispatching three separate sub-agents before the interview is correct per the skill, but the skill's probe-gate instruction ("run every probe on the decidable-by-probe list before forming a single question") arrives only after reading `shared.md` — which is cited but not pre-loaded. The probe gate is non-trivially expensive to miss (as it was here on the first round). Suggested change: load `shared.md` automatically alongside `SKILL.md` in the qexplore skill activation, or include the probe-gate rule inline in SKILL.md. — cost: one extra interview round and user correction.
+
+
+### 2026-09-19 — Phase 3 review (Senior Engineer + Reliability Engineer, high effort)
+
+2 findings (0 High, 1 Medium, 1 Low). 1 auto-resolved (fix commit 6bfbac7).
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Medium | `dashPickerCreate` did not check `send('close')` return value — if socket drops between attach and create press, `_dashPendingCreate` is set but close never fires | Fixed — added guard matching `acp.html` line 4875; commit 6bfbac7 |
+| 2 | Low | `_dashTrapFocus` appends inputs before buttons without comment — correct for today but fragile for future editors | Accepted — ordering is correct and comment added inline |
