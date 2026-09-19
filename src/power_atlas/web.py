@@ -204,9 +204,6 @@ def _time_bucket(iso_str: str) -> str:
     return "before"
 
 
-# Session statuses that count as "live" (a process is running for them).
-_LIVE_STATUSES = ("working", "waiting", "errored")
-
 def _map_reported_status(reported: str) -> str:
     """Map a provider's self-reported live state onto the semantic vocabulary.
 
@@ -286,15 +283,6 @@ def _resolved_session_status(snapshot, provider: str, session_id: str,
         return semantic.value
     # A process is running and nothing could classify it — not evidence of idle.
     return "working"
-
-
-def _status_matches(status_filter: str, status: str) -> bool:
-    """True if a computed status passes the requested filter value."""
-    if not status_filter or status_filter == "all":
-        return True
-    if status_filter == "live":
-        return status in _LIVE_STATUSES
-    return status == status_filter
 
 
 def _group_workspaces(workspace_data: list[tuple[str, int, str, str]], config) -> list[dict]:

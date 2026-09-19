@@ -7945,7 +7945,6 @@ def test_bulk_get_returns_multiple(mock_load, client, tmp_path):
 
 from datetime import datetime, timezone, timedelta
 from power_atlas import presence
-from power_atlas.web import _status_matches
 from power_atlas.data import _normalize_path
 
 
@@ -7960,17 +7959,6 @@ def _old_iso(mins=10):
 def _snapshot(live_sids=(), live_cwds=(), sid_to_cwd=None, sid_status=None):
     return presence.Snapshot(set(live_sids), set(live_cwds), sid_to_cwd or {},
                              sid_status or {})
-
-
-def test_status_matches_semantics():
-    assert _status_matches("", "closed") is True          # no filter
-    assert _status_matches("all", "waiting") is True
-    assert _status_matches("live", "working") is True
-    assert _status_matches("live", "waiting") is True
-    assert _status_matches("live", "errored") is True
-    assert _status_matches("live", "closed") is False
-    assert _status_matches("working", "working") is True
-    assert _status_matches("working", "waiting") is False
 
 
 def _tracked_snapshot(reported):
