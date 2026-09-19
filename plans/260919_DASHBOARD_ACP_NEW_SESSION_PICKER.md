@@ -173,9 +173,9 @@ None.
 **Note on SVG chevron**: Copy the exact `<svg>` used in `/acp`'s `#acpPicker` task-mode toggle (inspect `acp.html` for the exact markup used by the `.acp-taskmode-chevron` element). The snippet above is illustrative; use the verbatim SVG from `acp.html`.
 
 **Exit criteria:**
-- [ ] `#dashPicker` element present in `index.html`, `hidden` by default
-- [ ] All required child elements present: `#dashPickerTitle`, `#dashPickerCancel`, `#dashPickerNote`, `#dashPickerTaskModeRow`, `#dashPickerTaskModeToggle`, `#dashPickerTaskModeMenu`, `#dashPickerKeepRow`, `#dashPickerCloseCurrent`, `#dashPickerNeutral`, `#dashPickerSearch`, `#dashPickerList` (11 elements)
-- [ ] `node tests/acp_page.test.mjs` exits 0
+- [x] `#dashPicker` element present in `index.html`, `hidden` by default
+- [x] All required child elements present: `#dashPickerTitle`, `#dashPickerCancel`, `#dashPickerNote`, `#dashPickerTaskModeRow`, `#dashPickerTaskModeToggle`, `#dashPickerTaskModeMenu`, `#dashPickerKeepRow`, `#dashPickerCloseCurrent`, `#dashPickerNeutral`, `#dashPickerSearch`, `#dashPickerList` (11 elements)
+- [x] `node tests/acp_page.test.mjs` exits 0
 
 **Covers**: SC-2 (picker modal structure)
 
