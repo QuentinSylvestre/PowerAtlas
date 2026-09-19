@@ -512,11 +512,11 @@ if (ACP_TOKEN) {
 Note: `group.cwd` is already in scope within `dashRailGroupNode()` as the group data object's `cwd` field (use `group.cwd` — the variable name matches the outer closure in the existing builder).
 
 **Exit criteria:**
-- [ ] Sparkle dropdown on each workspace group contains "New kiro-cli v3 ACP session" as its first item when `ACP_TOKEN` is non-null
-- [ ] Clicking the item closes the dropdown and opens `#dashPicker` with the workspace's cwd pre-filled in the filter
-- [ ] When `ACP_TOKEN` is null, the item is absent — existing provider items are unaffected
-- [ ] Existing sparkle items (terminal launches for other providers) still work correctly
-- [ ] `node tests/acp_page.test.mjs` exits 0
+- [x] Sparkle dropdown on each workspace group contains "New kiro-cli v3 ACP session" as its first item when `ACP_TOKEN` is non-null
+- [x] Clicking the item closes the dropdown and opens `#dashPicker` with the workspace's cwd pre-filled in the filter
+- [x] When `ACP_TOKEN` is null, the item is absent — existing provider items are unaffected
+- [x] Existing sparkle items (terminal launches for other providers) still work correctly
+- [x] `node tests/acp_page.test.mjs` exits 0
 
 **Covers**: SC-1, SC-4
 
