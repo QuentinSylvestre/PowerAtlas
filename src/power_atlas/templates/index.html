@@ -850,6 +850,24 @@ function dashHandle(frame){
   var payload = (frame && frame.payload) || {};
 
   if (type === 'session') {
+    // New-session creation: adopt before any _viewingSid guards.
+    // payload.created === true arrives when dashPickerCreate fired send('new').
+    // Phase 4: plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md
+    if (payload && payload.created) {
+      _viewingSid = sid;
+      _dashLoadingSid = null; // creation is not a load-slot; prevents abandon-close path
+      var transcriptEl = document.getElementById('dashTranscript');
+      if (transcriptEl) transcriptEl.textContent = '';
+      // Show composer directly — no dashMaybeAttach needed; this page created the session.
+      dashComposerEl.hidden = false;
+      dashPromptInput.disabled = false;
+      dashSetComposerNote('');
+      _dashOrigin = 'dashboard';
+      _dashSent = false;
+      // Targeted rail refresh to surface the new session row
+      if (typeof dashPickerRailAdopt === 'function') dashPickerRailAdopt(payload.cwd || '');
+      // Fall through: the session-frame handling below sets _dashAttachedSid, _dashTurnActive, etc.
+    }
     if (sid === _dashLoadingSid && sid !== _viewingSid) {
       // Landed after the user already clicked a different row. Nobody is
       // watching it and it was never sent a prompt — exactly
