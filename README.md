@@ -315,9 +315,22 @@ directory inside your kiro-cli session store. The workspace's `.lock` file lives
 across every session in that workspace rather than owned by this one. Resuming a session without
 prompting leaves the transcript byte-identical.
 
-**There is no agent-mode picker on this page.** A session runs kiro-cli's default agent mode and
-cannot be switched to `spec`, `quick-spec`, `bug-fix`, or `plan` mode from here. This is deliberate
-scope, not a missing feature.
+**A session's task mode is chosen when it is created, and only then.** The *New session* picker
+carries a task-mode control offering Default, Spec, Quick spec, Bug fix, Plan and Semantic reviewer,
+which map to kiro-cli's own `kiro_default`, `spec`, `quick-spec`, `bug-fix`, `plan` and
+`semantic_reviewer` agent modes. The control resets to Default each time the picker opens. The mode
+is fixed for the life of the session: kiro-cli ignores a different mode on resume, so a session created
+in Spec mode stays in Spec mode however it is reopened. The same control is offered when a session is
+created from the dashboard's workspace sparkle menu.
+
+**Tool permissions are asked, not assumed.** The agent runs kiro-cli's v3 engine without
+`--trust-all-tools`; the two are incompatible, and the flag is never passed. When the agent wants to
+run a shell command or write a file that its agent configuration does not already allow, the request
+renders inline in the transcript as a set of option buttons and the turn pauses until one is pressed,
+from any tab or after a reload, the same way a clarifying question does. Nothing answers on your
+behalf: a session nobody is watching waits at its first such request until the silence timeout above
+cancels the turn. That is the current unattended posture, and `plans/ROADMAP.md`'s permission-policy
+item is what would change it.
 
 **The agent can ask a clarifying question mid-turn, and the page answers it inline.** When the agent
 needs you to choose between options before continuing, the question and its choices render as buttons
@@ -400,8 +413,10 @@ port. Every one of them is stopped by the cookie and by nothing else. Creating a
 the NetBird console re-establishes the second layer at any time and takes about five minutes; **nothing
 in the implementation depends on its absence**, so it is worth doing.
 
-Weigh that against what is behind the cookie. `/acp` runs its agent with `-a`, so a peer holding a valid
-cookie can execute arbitrary commands on this machine as you.
+Weigh that against what is behind the cookie. A peer holding a valid cookie can prompt the agent and
+press the approve button on every tool request it raises, so they can execute arbitrary commands on
+this machine as you. The permission prompt is a gate for the person holding the page, not a defence
+against them.
 
 **It also reads out the name of everything you have worked on.** `GET /api/acp/sessions` is paged, and
 paging is all there is: `group_page` walks the workspaces and `session_page` walks the sessions inside
@@ -446,7 +461,8 @@ direction here is the one that refuses.
 **One operational rule, because the design does not mitigate it.** Do not bind other services to
 `0.0.0.0` on this machine while the remote bind is enabled. Cookies are scoped to a host, not a port, so
 the device transmits its PowerAtlas cookie to *any* service listening on any port of the NetBird
-address — and a process that collects it gains full remote access to a `-a` agent.
+address — and a process that collects it gains full remote access to the agent surface, approve
+button included.
 
 There is no TLS, deliberately: WireGuard already encrypts the NetBird transport, and adding TLS inside
 it would buy encryption rather than authorization. That reasoning holds only while NetBird is the sole
