@@ -96,12 +96,13 @@ _cached_at = 0.0
 # deltas are +1.1s to +1.6s and the nearest false match was ~9500s off, so
 # 120s is generous and still leaves ~80x margin.
 _SIDECAR_SKEW_S = 120.0
-# Backward bound — both providers, and the check that actually rejects a
-# recycled pid. A sidecar is never written before its own process starts, so a
-# negative delta means a *different* process held this pid earlier: pid
-# exclusivity guarantees the recycled writer ran before the live process
-# existed. The small allowance covers clock-source jitter between the
-# provider's timestamp and psutil's create_time, nothing more.
+# Backward bound — claude-code only in practice (see _sidecar_records()), but
+# the check that actually rejects a recycled pid. A sidecar is never written
+# before its own process starts, so a negative delta means a *different*
+# process held this pid earlier: pid exclusivity guarantees the recycled
+# writer ran before the live process existed. The small allowance covers
+# clock-source jitter between the provider's timestamp and psutil's
+# create_time, nothing more.
 _SIDECAR_BACKWARD_SKEW_S = 5.0
 
 # claude-code's sidecar carries `procStart`, a Windows creation FILETIME
@@ -120,10 +121,11 @@ _SIDECAR_BACKWARD_SKEW_S = 5.0
 # module actually makes — so 2.0s is a deliberately generous ceiling on an
 # unmeasured quantity, not a pinned one.
 #
-# claude-code only, and it stays that way structurally rather than by a name
-# check here: kiro-cli's lock carries `{pid, started_at}` and nothing else, so
-# `_Sidecar.proc_start` is `None` on every kiro-cli record and this path never
-# runs for it. See `_sidecar_records()`.
+# claude-code only: `_sidecar_records()` reads `_CLAUDE_SESSION_DIR`
+# exclusively (kiro-cli-v3's own equivalent, `_lock_holder_v3()` in `acp.py`,
+# reads `session.json` directly and does not go through this module at all),
+# so `_Sidecar.proc_start` is `None` on every record this file ever builds
+# and this path never runs in practice. See `_sidecar_records()`.
 _PROC_START_TOLERANCE_S = 2.0
 
 # Windows FILETIME epoch (1601-01-01T00:00:00Z) expressed in 100ns intervals
@@ -245,12 +247,10 @@ def _list_sidecars(directory: Path, suffix: str) -> list[tuple[str, os.stat_resu
     sidecar leaves the directory mtime untouched, and the stats collected here
     are exactly what ``_load_json_cached`` compares against — so a cached
     listing pins a stale parse for as long as no file is created or deleted.
-    Both providers rewrite in place (kiro-cli on ``session/load``, claude-code
-    on every ``status`` change), so neither directory qualified.
-
-    The kiro lock directory also holds the session transcripts, so this walks
-    13k+ entries; measured ~19ms, and it runs off the event loop behind
-    ``get_snapshot``'s TTL.
+    claude-code rewrites its sidecar in place on every ``status`` change, so
+    the directory's own mtime would not have qualified for it either. The one
+    caller here is ``_CLAUDE_SESSION_DIR``; kiro-cli-v3 has no equivalent
+    sidecar directory for this module to scan (see ``_sidecar_records()``).
     """
     found: list[tuple[str, os.stat_result]] = []
     try:

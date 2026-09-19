@@ -6416,7 +6416,7 @@ def apply_config(config) -> None:
         config, "acp_idle_ttl_seconds", ACP_IDLE_TTL_SECONDS, 300, 86400))
     PROMPT_SILENCE_SECONDS = float(_clamped(
         config, "acp_prompt_silence_seconds", PROMPT_SILENCE_SECONDS,
-        60, 7200))
+        60, 86400))
     log.info("ACP config applied: max_sessions=%d idle_ttl=%.0fs "
              "prompt_silence=%.0fs", MAX_SESSIONS, ACP_IDLE_TTL_SECONDS,
              PROMPT_SILENCE_SECONDS)
