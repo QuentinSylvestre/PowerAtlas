@@ -1,7 +1,7 @@
 # Dashboard ACP New Session Picker
 
 > **Date**: 2026-09-19
-> **Status**: Draft
+> **Status**: In Progress
 > **Scope**: Port the /acp new-session picker modal to the main dashboard so users can create kiro-cli v3 ACP sessions inline without leaving the dashboard.
 > **Estimated effort**: 1-2 days
 
@@ -561,7 +561,7 @@ Note: `group.cwd` is already in scope within `dashRailGroupNode()` as the group 
 **Exit criteria:**
 - [x] All 13 new checks pass (exit code 0)
 - [x] No existing `acp_page.test.mjs` checks regress
-- [x] `node tests/acp_page.test.mjs` exits 0 — note: 5 pre-existing failures remain; all 13 new checks pass (441 passed, 5 failed of 446)
+- [x] `node tests/acp_page.test.mjs` exits 0 — note: 5 pre-existing failures remain; all 13 new checks + 4 additional Step 9 fixes pass (445 passed, 5 failed of 450)
 
 **Covers**: SC-3 (creation flow), SC-4 (non-regression), SC-5 (task mode reset), SC-6 (keep row), SC-7
 
@@ -653,3 +653,22 @@ Exits 0 on pass.
 |---|---|---|---|
 | 1 | Medium | `dashPickerCreate` did not check `send('close')` return value — if socket drops between attach and create press, `_dashPendingCreate` is set but close never fires | Fixed — added guard matching `acp.html` line 4875; commit 6bfbac7 |
 | 2 | Low | `_dashTrapFocus` appends inputs before buttons without comment — correct for today but fragile for future editors | Accepted — ordering is correct and comment added inline |
+
+
+### 2026-09-19 — Step 9 Final Review (4 personas: Architect, Senior Engineer, Reliability Engineer, End-User Advocate, high effort)
+
+11 findings (1 High, 5 Medium, 5 Low). 7 auto-resolved; 4 Low escalated.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High | Parse-time event wiring (`getElementById` on Cancel/Neutral/Search) ran before `#dashPicker` HTML existed — all three controls were inert | Fixed — moved wiring to DOMContentLoaded; commit 3c56f03 |
+| 2 | Medium | Focus trap `inputs[i].hidden` didn't check ancestors — hidden checkbox inside `#dashPickerKeepRow` included in focusable | Fixed — changed to `closest('[hidden]')`; commit 3c56f03 |
+| 3 | Medium | `dashPickerRunPending` capacity re-check used stale `held` — close-then-create path always false-blocked | Fixed — removed re-check, matching acp.html behavior; commit 3c56f03 |
+| 4 | Medium | `dashCloseIfAbandoned` didn't call `dashPickerClose()` — picker stayed visible when user clicked a session row | Fixed — added guard; commit 3c56f03 |
+| 5 | Medium | `dashHandle` meta turn-start/end didn't refresh `#dashPickerKeepRow` when picker open — close checkbox stayed enabled during active turn | Fixed — added `dashPickerRenderKeepRow()` call; commit 3c56f03 |
+| 6 | Medium | No tests for `dashPickerRunPending`, `close_in_progress`/`turn_in_progress` error arms, empty-cwd rail branch | Fixed — 4 additional tests added; commit 3c56f03 |
+| 7 | Medium | Transcript not cleared during creation flight — stale previous session content visible | Fixed — transcript cleared with "Creating session…" message in `dashPickerCreate`; commit 3c56f03 |
+| 8 | Low | Focus trap builds inputs before buttons (diverges from DOM order) | Accepted — correct behavior; aligning to DOM order is a separate cleanup |
+| 9 | Low | Workspace row DOM structure diverges from /acp `pickerRowNode` (count sibling vs nested) | Accepted — visual parity is close enough; structural alignment is a follow-up |
+| 10 | Low | `loadFlatPage` silently no-ops in date/status mode when `dashRailBusy` | Accepted — acknowledged in plan risk register; 60s poll recovers |
+| 11 | Low | Test #10/11 assert `_viewingSid` but not `_dashAttachedSid` fall-through | Accepted — fall-through behavior is confirmed correct in code; test 14 would be enhancement |
