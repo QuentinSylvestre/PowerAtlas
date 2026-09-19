@@ -112,10 +112,10 @@ None.
 3. In `AGENTS.md` § "ACP UI iteration does not require a restart" (the paragraph referencing `.acp-taskmode-*` as an inline-`<style>` exception): remove `.acp-taskmode-*` from the exception list (`.acp-mode-*` stays inline). Update the sentence to reflect that `.acp-taskmode-*` now lives in `style.css`.
 
 **Exit criteria:**
-- [ ] All `.acp-taskmode-*` rules removed from `acp.html`'s inline `<style>` block
-- [ ] Same rules present in `style.css` under a `/* task-mode picker */` comment
-- [ ] `AGENTS.md` exception list updated — `.acp-taskmode-*` no longer listed as inline; `.acp-mode-*` still listed
-- [ ] `node tests/acp_page.test.mjs` exits 0 (no regression in acp.html visual behavior)
+- [x] All `.acp-taskmode-*` rules removed from `acp.html`'s inline `<style>` block
+- [x] Same rules present in `style.css` under a `/* task-mode picker */` comment
+- [x] `AGENTS.md` exception list updated — `.acp-taskmode-*` no longer listed as inline; `.acp-mode-*` still listed
+- [x] `node tests/acp_page.test.mjs` exits 0 (no regression in acp.html visual behavior)
 
 **Covers**: SC-4 (no regression)
 
