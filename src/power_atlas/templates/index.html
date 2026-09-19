@@ -2385,6 +2385,33 @@ function dashRailGroupNode(group){
   aiMenu.setAttribute('role', 'menu');
   aiMenu.setAttribute('aria-label', 'New AI session');
   aiMenu.hidden = true;
+  // Fixed "New kiro-cli v3 ACP session" item — opens the dashboard picker modal.
+  // Only rendered when ACP is available (ACP_TOKEN is non-null), matching the
+  // guard on other ACP affordances throughout this page.
+  // plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md Phase 5
+  if (ACP_TOKEN) {
+    var acpItem = document.createElement('button');
+    acpItem.type = 'button';
+    acpItem.className = 'acp-rail-menu-item acp-rail-action-item';
+    acpItem.setAttribute('role', 'menuitem');
+    var acpIcon = document.createElement('img');
+    acpIcon.className = 'session-provider-icon';
+    acpIcon.src = '/api/launcher-icon/provider--kiro-cli-v3';
+    acpIcon.alt = '';
+    acpIcon.onerror = function(){ this.remove(); };
+    acpItem.appendChild(acpIcon);
+    var acpLabel = document.createElement('span');
+    acpLabel.textContent = 'New kiro\u2011cli\u00a0v3 ACP session';
+    acpItem.appendChild(acpLabel);
+    (function(groupCwd) {
+      acpItem.addEventListener('click', function(e) {
+        e.stopPropagation();
+        _closeAllRailActionMenus();
+        dashPickerOpen(groupCwd);
+      });
+    })(group.cwd);
+    aiMenu.appendChild(acpItem);
+  }
   (window._availableProviders || []).forEach(function(p){
     var provItem = document.createElement('button');
     provItem.type = 'button';
