@@ -1230,7 +1230,11 @@ function dashPickerCreate(cwd) {
     dashConnect(function() { send('new', {cwd: cwd, mode: mode}, null); });
   } else {
     _dashPendingCreate = {cwd: cwd, mode: mode};
-    send('close', {}, _dashAttachedSid);
+    if (!send('close', {}, _dashAttachedSid)) {
+      // Socket not open — clear pending so it doesn't fire on a future frame
+      _dashPendingCreate = null;
+      return;
+    }
   }
 }
 
