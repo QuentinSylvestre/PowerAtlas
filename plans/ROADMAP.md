@@ -21,7 +21,7 @@
 
 ### Platform
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext; serving them was fixed, storing them safely is not yet
-- **Parked items** — invisible sqlite sessions · usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
+- **Parked items** — usage stats · plan-progress overlay · creating a session in a workspace with no prior sessions · two SECURITY items
 - **`launch_custom` env scrub excluded (follow-up)**: CLAUDE_CODE_* markers are not scrubbed from `launch_custom`-launched sessions — user-defined scripts may rely on inherited environment. See `plans/done/260818_ACP_ENV_MARKER_AND_OVERLAY_STEERING.md` Follow-up #2.
 - **`launch_terminal` env scrub excluded (follow-up)**: `launch_terminal` (~`launcher.py:595`) opens a bare shell without env scrubbing — the user manually starts a process inside it. Follow-up #5 of the same plan.
 
@@ -56,7 +56,7 @@
 - **Auto-mode for `/acp` permissions** — drop `-a` and decide each request automatically; latency is measured and fine, accuracy against adversarial inputs is the open question
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured)
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely
-- **[P2b] Session stores PowerAtlas cannot see** — 11 classic sqlite sessions still invisible; v3 now covered
+- **[P2b] Session stores PowerAtlas cannot see** — closed; sqlite `conversations_v2` sessions permanently inaccessible post-v2-removal (2026-09-17); v3 covered
 
 ### Misc
 - **[SECURITY] Loopback API token** — any local process can create sessions and run shell commands via `/api/*`; proposed fix is a startup-generated secret injected into the page
@@ -104,7 +104,7 @@
 | 4 | *Tell the operator a turn ended* | week | Cheap version fails when the phone sleeps the tab; the real one reopens the declined-TLS decision |
 | 5 | *An auto-mode for `/acp` permissions* | **keystone** | Gates all six `## Automation & Workflows` items. Latency settled; **accuracy entirely unmeasured**, and that is the real gate |
 
-**Parked, deliberately**: [P2b] invisible stores · usage stats · plan-progress
+**Parked, deliberately**: usage stats · plan-progress
 overlay · creating a session in a workspace that has none · the accepted `[SECURITY]` item (carries its
 own reopen condition).
 
@@ -154,7 +154,7 @@ own reopen condition).
 - **Session status extensions** — "stale /qdev never completed" heuristics, sound notifications, and detecting fresh terminal sessions.
   - *Base shipped.* Live status dots (working/waiting/errored) shipped in `260712_LIVE_SESSION_STATUS`. The heuristics and notifications below are incremental.
   - *Stale /qdev detection* — `/qdev` writes a progress marker into the plan file on each phase; a session that last wrote a marker >24 h ago with a non-complete status is "stale". Would require reading plan files on every status poll — expensive. Deferred until status poll performance is better understood.
-  - *Sound notifications* — OS toast on Working→Waiting/Errored; `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION` shipped Windows WinRT + Linux `notify-send` for the browser surface; a generic hook for terminal sessions is unimplemented.
+  - *Sound notifications* — OS toast on Working→Waiting/Errored; `260731_ACP_REMOTE_CLIENT_PRODUCTIZATION` shipped the infrastructure (`notifications.py`: Windows WinRT + Linux `notify-send`, `check_and_notify`). **Wiring gap**: `check_and_notify` is called only from `_session_status`, which is never called in production — only `_resolved_session_status` is, and it has no notify side-effect. Notifications do not currently fire for any session type, including ACP. The infrastructure is complete; reconnecting the call site is the remaining work.
   - *Fresh terminal sessions* — sessions started in a terminal after PowerAtlas was launched are picked up on the next `refresh_stale_entries` tick (15–30 s). No gap for ACP sessions (PowerAtlas creates them). Terminal-session detection latency is bounded by the refresh interval, not by process monitoring.
 
 - **Plan progress overlay** — show phase completion (e.g. "Phase 3/5") on workspace cards by reading plan files.
@@ -167,7 +167,7 @@ own reopen condition).
 
 - **Secret-aware env vars for custom launchers** *(shape a still open)* — credentials in launcher env blocks are in cleartext in `config.toml`; shape (a) is an OS keystore reference, shape (b) is an encrypted-at-rest blob. Both require a UI decision about how the user enters/updates credentials.
 
-- **[P2b] Session stores PowerAtlas cannot see** — "classic" sqlite conversations in `conversations_v2` (`%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`) have no file on disk. PowerAtlas does not read this store (v2 support removed 2026-09-17); `kiro-cli chat --list-sessions -f json` remains the only surface that exposes these sessions, tagging each entry with `source: "classic"` — cost ~2.13 s per query, cwd-scoped (not global). *(v3 sessions covered by the `kiro-cli-v3` provider, shipped 2026-08-18.)*
+- **[P2b] Session stores PowerAtlas cannot see — closed, permanently inaccessible.** "Classic" sqlite conversations in `conversations_v2` (`%LOCALAPPDATA%\Kiro-Cli\data.sqlite3`) have no file on disk. PowerAtlas does not read this store (v2 support removed 2026-09-17, `data_kiro.py` deleted). `kiro-cli chat --list-sessions -f json` remains the only surface that exposes these sessions, tagging each entry with `source: "classic"` — cost ~2.13 s per query, cwd-scoped (not global). Adding a sqlite reader would require reintroducing v2 infrastructure for sessions kiro-cli itself no longer creates; the question is closed rather than parked. *(v3 sessions covered by the `kiro-cli-v3` provider, shipped 2026-08-18.)*
 
 ---
 
@@ -187,7 +187,7 @@ own reopen condition).
   - *This item gates the entire Automation & Workflows section* — all six items there assume the session can run unattended.
 
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured).
-  - *What is measured* — a `resources: []` agent costs ~46k tokens (the floor from cwd-driven context), versus ~73k for `kiro_default`. The delta is ~27k tokens, confirmed on kiro-cli 2.16.0.
+  - *What is measured* — a `resources: []` agent costs ~46k tokens (the floor from cwd-driven context), versus ~73k for `kiro_default`. The delta is ~27k tokens, confirmed on kiro-cli 2.16.0. **Stale-when**: kiro-cli moves off 2.16.0 — re-measure before building on this figure (currently at 2.22.0).
   - *One open question* — whether skills the dispatched task invokes (e.g. `/qplan`, `/qdev`) still load correctly with a stripped `resources` list. Untested; the skills themselves arrive via `skill://` resolvers and may not depend on the resources list.
 
 - **Revisit `None` → `"working"` fallback** — unclassifiable sessions show as working; may warrant an explicit "unknown" state now that the fallback fires rarely.
