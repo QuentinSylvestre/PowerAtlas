@@ -10598,6 +10598,63 @@ check("dashPickerClose clears _dashPendingCreate", () => {
     "dashPickerClose must null out _dashPendingCreate");
 });
 
+// --- Additional tests for error arms and dashPickerRunPending (Step 9 review M5) ---
+
+check("dashPickerRunPending fires a new session after session_closed", () => {
+  const p = loadDashPicker();
+  const sent = [];
+  // Stub send() to capture outgoing frames
+  p.sandbox.send = function(type, payload, sid) {
+    sent.push({ type, payload, sid });
+    return true;
+  };
+  // Stub dashConnect to invoke callback immediately
+  p.sandbox.dashConnect = function(cb) { if (cb) cb(); };
+  // Stub addMessage (called in session_closed handler)
+  p.sandbox.addMessage = function() {};
+  p.sandbox.dashUpdateCloseButton = function() {};
+  p.sandbox.dashPickerRunPending = p.sandbox.dashPickerRunPending; // already present
+  // Set up a pending create
+  p.sandbox._dashPendingCreate = { cwd: '/ws', mode: 'kiro_default' };
+  // Dispatch session_closed frame
+  p.sandbox.dashHandle({ type: 'session_closed', sessionId: null, payload: {} });
+  assertEqual(p.sandbox._dashPendingCreate, null, '_dashPendingCreate must be cleared after RunPending');
+  const newFrame = sent.find(f => f.type === 'new');
+  if (!newFrame) throw new Error('send("new") was not called after session_closed + dashPickerRunPending');
+  assertEqual(newFrame.payload.cwd, '/ws', 'new frame must carry the pending cwd');
+  assertEqual(newFrame.payload.mode, 'kiro_default', 'new frame must carry the pending mode');
+});
+
+check("dashHandle close_in_progress error arm fires dashPickerRunPending", () => {
+  const p = loadDashPicker();
+  const sent = [];
+  p.sandbox.send = function(type, payload, sid) { sent.push({ type, payload, sid }); return true; };
+  p.sandbox.dashConnect = function(cb) { if (cb) cb(); };
+  p.sandbox._dashPendingCreate = { cwd: '/y', mode: 'spec' };
+  p.sandbox.dashHandle({ type: 'error', sessionId: null, payload: { code: 'close_in_progress', message: 'closing' } });
+  assertEqual(p.sandbox._dashPendingCreate, null, '_dashPendingCreate cleared after close_in_progress');
+  const newFrame = sent.find(f => f.type === 'new');
+  if (!newFrame) throw new Error('send("new") not called after close_in_progress');
+  assertEqual(newFrame.payload.cwd, '/y', 'new frame must carry /y');
+});
+
+check("dashHandle turn_in_progress error arm clears _dashPendingCreate", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashPendingCreate = { cwd: '/z', mode: 'plan' };
+  p.sandbox.dashHandle({ type: 'error', sessionId: null, payload: { code: 'turn_in_progress', message: 'turn is running' } });
+  assertEqual(p.sandbox._dashPendingCreate, null, '_dashPendingCreate cleared after turn_in_progress');
+});
+
+check("dashPickerRailAdopt with empty cwd calls loadFlatPage", () => {
+  const p = loadDashPicker();
+  let flatCalled = false;
+  p.sandbox.loadFlatPage = function() { flatCalled = true; };
+  p.sandbox.dashRailMode = 'project'; // project mode but empty cwd
+  p.sandbox.dashPickerRailAdopt('');
+  if (!flatCalled) throw new Error('loadFlatPage was not called for empty cwd in project mode');
+});
+
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

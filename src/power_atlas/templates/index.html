@@ -831,6 +831,12 @@ function dashSendPrompt(){
  *  whichever other tab, still has it open. Called before switching to a
  *  different session and on the page unloading. */
 function dashCloseIfAbandoned(){
+  // Close the picker overlay if it happens to be open when the user navigates
+  // away (clicks a different session row or leaves the page).
+  var pickerEl = document.getElementById('dashPicker');
+  if (pickerEl && !pickerEl.hidden && typeof dashPickerClose === 'function') {
+    dashPickerClose();
+  }
   if (_dashAttachedSid && _dashOrigin === 'dashboard' && !_dashSent) {
     send('close', {}, _dashAttachedSid);
   }
@@ -906,8 +912,8 @@ function dashHandle(frame){
     dashRefreshSendButton();
     return;
   }
-  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); dashUpdateCloseButton(); return; }
-  if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); dashUpdateCloseButton(); return; }
+  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
+  if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp2 = document.getElementById('dashPicker'); if (_dp2 && !_dp2.hidden) dashPickerRenderKeepRow(); return; }
   if (type === 'chunk' || type === 'rendered' || type === 'tool_call' || type === 'tool_update') {
     renderTranscriptFrame(frame);
     return;
@@ -1053,7 +1059,7 @@ function _dashTrapFocus(dialog, onEscape) {
     var inputs = dialog.querySelectorAll('input');
     var focusable = [];
     for (var i = 0; i < inputs.length; i++) {
-      if (!inputs[i].disabled && !inputs[i].hidden) focusable.push(inputs[i]);
+      if (!inputs[i].disabled && !inputs[i].closest('[hidden]')) focusable.push(inputs[i]);
     }
     for (var j = 0; j < btns.length; j++) {
       if (!btns[j].disabled && !btns[j].closest('[hidden]')) focusable.push(btns[j]);
@@ -1243,6 +1249,17 @@ function dashPickerCreate(cwd) {
     !_dashTurnActive
   );
   var mode = _dashPickedTaskMode;
+  // Clear the transcript pane now so the user doesn't see a stale previous
+  // session's content during the creation round-trip.
+  var transcriptEl = document.getElementById('dashTranscript');
+  if (transcriptEl) {
+    transcriptEl.textContent = '';
+    var creatingMsg = document.createElement('div');
+    creatingMsg.className = 'acp-system-msg';
+    creatingMsg.textContent = 'Creating session\u2026';
+    transcriptEl.appendChild(creatingMsg);
+  }
+  dashComposerEl.hidden = true;
   dashPickerClose();
   if (!wantsClose) {
     dashConnect(function() { send('new', {cwd: cwd, mode: mode}, null); });
@@ -1259,26 +1276,17 @@ function dashPickerCreate(cwd) {
 /** Fire a pending close-then-create after the close completes. */
 function dashPickerRunPending() {
   if (!_dashPendingCreate) return;
-  // Re-check capacity — state may have changed while waiting for close
-  if (_dashPickerCapacity.held >= _dashPickerCapacity.max) {
-    _dashPendingCreate = null;
-    dashSetComposerNote('Session limit reached while waiting; could not create. Close a session and try again.');
-    return;
-  }
+  // No capacity re-check here: the close that just completed freed one slot;
+  // the server enforces the cap and will return an error frame if still at max.
+  // (acp.html's pickerRunPending() also skips the re-check for the same reason.)
   var pending = _dashPendingCreate;
   _dashPendingCreate = null;
   dashConnect(function() { send('new', {cwd: pending.cwd, mode: pending.mode}, null); });
 }
 
-// Wire up static elements: cancel button, neutral button, search filter.
-// (done here at parse time rather than DOMContentLoaded because these
-//  elements already exist in the DOM when this <script> block executes.)
-document.getElementById('dashPickerCancel').addEventListener('click', dashPickerClose);
-document.getElementById('dashPickerNeutral').addEventListener('click', function() { dashPickerCreate(''); });
-document.getElementById('dashPickerSearch').addEventListener('input', function(e) {
-  _dashPickerFilter = e.target.value;
-  dashPickerRender();
-});
+// Static picker element wiring — moved to DOMContentLoaded (Phase 5 review fix:
+// the #dashPicker HTML is below the </script> that contains these lines, so
+// getElementById returns null at parse time; handlers must be attached after parse).
 
 /** Targeted single-workspace rail refresh after a new session is created.
  *  In project-grouping mode: fetches only the new workspace's data and merges
@@ -1423,6 +1431,13 @@ document.addEventListener('DOMContentLoaded',function(){
   document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='hidden')refreshSettings()});
   (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);dashRailReload()}}).catch(function(){clearInterval(t)})},2000)})();
   dashPickerInitTaskMode();
+  // Picker static element wiring (must be after parse — picker HTML is below </script>)
+  document.getElementById('dashPickerCancel').addEventListener('click', dashPickerClose);
+  document.getElementById('dashPickerNeutral').addEventListener('click', function() { dashPickerCreate(''); });
+  document.getElementById('dashPickerSearch').addEventListener('input', function(e) {
+    _dashPickerFilter = e.target.value;
+    dashPickerRender();
+  });
 });
 function _escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function debounce(fn,delay){var timer;return function(){var ctx=this,args=arguments;clearTimeout(timer);timer=setTimeout(function(){fn.apply(ctx,args)},delay)}}
