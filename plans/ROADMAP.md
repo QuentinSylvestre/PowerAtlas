@@ -3,7 +3,7 @@
 ## Table of Contents
 
 ### Priority ranking
-- [Ranking table](#where-to-start--ranked-2026-09-19) — 7 items ranked by payoff/effort, with tier and one-line rationale each, plus a positioning note against Kiro Crew and the parallel-agent tools
+- [Ranking table](#where-to-start--ranked-2026-09-19) — 6 items ranked by payoff/effort, with tier and one-line rationale each, plus a positioning note against Kiro Crew and the parallel-agent tools
 
 ### Automation & Workflows
 - **Dispatch no-interactive tasks** — fire a kiro-cli task without a terminal; `--no-interactive` leaves no session trail so ACP is the right path, but unattended safety is still unsettled
@@ -15,7 +15,7 @@
 - **Plan-file shortcuts** — detect `plans/*.md` files and offer one-click `/qdev` buttons; same `$ARGUMENTS` blocker
 
 ### Workspace Intelligence
-- **Session status extensions** — "stale /qdev never completed" heuristics and detecting fresh terminal sessions (base shipped; notifications shipped 2026-09-19 for ACP-hosted sessions, event-driven rather than poll-driven)
+- **Session status extensions** — "stale /qdev never completed" heuristics and detecting fresh terminal sessions (live status dots and notifications both shipped)
 - **Plan progress overlay** — show phase completion (e.g. "Phase 3/5") on workspace cards by reading plan files
 - **kiro-cli usage stats** — dashboard showing session counts, durations, and tool-usage patterns over time
 
@@ -33,18 +33,17 @@
 > requires design decisions or product-shape choices beyond either plan's own scope.
 > **`260911_ACP_V2_TO_V3_ENGINE_CUTOVER`** has since retired that separate route and folded the v3
 > engine into `/acp` as the sole engine; the items below are updated to the current, single-engine
-> naming. Three of them (mode-switcher UI, the D32 orphan-lock item, and the steering-palette item)
-> were tracked in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` and have all now reached final
-> disposition there: mode-switcher UI and D32 shipped (Phases 3 and 1); the steering-palette item
-> was spiked and found not shippable as scoped (Phase 4) — see each bullet below for detail.
+> naming. Three items tracked in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` reached final
+> disposition there and have been removed from this list as done: the mode-switcher UI (Phase 3),
+> and D32's orphan-lock fix (Phase 1) — D32 survives below only for the live caveat it uncovered,
+> not as outstanding work. The steering-palette item was spiked and found not shippable as scoped
+> (Phase 4); it stays, because a negative result nobody records gets re-attempted.
 
 - **[POST-SPIKE] MCP OAuth in /acp — corrected.** The real signal is `session_info_update` → `_meta.kiro.displayError` (a human-readable message), not `_kiro/mcp/status` → `failedAuthorization`/`authorizationUrl` as originally guessed here — no `authorizationUrl`-bearing signal has ever been observed. `260908_ACP_V3_PRODUCTION_HARDENING`'s SC-3 surfaces the message; a full OAuth "Connect" completion flow isn't buildable from what's confirmed. Revisit if an `authorizationUrl` signal is ever found.
 
 - **[POST-SPIKE] _kiro/spec/* and _kiro/workflow/* notification handling — corrected.** No such dedicated notification methods exist (confirmed via `260908_ACP_V3_PRODUCTION_HARDENING` Phase 0/6 research) — spec mode only adds a `"spec"` tag to the builtin-tools list and relies on ordinary `session/update` subtypes plus `session/request_permission` (see that plan's SC-9, implemented in Phase 6: a structured clarifying-question request that blocks the turn on an answer).
 
-- **Mode-switcher UI for `/acp` — closed.** A user can now pick `spec`/`quick-spec`/`bug-fix`/`plan` (plus the default `kiro_default`) when creating a new `/acp` session, via a new task-mode control in the `#acpPicker` "New session — where?" modal — wired end-to-end from the picker through `send('new', ...)`, `_handle_new`'s validation, `_supervisor.new_session(cwd, mode=...)`, and `_build_kas_session_params(mode_id=...)` to the `session/new` wire call's `modeId` param. Confirmed working for all four modes via Phase 2's live probe (kiro-cli 2.21.4). Fixed in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 3. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Scope boundaries, Follow-up Work item 3.
-
-- **Self-orphan-lock suppression (D32) — closed, but currently inert in practice.** `_publish_live()` now publishes the real agent pid (`self.agent_pid()`) instead of the `pid=0` sentinel, and `presence._scan()`'s own-agent orphan-lock guard now checks `provider in _KIRO_PROVIDERS` (covering both `kiro-cli` and `kiro-cli-v3`), so the guard's logic now works correctly for v3. **Caveat (found in the same plan's Phase 1 QA pass, 2026-09-16, confirmed through kiro-cli build 2.21.4)**: kiro-cli v3 never writes a `.lock` file under `~/.kiro/sessions/cli/`, so this guard's `kiro-cli-v3` branch currently has no reachable input — the fix is correct but unobservable until/unless a future kiro-cli build writes v3 locks. The operative v3 session-availability/self-orphan-recovery mechanism today is `acp.py`'s `_lock_holder_v3()` (`session.json`'s own `status` field, independent mtime-staleness self-heal, no pid involved), unaffected by this fix either way. Fixed in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 1 review findings (Reliability engineer), Follow-up Work item 6.
+- **kiro-cli v3 writes no `.lock` file, so the D32 orphan-lock guard has no reachable input.** Kept as a live gotcha, not as outstanding work — the fix itself shipped. `_publish_live()` now publishes the real agent pid (`self.agent_pid()`) instead of the `pid=0` sentinel, and `presence._scan()`'s own-agent orphan-lock guard now checks `provider in _KIRO_PROVIDERS` (covering both `kiro-cli` and `kiro-cli-v3`), so the guard's logic now works correctly for v3. **Caveat (found in the same plan's Phase 1 QA pass, 2026-09-16, confirmed through kiro-cli build 2.21.4)**: kiro-cli v3 never writes a `.lock` file under `~/.kiro/sessions/cli/`, so this guard's `kiro-cli-v3` branch currently has no reachable input — the fix is correct but unobservable until/unless a future kiro-cli build writes v3 locks. The operative v3 session-availability/self-orphan-recovery mechanism today is `acp.py`'s `_lock_holder_v3()` (`session.json`'s own `status` field, independent mtime-staleness self-heal, no pid involved), unaffected by this fix either way. Fixed in `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 1. Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 1 review findings (Reliability engineer), Follow-up Work item 6.
 
 - **3 steering-type slash-command palette entries have no working trigger in `/acp` — spiked, no working mechanism found; not shippable as scoped.** `architecture-selection`/`quick-spec`/`bug-fix` are excluded from both dropdown buckets by the existing `steering` filter. `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md` Phase 4's live probe (kiro-cli 2.21.4) tested three ordered hypotheses, cheapest-first, and all three failed with distinct, diagnosable negative signals (not silent timeouts): **H1** (plain-chat dispatch, mirroring how skills resolve) — the agent explicitly denies having the skill and cites its real, unrelated catalogue, no resource-fetch signal anywhere in the trace. **H2** (`_kiro.dev/commands/execute` called directly) — fails with a server-side `-32603` naming the RPC method itself unregistered (`"Ext method ... has no persistence classification"`), not a command-not-found refusal; whether this is specific to this command name or a build-wide gap in the method couldn't be settled (no known-good control command exists in the current catalogue to test against). **H3** (`_kiro/knowledge`) — the method exists (confirmed present in `initialize`'s `extensionMethods` list) but rejects the plan's specified params shape with `"Unknown subcommand: undefined"`; 6 plausible `subcommand` guesses were all rejected identically, with no valid-value enumeration ever returned by the server. Whoever revisits this needs kiro-cli's own source/docs for `_kiro/knowledge`'s real params contract — further blind probing is not productive. Filed under `plans/260911_ACP_V3_FOLLOWUP_FEATURES.md`'s Follow-up Work (Deferred). Source: `260908_ACP_V3_PRODUCTION_HARDENING` Phase 0 rounds 3-4, Follow-up Work item 8.
 
@@ -54,7 +53,7 @@
 
 ### Session Control & Integration
 - **Creating a session in a workspace that has none** — cut from the picker because PowerAtlas has no folder browser; two candidate shapes described
-- **Tell the operator a turn ended** — notify when a turn finishes or a permission request is waiting; the tab-open version needs no infrastructure, the phone-asleep version reopens the TLS decision
+- **Reach the operator away from the machine** — the desktop half shipped 2026-09-19; reaching a phone needs a secure context on the remote bind, i.e. the TLS decision
 - **Permission policy for unattended sessions** — the keystone; `-a` is already gone and every tool request waits for a human, so an unattended session stalls rather than misbehaves. Gate tools at the execution boundary, the way Kiro Crew does
 - **A lean dispatch agent** — strip the full interactive-developer context before dispatching a narrow task; saves ~27k tokens per session (measured); now the agent-definition half of the permission-policy item
 - **A "needs you" inbox** — one cross-session list of pending permission requests, unanswered clarifying questions and finished turns, borrowed from Kiro Crew's activity view
@@ -96,7 +95,8 @@
 > or closed item shifts it. Re-rank rather than trusting a stale order — the reasoning for each item
 > lives in the item itself, and this table only records the comparison between them. The previous
 > ranking (2026-08-04) is in `git log -- plans/ROADMAP.md`; it was retired because its keystone rested
-> on a premise the code no longer has (see item 2 below).
+> on a premise the code no longer has (see item 1 below). The 2026-09-19 ranking opened with the
+> notification item; it shipped the same day and has been removed from the table.
 >
 > **Positioning, so the borrowing is deliberate.** Kiro Crew (AWS, open-sourced 2026-08-04) is one
 > long-running gateway driving a single `kiro-cli` process over ACP for many sessions — the same shape
@@ -108,20 +108,19 @@
 > execution-boundary permission model, Crew's single "needs you" view, and the tools' worktree per
 > session. Memory, lessons, apps and chat integrations stay out.
 >
-> **What would invalidate it**: item 2 shipping (it gates all six `## Automation & Workflows` items);
+> **What would invalidate it**: item 1 shipping (it gates all six `## Automation & Workflows` items);
 > kiro-cli changing how `session/request_permission` or custom-agent tool allow-lists behave; or the
 > `$ARGUMENTS` re-check coming back positive, which would promote three Automation items from
 > "blocked" to "ready".
 
 | # | Item | Tier | Why here |
 |---|---|---|---|
-| 1 | ~~*Tell the operator a turn ended* — the tab-open version~~ | **shipped 2026-09-19** | `260919_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS`. Fired from the supervisor's turn-end, `permission_request` and `display_error` frames via a `web.py`-injected hook. The toast had never worked — it wrote two text slots into a one-slot template, silently. Remote/phone stays out: measured, the browser refuses notifications on the plain-HTTP remote bind |
-| 2 | *Permission policy for unattended sessions* | **keystone** | Gates all six Automation items. `-a` is already gone; the open question is no longer "is auto-approve accurate against adversarial prompts" but "which tools auto-approve, which patterns deny, and what happens on timeout". Absorbs the dispatch-agent item |
-| 3 | *`$ARGUMENTS` re-check* | one prompt | Negative on 2.14.2; the palette now sends `/skill args` as prompt text and nobody has re-tested on 2.22. Cheapest possible unblock of three items |
-| 4 | *A fresh git worktree per session* | days | A checkbox in the picker that shipped 2026-09-19; removes the working-tree collision between parallel sessions in one workspace |
-| 5 | *[SECURITY] Loopback API token* | days | Becomes urgent the day item 2 lets a session run unattended: an auto-approving agent behind an unauthenticated loopback API is a different proposition from an attended one |
-| 6 | *A "needs you" inbox* | days | Status grouping already buckets Working/Waiting/Errored; this adds pending permissions and clarifying questions across every session in one place |
-| 7 | *Spike: Claude Code over ACP through an adapter* | week | The one thing Kiro Crew structurally cannot do. A spike, not a commitment: the supervisor is kiro-cli-specific in its `initialize`/`session/new` shapes and would need a second driver |
+| 1 | *Permission policy for unattended sessions* | **keystone** | Gates all six Automation items. `-a` is already gone; the open question is no longer "is auto-approve accurate against adversarial prompts" but "which tools auto-approve, which patterns deny, and what happens on timeout". Absorbs the dispatch-agent item |
+| 2 | *`$ARGUMENTS` re-check* | one prompt | Negative on 2.14.2; the palette now sends `/skill args` as prompt text and nobody has re-tested on 2.22. Cheapest possible unblock of three items |
+| 3 | *A fresh git worktree per session* | days | A checkbox in the picker that shipped 2026-09-19; removes the working-tree collision between parallel sessions in one workspace |
+| 4 | *[SECURITY] Loopback API token* | days | Becomes urgent the day item 1 lets a session run unattended: an auto-approving agent behind an unauthenticated loopback API is a different proposition from an attended one |
+| 5 | *A "needs you" inbox* | days | Status grouping already buckets Working/Waiting/Errored; this adds pending permissions and clarifying questions across every session in one place. Now also where a notification lands you — the toast tells you *a* session needs you, not *which* |
+| 6 | *Spike: Claude Code over ACP through an adapter* | week | The one thing Kiro Crew structurally cannot do. A spike, not a commitment: the supervisor is kiro-cli-specific in its `initialize`/`session/new` shapes and would need a second driver |
 
 **Parked, deliberately**: usage stats · plan-progress overlay · creating a session in a workspace that
 has none · secret-aware custom-launcher env vars (shape (a) — durable, not urgent) · the `None` →
@@ -148,7 +147,7 @@ condition).
 
 - **Dispatch no-interactive tasks** — fire a kiro-cli task without a terminal; `--no-interactive` leaves no session trail so ACP is the right path, but unattended safety is still unsettled.
   - *Unattended posture, corrected 2026-09-19* — this bullet used to say an unattended session runs with `-a`. It does not: `acp.py` never passes `-a` (the v3 engine rejects it with exit 2), and every `session/request_permission` is rendered inline and waits for a human. So a headless session today does not execute anything dangerous unasked; it **stalls** at its first shell or write request until `acp_prompt_silence_seconds` cancels the turn. The failure mode is a wasted slot and a silent non-result, not a runaway agent.
-  - *Exit condition for this item* — the permission-policy item under `## Session Control & Integration` (item 2 in the ranking): a per-tool auto-approve rule with deny patterns and a bounded wait. Once that exists, dispatch is a prompt plus a session close on turn end.
+  - *Exit condition for this item* — the permission-policy item under `## Session Control & Integration` (item 1 in the ranking): a per-tool auto-approve rule with deny patterns and a bounded wait. Once that exists, dispatch is a prompt plus a session close on turn end.
 
 - **Open session with a prompt or skill** — prompt delivery and skill loading are proven; passing skill arguments (`$ARGUMENTS`) was negative on 2.14.2 and is due a one-prompt re-check on the current build.
   - *`$ARGUMENTS` — measured on kiro-cli 2.14.2, 2026-07-26.* Slash-command argument passing uses `$ARGUMENTS` in the SKILL.md body (e.g. `/qdev plans/my-plan.md` expands to `$ARGUMENTS` → `plans/my-plan.md`). The expansion is handled by kiro-cli's own command parser, not by PowerAtlas. Whether a prompt string containing `$ARGUMENTS` is expanded by the model or by the CLI is unverified — a test session reliably received the literal string `$ARGUMENTS`. Until this is verified, skill invocations with arguments are not reliably deliverable.
@@ -172,11 +171,9 @@ condition).
 
 ## Workspace Intelligence
 
-- **Session status extensions** — "stale /qdev never completed" heuristics, sound notifications, and detecting fresh terminal sessions.
-  - *Base shipped.* Live status dots (working/waiting/errored) shipped in `260712_LIVE_SESSION_STATUS`. The heuristics and notifications below are incremental.
+- **Session status extensions** — "stale /qdev never completed" heuristics and detecting fresh terminal sessions. Live status dots shipped in `260712_LIVE_SESSION_STATUS`; notifications shipped 2026-09-19. What is left is below.
   - *Stale /qdev detection* — `/qdev` writes a progress marker into the plan file on each phase; a session that last wrote a marker >24 h ago with a non-complete status is "stale". Would require reading plan files on every status poll — expensive. Deferred until status poll performance is better understood.
-  - *Notifications — shipped 2026-09-19 for ACP-hosted sessions* (`260919_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS`). Event-driven, not poll-gated, per the project memory's "session-panel updates must be event-driven" rule: `acp.py` calls a `web.py`-injected hook at turn end, at `session/request_permission`, and at `display_error`. Three things were wrong rather than one — `check_and_notify` was reachable only from the callerless `_session_status`, `mark_initialized()` had no callers at all so the transition gate never armed, and `config.notifications` was read by nothing and writable by no route. The toast itself had also never rendered its body: it wrote two text slots into `ToastImageAndText01`, which has one. The poll-shaped transition table and its cooldown were deleted rather than reconnected — a turn ending is an event, and the 60 s cooldown would have swallowed a second permission request.
-  - *Terminal-hosted sessions are still not covered.* PowerAtlas does not host them, so there is no frame to fire from; a poll-side hook remains the only route, and nothing reads it today.
+  - *Notifications for terminal-hosted sessions* — the ACP half shipped; this half did not, and cannot take the same route. PowerAtlas does not host a terminal session, so there is no frame to fire from: the only signal is the `messages.jsonl` tail the status poll already reads, which makes a poll-side hook the sole option. Nothing reads it today.
   - *Fresh terminal sessions* — sessions started in a terminal after PowerAtlas was launched are picked up on the next `refresh_stale_entries` tick (15–30 s). No gap for ACP sessions (PowerAtlas creates them). Terminal-session detection latency is bounded by the refresh interval, not by process monitoring.
 
 - **Plan progress overlay** — show phase completion (e.g. "Phase 3/5") on workspace cards by reading plan files.
@@ -199,10 +196,9 @@ condition).
   - *Shape A* — an inline text field in the "new session" dialog for entering a path manually. Simple, but not discoverable for paths the user doesn't have memorized.
   - *Shape B* — a separate "add workspace" flow that opens a native folder browser and writes the path into `config.toml` as a pinned folder. More discoverable but adds a new surface.
 
-- **Tell the operator a turn ended** — *desktop half shipped 2026-09-19* (`260919_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS`); the remote half is parked behind the same TLS decision, on firmer evidence than before.
-  - *What shipped* — a `web.py`-injected hook fired from `acp.py`'s turn end, `session/request_permission` and `display_error`, gated by a **Notify me** toggle (`/api/notifications`, live-read, no restart). Two surfaces split by what each can observe: the server toasts when `_registry.subscribers` is empty, the page raises a browser `Notification` when a tab is attached but `document.visibilityState === 'hidden'`, and a visible tab stays silent. The server cannot see tab visibility — nothing carries it over the wire — which is precisely why the client half exists rather than being redundant with the toast.
-  - *The remote limit is measured, and it is stricter than this item assumed.* The old wording accepted losing the phone case to a **sleeping** tab. Measured on the live deployment: on `http://<netbird-ip>:4915` the page is not a secure context, so `Notification.permission` reads `"denied"` — hard-denied, unpromptable, no user gesture can rescue it — and `navigator.serviceWorker` is absent. An **awake** remote tab cannot notify either, and Web Push is independently foreclosed. Both surfaces reach the machine running PowerAtlas and nothing else.
-  - *Durable version* — still parked, and now the only route to the phone at all. Requires a secure context on the remote bind: Web Push needs HTTPS, and so does the plain `Notification` API. The reasoning against TLS holds only while WireGuard is the sole remote path; the cost of that choice is now precisely known rather than estimated.
+- **Reach the operator away from the machine** — the desktop half shipped 2026-09-19 (`plans/done/`); what remains is the phone, and it is parked behind the TLS decision on measured rather than assumed grounds.
+  - *The limit is measured, and stricter than this item used to assume.* The old wording accepted losing the phone case to a **sleeping** tab. Measured on the live deployment: on `http://<netbird-ip>:4915` the page is not a secure context, so `Notification.permission` reads `"denied"` — hard-denied, unpromptable, no user gesture can rescue it — and `navigator.serviceWorker` is absent. An **awake** remote tab cannot notify either, and Web Push is independently foreclosed. Both shipped surfaces reach the machine running PowerAtlas and nothing else.
+  - *What it would take* — a secure context on the remote bind, nothing less: Web Push needs HTTPS and so does the plain `Notification` API. The reasoning against TLS holds only while WireGuard is the sole remote path; the cost of that choice is now precisely known rather than estimated.
 
 - **Permission policy for unattended sessions** — the keystone. Decide `session/request_permission` by rule when nobody is watching, gated at the tool boundary rather than the prompt.
   - *Premise, corrected 2026-09-19* — this item used to be "drop `-a` and decide each request automatically", with accuracy against adversarial prompts as the open question. `-a` was never part of the v3 engine's invocation (`acp.py`: incompatible, exits 2, never passed), and every permission request already renders inline and waits for a human. So the starting point is the safe one: an unattended session **stalls**, it does not run away. The question is narrower than the old wording implied: which tools auto-approve, which shell patterns deny, and what happens when the rule cannot decide.
@@ -217,7 +213,7 @@ condition).
 
 - **A "needs you" inbox** — one cross-session list of everything waiting on a human: pending permission requests, unanswered clarifying questions, and turns that finished while unwatched.
   - *What exists* — the rail's status grouping buckets Working / Waiting / Errored / Available / Locked; the static-green dot marks an unwatched turn end (its state-loss bug was fixed 2026-09-19, `ad4e8f9`); permission requests and clarifying questions render inline in the transcript of the session that raised them, and nowhere else.
-  - *What is missing* — a permission request in a session you are not looking at is invisible until you open that session. Kiro Crew's activity view is the reference: every agent as one card, with its pending approval on the card. For PowerAtlas the cheapest shape is a "Needs attention" bucket in status grouping, fed by the supervisor's `_pending_permission` map and the clarifying-question state, with a count in the page title. Pairs with the notification item; the inbox is where a notification lands you.
+  - *What is missing* — a permission request in a session you are not looking at is invisible until you open that session. Kiro Crew's activity view is the reference: every agent as one card, with its pending approval on the card. For PowerAtlas the cheapest shape is a "Needs attention" bucket in status grouping, fed by the supervisor's `_pending_permission` map and the clarifying-question state, with a count in the page title. This is now the missing half of the notifications that shipped 2026-09-19: a toast tells you *a* session needs you and lands you on the page, but nothing yet tells you *which* one, so the inbox is where that notification should lead.
 
 - **A fresh git worktree per session** — a checkbox in the new-session picker that creates `git worktree add` under the workspace and starts the session there.
   - *Why* — worktree isolation per agent is the one feature Conductor, Crystal, Vibe Kanban and Claude Squad all share. Two `/acp` sessions created in the same workspace today edit the same working tree, and nothing warns.
@@ -237,7 +233,7 @@ condition).
   - *Proposed shape*: a secret written to `%LOCALAPPDATA%\power-atlas\local-secret` at first startup (same pattern as `remote-secret`). Required as a header (`X-PowerAtlas-Token`) on all `/api/*` and `/ws/acp` requests. Browser clients (the dashboard, `/acp` page) receive the token injected into the HTML at page-load time so they need no manual handling. Non-browser callers (agents, scripts, `Invoke-RestMethod`) must supply it explicitly — which is what "only allow what we choose" means in practice.
   - *What this does not change*: the browser UI works transparently; the remote surface is unaffected (it already has the device cookie); the loopback split between dashboard and `/acp` is unaffected.
   - *What this enables*: a deliberate opt-in for agent access — an agent that knows the token can drive PowerAtlas; one that does not cannot. The token is readable from disk by any process running as the same user, so this is not a hard security boundary against a fully-compromised session, but it raises the bar from "any process that makes an HTTP request" to "any process that reads a specific file first", and it makes the access explicit and auditable.
-  - *Interaction with the sync-prompt endpoint*: if that endpoint is added (see *Tell the operator a turn ended* and the dispatch-agent item), it should require the token too — it is the sharpest surface in the API.
+  - *Interaction with the sync-prompt endpoint*: if that endpoint is added (see *Reach the operator away from the machine* and the dispatch-agent item), it should require the token too — it is the sharpest surface in the API.
 
 - **[SECURITY — accepted, 2026-08-03] No NetBird access policy restricts this host, and that is now a decision rather than an oversight.** Measured 2026-07-31: `netbird status -d` enumerates **all 17** account peers in this host's network map, including machines belonging to other people (`akita`, `paros-g`, `nuc-chicago`, `ec2amaz-tv495hp`, `macbook-air-de-polestar`, …), so the stock `Default` (All → All) policy is still enabled.
   - *Measured 2026-08-03* — all inbound File and Printer Sharing rules (TCP 139, TCP 445) are **disabled** at the Windows Firewall level. The genuine exposure was UDP 137/138 (Network Discovery), admitted by two rules scoped to the Private profile. The WireGuard tunnel is classified Private, so those rules apply to NetBird peers.
