@@ -1,8 +1,46 @@
 # ACP Turn-End and Permission-Needed Notifications
 
 > **Date**: 2026-09-19
-> **Status**: Exploring  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — implemented and unit-verified; runtime verification pending a user-initiated restart  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Tell the operator, outside the page, that an ACP-hosted turn finished or is blocked on their approval.
+
+---
+
+## Implementation
+
+Implemented directly (user chose `/qexplore` → direct implementation, no `/qplan` stage).
+Code: `3f47642`.
+
+**Verified**: 1450 pytest, 450 `acp_page.test.mjs`, 439 other suites, `_check_test_names` clean.
+The four new behavioural assertions were mutation-checked — each fails with its production line
+disabled, so none is vacuous. The repaired Windows toast was verified against a live PowerShell
+child: both text slots populate, zero errors, and a `$(...)` payload in either field renders as
+literal text rather than executing.
+
+**Not yet verified, and why**: the server half cannot be exercised without restarting PowerAtlas,
+which project `AGENTS.md` forbids doing autonomously. Template changes are picked up by a hard
+reload, but the `/api/notifications` route they call is Python and does not exist in the running
+process. Outstanding runtime checks: toast fires on a real unwatched turn end; browser notification
+fires on a real backgrounded tab; neither re-fires on reload.
+
+### Deviations from the exploration's recommended approach
+
+- `_fire_toast`'s signature became `(title, body)` rather than keeping the status-mapping shape.
+  Its callers now pass an explicit body, since "turn ended" and "needs approval" are not statuses.
+- Caller text moved out of the PowerShell script body into the child's environment. Not in the
+  original plan: found while repairing the template that `html.escape` does not cover `$` or the
+  backtick, and the body now carries agent-authored `toolCall.title`, so the text was executable.
+- Both topbar toggles gained explicit ids and `refreshSettings` stopped using
+  `querySelector('.topbar-toggle')`. Adding a second such row would otherwise have made a
+  documented failure mode live (project memory: "ACP button label shows stale value on first load
+  when refreshSettings() queries by class instead of id").
+
+### Reported, not fixed
+
+`web._status_matches` and its `_LIVE_STATUSES` constant are dead by the same measure as the
+approved cluster (zero production callers; they filtered the removed server-rendered cards). They
+were **not** in the approved deletion list, so they are left in place and reported rather than
+silently swept up.
 
 ---
 
