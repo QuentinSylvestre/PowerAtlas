@@ -10321,6 +10321,283 @@ check("permission_request immediately followed by its own permission_resolved re
     "clicking a resolved-on-replay row must send nothing");
 });
 
+// ---- dashboard new-session picker (plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md) ---
+//
+// `index.html` carries the picker JS in a dedicated section that can be
+// extracted by anchor the way the remote-access panel was. Two regions are
+// needed here: `dashHandle` (which has the payload.created branch) and the
+// picker vars+functions block. Both run in the same sandbox so the shared
+// globals (_viewingSid, _dashPickerCapacity, etc.) are the same object.
+//
+// The region extracts anchored on code rather than comments — moving a comment
+// silently shrinks what is under test without throwing, which is the defect
+// the Phase 5b review found in two of its own checks.
+
+const DASH_PICKER_NAMES = [
+  "_dashPickerWorkspaces", "_dashPickerCapacity", "_dashPickedTaskMode",
+  "_dashPendingCreate", "dashPickerOpen", "dashPickerClose", "dashPickerRender",
+  "dashPickerRenderKeepRow", "dashPickerCreate", "dashPickerRunPending",
+  "dashPickerInitTaskMode",
+];
+const DASH_HANDLE_NAMES = ["dashHandle"];
+
+function dashPickerSource() {
+  const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+
+  // dashHandle region: from its declaration to its closing `}` immediately
+  // before the `// ---- Phase 4` picker comment.
+  const handleFrom = src.indexOf("function dashHandle(frame)");
+  if (handleFrom < 0) throw new Error("index.html no longer defines dashHandle");
+  // The picker section follows immediately after the closing `}` of dashHandle.
+  const pickerCommentMarker = "// ---- Phase 4: ACP new-session picker";
+  const pickerStart = src.indexOf("var _dashPickerWorkspaces");
+  if (pickerStart < 0) throw new Error("index.html no longer defines _dashPickerWorkspaces");
+  const handleRegion = src.slice(handleFrom, pickerStart);
+  for (const name of DASH_HANDLE_NAMES) {
+    if (!handleRegion.includes(name)) {
+      throw new Error(
+        `the extracted dashHandle region does not contain ${name}; it has moved`);
+    }
+  }
+
+  // Picker region: from `var _dashPickerWorkspaces` through the closing `}` of
+  // dashPickerRailAdopt. Anchor on the function that follows it (`function resetOverlays`)
+  // to know where to stop, so the wiring event listeners between them are included.
+  const pickerEnd = src.indexOf("function resetOverlays", pickerStart);
+  if (pickerEnd < 0) throw new Error("index.html no longer defines resetOverlays after the picker");
+  const pickerRegion = src.slice(pickerStart, pickerEnd);
+  for (const name of DASH_PICKER_NAMES) {
+    if (!pickerRegion.includes(name)) {
+      throw new Error(
+        `the extracted picker region does not contain ${name}; the picker has moved and ` +
+        "this harness is measuring less of it than it claims to");
+    }
+  }
+
+  return { handleRegion, pickerRegion };
+}
+
+function loadDashPicker(opts = {}) {
+  const { handleRegion, pickerRegion } = dashPickerSource();
+
+  // All picker-element IDs that must exist in the byId map for parse-time
+  // wiring (document.getElementById calls in the picker script body) to work.
+  const pickerEls = [
+    "dashPicker", "dashPickerSearch", "dashPickerNote",
+    "dashPickerTaskModeMenu", "dashPickerTaskModeToggle",
+    "dashPickerTaskModeToggleText", "dashPickerCloseCurrent",
+    "dashPickerKeepRow", "dashPickerKeepText",
+    "dashPickerNeutral", "dashPickerList", "dashPickerCancel",
+    "dashPickerTitle",
+  ];
+  const byId = new Map();
+  for (const id of pickerEls) {
+    const el = new El("div");
+    // Match the markup: #dashPicker starts hidden.
+    if (id === "dashPicker") el.hidden = true;
+    if (id === "dashPickerKeepRow") el.hidden = true;
+    if (id === "dashPickerTaskModeMenu") el.hidden = true;
+    if (id === "dashPickerSearch") { el.tagName = "INPUT"; el.value = ""; }
+    if (id === "dashPickerCloseCurrent") { el.tagName = "INPUT"; el.type = "checkbox"; el.checked = false; }
+    if (id === "dashPickerNeutral") { el.tagName = "BUTTON"; el.disabled = false; }
+    byId.set(id, el);
+  }
+
+  // Wire the task-mode toggle's dataset so dashPickerOpen can set .dataset.taskMode
+  byId.get("dashPickerTaskModeToggle").dataset = { taskMode: "kiro_default" };
+
+  const fetches = [];
+
+  const sandbox = {
+    document: {
+      createElement: (tag) => new El(tag),
+      getElementById: (id) => byId.get(id) ?? null,
+      addEventListener: () => {},
+      write: () => { throw new Error("document.write not allowed"); },
+    },
+    fetch: (url, init) => {
+      fetches.push({ url, init: init || {} });
+      return Promise.resolve({
+        ok: true, status: 200,
+        json: () => Promise.resolve(opts.workspacesResponse ?? {
+          workspaces: [], missing: 0, capacity: { held: 0, max: 8 },
+        }),
+        text: () => Promise.resolve("{}"),
+      });
+    },
+    // Globals read by the picker/dashHandle at runtime
+    ACP_TOKEN: opts.acpToken !== undefined ? opts.acpToken : "TEST-TOKEN",
+    _dashAttachedSid: opts.dashAttachedSid !== undefined ? opts.dashAttachedSid : null,
+    _dashTurnActive: opts.dashTurnActive !== undefined ? opts.dashTurnActive : false,
+    _viewingSid: opts.viewingSid !== undefined ? opts.viewingSid : null,
+    _dashLoadingSid: null,
+    _dashSent: false,
+    _dashOrigin: null,
+    _dashPendingSend: null,
+    // Stubs for functions dashHandle and dashPickerRailAdopt call but that live
+    // outside the extracted regions.
+    dashComposerEl: new El("div"),
+    dashPromptInput: new El("input"),
+    dashConnect: (cb) => { if (cb) cb(); },
+    send: () => true,
+    dashSetComposerNote: () => {},
+    dashUpdateCloseButton: () => {},
+    dashRefreshSendButton: () => {},
+    dashRailMode: "project",
+    dashRailMergeGroup: () => {},
+    dashRenderRail: () => {},
+    dashRailGroups: [],
+    loadFlatPage: () => {},
+    console: { log() {}, warn() {}, error() {} },
+  };
+  sandbox.window = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.createContext(sandbox);
+  // Run dashHandle first (it is declared before the picker in the page), then
+  // the picker section (which also executes the parse-time event-listener
+  // wiring against the byId map above).
+  vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
+  vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
+
+  return {
+    sandbox,
+    byId,
+    fetches,
+    /** Convenience: get an element by id, throws if absent. */
+    el(id) {
+      const found = byId.get(id);
+      if (!found) throw new Error(`dash-picker harness has no element with id '${id}'`);
+      return found;
+    },
+    settle() { return new Promise((resolve) => setImmediate(resolve)); },
+  };
+}
+
+// 13 new checks — dashboard new-session picker behaviour
+
+check("picker is hidden by default", () => {
+  const p = loadDashPicker();
+  assert(p.el("dashPicker").hidden === true, "dashPicker must start hidden");
+});
+
+check("dashPickerOpen shows the picker", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashPickerOpen("");
+  assert(p.el("dashPicker").hidden === false, "dashPickerOpen must set picker.hidden = false");
+});
+
+check("dashPickerOpen resets task mode to kiro_default", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashPickedTaskMode = "spec";
+  p.sandbox.dashPickerOpen("");
+  assertEqual(p.sandbox._dashPickedTaskMode, "kiro_default",
+    "dashPickerOpen must reset _dashPickedTaskMode to kiro_default");
+  assertEqual(p.el("dashPickerTaskModeToggle").dataset.taskMode, "kiro_default",
+    "dashPickerOpen must reset the toggle dataset.taskMode to kiro_default");
+});
+
+check("dashPickerClose hides the picker", () => {
+  // Open manually (set hidden = false directly) to avoid the focus-trap path
+  // whose removeEventListener is not exercised by this check. The close path
+  // itself — setting hidden = true and clearing _dashPendingCreate — is what
+  // the test measures, and it is reachable without a prior dashPickerOpen call.
+  const p = loadDashPicker();
+  p.el("dashPicker").hidden = false;           // simulate "picker is open"
+  p.sandbox._dashPickerTrapRemove = null;       // no trap to remove
+  p.sandbox.dashPickerClose();
+  assert(p.el("dashPicker").hidden === true, "dashPickerClose must set picker.hidden = true");
+});
+
+check("workspace rows are disabled at capacity", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashPickerWorkspaces = [{ cwd: "/a", name: "a", sessions: 1 }];
+  p.sandbox._dashPickerCapacity = { held: 8, max: 8 };
+  p.sandbox.dashPickerRender();
+  const listEl = p.el("dashPickerList");
+  const btn = listEl.childNodes.find((c) => c.tagName === "BUTTON" || c.disabled !== undefined);
+  assert(btn, "dashPickerRender should have appended a button row to dashPickerList");
+  assert(btn.disabled === true, "workspace button must be disabled when at capacity");
+});
+
+check("dashPickerNeutral is disabled at capacity", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashPickerWorkspaces = [{ cwd: "/a", name: "a", sessions: 1 }];
+  p.sandbox._dashPickerCapacity = { held: 8, max: 8 };
+  p.sandbox.dashPickerRender();
+  assert(p.el("dashPickerNeutral").disabled === true,
+    "dashPickerNeutral must be disabled when held >= max");
+});
+
+check("dashPickerKeepRow is hidden when no session is attached", () => {
+  const p = loadDashPicker({ dashAttachedSid: null });
+  p.sandbox._dashAttachedSid = null;
+  p.sandbox.dashPickerRenderKeepRow();
+  assert(p.el("dashPickerKeepRow").hidden === true,
+    "dashPickerKeepRow must stay hidden when _dashAttachedSid is null");
+});
+
+check("dashPickerKeepRow is shown and close button enabled when session attached and turn idle", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashAttachedSid = "sess_test";
+  p.sandbox._dashTurnActive = false;
+  p.sandbox.dashPickerRenderKeepRow();
+  assert(p.el("dashPickerKeepRow").hidden === false,
+    "dashPickerKeepRow must be visible when _dashAttachedSid is set");
+  assert(p.el("dashPickerCloseCurrent").disabled === false,
+    "dashPickerCloseCurrent must be enabled when turn is idle");
+});
+
+check("dashPickerCloseCurrent is disabled when turn is active", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashAttachedSid = "sess_test";
+  p.sandbox._dashTurnActive = true;
+  p.sandbox.dashPickerRenderKeepRow();
+  assert(p.el("dashPickerCloseCurrent").disabled === true,
+    "dashPickerCloseCurrent must be disabled while _dashTurnActive is true");
+});
+
+check("dashHandle creation branch sets _viewingSid to the new session id", () => {
+  const p = loadDashPicker();
+  p.sandbox._viewingSid = null;
+  p.sandbox._dashPendingCreate = null;
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess_new",
+    payload: { created: true, cwd: "/ws" },
+  });
+  assertEqual(p.sandbox._viewingSid, "sess_new",
+    "dashHandle with payload.created must set _viewingSid to the new session id");
+});
+
+check("dashHandle creation branch supersedes an existing _viewingSid", () => {
+  const p = loadDashPicker();
+  p.sandbox._viewingSid = "sess_other";
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess_new",
+    payload: { created: true, cwd: "/ws" },
+  });
+  assertEqual(p.sandbox._viewingSid, "sess_new",
+    "dashHandle creation branch must set _viewingSid even when another session was current");
+});
+
+check("dashHandle session frame without payload.created is dropped by the stale guard", () => {
+  const p = loadDashPicker();
+  p.sandbox._viewingSid = "sess_other";
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess_new",
+    payload: {},
+  });
+  assertEqual(p.sandbox._viewingSid, "sess_other",
+    "without payload.created the stale guard must fire and leave _viewingSid unchanged");
+});
+
+check("dashPickerClose clears _dashPendingCreate", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashPendingCreate = { cwd: "/x", mode: "kiro_default" };
+  p.sandbox.dashPickerClose();
+  assertEqual(p.sandbox._dashPendingCreate, null,
+    "dashPickerClose must null out _dashPendingCreate");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
