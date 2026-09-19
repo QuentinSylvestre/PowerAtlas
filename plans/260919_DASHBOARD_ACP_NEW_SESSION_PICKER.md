@@ -467,11 +467,11 @@ function dashPickerRailAdopt(cwd) {
 ```
 
 **Exit criteria:**
-- [ ] `dashHandle` receives `{type:'session', payload:{created:true, cwd:'...', sessionId:'sess_...'}}`  → `_viewingSid` set, `_dashOrigin = 'dashboard'`, transcript cleared, composer shown and enabled, `dashPickerRailAdopt` called
-- [ ] `_dashLoadingSid` cleared in the `payload.created` block (not left for the abandon-close path)
-- [ ] Existing `load`/`subscribe` paths (sessions opened by clicking a rail row) still work correctly
-- [ ] The abandoned-session close path (`sid === _dashLoadingSid && sid !== _viewingSid`) still fires for non-created sessions
-- [ ] `node tests/acp_page.test.mjs` exits 0
+- [x] `dashHandle` receives `{type:'session', payload:{created:true, cwd:'...', sessionId:'sess_...'}}`  → `_viewingSid` set, `_dashOrigin = 'dashboard'`, transcript cleared, composer shown and enabled, `dashPickerRailAdopt` called
+- [x] `_dashLoadingSid` cleared in the `payload.created` block (not left for the abandon-close path)
+- [x] Existing `load`/`subscribe` paths (sessions opened by clicking a rail row) still work correctly
+- [x] The abandoned-session close path (`sid === _dashLoadingSid && sid !== _viewingSid`) still fires for non-created sessions
+- [x] `node tests/acp_page.test.mjs` exits 0
 
 **Covers**: SC-3, SC-4
 
