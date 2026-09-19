@@ -1,11 +1,18 @@
 # Dashboard ACP New Session Picker
 
 > **Date**: 2026-09-19
-> **Status**: In Progress
+> **Status**: Complete
+> **Last Updated**: 2026-09-19
 > **Scope**: Port the /acp new-session picker modal to the main dashboard so users can create kiro-cli v3 ACP sessions inline without leaving the dashboard.
 > **Estimated effort**: 1-2 days
 
 ---
+
+## Completion Summary
+
+### Acknowledged at archival
+
+- Harness improvement opportunity ("Dispatching three separate sub-agents before the interview is correct per the skill, but the skill's probe-gate instruction ... arrives only after reading shared.md — which is cited but not pre-loaded"): **Promoted** — a forward-pointer to `/qexplore`'s existing Step 2 Probe gate was added right where Step 1.5's sub-agent reports are absorbed, in `shared/skills/qexplore/SKILL.md` (agent-playbook commit `d245792`, pushed and deployed via `/qconfig-sync`). The probe-gate rule itself was already inline in `SKILL.md` (added 2026-08-07); the fix addresses sequencing, not absence — the rule sits after the dispatch step in reading order, so it is easy to reach dispatch before reading it.
 
 ## Intent
 
