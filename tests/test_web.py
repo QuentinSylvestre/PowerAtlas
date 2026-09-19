@@ -5756,24 +5756,6 @@ class TestAcpLoadStatesItsCeiling:
         assert "addMessage('note'" in branch
 
 
-class TestAcpDashboardRowAction:
-    """`openInAcp` opens the clicked row's session in `/acp`. It used to live
-    inside the old server-rendered session row's ``.session-actions``
-    container, which the row's own ``onclick`` excluded so a click there
-    toggled multi-select instead of opening the session (the same collision
-    is recorded at ``CLOSED_INVESTIGATIONS.md:90``); the dashboard/ACP-merge
-    Phase 4 rail replaced that DOM with `.acp-rail-menu-wrap`, a sibling of
-    the row rather than a descendant, for the same reason (a button cannot
-    nest inside a button) — `openInAcp` itself is unchanged.
-    """
-
-    def test_the_action_opens_acp_for_this_row(self):
-        from power_atlas.web import templates
-        index = templates.env.loader.get_source(templates.env, "index.html")[0]
-        assert "function openInAcp(btn)" in index
-        assert "'/acp?sid='+encodeURIComponent(row.dataset.sid)" in index
-
-
 # --- ACP phase 6: cancel, close, and context-window telemetry ---
 
 

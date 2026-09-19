@@ -322,6 +322,10 @@ class El {
   // exists to configure. Recorded rather than ignored so a check can see it.
   select() { this.selected = true; ACTIVE = this; }
   focus() { ACTIVE = this; }
+  // A real `<textarea>`/`<input>` method: positions the caret (or selects the
+  // range between the two offsets when they differ). The skill-completion
+  // path calls this to land the caret after the text it just inserted.
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   // `click()` is a standard DOM method: triggers the element's click listener.
   // Needed by code that calls element.click() programmatically (e.g. Enter-
   // during-turn dispatching to sendModeBtn.click()).
@@ -3588,23 +3592,17 @@ check("only the two known views ever reach the shell attribute", async (tpl) => 
               "the shell took a view value other than the two the CSS knows");
 });
 
-check("the dashboard link is rendered for the viewer who can follow it", (tpl) => {
-  // `/` is not on `_REMOTE_ALLOWED_PATHS` and never will be (SC-4), so from a
-  // phone the old `<a href="/">` was a control whose only outcome was a 403
-  // with no way back.
+check("the topbar logo names the product for both viewers", (tpl) => {
+  // The `<a href="/">` "Main dashboard" back-link this test used to assert
+  // was itself removed by 0b4708e ("rename to Agent orchestrator, remove
+  // Main dashboard link") — `/` is not on `_REMOTE_ALLOWED_PATHS` and never
+  // will be (SC-4), so from a phone it was a control whose only outcome was
+  // a 403 with no way back, and it was dropped rather than gated. What
+  // remains, and still needs covering, is the logo below.
   const local = loadPage(tpl, { local: true });
-  const localNav = local.markup.match(/<a\b[^>]*class="[^"]*topbar-nav[^"]*"[^>]*>/);
-  assert(localNav, "the dashboard link is gone for a loopback viewer too");
-  assert(/href="\/"/.test(localNav[0]),
-         `the loopback link no longer reaches the dashboard: ${localNav[0]}`);
-  assert(/aria-label=/.test(localNav[0]),
-         "the link is unlabelled for a screen reader");
-
   const remote = loadPage(tpl, { local: false });
-  assertEqual(remote.markup.match(/topbar-nav/g), null,
-              "a remote viewer is still handed a link to a loopback-only page");
-  assert(!/href="\/"/.test(remote.markup),
-         "something else on the remote page still points at the dashboard");
+  assert(!/topbar-nav/.test(local.markup) && !/topbar-nav/.test(remote.markup),
+         "a topbar-nav dashboard link exists again — it has no remote-safe destination (SC-4)");
 
   // The logo is what makes dropping the link above affordable, so it is the
   // other half of this check rather than a separate one: it is served from
@@ -6802,7 +6800,7 @@ check("P3: group header format: name xCount · status xCount", async (tpl) => {
     "header should include narrowed status — got: " + text);
 });
 
-check("P3: clicking group toggle reveals rows; individual rows start collapsed", async (tpl) => {
+check("P3: clicking group toggle reveals rows and expands their command bodies", async (tpl) => {
   const { page, live } = connected(tpl);
   await deliverTurn(page, live, [
     { toolCallId: "g4a", title: "shell", kind: "execute", status: "completed", command: "ls" },
@@ -6812,11 +6810,8 @@ check("P3: clicking group toggle reveals rows; individual rows start collapsed",
   const toggle = transcript.querySelector(".acp-tool-group-toggle");
   assert(toggle !== null, "group toggle should exist");
   const body = transcript.querySelector(".acp-tool-group-body");
-  toggle.dispatch("click");
-  assertEqual(toggle.getAttribute("aria-expanded"), "true",
-    "after click group should be expanded");
-  assert(body.hidden === false, "group body should be visible after click");
-  // Individual rows inside should start collapsed (Phase 2 toggle hidden)
+  // Each row's command block starts collapsed while the group itself is
+  // collapsed — checked before the click, since opening the group changes it.
   const innerRows = body.querySelectorAll(".acp-msg-tool");
   assert(innerRows.length >= 2, "group body should contain the individual rows");
   for (const row of innerRows) {
@@ -6824,7 +6819,22 @@ check("P3: clicking group toggle reveals rows; individual rows start collapsed",
       ? row.querySelector(".acp-tool-cmd").parentNode : null;
     if (cmdWrap) {
       assert(cmdWrap.hidden === true,
-        "individual rows inside group should start collapsed (command body hidden)");
+        "individual rows should start with their command block collapsed");
+    }
+  }
+  toggle.dispatch("click");
+  assertEqual(toggle.getAttribute("aria-expanded"), "true",
+    "after click group should be expanded");
+  assert(body.hidden === false, "group body should be visible after click");
+  // Opening the group also expands every still-collapsed child toggle
+  // (d972bc9, "expand child tool rows when opening a tool call group") — a
+  // user who opens the group wants to see what ran, not a second click per row.
+  for (const row of innerRows) {
+    const cmdWrap = row.querySelector(".acp-tool-cmd")
+      ? row.querySelector(".acp-tool-cmd").parentNode : null;
+    if (cmdWrap) {
+      assert(cmdWrap.hidden === false,
+        "opening the group should also expand each row's command block");
     }
   }
 });
@@ -9336,7 +9346,12 @@ check("skillEntriesShowBadge", (tpl) => {
 });
 
 // skillSelectionSendsCleanName
-// Verify that selecting a skill entry sends only the clean name, not the badge text.
+// Verify that selecting a skill entry completes the prompt with only the
+// clean name, not the badge text. Updated for the mid-sentence-completion
+// behavior (acp.html ~2135-2160, commits 998884f3/ea6c9393): a skill, unlike
+// a plain command, is not executed immediately on selection — it replaces
+// the typed "/token" with "/<name> " and leaves the turn for the user to
+// send, so the same text can be completed from the middle of a sentence.
 check("skillSelectionSendsCleanName", (tpl) => {
   const { page, live } = connected(tpl);
   // Seed one skill.
@@ -9362,20 +9377,24 @@ check("skillSelectionSendsCleanName", (tpl) => {
   page.el("acpPrompt").dispatch("keydown", {
     key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
-  // Verify the WS message sent.
-  const execFrames = page.sentOf("commands_execute");
-  assert(execFrames.length > 0, "commands_execute message expected");
-  assertEqual(execFrames[execFrames.length - 1].payload.name, "qplan",
-    "skill name should be clean (no badge text), got: " + (execFrames[execFrames.length - 1].payload && execFrames[execFrames.length - 1].payload.name));
+  // No commands_execute yet — a skill completes the prompt rather than sending.
+  assertEqual(page.sentOf("commands_execute").length, 0,
+    "a skill selection must not execute immediately, only complete the prompt");
+  assertEqual(page.el("acpPrompt").value, "/qplan ",
+    "skill name should be clean (no badge text), got: " + page.el("acpPrompt").value);
+  assert(drop.hidden, "the dropdown should close once a skill is completed");
 });
 
 // keyboardNavigationReachesSkillEntries
-// Verify that ArrowDown navigation reaches skill entries and Enter selects one.
+// Verify that ArrowDown navigation reaches skill entries and Enter completes
+// one. Updated for the mid-sentence-completion behavior (see
+// skillSelectionSendsCleanName above): a skill selection completes the
+// prompt text rather than sending commands_execute.
 check("keyboardNavigationReachesSkillEntries", (tpl) => {
   const { page, live } = connected(tpl);
   // Seed ONE skill only (no commands) — so the only valid selection is "qexplore".
   // This makes the test discriminating: if ArrowDown navigation skips skill entries,
-  // Enter would find nothing to select and no commands_execute would be sent.
+  // Enter would find nothing to select and the prompt would stay empty.
   page.deliver({
     type: "skills", sessionId: live,
     payload: { skills: [{ name: "qexplore", description: "e" }] },
@@ -9393,14 +9412,11 @@ check("keyboardNavigationReachesSkillEntries", (tpl) => {
   page.el("acpPrompt").dispatch("keydown", {
     key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
-  // The skill must be reachable by keyboard: commands_execute sent with exact skill name.
-  const execFrames = page.sentOf("commands_execute");
-  assert(execFrames.length > 0,
-    "A commands_execute message should have been sent after ArrowDown + Enter");
-  // The skill must be reachable: only "qexplore" is a valid selection.
-  const sentName = execFrames[execFrames.length - 1].payload.name;
-  assertEqual(sentName, "qexplore",
-    "Keyboard navigation must reach the skill entry; got: " + sentName);
+  // The skill must be reachable by keyboard: the prompt completes to its exact name.
+  assertEqual(page.sentOf("commands_execute").length, 0,
+    "a skill selection must not execute immediately, only complete the prompt");
+  assertEqual(page.el("acpPrompt").value, "/qexplore ",
+    "Keyboard navigation must reach the skill entry; got: " + page.el("acpPrompt").value);
 });
 
 // Test 6: commandEntriesDoNotShowBadge
