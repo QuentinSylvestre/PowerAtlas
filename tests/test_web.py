@@ -657,60 +657,6 @@ def test_launcher_run(mock_load, mock_launch, client, tmp_path):
 # stays "interactive" for a plain `claude -p`. Both real observations are
 # pinned below so a future refactor cannot quietly regress to `kind` only.
 
-def test_session_origin_plain_sdk_run_is_badged():
-    """The observed `claude -p` sidecar: kind=interactive, entrypoint=sdk-cli.
-
-    This is the case keying on `kind` alone would miss, and it is the common
-    one — every script, hook and CI invocation looks like this.
-    """
-    from power_atlas.web import _session_origin
-    assert _session_origin("interactive", "sdk-cli") == "sdk"
-
-
-def test_session_origin_bg_kind_wins_over_entrypoint():
-    """The observed CLAUDE_CODE_SESSION_KIND=bg sidecar: kind=bg, entry=sdk-cli.
-
-    `kind` is the more specific claim, so it wins when both are informative.
-    """
-    from power_atlas.web import _session_origin
-    assert _session_origin("bg", "sdk-cli") == "bg"
-
-
-def test_session_origin_daemon_kinds():
-    from power_atlas.web import _session_origin
-    assert _session_origin("daemon", "cli") == "daemon"
-    assert _session_origin("daemon-worker", "cli") == "daemon-worker"
-
-
-def test_session_origin_ordinary_interactive_session_is_not_badged():
-    """The observed terminal sidecar: kind=interactive, entrypoint=cli."""
-    from power_atlas.web import _session_origin
-    assert _session_origin("interactive", "cli") == ""
-
-
-def test_session_origin_defers_on_unknown_and_absent():
-    """Unknown values yield no badge, matching _map_reported_status's contract.
-
-    "" for both is the kiro-cli case: its lock carries neither field.
-    """
-    from power_atlas.web import _session_origin
-    assert _session_origin("", "") == ""
-    assert _session_origin("some-future-kind", "some-future-entrypoint") == ""
-    assert _session_origin("", "mcp") == ""  # real value, deliberately unlisted
-
-
-def test_row_origin_reads_the_snapshot():
-    from types import SimpleNamespace
-    from power_atlas.presence import Snapshot
-    from power_atlas.web import _row_origin
-    snap = Snapshot(set(), set(), {}, {}, {},
-                    {("claude-code", "s1"): "bg"},
-                    {("claude-code", "s1"): "sdk-cli"})
-    assert _row_origin(snap, SimpleNamespace(session_id="s1"), "claude-code") == "bg"
-    # A session the snapshot knows nothing about — the historical-row case.
-    assert _row_origin(snap, SimpleNamespace(session_id="s2"), "claude-code") == ""
-
-
 def test_origin_badge_class_is_styled():
     """The badge is typographic, so an unstyled one renders as stray text.
 
@@ -7999,7 +7945,7 @@ def test_bulk_get_returns_multiple(mock_load, client, tmp_path):
 
 from datetime import datetime, timezone, timedelta
 from power_atlas import presence
-from power_atlas.web import _session_status, _workspace_status, _status_matches
+from power_atlas.web import _status_matches
 from power_atlas.data import _normalize_path
 
 
@@ -8027,71 +7973,6 @@ def test_status_matches_semantics():
     assert _status_matches("working", "waiting") is False
 
 
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_semantic_and_fallback(mock_semantic):
-    """Semantic status is returned when available; waiting fallback when None."""
-    from power_atlas.status_classifier import SemanticStatus
-    live = _snapshot(live_sids={("claude-code", "s1")})
-    recent_s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    closed_s = _make_session(session_id="s2", cwd="/w", updated_at=_recent_iso())
-
-    # Semantic path: returns classifier result
-    mock_semantic.return_value = SemanticStatus.WAITING
-    assert _session_status(live, recent_s, "claude-code") == "waiting"
-    mock_semantic.return_value = SemanticStatus.ERRORED
-    assert _session_status(live, recent_s, "claude-code") == "errored"
-
-    # Fallback path: classifier returns None -> working (process running, can't classify)
-    mock_semantic.return_value = None
-    assert _session_status(live, recent_s, "claude-code") == "working"
-
-    # Closed: not live at all
-    assert _session_status(live, closed_s, "claude-code") == "closed"
-
-
-@patch("power_atlas.status_classifier._resolve_jsonl_path")
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_cwd_based_no_resume_id(mock_semantic, mock_resolve):
-    """CWD-based detection: a process in the cwd is enough to classify as live."""
-    from power_atlas.status_classifier import SemanticStatus
-    import tempfile, os
-    # Create a temp file with recent mtime to pass the recency gate
-    tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
-    tmp.close()
-    mock_resolve.return_value = tmp.name
-    try:
-        # Snapshot: process running in /w but no session id matched (no --resume-id)
-        snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
-        s = _make_session(session_id="sess1", cwd="/w", updated_at=_recent_iso())
-
-        # Semantic classifier returns WORKING
-        mock_semantic.return_value = SemanticStatus.WORKING
-        assert _session_status(snap, s, "claude-code") == "working"
-
-        # Semantic classifier returns WAITING
-        mock_semantic.return_value = SemanticStatus.WAITING
-        assert _session_status(snap, s, "claude-code") == "waiting"
-
-        # Semantic classifier returns None + live process → fallback to "working"
-        mock_semantic.return_value = None
-        assert _session_status(snap, s, "claude-code") == "working"
-    finally:
-        os.unlink(tmp.name)
-
-    # Different provider → no process in cwd → closed
-    snap_kiro = _snapshot(live_cwds={("kiro-cli", _normalize_path("/w"))})
-    assert _session_status(snap_kiro, s, "claude-code") == "closed"
-
-
-def test_workspace_status_cwd_and_provider_scoped():
-    snap = _snapshot(live_cwds={("claude-code", _normalize_path("/w"))})
-    assert _workspace_status(snap, "/w", {"claude-code"}) == "working"
-    # provider filter excludes the live claude process
-    assert _workspace_status(snap, "/w", {"kiro-cli"}) == "closed"
-    # different folder is closed
-    assert _workspace_status(snap, "/other", None) == "closed"
-
-
 def _tracked_snapshot(reported):
     """Snapshot with one tracked claude-code session in /w reporting `reported`."""
     norm = _normalize_path("/w")
@@ -8101,116 +7982,6 @@ def _tracked_snapshot(reported):
         sid_to_cwd={("claude-code", "s1"): norm},
         sid_status={("claude-code", "s1"): reported},
     )
-
-
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_report_outranks_classifier(mock_semantic):
-    """A non-empty report is first-hand and current, so it beats the tail read.
-
-    Asserted here rather than on the card, where "busy"/"shell" map onto the
-    same "working" the aggregate already seeds itself with and so could not
-    tell a folded-in report from an ignored one.
-    """
-    from power_atlas.status_classifier import SemanticStatus
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    mock_semantic.return_value = SemanticStatus.ERRORED
-
-    # busy/shell mean a turn is running, so even an errored tail loses.
-    assert _session_status(_tracked_snapshot("busy"), s, "claude-code") == "working"
-    assert _session_status(_tracked_snapshot("shell"), s, "claude-code") == "working"
-    # "idle" carries no verdict, and no report at all carries none either:
-    # both leave the classifier in charge.
-    assert _session_status(_tracked_snapshot("idle"), s, "claude-code") == "errored"
-    assert _session_status(_tracked_snapshot(""), s, "claude-code") == "errored"
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.get_semantic_status")
-def test_workspace_status_reads_provider_report(mock_semantic, mock_sessions):
-    """The card dot honours the provider's own report, like per-session status."""
-    mock_sessions.return_value = []
-    mock_semantic.return_value = None
-
-    # Sole signal is the report: an unclassifiable tail still shows waiting.
-    assert _workspace_status(_tracked_snapshot("waiting"), "/w",
-                             {"claude-code"}) == "waiting"
-    # "idle" is ambiguous (finished/errored/never-started) — never waiting.
-    assert _workspace_status(_tracked_snapshot("idle"), "/w",
-                             {"claude-code"}) == "working"
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.get_semantic_status")
-def test_workspace_status_settles_sessions_before_aggregating(
-        mock_semantic, mock_sessions):
-    """The card settles each session the way its row does, then aggregates.
-
-    A tail that lags an in-flight turn must not outrank the provider's own
-    "busy" — that is what painted a card "waiting" above a row the very same
-    signals had settled as "working". "Errored" is the carve-out: the classifier
-    is its only source, so it survives a "busy", and the row honours it too.
-    """
-    from power_atlas.status_classifier import SemanticStatus
-    mock_sessions.return_value = []
-
-    mock_semantic.return_value = SemanticStatus.ERRORED
-    assert _workspace_status(_tracked_snapshot("busy"), "/w",
-                             {"claude-code"}) == "errored"
-    mock_semantic.return_value = SemanticStatus.WAITING
-    assert _workspace_status(_tracked_snapshot("busy"), "/w",
-                             {"claude-code"}) == "working"
-    # ...and a report still settles a session the classifier reads as working.
-    mock_semantic.return_value = SemanticStatus.WORKING
-    assert _workspace_status(_tracked_snapshot("waiting"), "/w",
-                             {"claude-code"}) == "waiting"
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.web.get_semantic_status")
-def test_workspace_status_aggregates_across_sessions(mock_semantic, mock_sessions):
-    """Settling per session does not flatten the card onto one session's answer."""
-    from power_atlas.status_classifier import SemanticStatus
-    mock_sessions.return_value = []
-    norm = _normalize_path("/w")
-    snap = _snapshot(
-        live_sids={("claude-code", "s1"), ("claude-code", "s2")},
-        live_cwds={("claude-code", norm)},
-        sid_to_cwd={("claude-code", "s1"): norm, ("claude-code", "s2"): norm},
-        sid_status={("claude-code", "s1"): "busy"},
-    )
-    # s1 is mid-turn and says so first-hand; s2 has finished and needs the user.
-    mock_semantic.side_effect = lambda sid, prov, c: (
-        SemanticStatus.WAITING if sid == "s2" else SemanticStatus.WORKING)
-    assert _workspace_status(snap, "/w", {"claude-code"}) == "waiting"
-
-
-@patch("power_atlas.web.data.get_sessions")
-@patch("power_atlas.status_classifier._resolve_jsonl_path")
-@patch("power_atlas.web.get_semantic_status")
-def test_workspace_status_fallback_reads_provider_report(
-        mock_semantic, mock_resolve, mock_sessions):
-    """The no-resume-id fallback reads the report too (same live session ids)."""
-    import tempfile, os
-    tmp = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False)
-    tmp.close()
-    mock_resolve.return_value = tmp.name
-    norm = _normalize_path("/w")
-    mock_sessions.return_value = [
-        _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())]
-    mock_semantic.return_value = None
-    try:
-        # No sid_to_cwd entry, so only the fallback scan can see this session.
-        waiting = _snapshot(
-            live_cwds={("claude-code", norm)},
-            sid_status={("claude-code", "s9"): "waiting"})
-        assert _workspace_status(waiting, "/w", {"claude-code"}) == "waiting"
-
-        idle = _snapshot(
-            live_cwds={("claude-code", norm)},
-            sid_status={("claude-code", "s9"): "idle"})
-        assert _workspace_status(idle, "/w", {"claude-code"}) == "working"
-    finally:
-        os.unlink(tmp.name)
 
 
 def test_classify_kiro_v3_working():
@@ -8692,136 +8463,205 @@ class TestGetSemanticStatus:
 
 
 class TestNotifications:
-    """Tests for the notifications module (session status transition toasts)."""
+    """The event-shaped toast API.
 
-    def setup_method(self):
-        """Reset module state between tests."""
-        from power_atlas import notifications
-        notifications._session_states.clear()
-        notifications._initialized = False
+    The previous model here was a status-transition table plus a per-session
+    cooldown. It was removed with its production code on 2026-09-19: it had
+    never fired (its only caller had no callers, and the gate that armed it was
+    never called), and its cooldown would have swallowed a second permission
+    request raised within a minute of the first.
+    """
 
-    def test_notification_transition_fires(self):
-        """Working→Waiting triggers a toast notification."""
+    def test_turn_end_reports_completion(self):
         from power_atlas import notifications
-        notifications.mark_initialized()
-        # Establish working state
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        # Transition to waiting should fire
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_called_once_with("My Session", "waiting")
+        with patch("power_atlas.notifications._fire_toast") as fire:
+            notifications.notify_turn_end("myrepo abc123", "end_turn")
+        title, body = fire.call_args[0]
+        assert "myrepo abc123" in title
+        assert "waiting for you" in body
 
-    def test_notification_working_to_waiting_fires(self):
-        """Working→Waiting triggers a toast notification (explicit)."""
+    def test_turn_end_distinguishes_an_error(self):
         from power_atlas import notifications
-        notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_called_once_with("My Session", "waiting")
+        with patch("power_atlas.notifications._fire_toast") as fire:
+            notifications.notify_turn_end("myrepo abc123", "error")
+        assert "error" in fire.call_args[0][1].lower()
 
-    def test_notification_working_to_errored_fires(self):
-        """Working→Errored triggers a toast notification."""
+    def test_permission_names_the_tool(self):
         from power_atlas import notifications
-        notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "errored", True)
-            mock_fire.assert_called_once_with("My Session", "errored")
+        with patch("power_atlas.notifications._fire_toast") as fire:
+            notifications.notify_permission_needed("r a1", "Run shell: git status")
+        assert "Run shell: git status" in fire.call_args[0][1]
 
-    def test_notification_non_active_transition_does_not_fire(self):
-        """Waiting→Closed does NOT trigger a notification."""
+    def test_permission_falls_back_when_the_title_is_blank(self):
+        """A blank agent-supplied title must not yield a bodyless toast."""
         from power_atlas import notifications
-        notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "closed", True)
-            mock_fire.assert_not_called()
+        with patch("power_atlas.notifications._fire_toast") as fire:
+            notifications.notify_permission_needed("r a1", "   ")
+        assert fire.call_args[0][1].strip().endswith("a tool")
 
-    def test_notification_working_to_closed_does_not_fire(self):
-        """Working→Closed does NOT trigger a notification."""
+    def test_agent_error_reports_the_message(self):
         from power_atlas import notifications
-        notifications.mark_initialized()
-        notifications.check_and_notify("sess-2", "Another Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-2", "Another Session", "closed", True)
-            mock_fire.assert_not_called()
+        with patch("power_atlas.notifications._fire_toast") as fire:
+            notifications.notify_agent_error("r a1", "invalid tool call")
+        assert "invalid tool call" in fire.call_args[0][1]
 
-    def test_notification_cooldown(self):
-        """Second transition within 60s is suppressed."""
+    def test_body_is_clamped(self):
+        """The backstop bound, independent of any caller-side clamp."""
         from power_atlas import notifications
-        notifications.mark_initialized()
-        # First: working → waiting (fires)
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_called_once()
-        # Go back to working then waiting again — within cooldown
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_not_called()  # suppressed by cooldown
+        with patch("power_atlas.notifications._fire_windows_toast") as win, \
+                patch("power_atlas.notifications._fire_linux_notify") as lin:
+            notifications._fire_toast("t", "x" * 5000)
+        sent = (win.call_args or lin.call_args)[0][1]
+        assert len(sent) == notifications.MAX_TOAST_BODY_CHARS
 
-    def test_notification_cooldown_expires(self):
-        """After cooldown expires, notification fires again."""
+    def test_dispatch_never_raises(self):
+        """A failing platform call must not propagate into an ACP turn."""
         from power_atlas import notifications
-        notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast"):
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-        # Manually expire the cooldown
-        state = notifications._session_states["sess-1"]
-        state.last_notified_at -= 61.0
-        # Go back to working then waiting
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_called_once()
+        with patch("power_atlas.notifications._fire_windows_toast",
+                   side_effect=RuntimeError("boom")), \
+                patch("power_atlas.notifications._fire_linux_notify",
+                      side_effect=RuntimeError("boom")):
+            notifications._fire_toast("t", "b")  # must not raise
 
-    def test_notification_disabled(self):
-        """enabled=False prevents all notifications."""
-        from power_atlas import notifications
-        notifications.mark_initialized()
-        notifications.check_and_notify("sess-1", "My Session", "working", False)
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", False)
-            mock_fire.assert_not_called()
+    def test_the_windows_payload_carries_text_out_of_band(self):
+        """Caller text must never be spliced into the PowerShell script.
 
-    def test_notification_startup_no_fire(self):
-        """Before mark_initialized(), no notifications fire."""
+        Both fields can carry agent-authored content, and PowerShell expands
+        `$...` inside a double-quoted string -- so text in the script body
+        would be executable. Guards the env-var indirection that closes it.
+        """
         from power_atlas import notifications
-        # Do NOT call mark_initialized
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "working", True)
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_not_called()
+        hostile = '$(Write-Output PWNED)'
+        with patch("power_atlas.notifications.subprocess.Popen") as popen:
+            notifications._fire_windows_toast(hostile, hostile)
+        args, kwargs = popen.call_args
+        import base64
+        script = base64.b64decode(args[0][3]).decode("utf-16-le")
+        assert hostile not in script
+        assert kwargs["env"][notifications._TOAST_TITLE_VAR] == hostile
+        assert kwargs["env"][notifications._TOAST_BODY_VAR] == hostile
 
-    def test_notification_startup_tracks_state(self):
-        """Before mark_initialized(), state IS tracked (for baseline)."""
-        from power_atlas import notifications
-        # Establish state before init
-        notifications.check_and_notify("sess-1", "My Session", "working", True)
-        # Now initialize
-        notifications.mark_initialized()
-        # Transition should work since state was already working
-        with patch("power_atlas.notifications._fire_toast") as mock_fire:
-            notifications.check_and_notify("sess-1", "My Session", "waiting", True)
-            mock_fire.assert_called_once_with("My Session", "waiting")
 
-    def test_notification_state_bounded(self):
-        """>100 entries triggers LRU eviction of oldest."""
-        from power_atlas import notifications
-        notifications.mark_initialized()
-        # Add 100 entries
-        for i in range(100):
-            notifications.check_and_notify(f"sess-{i}", f"Session {i}", "working", True)
-        assert len(notifications._session_states) == 100
-        assert "sess-0" in notifications._session_states
-        # Add one more — should evict sess-0
-        notifications.check_and_notify("sess-100", "Session 100", "working", True)
-        assert len(notifications._session_states) == 100
-        assert "sess-0" not in notifications._session_states
-        assert "sess-100" in notifications._session_states
+class TestNotificationPolicy:
+    """`web._notify_from_acp` -- which events earn a toast, and when.
+
+    The watched/unwatched split is only half the mechanism: a backgrounded but
+    still-attached tab reads as watched here, and is covered by the browser
+    Notification in acp.html instead. These tests pin the server half.
+    """
+
+    def _fire(self, monkeypatch, event, detail, watched, enabled=True):
+        import types
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: types.SimpleNamespace(
+                                notifications={"enabled": enabled}))
+        calls = []
+        for name in ("notify_turn_end", "notify_permission_needed",
+                     "notify_agent_error"):
+            monkeypatch.setattr(
+                web_mod.notifications, name,
+                (lambda n: lambda *a: calls.append((n,) + a))(name))
+        web_mod._notify_from_acp(event, "sess_abc123", r"C:\dev\myrepo",
+                                 detail, watched)
+        return calls
+
+    def test_unwatched_turn_end_notifies(self, monkeypatch):
+        calls = self._fire(monkeypatch, "turn_end", "end_turn", watched=False)
+        assert [c[0] for c in calls] == ["notify_turn_end"]
+
+    def test_watched_turn_end_is_silent(self, monkeypatch):
+        assert self._fire(monkeypatch, "turn_end", "end_turn", watched=True) == []
+
+    def test_a_cancelled_turn_is_silent(self, monkeypatch):
+        """The operator stopped it, so they already know."""
+        assert self._fire(monkeypatch, "turn_end", "cancelled", watched=False) == []
+        assert self._fire(monkeypatch, "turn_end", "interrupted", watched=False) == []
+
+    def test_permission_notifies_even_when_watched(self, monkeypatch):
+        """The turn is stopped until answered; an attached socket is not a reader."""
+        calls = self._fire(monkeypatch, "permission_request", "git status",
+                           watched=True)
+        assert [c[0] for c in calls] == ["notify_permission_needed"]
+
+    def test_agent_error_notifies_only_when_unwatched(self, monkeypatch):
+        assert [c[0] for c in self._fire(monkeypatch, "agent_error", "boom",
+                                         watched=False)] == ["notify_agent_error"]
+        assert self._fire(monkeypatch, "agent_error", "boom", watched=True) == []
+
+    def test_disabled_suppresses_everything(self, monkeypatch):
+        for event, detail in (("turn_end", "end_turn"),
+                              ("permission_request", "x"),
+                              ("agent_error", "x")):
+            assert self._fire(monkeypatch, event, detail, watched=False,
+                              enabled=False) == []
+
+    def test_an_empty_notifications_table_reads_as_off(self, monkeypatch):
+        """A bare `[notifications]` header loads as {}, not the dataclass default."""
+        import types
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: types.SimpleNamespace(notifications={}))
+        fired = []
+        monkeypatch.setattr(web_mod.notifications, "notify_turn_end",
+                            lambda *a: fired.append(a))
+        web_mod._notify_from_acp("turn_end", "s", "C:/r", "end_turn", False)
+        assert fired == []
+
+    def test_a_label_disambiguates_sessions_in_one_workspace(self):
+        from power_atlas import web as web_mod
+        a = web_mod._notify_label(r"C:\dev\myrepo", "sess_aaaaaa")
+        b = web_mod._notify_label(r"C:\dev\myrepo", "sess_bbbbbb")
+        assert a != b
+        assert a.startswith("myrepo")
+
+    def test_a_consumer_fault_never_escapes(self, monkeypatch):
+        """This runs inside an ACP turn boundary; it must not break the turn."""
+        from power_atlas import web as web_mod
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        web_mod._notify_from_acp("turn_end", "s", "C:/r", "end_turn", False)
+
+
+class TestNotificationsRoute:
+    """`/api/notifications` -- its own route rather than a save-setting key.
+
+    `/api/save-setting` rejects every boolean on purpose (isinstance(True, int)
+    is True, so a stray bool would pass the int check for an unrelated key),
+    and `notifications` is a nested dict rather than a flat scalar.
+    """
+
+    def test_get_defaults_to_off(self, client, isolated_config):
+        assert client.get("/api/notifications").json() == {"enabled": False}
+
+    def test_post_toggles_and_persists(self, client, isolated_config):
+        assert client.post("/api/notifications").json() == {"enabled": True}
+        assert client.get("/api/notifications").json() == {"enabled": True}
+        assert client.post("/api/notifications").json() == {"enabled": False}
+        assert client.get("/api/notifications").json() == {"enabled": False}
+
+    def test_the_value_survives_a_reload_from_disk(self, client, isolated_config):
+        from power_atlas.config import load_config
+        client.post("/api/notifications")
+        assert load_config().notifications.get("enabled") is True
+
+    def test_an_empty_table_on_disk_reads_as_off(self, client, isolated_config):
+        """A hand-written bare `[notifications]` header loads as {}.
+
+        `load_config` passes the empty dict explicitly, so the dataclass
+        default never applies -- indexing rather than `.get` would raise here.
+        """
+        (isolated_config / "config.toml").write_text("[notifications]\n",
+                                                     encoding="utf-8")
+        assert client.get("/api/notifications").json() == {"enabled": False}
+
+    def test_toggling_preserves_unknown_config_keys(self, client, isolated_config):
+        """`save_config` restores unknown top-level keys off `_extra`, but only
+        for the same `Config` instance `load_config` returned."""
+        path = isolated_config / "config.toml"
+        path.write_text('some_future_key = "keep me"\n', encoding="utf-8")
+        client.post("/api/notifications")
+        assert "some_future_key" in path.read_text(encoding="utf-8")
 
 
 # --- Path/status caching (260725_PARSE_AND_POLL_PERFORMANCE) ----------------
@@ -8962,83 +8802,6 @@ class TestStatusCacheLRU:
         assert cache.unlocked_ops == []
 
 
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_prefers_provider_report_for_working(mock_semantic):
-    """claude-code declaring a running turn beats an inferred verdict.
-
-    The classifier reads the transcript tail, which lags an in-flight turn
-    that has not flushed yet.
-    """
-    from power_atlas.status_classifier import SemanticStatus
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    for reported in ("busy", "shell"):
-        snap = _snapshot(
-            live_sids={("claude-code", "s1")},
-            sid_status={("claude-code", "s1"): reported},
-        )
-        mock_semantic.return_value = SemanticStatus.WAITING
-        assert _session_status(snap, s, "claude-code") == "working", reported
-        # The classifier must not even be consulted for an unambiguous report.
-        mock_semantic.return_value = None
-        assert _session_status(snap, s, "claude-code") == "working", reported
-
-
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_reports_waiting_from_provider(mock_semantic):
-    """"waiting" means a dialog is open and needs the human."""
-    snap = _snapshot(
-        live_sids={("claude-code", "s1")},
-        sid_status={("claude-code", "s1"): "waiting"},
-    )
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    mock_semantic.return_value = None
-    assert _session_status(snap, s, "claude-code") == "waiting"
-
-
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_idle_does_not_erase_errored(mock_semantic):
-    """"idle" only rules out working — it must never overwrite a richer verdict.
-
-    idle covers finished, errored and never-started alike, and the classifier
-    is the only source of "errored".
-    """
-    from power_atlas.status_classifier import SemanticStatus
-    snap = _snapshot(
-        live_sids={("claude-code", "s1")},
-        sid_status={("claude-code", "s1"): "idle"},
-    )
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    mock_semantic.return_value = SemanticStatus.ERRORED
-    assert _session_status(snap, s, "claude-code") == "errored"
-    mock_semantic.return_value = SemanticStatus.WAITING
-    assert _session_status(snap, s, "claude-code") == "waiting"
-
-
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_unknown_report_falls_through(mock_semantic):
-    """An unrecognised value must degrade to today's behaviour, not break it.
-
-    The field is undocumented internal state in a frequently-updated binary.
-    """
-    from power_atlas.status_classifier import SemanticStatus
-    snap = _snapshot(
-        live_sids={("claude-code", "s1")},
-        sid_status={("claude-code", "s1"): "some-future-value"},
-    )
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    mock_semantic.return_value = SemanticStatus.WAITING
-    assert _session_status(snap, s, "claude-code") == "waiting"
-
-
-@patch("power_atlas.web.get_semantic_status")
-def test_session_status_report_never_revives_a_closed_session(mock_semantic):
-    """A stale report must not make a dead session look alive."""
-    snap = _snapshot(sid_status={("claude-code", "s9"): "busy"})
-    s = _make_session(session_id="s9", cwd="/w", updated_at=_recent_iso())
-    mock_semantic.return_value = None
-    assert _session_status(snap, s, "claude-code") == "closed"
-
-
 # --- Waiting reason: blocked-on-approval vs asked-a-question ---
 
 def _snap_waiting(reason, status="waiting"):
@@ -9047,36 +8810,6 @@ def _snap_waiting(reason, status="waiting"):
         {("claude-code", "s1"): status},
         {("claude-code", "s1"): reason},
     )
-
-
-def test_waiting_detail_separates_approval_from_question():
-    from power_atlas.web import _waiting_detail
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    approval = ["permission prompt", "sandbox request", "worker request"]
-    for r in approval:
-        cat, phrase = _waiting_detail(_snap_waiting(r), s, "claude-code", "waiting")
-        assert cat == "approval", r
-        assert "approval" in phrase, r
-    cat, phrase = _waiting_detail(_snap_waiting("input needed"), s, "claude-code", "waiting")
-    assert (cat, phrase) == ("question", "asked you a question")
-
-
-def test_waiting_detail_passes_through_an_unmapped_reason():
-    """A new provider value must surface, not vanish."""
-    from power_atlas.web import _waiting_detail
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    assert _waiting_detail(_snap_waiting("some new thing"), s, "claude-code", "waiting") \
-        == ("other", "some new thing")
-
-
-def test_waiting_detail_only_applies_to_waiting_sessions():
-    from power_atlas.web import _waiting_detail
-    s = _make_session(session_id="s1", cwd="/w", updated_at=_recent_iso())
-    snap = _snap_waiting("permission prompt", status="busy")
-    assert _waiting_detail(snap, s, "claude-code", "working") == ("", "")
-    # kiro-cli reports no reason at all; must not raise or invent one.
-    bare = presence.Snapshot(set(), set(), {}, {}, {})
-    assert _waiting_detail(bare, s, "kiro-cli", "waiting") == ("", "")
 
 
 # --- ACP session lifecycle: activity stamps, inactivity ceiling, sweeper ---
@@ -10920,9 +10653,11 @@ class TestAcpLifespanWiring:
         # here, before the sweeper starts, and a stub missing it would fail for
         # a reason unrelated to the ordering this test is about.
         hooked = []
+        notify_hooked = []
         fake = types.SimpleNamespace(start_sweeper=start_sweeper,
                                      shutdown=shutdown,
-                                     set_sessions_changed_hook=hooked.append)
+                                     set_sessions_changed_hook=hooked.append,
+                                     set_notify_hook=notify_hooked.append)
 
         async def run():
             async with web_mod.lifespan(None):
@@ -14584,11 +14319,10 @@ class TestDashboardListingEndpoint:
         from power_atlas import presence as presence_mod
         grouped_multi_store["add"](r"C:\dev\ws", "claude-code", [_acp_row("s1")])
         # An explicit session-id match (--resume-id on a process cmdline) --
-        # the fast path _session_is_live checks first, same as the existing
-        # _session_status tests use, so this exercises the field without
-        # also depending on a real JSONL file's mtime (the cwd+recency
-        # fallback path's own gate, covered by test_no_live_process_*
-        # trivially failing it instead).
+        # the fast path _session_is_live checks first, so this exercises the
+        # field without also depending on a real JSONL file's mtime (the
+        # cwd+recency fallback path's own gate, covered by
+        # test_no_live_process_* trivially failing it instead).
         monkeypatch.setattr(
             presence_mod, "get_snapshot",
             lambda *a, **k: presence_mod.Snapshot({("claude-code", "s1")}, set()))
@@ -21499,6 +21233,128 @@ class TestSupervisor:
             assert payload["toolCall"]["title"] == "Pick a doc"
             assert payload["options"] == options
         finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_permission_request_title_is_clamped(self, monkeypatch):
+        """The one agent-authored string that reached the page unbounded.
+
+        It now also rides a desktop notification, where an unbounded value is
+        worse than untidy.
+        """
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permclamp00-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                7, sid, title="x" * 5000,
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payload = [f for f in _queued(conn)
+                       if f["type"] == "permission_request"][0]["payload"]
+            assert len(payload["toolCall"]["title"]) == \
+                acp_mod.MAX_PERMISSION_TITLE_CHARS
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_permission_request_calls_the_notify_hook(self, monkeypatch):
+        """The hook fires with the clamped title and the session's cwd.
+
+        `watched` is True here: a socket is attached. The consumer notifies for
+        a permission request anyway -- the turn is stopped until answered --
+        but the fact still has to arrive correctly for the other two events,
+        which do gate on it.
+        """
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permhook00-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\dev\\myrepo")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        seen = []
+        previous = acp_mod.notify_hook
+        try:
+            acp_mod.set_notify_hook(lambda *a: seen.append(a))
+            sv3._on_agent_request(self._permission_request_msg(
+                8, sid, title="Run shell: git status",
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            assert seen == [("permission_request", sid, "C:\\dev\\myrepo",
+                             "Run shell: git status", True)]
+        finally:
+            acp_mod.notify_hook = previous
+            self._cleanup_registry(acp_mod)
+
+    def test_notify_hook_reports_unwatched_when_no_socket_is_attached(
+            self, monkeypatch):
+        """`watched` is the whole basis of the server-side firing policy."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permnosock-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\dev\\myrepo")
+        sv3.history[sid] = acp_mod._History()
+        seen = []
+        previous = acp_mod.notify_hook
+        try:
+            acp_mod.set_notify_hook(lambda *a: seen.append(a))
+            sv3._on_agent_request(self._permission_request_msg(
+                9, sid, title="t",
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            assert seen and seen[0][4] is False
+        finally:
+            acp_mod.notify_hook = previous
+            self._cleanup_registry(acp_mod)
+
+    def test_a_raising_notify_hook_never_breaks_the_frame_path(self, monkeypatch):
+        """The permission frame must still reach the page if the hook throws."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permboom00-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        previous = acp_mod.notify_hook
+        try:
+            def boom(*_a):
+                raise RuntimeError("hook exploded")
+            acp_mod.set_notify_hook(boom)
+            sv3._on_agent_request(self._permission_request_msg(
+                10, sid, title="t",
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            assert [f for f in _queued(conn) if f["type"] == "permission_request"]
+            assert sv3._pending_permission[10]["session_id"] == sid
+        finally:
+            acp_mod.notify_hook = previous
+            self._cleanup_registry(acp_mod)
+
+    def test_display_error_calls_the_notify_hook(self, monkeypatch):
+        """A mid-turn error is its own fire point: it need not end the turn,
+        so waiting for turn end could mean waiting for the silence timeout."""
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_dispedhook-0000-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\dev\\myrepo")
+        sv3.history[sid] = acp_mod._History()
+        seen = []
+        previous = acp_mod.notify_hook
+        try:
+            acp_mod.set_notify_hook(lambda *a: seen.append(a))
+            sv3._on_notification({
+                "method": "session/update",
+                "params": {
+                    "sessionId": sid,
+                    "update": {
+                        "sessionUpdate": "session_info_update",
+                        "_meta": {"kiro": {"kind": "display_error",
+                                           "message": "model blew up",
+                                           "errorType": "ModelError"}},
+                    },
+                },
+            })
+            assert seen == [("agent_error", sid, "C:\\dev\\myrepo",
+                             "model blew up", False)]
+        finally:
+            acp_mod.notify_hook = previous
             self._cleanup_registry(acp_mod)
 
     def test_on_permission_request_malformed_request_is_refused_not_stored(

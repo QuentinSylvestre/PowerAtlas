@@ -874,6 +874,11 @@
   // frames in it are real and render normally; what would be wrong is
   // narrating a replay into the transport log as if it were live traffic.
   var replaying = false;
+  // Whether desktop notifications are switched on, mirrored from
+  // /api/notifications. Starts false so a failed or slow fetch is silent
+  // rather than noisy — the wrong direction to fail in is notifying someone
+  // who turned it off.
+  var _notifyEnabled = false;
   // Whether the server holds a turn for this session. Never inferred from a
   // replayed turn marker — the buffer evicts those; the `session` frame
   // carries the authoritative value.
@@ -2916,6 +2921,54 @@
   }
   function isUnread(sid) {
     try { return localStorage.getItem(RAIL_UNREAD_PREFIX + sid) === '1'; } catch(e) { return false; }
+  }
+
+  // ---- desktop notification (this tab, this session) ----------------------
+  // The client half of a two-part mechanism. The server toasts a session with
+  // no socket attached at all; it cannot see tab visibility, because that
+  // never crosses the wire. This covers the remaining case -- attached but
+  // hidden -- so between them the three states (detached / hidden / visible)
+  // are each covered exactly once and neither side needs to know about the
+  // other.
+  //
+  // Deliberately scoped to the session THIS tab subscribes to: a socket only
+  // ever receives frames for its own session, so a turn ending elsewhere never
+  // reaches here. The rail's poll-based unread marker above remains the only
+  // cross-session signal.
+  //
+  // Never fires while the tab is visible: the transcript already says it.
+  function maybeNotify(title, body, tag) {
+    // `typeof` rather than a truthiness check: the constructor is absent
+    // outside a browser (the mjs test harness runs this script under Node's
+    // `vm`), where a bare reference would throw ReferenceError.
+    if (typeof Notification === 'undefined') return;
+    // Hard-denied rather than promptable on any non-secure origin, which is
+    // what the remote bind is -- so this is the ordinary path there, not an
+    // error case. Checking `granted` rather than requesting keeps the ask on
+    // the settings toggle, where a user gesture exists to carry it.
+    if (Notification.permission !== 'granted') return;
+    if (document.visibilityState !== 'hidden') return;
+    try {
+      // `tag` coalesces: two tabs on one session replace each other's
+      // notification rather than stacking two identical ones.
+      new Notification(title, { body: body, tag: tag });
+    } catch (e) { /* never worth breaking frame handling over */ }
+  }
+
+  function notifyLabel() {
+    var name = (_sessionCwd || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+    return name || 'session';
+  }
+
+  // Read rather than pushed over the WebSocket: the flag is a UI preference,
+  // not session state, and putting it on the ACP wire would couple the
+  // protocol to the settings surface for no gain.
+  function refreshNotifyEnabled() {
+    if (typeof fetch !== 'function') return;
+    fetch('/api/notifications')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { _notifyEnabled = !!(d && d.enabled); })
+      .catch(function () { /* stays false — fail quiet, not noisy */ });
   }
 
   // Tracks the last known status per session id for unread-detection.
@@ -5120,6 +5173,20 @@
         addMessage('note', 'turn ended: ' + payload.stopReason);
       }
       logLine('info', '← turn end (' + payload.stopReason + ')');
+      // `!replaying` is load-bearing and is NOT inherited from the guards
+      // above: this branch runs during replay by design (see the addMessage
+      // comment), so without its own gate every reload would re-notify about a
+      // turn that ended hours ago. `cancelled`/`interrupted` are skipped for
+      // the same reason the server skips them -- the user stopped it.
+      if (!replaying && _notifyEnabled && payload.stopReason !== 'cancelled'
+          && payload.stopReason !== 'interrupted') {
+        maybeNotify(
+          'PowerAtlas — ' + notifyLabel(),
+          payload.stopReason === 'end_turn'
+            ? 'Done — waiting for you'
+            : 'Turn ended: ' + payload.stopReason,
+          'pa-turn-' + sessionId);
+      }
       // Cancelled turns must not fire a queued auto-send — the user stopped
       // the turn on purpose, so silently sending the next prompt would be
       // surprising. Discard and inform.
@@ -5408,6 +5475,17 @@
       var _permOptions = Array.isArray(payload && payload.options) ? payload.options : [];
       if ((typeof _reqId === 'string' || typeof _reqId === 'number') && _permOptions.length) {
         addPermissionRequest(_reqId, _permSid, _permTitle, _permOptions);
+        // The notification takes a `!replaying` gate even though the row above
+        // deliberately does not. The two want opposite things from a reload:
+        // the buttons must come back (the request may still be unanswered
+        // server-side), but re-announcing it would notify again every time the
+        // page is refreshed while the user is deciding.
+        if (!replaying && _notifyEnabled) {
+          maybeNotify(
+            'PowerAtlas — ' + notifyLabel(),
+            'Needs approval: ' + (_permTitle || 'a tool'),
+            'pa-perm-' + _permSid);
+        }
       }
       return;
     }
@@ -6398,11 +6476,19 @@
   } else {
     connect();
     railLoadFirstPage();
+    refreshNotifyEnabled();
     // Coming back to the tab refreshes at once, which is the moment a stale
     // dot would otherwise be believed — a phone returns to this page far more
     // often than it leaves it open for a full interval.
     document.addEventListener('visibilitychange', function () {
-      if (document.visibilityState !== 'hidden') railRefresh();
+      if (document.visibilityState !== 'hidden') {
+        railRefresh();
+        // The toggle lives on the dashboard, so this tab cannot observe a
+        // change to it. Re-reading on return is the cheapest way to stop an
+        // /acp tab left open for days from honouring a setting the user
+        // changed in the meantime.
+        refreshNotifyEnabled();
+      }
     });
     setInterval(function () {
       // Only while the page is being looked at. A poll is one request per

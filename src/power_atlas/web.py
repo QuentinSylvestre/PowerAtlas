@@ -207,40 +207,6 @@ def _time_bucket(iso_str: str) -> str:
 # Session statuses that count as "live" (a process is running for them).
 _LIVE_STATUSES = ("working", "waiting", "errored")
 
-# Tracks whether the first render has completed (for notification initialization)
-_first_render_done = False
-
-
-# claude-code reports why a session is blocked, which separates "the agent is
-# stuck behind an approval you have to grant" from "the agent asked you a
-# question". The raw strings come from the provider; the categories are ours.
-# An unmapped value is shown verbatim rather than dropped, so a new reason
-# degrades to a slightly clumsy tooltip instead of a silent regression.
-_WAITING_REASONS = {
-    "permission prompt": ("approval", "needs your approval"),
-    "sandbox request": ("approval", "needs your approval for a sandbox request"),
-    "worker request": ("approval", "needs your approval for a worker request"),
-    "input needed": ("question", "asked you a question"),
-    "dialog open": ("other", "has a dialog open"),
-}
-
-
-def _waiting_detail(snapshot, session, provider: str, status: str) -> tuple[str, str]:
-    """Return (category, human phrase) for a waiting session, else ("", "").
-
-    Only claude-code reports this; kiro-cli's lock file carries no such field.
-    """
-    if status != "waiting":
-        return "", ""
-    reason = snapshot.waiting_reason(provider, session.session_id)
-    if not reason:
-        return "", ""
-    known = _WAITING_REASONS.get(reason)
-    if known:
-        return known
-    return "other", reason
-
-
 def _map_reported_status(reported: str) -> str:
     """Map a provider's self-reported live state onto the semantic vocabulary.
 
@@ -266,68 +232,6 @@ def _map_reported_status(reported: str) -> str:
     if reported == "waiting":
         return "waiting"
     return ""
-
-
-# Entrypoints that mean "started by a program, not by a person at a terminal".
-# Taken verbatim from Claude Code's own set (2.1.221 carries
-# `new Set(["sdk-cli","sdk-ts","sdk-py"])` and filters these out of `/resume`),
-# so PowerAtlas and the provider agree on what counts as machine-driven rather
-# than inventing a second definition that drifts.
-#
-# `cli` is the interactive terminal case. Deliberately NOT listed here:
-# `mcp`, `local-agent`, `remote*`, `claude-vscode`, `claude-code-github-action`
-# and `claude_in_slack` are all real entrypoint values this build knows, and
-# each is arguably machine-driven too — but none has been observed on this
-# machine, and Claude Code itself does not filter them. Add one when there is a
-# sidecar to check it against, not before.
-_SDK_ENTRYPOINTS = frozenset({"sdk-cli", "sdk-ts", "sdk-py"})
-
-# Session kinds that are not a person at a prompt. `interactive` and "" are the
-# ordinary cases and yield no badge.
-_MACHINE_KINDS = frozenset({"bg", "daemon", "daemon-worker"})
-
-
-def _session_origin(kind: str, entrypoint: str) -> str:
-    """A short badge label for a session no human is sitting in front of, or "".
-
-    **Both fields are consulted, and that is the whole point of this function.**
-    Measured 2026-08-04 on Claude Code 2.1.221: `kind` is read straight out of
-    the `CLAUDE_CODE_SESSION_KIND` environment variable, so it only reads
-    non-`interactive` when a caller deliberately sets it. A plain `claude -p` —
-    the shape every script, hook and CI job uses — reports `kind: interactive`
-    with `entrypoint: sdk-cli`. Keying on `kind` alone, which is what this was
-    originally scoped as, would therefore have missed the commonest
-    machine-driven session entirely while looking like it worked.
-
-    `kind` wins when both are informative, because it is the more specific
-    claim: a `daemon` started through the SDK is better described as a daemon
-    than as an SDK run.
-
-    Returns "" for an ordinary interactive session, for kiro-cli (whose lock
-    carries neither field), and for any value this build does not recognise —
-    the same defer-rather-than-guess contract `_map_reported_status` uses.
-    """
-    if kind in _MACHINE_KINDS:
-        return kind
-    if entrypoint in _SDK_ENTRYPOINTS:
-        return "sdk"
-    return ""
-
-
-def _row_origin(snapshot, session, provider: str) -> str:
-    """``_session_origin`` for one row, read off the snapshot.
-
-    Only ever non-empty for a **live** session: both fields come from the
-    per-process sidecar, which `presence` discards once the process is gone. A
-    historical row therefore carries no badge, which is the right scope — the
-    confusion this addresses is a background session showing the same live dot
-    as a real one, and a dead session shows no dot at all.
-    """
-    sid = getattr(session, "session_id", "")
-    if not sid:
-        return ""
-    return _session_origin(snapshot.session_kind(provider, sid),
-                           snapshot.session_entrypoint(provider, sid))
 
 
 def _session_is_live(snapshot, session, provider: str) -> bool:
@@ -361,62 +265,6 @@ def _session_is_live(snapshot, session, provider: str) -> bool:
         return False
 
 
-def _session_status(snapshot, session, provider: str,
-                    notifications_enabled: bool = False, *,
-                    notify: bool = True) -> str:
-    """Return semantic status for a session.
-
-    Detection gate: see `_session_is_live`. A "not live" verdict there short-
-    circuits straight to "closed" here, before any transcript read.
-
-    Args:
-        notify: When False, skip the notification side-effect entirely.
-                Used by the lightweight status-polling endpoint to avoid toasts.
-    """
-    is_live = _session_is_live(snapshot, session, provider)
-
-    # A non-empty report wins outright, including over a richer-looking
-    # classifier verdict: it is first-hand and current, while the classifier
-    # reads a transcript tail that lags an in-flight turn. See
-    # _map_reported_status for the mapping and for why "idle" yields nothing.
-    reported = _map_reported_status(
-        snapshot.reported_status(provider, session.session_id))
-
-    if not is_live:
-        status_value = "closed"
-    elif reported:
-        status_value = reported
-    elif (semantic := get_semantic_status(session.session_id, provider, session.cwd)) is not None:
-        status_value = semantic.value
-    else:
-        # Process running but can't classify from JSONL tail.
-        # A running process = working. The classifier returns None when the
-        # tail is unparseable or mid-write — not evidence of idle state.
-        # "Waiting" only comes from positive classifier identification.
-        status_value = "working"
-
-    # Notify on transition (skip when caller opts out, e.g. status-poll endpoint)
-    if notify:
-        notifications.check_and_notify(
-            session.session_id, session.title or "untitled",
-            status_value, notifications_enabled
-        )
-    return status_value
-
-
-# Priority ordering for workspace-level status aggregation
-_STATUS_PRIORITY = {"errored": 3, "waiting": 2, "working": 1, "closed": 0}
-
-
-def _raise_status(best: str, candidate: str) -> str:
-    """Return the higher-priority of two statuses; "" candidates are ignored."""
-    if not candidate:
-        return best
-    if _STATUS_PRIORITY.get(candidate, 0) > _STATUS_PRIORITY.get(best, 0):
-        return candidate
-    return best
-
-
 def _resolved_session_status(snapshot, provider: str, session_id: str,
                              semantic: SemanticStatus | None) -> str:
     """Settle one live session's status, the way its own row settles it.
@@ -438,73 +286,6 @@ def _resolved_session_status(snapshot, provider: str, session_id: str,
         return semantic.value
     # A process is running and nothing could classify it — not evidence of idle.
     return "working"
-
-
-def _workspace_status(snapshot, cwd: str,
-                      providers: set[str] | None) -> str:
-    """Aggregate status for a workspace card — highest-priority session status wins.
-
-    Priority: errored > waiting > working > closed (no dot).
-    Falls back to classifying the most recently updated session when no
-    explicit --resume-id sessions are tracked for this cwd.
-
-    Each session is settled by ``_resolved_session_status`` first and only then
-    aggregated. Folding the raw report and the raw classifier straight into the
-    aggregate instead let a lagging tail outrank the provider's own "busy", so a
-    card read "waiting" above a row the very same signals had already settled as
-    "working". The card can still outrank a row, but only on the strength of a
-    different session, or of the errored verdict the row honours too.
-    """
-    from .data import _normalize_path
-    if _normalize_path(cwd) not in snapshot.live_cwds(providers):
-        return "closed"
-    # Check semantic status for recent sessions in this workspace
-    best = "working"  # at minimum, a process is running
-    found_any = False
-    # Try to get semantic classification for sessions in this cwd
-    for prov in (providers or {"claude-code", "kiro-cli-v3"}):
-        sids = snapshot.live_session_ids_for_cwd(prov, cwd)
-        for sid in sids:
-            semantic = get_semantic_status(sid, prov, cwd)
-            if semantic is not None:
-                # Only a classification clears the fallback — a report is not
-                # one, and skipping the scan on the strength of one would hide
-                # an "errored" session elsewhere in the workspace.
-                found_any = True
-            best = _raise_status(
-                best, _resolved_session_status(snapshot, prov, sid, semantic))
-    # Fallback: no explicit session IDs (chat -a without --resume-id).
-    # Classify all recently active sessions in this workspace, take highest priority.
-    if not found_any:
-        from . import data
-        from .status_classifier import _resolve_jsonl_path
-        import os, time as _time
-        for prov in (providers or {"claude-code", "kiro-cli-v3"}):
-            sessions = data.get_sessions(cwd=cwd, provider=prov)
-            checked = 0
-            for recent in sessions:
-                if checked >= 10:  # cap: only check the 10 most recent
-                    break
-                checked += 1
-                jsonl_path = _resolve_jsonl_path(recent.session_id, prov, cwd)
-                if jsonl_path is None:
-                    continue
-                try:
-                    mtime_age = _time.time() - os.path.getmtime(jsonl_path)
-                except OSError:
-                    continue
-                if mtime_age > 300:  # skip stale sessions
-                    continue
-                # Narrow but real: presence records a report for any validated
-                # sidecar, but a session only reaches sid_to_cwd through its
-                # sidecar's own "cwd" field or through the process pass, which
-                # maps proc.cwd() when the session id is on argv. A claude-code
-                # session with neither is invisible to the loop above and only
-                # reachable here — kiro-cli never reports a status at all.
-                best = _raise_status(best, _resolved_session_status(
-                    snapshot, prov, recent.session_id,
-                    get_semantic_status(recent.session_id, prov, cwd)))
-    return best
 
 
 def _status_matches(status_filter: str, status: str) -> bool:
@@ -628,6 +409,64 @@ _STATIC_DIR = _PKG_DIR / "static"
 log = logging.getLogger("power_atlas.web")
 
 
+# Turn endings worth a desktop toast. `cancelled` and `interrupted` are
+# deliberately absent: the operator caused those, so they already know.
+_NOTIFY_STOP_REASONS = frozenset({"end_turn", "error"})
+
+
+def _notify_label(cwd: str, session_id: str) -> str:
+    """A short, human-readable name for a session in a notification.
+
+    Workspace basename plus a session-id fragment. The fragment is not
+    decoration: `_new_session_record` carries no title, so the workspace is all
+    the identity a session has -- and `MAX_SESSIONS` is 8, with several
+    sessions in one repository being the ordinary case rather than the
+    exception, so the basename alone would render two concurrent sessions as
+    indistinguishable toasts.
+    """
+    name = os.path.basename((cwd or "").rstrip("\\/")) or "session"
+    suffix = session_id[-6:] if session_id else ""
+    return f"{name} {suffix}".strip()
+
+
+def _notify_from_acp(event: str, session_id: str, cwd: str, detail: str,
+                     watched: bool) -> None:
+    """Decide whether an ACP event earns a desktop toast, and fire it.
+
+    Installed into `acp` at lifespan startup. `acp` supplies facts (what
+    happened, whether a socket was attached); every policy judgement lives
+    here, which is what keeps the protocol layer free of product decisions.
+
+    **The watched/unwatched split is half a mechanism, and only half by
+    design.** `watched` means "a WebSocket is attached", which is not "a human
+    is looking" -- a backgrounded tab is still attached. The server cannot tell
+    those apart, because tab visibility never crosses the wire. The other half
+    lives in `acp.html`, which fires a browser `Notification` when it *is*
+    attached but hidden. Between them the three states -- detached, attached
+    and hidden, attached and visible -- are covered exactly once each, so
+    neither surface needs to know about the other.
+
+    Never raises: `acp._notify` already swallows and logs, but this runs on the
+    event loop inside a turn boundary, so it does not rely on that.
+    """
+    try:
+        if not load_config().notifications.get("enabled", False):
+            return
+        label = _notify_label(cwd, session_id)
+        if event == "permission_request":
+            # No `watched` gate: the turn is stopped until someone answers.
+            notifications.notify_permission_needed(label, detail)
+        elif event == "turn_end":
+            if not watched and detail in _NOTIFY_STOP_REASONS:
+                notifications.notify_turn_end(label, detail)
+        elif event == "agent_error":
+            if not watched:
+                notifications.notify_agent_error(label, detail)
+    except Exception:
+        log.exception("notification dispatch failed for %s on session %s",
+                      event, session_id)
+
+
 @asynccontextmanager
 async def lifespan(app_instance):
     task = asyncio.create_task(_background_refresh())
@@ -648,6 +487,12 @@ async def lifespan(app_instance):
     # case this exists to reject.
     if acp is not None:
         acp.set_sessions_changed_hook(presence.publish_acp_sessions)
+        # The other half of the same arrangement: `acp` may not import
+        # `notifications` any more than it may import `presence`, so this
+        # module -- which imports all three -- connects them. `acp` reports
+        # what happened and whether anyone was attached; `_notify_from_acp`
+        # owns the policy and the config read.
+        acp.set_notify_hook(_notify_from_acp)
     sweeper = acp.start_sweeper() if acp is not None else None
     try:
         yield
@@ -1540,6 +1385,10 @@ async def index(request: Request):
         "active_launch_profile": profile,
         "launch_profiles": [asdict(p) for p in config.launch_profiles],
         "autostart": autostart.is_enabled(),
+        # Read off the `config` already loaded above rather than through
+        # `_notifications_enabled()`, which would be a second whole-file TOML
+        # parse on a route that has one in hand.
+        "notifications_enabled": bool(config.notifications.get("enabled", False)),
         # Stripped: this one lands in the page source via `|tojson`.
         "launchers": _launchers_without_env(config.custom_launchers),
         "peek_hotkey": config.peek_hotkey,
@@ -3409,6 +3258,50 @@ async def toggle_autostart():
     else:
         autostart.enable()
     return {"enabled": autostart.is_enabled()}
+
+
+# Its own pair of routes rather than a `/api/save-setting` key, and that is not
+# arbitrary. That endpoint validates against `_SETTING_TYPES`, which holds only
+# `int`/`str`/`list`, and it rejects every boolean outright -- a guard that
+# exists because `isinstance(True, int)` is True in Python and a stray bool
+# would otherwise sail through the int check for an unrelated key. Teaching it
+# booleans to carry this one flag would weaken that guard for all nine existing
+# keys. `notifications` is also a nested dict, not the flat scalar that
+# endpoint's `setattr` shape assumes. `/api/autostart` is the precedent for a
+# boolean that owns its own route.
+#
+# Read live on every event, so a change takes effect immediately -- this is
+# deliberately NOT a `_RESTART_TO_APPLY` key. The ACP tunables are snapshotted
+# at startup because `at_capacity()` runs on the event loop and would pay an
+# uncached TOML parse per call; a notification fires once per turn, which is
+# orders of magnitude rarer than the ~16 routes already parsing per request.
+def _notifications_enabled() -> bool:
+    """Whether desktop notifications are on.
+
+    Always `.get`, never `["enabled"]`: a bare `[notifications]` table in
+    `config.toml` loads as `{}` rather than the dataclass default, because
+    `load_config` passes the empty dict explicitly and a dataclass default
+    applies only to an omitted kwarg. Indexing would raise on a hand-edited
+    config.
+    """
+    return bool(load_config().notifications.get("enabled", False))
+
+
+@app.get("/api/notifications")
+async def get_notifications():
+    return {"enabled": _notifications_enabled()}
+
+
+@app.post("/api/notifications")
+async def toggle_notifications():
+    config = load_config()
+    # Mutate and save the *same* instance `load_config` returned: it carries
+    # unknown top-level keys on `_extra`, which `save_config` restores from
+    # that attribute. Saving a freshly built Config would drop them.
+    enabled = not bool(config.notifications.get("enabled", False))
+    config.notifications = {"enabled": enabled}
+    save_config(config)
+    return {"enabled": enabled}
 
 
 @app.post("/api/open-folder", response_class=HTMLResponse)

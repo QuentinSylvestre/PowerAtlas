@@ -96,6 +96,15 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
 - Custom launchers with inline args editing and one-click execution
 - Global launch profiles with configurable Windows Terminal profile and terminal command
 - Launch-profile management (gear icon in topbar) for window mode, autostart, and profile switching
+- **Notify me** (gear icon in topbar, off by default) tells you when an ACP session finishes a turn
+  or stops waiting for your approval, so you do not have to keep the page in front of you. Two
+  surfaces cover different absences: a desktop toast when no browser tab is attached to the session
+  at all, and a browser notification when a tab is attached but backgrounded. A permission request
+  notifies either way, because it blocks the turn until you answer. A tab you are actually looking at
+  stays quiet. Turns you cancelled yourself are not announced. The toggle takes effect immediately,
+  with no restart. Notifications reach the machine running PowerAtlas, **not** a remote browser: the
+  remote bind serves plain HTTP, and browsers refuse the notification API outside a secure context,
+  so a phone on the NetBird address is hard-denied by the browser and cannot be prompted
 - Platform-aware terminal detection:
   - Windows: Windows Terminal › PowerShell › cmd
   - Linux: kitty › Alacritty › GNOME Terminal › Konsole › xterm

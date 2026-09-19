@@ -52,9 +52,14 @@
 
       <div class="topbar-menu-divider"></div>
       <div class="topbar-menu-section-label">Startup</div>
-      <div class="topbar-menu-row topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
+      <div id="autostartToggle" class="topbar-menu-row topbar-toggle{% if autostart %} active{% endif %}" onclick="this.classList.toggle('active');fetch('/api/autostart',{method:'POST'})" title="Auto-launch PowerAtlas on system startup">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>
         <span class="topbar-menu-label">Autostart on login</span>
+        <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
+      </div>
+      <div id="notifyToggle" class="topbar-menu-row topbar-toggle{% if notifications_enabled %} active{% endif %}" onclick="toggleNotifications(this)" title="Desktop notification when a turn ends unwatched, or an agent needs your approval">
+        <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+        <span class="topbar-menu-label">Notify me</span>
         <span class="topbar-switch"><span class="topbar-switch-knob"></span></span>
       </div>
       <div class="topbar-menu-row peek-hotkey-group" title="Global hotkey to show/hide the peek overlay window">
@@ -1417,7 +1422,36 @@ function openTerminal(btn){var group=btn.closest('[data-cwd]');fetch('/api/launc
 // launcher tiles, just aimed at a specific workspace + provider instead of
 // whatever tiles + selected-workspace state the left panel is carrying.
 function newSessionInWorkspace(btn,provider){var group=btn.closest('[data-cwd]');fetch('/api/new-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:group.dataset.cwd,provider:provider})}).then(function(r){return r.text()}).then(showToast).catch(function(){showToast('<div class="toast toast-error">Failed to launch session<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>')})}
-function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.querySelector('.topbar-toggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
+// Desktop notifications. The click is what makes this function necessary
+// rather than an inline `fetch` like the autostart row above: browsers only
+// honour Notification.requestPermission() from a user gesture, so the grant
+// has to be asked for here, inside the handler, and nowhere else. The /acp
+// page then only ever checks `Notification.permission`.
+//
+// Same-origin is why asking here is enough: permission is per-origin, and
+// /acp is served from this one. On the remote bind it is hard-denied and
+// unpromptable (a non-secure context), so this resolves to 'denied' and the
+// server-side OS toast is the only surface that works there -- which is the
+// documented limit, not a failure to handle.
+function toggleNotifications(el){
+  var turningOn=!el.classList.contains('active');
+  el.classList.toggle('active');  // optimistic; reconciled from the response
+  if(turningOn&&typeof Notification!=='undefined'&&Notification.permission==='default'){
+    try{Notification.requestPermission()}catch(e){}
+  }
+  fetch('/api/notifications',{method:'POST'})
+    .then(function(r){return r.ok?r.json():null})
+    .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
+    .catch(function(){el.classList.toggle('active',!turningOn)});
+}
+function refreshNotifyToggle(){
+  var el=document.getElementById('notifyToggle');
+  if(!el)return;
+  fetch('/api/notifications').then(function(r){return r.ok?r.json():null})
+    .then(function(d){if(d)el.classList.toggle('active',!!d.enabled)})
+    .catch(function(){});
+}
+function refreshSettings(){var modal=document.getElementById('launcherModal');if(modal&&modal.open)return;var profileModal=document.getElementById('profileModal');if(profileModal&&profileModal.open)return;fetch('/api/settings').then(function(r){return r.json()}).then(function(d){var profileBtn=document.getElementById('profileNameBtn');if(profileBtn&&d.launch_profiles&&d.active_launch_profile){var active=d.launch_profiles.find(function(p){return p.id===d.active_launch_profile});if(active){var lbl=profileBtn.querySelector('.topbar-menu-label');if(lbl)lbl.textContent=active.name}}var peekInput=document.getElementById('peekHotkey');if(peekInput)peekInput.value=d.peek_hotkey||'ctrl+shift+z';var toggle=document.getElementById('autostartToggle');if(toggle){if(d.autostart){toggle.classList.add('active')}else{toggle.classList.remove('active')}}refreshNotifyToggle();_providerSettings=d.provider_settings||{};if(d.default_directory!==undefined)_globalDefaultDirectory=d.default_directory;_launchers=d.custom_launchers||[];var tilesEl=document.getElementById('launcher-tiles');if(tilesEl){fetch('/partials/launchers').then(function(r){return r.text()}).then(function(html){tilesEl.innerHTML=html;if(window.htmx)htmx.process(tilesEl)})}}).catch(function(){})}
 document.addEventListener('DOMContentLoaded',function(){
   fetch('/api/last-refresh').then(function(r){return r.json()}).then(function(d){if(d.last_refresh)document.getElementById('refreshTime').textContent=d.last_refresh});
   initProviderFilter();initWorkspaceFilters();

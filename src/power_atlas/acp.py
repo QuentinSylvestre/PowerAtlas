@@ -582,6 +582,12 @@ MAX_STEER_CHARS = 4000
 # rather than reusing either of them.
 MAX_TITLE_CHARS = 200
 
+# Cap on a `session/request_permission` tool-call title. Added 2026-09-19: this
+# field was the one agent-authored string reaching the page with no bound at
+# all, while seven siblings above and below have one. It now also rides a
+# desktop notification, where an unbounded string is worse than merely untidy.
+MAX_PERMISSION_TITLE_CHARS = 200
+
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
 # targeting a sub-agent's own session id with. One string rather than one
 # per call site, so the three refusals cannot read differently for the same
@@ -877,6 +883,59 @@ def set_sessions_changed_hook(hook) -> None:
     global sessions_changed_hook
     sessions_changed_hook = hook
     _supervisor._publish_live()
+
+
+# Called with `(event, session_id, cwd, detail, watched)` when something happens
+# that a person away from the page might want to know about. `None` until
+# something wires it, which is the state for every test that does not opt in.
+#
+# A hook and not an import, for the same reason `sessions_changed_hook` above is
+# one: the consumer is `notifications`, and importing it here would add a third
+# name to the isolation boundary this module's header declares. `web.py` already
+# imports both and does the wiring.
+#
+# **This module decides no policy.** It reports `watched` — whether any socket is
+# currently attached to the session — as a fact, and the consumer decides what to
+# do with it. Keeping the decision out of here is what lets the policy change
+# (quiet hours, per-workspace rules, a different definition of "watched")
+# without touching the protocol layer.
+#
+# Deliberately has no immediate-publish counterpart to
+# `set_sessions_changed_hook`'s: these are discrete events, so there is no
+# "current state" a late consumer could have missed.
+notify_hook = None
+
+
+def set_notify_hook(hook) -> None:
+    """Install the notification hook. Loop-thread only, like the hook itself."""
+    global notify_hook
+    notify_hook = hook
+
+
+def _notify(event: str, session_id: str, detail: str = "") -> None:
+    """Report a notification-worthy event to whatever `web.py` wired in.
+
+    Never raises and never blocks the caller: every call site is either an ACP
+    turn boundary or an inbound agent request, and a notification failing is
+    never worth failing either. Mirrors `_publish_live`'s guard-and-swallow
+    shape for the same reason.
+
+    `watched` is computed here rather than by the consumer because
+    `_registry.subscribers` is loop-owned state the consumer must not reach
+    into. Both call sites run on the event loop with no `await` between this
+    read and the event itself, so the value cannot go stale in between.
+    """
+    hook = notify_hook
+    if hook is None:
+        return
+    try:
+        meta = _supervisor.sessions.get(session_id) or {}
+        hook(event, session_id, meta.get("cwd", ""), detail,
+             bool(_registry.subscribers.get(session_id)))
+    except Exception:
+        log.exception("ACP notify hook failed for %s on session %s",
+                      event, session_id)
+
 
 # How much of a session's `<sid>.json` is read to recover the directory it was
 # created against. `cwd` is that file's second key, while the rest of it is the
@@ -4103,10 +4162,17 @@ class _Supervisor:
                 return
             if _info_kind == "display_error":
                 if isinstance(session_id, str):
+                    _err_message = _as_text(
+                        _kiro_meta.get("message"))[:MAX_ERROR_DETAIL_CHARS]
                     _emit(session_id, envelope("agent_error", {
-                        "message": _as_text(_kiro_meta.get("message"))[:MAX_ERROR_DETAIL_CHARS],
+                        "message": _err_message,
                         "errorType": _as_text(_kiro_meta.get("errorType"))[:MAX_ERROR_DETAIL_CHARS],
                     }, session_id))
+                    # Its own fire point rather than folding into turn end: a
+                    # `display_error` does not necessarily end the turn, so
+                    # waiting for the turn-end notification could mean waiting
+                    # until the silence timeout.
+                    _notify("agent_error", session_id, _err_message)
                 return
             if _info_kind in ("user_message_id_assigned", "turn_end", "pending_interaction"):
                 # Explicit no-ops (plan Phase 3): turn-end is already read off
@@ -4479,12 +4545,18 @@ class _Supervisor:
             "session_id": session_id,
             "options": options,
         }
+        title = _as_text(tool_call.get("title"))[:MAX_PERMISSION_TITLE_CHARS]
         _emit(session_id, envelope("permission_request", {
             "requestId": request_id,
             "sessionId": session_id,
-            "toolCall": {"title": _as_text(tool_call.get("title"))},
+            "toolCall": {"title": title},
             "options": options,
         }, session_id))
+        # Notified unconditionally, unlike turn end: this request has stopped
+        # the turn and will keep it stopped until a human answers or the
+        # silence timeout cancels it, so "someone has the page open" is not
+        # evidence anyone has seen it.
+        _notify("permission_request", session_id, title)
 
     async def _fulfill_token(self, request_id) -> None:
         """Fetch a fresh OIDC token and deliver it to the agent.
@@ -5773,6 +5845,13 @@ async def _handle_prompt(conn, session_id, payload):
         _flush_bubble(session_id, emit_fn=_emit)
         _emit(session_id, envelope(
             "meta", {"turn": "end", "stopReason": stop_reason}, session_id))
+        # After the emit, so the transcript is already consistent for anyone the
+        # notification brings back to the page. Every way a turn can end reaches
+        # this `finally` -- normal completion, AcpError, an unexpected
+        # exception, the silence-timeout AgentTimeout, and a user cancel -- so
+        # this one call site covers them all; the consumer filters on
+        # `stop_reason` rather than this module guessing which endings matter.
+        _notify("turn_end", session_id, stop_reason)
 
 
 async def _handle_steer(conn, session_id, payload):
