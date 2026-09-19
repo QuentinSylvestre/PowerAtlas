@@ -1,7 +1,7 @@
 # ACP Turn-End and Permission-Needed Notifications
 
 > **Date**: 2026-09-19
-> **Status**: In Progress — implemented and unit-verified; runtime verification pending a user-initiated restart  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — implemented, unit-verified and runtime-verified; 3 claims unexercised (see QA)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Tell the operator, outside the page, that an ACP-hosted turn finished or is blocked on their approval.
 
 ---
@@ -34,6 +34,76 @@ fires on a real backgrounded tab; neither re-fires on reload.
   `querySelector('.topbar-toggle')`. Adding a second such row would otherwise have made a
   documented failure mode live (project memory: "ACP button label shows stale value on first load
   when refreshSettings() queries by class instead of id").
+
+### Runtime QA (2026-09-19, after restart at 17:27)
+
+Driven against the live process on both topologies (loopback and the NetBird
+remote bind). Independent evidence for every server-side toast is a
+`powershell -EncodedCommand` child in the process table, decoded to read back
+the actual title and body from its environment — a different code path from any
+assertion in the feature.
+
+| # | Claim | Verdict |
+|---|---|---|
+| 1 | Toggle renders, defaults off, persists across reload | PASS |
+| 2 | `GET`/`POST /api/notifications` persists, no restart | PASS |
+| 3 | Unwatched turn end fires an OS toast with title **and** body | PASS |
+| 4 | Permission request fires a toast even when watched | Not exercised — see below |
+| 5 | Attached-but-hidden tab fires a browser Notification | PASS (instrumented) |
+| 6 | Visible tab fires nothing | Not exercised |
+| 7 | Replay does not re-fire | Not exercised |
+| 8 | Remote origin degrades silently | PASS |
+
+**Claim 3, the decisive one.** Turn ended 17:47:42 with the socket detached
+since ~17:47:24. One toast, `TITLE='PowerAtlas — acp-cwd 377ad0'`,
+`BODY='Done — waiting for you'`, `template idx = 5`. This is the original
+defect proven fixed in the running process: before the repair the body was
+dropped and the toast could not distinguish "done" from "hit an error".
+
+**The `watched` gate proven in both directions on one session.** At 17:37:41 a
+`display_error` (MCP `playwright` failed to connect) arrived *during*
+`session/new`, before the socket attached — `watched=False`, so the OS toast
+fired and carried the error text. At 17:38:15 the same session's turn ended
+with the socket attached — no OS toast; the browser Notification fired instead
+(`tag: pa-turn-sess_d6da202b…`). The two surfaces partitioned exactly as
+designed, with no event notified twice.
+
+**Why three claims were not exercised** (none of them showing a defect):
+
+- **Claim 4** — no live `session/request_permission` could be induced. This
+  machine's `kiro_default` is a user-authored global agent config that
+  auto-trusts shell and write: `echo qa-permission-probe` and a `write-file`
+  both completed with no permission round-trip. Inducing one would mean using a
+  tool outside that trust list, which is not safe to do casually. The hook and
+  the always-notify policy are covered by mutation-checked unit tests
+  (`test_permission_request_calls_the_notify_hook`,
+  `test_permission_notifies_even_when_watched`).
+- **Claims 6 and 7** — both need `Notification.permission === 'granted'`.
+  Chrome's permission bubble is browser chrome, outside the page viewport, so
+  an agent driving the page cannot answer it. Claim 5 was verified instead by
+  substituting an instrumented `Notification` constructor, which exercises the
+  page's own gating (`!replaying`, `visibilityState === 'hidden'`, the
+  enabled flag) but not Chrome's rendering.
+- A first attempt at claim 7 was **discarded as vacuous rather than counted**:
+  the transcript already held 4 rows when instrumentation began, so the history
+  replay had finished before anything could observe it.
+
+**Observation (advisory).** An MCP startup failure toasts even while the
+operator is looking at the page, because at that instant `session/new` has not
+yet attached the socket, so the session is legitimately unwatched. Correct by
+the stated rule and arguably wanted — an MCP server failing is worth knowing —
+but it is a toast during an action the user is actively watching.
+
+**Observation (harness, not product).** `GET /acp` requires
+`Sec-Fetch-Site: same-origin|none` (`_acp_navigation_ok`, `web.py:743`). A
+browser-extension-driven navigation does not satisfy it and returns
+`{"error":"Forbidden"}`; the real flow (`location.href` from the dashboard)
+works. Worth knowing before diagnosing it as a product bug.
+
+**State touched and restored.** `config.toml` was snapshotted before the first
+write; the final diff against that snapshot is one line — `enabled = true`,
+which is the feature left switched on. The QA session was closed
+(`held: 0`), and `qa-probe.txt` was removed from the agent's scratch cwd.
 
 ### Reported, not fixed
 
