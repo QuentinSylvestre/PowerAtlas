@@ -1285,7 +1285,7 @@ function dashPickerRunPending() {
 }
 
 // Static picker element wiring — moved to DOMContentLoaded (Phase 5 review fix:
-// the #dashPicker HTML is below the </script> that contains these lines, so
+// the #dashPicker HTML is below the <\/script> that contains these lines, so
 // getElementById returns null at parse time; handlers must be attached after parse).
 
 /** Targeted single-workspace rail refresh after a new session is created.
@@ -1431,7 +1431,7 @@ document.addEventListener('DOMContentLoaded',function(){
   document.addEventListener('visibilitychange',function(){if(document.visibilityState!=='hidden')refreshSettings()});
   (function pollWarmup(){var t=setInterval(function(){fetch('/api/warmup-status').then(function(r){return r.json()}).then(function(d){if(d.ready){clearInterval(t);dashRailReload()}}).catch(function(){clearInterval(t)})},2000)})();
   dashPickerInitTaskMode();
-  // Picker static element wiring (must be after parse — picker HTML is below </script>)
+  // Picker static element wiring (must be after parse — picker HTML is below <\/script>)
   document.getElementById('dashPickerCancel').addEventListener('click', dashPickerClose);
   document.getElementById('dashPickerNeutral').addEventListener('click', function() { dashPickerCreate(''); });
   document.getElementById('dashPickerSearch').addEventListener('input', function(e) {
