@@ -351,10 +351,6 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
    halo a hover already gives it. */
 .acp-rail-ghost-btn { width: 28px; height: 28px; border-radius: 50%; border: none; background: transparent; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; color: var(--text-muted); transition: transform 120ms cubic-bezier(.34,1.56,.64,1), background 120ms, color 120ms; }
 .acp-rail-ghost-btn:hover, .acp-rail-ghost-btn[aria-expanded="true"] { transform: scale(1.1); background: rgba(139, 144, 160, 0.16); color: var(--text); }
-/* .row-btn's own `:disabled` state (opacity 0.45, cursor default) had no
-   ghost-btn equivalent because nothing that used to be a ghost-btn could be
-   disabled -- the session row's "Open in Agent orchestrator" button, now a
-   ghost-btn too, still can be (a retired v2 session). */
 .acp-rail-ghost-btn:disabled { opacity: 0.45; cursor: default; }
 /* The session row's primary action (Resume) keeps a color of its own, the
    ghost-btn equivalent of `.row-btn.primary`'s accent tint -- everything

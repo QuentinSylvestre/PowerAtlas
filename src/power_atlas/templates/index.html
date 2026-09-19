@@ -1329,10 +1329,6 @@ function showToast(html){var c=document.getElementById('toastContainer');if(!c){
 // acp.html's own railRowNode works around), so `closest()` has to find a
 // plain container carrying the same dataset rather than the button itself.
 function resumeSession(btn){var row=btn.closest('[data-sid]');fetch('/api/launch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:row.dataset.sid,workspace:row.dataset.cwd,provider:row.dataset.provider||''})}).then(function(r){return r.text()}).then(showToast)}
-// Navigates rather than opening a tab: this dashboard is usually a pywebview
-// window, where window.open lands somewhere the user did not ask for. /acp
-// carries a back link, and its own ?sid= is what survives a reload there.
-function openInAcp(btn){var row=btn.closest('[data-sid]');location.href='/acp?sid='+encodeURIComponent(row.dataset.sid)}
 function pinSession(btn){
   var row=btn.closest('[data-sid]');
   var pinned=btn.classList.contains('pinned');
@@ -2027,25 +2023,6 @@ function dashRailRowNode(session, flat, workspace){
     resumeBtn.appendChild(dashRailProviderIcon(session.provider));
     resumeBtn.addEventListener('click', function(e){ e.stopPropagation(); resumeSession(resumeBtn); });
     actions.appendChild(resumeBtn);
-  }
-  // /acp speaks ACP to kiro-cli only; legacy v2 kiro-cli sessions show the
-  // control (so it reads as retired rather than missing) but disabled, since
-  // v2 has no live-attach to open into -- the same distinction the
-  // dashboard's session rows have always drawn.
-  if (session.provider === '' || session.provider === 'kiro-cli' || session.provider === 'kiro-cli-v3') {
-    var acpBtn = document.createElement('button');
-    acpBtn.type = 'button';
-    acpBtn.className = 'acp-rail-ghost-btn';
-    acpBtn.setAttribute('aria-label', 'Open in Agent orchestrator');
-    if (session.provider === 'kiro-cli') {
-      acpBtn.disabled = true;
-      acpBtn.title = 'Unavailable — this session is from the retired v2 engine';
-    } else {
-      acpBtn.title = 'Open in Agent orchestrator';
-    }
-    acpBtn.appendChild(RAIL_ICON.chat());
-    acpBtn.addEventListener('click', function(e){ e.stopPropagation(); openInAcp(acpBtn); });
-    actions.appendChild(acpBtn);
   }
   // Pin is a top-level action now, not a ⋯ menu item (pin-button-redesign
   // follow-up): a normal flex child of `actions`, inserted before `moreBtn`
