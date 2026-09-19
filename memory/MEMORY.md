@@ -2,6 +2,24 @@
 
 ## Pattern
 
+### A capacity re-check across a close-then-create boundary must read post-close state, not the pre-close snapshot
+
+**Why**: `dashPickerRunPending()` re-checked `_dashPickerCapacity.held >= max` before sending the deferred `new` frame, using the capacity value captured before the close-in-flight session actually closed. Since that count still included the session being closed, the check always false-blocked the create — the close-then-create picker flow could never complete. Caught by the Step 9 final review (Medium); fixed by removing the redundant re-check and matching `acp.html`'s behavior of relying on the server's own cap enforcement instead.
+**How to apply**: When a flow closes one resource and then creates another using a count/capacity value read before the close, do not re-check that stale value after the close resolves — either re-fetch the count fresh, or drop the client-side re-check and let the authoritative server-side check (which sees post-close state) be the sole gate.
+**Source**: `plans/done/260919-1551_DASHBOARD_ACP_NEW_SESSION_PICKER.md`, Step 9 Final Review finding #3 (fixed commit `3c56f03`) | **Verified**: 2026-09-19
+
+### A focus-trap's hidden check must use closest('[hidden]'), not the element's own .hidden
+
+**Why**: The dashboard picker's focus trap built its candidate list checking `inputs[i].hidden` directly. `#dashPickerCloseCurrent` (a checkbox) sits inside `#dashPickerKeepRow`, which is the thing actually marked hidden — the checkbox itself has no `hidden` attribute of its own, so it was included as a tab target while invisible. Caught by the Step 9 final review (Medium).
+**How to apply**: When building a focus trap's focusable-element list, test `el.closest('[hidden]')` rather than `el.hidden` — a hidden container hides its descendants without marking each one hidden individually, and only the ancestor check catches that.
+**Source**: `plans/done/260919-1551_DASHBOARD_ACP_NEW_SESSION_PICKER.md`, Step 9 Final Review finding #2 (fixed commit `3c56f03`) | **Verified**: 2026-09-19
+
+### Inline-script DOM wiring must defer to DOMContentLoaded when its target HTML sits later in the file
+
+**Why**: Phase 3 wired `#dashPickerCancel`/`#dashPickerNeutral`/`#dashPickerSearch` at parse time, immediately after the function definitions — but the `#dashPicker` modal HTML (added by Phase 2) sits near the end of body, after that `<script>` block. `getElementById` returned null for all three at wiring time, so the buttons were inert. The Step 9 final review caught it as a High finding; it survived Phase 3's own review because the elements exist by the time a human tests the page, masking the defect until a discriminating test ran.
+**How to apply**: In `acp.html`/`index.html`'s inline `<script>`, any `addEventListener` wiring for an element added later in the same document (a modal, a picker, a panel appended near `</body>`) must run inside a `DOMContentLoaded` handler, not at top-level parse time — regardless of how early in the script the function that does the wiring is defined.
+**Source**: `plans/done/260919-1551_DASHBOARD_ACP_NEW_SESSION_PICKER.md`, Step 9 Final Review finding #1 (fixed commit `3c56f03`) | **Verified**: 2026-09-19
+
 ### Session-panel updates must be event-driven, not poll-gated (pin/unpin + startup warmup)
 
 **Why**: Pinned sessions took ~10s to move on pin/unpin (waiting for the next `refreshCards()` polling cycle) and ~20s to appear after restart (waiting for the warmup cache to fill on the 15-30s burst timer). The client relied on periodic polling instead of reacting to state changes and lifecycle events.
