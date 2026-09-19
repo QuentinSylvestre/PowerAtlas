@@ -2943,6 +2943,53 @@ function _updateFilterUI(){
   <hr class="profile-divider">
   <div id="remoteRestartBody"></div>
 </dialog>
+
+<!-- Dashboard ACP new-session picker — mirrors /acp #acpPicker with dash-prefixed IDs.
+     Shown by dashPickerOpen(), hidden by dashPickerClose().
+     CSS: .acp-picker base rules are in style.css (always); .acp-taskmode-* rules were
+     migrated to style.css by plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md Phase 1. -->
+<div class="acp-picker" id="dashPicker" hidden role="dialog" aria-modal="true"
+     aria-labelledby="dashPickerTitle">
+  <div class="acp-picker-panel">
+    <div class="acp-picker-head">
+      <span class="acp-picker-title" id="dashPickerTitle">New session — where?</span>
+      <button class="acp-btn" id="dashPickerCancel" type="button">Cancel</button>
+    </div>
+    <div class="acp-picker-note" id="dashPickerNote" role="status" aria-live="polite"></div>
+    <div class="acp-picker-taskmode" id="dashPickerTaskModeRow">
+      <span class="acp-picker-taskmode-label" id="dashPickerTaskModeLabel">Task mode</span>
+      <div class="acp-taskmode-picker">
+        <button class="acp-btn acp-taskmode-toggle" id="dashPickerTaskModeToggle" type="button"
+                aria-haspopup="menu" aria-expanded="false"
+                aria-label="Choose a task mode for the new session"
+                data-task-mode="kiro_default">
+          <span id="dashPickerTaskModeToggleText">Default</span>
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="acp-taskmode-menu" id="dashPickerTaskModeMenu" hidden role="menu" aria-label="Task mode">
+          <!-- populated by dashPickerInitTaskMode() at DOMContentLoaded -->
+        </div>
+      </div>
+    </div>
+    <label class="acp-picker-keep" id="dashPickerKeepRow" hidden>
+      <input type="checkbox" id="dashPickerCloseCurrent">
+      <span id="dashPickerKeepText"></span>
+    </label>
+    <button class="acp-btn acp-picker-option" id="dashPickerNeutral" type="button">
+      <span class="acp-picker-option-name">The agent's own folder</span>
+      <span class="acp-picker-option-hint acp-picker-neutral-hint">General local
+        work. Lights up no workspace in the dashboard, and the agent's tools run
+        in a scratch directory rather than in a project.</span>
+    </button>
+    <input class="acp-rail-search acp-picker-search" id="dashPickerSearch" type="text"
+           spellcheck="false" placeholder="Filter workspaces"
+           aria-label="Filter the workspaces listed below">
+    <div class="acp-picker-list" id="dashPickerList"></div>
+  </div>
+</div>
+
 <script>
 var _providerSettings={{provider_settings|tojson}};
 var _globalDefaultDirectory={{default_directory|tojson}};
