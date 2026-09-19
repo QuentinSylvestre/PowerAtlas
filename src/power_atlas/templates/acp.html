@@ -647,67 +647,6 @@
   outline: 2px solid var(--accent, #6c8cff);
   outline-offset: -2px;
 }
-/* ---- task-mode picker (inside #acpPicker, create-time only) --------------- */
-/* Independent from the .acp-mode-* rules above (send-mode picker): same
-   button + popover-menu interaction pattern, but its own classes since the
-   two features have different lifecycles and live in different parts of the
-   page — this one opens downward from a row near the top of a modal rather
-   than upward from a composer button pinned to the bottom of the screen. */
-.acp-picker-taskmode { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; font-size: 11px; color: var(--text-muted, #8b95b0); padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.acp-picker-taskmode-label { font-weight: 600; }
-.acp-taskmode-picker { position: relative; flex-shrink: 0; }
-.acp-taskmode-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  font-size: 12px;
-  color: var(--text, #c8d0e7);
-  border-radius: var(--radius-sm, 6px);
-}
-.acp-taskmode-toggle svg { width: 12px; height: 12px; flex-shrink: 0; }
-.acp-taskmode-toggle[aria-expanded="true"] {
-  border-color: var(--accent, #6c8cff);
-  color: var(--accent, #6c8cff);
-}
-.acp-taskmode-toggle:focus-visible {
-  outline: 2px solid var(--accent, #6c8cff);
-  outline-offset: -2px;
-}
-.acp-taskmode-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 200;
-  background: var(--surface, #1e2030);
-  border: 1px solid var(--border, #2d3150);
-  border-radius: var(--radius-sm, 6px);
-  overflow: hidden;
-  min-width: 120px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-}
-.acp-taskmode-menu[hidden] { display: none; }
-.acp-taskmode-option {
-  display: block;
-  width: 100%;
-  padding: 8px 12px;
-  background: none;
-  border: none;
-  color: var(--text, #c8d0e7);
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.acp-taskmode-option:hover,
-.acp-taskmode-option[aria-current="true"] {
-  background: var(--surface-hover, #252840);
-  color: var(--text, #c8d0e7);
-}
-.acp-taskmode-option:focus-visible {
-  outline: 2px solid var(--accent, #6c8cff);
-  outline-offset: -2px;
-}
 /* Screen-reader-only visually hidden utility — used for aria-live regions */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 </style>
