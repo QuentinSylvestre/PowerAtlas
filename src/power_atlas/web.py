@@ -2130,6 +2130,17 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             # Same cross-provider interleave the dashboard has always used.
             tagged.sort(key=lambda x: (x[0].updated_at or "").replace("Z", "+00:00"),
                         reverse=True)
+        if pinned_set:
+            # A session individually pinned within this workspace surfaces at
+            # the top of the workspace's own row list too, not just the
+            # separate "Pinned sessions" section above it — the same
+            # coarsest-last stable sort the pinned-*workspace* ordering above
+            # uses, so recency order is preserved within each of the two
+            # partitions this only splits into. Must run before the
+            # session_page slicing below: a pinned session that is not among
+            # the most recent `session_size` would otherwise land on a later
+            # page and never show pinned-at-top on the first one.
+            tagged.sort(key=lambda x: x[0].session_id not in pinned_set)
         ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
         if pinned_set:
             for s, prov_name in tagged:

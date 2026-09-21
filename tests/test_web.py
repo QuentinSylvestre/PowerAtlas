@@ -14295,6 +14295,30 @@ class TestDashboardListingEndpoint:
         assert body["groups"][0]["sessions"][0]["id"] == "s1"
         assert body["groups"][0]["sessions"][0]["pinned"] is True
 
+    def test_a_pinned_session_sorts_above_recency_within_its_own_workspace(
+            self, client, grouped_multi_store, monkeypatch):
+        """An individually pinned session surfaces at the top of its own
+        workspace's row list, not just the separate top-level "Pinned
+        sessions" section -- the session-level equivalent of
+        test_an_active_workspace_sorts_above_recency_below_pinned's
+        workspace-level partition, and must run before the session_page
+        slicing (session_size=1 below) or a pinned session outside the most
+        recent page would never surface on the first one."""
+        import power_atlas.web as web_mod
+        from power_atlas.config import Config
+        grouped_multi_store["add"](r"C:\dev\ws", "kiro-cli-v3", [
+            _acp_row("newest", updated="2026-08-03T00:00:00Z"),
+            _acp_row("older-pinned", updated="2026-08-01T00:00:00Z"),
+            _acp_row("oldest", updated="2026-07-01T00:00:00Z"),
+        ])
+        monkeypatch.setattr(web_mod, "load_config",
+                            lambda: Config(pinned_sessions=["older-pinned"]))
+        body = client.get(self._PATH, params={
+            "cwd": r"C:\dev\ws", "session_size": 3}).json()
+        group = body["groups"][0]
+        assert [s["id"] for s in group["sessions"]] == [
+            "older-pinned", "newest", "oldest"]
+
     def test_a_live_process_in_the_workspace_marks_the_row_live(
             self, client, grouped_multi_store, monkeypatch):
         """The cheap all-provider liveness dot (regression follow-up): a

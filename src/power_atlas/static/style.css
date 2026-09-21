@@ -266,6 +266,13 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
    `.acp-btn` used to provide, so `#dashRailSettings` no longer needs `.acp-btn`
    too. */
 .ws-icon-btn { position: relative; width: 32px; height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-muted); cursor: pointer; transition: all 0.15s; }
+/* Same trap `.acp-rail-menu[hidden]` etc. exist to escape elsewhere in this
+   file: `[hidden]` and `.ws-icon-btn` are both one selector of specificity,
+   and an author rule always beats the UA stylesheet's `[hidden] { display:
+   none }` regardless of source order -- so the `display: inline-flex` above
+   would otherwise win and #dashRailNewAcp would stay visible while `hidden`
+   still read true. */
+.ws-icon-btn[hidden] { display: none; }
 .ws-icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 .ws-icon-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
 .ws-icon-btn.has-filter { border-color: var(--accent); color: var(--accent); }
@@ -1762,6 +1769,18 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-row:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-rail-row-when { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* Room for the pin button that stays visible without a hover once pinned --
+   the session-row equivalent of .acp-rail-group-toggle's own padding-right
+   above. .acp-rail-pin-btn.pinned sits permanently over the row's right edge
+   via .acp-rail-menu-wrap's `position: absolute; right: 4px`, and
+   .acp-rail-row-when lives in that exact spot in the row's own flex flow --
+   so an always-visible pinned button and the timestamp painted underneath it
+   collided at rest. 32px (one 28px ghost button plus its 4px offset) keeps
+   the timestamp inline before the pin icon instead of behind it. Applies
+   whether or not the pointer can hover, like the group-toggle rule: a touch
+   viewer never triggers the `hover: hover` reveal below and sees the same
+   collision otherwise. */
+.acp-rail-item:has(.acp-rail-pin-btn.pinned) .acp-rail-row { padding-right: 32px; }
 /* The row's actions menu. Present for loopback viewers and authenticated remote
    desktop browsers (non-mobile UA); absent for remote mobile browsers
    (ACP_CAN_DELETE=false). 32x40 keeps the row's touch height while taking as

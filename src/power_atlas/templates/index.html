@@ -106,12 +106,17 @@
         </div>
       </div>
 
-      <div id="topbarRestartDivider" class="topbar-menu-divider" hidden></div>
+      <div id="topbarRestartDivider" class="topbar-menu-divider"></div>
+      <!-- Stays conditional (markTopbarRestart toggles it): the "why" only
+           makes sense while a saved setting genuinely disagrees with the
+           running process. The divider and button above/below it, unlike
+           this note, are no longer gated on that -- see markTopbarRestart's
+           own comment for why a general restart needed a reachable home. -->
       <div id="topbarRestartNote" class="topbar-restart-note" hidden>
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 2.5 17a2 2 0 0 0 1.7 3h15.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
         <span id="topbarRestartText"></span>
       </div>
-      <button id="topbarRestartBtn" class="topbar-restart-btn" onclick="restartPowerAtlas()" title="Restart PowerAtlas now to apply pending settings" hidden>
+      <button id="topbarRestartBtn" class="topbar-restart-btn" onclick="restartPowerAtlas()" title="Restart PowerAtlas">
         <svg class="topbar-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>
         Restart PowerAtlas
       </button>
@@ -203,6 +208,26 @@
           <div class="acp-rail-menu ws-filter-menu" id="wsFilterMenu" role="menu"
                aria-label="Filter workspaces" hidden></div>
         </div>
+        <!-- Hidden by default; shown by JS iff ACP_TOKEN is set (see the
+             dashRailNewAcpBtn wiring below), the same runtime gate every
+             other ACP-only affordance on this page uses instead of a
+             server-rendered conditional -- acp_token isn't known to be
+             truthy/falsy until the ACP_TOKEN assignment further down in the
+             page's own script runs. The picker this opens
+             (dashPickerOpen('')) is otherwise reachable
+             only from a workspace's own quick actions (plans/done/
+             260919-1551_DASHBOARD_ACP_NEW_SESSION_PICKER.md scoped a global
+             button out at the time), which stopped being true once
+             dashRailQuickCreate (see acpItem's click handler below) started
+             bypassing the picker for that per-workspace path -- this is now
+             the only on-page way to reach the picker's task-mode choice and
+             its close-current-then-create option. -->
+        <button class="ws-icon-btn" id="dashRailNewAcp" type="button" hidden
+                aria-label="New ACP session" title="New ACP session">
+          <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
         <button class="ws-icon-btn" id="dashRailReload" type="button"
                 aria-label="Refresh workspaces" title="Refresh">
           <svg class="ws-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1278,6 +1303,35 @@ function dashPickerCreate(cwd) {
   }
 }
 
+/** Create a new kiro-cli v3 ACP session in `cwd` immediately, with no picker
+ *  shown -- for a workspace's own "New kiro-cli v3 ACP session" quick
+ *  action, where the destination is already unambiguous and asking the user
+ *  to reconfirm it just adds a click. Always the default task mode, and
+ *  never offers to close the currently-attached session first (that option
+ *  only exists inside the picker, next to its capacity note): reusing
+ *  dashPickerCreate here would read the #dashPickerCloseCurrent checkbox and
+ *  _dashPickedTaskMode state left over from whatever the picker was last
+ *  used for, possibly closing an unrelated session the caller never asked
+ *  to close. At capacity, falls back to the picker (dashPickerOpen) instead
+ *  of failing silently -- that is the only place left to close a session and
+ *  retry, now that this path skips it in the common case. */
+function dashRailQuickCreate(cwd){
+  if (_dashPickerCapacity.held >= _dashPickerCapacity.max) {
+    dashPickerOpen(cwd);
+    return;
+  }
+  var transcriptEl = document.getElementById('dashTranscript');
+  if (transcriptEl) {
+    transcriptEl.textContent = '';
+    var creatingMsg = document.createElement('div');
+    creatingMsg.className = 'acp-system-msg';
+    creatingMsg.textContent = 'Creating session…';
+    transcriptEl.appendChild(creatingMsg);
+  }
+  dashComposerEl.hidden = true;
+  dashConnect(function() { send('new', {cwd: cwd, mode: 'kiro_default'}, null); });
+}
+
 /** Fire a pending close-then-create after the close completes. */
 function dashPickerRunPending() {
   if (!_dashPendingCreate) return;
@@ -1309,12 +1363,10 @@ function dashPickerRailAdopt(cwd) {
     .then(function(data) {
       (data.groups || []).forEach(function(g) {
         dashRailMergeGroup(g);
-        // Move the workspace to the front of the list if it was just created
-        var key = 'c:' + g.cwd;
-        var idx = dashRailGroups ? dashRailGroups.findIndex(function(x) { return 'c:' + x.cwd === key; }) : -1;
-        if (idx > 0) {
-          dashRailGroups.splice(0, 0, dashRailGroups.splice(idx, 1)[0]);
-        }
+        // Surface the workspace a session was just created in -- to the
+        // front of its own tier, not index 0, so an unpinned workspace
+        // never jumps above a pinned one (dashRailBumpGroup).
+        dashRailBumpGroup(g.cwd);
       });
       dashRenderRail();
     })
@@ -1362,7 +1414,15 @@ function pinSession(btn){
   }
   // Keep session.pinned flag in sync across groups and flat list
   (function(list){ list.forEach(function(s){ if (s.id === sid) s.pinned = !pinned; }); })(dashRailFlat);
-  dashRailGroups.forEach(function(g){ g.sessions.forEach(function(s){ if (s.id === sid) s.pinned = !pinned; }); });
+  dashRailGroups.forEach(function(g){
+    var touched = false;
+    g.sessions.forEach(function(s){ if (s.id === sid) { s.pinned = !pinned; touched = true; } });
+    // Re-settle this one group's own row order -- pinned first, stable
+    // otherwise -- so a session pinned mid-list jumps to the top of its
+    // workspace immediately instead of waiting for the next full reload to
+    // pick up the server's own pinned-first ordering (_acp_listing).
+    if (touched) g.sessions.sort(function(a, b){ return (a.pinned === b.pinned) ? 0 : (a.pinned ? -1 : 1); });
+  });
   dashRenderRail();
   showToast('<div class="toast toast-success">'+(pinned?'Unpinned':'Pinned')+'<button class="toast-dismiss" onclick="this.parentElement.remove()">\u00d7</button></div>');
   fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sid,workspace:row.dataset.cwd})})
@@ -1391,16 +1451,21 @@ function pinWorkspace(btn){
   // Update in-memory group and re-render immediately
   dashRailGroups.forEach(function(g){ if (g.cwd === cwd) g.pinned = !pinned; });
   if (!pinned) {
-    // Move to front of dashRailGroups
-    var idx = dashRailGroups.findIndex ? dashRailGroups.findIndex(function(g){ return g.cwd === cwd; })
-      : (function(){ for (var i=0;i<dashRailGroups.length;i++) if (dashRailGroups[i].cwd===cwd) return i; return -1; })();
-    if (idx > 0) { dashRailGroups.unshift(dashRailGroups.splice(idx, 1)[0]); }
+    // Move to front of the (now-pinned) tier.
+    dashRailBumpGroup(cwd);
   } else {
-    // Move out of pinned position — re-sort: pinned first, then active, then by latest_updated desc
+    // Move out of the pinned tier into the active/recency tiers below it.
+    // No third key: a group carries no `latest_updated` field to break ties
+    // on (the server payload never included one), and Array.prototype.sort
+    // is stable in every evergreen browser, so leaving ties at `0` keeps
+    // whatever recency/alpha order the last full load already established
+    // instead of the previous `(b.latest_updated || '') < (a.latest_updated
+    // || '')` comparison, which compared "" to "" for every pair and broke
+    // the sort's ordering guarantee.
     dashRailGroups.sort(function(a, b){
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       if (a.active !== b.active) return a.active ? -1 : 1;
-      return (b.latest_updated || '') < (a.latest_updated || '') ? -1 : 1;
+      return 0;
     });
   }
   dashRenderRail();
@@ -1787,6 +1852,22 @@ function dashRailMergeGroup(incoming){
     existing.has_more = incoming.has_more;
   }
 }
+/** Move a workspace group to the front of its own tier -- the pinned block
+ *  stays before the unpinned block; a pinned group goes to index 0, an
+ *  unpinned one goes just after the last pinned group -- without letting it
+ *  cross the tier boundary the server's own pinned-first sort established.
+ *  Shared by dashPickerRailAdopt (surface a workspace after creating a
+ *  session in it) and pinWorkspace (surface a workspace just pinned); both
+ *  used to splice straight to index 0, which let an unpinned workspace jump
+ *  above every pinned one the moment a session landed in it. */
+function dashRailBumpGroup(cwd){
+  var idx = dashRailGroups.findIndex(function(g){ return g.cwd === cwd; });
+  if (idx < 0) return;
+  var insertAt = dashRailGroups[idx].pinned ? 0
+    : dashRailGroups.filter(function(g){ return g.pinned; }).length;
+  if (idx === insertAt) return;
+  dashRailGroups.splice(insertAt, 0, dashRailGroups.splice(idx, 1)[0]);
+}
 function loadGroupPage(page){
   if (dashRailBusy) return;
   dashRailBusy = true;
@@ -1809,6 +1890,10 @@ function loadGroupPage(page){
     dashRailGroupTotal = data.group_total;
     dashRailHasMore = data.has_more;
     dashRailPinned = data.pinned || [];
+    // Kept fresh here (not just by the picker's own dashPickerLoad) so a
+    // workspace's "New kiro-cli v3 ACP session" quick action can check
+    // capacity without opening the picker at all -- see dashRailQuickCreate.
+    if (data.capacity) _dashPickerCapacity = data.capacity;
     dashRailSummary();
     dashRenderRail();
   }).catch(function(err){
@@ -2411,9 +2496,10 @@ function dashRailGroupNode(group){
   aiMenu.setAttribute('role', 'menu');
   aiMenu.setAttribute('aria-label', 'New AI session');
   aiMenu.hidden = true;
-  // Fixed "New kiro-cli v3 ACP session" item — opens the dashboard picker modal.
-  // Only rendered when ACP is available (ACP_TOKEN is non-null), matching the
-  // guard on other ACP affordances throughout this page.
+  // Fixed "New kiro-cli v3 ACP session" item — creates directly in this
+  // workspace via dashRailQuickCreate (no picker: the destination is already
+  // this group's own cwd). Only rendered when ACP is available (ACP_TOKEN is
+  // non-null), matching the guard on other ACP affordances throughout this page.
   // plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md Phase 5
   if (ACP_TOKEN) {
     var acpItem = document.createElement('button');
@@ -2433,7 +2519,7 @@ function dashRailGroupNode(group){
       acpItem.addEventListener('click', function(e) {
         e.stopPropagation();
         _closeAllRailActionMenus();
-        dashPickerOpen(groupCwd);
+        dashRailQuickCreate(groupCwd);
       });
     })(group.cwd);
     aiMenu.appendChild(acpItem);
@@ -3067,6 +3153,11 @@ document.addEventListener('keydown', function(e){
   if (e.key === 'Escape' && !dashRailSettingsMenu.hidden) dashRailCloseMenus();
 });
 dashRailReloadBtn.addEventListener('click', function(){ dashRailReload(); });
+var dashRailNewAcpBtn = document.getElementById('dashRailNewAcp');
+if (ACP_TOKEN) {
+  dashRailNewAcpBtn.hidden = false;
+  dashRailNewAcpBtn.addEventListener('click', function(){ dashPickerOpen(''); });
+}
 
 // ---- session-level live diffing + 60s poll ------------------------------
 
@@ -3203,6 +3294,13 @@ document.addEventListener('keydown', function(e){
 // and redirects back to the current origin, which is correct here since a
 // plain restart doesn't change what port the server comes back up on.
 function restartPowerAtlas(){
+  // Confirmed (dashboard punch list follow-up, markTopbarRestart's own
+  // comment): this button is no longer gated behind "a setting is actually
+  // pending", so it is now reachable on a much more casual click than the
+  // deliberate "I just changed a setting" context it lived in before --
+  // matching /acp's own restart item, which has carried this same confirm()
+  // since it has always been reachable unconditionally.
+  if (!window.confirm('Restart PowerAtlas?\n\nAll active ACP sessions will be terminated.')) return;
   closeTopbarSettings();
   showRestartOverlay(0);
   fetch('/api/restart', {method: 'POST'}).catch(function(){});
@@ -3919,21 +4017,24 @@ function renderRestartKeys(settings) {
 }
 
 // The topbar's own reading of `pending`: a dot on the settings gear (so the
-// menu doesn't have to be open to notice), and inside the menu, why plus the
-// Restart action itself -- shown only while something genuinely disagrees
-// with the running process, never as a standing "just in case" button.
+// menu doesn't have to be open to notice) and, inside the menu, why -- shown
+// only while something genuinely disagrees with the running process. The
+// Restart action itself is unconditional (dashboard punch list follow-up):
+// it used to hide alongside the "why" note on the theory that a standing
+// "just in case" button invites accidental clicks, but that left restarting
+// PowerAtlas unreachable from the dashboard for any OTHER reason -- picking
+// up a code change, clearing a stuck state -- with the only other way in
+// being /acp's own status-menu restart item. restartPowerAtlas() carries its
+// own confirm() now that it is reachable this generally, matching that
+// item's guard against the exact same accidental-click concern.
 function markTopbarRestart(pending) {
   var dot = document.getElementById('topbarPendingDot');
-  var divider = document.getElementById('topbarRestartDivider');
   var note = document.getElementById('topbarRestartNote');
   var text = document.getElementById('topbarRestartText');
-  var btn = document.getElementById('topbarRestartBtn');
-  if (!dot || !divider || !note || !text || !btn) return;
+  if (!dot || !note || !text) return;
   var has = pending.length > 0;
   dot.hidden = !has;
-  divider.hidden = !has;
   note.hidden = !has;
-  btn.hidden = !has;
   if (has) {
     text.textContent = pending.length === 1
       ? '1 change needs a restart to take effect'

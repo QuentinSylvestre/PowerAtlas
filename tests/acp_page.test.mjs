@@ -10461,6 +10461,12 @@ function loadDashPicker(opts = {}) {
     dashRefreshSendButton: () => {},
     dashRailMode: "project",
     dashRailMergeGroup: () => {},
+    // dashPickerRailAdopt calls this (index.html) to surface a workspace
+    // without letting it jump above a pinned one -- stubbed here exactly
+    // like dashRailMergeGroup above, since the sandbox's dashRailGroups is
+    // never populated with real group objects for these picker-region tests
+    // to reorder in the first place.
+    dashRailBumpGroup: () => {},
     dashRenderRail: () => {},
     dashRailGroups: [],
     loadFlatPage: () => {},
@@ -10659,6 +10665,33 @@ check("dashHandle turn_in_progress error arm clears _dashPendingCreate", () => {
   p.sandbox._dashPendingCreate = { cwd: '/z', mode: 'plan' };
   p.sandbox.dashHandle({ type: 'error', sessionId: null, payload: { code: 'turn_in_progress', message: 'turn is running' } });
   assertEqual(p.sandbox._dashPendingCreate, null, '_dashPendingCreate cleared after turn_in_progress');
+});
+
+check("dashRailQuickCreate sends 'new' directly and never opens the picker when under capacity", () => {
+  const p = loadDashPicker();
+  const sent = [];
+  p.sandbox.send = function(type, payload, sid) { sent.push({ type, payload, sid }); return true; };
+  p.sandbox._dashPickerCapacity = { held: 0, max: 8 };
+  p.sandbox.dashRailQuickCreate("/proj");
+  assertEqual(p.el("dashPicker").hidden, true,
+    "the picker must stay hidden -- this path exists specifically to skip it");
+  const newFrame = sent.find((f) => f.type === "new");
+  if (!newFrame) throw new Error("send('new') was not called");
+  assertEqual(newFrame.payload.cwd, "/proj", "new frame must carry the workspace's own cwd");
+  assertEqual(newFrame.payload.mode, "kiro_default",
+    "the direct-create path always uses the default task mode, never a leftover _dashPickedTaskMode");
+});
+
+check("dashRailQuickCreate falls back to the picker at capacity instead of failing silently", () => {
+  const p = loadDashPicker();
+  const sent = [];
+  p.sandbox.send = function(type, payload, sid) { sent.push({ type, payload, sid }); return true; };
+  p.sandbox._dashPickerCapacity = { held: 8, max: 8 };
+  p.sandbox.dashRailQuickCreate("/proj");
+  assertEqual(p.el("dashPicker").hidden, false,
+    "at capacity, dashRailQuickCreate must open the picker -- it is the only place left to close a session and retry");
+  const newFrame = sent.find((f) => f.type === "new");
+  if (newFrame) throw new Error("send('new') must not fire before the picker's own capacity/close-current flow runs");
 });
 
 check("dashPickerRailAdopt with empty cwd calls loadFlatPage", () => {
