@@ -10381,15 +10381,19 @@ const DASH_PICKER_NAMES = [
   "dashPickerRenderKeepRow", "dashPickerCreate", "dashPickerRunPending",
   "dashPickerInitTaskMode",
 ];
-const DASH_HANDLE_NAMES = ["dashHandle"];
+const DASH_HANDLE_NAMES = ["dashCloseIfAbandoned", "dashHandle"];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
 
-  // dashHandle region: from its declaration to its closing `}` immediately
-  // before the `// ---- Phase 4` picker comment.
-  const handleFrom = src.indexOf("function dashHandle(frame)");
-  if (handleFrom < 0) throw new Error("index.html no longer defines dashHandle");
+  // dashHandle region: from dashCloseIfAbandoned's declaration (the function
+  // immediately preceding dashHandle -- pulled in too so its own review-fix
+  // behaviour, e.g. the setContext(null) call added during the Phase 1 fix
+  // cycle, is exercised by the real source rather than a re-typed stand-in)
+  // through dashHandle's closing `}` immediately before the `// ---- Phase 4`
+  // picker comment.
+  const handleFrom = src.indexOf("function dashCloseIfAbandoned");
+  if (handleFrom < 0) throw new Error("index.html no longer defines dashCloseIfAbandoned");
   // The picker section follows immediately after the closing `}` of dashHandle.
   const pickerCommentMarker = "// ---- Phase 4: ACP new-session picker";
   const pickerStart = src.indexOf("var _dashPickerWorkspaces");
@@ -10475,6 +10479,12 @@ function loadDashPicker(opts = {}) {
       addEventListener: () => {},
       write: () => { throw new Error("document.write not allowed"); },
     },
+    // window.addEventListener('pagehide', dashCloseIfAbandoned) -- a bare,
+    // top-level call now inside the extracted handleRegion (dashCloseIfAbandoned
+    // was pulled in alongside dashHandle above). A no-op stub, same as
+    // document.addEventListener above; the harness calls dashCloseIfAbandoned
+    // directly rather than through a real pagehide event.
+    addEventListener: () => {},
     fetch: (url, init) => {
       fetches.push({ url, init: init || {} });
       return Promise.resolve({
@@ -10897,12 +10907,24 @@ check("the baseline agent_died case resets turn state, disables the composer wit
     payload: { sessionId: "sess-1", cwd: "C:\\work\\my-repo", turnActive: true },
   });
   assertEqual(p.sandbox._dashAttachedSid, "sess-1", "sanity check -- session frame must attach first");
+  // Simulate a lazy-load in flight when the agent dies (review finding, Phase
+  // 1 fix cycle) -- pre-existing dashboard state, not introduced by this
+  // plan, that agent_died's baseline reset did not used to touch.
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashPendingSend = "queued text";
+  p.sandbox._dashSent = true;
 
   p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1",
                           payload: { exitCode: 1, message: "boom" } });
 
   assertEqual(p.sandbox._dashAttachedSid, null, "agent_died must clear _dashAttachedSid");
   assertEqual(p.sandbox._dashTurnActive, false, "agent_died must clear _dashTurnActive");
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "agent_died must clear _dashLoadingSid -- a mid-lazy-load death must not leave a stale load slot");
+  assertEqual(p.sandbox._dashPendingSend, null,
+    "agent_died must clear _dashPendingSend -- a queued prompt for a session whose agent just died must not fire later");
+  assertEqual(p.sandbox._dashSent, false,
+    "agent_died must reset _dashSent to its default");
   // dashPromptInput/dashSendBtn are sandbox globals stubbed directly (like
   // dashComposerEl), not byId-registered elements -- p.el() only looks up the
   // picker/composer-chrome markup ids.
@@ -10914,6 +10936,47 @@ check("the baseline agent_died case resets turn state, disables the composer wit
   assertEqual(p.el("dashContext").hidden, true, "the context indicator must hide (setContext(null))");
   assertEqual(p.el("dashSid").textContent, "", "the sid label must clear with no session attached");
   assertEqual(p.el("dashCopy").hidden, true, "the copy button must hide with no session attached");
+});
+
+// ---- Phase 1 review-fix cycle: context-clear parity, dashCloseIfAbandoned ---
+//
+// Both reviewers confirmed via mutation testing that the `session`-frame
+// setContext call and dashCloseIfAbandoned() had zero test coverage before
+// this cycle (removing the session-case setContext call entirely caused 0/460
+// test failures). The two checks below close that gap.
+
+check("a session frame with contextPercent: null clears a stale prior context reading", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  // Leave a stale reading on screen, as a previously-viewed session's own
+  // session frame would.
+  p.sandbox.setContext(77);
+  assertEqual(p.el("dashContext").hidden, false,
+    "sanity check -- a numeric reading must show the indicator before the frame under test arrives");
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\my-repo", turnActive: false, contextPercent: null },
+  });
+  assertEqual(p.el("dashContext").hidden, true,
+    "a session frame with contextPercent: null must hide the indicator -- the `typeof` guard this " +
+    "fix removed used to skip setContext entirely for this common case (a session that has not " +
+    "completed a turn yet), leaving the previous session's stale percentage on screen");
+});
+
+check("dashCloseIfAbandoned clears the context indicator", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.setContext(55);
+  assertEqual(p.el("dashContext").hidden, false,
+    "sanity check -- a numeric reading must show the indicator before dashCloseIfAbandoned runs");
+  // A purely static/browse view -- no live-attach was ever made, so there is
+  // nothing for the close-if-abandoned's own send('close', ...) branch to do;
+  // only the sid/copy + context reset should fire.
+  p.sandbox._dashAttachedSid = null;
+  p.sandbox._dashOrigin = null;
+  p.sandbox.dashCloseIfAbandoned();
+  assertEqual(p.el("dashContext").hidden, true,
+    "dashCloseIfAbandoned must clear the context indicator (setContext(null)) -- without this, a " +
+    "session viewed with no `session` frame ever arriving kept whatever the previously-viewed " +
+    "session's context bar last showed");
 });
 
 let failed = 0;

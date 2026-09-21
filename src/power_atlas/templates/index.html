@@ -823,7 +823,12 @@ function dashConnect(onReady){
     logLine('info', 'socket open to ' + location.host);
     if (onReady) onReady(e);
   };
-  _dashWs.onerror = function(){};
+  // Mirrors acp.html's own ws.onerror logLine call -- a silent no-op here
+  // left a rejected handshake with no diagnostic anywhere (review finding,
+  // Phase 1 fix cycle).
+  _dashWs.onerror = function(){
+    logLine('error', 'socket error — the handshake may have been rejected');
+  };
   _dashWs.onmessage = function(event){
     var frame;
     try { frame = JSON.parse(event.data); } catch (e) {
@@ -996,6 +1001,12 @@ function dashCloseIfAbandoned(){
   _sessionCwd = '';
   sidRevealed = false;
   renderSidLabel();
+  // Same reasoning as the sid/copy reset above: the context reading belonged
+  // to the session just walked away from too. Without this, a session viewed
+  // with no `session` frame ever arriving (a purely static/browse view) left
+  // whatever the previously-viewed session's context bar last showed on
+  // screen (review finding, Phase 1 fix cycle).
+  setContext(null);
   dashUpdateCloseButton();
 }
 window.addEventListener('pagehide', dashCloseIfAbandoned);
@@ -1048,7 +1059,14 @@ function dashHandle(frame){
     _sessionCwd = payload.cwd || '';
     sidRevealed = false;
     renderSidLabel();
-    if (typeof payload.contextPercent === 'number') setContext(payload.contextPercent);
+    // Unconditional, mirroring acp.html's own session-frame handling exactly
+    // (acp.html's setContext(payload.contextPercent) call) -- setContext()'s
+    // own internal guard is what hides the indicator for a null/non-number
+    // reading (a session that hasn't completed a turn yet). An extra
+    // `typeof` guard here used to skip that common case entirely, leaving
+    // the previous session's stale percentage on screen (review finding,
+    // Phase 1 fix cycle).
+    setContext(payload.contextPercent);
     dashSetComposerNote('');
     dashRefreshSendButton();
     dashUpdateCloseButton();
@@ -1162,6 +1180,14 @@ function dashHandle(frame){
     _dashAttachedSid = null;
     _dashOrigin = null;
     _dashTurnActive = false;
+    // Three pre-existing dashboard state variables (not introduced by this
+    // plan) that could otherwise leave stale lazy-load state if the agent
+    // dies mid-lazy-load before a `session` frame confirms attach -- cleared
+    // to the same defaults every other reset site in this file already uses
+    // for them (review finding, Phase 1 fix cycle).
+    _dashLoadingSid = null;
+    _dashPendingSend = null;
+    _dashSent = false;
     setContext(null);
     sidWorkspace = '';
     _sessionCwd = '';
