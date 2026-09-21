@@ -17,3 +17,23 @@
 - `src/power_atlas/static/prism.js` is **generated** — the syntax highlighter behind /acp's code blocks, built by `_build_prism.mjs` from the `prismjs` npm tarball. Never hand-edit it: change the language list in `_build_prism.mjs` and rebuild (`npm pack prismjs@<version> && tar -xzf prismjs-<version>.tgz && node _build_prism.mjs ./package`). The languages are concatenated in dependency order and a grammar added out of order throws at load. `tests/acp_page.test.mjs` runs the committed bundle for real, so a bad rebuild fails there rather than in a browser.
 - `pytest-timeout` is a dev dependency (`.venv-PowerAtlas/Scripts/python -m pip install -e ".[dev]"` picks it up). Use `pytest tests/test_web.py --timeout=300` when running the full suite after a change to session-close/concurrency code — a test whose mocking strategy assumes a code path that no longer exists can hang on an `asyncio.Event` that nothing will ever set, rather than failing fast; the flag turns that into a loud stack dump at 300s instead of an indefinitely stuck run.
 - When the user requests something that contradicts these guidelines, apply the request AND propose a durable update to this section so future sessions follow the new policy.
+
+## Terminology
+
+Project-specific terms. Each entry names the rejected synonyms too, so a future session does not
+re-litigate a settled word. General programming vocabulary does not belong here.
+
+- **login code** — the one-time credential PowerAtlas mints into the URL when it opens its own web UI
+  (tray, peek double-tap, peek webview), exchanged exactly once for the loopback session cookie.
+  **Not "nonce"**: `_acp_csp` in `web.py` already uses that word for the per-response CSP nonce, and
+  the two appear within a few lines of each other. **Not "token"**: `_ACP_TOKEN` meant a different,
+  per-launch mechanism that the login code replaces. Settled 2026-09-21,
+  `plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md`.
+- **base agent** — the kiro-cli agent definition PowerAtlas *reads* in order to build the derived
+  agent. User-configurable by name, defaults to `kiro_default`. It is never modified; interactive
+  terminal kiro-cli sessions keep using it untouched, which is what keeps their permission posture
+  independent of anything PowerAtlas does.
+- **derived agent** — `~/.kiro/agents/poweratlas-acp.md`, which PowerAtlas *generates* from the base
+  agent plus a permissions overlay. Never hand-edited and never committed: it is a build product,
+  regenerated at startup and on settings change. Editing it directly is always the wrong move — change
+  the base agent or the overlay instead.
