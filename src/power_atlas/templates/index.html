@@ -287,6 +287,40 @@
   <section class="right-panel" id="sessions-panel">
     <div class="section-label">
       <span>Transcript</span>
+      <div class="topbar-spacer"></div>
+      <!-- Context-window usage indicator (SC2, dashboard/ACP feature-parity
+           plan Phase 1) -- mirrors acp.html's #acpContext, wired through the
+           shared composer-chrome.js module (initContextDom/setContext).
+           Hidden until the agent has reported a reading, same as /acp. -->
+      <span class="acp-context" id="dashContext" hidden
+            title="Context window used by this session">
+        <span class="acp-context-track"><span class="acp-context-fill" id="dashContextFill"></span></span>
+        <span class="acp-context-label" id="dashContextLabel"></span>
+      </span>
+      <!-- Workspace/session-id tap-to-copy widget (SC3) -- mirrors acp.html's
+           #acpSid/#acpCopy, wired through the shared composer-chrome.js
+           module (initSidCopyDom/renderSidLabel). Copies the full workspace
+           path, not the short display name (SC3 bug fix). -->
+      <button type="button" class="acp-sid" id="dashSid"
+              aria-label="Workspace and session id — tap to switch between them"
+              aria-pressed="false"></button>
+      <button type="button" class="acp-copy-btn" id="dashCopy" hidden
+              aria-label="Copy to clipboard" title="Copy to clipboard">
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none"
+             aria-hidden="true" focusable="false"
+             xmlns="http://www.w3.org/2000/svg">
+          <rect x="4" y="0" width="8" height="8" rx="1.5"
+                fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <rect x="0" y="4" width="8" height="8" rx="1.5"
+                fill="var(--bg, #18181b)" stroke="currentColor" stroke-width="1.2"/>
+        </svg>
+      </button>
+      <!-- Debug/transport log toggle (SC4) -- mirrors acp.html's
+           #acpLogToggle, wired through the shared composer-chrome.js module
+           (initLogDom/logLine/setLogOpen). -->
+      <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
+              aria-expanded="false" aria-controls="dashLog">Debug log<span
+              class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
       <!-- Mirrors /acp's own #acpClose: same "hidden unless attached,
            disabled under a live turn (the server refuses a close then
            anyway)" rule, but independent of dashCloseIfAbandoned's
@@ -332,6 +366,12 @@
       </div>
       <div class="acp-steer-status" id="dashComposerNote" hidden aria-live="polite"></div>
     </div>
+    <!-- Debug/transport log panel (SC4) -- mirrors acp.html's #acpLog, toggled
+         by #dashLogToggle above via the shared composer-chrome.js module.
+         Collapsed by default and remembered per browser (shared with /acp:
+         one DEBUG_LOG_KEY, not one preference per page). -->
+    <div class="acp-log" id="dashLog" role="log" aria-live="polite"
+         aria-label="ACP transport log" hidden></div>
   </section>
 </main>
 
@@ -340,6 +380,13 @@
      load before any inline script that calls initTranscriptDom/
      renderTranscriptHistory/openSessionTranscript below. -->
 <script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/transcript-renderer.js"></script>
+<!-- Shared composer chrome (dashboard/ACP feature-parity plan, Phase 1) --
+     context indicator, sid/copy widget, debug log panel. Same conditional-
+     nonce pattern as transcript-renderer.js above: harmless today since
+     index() never sets csp_nonce (web.py), but keeps this page's script
+     markup consistent with acp.html's and future-proofs against index.html
+     ever gaining a nonce-based CSP. -->
+<script{% if csp_nonce %} nonce="{{ csp_nonce }}"{% endif %} src="/static/composer-chrome.js"></script>
 
 <!-- Workspace-only selection now (dashboard/ACP-merge Phase 4): the rail has
      no session-row selection, matching /acp's own rail, which has none
@@ -610,6 +657,30 @@ initTranscriptDom({
   promptUpBtn: document.getElementById('dashPromptUp'),
   promptDownBtn: document.getElementById('dashPromptDown'),
 });
+// composer-chrome.js (dashboard/ACP feature-parity plan, Phase 1) -- same
+// "no IIFE here, true globals already" situation as transcript-renderer.js
+// above. _dashReplaying mirrors acp.html's own `replaying` variable: true for
+// the duration of a history frame (WS) or a fetched static transcript being
+// rendered through renderTranscriptHistory(), so the debug log panel does not
+// narrate a replay as live traffic -- see openSessionTranscript() below and
+// dashHandle()'s `history` case further down, both of which set it around
+// their own renderTranscriptHistory() call.
+var _dashReplaying = false;
+initContextDom({
+  contextEl: document.getElementById('dashContext'),
+  contextFill: document.getElementById('dashContextFill'),
+  contextLabel: document.getElementById('dashContextLabel'),
+});
+initSidCopyDom({
+  sidEl: document.getElementById('dashSid'),
+  copyBtn: document.getElementById('dashCopy'),
+  getSessionId: function () { return _dashAttachedSid; },
+});
+initLogDom({
+  logEl: document.getElementById('dashLog'),
+  logToggle: document.getElementById('dashLogToggle'),
+  isReplaying: function () { return _dashReplaying; },
+});
 // ---- prompt navigation arrows ---------------------------------------------
 //
 // acp.html wires its own copy of this (same shared transcriptEl/promptUpBtn/
@@ -675,7 +746,16 @@ function openSessionTranscript(row){
     return r.json();
   }).then(function(data){
     if(_viewingSid !== sid) return; // superseded by a later click
-    renderTranscriptHistory(data.events || []);
+    // Guards the shared debug log panel against narrating this static replay
+    // as live traffic -- mirrors acp.html's own `replaying` gate around
+    // history-frame processing (composer-chrome.js's logLine() reads this via
+    // the isReplaying accessor from initLogDom() above).
+    _dashReplaying = true;
+    try {
+      renderTranscriptHistory(data.events || []);
+    } finally {
+      _dashReplaying = false;
+    }
     dashMaybeAttach(row, sid);
   }).catch(function(){
     if(_viewingSid !== sid) return;
@@ -712,8 +792,16 @@ var _dashWs = null;
 // `typeof send === 'function'` guards without this page doing anything
 // special to expose it.
 function send(type, payload, sid){
-  if (!_dashWs || _dashWs.readyState !== WebSocket.OPEN) return false;
+  if (!_dashWs || _dashWs.readyState !== WebSocket.OPEN) {
+    // logLine is a composer-chrome.js global (dashboard/ACP feature-parity
+    // plan, Phase 1) -- mirrors acp.html's own send(), which always logs.
+    // Without this the debug log panel showed nothing for the dashboard's
+    // own traffic.
+    logLine('error', 'not connected — nothing sent');
+    return false;
+  }
   _dashWs.send(JSON.stringify({type: type, sessionId: sid || null, payload: payload || {}}));
+  logLine('out', '→ ' + type);
   return true;
 }
 // Opens the socket if needed (reused across session switches within one page
@@ -721,7 +809,8 @@ function send(type, payload, sid){
 // immediately if a connection is already up. No reconnect-on-drop for this
 // MVP: a dropped socket silently ends live-attach until the next full page
 // load, which is never worse than the static transcript Phase 2 already
-// renders underneath it.
+// renders underneath it. (Phase 6, SC7, adds reconnect-on-drop once the full
+// state surface Phases 1-5 introduce exists to restore.)
 function dashConnect(onReady){
   if (_dashWs && _dashWs.readyState === WebSocket.OPEN) { if (onReady) onReady(); return; }
   if (_dashWs && _dashWs.readyState === WebSocket.CONNECTING) {
@@ -729,12 +818,27 @@ function dashConnect(onReady){
     return;
   }
   _dashWs = new WebSocket(dashWsUrl());
-  _dashWs.onopen = onReady || null;
+  _dashWs.onopen = function(e){
+    // Mirrors acp.html's ws.onopen logLine call.
+    logLine('info', 'socket open to ' + location.host);
+    if (onReady) onReady(e);
+  };
   _dashWs.onerror = function(){};
   _dashWs.onmessage = function(event){
     var frame;
-    try { frame = JSON.parse(event.data); } catch (e) { return; }
+    try { frame = JSON.parse(event.data); } catch (e) {
+      // Mirrors acp.html's ws.onmessage parse-error logLine call.
+      logLine('error', '← unparseable frame');
+      return;
+    }
     dashHandle(frame);
+  };
+  // Logging only here -- no state reset, no reconnect scheduling. Those
+  // belong to Phase 6 (SC7), which needs the full Phases 1-5 state surface to
+  // restore correctly; this handler's sole job for now is what acp.html's own
+  // ws.onclose already does first, unconditionally: say the socket dropped.
+  _dashWs.onclose = function(ev){
+    logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
   };
 }
 var dashComposerEl = document.getElementById('dashComposer');
@@ -770,6 +874,14 @@ var _dashSent = false;
 var _dashTurnActive = false;
 var _dashLoadingSid = null;
 var _dashPendingSend = null;
+// The per-prompt image budget, mirroring acp.html's imageMaxCount/
+// imageMaxBytes defaults (acp.html's own IMAGE_LADDER comment) -- overwritten
+// from the server's `connected` meta the moment it arrives (dashHandle()
+// below), the same authority acp.html defers to, so the dashboard never
+// stages more than acp.py will actually accept. Read (not yet written to a
+// send payload) starting Phase 4, SC6.
+var _dashImageMaxCount = 4;
+var _dashImageMaxBytes = 176 * 1024;
 
 function dashSetComposerNote(text){
   if (!text) { dashComposerNote.hidden = true; dashComposerNote.textContent = ''; return; }
@@ -876,6 +988,14 @@ function dashCloseIfAbandoned(){
   _dashTurnActive = false;
   _dashPendingSend = null;
   _dashPendingCreate = null; // prevent stale close-then-create on back-navigation
+  // The sid/copy widget belonged to the session just walked away from —
+  // mirrors acp.html's own reset at the equivalent session-switch point
+  // (composer-chrome.js's renderSidLabel() blanks the widget with no
+  // sessionId to show).
+  sidWorkspace = '';
+  _sessionCwd = '';
+  sidRevealed = false;
+  renderSidLabel();
   dashUpdateCloseButton();
 }
 window.addEventListener('pagehide', dashCloseIfAbandoned);
@@ -919,6 +1039,16 @@ function dashHandle(frame){
     _dashAttachedSid = sid;
     _dashTurnActive = !!payload.turnActive;
     _dashLoadingSid = null;
+    // The one place this page learns the workspace: `cwd` arrives on every
+    // `session` frame, created or resubscribed alike -- mirrors acp.html's
+    // own session-frame handling. Reset the reveal on every frame, not only
+    // a fresh selection, so a stale "show session id" tap from a previous
+    // session never carries over.
+    sidWorkspace = shortName(payload.cwd || '');
+    _sessionCwd = payload.cwd || '';
+    sidRevealed = false;
+    renderSidLabel();
+    if (typeof payload.contextPercent === 'number') setContext(payload.contextPercent);
     dashSetComposerNote('');
     dashRefreshSendButton();
     dashUpdateCloseButton();
@@ -930,7 +1060,15 @@ function dashHandle(frame){
     // The live ring buffer supersedes whatever the static
     // /api/session-transcript fetch already drew, through the exact same
     // renderer, so the two can never disagree about how a frame looks.
-    renderTranscriptHistory(payload.events || []);
+    // _dashReplaying guards the shared debug log panel the same way it does
+    // in openSessionTranscript() above -- mirrors acp.html's own `replaying`
+    // gate around history-frame processing.
+    _dashReplaying = true;
+    try {
+      renderTranscriptHistory(payload.events || []);
+    } finally {
+      _dashReplaying = false;
+    }
     if (_dashPendingSend !== null) {
       var text = _dashPendingSend;
       _dashPendingSend = null;
@@ -944,6 +1082,31 @@ function dashHandle(frame){
   }
   if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
   if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp2 = document.getElementById('dashPicker'); if (_dp2 && !_dp2.hidden) dashPickerRenderKeepRow(); return; }
+  // `connected` meta: the server's ack for this socket, once per connection.
+  // The image budget comes off the wire rather than being written into this
+  // page (mirrors acp.html's own `connected` handling) so the number the
+  // composer rations itself against (Phase 4, SC6) is the one acp.py will
+  // actually enforce.
+  if (type === 'meta' && payload.connected) {
+    if (typeof payload.maxPromptImages === 'number') {
+      _dashImageMaxCount = payload.maxPromptImages;
+    }
+    if (typeof payload.maxPromptImageBytes === 'number') {
+      _dashImageMaxBytes = payload.maxPromptImageBytes;
+    }
+    logLine('info', '← meta: server ack (max frame ' + payload.maxMessageBytes +
+                    ' bytes, max sockets ' + payload.maxConnections +
+                    ', up to ' + _dashImageMaxCount + ' images per prompt)');
+    return;
+  }
+  // Context-window usage indicator (SC2) -- never replayed: the server keeps
+  // the latest reading on the session and puts it on the `session` frame
+  // instead (see above), so this only ever carries a fresh, live update.
+  if (type === 'meta' && 'contextPercent' in payload) {
+    setContext(payload.contextPercent);
+    logLine('info', '← context window ' + payload.contextPercent + '%');
+    return;
+  }
   if (type === 'chunk' || type === 'rendered' || type === 'tool_call' || type === 'tool_update') {
     renderTranscriptFrame(frame);
     return;
@@ -977,8 +1140,44 @@ function dashHandle(frame){
     _dashAttachedSid = null;
     _dashOrigin = null;
     _dashTurnActive = false;
+    setContext(null);
+    // The sid/copy widget belonged to the session just released -- mirrors
+    // acp.html's own releaseSession() reset.
+    sidWorkspace = '';
+    _sessionCwd = '';
+    sidRevealed = false;
+    renderSidLabel();
     dashUpdateCloseButton();
     dashPickerRunPending(); // fire pending close-then-create if any
+    return;
+  }
+  if (type === 'agent_died') {
+    // Baseline reset (turn state, composer, context, sid/copy widget) --
+    // Phase 3 extends this to restore any pending steer text and re-enable
+    // the send-mode controls, Phase 5 to close an open sub-agent panel and
+    // clear crew state, since neither exists yet at this point in the plan.
+    // Mirrors the turn/composer-reset portion of acp.html's own agent_died
+    // handler (its steer/crew-restoration portions are exactly what Phases 3
+    // and 5 add here).
+    _dashAttachedSid = null;
+    _dashOrigin = null;
+    _dashTurnActive = false;
+    setContext(null);
+    sidWorkspace = '';
+    _sessionCwd = '';
+    sidRevealed = false;
+    renderSidLabel();
+    // Left visible-and-disabled, not hidden -- a prompt already typed here is
+    // worth keeping on screen with an explanation, mirroring the 'locked'
+    // state dashMaybeAttach() above already renders the same way.
+    dashPromptInput.disabled = true;
+    dashSendBtn.disabled = true;
+    dashSetComposerNote("This session's agent process ended.");
+    dashUpdateCloseButton();
+    addMessage('error', 'the agent exited (code ' + payload.exitCode + ') — ' +
+                        (payload.message || ''));
+    logLine('error', '← agent_died (exit ' + payload.exitCode + ') ' +
+                     (payload.message || ''));
     return;
   }
   if (type === 'error') {

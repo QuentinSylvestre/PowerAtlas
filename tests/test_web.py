@@ -4177,8 +4177,12 @@ class TestAcpContentSecurityPolicy:
         # The shared transcript renderer (dashboard/ACP-merge plan, Phase 2) —
         # same reasoning as prism.js above.
         assert ('<script nonce="%s" src="/static/transcript-renderer.js">' % nonce) in resp.text
+        # The shared composer chrome (dashboard/ACP feature-parity plan,
+        # Phase 1) — context indicator, sid/copy widget, debug log panel —
+        # same reasoning as prism.js and transcript-renderer.js above.
+        assert ('<script nonce="%s" src="/static/composer-chrome.js">' % nonce) in resp.text
         tags = re.findall(r"<script\b[^>]*>", resp.text)
-        assert len(tags) == 4, "a script tag was added without a nonce: %s" % tags
+        assert len(tags) == 5, "a script tag was added without a nonce: %s" % tags
         # Every tag, not only the three named above. The count makes adding a
         # script a deliberate act; this makes a nonce-less one a failing test
         # rather than a feature that quietly does nothing in the browser.
@@ -6258,11 +6262,20 @@ class TestAcpContextWindow:
 
     def test_the_page_narrows_the_value_again_before_the_style_sink(self):
         """The one attribute sink on a page whose whole defence is that nothing
-        agent-derived reaches one."""
-        from power_atlas.web import templates
-        src = templates.env.loader.get_source(templates.env, "acp.html")[0]
+        agent-derived reaches one.
+
+        ``setContext`` moved out of ``acp.html`` into the shared
+        ``composer-chrome.js`` module (``plans/260921_DASHBOARD_ACP_FEATURE_
+        PARITY.md`` Phase 1) — both ``acp.html`` and ``index.html`` now call
+        the same function, so the guard is read from there rather than from
+        either template's own source.
+        """
+        from pathlib import Path
+        import power_atlas
+        src = (Path(power_atlas.__file__).parent / "static" / "composer-chrome.js"
+               ).read_text(encoding="utf-8")
         body = src.split("function setContext(percent)", 1)[1].split(
-            "\n  }", 1)[0]
+            "\n}", 1)[0]
         assert "typeof percent !== 'number'" in body
         assert "isFinite(percent)" in body
         assert "percent < 0 || percent > 100" in body

@@ -62,6 +62,22 @@ function transcriptRendererSource() {
   }
   return TRANSCRIPT_RENDERER_SRC;
 }
+// The shared composer chrome (dashboard/ACP feature-parity plan, Phase 1) —
+// context indicator, sid/copy widget, debug log panel — loaded by acp.html
+// via <script src> immediately after transcript-renderer.js, same reasoning:
+// setContext/renderSidLabel/logLine/etc. moved out of acp.html's inline
+// script into this file, so it must run in the same sandbox, in the same
+// document order a browser would load it in, for the inline script's now-bare
+// references to them to resolve instead of throwing ReferenceError.
+const COMPOSER_CHROME_BUNDLE = path.join(
+  HERE, "..", "src", "power_atlas", "static", "composer-chrome.js");
+let COMPOSER_CHROME_SRC = null;
+function composerChromeSource() {
+  if (COMPOSER_CHROME_SRC === null) {
+    COMPOSER_CHROME_SRC = fs.readFileSync(COMPOSER_CHROME_BUNDLE, "utf8");
+  }
+  return COMPOSER_CHROME_SRC;
+}
 
 // Prism as the page sees it, built once and shared by every check.
 //
@@ -631,9 +647,11 @@ function loadPage(templatePath, opts = {}) {
 
   // `acp.html`'s own content block only — `{% extends %}` is stripped by
   // `render()`, so `base.html`'s `<script src="/static/htmx.min.js">` is not in
-  // this string and is not being counted. The served `/acp` therefore has three
-  // script elements, not two; the policy still holds because base.html applies
-  // the same nonce conditionally, and `test_web.py` counts the served page.
+  // this string and is not being counted. The served `/acp` therefore has four
+  // script elements, not three (dashboard/ACP feature-parity plan, Phase 1
+  // added composer-chrome.js alongside prism.js and transcript-renderer.js);
+  // the policy still holds because base.html applies the same nonce
+  // conditionally, and `test_web.py` counts the served page.
   //
   // What is measured here is this template's own contribution: exactly one
   // inline script — the one every check below drives — and every external one
@@ -957,6 +975,11 @@ function loadPage(templatePath, opts = {}) {
   // does, and measuring anything else would not be measuring the real page.
   vm.runInContext(transcriptRendererSource(), sandbox,
                   { filename: "transcript-renderer.js" });
+  // Runs next, same reasoning and same sandbox as transcript-renderer.js
+  // above — acp.html loads composer-chrome.js immediately after it, before
+  // the inline <script>.
+  vm.runInContext(composerChromeSource(), sandbox,
+                  { filename: "composer-chrome.js" });
   vm.runInContext(scriptBody, sandbox, { filename: `${templatePath}#inline-script` });
 
   Object.assign(page, {
@@ -1186,11 +1209,14 @@ check("no HTML sink appears anywhere in the page source", (tpl) => {
 });
 
 check("exactly one inline script in the content block, carrying the CSP nonce", (tpl) => {
-  // Named for what it measures. The *served* /acp has two script elements: this
-  // template extends base.html, which carries `<script src="/static/htmx.min.js">`
-  // with the same nonce applied conditionally. `loadPage` renders this template
-  // in isolation, so what the count below pins is that acp.html contributes one
-  // inline script and no external one — not that the page has a single tag.
+  // Named for what it measures. The *served* /acp has five script elements
+  // (dashboard/ACP feature-parity plan, Phase 1 added composer-chrome.js
+  // alongside htmx.min.js, prism.js, transcript-renderer.js and the inline
+  // script): this template extends base.html, which carries
+  // `<script src="/static/htmx.min.js">` with the same nonce applied
+  // conditionally. `loadPage` renders this template in isolation, so what the
+  // count below pins is that acp.html contributes one inline script and no
+  // external one — not that the page has a single tag.
   const page = loadPage(tpl);
   assert(/nonce="NONCE-1"/.test(page.scriptAttrs),
          `the single <script> carries no rendered nonce: ${page.scriptAttrs}`);
@@ -10422,6 +10448,24 @@ function loadDashPicker(opts = {}) {
   // Wire the task-mode toggle's dataset so dashPickerOpen can set .dataset.taskMode
   byId.get("dashPickerTaskModeToggle").dataset = { taskMode: "kiro_default" };
 
+  // composer-chrome.js's DOM refs (dashboard/ACP feature-parity plan, Phase
+  // 1) -- dashHandle's `session` and `agent_died` branches now reach
+  // setContext/renderSidLabel/logLine via the shared module's initXxxDom()
+  // calls below, the same way the real index.html wires it, so this harness
+  // must too: without them, the `dashHandle creation branch …` checks further
+  // down (which already send a `session` frame with a real `cwd`) would throw
+  // a ReferenceError the moment that widened code runs.
+  byId.set("dashContext", new El("span"));
+  byId.get("dashContext").hidden = true;
+  byId.set("dashContextFill", new El("span"));
+  byId.set("dashContextLabel", new El("span"));
+  byId.set("dashSid", new El("button"));
+  byId.set("dashCopy", new El("button"));
+  byId.get("dashCopy").hidden = true;
+  byId.set("dashLog", new El("div"));
+  byId.get("dashLog").hidden = true;
+  byId.set("dashLogToggle", new El("button"));
+
   const fetches = [];
 
   const sandbox = {
@@ -10450,15 +10494,28 @@ function loadDashPicker(opts = {}) {
     _dashSent: false,
     _dashOrigin: null,
     _dashPendingSend: null,
+    // Mirrors index.html's own var (dashboard/ACP feature-parity plan, Phase
+    // 1) -- read by the isReplaying accessor passed to initLogDom() below.
+    _dashReplaying: false,
+    // Mirrors index.html's own defaults (dashboard/ACP feature-parity plan,
+    // Phase 1) -- dashHandle's widened `connected` meta case overwrites these.
+    _dashImageMaxCount: 4,
+    _dashImageMaxBytes: 176 * 1024,
     // Stubs for functions dashHandle and dashPickerRailAdopt call but that live
     // outside the extracted regions.
     dashComposerEl: new El("div"),
     dashPromptInput: new El("input"),
+    dashSendBtn: new El("button"),
     dashConnect: (cb) => { if (cb) cb(); },
     send: () => true,
     dashSetComposerNote: () => {},
     dashUpdateCloseButton: () => {},
     dashRefreshSendButton: () => {},
+    // dashHandle's agent_died/session_closed/agent_error branches call this
+    // (transcript-renderer.js, not part of either extracted region) -- a
+    // no-op here since these checks assert on dashHandle's own state, not on
+    // transcript rendering.
+    addMessage: () => {},
     dashRailMode: "project",
     dashRailMergeGroup: () => {},
     // dashPickerRailAdopt calls this (index.html) to surface a workspace
@@ -10475,6 +10532,27 @@ function loadDashPicker(opts = {}) {
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  // composer-chrome.js's real source (dashboard/ACP feature-parity plan,
+  // Phase 1) -- must run before handleRegion below, mirroring the real
+  // index.html's document order (composer-chrome.js's <script> tag, then the
+  // inline script that calls initXxxDom() and defines dashHandle).
+  vm.runInContext(composerChromeSource(), sandbox,
+                   { filename: "composer-chrome.js" });
+  sandbox.initContextDom({
+    contextEl: byId.get("dashContext"),
+    contextFill: byId.get("dashContextFill"),
+    contextLabel: byId.get("dashContextLabel"),
+  });
+  sandbox.initSidCopyDom({
+    sidEl: byId.get("dashSid"),
+    copyBtn: byId.get("dashCopy"),
+    getSessionId: () => sandbox._dashAttachedSid,
+  });
+  sandbox.initLogDom({
+    logEl: byId.get("dashLog"),
+    logToggle: byId.get("dashLogToggle"),
+    isReplaying: () => sandbox._dashReplaying,
+  });
   // Run dashHandle first (it is declared before the picker in the page), then
   // the picker section (which also executes the parse-time event-listener
   // wiring against the byId map above).
@@ -10703,6 +10781,140 @@ check("dashPickerRailAdopt with empty cwd calls loadFlatPage", () => {
   if (!flatCalled) throw new Error('loadFlatPage was not called for empty cwd in project mode');
 });
 
+// ---- dashboard composer chrome (plans/260921_DASHBOARD_ACP_FEATURE_PARITY.md,
+// Phase 1: context indicator SC2, sid/copy widget SC3, debug log SC4) -------
+//
+// Reuses loadDashPicker()'s harness: composer-chrome.js's real source now
+// runs in that same sandbox (see the vm.runInContext/initXxxDom() calls added
+// to loadDashPicker() above), so these checks exercise the actual shared
+// module, not a stand-in -- what is under test is index.html's own wiring
+// (the widened `meta` branch, the `session` frame's sidWorkspace/_sessionCwd
+// assignment, the baseline `agent_died` case), not composer-chrome.js's
+// internals (those are covered by /acp's own suite, which this module must
+// keep passing unmodified).
+
+check("a meta frame with contextPercent calls setContext, updating the shared context indicator", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({ type: "meta", payload: { contextPercent: 42 } });
+  assertEqual(p.el("dashContext").hidden, false,
+    "the context indicator must become visible once a reading arrives");
+  assertEqual(p.el("dashContextFill").style.width, "42%",
+    "the fill width must reflect the reported percentage");
+  assertEqual(p.el("dashContextLabel").textContent, "context 42%",
+    "the label must show the reported percentage");
+});
+
+check("a meta frame with contextPercent absent (turn-only) leaves the context branch alone", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1", dashTurnActive: false });
+  // Sanity: the pre-existing turn-start/turn-end handling must survive the
+  // widened `meta` branch unchanged, alongside the new cases.
+  p.sandbox.dashHandle({ type: "meta", payload: { turn: "start" } });
+  assertEqual(p.sandbox._dashTurnActive, true,
+    "meta turn:start must still set _dashTurnActive -- the widened branch must be additive, not a replacement");
+  p.sandbox.dashHandle({ type: "meta", payload: { turn: "end" } });
+  assertEqual(p.sandbox._dashTurnActive, false,
+    "meta turn:end must still clear _dashTurnActive");
+});
+
+check("a meta connected frame stores maxPromptImages/maxPromptImageBytes for Phase 4 to consume", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "meta",
+    payload: { connected: true, maxPromptImages: 6, maxPromptImageBytes: 200000 },
+  });
+  assertEqual(p.sandbox._dashImageMaxCount, 6,
+    "_dashImageMaxCount must be overwritten from the connected meta's maxPromptImages");
+  assertEqual(p.sandbox._dashImageMaxBytes, 200000,
+    "_dashImageMaxBytes must be overwritten from the connected meta's maxPromptImageBytes");
+});
+
+check("a session frame's cwd populates the sid/copy widget", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\my-repo", turnActive: false },
+  });
+  assertEqual(p.el("dashSid").textContent, "my-repo",
+    "the sid label must show the short workspace name once a session frame lands");
+  assertEqual(p.el("dashCopy").hidden, false,
+    "the copy button must become visible once a session is attached");
+});
+
+check("the copy button copies the full workspace path, not the short display name (SC3 bug fix)", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const copied = [];
+  p.sandbox.navigator = { clipboard: { writeText: (v) => { copied.push(v); return Promise.resolve(); } } };
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\my-repo", turnActive: false },
+  });
+  p.el("dashCopy").dispatch("click");
+  assertEqual(copied.length, 1, "clicking copy must copy exactly one value");
+  assertEqual(copied[0], "C:\\work\\my-repo",
+    "the copied value must be the full workspace path (_sessionCwd), not shortName(cwd) -- " +
+    "this is the pre-existing acp.html bug (comment claimed full-path copy, code copied the " +
+    "short name) this plan was explicitly asked to fix on both pages");
+});
+
+check("the debug log toggle opens/closes the shared log panel and remembers the choice", () => {
+  const p = loadDashPicker();
+  assertEqual(p.el("dashLog").hidden, true, "the log panel must start collapsed");
+  p.el("dashLogToggle").dispatch("click");
+  assertEqual(p.el("dashLog").hidden, false, "clicking the toggle must open the log panel");
+  assertEqual(p.el("dashLogToggle").getAttribute("aria-expanded"), "true",
+    "aria-expanded must reflect the open state for the CSS-drawn chevron");
+  p.el("dashLogToggle").dispatch("click");
+  assertEqual(p.el("dashLog").hidden, true, "clicking the toggle again must close the log panel");
+});
+
+check("logLine is silenced during a replay via the isReplaying accessor, not a snapshot", () => {
+  const p = loadDashPicker();
+  p.sandbox._dashReplaying = false;
+  p.sandbox.logLine("info", "live line");
+  assertEqual(p.el("dashLog").childNodes.length, 1,
+    "a log line written while not replaying must be appended");
+  p.sandbox._dashReplaying = true;
+  p.sandbox.logLine("info", "replayed line");
+  assertEqual(p.el("dashLog").childNodes.length, 1,
+    "isReplaying must be re-read live on every call -- a snapshot taken at initLogDom() time " +
+    "would never see this later flip and would log the replayed line too");
+  p.sandbox._dashReplaying = false;
+  p.sandbox.logLine("info", "live again");
+  assertEqual(p.el("dashLog").childNodes.length, 2,
+    "logging must resume once _dashReplaying flips back");
+});
+
+check("the baseline agent_died case resets turn state, disables the composer with a note, and clears the sid/copy widget", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const notes = [];
+  p.sandbox.dashSetComposerNote = (t) => notes.push(t);
+  // Attach first, so there is real state (sid/copy widget, turn flag) for
+  // agent_died to tear down -- exercises the session-frame wiring and the
+  // agent_died reset together, the same sequence a live agent crash would
+  // actually produce.
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\my-repo", turnActive: true },
+  });
+  assertEqual(p.sandbox._dashAttachedSid, "sess-1", "sanity check -- session frame must attach first");
+
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1",
+                          payload: { exitCode: 1, message: "boom" } });
+
+  assertEqual(p.sandbox._dashAttachedSid, null, "agent_died must clear _dashAttachedSid");
+  assertEqual(p.sandbox._dashTurnActive, false, "agent_died must clear _dashTurnActive");
+  // dashPromptInput/dashSendBtn are sandbox globals stubbed directly (like
+  // dashComposerEl), not byId-registered elements -- p.el() only looks up the
+  // picker/composer-chrome markup ids.
+  assertEqual(p.sandbox.dashPromptInput.disabled, true,
+    "the composer must be disabled, not left usable against a dead agent");
+  assertEqual(p.sandbox.dashSendBtn.disabled, true, "the send button must be disabled too");
+  assert(notes[notes.length - 1] && /agent process ended/.test(notes[notes.length - 1]),
+    "an explanatory note must be shown, mirroring acp.html's own agent_died message");
+  assertEqual(p.el("dashContext").hidden, true, "the context indicator must hide (setContext(null))");
+  assertEqual(p.el("dashSid").textContent, "", "the sid label must clear with no session attached");
+  assertEqual(p.el("dashCopy").hidden, true, "the copy button must hide with no session attached");
+});
 
 let failed = 0;
 for (const { name, fn } of checks) {

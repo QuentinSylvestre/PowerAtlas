@@ -652,6 +652,7 @@
 </style>
 <script nonce="{{ csp_nonce }}" src="/static/prism.js"></script>
 <script nonce="{{ csp_nonce }}" src="/static/transcript-renderer.js"></script>
+<script nonce="{{ csp_nonce }}" src="/static/composer-chrome.js"></script>
 
 <script nonce="{{ csp_nonce }}">
 // This page is served with a nonce-based Content-Security-Policy, so this tag
@@ -699,10 +700,10 @@
   var SESSION_DELETE_API = '/api/acp/sessions/delete';
 
   var statusEl = document.getElementById('acpStatus');
-  var logEl = document.getElementById('acpLog');
-  var logToggle = document.getElementById('acpLogToggle');
-  var sidEl = document.getElementById('acpSid');
-  var copyBtn = document.getElementById('acpCopy');
+  // logEl/logToggle/sidEl/copyBtn are no longer read directly here — they are
+  // passed once to initLogDom()/initSidCopyDom() below (composer-chrome.js,
+  // dashboard/ACP feature-parity plan Phase 1), the same DI pattern
+  // initTranscriptDom() already uses for transcriptEl et al.
   var newBtn = document.getElementById('acpNew');
   var picker = document.getElementById('acpPicker');
   var pickerCancel = document.getElementById('acpPickerCancel');
@@ -790,20 +791,51 @@
     promptUpBtn: document.getElementById('acpPromptUp'),
     promptDownBtn: document.getElementById('acpPromptDown'),
   });
-  // send/logLine stay declared here (both are genuinely page-specific: send
-  // is the live WS wrapper, logLine writes to this page's own debug-log
-  // panel) rather than moving to transcript-renderer.js like the DOM refs
-  // above -- but two functions there (addPermissionRequest, mdColour) call
-  // them if present. A bare `typeof send === 'function'` check from inside
+  // contextEl/contextFill/contextLabel, sidEl/copyBtn and logEl/logToggle are
+  // declared in /static/composer-chrome.js (dashboard/ACP feature-parity plan,
+  // Phase 1) — same DI mechanism as initTranscriptDom() above. sessionId and
+  // replaying stay declared further down in this script (both are genuinely
+  // page-specific and read by composer-chrome.js's ported code as free
+  // variables today, acp.html:851/876-ish before this plan) -- so each is
+  // passed as a live accessor FUNCTION rather than a snapshotted value: a
+  // snapshot taken here, before either variable is even assigned, would never
+  // see a later session switch. Safe to reference both inside these closures
+  // before their own `var` declarations further down -- the closures are not
+  // *called* until well after those declarations run; only their *creation*
+  // happens here, and hoisting makes the names resolvable either way.
+  initContextDom({
+    contextEl: document.getElementById('acpContext'),
+    contextFill: document.getElementById('acpContextFill'),
+    contextLabel: document.getElementById('acpContextLabel'),
+  });
+  initSidCopyDom({
+    sidEl: document.getElementById('acpSid'),
+    copyBtn: document.getElementById('acpCopy'),
+    getSessionId: function () { return sessionId; },
+  });
+  initLogDom({
+    logEl: document.getElementById('acpLog'),
+    logToggle: document.getElementById('acpLogToggle'),
+    isReplaying: function () { return replaying; },
+  });
+  // send stays declared here (it is genuinely page-specific: the live WS
+  // wrapper) rather than moving to transcript-renderer.js like the DOM refs
+  // above -- but a function there (addPermissionRequest, mdColour) calls it
+  // if present. A bare `typeof send === 'function'` check from inside
   // transcript-renderer.js would NOT find this one: it is declared inside
   // this whole script's `(function () { ... })();` wrapper, so it is private
   // to that closure, not a true global, the same reason the DOM refs needed
   // initTranscriptDom() in the first place (see that file's header comment).
   // Exposing it here, once, is what makes the guard in the shared file find
-  // it. Safe to do before either function's own declaration further down —
-  // both are `function` declarations, fully hoisted within this script.
+  // it. Safe to do before its own declaration further down — it is a
+  // `function` declaration, fully hoisted within this script.
+  //
+  // logLine needs none of this any more: it moved to composer-chrome.js
+  // (Phase 1 of the dashboard/ACP feature-parity plan), so it is already a
+  // true global by the same mechanism initTranscriptDom() documents for
+  // transcriptEl et al. -- no window.logLine assignment needed, and the one
+  // this comment used to describe has been removed.
   window.send = send;
-  window.logLine = logLine;
   // removeAllCrewPanels/closeSubagentView, exposed the same way and for the
   // same reason: clearTranscript() (also moved to transcript-renderer.js,
   // Phase 2 slice 5) calls both, guarded, to tear down the crew/sub-agent
@@ -814,9 +846,8 @@
   window.removeAllCrewPanels = removeAllCrewPanels;
   window.closeSubagentView = closeSubagentView;
   var closeBtn = document.getElementById('acpClose');
-  var contextEl = document.getElementById('acpContext');
-  var contextFill = document.getElementById('acpContextFill');
-  var contextLabel = document.getElementById('acpContextLabel');
+  // contextEl/contextFill/contextLabel: see the initContextDom() call above —
+  // they are composer-chrome.js state now, not local to this script.
   // v3's `steer_status` echo (SC-3) — see setSteerStatus().
   var steerStatusEl = document.getElementById('acpSteerStatus');
   var _steerStatusTimer = null;
@@ -857,19 +888,13 @@
   // never will. Reset by connect(), because a socket that dropped took its
   // subscription with it and the new one holds nothing until it is answered.
   var subscribed = false;
-  // The open session's workspace, short form (`repo`, not `C:\work\repo`) —
-  // read off the `session` frame's `cwd`, which is the only place this page
-  // ever learns it. "" until that frame lands, which is why `renderSidLabel`
-  // falls back to the raw id rather than drawing an empty header.
-  var sidWorkspace = '';
-  // The full path of the current session's workspace — set from `payload.cwd`
-  // on each `session` frame, used by `railEvictWorkspaceGroup` to release the
-  // session when its workspace is deleted. "" until the session frame lands.
-  var _sessionCwd = '';
-  // Whether the header is showing the session id instead of the workspace
-  // name. Reset to false on every session change: the id was one tap away
-  // for whichever conversation asked for it, not a standing preference.
-  var sidRevealed = false;
+  // sidWorkspace/_sessionCwd/sidRevealed are composer-chrome.js state now
+  // (dashboard/ACP feature-parity plan, Phase 1) — every read/write site
+  // below (the `session` frame handler, releaseSession(), agent_died, …)
+  // is unchanged and resolves to that file's globals via the scope chain,
+  // exactly as sidEl/copyBtn/renderSidLabel already do. `railEvictWorkspace
+  // Group` still reads _sessionCwd to release a session whose workspace was
+  // deleted.
   // True while a `history` frame is being fed back through handle(). The
   // frames in it are real and render normally; what would be wrong is
   // narrating a replay into the transport log as if it were live traffic.
@@ -1156,44 +1181,10 @@
     statusEl.textContent = text;
   }
 
-  function logLine(kind, text) {
-    if (replaying) return;
-    var row = document.createElement('div');
-    row.className = 'acp-log-line acp-log-' + kind;
-    var when = document.createElement('span');
-    when.className = 'acp-log-time';
-    when.textContent = new Date().toLocaleTimeString();
-    var body = document.createElement('span');
-    body.className = 'acp-log-body';
-    body.textContent = text;
-    row.appendChild(when);
-    row.appendChild(body);
-    logEl.appendChild(row);
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  // Remembered per browser (`railStored`/`railStore` — generic localStorage
-  // wrappers despite the name, defined below and hoisted like every other
-  // `function` declaration in this closure) so a preference set once survives
-  // a reload rather than reopening closed by default every time.
-  var DEBUG_LOG_KEY = 'pa_acp_debug_log';
-
-  function setLogOpen(open) {
-    logEl.hidden = !open;
-    // The label text is static in the markup; only the attribute moves, and
-    // the CSS-drawn chevron beside it (`.acp-log-toggle-chevron`) reads that
-    // same attribute to rotate itself — one source of truth for which way it
-    // points, the way the rail's own group chevron already works.
-    logToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open) logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  setLogOpen(railStored(DEBUG_LOG_KEY) === 'open');
-  logToggle.addEventListener('click', function () {
-    var open = logEl.hidden;
-    setLogOpen(open);
-    railStore(DEBUG_LOG_KEY, open ? 'open' : 'closed');
-  });
+  // logLine/setLogOpen/DEBUG_LOG_KEY, and the setLogOpen()-on-load call plus
+  // logToggle's click listener, all moved to composer-chrome.js's
+  // initLogDom() (dashboard/ACP feature-parity plan, Phase 1) — see the
+  // initLogDom() call above.
 
   function wsUrl() {
     // Derived from location.host, never a hardcoded port: config.py defaults
@@ -1268,81 +1259,12 @@
     railNew.title = why;
   }
 
-  /** The last non-empty path segment, `Path(cwd).name`'s client-side mirror.
-   *  Both separators are handled: the server sends whatever the OS the agent
-   *  runs on writes into `cwd`, `\` on Windows, and this page runs on
-   *  whichever OS the browser happens to be. */
-  function shortName(cwdPath) {
-    var trimmed = String(cwdPath || '').replace(/[\\/]+$/, '');
-    var cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
-    var name = cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
-    return name || trimmed;
-  }
-
-  /** Redraw the toolbar's session label from the current `sidWorkspace` /
-   *  `sidRevealed` / `sessionId` state. One function for every writer so the
-   *  three cannot drift out of sync — see the click handler below and every
-   *  place that sets `sidWorkspace`. */
-  function renderSidLabel() {
-    if (!sessionId) {
-      sidEl.textContent = '';
-      sidEl.title = '';
-      copyBtn.hidden = true;
-      return;
-    }
-    // Falls back to the id when the workspace is not known yet — right after
-    // `selectSession` and before the `session` frame answers — rather than
-    // drawing a blank header for that gap.
-    var showId = sidRevealed || !sidWorkspace;
-    sidEl.textContent = showId ? 'session ' + sessionId : sidWorkspace;
-    sidEl.setAttribute('aria-pressed', showId ? 'true' : 'false');
-    sidEl.title = sidWorkspace
-      ? (showId ? 'tap to show the workspace' : 'tap to show the session id')
-      : '';
-    copyBtn.hidden = false;
-    // Update tooltip to reflect what will be copied.
-    copyBtn.title = showId ? 'Copy session id' : 'Copy workspace name';
-    copyBtn.setAttribute('aria-label', showId ? 'Copy session id' : 'Copy workspace name');
-  }
-
-  sidEl.addEventListener('click', function () {
-    if (!sessionId) return;
-    sidRevealed = !sidRevealed;
-    renderSidLabel();
-  });
-
-  // Copies the value currently shown in the sid label (session id or workspace
-  // name). Uses the Clipboard API where available and falls back to a transient
-  // textarea execCommand for older/restricted contexts (e.g. non-HTTPS).
-  var _copyOkTimer = null;
-  copyBtn.addEventListener('click', function () {
-    if (!sessionId) return;
-    var showId = sidRevealed || !sidWorkspace;
-    // Copy the raw value — the session id without the "session " display prefix,
-    // or the full workspace path (not the short display name) for easy paste.
-    var value = showId ? sessionId : (sidWorkspace || sessionId);
-    function markOk() {
-      copyBtn.classList.add('acp-copy-btn--ok');
-      copyBtn.title = 'Copied!';
-      clearTimeout(_copyOkTimer);
-      _copyOkTimer = setTimeout(function () {
-        copyBtn.classList.remove('acp-copy-btn--ok');
-        renderSidLabel(); // restore correct title
-      }, 1200);
-    }
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(value).then(markOk, function () {});
-    } else {
-      var ta = document.createElement('textarea');
-      ta.value = value;
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); markOk(); } catch (e) {}
-      document.body.removeChild(ta);
-    }
-  });
+  // shortName/renderSidLabel, sidEl's click listener and copyBtn's
+  // copy-to-clipboard click listener all moved to composer-chrome.js's
+  // initSidCopyDom() (dashboard/ACP feature-parity plan, Phase 1) — see the
+  // initSidCopyDom() call above. The copy button now copies _sessionCwd (the
+  // full workspace path) rather than sidWorkspace (the short display name) —
+  // SC3 bug fix, applied during the port.
 
   function setLoading(sid) {
     loadingSid = sid || null;
@@ -1392,21 +1314,8 @@
     if (picker && !picker.hidden) pickerRenderKeepRow();
   }
 
-  function setContext(percent) {
-    // Numeric or nothing. The server clamps this to 0-100 and rounds it, and
-    // the check is repeated here because the value ends up as a CSS width:
-    // that is an attribute sink, and the rule on this page is that nothing
-    // agent-derived reaches one. A number that survives both checks is written
-    // by this line, not by the agent.
-    if (typeof percent !== 'number' || !isFinite(percent) ||
-        percent < 0 || percent > 100) {
-      contextEl.hidden = true;
-      return;
-    }
-    contextEl.hidden = false;
-    contextFill.style.width = percent + '%';
-    contextLabel.textContent = 'context ' + percent + '%';
-  }
+  // setContext moved to composer-chrome.js's initContextDom() (dashboard/ACP
+  // feature-parity plan, Phase 1) — see the initContextDom() call above.
 
   /** Show (or clear) the transient composer-area steer status line (SC-3,
    *  v3's `steer_status` frame). SECURITY: MUST use textContent — never
@@ -2893,17 +2802,13 @@
   // this is a gesture.
   var railCollapsed = Object.create(null);
 
-  // `localStorage` throws outright when storage is disabled or a browser is in
-  // a mode that refuses it, and it throws on *read* as well as on write. A rail
-  // that cannot remember a preference is a much smaller problem than a rail
-  // that does not render, so both sides swallow it.
-  function railStored(key) {
-    try { return localStorage.getItem(key); } catch (e) { return null; }
-  }
-
-  function railStore(key, value) {
-    try { localStorage.setItem(key, value); } catch (e) { /* not fatal */ }
-  }
+  // railStored/railStore moved to composer-chrome.js (dashboard/ACP
+  // feature-parity plan, Phase 1) — now shared infrastructure (DEBUG_LOG_KEY,
+  // and from Phase 3 on the send-mode picker) rather than acp.html-private.
+  // Every call site below (RAIL_MODE_KEY, RAIL_WIDTH_KEY, SEND_MODE_KEY, …)
+  // is unchanged and resolves to composer-chrome.js's globals via the scope
+  // chain, the same `localStorage` throws-on-disabled/blocked-storage
+  // swallowing behaviour as before.
 
   // ---- unread state (client-side, localStorage) ---------------------------
   // Marks a held session unread when its turn ends while the tab is not on it.
