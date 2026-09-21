@@ -1505,6 +1505,16 @@ function dashBlobToBase64(blob) {
 
 function dashStageOne(file) {
   var label = (file && file.name) ? file.name : 'the pasted image';
+  // Fix 1 (Phase 4 review): the session on screen when staging began, not
+  // read again later -- canvas.toBlob across the compression ladder can be
+  // several real async steps, and dashCloseIfAbandoned() (switching
+  // sessions) can fire while this file is still mid-encode. Checked below,
+  // right before the resolved encode would otherwise mutate dashAttachments/
+  // dashPromptInput for whatever session happens to be on screen when it
+  // finally resolves -- mirrors this file's own stale-frame idiom
+  // (dashHandle()'s `if (sid && sid !== _viewingSid) return;`) applied to an
+  // async encode instead of a frame.
+  var targetSid = _viewingSid;
   if (dashAttachments.length >= _dashImageMaxCount) {
     dashAttachNote('at most ' + _dashImageMaxCount + ' images can go with one prompt — '
                + label + ' was not attached');
@@ -1531,6 +1541,18 @@ function dashStageOne(file) {
       return;
     }
     return dashBlobToBase64(blob).then(function (data) {
+      // Fix 1 (Phase 4 review): the session being viewed may have changed
+      // while this file was decoding/encoding. Discard silently rather than
+      // repopulating dashAttachments / inserting a stray [Image N] marker
+      // into whatever session's textarea is now showing -- no object URL
+      // has been minted for this attachment yet (the only one this function
+      // creates is below, via URL.createObjectURL(blob)), so there is
+      // nothing to revoke to avoid a leak here.
+      if (targetSid !== _viewingSid) {
+        logLine('info', 'discarded a stale image encode for ' + label
+                   + ' -- the session it was staged for is no longer being viewed');
+        return;
+      }
       dashAttachments.push({
         mimeType: blob.type,
         data: data,
@@ -1559,6 +1581,17 @@ function dashStageOne(file) {
   });
 }
 
+// Persistent across calls, not created fresh inside dashStageFiles (Fix 2,
+// Phase 4 review) -- two paste/drop events fired back-to-back each used to
+// start their own independent Promise.resolve() chain, so both could pass
+// dashStageOne's `dashAttachments.length >= _dashImageMaxCount` check before
+// either had actually pushed, exceeding the configured max. Every file from
+// every dashStageFiles() call is chained onto this one variable instead, so
+// a second call started while a first is still in flight waits for it --
+// dashStageOne's own per-file numbering already needed exactly this
+// one-at-a-time ordering within a single call; this extends it across calls.
+var _dashStageChain = Promise.resolve();
+
 /* Staged one at a time rather than in parallel: `[Image N]` numbers them in
  * the order they land, and the budget check for the second has to see what
  * the first actually cost. Two concurrent encodes would race on both. */
@@ -1568,13 +1601,22 @@ function dashStageFiles(files) {
     dashAttachNote('this browser cannot attach images here — nothing was attached');
     return;
   }
-  var chain = Promise.resolve();
   files.forEach(function (file) {
-    chain = chain.then(function () { return dashStageOne(file); });
-  });
-  chain.catch(function (err) {
-    dashAttachNote('attaching an image failed: '
-               + ((err && err.message) ? err.message : String(err)));
+    var label = (file && file.name) ? file.name : 'the pasted image';
+    // Fix 5 (Phase 4 review): a `.catch()` per file, not one at the end of
+    // the whole chain -- a single trailing catch meant one file's rejection
+    // (e.g. a corrupt image that fails to decode) put the whole chain into a
+    // rejected state, silently skipping every file queued after it with no
+    // indication which file failed or that others were dropped. Catching
+    // per file recovers the chain (a .catch() that doesn't rethrow
+    // resolves), so the next file's dashStageOne still runs, and the note
+    // below names the specific file that failed.
+    _dashStageChain = _dashStageChain.then(function () {
+      return dashStageOne(file);
+    }).catch(function (err) {
+      dashAttachNote('attaching ' + label + ' failed: '
+                 + ((err && err.message) ? err.message : String(err)));
+    });
   });
 }
 
@@ -1695,6 +1737,19 @@ dashComposerEl.addEventListener('drop', function (ev) {
   var files = dashImageFilesFrom(ev && ev.dataTransfer);
   if (!files.length) return;
   if (ev.preventDefault) ev.preventDefault();
+  // Fix 4 (Phase 4 review): paste is naturally blocked while
+  // dashPromptInput.disabled is true (the lazy-attach "Starting the
+  // agent…" window), but dragover/drop are bound to dashComposerEl (a div,
+  // no `disabled` semantics), so they stayed live through that same window.
+  // An image dropped then used to stage into the tray successfully but be
+  // excluded from the actual deferred send (which only carries the
+  // click-time _dashPendingImages snapshot) and later be silently revoked
+  // with no note distinguishing it from a normal removal -- mirrors exactly
+  // why the textarea itself is disabled during this window.
+  if (_dashLoadingSid) {
+    dashAttachNote('the agent is still starting — drop the image again once it is ready');
+    return;
+  }
   dashStageFiles(files);
 });
 
@@ -1780,6 +1835,12 @@ function dashCloseIfAbandoned(){
   _dashSent = false;
   _dashTurnActive = false;
   _dashPendingSend = null;
+  // Paired with _dashPendingSend above, for consistency (Fix 6, Phase 4
+  // review) -- both reviewers confirmed no correctness/cross-session-mis-
+  // send risk from leaving this unset here (it is bounded and self-
+  // correcting on the next deferred send), but it belongs alongside its
+  // sibling regardless.
+  _dashPendingImages = null;
   _dashPendingCreate = null; // prevent stale close-then-create on back-navigation
   // Queue/Steer state (SC5, Phase 3) belonged to the session just walked
   // away from too -- same reset as the session_closed frame handler above,
@@ -1859,6 +1920,9 @@ function dashHandle(frame){
       send('close', {}, sid);
       _dashLoadingSid = null;
       _dashPendingSend = null;
+      // Paired with _dashPendingSend above, for consistency (Fix 6, Phase 4
+      // review) -- same reasoning as dashCloseIfAbandoned's reset above.
+      _dashPendingImages = null;
       return;
     }
     if (sid !== _viewingSid) return;
@@ -2367,9 +2431,11 @@ function dashHandle(frame){
     // the dashboard has no pending-TEXT-restore mechanism to extend here (a
     // pre-existing gap, out of this phase's scope). Gated on the error's own
     // sid matching the viewed session, mirroring the steer-restore guard
-    // immediately above (Fix 3, Phase 3 review cycle) -- a sid-less
-    // error_frame() call must not restore images belonging to a different
-    // (or no) session.
+    // immediately above (Fix 3, Phase 3 review cycle) -- a sid that IS
+    // present and does NOT match _viewingSid must not restore images
+    // belonging to a different session. A sid-less error is handled
+    // separately below (Fix 3, Phase 4 review cycle), since it cannot be
+    // attributed to a different session either way.
     if (dashPendingAttachments.length && sid && sid === _viewingSid) {
       if (dashAttachments.length) {
         // Images staged since the refused send take precedence -- mirrors
@@ -2381,6 +2447,19 @@ function dashHandle(frame){
         dashRenderTray();
       }
       dashPendingAttachments = [];
+    } else if (dashPendingAttachments.length && !sid) {
+      // Fix 3 (Phase 4 review): several server-side error_frame() calls omit
+      // sessionId entirely for a frame unrelated to any specific staged send
+      // (bad_json/bad_envelope/bad_payload -- error_frame(code, message)'s
+      // two-arg form). Such a frame can never be attributed to a different
+      // session (there is no sid to disagree with _viewingSid), so treating
+      // it conservatively is safe: revoke the pending images' object URLs
+      // and clear them, rather than leaving them resident until the next
+      // session switch/turn-start/send. Fallback only -- the sid-matched
+      // restore above still runs whenever the error's sid actually matches.
+      for (var _pk = 0; _pk < dashPendingAttachments.length; _pk++) dashRevokeAttachment(dashPendingAttachments[_pk]);
+      dashPendingAttachments = [];
+      logLine('info', 'discarded pending image attachments after a sid-less error frame');
     }
     dashRefreshComposerControls();
     // close_in_progress: server is in the middle of releasing this session —

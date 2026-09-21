@@ -10883,7 +10883,16 @@ function loadDashPicker(opts = {}) {
       }
       set src(value) {
         this._src = value;
-        if (opts.imageDecodeFails) { if (this.onerror) this.onerror(); }
+        // opts.imageDecodeFailsFor (Fix 5, Phase 4 review fix cycle): a list
+        // of file names that should fail to decode while their siblings in
+        // the same paste/drop batch succeed -- needed to test that one bad
+        // file no longer silently aborts the rest of the batch.
+        // dashObjectUrls (declared above) maps the blob: url minted for this
+        // src back to the File object dashLoadImage() created it from.
+        const source = dashObjectUrls.get(value);
+        const failsForThis = opts.imageDecodeFails ||
+          (opts.imageDecodeFailsFor && source && opts.imageDecodeFailsFor.includes(source.name));
+        if (failsForThis) { if (this.onerror) this.onerror(); }
         else if (this.onload) this.onload();
       }
       get src() { return this._src; }
@@ -12689,6 +12698,145 @@ check("dashboard: image attach — a refused lazy-attach load leaves the still-s
   assertEqual(p.trayChips().length, 1,
     "the staged image was never moved out of the tray for this path — it must still be there, " +
     "not duplicated or lost, ready for the user to retry");
+});
+
+// ---- Phase 4 review-fix cycle: stale-encode staleness check, staging
+// serialization across calls, sid-less error restore, lazy-attach drop
+// gating, per-file batch independence, and _dashPendingImages reset parity.
+//
+// Both reviewers (Senior engineer, Reliability engineer) reviewed the
+// Phase 4 commit and found six issues, none of which had test coverage
+// before this cycle. The checks below close that gap, one per fix.
+
+check("dashboard: image attach — a stale encode from a session switched away from mid-paste does not corrupt the new session's state", async () => {
+  // The test harness's Image/FileReader/canvas.toBlob stand-ins all settle
+  // through plain microtask .then() chains with no real macrotask boundary
+  // (unlike a real browser, where canvas.toBlob() and Image decode are
+  // genuinely async and leave room for the user to act in between) -- so the
+  // session switch is injected from inside the encode step itself (the
+  // opts.encode hook, invoked synchronously from within
+  // dashEncodeToBudget()'s own promise chain), which is exactly the "mid- of
+  // an in-flight encode" moment dashStageOne's captured targetSid has to
+  // survive. Without this hook, any switch performed from the test body
+  // itself would run before dashStageOne even starts (still queued as a
+  // microtask), making it indistinguishable from "no image was ever in
+  // flight for the old session" rather than the actual regression.
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1",
+    encode: (type) => {
+      // Simulate switching sessions mid-encode, mirroring
+      // openSessionTranscript()'s own sequencing: dashCloseIfAbandoned()
+      // first (clears dashAttachments for sess-1), then _viewingSid moves to
+      // the new session, whose (empty) textarea is now what dashPromptInput
+      // shows.
+      p.sandbox.dashCloseIfAbandoned();
+      p.sandbox._viewingSid = "sess-2";
+      p.sandbox.dashPromptInput.value = "";
+      return { size: 5000, type };
+    },
+  });
+  p.paste([p.imageFile()]);
+  await settleStaging(); // let the now-stale encode resolve
+  assertEqual(p.sandbox.dashAttachments.length, 0,
+    "a stale encode for a session no longer being viewed must not repopulate dashAttachments — " +
+    "silent cross-session state corruption, not just a cosmetic glitch");
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "a stale encode must not insert a stray [Image N] marker into the newly-viewed session's textarea");
+});
+
+check("dashboard: image attach — two back-to-back staging calls near the count limit never exceed it", async () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1",
+    dashAttachments: [
+      { mimeType: "image/png", data: "x", bytes: 100, url: "blob:existing-1", name: "one.png" },
+      { mimeType: "image/png", data: "x", bytes: 100, url: "blob:existing-2", name: "two.png" },
+      { mimeType: "image/png", data: "x", bytes: 100, url: "blob:existing-3", name: "three.png" },
+    ], // three already staged, default _dashImageMaxCount is 4 -- one slot left
+  });
+  // Two paste events fired back-to-back, each with one image, before either
+  // has had a chance to actually push -- without serialization both could
+  // pass dashStageOne's synchronous count check while dashAttachments.length
+  // still reads 3, exceeding the max of 4.
+  p.paste([p.imageFile("image/png", "four.png")]);
+  p.paste([p.imageFile("image/png", "five.png")]);
+  await settleStaging();
+  assert(p.sandbox.dashAttachments.length <= 4,
+    "two back-to-back staging calls near the count limit must never exceed _dashImageMaxCount — got "
+    + p.sandbox.dashAttachments.length);
+  assertEqual(p.sandbox.dashAttachments.length, 4,
+    "exactly one of the two images should have been accepted into the one remaining slot");
+});
+
+check("dashboard: image attach — a sid-less error frame revokes pending attachment URLs", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashSendBtn.dispatch("click");
+  assertEqual(p.sandbox.dashPendingAttachments.length, 1, "sanity check — the send handed the image to dashPendingAttachments");
+  const before = p.revoked().length;
+  p.sandbox.dashHandle({
+    type: "error", sessionId: null,
+    payload: { code: "bad_json", message: "Frame is not valid JSON." },
+  });
+  assertEqual(p.sandbox.dashPendingAttachments.length, 0,
+    "a sid-less error frame must clear dashPendingAttachments rather than leaving its object URLs resident");
+  assert(p.revoked().length > before,
+    "a sid-less error frame must revoke the pending attachments' object URLs, not merely drop the array");
+});
+
+check("dashboard: image attach — a drop during an active lazy-attach load is rejected, not silently lost", async () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" }); // dashAttachedSid defaults to null -- not yet attached
+  p.sandbox.dashPromptInput.value = "hello";
+  p.sandbox.dashSendBtn.dispatch("click"); // starts the lazy-attach load
+  assertEqual(p.sandbox._dashLoadingSid, "sess-1", "sanity check — a lazy load is in flight");
+  const allowed = p.drop([p.imageFile()]);
+  assert(allowed, "dragover must still preventDefault during the lazy-attach window, or a real " +
+                  "browser navigates to the dropped file instead of firing 'drop' at all");
+  await settleStaging();
+  assertEqual(p.sandbox.dashAttachments.length, 0,
+    "an image dropped during the lazy-attach window must not be staged into a tray that will lose " +
+    "it -- it is excluded from the deferred send, which only carries the click-time _dashPendingImages snapshot");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /starting/.test(note.text),
+    "the rejected drop must say why, the same way this file already does for other rejected staging actions");
+});
+
+check("dashboard: image attach — one bad file in a multi-file paste does not silently abort the rest of the batch", async () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1",
+    imageDecodeFailsFor: ["bad.png"],
+  });
+  p.paste([
+    p.imageFile("image/png", "good1.png"),
+    p.imageFile("image/png", "bad.png"),
+    p.imageFile("image/png", "good2.png"),
+  ]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 2,
+    "the two good files must still be staged despite the bad one in between failing to decode");
+  const badNote = p.addMessageCalls.find((m) => m.text && m.text.includes("bad.png"));
+  assert(badNote, "the failed file's own name must appear in the note — nobody is told which file failed " +
+                  "or that anything else was skipped");
+});
+
+check("dashboard: image attach — dashCloseIfAbandoned resets _dashPendingImages alongside its sibling _dashPendingSend", () => {
+  const p = loadDashPicker({
+    viewingSid: "sess-1",
+    dashPendingImages: [{ mimeType: "image/png", data: "x" }],
+  });
+  p.sandbox.dashCloseIfAbandoned();
+  assertEqual(p.sandbox._dashPendingImages, null,
+    "_dashPendingImages must be reset by dashCloseIfAbandoned, matching its sibling _dashPendingSend");
+});
+
+check("dashboard: image attach — the session-frame stale-load block resets _dashPendingImages alongside its sibling _dashPendingSend", () => {
+  const p = loadDashPicker({ viewingSid: "sess-2" }); // viewing a DIFFERENT session than the stale load
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashPendingImages = [{ mimeType: "image/png", data: "x" }];
+  p.sandbox.dashHandle({ type: "session", sessionId: "sess-1", payload: {} });
+  assertEqual(p.sandbox._dashPendingImages, null,
+    "_dashPendingImages must be reset by the session-frame stale-load block, matching its sibling " +
+    "_dashPendingSend");
 });
 
 let failed = 0;
