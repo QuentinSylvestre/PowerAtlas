@@ -293,10 +293,15 @@ STOP and ask the user.** As of 2026-09-21 this precondition was NOT satisfied �
    It must print `modeId_in_effect` so a silent coercion to `vibe` is visible.
 4. **Establish the default rule set.** Read kiro-cli's published permission documentation and
    transcribe the default posture as an explicit rule list, recording the doc reference per rule.
-   **If no such documentation is reachable**, derive the set empirically instead: with the user's
-   consent, move `~/.kiro/settings/permissions.yaml` aside, run the harness with a no-rules agent, and
-   record which capabilities prompt; restore the file and verify by hash. Record which of the two
-   routes was used — a documentation-sourced set and a measured set carry different confidence.
+   **If no such documentation is reachable**, the set can be derived empirically instead — but
+   **STOP and ask the user first.** The empirical route moves `~/.kiro/settings/permissions.yaml`
+   aside, which removes this machine's permission posture for **every concurrent kiro-cli session**,
+   not just the probe's; it is the same blast radius as a PowerAtlas restart and gets the same
+   discipline. No turn has approved it — the exploration's Q17 was answered with a question, and
+   Q17-revised settled the deny floor, not this. On approval: move the file, run the harness with a
+   no-rules agent, record which capabilities prompt, restore, and verify by hash against the § 7
+   baseline. Record which of the two routes was used — a documentation-sourced set and a measured set
+   carry different confidence, and Phase 7 should know which it is confirming.
 5. **Draft the deny floor** — a short curated list of never-okay patterns, each justified in one line.
    It is always on, including in allow-all, so a false positive blocks work the user expects to run.
 6. **Test the floor's bypass resistance.** For at least one floor pattern, attempt: a case-variant
@@ -460,7 +465,7 @@ be answered on its merits.
 
 **Covers**: SC-3 (backend half), SC-4 (backend half)
 
-### Phase 3: Settings and permission-prompt UI [QA]
+### Phase 3: Settings and permission-prompt UI [QA] [P:4]
 
 **Goal**: The user can turn the posture on, name a base agent, see when it is on-but-not-in-effect, and
 read what a permission prompt is asking.
@@ -492,7 +497,7 @@ pattern. Settings copy must state that the setting governs **newly created sessi
 
 **Covers**: SC-1 (UI half), SC-4 (UI half), SC-8 (UI half)
 
-### Phase 4: Local secret, login code, and the exchange route [QA]
+### Phase 4: Local secret, login code, and the exchange route [QA] [P:3]
 
 **Goal**: A durable local secret exists and a one-time login code can be exchanged for an HttpOnly
 cookie. No route is gated yet — Phase 5 enforces.
@@ -721,8 +726,8 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | 0 | Pre-flight — preconditions, anchors, harness, rule set | Not started | Step 0 STOPs if the parity plan is not complete |
 | 1 | Derived-agent generation and settings | Not started | Atomic write; textual injection; no YAML dep |
 | 2 | Mode wiring and frame enrichment | Not started | |
-| 3 | Settings and permission-prompt UI | Not started | Includes `transcript-renderer.js` |
-| 4 | Local secret, login code, exchange | Not started | |
+| 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
+| 4 | Local secret, login code, exchange `[P:3]` | Not started | Parallel-eligible with 3 |
 | 5 | Default-deny gate and the three doors | Not started | |
 | 6 | Retire `_ACP_TOKEN`, add `ACP_AVAILABLE` | Not started | Ordered: repoint before delete |
 | 7 | Live verification and documentation | Not started | Requires a user-performed restart |
@@ -740,9 +745,13 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
                   |
               Phase 2  mode wiring + frame enrichment        (acp.py)
                   |
-              Phase 3  UI: settings + prompt rendering       (templates + static)
-                  |
-              Phase 4  local secret + login code + exchange  (config.py + web.py)
+        +---------+---------+
+        |                   |
+    Phase 3 [P:4]       Phase 4 [P:3]     (templates+static  vs  config.py+web.py: no overlap)
+    UI: settings        local secret
+    + prompt render     + login code
+        |                   |
+        +---------+---------+
                   |
               Phase 5  default-deny gate + three doors
                   |
@@ -751,8 +760,12 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
               Phase 7  live verification + docs
 ```
 
-No phase pair is parallel-eligible: every pair either shares `tests/test_web.py`, shares a template, or
-consumes the previous phase's output.
+**Parallel eligibility**: exactly one pair qualifies. **Phases 3 and 4 are `[P:4]` / `[P:3]`** — Phase 3's scope
+is templates plus `static/` plus `acp_page.test.mjs`; Phase 4's is `config.py`, `web.py` and
+`tests/test_web.py`. No shared file, and Phase 4 consumes nothing Phase 3 produces. Every other pair
+either shares `tests/test_web.py` (2 and 4), shares a template (3 and 6), or consumes the previous
+phase's output. *An earlier draft asserted no pair was eligible; that was false against the plan's own
+file scopes — the `parallel-symmetry` check passed only because no annotations existed to verify.*
 
 ## Backwards Compatibility
 
@@ -873,7 +886,25 @@ decision. Arch-7's premise was partly incorrect and is corrected inline above ra
 stated.
 
 **Coverage note**: one review cycle was run, per the user's instruction. The auto-fix loop's normal
-re-review pass was therefore not performed — the fixes above are unreviewed by a second cycle.
+re-review pass was therefore not performed — **the 33 resolutions above are unreviewed by a second
+cycle**. Phase 0 is the phase most likely to still carry an error, because it absorbed the most new
+text (step 0, the harness contract, the bypass tests, and the rule-set fallback all landed in this
+pass).
+
+### 2026-09-21 — Post-commit corrections (author self-check)
+
+Two defects found in the resolutions themselves, after the plan was committed as `d08efdc`. Both are
+the class a second review cycle exists to catch: a fix that introduces a new claim.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| PC-1 | Medium | The Dependency Graph asserted no phase pair was parallel-eligible, which is false against the plan's own file scopes | Fixed — Phases 3 and 4 annotated `[P:4]`/`[P:3]`; the claim now names the one eligible pair and why the others are not |
+| PC-2 | Medium | Phase 0's empirical rule-set fallback said "with the user's consent" as though approval existed; no turn granted it | Fixed — rewritten as an explicit STOP-and-ask, with the blast radius (every concurrent kiro-cli session) stated |
+| PC-3 | Low | PC-1's first fix used `[P:1]` meaning "group 1"; the grammar is `[P:<partner phase>]` and qvalidate rejected it | Fixed — corrected to `[P:4]`/`[P:3]`; the guard caught a defect introduced while fixing another |
+
+PC-1 also shows a limit of the mechanical check: `parallel-symmetry` passed on the committed version
+**because no annotations existed to verify**, not because the no-eligible-pairs claim was true. A
+guard that validates declared annotations cannot catch an annotation that should have been declared.
 
 ## Harness Improvement Opportunities
 
