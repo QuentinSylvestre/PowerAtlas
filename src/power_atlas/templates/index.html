@@ -1230,6 +1230,28 @@ function dashHandle(frame){
     handleCommandsExecuteResult(payload);
     return;
   }
+  if (type === 'compaction') {
+    // Minimal compaction feedback (Phase 2 review fix): the dashboard's
+    // palette makes /compact invokable here for the first time, and without
+    // this the server's compaction frame had no case at all -- zero visible
+    // feedback. This intentionally mirrors only the status->message->
+    // addSystemMessage(txt) portion of acp.html's own `compaction` handler,
+    // not the <details class="acp-compaction-details">/recap block that
+    // follows it there -- that rich recap UI is explicitly out of this
+    // plan's scope (see the plan's "Scope boundaries & non-goals": it stays
+    // /acp-only). payload.summary/payload.error are ignored on purpose,
+    // matching acp.html's own security note that payload.error is agent-
+    // controlled and never rendered. addSystemMessage is a bare global
+    // provided by transcript-renderer.js (loaded before this script on both
+    // pages), the same function acp.html's own compaction handler calls.
+    var compactionStatus = (payload && payload.status) || '';
+    var compactionTxt = compactionStatus === 'started' ? 'Compacting conversation context…'
+                       : compactionStatus === 'completed' ? 'Context compacted.'
+                       : compactionStatus === 'failed' ? 'Compaction failed.'
+                       : null;
+    if (compactionTxt) addSystemMessage(compactionTxt);
+    return;
+  }
   if (type === 'chunk' || type === 'rendered' || type === 'tool_call' || type === 'tool_update') {
     renderTranscriptFrame(frame);
     return;

@@ -11286,6 +11286,22 @@ check("dashboard: a commands_options_result frame is a silent no-op", () => {
   assertEqual(p.el("dashCmdDropdown").hidden, true, "no dropdown state should change");
 });
 
+check("dashboard: a compaction frame calls addSystemMessage with the status-mapped text (Phase 2 review fix)", () => {
+  // Phase 2's palette makes /compact invokable on the dashboard for the
+  // first time; before this fix, dashHandle() had no case for 'compaction'
+  // at all, so triggering it gave zero visible feedback. Minimal ack only --
+  // the rich recap UI (.acp-compaction-details/.acp-compaction-recap) stays
+  // /acp-only per the plan's scope boundaries.
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "compaction", sessionId: "sess-1",
+    payload: { status: "completed", summary: "should be ignored" },
+  });
+  assert(p.systemMessages.includes("Context compacted."),
+    "a completed compaction frame must call addSystemMessage('Context compacted.'); got: " +
+    JSON.stringify(p.systemMessages));
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {

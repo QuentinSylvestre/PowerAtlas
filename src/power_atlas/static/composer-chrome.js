@@ -315,22 +315,29 @@ var cmdSend = null;
 // as bare globals from this file — the same IIFE boundary this file's header
 // comment documents for `sessionId`/`replaying`. The dashboard passes
 // dashRefreshSendButton (it has no textarea auto-grow yet, Phase 2 of the
-// dashboard/ACP feature-parity plan). Optional — defaults to a no-op so a
-// host page that supplies nothing still works.
-var cmdOnPromptChanged = function () {};
+// dashboard/ACP feature-parity plan). REQUIRED, same as `getSessionId`/
+// `send` above — see the file header for why a raw value/bare global cannot
+// substitute for an accessor. This used to default to a silent no-op
+// (`refs.onPromptChanged || function(){}`) when a caller omitted it, which
+// would have degraded to "composer controls looked stale after a skill
+// insertion" with no diagnostic; omitting the fallback here means a future
+// caller that forgets this accessor gets a loud TypeError at the first
+// prompt-changing call instead, the same failure mode every other REQUIRED
+// accessor in this file already has (Phase 2 review fix).
+var cmdOnPromptChanged = null;
 
-/** Called once by each loading page's own inline script. `getSessionId` and
- *  `send` are REQUIRED — see the file header for why a raw value/bare global
- *  cannot substitute for either. Also attaches the dropdown's mousedown
- *  delegate (mirrors initSidCopyDom()'s own click-listener attachment,
- *  Phase 1 — DOM listeners this module owns are wired here, once, rather
- *  than by each host page). */
+/** Called once by each loading page's own inline script. `getSessionId`,
+ *  `send`, and `onPromptChanged` are REQUIRED — see the file header for why
+ *  a raw value/bare global cannot substitute for any of them. Also attaches
+ *  the dropdown's mousedown delegate (mirrors initSidCopyDom()'s own
+ *  click-listener attachment, Phase 1 — DOM listeners this module owns are
+ *  wired here, once, rather than by each host page). */
 function initCommandPaletteDom(refs) {
   cmdDropdownEl = refs.cmdDropdownEl;
   cmdPromptInput = refs.promptInput;
   cmdGetSessionId = refs.getSessionId;
   cmdSend = refs.send;
-  cmdOnPromptChanged = refs.onPromptChanged || function () {};
+  cmdOnPromptChanged = refs.onPromptChanged;
 
   // Delegated mousedown on the dropdown container: fires before the blur
   // event on the textarea, so the dropdown is not hidden before the click
@@ -571,7 +578,14 @@ function resetCommandPalette() {
  *  module) already rendered "Compacting conversation context...". Rendering
  *  both gave a palette-triggered compaction two "Compacting..." rows instead
  *  of one; the typed `/compact` prompt does not go through this path at all,
- *  so it never had the duplicate. */
+ *  so it never had the duplicate.
+ *
+ *  Incoming dependency (Phase 2 review fix, the mirror image of this file's
+ *  own header comment on outgoing globals): `addSystemMessage` below is not
+ *  defined in this file — it is a bare global provided by
+ *  transcript-renderer.js, which must therefore load before composer-chrome.js
+ *  on any host page (both acp.html and index.html already order their
+ *  `<script src>` tags this way). */
 function handleCommandsExecuteResult(payload) {
   hideCommandDropdown();
   var res = payload && payload.result;
