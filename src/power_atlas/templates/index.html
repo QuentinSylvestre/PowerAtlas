@@ -1100,7 +1100,15 @@ dashPromptInput.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
     if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
   }
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Fix 6 (review, Phase 3 fix cycle): !e.ctrlKey && !e.altKey added to match
+  // acp.html's own equivalent plain-Enter-sends condition (acp.html:5863,
+  // `!ev.shiftKey && !ev.ctrlKey && !ev.altKey` -- its further
+  // `&& !isTouchDevice` is not ported, since index.html has no such
+  // variable). Without these, Ctrl+Enter/Alt+Enter -- often bound to other
+  // browser/OS shortcuts or muscle-memory "definitely send" combos -- were
+  // being intercepted as a plain send here instead of reaching whatever
+  // else was supposed to handle them.
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey) {
     e.preventDefault();
     // Phase 3 (SC5): during a turn with text present, Enter dispatches to
     // Queue or Steer (whichever is selected) instead of the idle send path
@@ -1142,7 +1150,14 @@ dashSendBtn.addEventListener('click', dashSendPrompt);
 // through composer-chrome.js.
 dashStopBtn.addEventListener('click', function () {
   if (!_dashAttachedSid || !_dashTurnActive) return;
-  if (!send('cancel', {}, _dashAttachedSid)) return;
+  if (!send('cancel', {}, _dashAttachedSid)) {
+    // Fix 7 (review, Phase 3 fix cycle): mirrors dashSendPrompt()'s own
+    // not-connected toast for the same class of failure -- previously this
+    // silently logged to the debug panel only, with nothing telling the user
+    // their Stop click did nothing.
+    showToast('<div class="toast toast-error">Not connected — nothing sent<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+    return;
+  }
   // Trigger a rail refresh so the dot state updates promptly rather than
   // waiting for the polling cycle -- mirrors acp.html's own railRefreshSoon()
   // call after cancel.
@@ -1231,6 +1246,11 @@ dashSendModeBtn.addEventListener('click', function () {
       dashModeToggle.disabled = false;
       _dashSteerPending = null;
       dashRefreshComposerControls();
+      // Fix 7 (review, Phase 3 fix cycle): mirrors dashSendPrompt()'s own
+      // not-connected toast for the same class of failure -- previously this
+      // silently logged to the debug panel only, with nothing telling the
+      // user their steer text was never sent.
+      showToast('<div class="toast toast-error">Not connected — nothing sent<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
       return;
     }
     // Do NOT show a "sent" note here -- wait for steer_ack from the server,
@@ -1341,6 +1361,13 @@ function dashCloseIfAbandoned(){
   }
   _dashSteerPending = null;
   setDashSteerStatus('');
+  // Fix 5 (review, Phase 3 fix cycle): currently harmless -- both call sites
+  // (a row-click switch, and pagehide) hide the composer right after this
+  // runs -- but explicit for consistency with session_closed/agent_died/
+  // error, which all reset this. A future caller of dashCloseIfAbandoned()
+  // that doesn't immediately hide the composer would otherwise inherit a
+  // disabled textbox with no visible reason why.
+  dashPromptInput.disabled = false;
   // The sid/copy widget belonged to the session just walked away from —
   // mirrors acp.html's own reset at the equivalent session-switch point
   // (composer-chrome.js's renderSidLabel() blanks the widget with no
@@ -1395,6 +1422,19 @@ function dashHandle(frame){
       return;
     }
     if (sid !== _viewingSid) return;
+    // Fix 1 (review, Phase 3 fix cycle): a `session` frame only ever arrives
+    // as a private reply to THIS connection's own subscribe/load/new request
+    // (acp.py's _handle_subscribe/_handle_load/_handle_new all `conn.send`,
+    // never broadcast) -- so a queued prompt still set at this point cannot
+    // belong to the turn this attach is about to observe; the legitimate
+    // Queue-mode flush already happens at `meta turn:end` before a fresh
+    // `session` frame for the same sid would arrive. Left over here, it is
+    // stale -- most reachably, a queue from a pre-crash attach to this same
+    // session id that agent_died's own reset (below) didn't clear before
+    // this reattach's `session` frame landed -- and must not survive into
+    // this fresh attach's turn lifecycle and auto-send into the wrong turn.
+    _dashQueuedPrompt = null;
+    _dashQueuedPromptSession = null;
     _dashAttachedSid = sid;
     _dashTurnActive = !!payload.turnActive;
     _dashLoadingSid = null;
@@ -1545,6 +1585,17 @@ function dashHandle(frame){
     return;
   }
   if (type === 'steer_ack') {
+    // Fix 4 (review, Phase 3 fix cycle): steer_ack is a private reply to the
+    // steering connection only (acp.py's _handle_steer does `conn.send`, not
+    // a broadcast), so if no steer is pending locally this frame cannot
+    // legitimately correspond to anything this page did -- most reachably, a
+    // late ack for a steer this page already abandoned (dashCloseIfAbandoned()
+    // clears _dashSteerPending) followed by a reattach to the SAME session
+    // id, which still passes the sid === _viewingSid guard above. Treat it
+    // as stale and ignore it, mirroring this file's own silent-return
+    // convention for a stale frame (the sid/_viewingSid guard above) rather
+    // than adding a new logLine call this file has no precedent for here.
+    if (!_dashSteerPending) return;
     // Mirrors acp.html's own steer_ack handling (acp.html:4935-4956).
     if (payload && payload.queued === false) {
       // Steer rejected -- restore the textarea text so the user can retry.
@@ -1570,18 +1621,35 @@ function dashHandle(frame){
     // rendered as a dimmed user-band message via the shared addMessage()
     // (transcript-renderer.js), which is already textContent-only -- see
     // that function's own header comment. Mirrors acp.html:4958-4984.
+    // Fix 4 (review, Phase 3 fix cycle): unlike steer_ack above, steer_sent
+    // is a broadcast (acp.py's _handle_steer emits it via _emit(session_id,
+    // ...) to every viewer of the session, not just the sender) -- so
+    // addMessage() below stays unconditional: a steer sent from /acp or
+    // another dashboard tab must still render its band here even though
+    // _dashSteerPending is (correctly) null on this client. What is dropped
+    // is the composer-mutating `else if (dashPromptInput.value.trim() ===
+    // dashSteerText)` branch acp.html carries for this same case
+    // (acp.html:4926-4932): there, it clears the textarea once a
+    // reconnect-replayed steer_sent confirms text a WS-drop's onclose
+    // restored actually landed -- a mechanism keyed on reconnect/replay,
+    // which the dashboard does not have yet (Phase 6, SC7). Without that
+    // legitimate trigger, the only way to reach "_dashSteerPending already
+    // false, but the textarea happens to match" here is a stale broadcast
+    // from an abandoned attempt (dashCloseIfAbandoned() already cleared the
+    // flag) echoing back after a reattach to the same session id --
+    // clearing the textarea then would risk wiping text the user has since
+    // typed fresh, purely by coincidental match. Dropped rather than
+    // ported until Phase 6 gives it a real trigger to guard on.
     var dashSteerText = payload && typeof payload.text === 'string' ? payload.text : '';
     if (dashSteerText) {
       if (_dashSteerPending) {
-        // Live frame received while steer still in-flight.
+        // Live frame received while steer still in-flight (this client's own
+        // send, not a broadcast from elsewhere).
         dashPromptInput.value = '';
         dashPromptInput.disabled = false;
         dashSendModeBtn.disabled = false;
         dashModeToggle.disabled = false;
         _dashSteerPending = null;
-        dashRefreshComposerControls();
-      } else if (dashPromptInput.value.trim() === dashSteerText) {
-        dashPromptInput.value = '';
         dashRefreshComposerControls();
       }
       addMessage('steer', dashSteerText);
@@ -1729,6 +1797,14 @@ function dashHandle(frame){
       _dashSteerPending = null;
     }
     _dashStopInProgress = false;
+    // Fix 1 (review, Phase 3 fix cycle): a queued prompt belonged to the
+    // turn this now-dead agent was running -- neither it nor its recorded
+    // session survive the crash. Without this, a same-session reattach
+    // (the `session` frame case above now also clears it, defense-in-depth)
+    // followed by an unrelated later turn's `meta turn:end` would silently
+    // auto-send this stale pre-crash text into the wrong turn.
+    _dashQueuedPrompt = null;
+    _dashQueuedPromptSession = null;
     setDashSteerStatus('');
     _dashAttachedSid = null;
     _dashOrigin = null;
@@ -1772,8 +1848,27 @@ function dashHandle(frame){
     // below) would otherwise leave the mode controls disabled forever, since
     // steer_ack never arrives for a send refused before the agent
     // acknowledged it.
-    if (!_dashTurnActive) _dashStopInProgress = false;
-    if (_dashSteerPending) {
+    // Fix 2 (review, Phase 3 fix cycle): cleared unconditionally, not just
+    // when _dashTurnActive already reads false -- that condition only ever
+    // held in the state Stop wouldn't have been clickable in to begin with.
+    // The realistic refusal case (the server refuses `cancel` via this very
+    // `error` frame while _dashTurnActive is still true) used to leave this
+    // flag stuck true forever, since no other frame was coming to clear it
+    // and dashStopBtn.disabled stays true while it is set.
+    _dashStopInProgress = false;
+    // Fix 3 (review, Phase 3 fix cycle): several server-side error_frame()
+    // calls omit sessionId entirely (bad_json/bad_envelope/bad_payload for a
+    // frame unrelated to this steer -- acp.py's error_frame(code, message)
+    // two-arg form) and so pass the top-level `if (sid && sid !==
+    // _viewingSid) return;` guard above unchallenged (sid is falsy there,
+    // so the check never fires) -- reaching this restore block regardless
+    // of whether the error is even about the currently-attached session's
+    // steer. A steer is only ever pending for the session this page is
+    // currently viewing, so require the error's own sid to match it before
+    // restoring/re-enabling anything, mirroring the sid/_viewingSid guard
+    // every other dashHandle() case already applies before acting on
+    // session state.
+    if (_dashSteerPending && sid && sid === _viewingSid) {
       dashPromptInput.value = _dashSteerPending;
       dashPromptInput.disabled = false;
       dashSendModeBtn.disabled = false;

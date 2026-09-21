@@ -11947,6 +11947,211 @@ check("Enter during a turn in queue mode dispatches to sendModeBtn (queues the p
   assertEqual(p.dashSendPromptCalls.length, 0, "Enter during a turn must not fall through to dashSendPrompt");
 });
 
+// ---------------------------------------------------------------------------
+// Phase 3 review-fix cycle: 7 findings from independent Security/Senior-
+// engineer/Reliability review of commit bea1869. Each check below is named
+// for the fix it covers; see index.html's own "Fix N (review, Phase 3 fix
+// cycle)" comments at each corresponding edit site.
+// ---------------------------------------------------------------------------
+
+check("Fix 1: agent_died clears a pending queued prompt", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "queued before the crash";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "crashed" } });
+  assertEqual(p.sandbox._dashQueuedPrompt, null, "agent_died must clear _dashQueuedPrompt");
+  assertEqual(p.sandbox._dashQueuedPromptSession, null, "agent_died must clear _dashQueuedPromptSession");
+});
+
+check("Fix 1: a session frame for the currently-viewed sid clears a leftover queued prompt", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  // Simulates the state agent_died's own clear (checked separately above)
+  // did NOT run, or ran on a different code path -- this check isolates the
+  // `session`-frame clear alone, so it fails on its own if that specific
+  // clear is removed, independent of the agent_died clear.
+  p.sandbox._dashQueuedPrompt = "stale from a previous attach";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\repo", turnActive: false },
+  });
+  assertEqual(p.sandbox._dashQueuedPrompt, null,
+    "a session frame for the currently-viewed sid must clear a leftover queued prompt");
+  assertEqual(p.sandbox._dashQueuedPromptSession, null,
+    "a session frame for the currently-viewed sid must clear the queued prompt's recorded session too");
+});
+
+check("Fix 1 regression: queue -> agent_died -> reattach to the same sid -> turn:end must not auto-send stale text", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  // Attach to sess-1 with a turn already running, queue a prompt.
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\repo", turnActive: true },
+  });
+  p.sandbox.dashApplySendMode("queue");
+  p.sandbox.dashPromptInput.value = "queued before crash";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p.sandbox._dashQueuedPrompt, "queued before crash", "sanity check -- prompt is queued");
+  // The agent process dies mid-turn.
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "crashed" } });
+  // The user reattaches to the SAME session id (a fresh `session` frame).
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\repo", turnActive: false },
+  });
+  // An unrelated later turn on this same reattached session ends.
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "start" } });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(p.dashSendPromptCalls.length, 0,
+    "a stale pre-crash queued prompt must not auto-send into an unrelated later turn after a same-sid reattach");
+});
+
+check("Fix 2: error frame clears _dashStopInProgress and re-enables Stop even while the turn is still active", () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", dashTurnActive: true, dashStopInProgress: true, viewingSid: "sess-1",
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashStopBtn.disabled = true;
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "internal_error", message: "cancel refused" },
+  });
+  assertEqual(p.sandbox._dashStopInProgress, false,
+    "a refused cancel must clear _dashStopInProgress even while _dashTurnActive is still true -- " +
+    "the realistic refusal case, and the one the old `if (!_dashTurnActive) ...` guard missed");
+  assertEqual(p.sandbox.dashStopBtn.disabled, false,
+    "Stop must be re-enabled by the same error frame's dashRefreshComposerControls() call");
+});
+
+check("Fix 3: an error frame with no sessionId does not restore a pending steer for the viewed session", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox._dashSteerPending = "important steer";
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  // Mirrors acp.py error_frame() calls that omit sessionId entirely (e.g.
+  // bad_json/bad_envelope/bad_payload for a frame unrelated to this steer).
+  p.sandbox.dashHandle({ type: "error", sessionId: null, payload: { code: "bad_json", message: "Frame is not valid JSON." } });
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "a sid-less error unrelated to this session must not restore steer text into the composer");
+  assertEqual(p.sandbox._dashSteerPending, "important steer",
+    "a sid-less error must not clear _dashSteerPending -- the real steer is still in flight");
+  // Note: dashPromptInput.disabled still ends up false here, via the generic
+  // refusal tail further down in the same `error` case (unconditional
+  // `dashPromptInput.disabled = false;`, pre-existing and out of Fix 3's own
+  // scope -- Fix 3 only concerns the steer-text-restore block above it) --
+  // not asserted either way here, since that behaviour is unchanged by this
+  // fix cycle.
+});
+
+check("Fix 3: an error frame carrying the viewed session's own sid still restores pending steer text", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "important steer";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  p.sandbox.dashHandle({ type: "error", sessionId: "sess-1", payload: { code: "internal_error", message: "steer failed" } });
+  assertEqual(p.sandbox.dashPromptInput.value, "important steer",
+    "an error frame whose sid matches the viewed session must still restore the steer text");
+  assertEqual(p.sandbox._dashSteerPending, null, "the matching-sid restore path must still clear _dashSteerPending");
+});
+
+check("Fix 4: a stale steer_ack with no local pending steer is ignored", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  // Simulates leftover disabled state from an abandoned attempt reattached
+  // to the same session id -- _dashSteerPending is null (already cleared by
+  // dashCloseIfAbandoned()), but this late ack still carries the same sid.
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashHandle({ type: "steer_ack", sessionId: "sess-1", payload: { queued: true } });
+  assertEqual(p.sandbox.dashPromptInput.disabled, true,
+    "a steer_ack with no local _dashSteerPending must be treated as stale and ignored, not act on composer state");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, true, "a stale steer_ack must not touch the send-mode button either");
+});
+
+check("Fix 4: a live steer_ack (local pending steer set) still re-enables controls", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "steer text";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  p.sandbox.dashHandle({ type: "steer_ack", sessionId: "sess-1", payload: { queued: true } });
+  assertEqual(p.sandbox.dashPromptInput.disabled, false,
+    "steer_ack must still re-enable the textarea for a genuine, locally in-flight steer");
+  assertEqual(p.sandbox._dashSteerPending, null, "_dashSteerPending must still clear for a genuine steer_ack");
+});
+
+check("Fix 4: a stale steer_sent does not clear coincidentally-matching composer text, but the band still renders", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  // No local steer pending (as if abandoned then reattached to the same
+  // sid) -- the user has since typed fresh text that happens to coincide
+  // with the broadcast steer text.
+  p.sandbox.dashPromptInput.value = "do X";
+  p.sandbox.dashHandle({ type: "steer_sent", sessionId: "sess-1", payload: { text: "do X" } });
+  assertEqual(p.sandbox.dashPromptInput.value, "do X",
+    "a steer_sent with no local pending steer must not clear composer text merely because it happens to match");
+  const call = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assertEqual(call.role, "steer",
+    "the band must still render -- steer_sent is a broadcast frame other viewers (e.g. /acp) rely on");
+  assertEqual(call.text, "do X", "the rendered band text must match the broadcast steer text");
+});
+
+check("Fix 5: dashCloseIfAbandoned resets dashPromptInput.disabled", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashOrigin = "joined"; // skips the send('close', ...) arm
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashCloseIfAbandoned();
+  assertEqual(p.sandbox.dashPromptInput.disabled, false,
+    "dashCloseIfAbandoned must reset dashPromptInput.disabled, for consistency with " +
+    "session_closed/agent_died/error, which all reset it explicitly");
+});
+
+check("Fix 6: Ctrl+Enter is not intercepted as a plain send", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "some text";
+  let prevented = false;
+  p.sandbox.dashPromptInput.dispatch("keydown", { key: "Enter", ctrlKey: true, preventDefault: () => { prevented = true; } });
+  assertEqual(prevented, false, "Ctrl+Enter must not be swallowed by the plain-Enter-sends handler");
+  assertEqual(p.dashSendPromptCalls.length, 0, "Ctrl+Enter must not trigger dashSendPrompt");
+});
+
+check("Fix 6: Alt+Enter is not intercepted as a plain send", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "some text";
+  let prevented = false;
+  p.sandbox.dashPromptInput.dispatch("keydown", { key: "Enter", altKey: true, preventDefault: () => { prevented = true; } });
+  assertEqual(prevented, false, "Alt+Enter must not be swallowed by the plain-Enter-sends handler");
+  assertEqual(p.dashSendPromptCalls.length, 0, "Alt+Enter must not trigger dashSendPrompt");
+});
+
+check("Fix 6: a plain Enter (no modifiers) still sends", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "some text";
+  p.sandbox.dashPromptInput.dispatch("keydown", { key: "Enter", preventDefault: () => {} });
+  assertEqual(p.dashSendPromptCalls.length, 1, "a plain Enter with no modifier keys must still dispatch to dashSendPrompt");
+});
+
+check("Fix 7: a failed Stop/cancel send shows a not-connected toast", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  const toasts = [];
+  p.sandbox.showToast = (html) => toasts.push(html);
+  p.sandbox.send = () => false;
+  p.sandbox.dashStopBtn.dispatch("click");
+  assertEqual(toasts.length, 1, "a failed cancel send must show a toast, mirroring dashSendPrompt()'s own pattern");
+  assert(/Not connected/.test(toasts[0]), "the toast must explain the send failed for lack of a connection");
+});
+
+check("Fix 7: a failed Steer send shows a not-connected toast", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  const toasts = [];
+  p.sandbox.showToast = (html) => toasts.push(html);
+  p.sandbox.send = () => false;
+  p.sandbox.dashPromptInput.value = "inject this";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "a failed send must not leave the textarea disabled");
+  assertEqual(p.sandbox._dashSteerPending, null, "a failed send must clear the pending-steer state");
+  assertEqual(toasts.length, 1, "a failed steer send must show a toast, mirroring dashSendPrompt()'s own pattern");
+  assert(/Not connected/.test(toasts[0]), "the toast must explain the send failed for lack of a connection");
+});
+
 let failed = 0;
 for (const { name, fn } of checks) {
   try {
