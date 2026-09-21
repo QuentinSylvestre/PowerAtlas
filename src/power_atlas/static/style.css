@@ -1494,25 +1494,101 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
   display: block;
   flex-shrink: 0;
 }
-/* Send: accent fill circle when enabled; clean and distinct from other buttons. */
-#acpSend:not(:disabled).acp-icon-btn {
+/* Send: accent fill circle when enabled; clean and distinct from other buttons.
+   #dashSendBtn added dashboard/ACP feature-parity plan, Phase 3 -- Send is
+   now hidden (not just disabled) during a turn on the dashboard too, the
+   same visual language as /acp's own Send/Stop pair. */
+#acpSend:not(:disabled).acp-icon-btn, #dashSendBtn:not(:disabled).acp-icon-btn {
   background: var(--accent, #6c8cff);
   border-color: var(--accent, #6c8cff);
   color: #fff;
 }
-#acpSend:not(:disabled).acp-icon-btn:hover {
+#acpSend:not(:disabled).acp-icon-btn:hover, #dashSendBtn:not(:disabled).acp-icon-btn:hover {
   background: #8aa5ff;
   border-color: #8aa5ff;
   color: #fff;
 }
-/* Stop: red fills on hover, matching the destructive pattern. */
-#acpStop.acp-icon-btn:hover {
+/* Stop: red fills on hover, matching the destructive pattern. #dashStop added
+   dashboard/ACP feature-parity plan, Phase 3 (SC5). */
+#acpStop.acp-icon-btn:hover, #dashStop.acp-icon-btn:hover {
   background: rgba(248,113,113,0.12);
 }
 /* Prevent .acp-icon-btn's `display: inline-flex` from overriding the UA
    `display: none` that [hidden] sets — author rules always beat UA rules.
-   The same escape is applied to other [hidden] flex/grid elements in this file. */
-#acpSend[hidden], #acpStop[hidden] { display: none; }
+   The same escape is applied to other [hidden] flex/grid elements in this
+   file. #dashSendBtn/#dashStop added dashboard/ACP feature-parity plan,
+   Phase 3 -- without this pair the Stop button would render during idle time
+   and Send would never hide during a turn, since .acp-icon-btn's own
+   `display: inline-flex` (an author rule) otherwise beats the UA stylesheet's
+   `[hidden] { display: none }`. */
+#acpSend[hidden], #acpStop[hidden], #dashSendBtn[hidden], #dashStop[hidden] { display: none; }
+/* ---- two-button + mode-select composer row --------------------------------
+   Migrated from acp.html's inline <style nonce> block (dashboard/ACP
+   feature-parity plan, Phase 3, SC5), the same move Phase 2 made for
+   .acp-cmd-dropdown/.acp-cmd-* -- both pages share one class-based ruleset
+   rather than /acp keeping a page-scoped, nonce-gated copy. No selector was
+   renamed in the move: #acpQueueSteer/#acpModeToggle/#acpModeMenu/
+   #acpModeOptSteer/#acpModeOptQueue and #dashQueueSteer/#dashModeToggle/
+   #dashModeMenu/#dashModeOptSteer/#dashModeOptQueue already shared the
+   class-based .acp-queue-steer/.acp-mode-*/.sr-only selectors below, not
+   their own ids -- the ids stay on both pages' elements for JS lookups and
+   ARIA wiring, just carrying no CSS of their own. */
+/* Queue/Steer row: action button + mode-picker button, both 34×34 standalone
+   squares separated by a 4px gap. Wrapper visibility is unchanged --
+   refreshComposerControls()/dashRefreshComposerControls() still toggle it. */
+.acp-queue-steer { display: flex; flex-direction: row; gap: 4px; align-items: stretch; position: relative; }
+.acp-queue-steer[hidden] { display: none; }
+/* Custom mode picker — standalone square matching the rail settings button
+   pattern; [aria-expanded="true"] highlights with accent color. */
+.acp-mode-toggle {
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-muted, #8b95b0);
+}
+.acp-mode-toggle[aria-expanded="true"],
+.acp-mode-toggle.acp-icon-btn[aria-expanded="true"] {
+  border-color: var(--accent, #6c8cff);
+  color: var(--accent, #6c8cff);
+}
+.acp-mode-toggle:focus-visible {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: -2px;
+}
+.acp-mode-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  background: var(--surface, #1e2030);
+  border: 1px solid var(--border, #2d3150);
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+  min-width: 80px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.acp-mode-menu[hidden] { display: none; }
+.acp-mode-option {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: var(--text, #c8d0e7);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.acp-mode-option:hover,
+.acp-mode-option[aria-current="true"] {
+  background: var(--surface-hover, #252840);
+  color: var(--text, #c8d0e7);
+}
+.acp-mode-option:focus-visible {
+  outline: 2px solid var(--accent, #6c8cff);
+  outline-offset: -2px;
+}
+/* Screen-reader-only visually hidden utility — used for aria-live regions */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 /* The transport log is a debugging strip, and 120 px of it on an 844 px phone
    is a sixth of the screen taken from the conversation — so it starts
    collapsed (`hidden` in the markup; acp.html toggles it and remembers the

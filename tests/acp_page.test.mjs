@@ -10397,14 +10397,52 @@ const DASH_PICKER_NAMES = [
   "dashPickerRenderKeepRow", "dashPickerCreate", "dashPickerRunPending",
   "dashPickerInitTaskMode",
 ];
-const DASH_HANDLE_NAMES = ["dashCloseIfAbandoned", "dashHandle"];
+const DASH_HANDLE_NAMES = [
+  "dashCloseIfAbandoned", "dashHandle",
+  // SC5 (Queue/Steer + Stop, dashboard/ACP feature-parity plan Phase 3) --
+  // guards against the frame cases silently moving out of dashHandle.
+  "steer_ack", "steer_sent", "steer_status",
+];
 const DASH_CMD_PALETTE_NAMES = [
   "initCommandPaletteDom", "showCommandDropdown", "hideCommandDropdown",
   "isCommandDropdownVisible", "moveCommandSelection", "confirmCommandSelection",
 ];
+// SC5 (Queue/Steer + Stop, dashboard/ACP feature-parity plan Phase 3) -- a
+// duplicated, not extracted, feature (index.html-only, not composer-chrome.js).
+const DASH_COMPOSER_CONTROLS_NAMES = [
+  "dashRefreshComposerControls", "setDashSteerStatus", "dashApplySendMode",
+  "DASH_SEND_MODE_KEY",
+];
+const DASH_QUEUE_STEER_WIRING_NAMES = [
+  "dashStopBtn.addEventListener", "_dashCloseModeMenu", "dashSendModeBtn.addEventListener",
+];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+
+  // Composer-controls region (SC5, dashboard/ACP feature-parity plan Phase
+  // 3): from dashRefreshComposerControls's declaration (which governs
+  // Send/Stop/Queue+Steer's visible/enabled state) through the
+  // initCommandPaletteDom() call that follows it (exclusive -- that call is
+  // the start of cmdPaletteRegion below). Must run BEFORE cmdPaletteRegion:
+  // that region's own initCommandPaletteDom({onPromptChanged:
+  // dashRefreshComposerControls}) call reads dashRefreshComposerControls as
+  // a plain identifier value immediately, at harness-setup time, so it has
+  // to already exist as a real function by then -- exactly why this used to
+  // be stubbed as a no-op here before Phase 3 needed its real Stop/
+  // Queue+Steer visibility logic under test.
+  const controlsFrom = src.indexOf("function dashRefreshComposerControls");
+  if (controlsFrom < 0) throw new Error("index.html no longer defines dashRefreshComposerControls");
+  const cmdFrom = src.indexOf("initCommandPaletteDom({");
+  if (cmdFrom < 0) throw new Error("index.html no longer calls initCommandPaletteDom");
+  if (cmdFrom < controlsFrom) throw new Error("initCommandPaletteDom now precedes dashRefreshComposerControls");
+  const composerControlsRegion = src.slice(controlsFrom, cmdFrom);
+  for (const name of DASH_COMPOSER_CONTROLS_NAMES) {
+    if (!composerControlsRegion.includes(name)) {
+      throw new Error(
+        `the extracted composer-controls region does not contain ${name}; it has moved`);
+    }
+  }
 
   // Command-palette wiring region (SC1, dashboard/ACP feature-parity plan
   // Phase 2): from the initCommandPaletteDom() call through the end of the
@@ -10414,8 +10452,6 @@ function dashPickerSource() {
   // logic (the `/` intercept, arrow-key navigation, Enter/Tab confirm) that
   // must be exercised as written, not as re-described. Comes earlier in the
   // file than dashHandle, so it is extracted and run first.
-  const cmdFrom = src.indexOf("initCommandPaletteDom({");
-  if (cmdFrom < 0) throw new Error("index.html no longer calls initCommandPaletteDom");
   const cmdTo = src.indexOf("dashSendBtn.addEventListener('click', dashSendPrompt);", cmdFrom);
   if (cmdTo < 0) throw new Error("index.html's composer wiring section has moved");
   const cmdPaletteRegion = src.slice(cmdFrom, cmdTo);
@@ -10423,6 +10459,21 @@ function dashPickerSource() {
     if (!cmdPaletteRegion.includes(name)) {
       throw new Error(
         `the extracted command-palette region does not contain ${name}; it has moved`);
+    }
+  }
+
+  // Queue/Steer + Stop click-handler wiring region (SC5, dashboard/ACP
+  // feature-parity plan Phase 3): from immediately after dashSendBtn's own
+  // click wiring (cmdTo, above) through dashMaybeAttach's declaration
+  // (exclusive). Real source, not a re-typed stand-in, for the same
+  // keyboard/click-dispatch reason cmdPaletteRegion is one.
+  const queueSteerTo = src.indexOf("function dashMaybeAttach", cmdTo);
+  if (queueSteerTo < 0) throw new Error("index.html no longer defines dashMaybeAttach after the composer wiring");
+  const queueSteerWiringRegion = src.slice(cmdTo, queueSteerTo);
+  for (const name of DASH_QUEUE_STEER_WIRING_NAMES) {
+    if (!queueSteerWiringRegion.includes(name)) {
+      throw new Error(
+        `the extracted queue/steer wiring region does not contain ${name}; it has moved`);
     }
   }
 
@@ -10460,11 +10511,11 @@ function dashPickerSource() {
     }
   }
 
-  return { cmdPaletteRegion, handleRegion, pickerRegion };
+  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, handleRegion, pickerRegion };
 }
 
 function loadDashPicker(opts = {}) {
-  const { cmdPaletteRegion, handleRegion, pickerRegion } = dashPickerSource();
+  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, handleRegion, pickerRegion } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10514,24 +10565,69 @@ function loadDashPicker(opts = {}) {
   // cmdPaletteRegion below) looks this up by id.
   byId.set("dashCmdDropdown", new El("div"));
   byId.get("dashCmdDropdown").hidden = true;
+  // Queue/Steer + Stop DOM refs (SC5, dashboard/ACP feature-parity plan
+  // Phase 3) -- pre-set exactly like dashComposerEl/dashPromptInput/
+  // dashSendBtn below rather than extracted from real
+  // `document.getElementById(...)` source lines: dashRefreshComposerControls/
+  // dashApplySendMode (composerControlsRegion) and the click wiring
+  // (queueSteerWiringRegion) reference these by name as free variables that
+  // resolve to these sandbox globals, the same mechanism dashSendBtn etc.
+  // already rely on.
+  byId.set("dashModeLiveRegion", new El("span")); // read via document.getElementById inside dashApplySendMode
 
   const fetches = [];
   const sentFrames = [];
   const dashSendPromptCalls = [];
   const systemMessages = [];
+  const addMessageCalls = [];
+  // Timer stand-in for setDashSteerStatus's steering_injected auto-clear
+  // (SC5, Phase 3) -- mirrors the acp.html-side harness's own timers/
+  // setTimeout/runTimers pattern (see loadPage() above) so a check can fire
+  // the 4s clear deterministically rather than waiting on a real timer.
+  const timers = [];
+  // Backing store for the localStorage stand-in below (SC5, Phase 3) --
+  // seeded from opts.stored the same way loadPage()'s own `stored` is, and
+  // exposed on the returned harness object as `dashStored` so a check can
+  // assert on it directly.
+  const dashStoredData = { ...(opts.stored || {}) };
+  const dashSendModeBtnSrOnly = new El("span");
+  dashSendModeBtnSrOnly.className = "sr-only";
+  const dashSendModeBtnEl = new El("button");
+  dashSendModeBtnEl.appendChild(dashSendModeBtnSrOnly); // matches real markup's child <span class="sr-only">
+  const dashModeToggleEl = new El("button");
+  const dashModeMenuEl = new El("div");
+  dashModeMenuEl.hidden = true; // matches real markup's `hidden` attribute
+  const dashModeOptSteerEl = new El("button");
+  const dashModeOptQueueEl = new El("button");
+  const dashStopBtnEl = new El("button");
+  dashStopBtnEl.hidden = true; // matches real markup's `hidden` attribute
+  const dashQueueSteerElEl = new El("div");
+  dashQueueSteerElEl.hidden = true; // matches real markup's `hidden` attribute
+  const dashSteerStatusElEl = new El("div");
+  dashSteerStatusElEl.hidden = true; // matches real markup's `hidden` attribute
+  // Document-level listener tracking (SC5, Phase 3) -- the mode menu's
+  // outside-click/Esc-close wiring registers through document.addEventListener,
+  // which was a blanket no-op here through Phase 2 (nothing needed to fire a
+  // document-level listener). Mirrors loadPage()'s own docListeners Map +
+  // fireDoc() helper (this file, ~line 1123) exactly.
+  const dashDocListeners = new Map();
 
   const sandbox = {
     document: {
       createElement: (tag) => new El(tag),
       getElementById: (id) => byId.get(id) ?? null,
-      addEventListener: () => {},
+      addEventListener: (type, fn) => {
+        if (!dashDocListeners.has(type)) dashDocListeners.set(type, []);
+        dashDocListeners.get(type).push(fn);
+      },
       write: () => { throw new Error("document.write not allowed"); },
     },
     // window.addEventListener('pagehide', dashCloseIfAbandoned) -- a bare,
     // top-level call now inside the extracted handleRegion (dashCloseIfAbandoned
-    // was pulled in alongside dashHandle above). A no-op stub, same as
-    // document.addEventListener above; the harness calls dashCloseIfAbandoned
-    // directly rather than through a real pagehide event.
+    // was pulled in alongside dashHandle above). A no-op stub (unlike
+    // document.addEventListener above, which now tracks listeners for SC5's
+    // mode-menu wiring); the harness calls dashCloseIfAbandoned directly
+    // rather than through a real pagehide event.
     addEventListener: () => {},
     fetch: (url, init) => {
       fetches.push({ url, init: init || {} });
@@ -10559,11 +10655,53 @@ function loadDashPicker(opts = {}) {
     // Phase 1) -- dashHandle's widened `connected` meta case overwrites these.
     _dashImageMaxCount: 4,
     _dashImageMaxBytes: 176 * 1024,
+    // Queue/Steer + Stop state (SC5, dashboard/ACP feature-parity plan Phase
+    // 3), overridable so a check can start mid-steer/mid-queue.
+    _dashQueuedPrompt: opts.dashQueuedPrompt !== undefined ? opts.dashQueuedPrompt : null,
+    _dashQueuedPromptSession: opts.dashQueuedPromptSession !== undefined ? opts.dashQueuedPromptSession : null,
+    _dashSteerPending: opts.dashSteerPending !== undefined ? opts.dashSteerPending : null,
+    _dashStopInProgress: opts.dashStopInProgress !== undefined ? opts.dashStopInProgress : false,
+    _dashSteerStatusTimer: null,
+    dashStopBtn: dashStopBtnEl,
+    dashQueueSteerEl: dashQueueSteerElEl,
+    dashSendModeBtn: dashSendModeBtnEl,
+    dashModeToggle: dashModeToggleEl,
+    dashModeMenu: dashModeMenuEl,
+    dashModeOptSteer: dashModeOptSteerEl,
+    dashModeOptQueue: dashModeOptQueueEl,
+    dashModeOptions: [dashModeOptSteerEl, dashModeOptQueueEl],
+    dashSteerStatusEl: dashSteerStatusElEl,
+    // localStorage stand-in for railStore/railStored (composer-chrome.js) --
+    // dashApplySendMode persists the chosen send mode under DASH_SEND_MODE_KEY
+    // through these. Without a stand-in every read/write throws inside
+    // railStore/railStored's own try/catch and is silently swallowed, which
+    // would make a persistence check pass against a page that persisted
+    // nothing (same reasoning as the acp.html-side harness's own
+    // localStorage stub, loadPage() above). `dashStoredData` (declared
+    // below the sandbox literal) is what a check reads back to assert the
+    // store, mirroring loadPage()'s own `page.stored` exposure.
+    localStorage: {
+      getItem: (key) => (key in dashStoredData ? dashStoredData[key] : null),
+      setItem: (key, value) => { dashStoredData[key] = String(value); },
+      removeItem: (key) => { delete dashStoredData[key]; },
+    },
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    clearTimeout: (id) => {
+      if (id != null) {
+        const idx = timers.findIndex((_, i) => i + 1 === id);
+        if (idx !== -1) timers.splice(idx, 1);
+      }
+    },
     // Stubs for functions dashHandle and dashPickerRailAdopt call but that live
     // outside the extracted regions.
     dashComposerEl: new El("div"),
     dashPromptInput: new El("input"),
     dashSendBtn: new El("button"),
+    // Stop's click handler calls this after a successful cancel send (SC5,
+    // Phase 3) -- mirrors acp.html's own railRefreshSoon() call, stubbed the
+    // same way dashRailMergeGroup/dashRailBumpGroup/dashRenderRail below are:
+    // the picker-region tests never populate real rail state for it to act on.
+    dashRailRefreshSoon: () => {},
     dashConnect: (cb) => { if (cb) cb(); },
     // Records every outgoing frame (default `sentOf()` below reads this).
     // The command-palette region's initCommandPaletteDom() call captures
@@ -10577,16 +10715,38 @@ function loadDashPicker(opts = {}) {
     send: (type, payload, sid) => { sentFrames.push({ type, payload, sid }); return true; },
     dashSetComposerNote: () => {},
     dashUpdateCloseButton: () => {},
-    dashRefreshSendButton: () => {},
+    // dashHandle's generic `error` case tail (index.html, outside both
+    // extracted regions' own concerns) calls these for a refusal that falls
+    // through every named payload.code branch -- no-op/passthrough stubs,
+    // same reasoning as dashSetComposerNote above. _escHtml's real
+    // implementation reads .innerHTML off a scratch element, which this
+    // harness's El deliberately makes unusable (HTML_SINK) -- a passthrough
+    // is the correct stand-in for a check that only cares about the steer
+    // restore this call sits downstream of, not the toast's own markup.
+    showToast: () => {},
+    _escHtml: (s) => String(s),
+    // dashRefreshSendButton was stubbed here through Phase 2 (a no-op, since
+    // no test needed the real Send-disable logic); Phase 3 (SC5) renamed it
+    // to dashRefreshComposerControls and gave it Stop/Queue+Steer visibility
+    // logic genuinely under test, so it is now real source, extracted as
+    // composerControlsRegion and run below -- not stubbed.
     // The command-palette keydown listener's plain-Enter fallback
     // (dashboard/ACP feature-parity plan, Phase 2) -- recorded so a test can
     // assert it was (or, with the dropdown open, was NOT) called.
     dashSendPrompt: () => { dashSendPromptCalls.push(true); },
     // dashHandle's agent_died/session_closed/agent_error branches call this
-    // (transcript-renderer.js, not part of either extracted region) -- a
-    // no-op here since these checks assert on dashHandle's own state, not on
-    // transcript rendering.
-    addMessage: () => {},
+    // (transcript-renderer.js, not part of either extracted region). Records
+    // every call (SC5, Phase 3 needs to assert on queue/steer notes and
+    // error messages) and returns a fresh element with an appendChild-able
+    // body, mirroring the real addMessage()'s return value closely enough
+    // for the Queue click handler's `queueNoteEl.appendChild(...)` calls to
+    // work without throwing.
+    addMessage: (role, text) => {
+      const el = new El("div");
+      el.className = "acp-msg acp-msg-" + role;
+      addMessageCalls.push({ role, text, el });
+      return el;
+    },
     // composer-chrome.js's handleCommandsExecuteResult() (dashboard/ACP
     // feature-parity plan, Phase 2) calls this (also transcript-renderer.js,
     // not loaded by this harness) -- recorded, not a no-op, so a test can
@@ -10629,12 +10789,16 @@ function loadDashPicker(opts = {}) {
     logToggle: byId.get("dashLogToggle"),
     isReplaying: () => sandbox._dashReplaying,
   });
-  // Run the command-palette wiring region first (it is declared before
-  // dashHandle in the real page -- see the comment on cmdPaletteRegion's
-  // extraction above), then dashHandle, then the picker section (which also
-  // executes the parse-time event-listener wiring against the byId map
-  // above).
+  // Run in real-file order: composer-controls (SC5, Phase 3 -- must precede
+  // cmdPaletteRegion, whose initCommandPaletteDom({onPromptChanged:
+  // dashRefreshComposerControls}) call reads it as a plain identifier value
+  // immediately, at this call's own execution time), then the command-
+  // palette wiring, then the queue/steer click wiring (SC5, Phase 3), then
+  // dashHandle, then the picker section (which also executes the parse-time
+  // event-listener wiring against the byId map above).
+  vm.runInContext(composerControlsRegion, sandbox, { filename: "index.html#dash-composer-controls" });
   vm.runInContext(cmdPaletteRegion, sandbox, { filename: "index.html#dash-cmd-palette" });
+  vm.runInContext(queueSteerWiringRegion, sandbox, { filename: "index.html#dash-queue-steer" });
   vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
   vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
 
@@ -10644,6 +10808,17 @@ function loadDashPicker(opts = {}) {
     fetches,
     sentFrames,
     dashSendPromptCalls,
+    addMessageCalls,
+    dashStored: dashStoredData,
+    timers,
+    /** Fire every timer queued so far, once -- mirrors loadPage()'s own
+     *  runTimers() (SC5, Phase 3: setDashSteerStatus's steering_injected
+     *  auto-clear). */
+    runTimers() {
+      const due = timers.splice(0, timers.length);
+      for (const t of due) t.fn();
+      return due.length;
+    },
     systemMessages,
     sentOf(type) { return sentFrames.filter((f) => f.type === type); },
     /** Convenience: get an element by id, throws if absent. */
@@ -10651,6 +10826,13 @@ function loadDashPicker(opts = {}) {
       const found = byId.get(id);
       if (!found) throw new Error(`dash-picker harness has no element with id '${id}'`);
       return found;
+    },
+    /** Fire a document-level listener (SC5, Phase 3: the mode menu's
+     *  outside-click/Esc-close wiring) -- mirrors loadPage()'s own fireDoc(). */
+    fireDoc(type, ev) {
+      const fns = dashDocListeners.get(type) ?? [];
+      if (fns.length === 0) throw new Error(`nothing listens for document '${type}'`);
+      for (const fn of fns) fn(ev ?? {});
     },
     settle() { return new Promise((resolve) => setImmediate(resolve)); },
   };
@@ -11300,6 +11482,469 @@ check("dashboard: a compaction frame calls addSystemMessage with the status-mapp
   assert(p.systemMessages.includes("Context compacted."),
     "a completed compaction frame must call addSystemMessage('Context compacted.'); got: " +
     JSON.stringify(p.systemMessages));
+});
+
+// ---- dashboard Queue/Steer send-mode toggle + Stop/cancel (SC5,
+//      dashboard/ACP feature-parity plan Phase 3) -----------------------
+//
+// A duplicated, not extracted, feature (index.html-only dash-prefixed code,
+// not composer-chrome.js) -- see loadDashPicker()'s composerControlsRegion/
+// queueSteerWiringRegion extraction above for how the real source gets
+// under test here. Density target: comparable to acp.html's own Queue/
+// Steer/mode-select test suite (tests/acp_page.test.mjs:7704-8143 plus the
+// steer_status suite at :10038-10103, ~31 tests as actually counted in this
+// file today).
+
+check("dashRefreshComposerControls: idle state shows Send only", () => {
+  const p = loadDashPicker({ dashTurnActive: false });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashRefreshComposerControls();
+  assertEqual(p.sandbox.dashSendBtn.hidden, false, "Send must be visible when idle");
+  assertEqual(p.sandbox.dashStopBtn.hidden, true, "Stop must stay hidden when idle");
+  assertEqual(p.sandbox.dashQueueSteerEl.hidden, true, "Queue+Steer must stay hidden when idle");
+});
+
+check("dashRefreshComposerControls: turn active + empty textarea shows Stop only", () => {
+  const p = loadDashPicker({ dashTurnActive: true });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashRefreshComposerControls();
+  assertEqual(p.sandbox.dashSendBtn.hidden, true, "Send must hide during a turn");
+  assertEqual(p.sandbox.dashStopBtn.hidden, false, "Stop must show with an empty textarea during a turn");
+  assertEqual(p.sandbox.dashQueueSteerEl.hidden, true, "Queue+Steer must stay hidden with an empty textarea");
+});
+
+check("dashRefreshComposerControls: turn active + text shows Queue+Steer only", () => {
+  const p = loadDashPicker({ dashTurnActive: true });
+  p.sandbox.dashPromptInput.value = "some text";
+  p.sandbox.dashRefreshComposerControls();
+  assertEqual(p.sandbox.dashStopBtn.hidden, true, "Stop must hide once text is present");
+  assertEqual(p.sandbox.dashQueueSteerEl.hidden, false,
+    "Queue+Steer must show once text is present during a turn");
+});
+
+check("dashRefreshComposerControls: Stop stays hidden while a steer is pending, even with an empty textarea", () => {
+  const p = loadDashPicker({ dashTurnActive: true, dashSteerPending: "in flight" });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashRefreshComposerControls();
+  assertEqual(p.sandbox.dashStopBtn.hidden, true,
+    "Stop must stay hidden while a steer is in-flight, mirroring acp.html's !!_steerPending guard");
+});
+
+check("dashRefreshComposerControls: Stop stays disabled while a cancel is in-flight", () => {
+  const p = loadDashPicker({ dashTurnActive: true, dashStopInProgress: true });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashRefreshComposerControls();
+  assertEqual(p.sandbox.dashStopBtn.disabled, true,
+    "Stop must stay disabled while _dashStopInProgress is true, so a second click cannot fire before turn:end clears it");
+});
+
+check("Stop button click sends cancel, disables itself, and triggers a rail refresh", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  let railRefreshed = false;
+  p.sandbox.dashRailRefreshSoon = () => { railRefreshed = true; };
+  p.sandbox.dashStopBtn.dispatch("click");
+  const cancels = p.sentOf("cancel");
+  assertEqual(cancels.length, 1, "exactly one cancel frame should be sent");
+  assertEqual(cancels[0].sid, "sess-1", "cancel should target the attached session");
+  assertEqual(p.sandbox.dashStopBtn.disabled, true, "Stop must disable itself immediately");
+  assertEqual(p.sandbox._dashStopInProgress, true,
+    "_dashStopInProgress must be set so a repaint cannot re-enable Stop before turn:end");
+  assert(railRefreshed, "dashRailRefreshSoon must be called after a successful cancel send");
+});
+
+check("Stop button click is a no-op without an attached session or an active turn", () => {
+  const p1 = loadDashPicker({ dashAttachedSid: null, dashTurnActive: true });
+  p1.sandbox.dashStopBtn.dispatch("click");
+  assertEqual(p1.sentOf("cancel").length, 0, "no cancel frame without an attached session");
+
+  const p2 = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: false });
+  p2.sandbox.dashStopBtn.dispatch("click");
+  assertEqual(p2.sentOf("cancel").length, 0, "no cancel frame without an active turn");
+});
+
+check("meta turn:end clears _dashStopInProgress, re-enabling Stop for the next turn", () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", dashTurnActive: true, dashStopInProgress: true, viewingSid: "sess-1",
+  });
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(p.sandbox._dashStopInProgress, false, "turn:end must clear _dashStopInProgress");
+});
+
+check("dashApplySendMode('queue') updates label/aria-label/data-mode/aria-current and persists to localStorage", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashApplySendMode("queue");
+  assertEqual(p.sandbox._dashSendMode, "queue", "_dashSendMode must update");
+  assertEqual(p.sandbox.dashModeToggle.getAttribute("data-mode"), "queue", "the mode toggle's data-mode must update");
+  assertEqual(p.sandbox.dashModeOptQueue.getAttribute("aria-current"), "true", "the Queue option must be marked current");
+  assertEqual(p.sandbox.dashModeOptSteer.getAttribute("aria-current"), "false", "the Steer option must be marked not current");
+  assert(/Queue/.test(p.sandbox.dashSendModeBtn.getAttribute("aria-label")),
+    "sendModeBtn's aria-label must describe queueing");
+  const srSpan = p.sandbox.dashSendModeBtn.querySelector(".sr-only");
+  assertEqual(srSpan.textContent, "Queue", "the sr-only label span must update");
+  assertEqual(p.dashStored["pa_dash_send_mode"], "queue",
+    "the chosen mode must persist to localStorage under pa_dash_send_mode");
+});
+
+check("dashApplySendMode falls back to 'steer' for a missing or invalid stored value", () => {
+  const p1 = loadDashPicker();
+  assertEqual(p1.sandbox._dashSendMode, "steer", "default with nothing stored must be steer");
+  const p2 = loadDashPicker({ stored: { pa_dash_send_mode: "bogus" } });
+  assertEqual(p2.sandbox._dashSendMode, "steer", "an invalid stored value must fall back to steer");
+});
+
+check("mode toggle button opens and closes the menu", () => {
+  const p = loadDashPicker();
+  assertEqual(p.sandbox.dashModeMenu.hidden, true, "sanity check -- menu starts hidden");
+  p.sandbox.dashModeToggle.dispatch("click");
+  assertEqual(p.sandbox.dashModeMenu.hidden, false, "clicking the toggle must open the menu");
+  assertEqual(p.sandbox.dashModeToggle.getAttribute("aria-expanded"), "true", "aria-expanded must flip to true");
+  p.sandbox.dashModeToggle.dispatch("click");
+  assertEqual(p.sandbox.dashModeMenu.hidden, true, "clicking the toggle again must close the menu");
+  assertEqual(p.sandbox.dashModeToggle.getAttribute("aria-expanded"), "false", "aria-expanded must flip back to false");
+});
+
+check("clicking a mode option applies that mode and closes the menu", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashModeToggle.dispatch("click");
+  assertEqual(p.sandbox.dashModeMenu.hidden, false, "sanity check -- menu is open");
+  p.sandbox.dashModeOptQueue.dispatch("click");
+  assertEqual(p.sandbox._dashSendMode, "queue", "clicking the Queue option must apply queue mode");
+  assertEqual(p.sandbox.dashModeMenu.hidden, true, "selecting an option must close the menu");
+});
+
+check("an outside document click closes the mode menu", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashModeToggle.dispatch("click");
+  assertEqual(p.sandbox.dashModeMenu.hidden, false, "sanity check -- menu is open");
+  p.fireDoc("click");
+  assertEqual(p.sandbox.dashModeMenu.hidden, true, "a document-level click must close the open menu");
+});
+
+check("Escape closes the mode menu", () => {
+  const p = loadDashPicker();
+  p.sandbox.dashModeToggle.dispatch("click");
+  assertEqual(p.sandbox.dashModeMenu.hidden, false, "sanity check -- menu is open");
+  p.fireDoc("keydown", { key: "Escape" });
+  assertEqual(p.sandbox.dashModeMenu.hidden, true, "Escape must close the open menu");
+});
+
+check("Queue: sendModeBtn click stores text, clears the textarea, and shows a cancellable note", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashApplySendMode("queue");
+  p.sandbox.dashPromptInput.value = "hello agent";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p.sandbox._dashQueuedPrompt, "hello agent", "the typed text must be stored in _dashQueuedPrompt");
+  assertEqual(p.sandbox._dashQueuedPromptSession, "sess-1", "the session id at queue time must be recorded");
+  assertEqual(p.sandbox.dashPromptInput.value, "", "the textarea must be cleared after queueing");
+  assertEqual(p.sentOf("prompt").length, 0, "queueing must not send a prompt frame immediately");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && note.role === "note", "a note must be added to the transcript");
+  const cancelBtn = note.el.querySelector(".acp-inline-cancel");
+  assert(cancelBtn !== null, "the queue note must contain a cancel button, mirroring acp.html's own note");
+});
+
+check("Queue: cancel link restores the text to the textarea", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashApplySendMode("queue");
+  p.sandbox.dashPromptInput.value = "queued text";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  const cancelBtn = note.el.querySelector(".acp-inline-cancel");
+  cancelBtn.dispatch("click");
+  assertEqual(p.sandbox.dashPromptInput.value, "queued text", "cancel must restore the text to the textarea");
+  assertEqual(p.sandbox._dashQueuedPrompt, null, "cancel must clear _dashQueuedPrompt");
+});
+
+check("Queue/Steer: sendModeBtn click is a no-op without text, an attached session, or an active turn", () => {
+  const p1 = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p1.sandbox.dashPromptInput.value = "";
+  p1.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p1.sentOf("steer").length, 0, "no steer frame with empty text");
+
+  const p2 = loadDashPicker({ dashAttachedSid: null, dashTurnActive: true, viewingSid: "sess-1" });
+  p2.sandbox.dashPromptInput.value = "hi";
+  p2.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p2.sentOf("steer").length, 0, "no steer frame without an attached session");
+
+  const p3 = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: false, viewingSid: "sess-1" });
+  p3.sandbox.dashPromptInput.value = "hi";
+  p3.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p3.sentOf("steer").length, 0, "no steer frame without an active turn");
+});
+
+check("queued prompt auto-sends on meta turn:end when the textarea is empty", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "queued message";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(p.dashSendPromptCalls.length, 1, "dashSendPrompt must be called to flush the queued prompt");
+  assertEqual(p.sandbox.dashPromptInput.value, "queued message",
+    "the queued text must be placed into the textarea before sending");
+  assertEqual(p.sandbox._dashQueuedPrompt, null, "the queued state must be cleared");
+});
+
+check("queued prompt discarded on meta turn:end when the session changed", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-2", dashTurnActive: true, viewingSid: "sess-2" });
+  p.sandbox._dashQueuedPrompt = "to discard";
+  p.sandbox._dashQueuedPromptSession = "sess-1"; // different from the now-attached session
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-2", payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(p.dashSendPromptCalls.length, 0, "dashSendPrompt must not be called for a session-mismatched queue");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /session changed/.test(note.text), "a discard note must mention the session changed");
+});
+
+check("queued prompt discarded on meta turn:end when the user typed something else", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "to discard";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashPromptInput.value = "something new";
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(p.dashSendPromptCalls.length, 0,
+    "dashSendPrompt must not be called when the user already typed something");
+  assertEqual(p.sandbox.dashPromptInput.value, "something new", "the user's own text must not be clobbered");
+});
+
+check("queued prompt not sent on meta turn:end when the turn was cancelled", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "queued";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "cancelled" } });
+  assertEqual(p.dashSendPromptCalls.length, 0, "a cancelled turn must not fire the queued auto-send");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /not sent/.test(note.text), "a note must explain the turn was stopped");
+});
+
+check("Steer (default mode): sendModeBtn click sends a steer frame and disables the composer", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "inject this";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  const steers = p.sentOf("steer");
+  assertEqual(steers.length, 1, "exactly one steer frame should be sent");
+  assertEqual(steers[0].payload.message, "inject this", "steer payload.message must match the typed text");
+  assertEqual(steers[0].sid, "sess-1", "steer must target the attached session");
+  assertEqual(p.sandbox.dashPromptInput.value, "", "the textarea must be cleared after steering");
+  assertEqual(p.sandbox.dashPromptInput.disabled, true, "the textarea must be disabled while awaiting steer_ack");
+  assertEqual(p.sandbox._dashSteerPending, "inject this", "the pending text must be held for restoration");
+});
+
+check("Steer: send() returning false immediately restores composer controls", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.send = () => false;
+  p.sandbox.dashPromptInput.value = "inject this";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "a failed send must not leave the textarea disabled");
+  assertEqual(p.sandbox._dashSteerPending, null, "a failed send must clear the pending-steer state");
+});
+
+check("steer_ack (queued:true) re-enables controls", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "steer text";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  p.sandbox.dashHandle({ type: "steer_ack", sessionId: "sess-1", payload: { queued: true } });
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "the textarea must be re-enabled after steer_ack");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled after steer_ack");
+  assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled after steer_ack");
+  assertEqual(p.sandbox._dashSteerPending, null, "_dashSteerPending must be cleared");
+});
+
+check("steer_ack (queued:false) restores the text and shows an error message", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "bad steer";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  p.sandbox.dashHandle({ type: "steer_ack", sessionId: "sess-1", payload: { queued: false } });
+  assertEqual(p.sandbox.dashPromptInput.value, "bad steer", "steer_ack queued:false must restore the textarea text");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "the textarea must be re-enabled");
+  const err = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assertEqual(err.role, "error", "an error message must be shown");
+});
+
+check("steer_sent frame adds a dimmed steer band via addMessage", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({ type: "steer_sent", sessionId: "sess-1", payload: { text: "do X" } });
+  const call = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assertEqual(call.role, "steer", "the band must be added with the 'steer' role, matching acp.html's addMessage('steer', ...)");
+  assertEqual(call.text, "do X", "the band text must match the steered text");
+});
+
+check("steer_sent frame with empty text is a no-op", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const before = p.addMessageCalls.length;
+  p.sandbox.dashHandle({ type: "steer_sent", sessionId: "sess-1", payload: { text: "" } });
+  assertEqual(p.addMessageCalls.length, before, "an empty steer_sent text must not call addMessage");
+});
+
+check("error frame restores pending steer text before any payload.code branching (close_in_progress)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "important steer";
+  p.sandbox.dashSendModeBtn.dispatch("click");
+  assertEqual(p.sandbox.dashPromptInput.disabled, true, "fixture: textarea disabled after steer click");
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "close_in_progress", message: "closing" },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "important steer",
+    "the steer-restore block must run even though close_in_progress returns early afterward");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "the textarea must be re-enabled");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled");
+});
+
+check("error frame restores pending steer text and clears the stop-in-progress flag on a generic refusal", () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", dashTurnActive: false, dashStopInProgress: true, viewingSid: "sess-1",
+  });
+  p.sandbox.dashPromptInput.value = "important steer";
+  p.sandbox._dashSteerPending = "important steer";
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "agent_error", message: "steer failed" },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "important steer", "error frame must restore steer text to the textarea");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "the textarea must be re-enabled after the error frame");
+  assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled after the error frame");
+  assertEqual(p.sandbox._dashStopInProgress, false, "a refused action while idle must clear _dashStopInProgress");
+});
+
+check("agent_died restores pending steer text and re-enables mode controls, leaving the textarea disabled", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\repo", turnActive: true },
+  });
+  p.sandbox._dashSteerPending = "pending steer text";
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashPromptInput.value = ""; // cleared, as it would be while awaiting steer_ack
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "boom" } });
+  assertEqual(p.sandbox.dashPromptInput.value, "pending steer text",
+    "agent_died must restore the pending steer text into the textarea");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled");
+  assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled");
+  assertEqual(p.sandbox._dashSteerPending, null, "_dashSteerPending must be cleared");
+  // The composer as a whole stays disabled-with-a-note -- the dashboard's own
+  // pre-existing pattern (not acp.html's fully-reenabled composer); see the
+  // code comment on agent_died's steer-restore block.
+  assertEqual(p.sandbox.dashPromptInput.disabled, true,
+    "the textarea itself stays disabled under the agent-died note, per the dashboard's existing pattern");
+});
+
+check("session_closed clears queue/steer state and re-enables mode controls with a note", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "queued";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox._dashSteerPending = "steering";
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: { message: "closed" } });
+  assertEqual(p.sandbox._dashQueuedPrompt, null, "session_closed must clear the queued prompt");
+  assertEqual(p.sandbox._dashSteerPending, null, "session_closed must clear the pending steer");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled");
+  assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled");
+  const note = p.addMessageCalls.find((c) => /Steer could not complete/.test(c.text));
+  assert(note, "a note explaining the steer could not complete must be shown");
+});
+
+check("dashCloseIfAbandoned re-enables mode controls if a steer was pending", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashOrigin = "joined"; // not this page's own load, so the send('close', ...) arm is skipped
+  p.sandbox._dashSteerPending = "steering";
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashCloseIfAbandoned();
+  assertEqual(p.sandbox._dashSteerPending, null, "dashCloseIfAbandoned must clear the pending steer");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled");
+  assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled");
+});
+
+check("steer_status queued shows transient text near the composer", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true, "steer status must start hidden");
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1",
+    payload: { status: "steering_queued", content: "look at foo.py" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, false, "steer status must show once queued");
+  assert(p.sandbox.dashSteerStatusEl.textContent.includes("look at foo.py"),
+    "steer status text must include the steered content");
+});
+
+check("steer_status injected auto-clears after a 4s timer", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1",
+    payload: { status: "steering_injected", content: "look at foo.py" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, false, "steer status must show once injected");
+  assert(p.timers.length > 0, "steering_injected must schedule a clear timer");
+  assertEqual(p.timers[p.timers.length - 1].ms, 4000, "the clear timer must fire after 4000ms, matching acp.html");
+  p.runTimers();
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true, "the status line must hide once the timer fires");
+  assertEqual(p.sandbox.dashSteerStatusEl.textContent, "", "the status text must clear once the timer fires");
+});
+
+check("steer_status cleared hides the status line immediately", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1", payload: { status: "steering_queued", content: "x" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, false, "sanity check -- status should be visible after steering_queued");
+  p.sandbox.dashHandle({ type: "steer_status", sessionId: "sess-1", payload: { status: "steering_cleared" } });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true, "steering_cleared must hide the status line immediately");
+});
+
+check("steer_status during a simulated replay does not touch the DOM", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  // Reachability note: index.html's `history` frame handling goes through
+  // renderTranscriptHistory() -> renderTranscriptFrame() (transcript-renderer.js),
+  // which has no steer_status case at all, so a real history payload can
+  // never reach dashHandle()'s steer_status case in the first place -- a
+  // pre-existing dashboard/acp.html replay gap this phase does not close
+  // (see the code comment on dashHandle()'s steer_status case in index.html).
+  // This test drives the !_dashReplaying guard directly, the way it is
+  // written, in case a future change wires nested-frame replay through
+  // dashHandle().
+  p.sandbox._dashReplaying = true;
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1", payload: { status: "steering_injected", content: "stale" },
+  });
+  assertEqual(p.sandbox.dashSteerStatusEl.hidden, true,
+    "a replayed steer_status must not surface a stale composer status");
+});
+
+check("steer_status frame with agent-controlled content uses textContent, never innerHTML", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const malicious = "<img src=x onerror=\"window._dash_steer_xss=true\">";
+  p.sandbox.dashHandle({
+    type: "steer_status", sessionId: "sess-1", payload: { status: "steering_queued", content: malicious },
+  });
+  // Reaching here at all means no innerHTML sink fired -- El's innerHTML
+  // getter/setter throws unconditionally (HTML_SINK, this file's DOM stand-in).
+  assert(p.sandbox.dashSteerStatusEl.textContent.includes(malicious),
+    "steer status must render the content as literal text");
+  assert(!p.sandbox._dash_steer_xss, "the onerror handler must not fire -- steer status must not use innerHTML");
+});
+
+check("Enter during a turn in steer mode dispatches to sendModeBtn (steer send)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "inject via enter";
+  p.sandbox.dashPromptInput.dispatch("keydown", { key: "Enter", preventDefault: () => {} });
+  const steers = p.sentOf("steer");
+  assertEqual(steers.length, 1,
+    "Enter during a turn (steer mode) must dispatch to sendModeBtn and send a steer frame");
+  assertEqual(p.dashSendPromptCalls.length, 0, "Enter during a turn must not fall through to dashSendPrompt");
+});
+
+check("Enter during a turn in queue mode dispatches to sendModeBtn (queues the prompt)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", dashTurnActive: true, viewingSid: "sess-1" });
+  p.sandbox.dashApplySendMode("queue");
+  p.sandbox.dashPromptInput.value = "queue via enter";
+  p.sandbox.dashPromptInput.dispatch("keydown", { key: "Enter", preventDefault: () => {} });
+  assertEqual(p.sandbox._dashQueuedPrompt, "queue via enter",
+    "Enter during a turn (queue mode) must queue the prompt");
+  assertEqual(p.dashSendPromptCalls.length, 0, "Enter during a turn must not fall through to dashSendPrompt");
 });
 
 let failed = 0;

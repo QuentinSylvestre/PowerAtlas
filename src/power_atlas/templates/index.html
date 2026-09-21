@@ -378,8 +378,55 @@
             <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
+        <!-- Queue/Steer + Stop (SC5, dashboard/ACP feature-parity plan
+             Phase 3) -- mirrors acp.html's #acpStop/#acpQueueSteer markup
+             (acp.html:278-311) with dash-prefixed ids, sharing the
+             .acp-queue-steer/.acp-mode-*/.sr-only CSS migrated to style.css
+             by this same phase. Only during a turn -- see acp.html's own
+             markup comment on #acpStop for why a stop control that is
+             present-and-inert the rest of the time is indistinguishable from
+             a broken one. -->
+        <button class="acp-btn acp-danger acp-icon-btn" id="dashStop" type="button" hidden
+                aria-label="Stop">
+          <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <div class="acp-queue-steer" id="dashQueueSteer" hidden>
+          <button class="acp-btn acp-icon-btn" id="dashSendMode" type="button"
+                  aria-label="Inject this text into the current agent turn">
+            <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M8 12V4M4.5 7.5L8 4l3.5 3.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span class="sr-only">Steer</span>
+          </button>
+          <button class="acp-btn acp-mode-toggle acp-icon-btn" id="dashModeToggle" type="button"
+                  aria-haspopup="menu" aria-expanded="false" aria-label="Change send mode"
+                  data-mode="steer">
+            <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <div class="acp-mode-menu" id="dashModeMenu" hidden role="menu" aria-label="Send mode">
+            <button class="acp-mode-option" id="dashModeOptSteer" data-value="steer" role="menuitem">Steer</button>
+            <button class="acp-mode-option" id="dashModeOptQueue" data-value="queue" role="menuitem">Queue</button>
+          </div>
+        </div>
+        <span id="dashModeLiveRegion" class="sr-only" aria-live="polite" aria-atomic="true"></span>
       </div>
       <div class="acp-steer-status" id="dashComposerNote" hidden aria-live="polite"></div>
+      <!-- Steer status echo (SC5) -- separate from #dashComposerNote above,
+           which is a multi-purpose lifecycle note (loading/locked/agent-died
+           messages) driven by dashSetComposerNote(). Keeping this one apart
+           mirrors acp.html's own #acpSteerStatus, which has no other-purpose
+           note element to share with at all, and avoids a real correctness
+           risk here: steering_injected's 4s auto-clear timer would otherwise
+           blank whatever unrelated note dashSetComposerNote() had shown in
+           the meantime. Built with createElement + textContent only, like
+           the rest of this page -- see setDashSteerStatus()'s own header
+           comment for the security note (this line renders agent-controlled
+           steering content). -->
+      <div class="acp-steer-status" id="dashSteerStatus" hidden aria-live="polite"></div>
     </div>
     <!-- Debug/transport log panel (SC4) -- mirrors acp.html's #acpLog, toggled
          by #dashLogToggle above via the shared composer-chrome.js module.
@@ -866,6 +913,22 @@ var dashPromptInput = document.getElementById('dashPromptInput');
 var dashSendBtn = document.getElementById('dashSendBtn');
 var dashComposerNote = document.getElementById('dashComposerNote');
 var dashCloseBtn = document.getElementById('dashCloseSession');
+// Queue/Steer + Stop (SC5, dashboard/ACP feature-parity plan Phase 3) --
+// dash-prefixed DOM refs mirroring acp.html's own stopBtn/queueSteerEl/
+// sendModeBtn/modeToggle/modeMenu/modeOptSteer/modeOptQueue/modeOptions/
+// steerStatusEl (acp.html:638-645,760). A duplicated, not extracted, feature
+// (see the plan's Design Decisions) -- these stay index.html-private rather
+// than moving into composer-chrome.js, unlike Phase 1/2's context/sid/log/
+// palette DOM refs above.
+var dashStopBtn = document.getElementById('dashStop');
+var dashQueueSteerEl = document.getElementById('dashQueueSteer');
+var dashSendModeBtn = document.getElementById('dashSendMode');
+var dashModeToggle = document.getElementById('dashModeToggle');
+var dashModeMenu = document.getElementById('dashModeMenu');
+var dashModeOptSteer = document.getElementById('dashModeOptSteer');
+var dashModeOptQueue = document.getElementById('dashModeOptQueue');
+var dashModeOptions = dashModeOptSteer && dashModeOptQueue ? [dashModeOptSteer, dashModeOptQueue] : [];
+var dashSteerStatusEl = document.getElementById('dashSteerStatus');
 // Hidden unless attached to a live session, disabled under a live turn (the
 // server refuses a close then anyway, same as /acp's #acpClose) -- called
 // everywhere _dashAttachedSid or _dashTurnActive changes.
@@ -902,16 +965,93 @@ var _dashPendingSend = null;
 // send payload) starting Phase 4, SC6.
 var _dashImageMaxCount = 4;
 var _dashImageMaxBytes = 176 * 1024;
+// Queue/Steer + Stop state (SC5, dashboard/ACP feature-parity plan Phase 3),
+// mirroring acp.html's own queuedPrompt/queuedPromptSession/_steerPending/
+// _stopInProgress/_steerStatusTimer (acp.html:821-827,760-761). Deliberately
+// NOT sharing _dashPendingSend above: that is the pre-existing lazy-load-
+// pending mechanism (flushed by the `history` branch for a session that
+// hadn't finished attaching yet); Queue mode is flushed by `meta turn:end`
+// instead, and sharing one variable between both risks a reconnect-triggered
+// `history` frame firing a prompt meant to wait for turn:end, or vice versa.
+var _dashQueuedPrompt = null;
+var _dashQueuedPromptSession = null; // sid at queue time, for the session-changed guard
+var _dashSteerPending = null; // text held in-flight for a steer request, restored on error/agent_died
+var _dashStopInProgress = false; // true between the Stop click and turn:end
+var _dashSteerStatusTimer = null; // clears the transient steer-status line
 
 function dashSetComposerNote(text){
   if (!text) { dashComposerNote.hidden = true; dashComposerNote.textContent = ''; return; }
   dashComposerNote.textContent = text;
   dashComposerNote.hidden = false;
 }
-function dashRefreshSendButton(){
+// Governs the three mutually-exclusive composer controls: Send (idle), Stop
+// (turn active + textarea empty), Queue+Steer (turn active + textarea has
+// text) -- mirrors acp.html's refreshComposerControls() (acp.html:1181-1192)
+// exactly, reading _dashTurnActive/dashPromptInput.value instead of
+// turnActive/promptInput.value. Renamed from dashRefreshSendButton (Phase 1/2)
+// now that it governs three controls, not one; every prior call site below
+// (and in dashHandle()/dashSendPrompt()/dashMaybeAttach() further down) is
+// updated to the new name.
+function dashRefreshComposerControls(){
   var hasText = dashPromptInput.value.trim().length > 0;
+  // Send: visible when not in a turn. Disabled condition is unchanged from
+  // Phase 1/2 (dashboard-specific: also disabled on empty text, unlike
+  // acp.html's sendBtn, which does not gate on text at all) -- only the
+  // `.hidden` toggle is new here.
+  dashSendBtn.hidden = _dashTurnActive;
   dashSendBtn.disabled = !hasText || _dashTurnActive;
+  // Stop: visible during turn only when textarea is empty and no steer
+  // pending; stays disabled while _dashStopInProgress (cancel in-flight).
+  dashStopBtn.hidden = !_dashTurnActive || hasText || !!_dashSteerPending;
+  dashStopBtn.disabled = !_dashTurnActive || _dashStopInProgress;
+  // Queue+Steer wrapper: visible during turn only when textarea has text.
+  dashQueueSteerEl.hidden = !_dashTurnActive || !hasText;
 }
+/** Show (or clear) the transient composer-area steer status line (SC5,
+ *  v3's `steer_status` frame) -- mirrors acp.html's setSteerStatus()
+ *  (acp.html:1218-1233). SECURITY: MUST use textContent -- never innerHTML.
+ *  `text` may include the agent-controlled steering content. */
+function setDashSteerStatus(text) {
+  if (_dashSteerStatusTimer) {
+    clearTimeout(_dashSteerStatusTimer);
+    _dashSteerStatusTimer = null;
+  }
+  if (!text) {
+    dashSteerStatusEl.textContent = '';
+    dashSteerStatusEl.hidden = true;
+    return;
+  }
+  dashSteerStatusEl.textContent = text;
+  dashSteerStatusEl.hidden = false;
+}
+// Send-mode picker (Queue vs Steer), persisted via composer-chrome.js's
+// railStore/railStored (Phase 1 -- shared infrastructure, not reimplemented
+// here) under a dashboard-scoped key, mirroring acp.html's SEND_MODE_KEY/
+// _sendMode/_applySendMode (acp.html:646-668) exactly but with dash-prefixed
+// DOM refs and its own storage key so the two pages' choices do not clobber
+// each other.
+var DASH_SEND_MODE_KEY = 'pa_dash_send_mode';
+var _dashSendMode = railStored(DASH_SEND_MODE_KEY);
+if (_dashSendMode !== 'steer' && _dashSendMode !== 'queue') _dashSendMode = 'steer';
+function dashApplySendMode(mode) {
+  _dashSendMode = mode;
+  railStore(DASH_SEND_MODE_KEY, mode);
+  var label = mode === 'queue' ? 'Queue' : 'Steer';
+  var srSpan = dashSendModeBtn.querySelector ? dashSendModeBtn.querySelector('.sr-only') : null;
+  if (srSpan) { srSpan.textContent = label; } else { dashSendModeBtn.textContent = label; }
+  dashSendModeBtn.setAttribute('aria-label',
+    mode === 'queue'
+      ? 'Queue this prompt — it will send when the agent finishes'
+      : 'Inject this text into the current agent turn');
+  if (dashModeToggle) dashModeToggle.setAttribute('data-mode', mode);
+  dashModeOptions.forEach(function (opt) {
+    var optMode = opt === dashModeOptQueue ? 'queue' : 'steer';
+    opt.setAttribute('aria-current', optMode === mode ? 'true' : 'false');
+  });
+  var liveRegion = document.getElementById('dashModeLiveRegion');
+  if (liveRegion) liveRegion.textContent = 'Send mode: ' + label;
+}
+dashApplySendMode(_dashSendMode);
 // Slash command / skill autocomplete palette (SC1, dashboard/ACP
 // feature-parity plan Phase 2) -- composer-chrome.js's globals (cmdDropdownEl
 // et al., initCommandPaletteDom, showCommandDropdown, hideCommandDropdown,
@@ -931,9 +1071,9 @@ initCommandPaletteDom({
   send: send,
   // acp.html's ported code calls autoGrowPrompt()+refreshComposerControls()
   // after it changes promptInput.value; this page has no textarea auto-grow
-  // yet, so dashRefreshSendButton() -- keeping the Send button's
-  // enabled/disabled state in sync -- is the equivalent here.
-  onPromptChanged: dashRefreshSendButton,
+  // yet, so dashRefreshComposerControls() -- keeping Send/Stop/Queue+Steer's
+  // visible/enabled state in sync -- is the equivalent here.
+  onPromptChanged: dashRefreshComposerControls,
 });
 dashPromptInput.addEventListener('keydown', function(e){
   // Slash intercept: open the command palette when `/` is pressed into an
@@ -945,7 +1085,7 @@ dashPromptInput.addEventListener('keydown', function(e){
       !e.shiftKey && !e.ctrlKey && !e.altKey && !_dashTurnActive) {
     e.preventDefault();
     dashPromptInput.value = '/';
-    dashRefreshSendButton();
+    dashRefreshComposerControls();
     showCommandDropdown('');
     return;
   }
@@ -960,10 +1100,26 @@ dashPromptInput.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
     if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
   }
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); dashSendPrompt(); }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    // Phase 3 (SC5): during a turn with text present, Enter dispatches to
+    // Queue or Steer (whichever is selected) instead of the idle send path
+    // -- mirrors acp.html's own keydown handler exactly (acp.html:5863-5876).
+    // dashSendModeBtn.click() avoids duplicating the guard logic already in
+    // its own click handler. Safety invariant carried over from acp.html:
+    // dashPromptInput is disabled while a steer is in-flight
+    // (_dashSteerPending set), which prevents this from firing in that
+    // state, and #dashQueueSteer is hidden when !hasText, so
+    // dashSendModeBtn is only reachable when text is present.
+    if (_dashTurnActive && dashPromptInput.value.trim()) {
+      dashSendModeBtn.click();
+    } else {
+      dashSendPrompt();
+    }
+  }
 });
 dashPromptInput.addEventListener('input', function(){
-  dashRefreshSendButton();
+  dashRefreshComposerControls();
   // Live slash-command filtering -- mirrors acp.html's own `input` listener:
   // open or update the dropdown while the user is typing a /command token,
   // hide it when they leave the command token.
@@ -978,6 +1134,109 @@ dashPromptInput.addEventListener('input', function(){
   }
 });
 dashSendBtn.addEventListener('click', dashSendPrompt);
+
+// ---- Queue/Steer + Stop wiring (SC5, dashboard/ACP feature-parity plan
+// Phase 3) -- a duplicated, not extracted, feature (see the plan's Design
+// Decisions): dash-prefixed, mirroring acp.html's own stopBtn/modeToggle/
+// modeOptions/sendModeBtn click wiring (acp.html:5473-5599) as-is, not
+// through composer-chrome.js.
+dashStopBtn.addEventListener('click', function () {
+  if (!_dashAttachedSid || !_dashTurnActive) return;
+  if (!send('cancel', {}, _dashAttachedSid)) return;
+  // Trigger a rail refresh so the dot state updates promptly rather than
+  // waiting for the polling cycle -- mirrors acp.html's own railRefreshSoon()
+  // call after cancel.
+  dashRailRefreshSoon();
+  // The turn does not end here -- the agent finishes the request it is
+  // holding and answers stopReason: "cancelled", which arrives as an
+  // ordinary turn boundary, so dashRefreshComposerControls() is NOT called
+  // here: this eager disable is the only thing that disables the button
+  // immediately, and _dashStopInProgress stops it being re-enabled by a
+  // later dashRefreshComposerControls() call before turn:end clears the flag.
+  _dashStopInProgress = true;
+  dashStopBtn.disabled = true;
+});
+function _dashCloseModeMenu() {
+  if (!dashModeMenu) return;
+  dashModeMenu.hidden = true;
+  if (dashModeToggle) dashModeToggle.setAttribute('aria-expanded', 'false');
+}
+if (dashModeToggle) {
+  dashModeToggle.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var open = !dashModeMenu.hidden;
+    if (open) { _dashCloseModeMenu(); } else {
+      dashModeMenu.hidden = false;
+      dashModeToggle.setAttribute('aria-expanded', 'true');
+    }
+  });
+}
+dashModeOptions.forEach(function (opt) {
+  opt.addEventListener('click', function () {
+    dashApplySendMode(opt === dashModeOptQueue ? 'queue' : 'steer');
+    _dashCloseModeMenu();
+  });
+});
+// Close the menu on outside click or Esc -- mirrors acp.html's own listeners.
+document.addEventListener('click', function () { _dashCloseModeMenu(); });
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') _dashCloseModeMenu();
+});
+dashSendModeBtn.addEventListener('click', function () {
+  var text = dashPromptInput.value.trim();
+  if (!text || !_dashTurnActive || !_dashAttachedSid) return;
+  if (_dashSendMode === 'queue') {
+    _dashQueuedPrompt = text;
+    _dashQueuedPromptSession = _dashAttachedSid;
+    dashPromptInput.value = '';
+    dashRefreshComposerControls();
+    // Show a cancellable inline note so the user can recover the text if
+    // they change their mind before the turn ends -- mirrors acp.html's own
+    // queue note + .acp-inline-cancel button exactly.
+    var queueNoteEl = addMessage('note', '');
+    var preview = text.length > 30 ? text.slice(0, 30) + '…' : text;
+    var noteSpan = document.createElement('span');
+    noteSpan.textContent = 'Queued: ' + preview + ' — ';
+    queueNoteEl.appendChild(noteSpan);
+    var cancelLink = document.createElement('button');
+    cancelLink.className = 'acp-inline-cancel';
+    cancelLink.type = 'button';
+    cancelLink.textContent = 'Cancel';
+    cancelLink.setAttribute('aria-label', 'Cancel queued prompt');
+    cancelLink.addEventListener('click', function () {
+      if (!_dashQueuedPrompt) return;
+      dashPromptInput.value = _dashQueuedPrompt;
+      _dashQueuedPrompt = null;
+      _dashQueuedPromptSession = null;
+      dashRefreshComposerControls();
+      queueNoteEl.textContent = 'Queued prompt cancelled.';
+      // textContent replaces all child nodes, cancel button already removed
+    });
+    queueNoteEl.appendChild(cancelLink);
+  } else {
+    _dashSteerPending = text;
+    // Disable the textarea, button, and mode toggle while awaiting
+    // steer_ack. Textarea cleared immediately; text preserved in
+    // _dashSteerPending for restoration on error/agent_died/refusal.
+    dashPromptInput.disabled = true;
+    dashSendModeBtn.disabled = true;
+    dashModeToggle.disabled = true;
+    dashPromptInput.value = '';
+    dashRefreshComposerControls();
+    // If send() returns false (WS not open), restore controls immediately
+    // rather than waiting for a frame that is never coming on a dead socket.
+    if (!send('steer', {message: text}, _dashAttachedSid)) {
+      dashPromptInput.disabled = false;
+      dashSendModeBtn.disabled = false;
+      dashModeToggle.disabled = false;
+      _dashSteerPending = null;
+      dashRefreshComposerControls();
+      return;
+    }
+    // Do NOT show a "sent" note here -- wait for steer_ack from the server,
+    // mirroring acp.html exactly.
+  }
+});
 
 /** Called once per newly-rendered session, right after the availability
  *  peek answers. Shows/hides/enables the composer; for 'held' it also
@@ -1007,7 +1266,7 @@ function dashMaybeAttach(row, sid){
       dashComposerEl.hidden = false;
       dashPromptInput.disabled = false;
       dashSetComposerNote('');
-      dashRefreshSendButton();
+      dashRefreshComposerControls();
       if (state === 'held') {
         _dashOrigin = 'joined';
         dashConnect(function(){ send('subscribe', {}, sid); });
@@ -1028,7 +1287,7 @@ function dashSendPrompt(){
     }
     _dashSent = true;
     dashPromptInput.value = '';
-    dashRefreshSendButton();
+    dashRefreshComposerControls();
     return;
   }
   // Not attached yet — the lazy 'available' -> first-send path (also the
@@ -1069,6 +1328,19 @@ function dashCloseIfAbandoned(){
   _dashTurnActive = false;
   _dashPendingSend = null;
   _dashPendingCreate = null; // prevent stale close-then-create on back-navigation
+  // Queue/Steer state (SC5, Phase 3) belonged to the session just walked
+  // away from too -- same reset as the session_closed frame handler above,
+  // so switching sessions with a steer pending does not leave the next
+  // session's mode buttons stuck disabled.
+  _dashQueuedPrompt = null;
+  _dashQueuedPromptSession = null;
+  _dashStopInProgress = false;
+  if (_dashSteerPending) {
+    dashSendModeBtn.disabled = false;
+    dashModeToggle.disabled = false;
+  }
+  _dashSteerPending = null;
+  setDashSteerStatus('');
   // The sid/copy widget belonged to the session just walked away from —
   // mirrors acp.html's own reset at the equivalent session-switch point
   // (composer-chrome.js's renderSidLabel() blanks the widget with no
@@ -1149,7 +1421,7 @@ function dashHandle(frame){
     // Phase 1 fix cycle).
     setContext(payload.contextPercent);
     dashSetComposerNote('');
-    dashRefreshSendButton();
+    dashRefreshComposerControls();
     dashUpdateCloseButton();
     return;
   }
@@ -1176,13 +1448,55 @@ function dashHandle(frame){
       dashPromptInput.value = '';
     }
     dashPromptInput.disabled = false;
-    dashRefreshSendButton();
+    dashRefreshComposerControls();
     return;
   }
   // hideCommandDropdown() on turn start: a mid-turn dropdown cannot be acted
   // on and would just be confusing -- mirrors acp.html's own setTurn(true).
-  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; hideCommandDropdown(); dashRefreshSendButton(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
-  if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp2 = document.getElementById('dashPicker'); if (_dp2 && !_dp2.hidden) dashPickerRenderKeepRow(); return; }
+  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; hideCommandDropdown(); dashRefreshComposerControls(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
+  if (type === 'meta' && payload.turn === 'end') {
+    // Snapshot the queued prompt BEFORE clearing turn state, mirroring
+    // acp.html's own ordering (acp.html:4737-4742) so the decision guards
+    // below read the pre-release turn/session state correctly.
+    var _dashToSend = _dashQueuedPrompt;
+    var _dashQueueSession = _dashQueuedPromptSession;
+    _dashQueuedPrompt = null;
+    _dashQueuedPromptSession = null;
+    // Clears a Stop click's in-progress flag -- mirrors acp.html's own
+    // setTurn(false) (acp.html:1194-1198), which resets _stopInProgress
+    // whenever a turn ends.
+    _dashStopInProgress = false;
+    _dashTurnActive = false;
+    dashRefreshComposerControls();
+    dashUpdateCloseButton();
+    var _dp2 = document.getElementById('dashPicker'); if (_dp2 && !_dp2.hidden) dashPickerRenderKeepRow();
+    // Cancelled turns must not fire a queued auto-send -- the user stopped
+    // the turn on purpose, so silently sending the next prompt would be
+    // surprising. Discard and inform, mirroring acp.html's queueDiscardNote.
+    if (_dashToSend && payload.stopReason === 'cancelled') {
+      addMessage('note', 'Queued prompt not sent — the turn was stopped.');
+      return;
+    }
+    // Auto-send the queued prompt if one was stored at queue time. Unlike
+    // acp.html (which checks `ws`/`readyState` directly before deciding
+    // whether to restore or send), this reuses dashSendPrompt()'s own
+    // existing not-connected handling (a toast, text left in the box) rather
+    // than re-implementing a raw WebSocket-state check here.
+    if (_dashToSend) {
+      if (_dashQueueSession && _dashQueueSession !== _dashAttachedSid) {
+        // Session changed between queue and turn-end -- discard silently
+        // rather than sending to a different conversation.
+        addMessage('note', 'Queued prompt discarded — session changed.');
+      } else if (dashPromptInput.value.trim()) {
+        // User typed something after queuing -- do not clobber their text.
+        addMessage('note', 'Queued prompt discarded — you typed a new prompt.');
+      } else {
+        dashPromptInput.value = _dashToSend;
+        dashSendPrompt();
+      }
+    }
+    return;
+  }
   // `connected` meta: the server's ack for this socket, once per connection.
   // The image budget comes off the wire rather than being written into this
   // page (mirrors acp.html's own `connected` handling) so the number the
@@ -1228,6 +1542,76 @@ function dashHandle(frame){
     // the same reason acp.html no longer handles it: the client never sends
     // commands_options, so this frame never arrives in production.
     handleCommandsExecuteResult(payload);
+    return;
+  }
+  if (type === 'steer_ack') {
+    // Mirrors acp.html's own steer_ack handling (acp.html:4935-4956).
+    if (payload && payload.queued === false) {
+      // Steer rejected -- restore the textarea text so the user can retry.
+      dashPromptInput.value = _dashSteerPending;
+      dashPromptInput.disabled = false;
+      dashSendModeBtn.disabled = false;
+      dashModeToggle.disabled = false;
+      _dashSteerPending = null;
+      dashRefreshComposerControls();
+      addMessage('error', 'Steer was not accepted by the agent.');
+      return;
+    }
+    // queued===true (or absent -- default success path)
+    dashPromptInput.disabled = false;
+    dashSendModeBtn.disabled = false;
+    dashModeToggle.disabled = false;
+    _dashSteerPending = null;
+    dashRefreshComposerControls();
+    return;
+  }
+  if (type === 'steer_sent') {
+    // Steer text emitted to the ring buffer by _handle_steer on success,
+    // rendered as a dimmed user-band message via the shared addMessage()
+    // (transcript-renderer.js), which is already textContent-only -- see
+    // that function's own header comment. Mirrors acp.html:4958-4984.
+    var dashSteerText = payload && typeof payload.text === 'string' ? payload.text : '';
+    if (dashSteerText) {
+      if (_dashSteerPending) {
+        // Live frame received while steer still in-flight.
+        dashPromptInput.value = '';
+        dashPromptInput.disabled = false;
+        dashSendModeBtn.disabled = false;
+        dashModeToggle.disabled = false;
+        _dashSteerPending = null;
+        dashRefreshComposerControls();
+      } else if (dashPromptInput.value.trim() === dashSteerText) {
+        dashPromptInput.value = '';
+        dashRefreshComposerControls();
+      }
+      addMessage('steer', dashSteerText);
+    }
+    return;
+  }
+  if (type === 'steer_status') {
+    // v3's steer echo (SC5): steering_queued -> steering_injected ->
+    // steering_cleared, near the composer -- the transcript already got the
+    // text from steer_sent above. Mirrors acp.html:4985-5006. The
+    // !_dashReplaying guard is unreachable via the dashboard's own `history`
+    // handling today (renderTranscriptHistory() goes through
+    // transcript-renderer.js's renderTranscriptFrame(), which has no
+    // steer_status case at all -- a pre-existing dashboard/acp.html replay
+    // gap this phase does not close, out of file scope), but is kept for
+    // parity with acp.html and in case a future change wires nested-frame
+    // replay through dashHandle().
+    if (!_dashReplaying) {
+      var _dashSteerStatusVal = payload && payload.status;
+      var _dashSteerContent = (payload && typeof payload.content === 'string')
+        ? payload.content : '';
+      if (_dashSteerStatusVal === 'steering_queued') {
+        setDashSteerStatus(_dashSteerContent ? 'Steering… ' + _dashSteerContent : 'Steering…');
+      } else if (_dashSteerStatusVal === 'steering_injected') {
+        setDashSteerStatus(_dashSteerContent ? 'Injected: ' + _dashSteerContent : 'Injected');
+        _dashSteerStatusTimer = setTimeout(function () { setDashSteerStatus(''); }, 4000);
+      } else if (_dashSteerStatusVal === 'steering_cleared') {
+        setDashSteerStatus('');
+      }
+    }
     return;
   }
   if (type === 'compaction') {
@@ -1296,25 +1680,60 @@ function dashHandle(frame){
     // dashboard/ACP feature-parity plan Phase 2) -- mirrors acp.html's own
     // releaseSession() reset.
     resetCommandPalette();
+    // Queue/Steer state (SC5, Phase 3) belonged to the session just
+    // released too -- neither must fire against whatever session is opened
+    // next on this page. Mirrors acp.html's own releaseSession() (its
+    // queuedPrompt/queuedPromptSession clear and its _steerPending
+    // re-enable-controls-without-restoring-text block, acp.html:1266-1282 --
+    // text is NOT restored here since the session is gone, only re-enabled
+    // so the composer is usable once a new session is opened).
+    _dashQueuedPrompt = null;
+    _dashQueuedPromptSession = null;
+    _dashStopInProgress = false;
+    if (_dashSteerPending) {
+      dashSendModeBtn.disabled = false;
+      dashModeToggle.disabled = false;
+      addMessage('note', 'Steer could not complete — session was closed.');
+    }
+    _dashSteerPending = null;
+    setDashSteerStatus('');
     dashUpdateCloseButton();
     dashPickerRunPending(); // fire pending close-then-create if any
     return;
   }
   if (type === 'agent_died') {
     // Baseline reset (turn state, composer, context, sid/copy widget,
-    // command palette) -- Phase 3 extends this to restore any pending steer
-    // text and re-enable the send-mode controls, Phase 5 to close an open
-    // sub-agent panel and clear crew state, since neither exists yet at this
-    // point in the plan. Mirrors the turn/composer-reset portion of
-    // acp.html's own agent_died handler (its steer/crew-restoration portions
-    // are exactly what Phases 3 and 5 add here); the command-palette reset
-    // below has no acp.html counterpart in its own agent_died handler (a
-    // pre-existing gap there, out of this phase's scope to fix) but is cheap
-    // and correct to add here regardless, since the composer is disabled
-    // immediately afterward anyway.
+    // command palette) from Phase 1, now extended by Phase 3 (SC5) to
+    // restore any pending steer text and re-enable the send-mode controls --
+    // Phase 5 still owes closing an open sub-agent panel and clearing crew
+    // state, since neither exists yet at this point in the plan. Mirrors the
+    // turn/composer-reset portion of acp.html's own agent_died handler; the
+    // command-palette reset below has no acp.html counterpart in its own
+    // agent_died handler (a pre-existing gap there, out of this phase's
+    // scope to fix) but is cheap and correct to add here regardless, since
+    // the composer is disabled immediately afterward anyway.
+    //
+    // Phase 3 (SC5): restore any pending steer text into the textarea and
+    // re-enable the send-mode controls -- mirrors acp.html's own agent_died
+    // handler (acp.html:5176-5187; the steer_ack that would have cleared
+    // _dashSteerPending is never coming from an agent that has exited). The
+    // textarea itself stays disabled a few lines below along with the rest
+    // of the composer -- the same "visible-and-disabled with an explanation"
+    // pattern this baseline already uses for a lazy-load prompt, not
+    // acp.html's own fully-reenabled composer (acp.html has no per-session
+    // "agent died" note at all; this page's does, by design).
+    if (_dashSteerPending) {
+      dashPromptInput.value = _dashSteerPending;
+      dashSendModeBtn.disabled = false;
+      dashModeToggle.disabled = false;
+      _dashSteerPending = null;
+    }
+    _dashStopInProgress = false;
+    setDashSteerStatus('');
     _dashAttachedSid = null;
     _dashOrigin = null;
     _dashTurnActive = false;
+    dashRefreshComposerControls();
     resetCommandPalette();
     // Three pre-existing dashboard state variables (not introduced by this
     // plan) that could otherwise leave stale lazy-load state if the agent
@@ -1343,6 +1762,25 @@ function dashHandle(frame){
     return;
   }
   if (type === 'error') {
+    // Phase 3 (SC5): unconditional, at the very top of the handler, before
+    // any payload.code branching below -- mirrors acp.html's own error
+    // handler exactly (acp.html:5222-5239, its setTurn(turnActive) repaint
+    // plus the _steerPending restore that follows it). A refused `cancel`
+    // would otherwise leave Stop's in-progress flag stuck true with no other
+    // frame coming to clear it; a refused `steer` (including one refused as
+    // part of a close_in_progress/turn_in_progress/not_subscribed refusal
+    // below) would otherwise leave the mode controls disabled forever, since
+    // steer_ack never arrives for a send refused before the agent
+    // acknowledged it.
+    if (!_dashTurnActive) _dashStopInProgress = false;
+    if (_dashSteerPending) {
+      dashPromptInput.value = _dashSteerPending;
+      dashPromptInput.disabled = false;
+      dashSendModeBtn.disabled = false;
+      dashModeToggle.disabled = false;
+      _dashSteerPending = null;
+    }
+    dashRefreshComposerControls();
     // close_in_progress: server is in the middle of releasing this session —
     // treat it the same as session_closed for the pending-create path.
     if (payload && payload.code === 'close_in_progress') {
@@ -1366,7 +1804,7 @@ function dashHandle(frame){
     showToast('<div class="toast toast-error">' + _escHtml(errText) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
     dashSetComposerNote('');
     dashPromptInput.disabled = false;
-    dashRefreshSendButton();
+    dashRefreshComposerControls();
     return;
   }
 }
