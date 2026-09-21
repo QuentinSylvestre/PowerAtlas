@@ -10402,6 +10402,22 @@ const DASH_HANDLE_NAMES = [
   // SC5 (Queue/Steer + Stop, dashboard/ACP feature-parity plan Phase 3) --
   // guards against the frame cases silently moving out of dashHandle.
   "steer_ack", "steer_sent", "steer_status",
+  // SC8 (sub-agent/crew read-only panel, dashboard/ACP feature-parity plan
+  // Phase 5) -- guards against the `subagents` case, and the agent_died/
+  // session_closed crew/sub-agent teardown calls, silently moving out of
+  // dashHandle.
+  "subagents", "dashCloseSubagentView", "dashRemoveAllCrewPanels",
+];
+// SC8 (sub-agent/crew read-only panel, dashboard/ACP feature-parity plan
+// Phase 5) -- a duplicated, not extracted, feature (index.html-only, not
+// composer-chrome.js), mirroring acp.html's own crew panel + read-only
+// sub-agent panel, kept as two distinct pieces here too.
+const DASH_CREW_SUBAGENT_NAMES = [
+  "dashCrewLabel", "dashRenderCrewPanel", "dashSubagentState", "dashStopSlotTimer",
+  "dashRemoveSingleCrewPanel", "dashRemoveAllCrewPanels", "dashSetCrew",
+  "dashOpenSubagent", "dashCloseSubagentView", "dashConnectSubWs",
+  "dashSubAppendChunk", "dashSubAddToolCall", "dashSubAddNote", "dashHandleSub",
+  "window.removeAllCrewPanels", "window.closeSubagentView",
 ];
 const DASH_CMD_PALETTE_NAMES = [
   "initCommandPaletteDom", "showCommandDropdown", "hideCommandDropdown",
@@ -10494,20 +10510,43 @@ function dashPickerSource() {
   const handleFrom = src.indexOf("function dashCloseIfAbandoned");
   if (handleFrom < 0) throw new Error("index.html no longer defines dashCloseIfAbandoned");
 
+  // Sub-agent/crew read-only panel region (SC8, dashboard/ACP feature-parity
+  // plan Phase 5): from dashCrews's declaration through the end of the
+  // window.removeAllCrewPanels/window.closeSubagentView guard assignments,
+  // immediately before dashCloseIfAbandoned (handleFrom, above). Real
+  // source, not a hand-rewritten stand-in, for the same reason
+  // imageAttachRegion below is one -- the crew-panel rendering, timer
+  // cleanup and sub-agent-socket lifecycle logic must be exercised as
+  // written.
+  const crewFrom = src.indexOf("var dashCrews = {};");
+  if (crewFrom < 0) throw new Error("index.html no longer defines dashCrews");
+  if (crewFrom > handleFrom) throw new Error("dashCrews now follows dashCloseIfAbandoned");
+
   // Image-attach pipeline region (SC6, dashboard/ACP feature-parity plan
   // Phase 4): from IMAGE_LADDER's declaration through the end of
-  // dashSendPrompt, immediately before dashCloseIfAbandoned (handleFrom,
-  // above). Real source, not a hand-rewritten stand-in, for the same reason
-  // cmdPaletteRegion/queueSteerWiringRegion are -- the encode pipeline and
-  // dashSendPrompt's own images-payload logic must be exercised as written.
+  // dashSendPrompt, immediately before the sub-agent/crew panel region
+  // (crewFrom, above -- Phase 5 inserted its own block between dashSendPrompt
+  // and dashCloseIfAbandoned, so this region's end boundary moved off
+  // handleFrom onto crewFrom). Real source, not a hand-rewritten stand-in,
+  // for the same reason cmdPaletteRegion/queueSteerWiringRegion are -- the
+  // encode pipeline and dashSendPrompt's own images-payload logic must be
+  // exercised as written.
   const imageFrom = src.indexOf("var IMAGE_LADDER = [");
   if (imageFrom < 0) throw new Error("index.html no longer defines IMAGE_LADDER");
-  if (imageFrom > handleFrom) throw new Error("IMAGE_LADDER now follows dashCloseIfAbandoned");
-  const imageAttachRegion = src.slice(imageFrom, handleFrom);
+  if (imageFrom > crewFrom) throw new Error("IMAGE_LADDER now follows the sub-agent/crew panel region");
+  const imageAttachRegion = src.slice(imageFrom, crewFrom);
   for (const name of DASH_IMAGE_ATTACH_NAMES) {
     if (!imageAttachRegion.includes(name)) {
       throw new Error(
         `the extracted image-attach region does not contain ${name}; it has moved`);
+    }
+  }
+
+  const crewSubagentRegion = src.slice(crewFrom, handleFrom);
+  for (const name of DASH_CREW_SUBAGENT_NAMES) {
+    if (!crewSubagentRegion.includes(name)) {
+      throw new Error(
+        `the extracted sub-agent/crew panel region does not contain ${name}; it has moved`);
     }
   }
 
@@ -10537,11 +10576,11 @@ function dashPickerSource() {
     }
   }
 
-  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, handleRegion, pickerRegion };
+  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion };
 }
 
 function loadDashPicker(opts = {}) {
-  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, handleRegion, pickerRegion } = dashPickerSource();
+  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10600,6 +10639,19 @@ function loadDashPicker(opts = {}) {
   // resolve to these sandbox globals, the same mechanism dashSendBtn etc.
   // already rely on.
   byId.set("dashModeLiveRegion", new El("span")); // read via document.getElementById inside dashApplySendMode
+  // Sub-agent/crew read-only panel DOM refs (SC8, dashboard/ACP
+  // feature-parity plan Phase 5) -- pre-set exactly like the composer-chrome.js
+  // refs above: crewSubagentRegion's own top-level `document.getElementById`
+  // calls (dashTranscriptWrapEl, dashSubPanelEl, etc.) look these up at parse
+  // time, and dashSubBackBtn.addEventListener(...) runs at parse time too, so
+  // the ref must already exist by then.
+  byId.set("dashTranscriptWrap", new El("div"));
+  byId.set("dashSubPanel", new El("div"));
+  byId.get("dashSubPanel").hidden = true;
+  byId.set("dashSubBack", new El("button"));
+  byId.set("dashSubRole", new El("span"));
+  byId.set("dashSubStatus", new El("span"));
+  byId.set("dashSubTranscript", new El("div"));
 
   const fetches = [];
   const sentFrames = [];
@@ -10667,6 +10719,44 @@ function loadDashPicker(opts = {}) {
     return new DashFakeBlob(
       Math.max(1, Math.round(w * h * (DASH_IMAGE_RATE[got] ?? 0.11) * quality)), got);
   });
+
+  /* ---- the sub-agent/crew read-only panel surface (SC8, Phase 5) --------
+   *
+   * transcript-renderer.js is not loaded for real in this sandbox (see the
+   * header comment on this function: only composer-chrome.js is real
+   * source here), so the handful of its globals dashSetCrew() reaches into
+   * as bare identifiers -- exactly as acp.html's own setCrew() does -- are
+   * stood in individually, same reasoning as addMessage/addSystemMessage/
+   * renderTranscriptHistory below. `transcriptEl` here is the crew panel's
+   * host (mirrors production's dashTranscript element, wired via
+   * initTranscriptDom() on the real page); `elapsedText` is copied verbatim
+   * from transcript-renderer.js since it is pure and has no DOM dependency
+   * of its own.
+   */
+  const dashMainTranscriptEl = new El("div");
+  const dashToolRows = Object.create(null);
+  const dashIntervals = [];
+  // A second, independent WebSocket (SC8, Phase 5) -- dashConnectSubWs()
+  // constructs one directly (mirrors acp.html's own connectSubWs(), which
+  // has no reconnect loop and no dependency on dashConnect()/`_dashWs`,
+  // both of which stay stubbed/unused for this surface). Readied OPEN on
+  // construction like the acp.html-side harness's own FakeWs (this file,
+  // ~line 782) -- openSub() below still fires onopen by hand, mirroring
+  // page.openAt()'s own pattern, since the real page's onopen is what sends
+  // the `subscribe` frame.
+  const dashSubSockets = [];
+  class DashFakeSubWs {
+    static OPEN = 1;
+    constructor(url) {
+      this.url = url;
+      this.readyState = DashFakeSubWs.OPEN;
+      this.sent = [];
+      this.onopen = this.onmessage = this.onclose = this.onerror = null;
+      dashSubSockets.push(this);
+    }
+    send(text) { this.sent.push(JSON.parse(text)); }
+    close() { this.readyState = 3; }
+  }
 
   const sandbox = {
     document: {
@@ -10824,7 +10914,19 @@ function loadDashPicker(opts = {}) {
     // no-op stand-in for a dependency outside either extracted region's own
     // concern). Recorded, not a blank no-op, so a Phase 4 check can confirm
     // history rendering still happened alongside the images-payload flush.
-    renderTranscriptHistory: (events) => { historyRenders.push(events); },
+    // SC8 (Phase 5): also reproduces the one piece of the real
+    // renderTranscriptHistory()'s behavior this phase's crew/sub-agent
+    // teardown depends on -- its own real body always calls clearTranscript()
+    // first, which calls the window.removeAllCrewPanels/window.closeSubagentView
+    // guards (transcript-renderer.js:1899-1900) -- so a `history` frame
+    // through dashHandle in this harness tears down crew/sub-agent state the
+    // same way it does on the real page, where transcript-renderer.js is
+    // loaded for real.
+    renderTranscriptHistory: (events) => {
+      historyRenders.push(events);
+      if (typeof sandbox.removeAllCrewPanels === "function") sandbox.removeAllCrewPanels();
+      if (typeof sandbox.closeSubagentView === "function") sandbox.closeSubagentView();
+    },
     // dashHandle's agent_died/session_closed/agent_error branches call this
     // (transcript-renderer.js, not part of either extracted region). Records
     // every call (SC5, Phase 3 needs to assert on queue/steer notes and
@@ -10854,6 +10956,57 @@ function loadDashPicker(opts = {}) {
     dashRenderRail: () => {},
     dashRailGroups: [],
     loadFlatPage: () => {},
+    // Sub-agent/crew read-only panel (SC8, dashboard/ACP feature-parity plan
+    // Phase 5) -- DOM refs, pre-set exactly like dashComposerEl/dashTrayEl
+    // above.
+    dashTranscriptWrapEl: byId.get("dashTranscriptWrap"),
+    dashSubPanelEl: byId.get("dashSubPanel"),
+    dashSubBackBtn: byId.get("dashSubBack"),
+    dashSubRoleEl: byId.get("dashSubRole"),
+    dashSubStatusEl: byId.get("dashSubStatus"),
+    dashSubTranscriptEl: byId.get("dashSubTranscript"),
+    // transcript-renderer.js globals dashSetCrew() reaches into as bare
+    // identifiers (see the header comment on dashMainTranscriptEl above).
+    // `stuckToBottom` mirrors the real implementation exactly
+    // (transcript-renderer.js's own stuckToBottom(), which reads these same
+    // three properties off transcriptEl) rather than a fixed true/false, so
+    // a check can drive the "not stuck to bottom" branch by setting
+    // dashMainTranscriptEl's scroll properties directly, the same way it
+    // would on the real page.
+    transcriptEl: dashMainTranscriptEl,
+    toolRows: dashToolRows,
+    stuckToBottom: () =>
+      dashMainTranscriptEl.scrollHeight - dashMainTranscriptEl.scrollTop
+        - dashMainTranscriptEl.clientHeight < 60,
+    elapsedText: (startedAt, endAt) => {
+      if (typeof startedAt !== "number" || !startedAt) return "";
+      const now = (typeof endAt === "number" && endAt) ? endAt : Date.now() / 1000;
+      let secs = Math.round(now - startedAt);
+      if (secs < 0) secs = 0;
+      const m = Math.floor(secs / 60);
+      const s = secs % 60;
+      return m > 0 ? m + "m " + s + "s" : s + "s";
+    },
+    // setInterval/clearInterval -- nothing on this page's dashboard-side
+    // extracted regions used a timer before crewSubagentRegion (dashSetCrew's
+    // elapsed-time ticker), so the sandbox had neither. Mirrors the
+    // acp.html-side harness's own setInterval/clearInterval stand-in (this
+    // file, ~line 871) exactly: held rather than run, so a check fires a
+    // tick by hand (via the returned harness's `intervals` array) rather
+    // than racing a real one.
+    setInterval: (fn, ms) => { dashIntervals.push({ fn, ms }); return dashIntervals.length; },
+    clearInterval: (id) => {
+      if (id != null) {
+        const idx = dashIntervals.findIndex((_, i) => i + 1 === id);
+        if (idx !== -1) dashIntervals.splice(idx, 1);
+      }
+    },
+    // dashConnectSubWs() constructs `new WebSocket(dashWsUrl())` directly
+    // (SC8, Phase 5) -- independent of `_dashWs`/dashConnect() above, which
+    // stay stubbed/unused for this surface (mirrors acp.html's own
+    // connectSubWs(), which has no dependency on connect() either).
+    WebSocket: DashFakeSubWs,
+    dashWsUrl: () => "ws://test.invalid/ws/acp",
     console: { log() {}, warn() {}, error() {} },
   };
   // Image API globals (SC6, dashboard/ACP feature-parity plan Phase 4) --
@@ -10955,6 +11108,14 @@ function loadDashPicker(opts = {}) {
     return _realDashSendPrompt.apply(sandbox, arguments);
   };
   vm.runInContext(queueSteerWiringRegion, sandbox, { filename: "index.html#dash-queue-steer" });
+  // Sub-agent/crew read-only panel (SC8, dashboard/ACP feature-parity plan
+  // Phase 5) -- self-contained (dashSubBackBtn.addEventListener(...) and the
+  // window.removeAllCrewPanels/window.closeSubagentView assignments at its
+  // own end all resolve within this same region's own hoisted function
+  // declarations), so its position relative to the regions above is not
+  // load-bearing; run immediately before handleRegion, matching its real
+  // textual adjacency to dashCloseIfAbandoned in index.html.
+  vm.runInContext(crewSubagentRegion, sandbox, { filename: "index.html#dash-crew-subagent" });
   vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
   vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
 
@@ -11020,6 +11181,47 @@ function loadDashPicker(opts = {}) {
     trayChips() { return sandbox.dashTrayEl.querySelectorAll(".acp-attach"); },
     /** Every object URL the page has revoked, in order. */
     revoked() { return dashRevokedUrls.slice(); },
+    // ---- sub-agent/crew read-only panel helpers (SC8, dashboard/ACP
+    // feature-parity plan Phase 5) -- mirror loadPage()'s own
+    // intervals/socketAt()/openAt()/deliverTo() (this file, ~lines
+    // 801/1003-1025) exactly, targeted at dashConnectSubWs()'s independent
+    // dashSubWs instead of acp.html's subWs.
+    /** Crew-slot elapsed-time timers registered via setInterval -- mirrors
+     *  loadPage()'s own `page.intervals`. A live reference, not a snapshot:
+     *  its `.length` reflects clearInterval() calls made since this harness
+     *  was created. */
+    intervals: dashIntervals,
+    /** How many independent sub-agent WebSockets dashConnectSubWs() has
+     *  constructed so far. */
+    subSocketCount() { return dashSubSockets.length; },
+    /** The Nth sub-agent socket dashConnectSubWs() has opened, 0-indexed. */
+    subSocket(i) {
+      const s = dashSubSockets[i];
+      if (!s) throw new Error(`the dashboard has not opened sub-agent socket #${i}`);
+      return s;
+    },
+    /** Fire the Nth sub-agent socket's onopen handler -- the real page's
+     *  onopen is what sends the `subscribe` frame. */
+    openSub(i) {
+      const s = this.subSocket(i);
+      s.readyState = DashFakeSubWs.OPEN;
+      if (!s.onopen) throw new Error("dashConnectSubWs set no onopen handler");
+      s.onopen();
+    },
+    /** Deliver a frame to the Nth sub-agent socket's onmessage handler. */
+    deliverSub(i, frame) {
+      const s = this.subSocket(i);
+      if (!s.onmessage) throw new Error("dashConnectSubWs set no onmessage handler");
+      s.onmessage({ data: JSON.stringify(frame) });
+    },
+    /** Fire the Nth sub-agent socket's onclose handler (simulates a dropped
+     *  or rejected connection -- e.g. a too_many_connections close, code
+     *  1013). */
+    closeSub(i, ev) {
+      const s = this.subSocket(i);
+      s.readyState = 3;
+      if (s.onclose) s.onclose(ev ?? { code: 1000, reason: "" });
+    },
   };
 }
 
@@ -12837,6 +13039,593 @@ check("dashboard: image attach — the session-frame stale-load block resets _da
   assertEqual(p.sandbox._dashPendingImages, null,
     "_dashPendingImages must be reset by the session-frame stale-load block, matching its sibling " +
     "_dashPendingSend");
+});
+
+// ---- dashboard sub-agent/crew read-only panel (plans/260921_DASHBOARD_ACP_FEATURE_PARITY.md,
+// Phase 5: SC8) --------------------------------------------------------------
+//
+// Reuses loadDashPicker()'s harness with the crewSubagentRegion additions
+// (this file, dashPickerSource()): dashCrewLabel/dashRenderCrewPanel/
+// dashSubagentState/dashStopSlotTimer/dashRemoveSingleCrewPanel/
+// dashRemoveAllCrewPanels/dashSetCrew (crew panel, rendered inline in
+// transcriptEl) and dashOpenSubagent/dashCloseSubagentView/dashConnectSubWs/
+// dashSubAppendChunk/dashSubAddToolCall/dashSubAddNote/dashHandleSub (the
+// read-only sub-agent panel, driven over its own independent dashSubWs) are
+// all real source here, not stand-ins -- kept as two distinct pieces, exactly
+// as acp.html keeps them. `dashSubagentsFrame()` mirrors the acp.html-side
+// harness's own `subagentsFrame()` helper.
+
+function dashSubagentsFrame(sid, subagents, toolCallId) {
+  return { type: "subagents", sessionId: sid, payload: { subagents, toolCallId: toolCallId || "" } };
+}
+
+// ---- crew panel rendering ---------------------------------------------
+
+check("dashboard: crew panel — no panel appears until a subagents frame arrives", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 0,
+    "a session with no crew should show no crew panel");
+});
+
+check("dashboard: crew panel — a subagents frame with a running entry renders a row with label and action", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "stage-1",
+      status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
+  ]));
+  const panels = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel");
+  assertEqual(panels.length, 1, "a crew panel should appear in the transcript");
+  const rows = panels[0].querySelectorAll(".acp-crew-row");
+  assertEqual(rows.length, 1, "one row per sub-agent");
+  assertEqual(rows[0].querySelector(".acp-crew-label").textContent, "stage-1",
+    "entry should show the sessionName as primary label");
+  assertEqual(rows[0].querySelector(".acp-crew-action").textContent, "reading",
+    "entry should show the current action");
+});
+
+check("dashboard: crew panel — a row is clickable and opens the sub-agent panel", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "",
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
+  assertEqual(rows.length, 1);
+  rows[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "clicking a crew row should open the sub-agent panel");
+});
+
+check("dashboard: crew panel — persists after all entries are done (no auto-dismiss)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now - 10 },
+  ], "tc-persist"));
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 1);
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "terminated", action: "", done: true, error: "", startedAt: now - 10, stoppedAt: now },
+  ], "tc-persist"));
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 1,
+    "the panel must stay visible after all entries are done");
+});
+
+check("dashboard: crew panel — persists after a main-channel meta turn:end (no auto-dismiss)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", dashTurnActive: true });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "terminated", action: "", done: true, error: "", startedAt: Date.now() / 1000 - 30 },
+  ], "tc-turnend"));
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 1);
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "end_turn" } });
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 1,
+    "turn end must not dismiss the crew panel");
+});
+
+check("dashboard: crew panel — header text: 'Orchestrating (N agents)' singular/plural", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
+  ]));
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
+    "Orchestrating (1 agent)", "singular for one running entry");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
+    { sessionId: "sub-2", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
+  ]));
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
+    "Orchestrating (2 agents)", "plural for two running entries");
+});
+
+check("dashboard: crew panel — header text: 'Done (N agents)' singular/plural when all entries are done", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now },
+  ]));
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
+    "Done (1 agent)", "singular when the sole entry is done");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now },
+    { sessionId: "sub-2", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now - 5, stoppedAt: now },
+  ]));
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-header").textContent,
+    "Done (2 agents)", "plural when both entries are done");
+});
+
+check("dashboard: crew panel — label falls back from sessionName to truncated task to 'agent'", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  assertEqual(p.sandbox.dashCrewLabel({ sessionName: "stage-a", task: "do a thing" }), "stage-a");
+  assertEqual(p.sandbox.dashCrewLabel({ sessionName: "", task: "x".repeat(40) }),
+    "x".repeat(30).trim() + "…");
+  assertEqual(p.sandbox.dashCrewLabel({ sessionName: "", task: "" }), "agent");
+  assertEqual(p.sandbox.dashCrewLabel(null), "agent");
+});
+
+check("dashboard: crew panel — action text falls back to 'working…'/'done'/'errored'", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "a"));
+  assertEqual(p.sandbox.transcriptEl.querySelector(".acp-crew-action").textContent, "working…");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-2", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now, stoppedAt: now },
+  ], "b"));
+  const doneAction = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-action")[1];
+  assertEqual(doneAction.textContent, "done");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-3", role: "worker", task: "", status: "error", action: "", done: true, error: "boom", startedAt: now, stoppedAt: now },
+  ], "c"));
+  const errAction = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-action")[2];
+  assertEqual(errAction.textContent, "errored");
+});
+
+check("dashboard: crew panel — status dot class reflects working/done/error", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: now },
+  ], "a"));
+  assert(p.sandbox.transcriptEl.querySelector(".acp-crew-row").className.includes("acp-crew-row-working"));
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-2", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: now, stoppedAt: now },
+  ], "b"));
+  let rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
+  assert(rows[1].className.includes("acp-crew-row-done"));
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-3", role: "worker", task: "", status: "error", action: "", done: true, error: "boom", startedAt: now, stoppedAt: now },
+  ], "c"));
+  rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
+  assert(rows[2].className.includes("acp-crew-row-error"));
+});
+
+check("dashboard: crew panel — setCrew with a toolCallId anchors the panel immediately after the matching tool-call row", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const toolRow = new El("div");
+  p.sandbox.transcriptEl.appendChild(toolRow);
+  const toolBody = new El("div");
+  toolRow.appendChild(toolBody);
+  p.sandbox.toolRows["t:tc-1"] = { body: toolBody };
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tc-1"));
+  const kids = p.sandbox.transcriptEl.childNodes;
+  const panelIdx = kids.findIndex((n) => n.className === "acp-crew-panel");
+  const toolIdx = kids.indexOf(toolRow);
+  assert(panelIdx === toolIdx + 1,
+    "the crew panel must be inserted immediately after the anchoring tool-call row");
+});
+
+check("dashboard: crew panel — setCrew with no toolCallId appends a no-anchor panel to the transcript", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 1,
+    "a no-anchor crew update should still produce a panel, appended to the transcript");
+});
+
+check("dashboard: crew panel — empty entries with no active no-anchor slot does not ghost _dashNoAnchorKey", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", []));
+  assertEqual(p.sandbox._dashNoAnchorKey, null,
+    "an empty-entries update with nothing active must not set _dashNoAnchorKey");
+  assertEqual(p.sandbox._dashNoAnchorSeq, 0,
+    "an empty-entries update with nothing active must not advance _dashNoAnchorSeq");
+});
+
+check("dashboard: crew panel — two subagents frames with different toolCallIds produce two independent panels", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-a", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "a"));
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-b", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "b"));
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 2,
+    "two different toolCallIds should produce two independent crew slots");
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 2,
+    "two panels should appear in the transcript");
+});
+
+check("dashboard: crew panel — two consecutive no-anchor subagents updates reuse the same slot", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const keysAfterFirst = Object.keys(p.sandbox.dashCrews);
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "reading", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const keysAfterSecond = Object.keys(p.sandbox.dashCrews);
+  assertEqual(keysAfterSecond.length, 1, "a second no-anchor update should not create a second slot");
+  assertEqual(keysAfterSecond[0], keysAfterFirst[0], "the same _na_ key should be reused");
+});
+
+check("dashboard: crew panel — dashCrewEntry finds entries across multiple active crews", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-x", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "x"));
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-y", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: Date.now() / 1000, stoppedAt: Date.now() / 1000 },
+  ], "y"));
+  const found = p.sandbox.dashCrewEntry("sub-y");
+  assert(found && found.sessionId === "sub-y", "dashCrewEntry should find an entry in a non-first crew slot");
+});
+
+check("dashboard: crew panel — a malicious sessionName renders as literal text, never innerHTML", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const malicious = "<img src=x onerror=\"window._dash_crew_xss=true\">";
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: malicious,
+      status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const label = p.sandbox.transcriptEl.querySelector(".acp-crew-label");
+  assert(label.textContent.includes(malicious),
+    "the crew label must render an agent-controlled sessionName as literal text");
+  assert(!p.sandbox._dash_crew_xss, "the onerror handler must not fire -- crew row rendering must not use innerHTML");
+});
+
+// ---- crew-slot timer cleanup (a real, easy-to-miss bug class here) -----
+
+check("dashboard: crew panel — a setInterval timer starts when the crew has a non-done entry", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const before = p.intervals.length;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(p.intervals.length > before, "a setInterval should be registered for a running crew entry");
+});
+
+check("dashboard: crew panel — no setInterval timer starts for an all-done crew", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const before = p.intervals.length;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: Date.now() / 1000 - 10, stoppedAt: Date.now() / 1000 },
+  ]));
+  assertEqual(p.intervals.length, before, "no new setInterval should be registered when all entries are done");
+});
+
+check("dashboard: crew panel — the setInterval timer is cleared once all entries in the slot become done", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const baseline = p.intervals.length;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tc-stop"));
+  assert(p.intervals.length > baseline, "fixture: a timer should be registered while running");
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "done", action: "", done: true, error: "", startedAt: Date.now() / 1000 - 5, stoppedAt: Date.now() / 1000 },
+  ], "tc-stop"));
+  assertEqual(p.intervals.length, baseline, "the timer must be cleared once the slot's entries are all done");
+});
+
+check("dashboard: crew panel — the elapsed-time interval rebuilds rows without error when it fires", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  const startedAt = Date.now() / 1000 - 10;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt },
+  ]));
+  const elapsed = p.sandbox.transcriptEl.querySelector(".acp-crew-elapsed");
+  assert(elapsed !== null && elapsed.textContent.length > 0, "elapsed span should show a non-empty time string");
+  p.intervals[p.intervals.length - 1].fn();
+  const elapsed2 = p.sandbox.transcriptEl.querySelector(".acp-crew-elapsed");
+  assert(elapsed2 !== null, "elapsed span should still be present after the tick");
+});
+
+check("dashboard: crew panel — session_closed clears crew timers (parity with acp.html's releaseSession)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const baseline = p.intervals.length;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(p.intervals.length > baseline, "fixture: a timer should be registered for a running crew entry");
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assertEqual(p.intervals.length, baseline, "session_closed must clear crew timers");
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "session_closed must clear crew state");
+});
+
+check("dashboard: crew panel — agent_died clears crew timers, crew state, and closes any open sub-agent panel", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const baseline = p.intervals.length;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  assert(p.intervals.length > baseline, "fixture: a timer should be registered for a running crew entry");
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "" } });
+  assertEqual(p.intervals.length, baseline, "agent_died must clear crew timers");
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "agent_died must clear crew state");
+  assertEqual(p.el("dashSubPanel").hidden, true, "agent_died must close any open sub-agent panel");
+});
+
+check("dashboard: crew panel — a removed slot's stale timer tick does not throw or leak", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "tc-orphan"));
+  const timerEntry = p.intervals[p.intervals.length - 1];
+  p.sandbox.dashRemoveAllCrewPanels();
+  // The removed slot's own interval callback checks `slot.panel &&
+  // slot.panel.parentNode` and clears itself via dashStopSlotTimer if that
+  // fails -- calling it after removal must not throw.
+  timerEntry.fn();
+});
+
+// ---- the live removeAllCrewPanels/closeSubagentView guards (5d) --------
+
+check("dashboard: crew panel — window.removeAllCrewPanels/window.closeSubagentView resolve to the real dash functions", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  assertEqual(p.sandbox.removeAllCrewPanels, p.sandbox.dashRemoveAllCrewPanels,
+    "window.removeAllCrewPanels must be assigned to dashRemoveAllCrewPanels");
+  assertEqual(p.sandbox.closeSubagentView, p.sandbox.dashCloseSubagentView,
+    "window.closeSubagentView must be assigned to dashCloseSubagentView");
+});
+
+check("dashboard: crew panel — a history reload clears all crew panels and closes an open sub-agent panel", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  p.sandbox.dashHandle({ type: "history", sessionId: "sess-1", payload: { events: [] } });
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0,
+    "all crew slots should be cleared after a history reload (window.removeAllCrewPanels now live)");
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-panel").length, 0);
+  assertEqual(p.el("dashSubPanel").hidden, true,
+    "the sub-agent panel should close on a history reload (window.closeSubagentView now live)");
+});
+
+// ---- the read-only sub-agent panel --------------------------------------
+
+check("dashboard: sub-agent panel — opening hides the transcript wrapper and composer, shows the sub panel", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashTranscriptWrap").hidden, true, "the transcript wrapper should hide while a sub-agent is open");
+  assertEqual(p.sandbox.dashComposerEl.hidden, true, "the composer should hide -- a sub-agent's conversation is read-only");
+  assertEqual(p.el("dashSubPanel").hidden, false);
+});
+
+check("dashboard: sub-agent panel — opening a crew row's sub-agent sends exactly one subscribe on a fresh socket", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "look around", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.subSocketCount(), 1, "exactly one sub-agent socket should be opened");
+  p.openSub(0);
+  const subs = p.subSocket(0).sent.filter((f) => f.type === "subscribe");
+  assertEqual(subs.length, 1, "expected exactly one subscribe on the sub-agent socket");
+  assertEqual(subs[0].sessionId, "sub-1");
+});
+
+check("dashboard: sub-agent panel — the back button restores the main transcript and leaves the sub socket open", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.el("dashSubBack").dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, true);
+  assertEqual(p.el("dashTranscriptWrap").hidden, false);
+  assertEqual(p.sandbox.dashComposerEl.hidden, false, "the composer must be restored -- the page is still attached to sess-1");
+  assert(p.subSocket(0).readyState !== 3,
+    "the sub-agent socket must be left open, not closed, when returning to the main transcript");
+});
+
+check("dashboard: sub-agent panel — closing the panel does not un-hide the composer when no session is attached", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1", dashAttachedSid: null });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.el("dashSubBack").dispatch("click");
+  assertEqual(p.sandbox.dashComposerEl.hidden, true,
+    "the composer must stay hidden -- there is no attached session for it to show for");
+});
+
+check("dashboard: sub-agent panel — reopening a sub-agent reuses the existing socket rather than opening a new one", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.el("dashSubBack").dispatch("click");
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.subSocketCount(), 1, "a second socket must not be opened when the existing one is still OPEN");
+  const subs = p.subSocket(0).sent.filter((f) => f.type === "subscribe");
+  assertEqual(subs.length, 2, "expected a second subscribe sent on the reused socket");
+});
+
+check("dashboard: sub-agent panel — renders its own chunk and tool_call frames via dashHandleSub", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.deliverSub(0, { type: "session", sessionId: "sub-1", payload: { sessionId: "sub-1", readOnly: true, parentSessionId: "sess-1" } });
+  p.deliverSub(0, { type: "history", sessionId: "sub-1", payload: { events: [] } });
+  p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: "looking around" } });
+  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: "read", kind: "", status: "" } });
+  const body = p.el("dashSubTranscript").textContent;
+  assert(body.includes("looking around"), "the sub-agent's chunk text was not rendered");
+  assert(body.includes("read"), "the sub-agent's tool call was not rendered");
+});
+
+check("dashboard: sub-agent panel — a live subagents update refreshes the header status while the panel is open", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const now = Date.now() / 1000;
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "reading", done: false, error: "", startedAt: now - 5 },
+  ], "tc-update"));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "done", action: "", done: true, error: "", startedAt: now - 5 },
+  ], "tc-update"));
+  assertEqual(p.el("dashSubPanel").hidden, false, "the panel should stay open across a crew update");
+  assertEqual(p.el("dashSubStatus").textContent, "done");
+});
+
+check("dashboard: sub-agent panel — dashRenderSubHead shows 'errored: <message>' for an errored entry", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "error", action: "", done: true, error: "boom", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubStatus").textContent, "errored: boom");
+  assert(p.el("dashSubStatus").className.includes("acp-subpanel-status-error"));
+});
+
+check("dashboard: sub-agent panel — dashOpenSubagent(null) is a no-op", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashOpenSubagent(null);
+  assertEqual(p.el("dashSubPanel").hidden, true);
+  assertEqual(p.subSocketCount(), 0);
+});
+
+check("dashboard: sub-agent panel — session_closed closes any open sub-agent panel (parity with acp.html's releaseSession)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
+  assertEqual(p.el("dashSubPanel").hidden, true, "session_closed must close any open sub-agent panel");
+  assertEqual(p.el("dashTranscriptWrap").hidden, false);
+});
+
+check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  assertEqual(typeof p.sandbox.dashHandleSub, "function");
+  assert(p.sandbox.dashHandleSub !== p.sandbox.dashHandle,
+    "dashHandleSub must be a separate function, not an alias for dashHandle");
+  // A sub-agent-only frame type delivered on the MAIN dashHandle dispatcher
+  // must not reach the sub-agent transcript.
+  p.sandbox.dashHandle({ type: "history_truncated", sessionId: "sess-1", payload: { message: "dropped" } });
+  assertEqual(p.el("dashSubTranscript").textContent, "",
+    "dashHandle must not thread a sub-agent-shaped frame into dashSubTranscriptEl");
+});
+
+// ---- graceful MAX_CONNECTIONS handling (5e) -----------------------------
+
+check("dashboard: sub-agent panel — a too_many_connections error frame shows a clear message, not a stuck loading state", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.deliverSub(0, { type: "error", payload: { code: "too_many_connections", message: "At most 8 /acp sockets may be open at once." } });
+  const body = p.el("dashSubTranscript").textContent;
+  assert(body.includes("Too many active connections"),
+    "a too_many_connections error frame must render a clear, actionable message in the panel");
+});
+
+check("dashboard: sub-agent panel — an onclose with no prior content shows a graceful fallback message (defense-in-depth)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  // The socket closes (e.g. code 1013) without ever delivering a message --
+  // a parse failure, or a close that outraces its own message.
+  p.closeSub(0, { code: 1013, reason: "too many connections" });
+  const body = p.el("dashSubTranscript").textContent;
+  assert(body.length > 0, "the panel must not be left blank when the socket closes with no prior content");
+});
+
+check("dashboard: sub-agent panel — a normal close after content already arrived does not add a spurious fallback note", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.deliverSub(0, { type: "session", sessionId: "sub-1", payload: { sessionId: "sub-1" } });
+  p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: "hello" } });
+  const before = p.el("dashSubTranscript").textContent;
+  p.closeSub(0, { code: 1000, reason: "" });
+  const after = p.el("dashSubTranscript").textContent;
+  assertEqual(after, before,
+    "a close after the connection succeeded must not append a spurious 'could not connect' note");
+});
+
+// ---- security: agent-controlled text in the sub-agent panel (5c) -------
+
+check("dashboard: sub-agent panel — chunk frame with agent-controlled text uses textContent, never innerHTML", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  const malicious = "<img src=x onerror=\"window._dash_sub_xss=true\">";
+  p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: malicious } });
+  // Reaching here at all means no innerHTML sink fired -- El's innerHTML
+  // getter/setter throws unconditionally (HTML_SINK, this file's DOM stand-in).
+  assert(p.el("dashSubTranscript").textContent.includes(malicious),
+    "the sub-agent's chunk text must render as literal text");
+  assert(!p.sandbox._dash_sub_xss, "the onerror handler must not fire -- chunk rendering must not use innerHTML");
+});
+
+check("dashboard: sub-agent panel — tool_call frame with an agent-controlled title uses textContent, never innerHTML", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  const malicious = "<img src=x onerror=\"window._dash_sub_tool_xss=true\">";
+  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-x", title: malicious, kind: "", status: "" } });
+  assert(p.el("dashSubTranscript").textContent.includes(malicious),
+    "the sub-agent's tool-call title must render as literal text");
+  assert(!p.sandbox._dash_sub_tool_xss, "the onerror handler must not fire -- tool-call rendering must not use innerHTML");
+});
+
+check("dashboard: sub-agent panel — session_closed/error note text uses textContent, never innerHTML", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  const malicious = "<img src=x onerror=\"window._dash_sub_note_xss=true\">";
+  p.deliverSub(0, { type: "session_closed", sessionId: "sub-1", payload: { message: malicious } });
+  assert(p.el("dashSubTranscript").textContent.includes(malicious),
+    "the sub-agent's session_closed note must render as literal text");
+  assert(!p.sandbox._dash_sub_note_xss, "the onerror handler must not fire -- note rendering must not use innerHTML");
 });
 
 let failed = 0;

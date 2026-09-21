@@ -352,6 +352,22 @@
         </button>
       </div>
     </div>
+    <!-- A sub-agent's own conversation, shown in place of the transcript+
+         composer while one is selected on the crew panel above (SC8,
+         dashboard/ACP feature-parity plan Phase 5) -- mirrors acp.html's own
+         #acpSubPanel (acp.html:219-233) exactly, dash-prefixed. Read-only by
+         design -- no composer here at all, only a way back. Built with
+         createElement + textContent like every other pane on this page;
+         empty in the markup. -->
+    <div class="acp-subpanel" id="dashSubPanel" hidden>
+      <div class="acp-subpanel-head">
+        <button class="acp-btn" id="dashSubBack" type="button">‹ Back to main</button>
+        <span class="acp-subpanel-role" id="dashSubRole"></span>
+        <span class="acp-subpanel-status" id="dashSubStatus"></span>
+      </div>
+      <div class="acp-transcript acp-subpanel-transcript" id="dashSubTranscript"
+           role="log" aria-live="polite" aria-label="Sub-agent conversation"></div>
+    </div>
     <div class="acp-composer" id="dashComposer" hidden>
       <!-- Images staged for the next prompt (SC6, dashboard/ACP
            feature-parity plan Phase 4) -- mirrors acp.html's own #acpTray
@@ -944,6 +960,19 @@ var dashModeOptSteer = document.getElementById('dashModeOptSteer');
 var dashModeOptQueue = document.getElementById('dashModeOptQueue');
 var dashModeOptions = dashModeOptSteer && dashModeOptQueue ? [dashModeOptSteer, dashModeOptQueue] : [];
 var dashSteerStatusEl = document.getElementById('dashSteerStatus');
+// Sub-agent/crew read-only panel (SC8, dashboard/ACP feature-parity plan
+// Phase 5) -- dash-prefixed DOM refs mirroring acp.html's own
+// transcriptWrapEl/subPanelEl/subBackBtn/subRoleEl/subStatusEl/
+// subTranscriptEl (acp.html:580-585). A duplicated, not extracted, feature
+// (see the plan's Design Decisions) -- these stay index.html-private rather
+// than moving into composer-chrome.js, same reasoning as the Queue/Steer
+// refs above.
+var dashTranscriptWrapEl = document.getElementById('dashTranscriptWrap');
+var dashSubPanelEl = document.getElementById('dashSubPanel');
+var dashSubBackBtn = document.getElementById('dashSubBack');
+var dashSubRoleEl = document.getElementById('dashSubRole');
+var dashSubStatusEl = document.getElementById('dashSubStatus');
+var dashSubTranscriptEl = document.getElementById('dashSubTranscript');
 // Hidden unless attached to a live session, disabled under a live turn (the
 // server refuses a close then anyway, same as /acp's #acpClose) -- called
 // everywhere _dashAttachedSid or _dashTurnActive changes.
@@ -1811,6 +1840,483 @@ function dashSendPrompt(){
   dashConnect(function(){ send('load', {}, sid); });
 }
 
+// ---- Phase 5: sub-agent/crew read-only panel (SC8) -------------------------
+//
+// A duplicated, not extracted, feature (see the plan's Design Decisions) --
+// dash-prefixed, index.html-only, mirroring acp.html's own crew panel
+// (acp.html:1770-1864, crewLabel/renderCrewPanel/subagentState/
+// stopSlotTimer/removeSingleCrewPanel/removeAllCrewPanels/setCrew) and its
+// read-only sub-agent panel (acp.html:1865-2137, openSubagent/
+// closeSubagentView/connectSubWs/subAppendChunk/subAddToolCall/subAddNote/
+// handleSub) -- kept as two distinct pieces here too, exactly as acp.html
+// keeps them.
+//
+// dashSetCrew() reaches into transcript-renderer.js's toolRows/transcriptEl/
+// stuckToBottom/elapsedText as bare globals, exactly as acp.html's own
+// setCrew() does -- pre-existing, expected coupling (this file's own
+// initTranscriptDom() call above already makes transcriptEl a true global on
+// this page the same way it is one on acp.html).
+
+// Per-fan-out crew state, keyed by spawner toolCallId (non-empty string) or
+// a unique sequence counter for no-anchor fan-outs ('_na_N'). Mirrors
+// acp.html's own crews/_noAnchorSeq/_noAnchorKey (acp.html:799-801).
+// {key: {entries: [], panel: null|Element, timer: null|int, allDone: false}}
+var dashCrews = {};
+var _dashNoAnchorSeq = 0; // counter for no-anchor fan-out keys
+var _dashNoAnchorKey = null; // stable key for the current no-anchor fan-out
+
+function dashCrewLabel(entry) {
+  if (!entry) return 'agent';
+  var sn = entry.sessionName || '';
+  if (sn) return sn;
+  var t = entry.task || '';
+  if (t) return t.length > 30 ? t.slice(0, 30).trim() + '…' : t.trim();
+  return 'agent';
+}
+
+function dashRenderCrewPanel(slot) {
+  // slot: {entries, panel, allDone}
+  if (!slot || !slot.panel || !slot.panel.parentNode) return;
+  var hdr = slot.panel.querySelector('.acp-crew-header');
+  if (!hdr) {
+    hdr = document.createElement('div');
+    hdr.className = 'acp-crew-header';
+    slot.panel.insertBefore(hdr, slot.panel.firstChild);
+  }
+  var n = slot.entries.length;
+  hdr.textContent = slot.allDone
+    ? 'Done (' + n + (n === 1 ? ' agent)' : ' agents)')
+    : 'Orchestrating (' + n + (n === 1 ? ' agent)' : ' agents)');
+
+  // Remove old rows (keep header)
+  while (slot.panel.lastChild && slot.panel.lastChild.className !== 'acp-crew-header') {
+    slot.panel.removeChild(slot.panel.lastChild);
+  }
+
+  // Append new lean rows
+  for (var i = 0; i < slot.entries.length; i++) {
+    (function(entry) {
+      var state = dashSubagentState(entry);  // 'working' | 'done' | 'error'
+      var dotClass = state === 'working' ? 'status-thinking'
+                   : state === 'error'   ? 'status-errored'
+                   : 'status-idle';
+      var label = dashCrewLabel(entry);
+      var stateText = state === 'error' ? 'errored' : state === 'done' ? 'done' : (entry.action || 'working');
+
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'acp-crew-row acp-crew-row-' + state;
+      row.setAttribute('aria-label',
+        label + (entry.role ? ', ' + entry.role : '') + ', ' + stateText);
+
+      var dot = document.createElement('span');
+      dot.className = 'session-status ' + dotClass;
+      dot.setAttribute('aria-hidden', 'true');
+
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'acp-crew-label';
+      nameSpan.textContent = label;
+
+      var roleSpan = document.createElement('span');
+      roleSpan.className = 'acp-crew-role';
+      roleSpan.textContent = entry.role || '';
+
+      var actionSpan = document.createElement('span');
+      actionSpan.className = 'acp-crew-action';
+      actionSpan.textContent = state === 'working' && !entry.action
+        ? 'working…' : stateText;
+
+      var elapsedSpan = document.createElement('span');
+      elapsedSpan.className = 'acp-crew-elapsed';
+      var start = entry.startedAt;
+      var stop = entry.stoppedAt;
+      elapsedSpan.textContent = stop > 0
+        ? elapsedText(start, stop) : elapsedText(start);
+
+      row.appendChild(dot);
+      row.appendChild(nameSpan);
+      if (entry.role) row.appendChild(roleSpan);
+      row.appendChild(actionSpan);
+      row.appendChild(elapsedSpan);
+      row.addEventListener('click', function() { dashOpenSubagent(entry.sessionId); });
+      slot.panel.appendChild(row);
+    })(slot.entries[i]);
+  }
+}
+
+// One of 'working' / 'done' / 'error', shared by the crew panel and the
+// sub-agent panel header. `null`/missing reads as 'working': a slot the
+// panel already has a row for but the crew has no entry for yet is a
+// sub-agent that has not finished, not one that has. Mirrors acp.html's own
+// subagentState (acp.html:1860-1863).
+function dashSubagentState(entry) {
+  if (!entry || !entry.done) return 'working';
+  return entry.error ? 'error' : 'done';
+}
+
+// Every code path that removes a crew slot (normal removal via
+// dashRemoveSingleCrewPanel, dashRemoveAllCrewPanels, a slot update that
+// finds all entries done) must clear that slot's setInterval -- a leaked
+// interval ticking against a removed DOM row is a real, easy-to-miss bug
+// class here. Mirrors acp.html's own stopSlotTimer (acp.html:1867-1869).
+function dashStopSlotTimer(slot) {
+  if (slot.timer !== null) { clearInterval(slot.timer); slot.timer = null; }
+}
+
+function dashRemoveSingleCrewPanel(key) {
+  var slot = dashCrews[key];
+  if (!slot) return;
+  dashStopSlotTimer(slot);
+  if (slot.panel && slot.panel.parentNode) slot.panel.remove();
+  slot.panel = null;
+  delete dashCrews[key];
+  if (key === _dashNoAnchorKey) _dashNoAnchorKey = null; // allow a fresh no-anchor slot next time
+}
+
+// Wired live onto window.removeAllCrewPanels below (SC8, Phase 5) -- the
+// guard already exists in transcript-renderer.js's clearTranscript()
+// (called from renderTranscriptHistory(), itself called from this page's
+// own openSessionTranscript()/dashHandle() `history` branch), and used to
+// no-op harmlessly on the dashboard because nothing assigned it. Mirrors
+// acp.html's own removeAllCrewPanels (acp.html:1881-1886).
+function dashRemoveAllCrewPanels() {
+  Object.keys(dashCrews).forEach(function(k) { dashRemoveSingleCrewPanel(k); });
+  dashCrews = {};
+  _dashNoAnchorSeq = 0;
+  _dashNoAnchorKey = null; // reset for the next session
+}
+
+function dashSetCrew(entries, toolCallId) {
+  var key = (toolCallId && toolCallId !== '') ? toolCallId : null;
+
+  // Early-return for empty entries BEFORE computing useKey -- mirrors
+  // acp.html's own ordering exactly (acp.html:1891-1902), to avoid advancing
+  // _dashNoAnchorSeq and ghosting _dashNoAnchorKey when there is no active
+  // no-anchor slot to remove.
+  if (!entries.length) {
+    if (key && dashCrews[key]) {
+      dashRemoveSingleCrewPanel(key);
+    } else if (!key && _dashNoAnchorKey && dashCrews[_dashNoAnchorKey]) {
+      dashRemoveSingleCrewPanel(_dashNoAnchorKey);
+    }
+    return;
+  }
+
+  var useKey;
+  if (key) {
+    useKey = key;
+  } else {
+    if (_dashNoAnchorKey && dashCrews[_dashNoAnchorKey]) {
+      useKey = _dashNoAnchorKey;
+    } else {
+      useKey = '_na_' + (++_dashNoAnchorSeq);
+      _dashNoAnchorKey = useKey;
+    }
+  }
+
+  if (!dashCrews[useKey]) {
+    dashCrews[useKey] = {entries: [], panel: null, timer: null, allDone: false};
+  }
+  var s = dashCrews[useKey];
+  s.entries = entries;
+  s.allDone = entries.every(function(e) { return e.done; });
+
+  // The panel currently open may name a sub-agent this update no longer
+  // carries the same entry for -- refresh its header from the latest
+  // role/task/status rather than leaving it showing the snapshot from
+  // whenever it was opened.
+  if (dashSubViewSid) dashRenderSubHead();
+
+  if (s.allDone) {
+    dashStopSlotTimer(s);
+  } else {
+    if (s.timer === null) {
+      s.timer = setInterval(function() {
+        if (s.panel && s.panel.parentNode) dashRenderCrewPanel(s);
+        else dashStopSlotTimer(s);
+      }, 1000);
+    }
+  }
+
+  if (!s.panel || !s.panel.parentNode) {
+    var stick = stuckToBottom();
+    s.panel = document.createElement('div');
+    s.panel.className = 'acp-crew-panel';
+    // Anchor insertion: after the spawner tool call row if known. Walk up to
+    // find a direct child of transcriptEl (handles the post-flushToolGroups
+    // case where the spawner row is inside a .acp-tool-group body).
+    var anchor = key ? toolRows['t:' + key] : null;
+    var row = anchor ? anchor.body.parentNode : null;
+    while (row && row.parentNode && row.parentNode !== transcriptEl) {
+      row = row.parentNode;
+    }
+    if (row && row.parentNode === transcriptEl) {
+      row.parentNode.insertBefore(s.panel, row.nextSibling);
+    } else {
+      transcriptEl.appendChild(s.panel);
+    }
+    if (stick) transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+  dashRenderCrewPanel(s);
+}
+
+function dashCrewEntry(sid) {
+  var keys = Object.keys(dashCrews);
+  for (var i = 0; i < keys.length; i++) {
+    var entries = dashCrews[keys[i]].entries;
+    for (var j = 0; j < entries.length; j++) {
+      if (entries[j].sessionId === sid) return entries[j];
+    }
+  }
+  return null;
+}
+
+// ---- the read-only sub-agent panel -----------------------------------------
+
+// The sub-agent currently shown in dashSubPanelEl, or null while looking at
+// the main transcript. Distinct from _viewingSid/_dashAttachedSid: the
+// parent session's own view never stops rendering behind the panel while one
+// is open -- only what is drawn changes -- mirrors acp.html's own subViewSid
+// (acp.html:802-807).
+var dashSubViewSid = null;
+// A second, independent WebSocket, opened the first time a crew row is
+// clicked and left connected afterwards (switching rows re-subscribes it
+// rather than reopening it). Kept apart from _dashWs on purpose: acp.py's
+// _registry attaches one socket to one session at a time, so watching a
+// sub-agent on the primary socket would detach it from the parent and stop
+// the main transcript mid-fan-out -- the one thing this feature must not do.
+// Mirrors acp.html's own subWs (acp.html:816-822).
+var dashSubWs = null;
+// The dashHandleSub-replaying flag's counterpart, scoped to dashSubWs's own
+// history replay rather than the main socket's.
+var dashSubReplaying = false;
+// The sub-agent bubble text is appended to, mirroring agentBody but for
+// dashSubTranscriptEl. No markdown rendering in this panel, mirroring
+// acp.html's own subAgentBody -- a read-only, transcript-only view.
+var dashSubAgentBody = null;
+// toolRows's counterpart for the sub-agent panel.
+var dashSubToolRows = Object.create(null);
+// True once a real frame (a `session` reply) has confirmed dashSubWs is
+// actually talking to a sub-agent's session -- distinguishes "still
+// connecting" from "connected and simply quiet" for the graceful-rejection
+// fallback in dashConnectSubWs()'s onclose handler below (SC8, Phase 5:
+// MAX_CONNECTIONS is a GLOBAL cap across every /acp socket on the machine,
+// not per-viewer, acp.py:282 -- this socket can be refused on a busy machine
+// the same way any other socket can). acp.html has no equivalent: this
+// graceful-rejection handling is new, dashboard-only client-side logic (see
+// the plan's Phase 5 text) -- acp.html's own connectSubWs has no onclose
+// handler at all.
+var dashSubConnected = false;
+
+function dashRenderSubHead() {
+  var entry = dashCrewEntry(dashSubViewSid);
+  dashSubRoleEl.textContent = dashCrewLabel(entry) || dashSubViewSid;
+  if (!entry) {
+    dashSubStatusEl.className = 'acp-subpanel-status';
+    dashSubStatusEl.textContent = '';
+    return;
+  }
+  var state = dashSubagentState(entry);
+  dashSubStatusEl.className = 'acp-subpanel-status acp-subpanel-status-' + state;
+  dashSubStatusEl.textContent = state === 'error' ? 'errored: ' + entry.error
+    : state === 'done' ? 'done' : (entry.action || 'working…');
+}
+
+function dashOpenSubagent(sid) {
+  if (!sid) return;
+  dashSubViewSid = sid;
+  dashSubPanelEl.hidden = false;
+  dashTranscriptWrapEl.hidden = true;
+  dashComposerEl.hidden = true;
+  dashSubTranscriptEl.textContent = '';
+  dashSubAgentBody = null;
+  dashSubToolRows = Object.create(null);
+  dashRenderSubHead();
+  dashConnectSubWs(sid);
+}
+
+function dashCloseSubagentView() {
+  dashSubViewSid = null;
+  dashSubPanelEl.hidden = true;
+  dashTranscriptWrapEl.hidden = false;
+  // Restores the composer only if this page still has a live-attached
+  // session to show it for. acp.html's own closeSubagentView() (acp.html:
+  // 2004-2016) unconditionally un-hides #acpComposer because /acp always has
+  // an attached session the moment any panel exists; the dashboard's
+  // composer can legitimately be hidden (browsing a held-but-not-attached
+  // session's static transcript), so this toggles independently of
+  // dashRefreshComposerControls() (Phase 3, which only governs which button
+  // shows within an already-visible composer) on the same _dashAttachedSid
+  // signal every other reset in this file already uses for "is there a live
+  // session to show a composer for at all".
+  dashComposerEl.hidden = !_dashAttachedSid;
+  dashRefreshComposerControls();
+  // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
+  // budgets for a handful of sockets per viewer for exactly this shape --
+  // reopening it on every click would pay a fresh handshake for what is
+  // often a few seconds of switching back and forth. Mirrors acp.html's own
+  // closeSubagentView (acp.html:2004-2016).
+}
+dashSubBackBtn.addEventListener('click', dashCloseSubagentView);
+
+function dashConnectSubWs(sid) {
+  if (dashSubWs && dashSubWs.readyState === WebSocket.OPEN) {
+    dashSubWs.send(JSON.stringify({ type: 'subscribe', sessionId: sid, payload: {} }));
+    return;
+  }
+  if (dashSubWs) { try { dashSubWs.close(); } catch (e) {} }
+  dashSubConnected = false;
+  var socket = new WebSocket(dashWsUrl());
+  dashSubWs = socket;
+  socket.onopen = function () {
+    socket.send(JSON.stringify({ type: 'subscribe', sessionId: sid, payload: {} }));
+  };
+  socket.onmessage = function (event) {
+    var frame;
+    try { frame = JSON.parse(event.data); } catch (e) { return; }
+    dashHandleSub(frame);
+  };
+  // Graceful handling of a rejected connection (SC8, Phase 5) -- client-side
+  // only, no change to acp.py's MAX_CONNECTIONS itself (out of scope, see
+  // the plan's Scope boundaries). acp.py's serve_socket() accepts the
+  // handshake, sends a `too_many_connections` error frame, then closes with
+  // code 1013 (acp.py:5081-5086) -- dashHandleSub's own 'error' case below
+  // already renders that frame's message as a note the moment it arrives, so
+  // this onclose handler is the defense-in-depth fallback for whatever
+  // reaches this socket without ever delivering a message (a parse failure,
+  // or a close that outraces its own message). Without it, a connection that
+  // never renders anything would leave the panel silently blank with no way
+  // to tell "still loading" from "never going to load".
+  socket.onclose = function () {
+    if (socket === dashSubWs && !dashSubConnected) {
+      dashSubAddNote('Could not connect to this sub-agent — try again.');
+    }
+  };
+  // No reconnect loop, unlike the primary _dashWs -- this socket exists only
+  // while a sub-agent panel is open, and the crew row that opens it is
+  // always one tap away from trying again. Mirrors acp.html's own
+  // connectSubWs (acp.html:2020-2038).
+}
+
+function dashSubAppendChunk(text) {
+  if (!dashSubAgentBody) {
+    var row = document.createElement('div');
+    row.className = 'acp-msg acp-msg-agent';
+    var who = document.createElement('span');
+    who.className = 'acp-msg-role';
+    who.textContent = 'agent';
+    dashSubAgentBody = document.createElement('div');
+    dashSubAgentBody.className = 'acp-msg-body';
+    row.appendChild(who);
+    row.appendChild(dashSubAgentBody);
+    dashSubTranscriptEl.appendChild(row);
+  }
+  dashSubAgentBody.textContent += text;
+  dashSubTranscriptEl.scrollTop = dashSubTranscriptEl.scrollHeight;
+}
+
+function dashSubAddToolCall(payload) {
+  var id = payload.toolCallId;
+  var known = id ? dashSubToolRows['t:' + id] : null;
+  if (known) {
+    known.textContent = payload.title || payload.kind || 'tool call';
+    return;
+  }
+  dashSubAgentBody = null;
+  var row = document.createElement('div');
+  row.className = 'acp-msg acp-msg-tool';
+  var who = document.createElement('span');
+  who.className = 'acp-msg-role';
+  who.textContent = 'tool';
+  var body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  body.textContent = payload.title || payload.kind || 'tool call';
+  row.appendChild(who);
+  row.appendChild(body);
+  dashSubTranscriptEl.appendChild(row);
+  if (id) dashSubToolRows['t:' + id] = body;
+  dashSubTranscriptEl.scrollTop = dashSubTranscriptEl.scrollHeight;
+}
+
+function dashSubAddNote(text) {
+  var row = document.createElement('div');
+  row.className = 'acp-msg acp-msg-note';
+  var body = document.createElement('div');
+  body.className = 'acp-msg-body';
+  body.textContent = text;
+  row.appendChild(body);
+  dashSubTranscriptEl.appendChild(row);
+  dashSubTranscriptEl.scrollTop = dashSubTranscriptEl.scrollHeight;
+}
+
+// A deliberately separate, smaller dispatcher from dashHandle() -- mirrors
+// acp.html's own handleSub() (acp.html:2091-2099's comment): sub-agent
+// frames arriving on dashSubWs must NOT be threaded through dashHandle()'s
+// main dispatch chain, which was written assuming there is only ever one
+// transcript/session in view. Only the frame types a sub-agent's own session
+// actually emits are handled; the main channel's markdown/thinking/context/
+// rail machinery does not apply to a read-only secondary view.
+function dashHandleSub(frame) {
+  var type = frame && frame.type;
+  var payload = (frame && frame.payload) || {};
+  if (type === 'session') {
+    dashSubConnected = true;
+    dashSubTranscriptEl.textContent = '';
+    dashSubAgentBody = null;
+    dashSubToolRows = Object.create(null);
+    return;
+  }
+  if (type === 'history') {
+    var events = payload.events || [];
+    dashSubReplaying = true;
+    try {
+      for (var i = 0; i < events.length; i++) dashHandleSub(events[i]);
+    } finally {
+      dashSubReplaying = false;
+    }
+    return;
+  }
+  if (type === 'history_truncated') {
+    dashSubAddNote(payload.message || 'earlier events were dropped');
+    return;
+  }
+  if (type === 'chunk') {
+    if (payload.text) dashSubAppendChunk(payload.text);
+    return;
+  }
+  if (type === 'tool_call' || type === 'tool_update') {
+    dashSubAddToolCall(payload);
+    return;
+  }
+  if (type === 'session_closed') {
+    dashSubAddNote(payload.message || 'this sub-agent session ended');
+    return;
+  }
+  if (type === 'error') {
+    // Graceful capacity handling (SC8, Phase 5) -- see dashConnectSubWs()'s
+    // own comment above for the full acp.py citation. too_many_connections
+    // gets a clearer, actionable message; every other error frame falls back
+    // to the server's own message, mirroring acp.html's combined
+    // session_closed/error handling (acp.html:2130-2133).
+    dashSubAddNote(payload.code === 'too_many_connections'
+      ? 'Too many active connections — close another session or sub-agent view and try again.'
+      : (payload.message || 'this sub-agent session ended'));
+    return;
+  }
+  // thought/rendered/meta/subagents -- not rendered in this panel, mirroring
+  // acp.html's own handleSub() (acp.html:2134-2136).
+}
+
+// Live guards, called by transcript-renderer.js's clearTranscript()
+// (transcript-renderer.js:1899-1900) -- these already exist there and used
+// to no-op harmlessly on the dashboard because nothing assigned them. Only
+// assigned from index.html's new code, never from composer-chrome.js, which
+// has no involvement in crew/sub-agent logic. Mirrors acp.html's own
+// window.removeAllCrewPanels/window.closeSubagentView exposure
+// (acp.html:706-707).
+window.removeAllCrewPanels = dashRemoveAllCrewPanels;
+window.closeSubagentView = dashCloseSubagentView;
+
 /** A dashboard-originated attach (this page's own `load`) that never sent a
  *  prompt is scrap the moment the user walks away from it — freeing the
  *  slot now rather than leaving it idle for up to ACP_IDLE_TTL_SECONDS
@@ -2098,6 +2604,16 @@ function dashHandle(frame){
     logLine('info', '← context window ' + payload.contextPercent + '%');
     return;
   }
+  if (type === 'subagents') {
+    // Crew fan-out data (SC8, dashboard/ACP feature-parity plan Phase 5).
+    // Not part of `history` (acp.py's _emit_subagents_frame deliberately
+    // keeps it out of the replay buffer) -- it arrives live, and once more
+    // right after every subscribe/session reply that has a crew to report,
+    // which is this page's only source for it after a reconnect. Mirrors
+    // acp.html's own `subagents` handling (acp.html:5038-5045).
+    dashSetCrew(payload.subagents || [], payload.toolCallId || '');
+    return;
+  }
   if (type === 'commands') {
     // Slash command catalogue from the server (SC1, dashboard/ACP
     // feature-parity plan Phase 2). Broadcast-only (not in history), so this
@@ -2284,6 +2800,17 @@ function dashHandle(frame){
     // dashboard/ACP feature-parity plan Phase 2) -- mirrors acp.html's own
     // releaseSession() reset.
     resetCommandPalette();
+    // The crew belonged to the session just released too (SC8, Phase 5) --
+    // acp.py's close_session has already torn down every one of its
+    // sub-agent records server-side, so a panel still showing them would be
+    // offering entries that subscribe would now answer unknown_session.
+    // Not explicitly named in this phase's own exit criteria (only
+    // session/history/agent_died are), but found by reading acp.html's own
+    // releaseSession(), which calls both of these at exactly this point
+    // (acp.html:1239-1240) -- required for genuine SC8 parity, and directly
+    // tested there ("crew timer clears on session release").
+    dashCloseSubagentView();
+    dashRemoveAllCrewPanels();
     // Queue/Steer state (SC5, Phase 3) belonged to the session just
     // released too -- neither must fire against whatever session is opened
     // next on this page. Mirrors acp.html's own releaseSession() (its
@@ -2313,10 +2840,10 @@ function dashHandle(frame){
   if (type === 'agent_died') {
     // Baseline reset (turn state, composer, context, sid/copy widget,
     // command palette) from Phase 1, now extended by Phase 3 (SC5) to
-    // restore any pending steer text and re-enable the send-mode controls --
-    // Phase 5 still owes closing an open sub-agent panel and clearing crew
-    // state, since neither exists yet at this point in the plan. Mirrors the
-    // turn/composer-reset portion of acp.html's own agent_died handler; the
+    // restore any pending steer text and re-enable the send-mode controls,
+    // and by Phase 5 (SC8, below) to close any open sub-agent panel and
+    // clear crew state. Mirrors the turn/composer-reset portion of
+    // acp.html's own agent_died handler; the
     // command-palette reset below has no acp.html counterpart in its own
     // agent_died handler (a pre-existing gap there, out of this phase's
     // scope to fix) but is cheap and correct to add here regardless, since
@@ -2358,6 +2885,12 @@ function dashHandle(frame){
     _dashTurnActive = false;
     dashRefreshComposerControls();
     resetCommandPalette();
+    // Phase 5 (SC8): close any open sub-agent panel and clear crew state --
+    // there is no live agent process left for either to be watching, and
+    // acp.html's own agent_died handler has nothing left to show a sub-agent
+    // conversation for either once the whole process has exited.
+    dashCloseSubagentView();
+    dashRemoveAllCrewPanels();
     // Three pre-existing dashboard state variables (not introduced by this
     // plan) that could otherwise leave stale lazy-load state if the agent
     // dies mid-lazy-load before a `session` frame confirms attach -- cleared
