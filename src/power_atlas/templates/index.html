@@ -353,6 +353,18 @@
       </div>
     </div>
     <div class="acp-composer" id="dashComposer" hidden>
+      <!-- Images staged for the next prompt (SC6, dashboard/ACP
+           feature-parity plan Phase 4) -- mirrors acp.html's own #acpTray
+           (acp.html:245-246) placement exactly: inside the composer, above
+           the composer row. The transcript gets `[Image N]` instead -- the
+           bytes are sent to the agent and deliberately never enter a `chunk`
+           frame. `hidden` until something is staged; every chip inside is
+           built with createElement and textContent, like the rest of this
+           page. CSS is shared via style.css (already page-agnostic --
+           .acp-tray/.acp-attach-* carry no #acpTray-specific selector, so no
+           migration was needed for this phase). -->
+      <div class="acp-tray" id="dashTray" hidden role="group"
+           aria-label="Images attached to the next prompt"></div>
       <div class="acp-composer-row">
         <!-- Slash command palette (SC1, dashboard/ACP feature-parity plan
              Phase 2) -- mirrors acp.html's #acpCmdDropdown, wired through the
@@ -909,6 +921,9 @@ function dashConnect(onReady){
   };
 }
 var dashComposerEl = document.getElementById('dashComposer');
+// Image tray (SC6, dashboard/ACP feature-parity plan Phase 4) -- mirrors
+// acp.html's own trayEl (acp.html:588).
+var dashTrayEl = document.getElementById('dashTray');
 var dashPromptInput = document.getElementById('dashPromptInput');
 var dashSendBtn = document.getElementById('dashSendBtn');
 var dashComposerNote = document.getElementById('dashComposerNote');
@@ -957,12 +972,29 @@ var _dashSent = false;
 var _dashTurnActive = false;
 var _dashLoadingSid = null;
 var _dashPendingSend = null;
+// Paired with _dashPendingSend above (SC6, dashboard/ACP feature-parity plan
+// Phase 4) -- populated alongside it whenever dashSendPrompt()'s immediate
+// path defers to the lazy-attach flow (session not yet attached), consumed
+// at the deferred send('prompt', ...) call site inside dashHandle()'s
+// `history` branch below. Without this, a first image+message sent to a
+// not-yet-attached session would silently drop the image -- kept as its own
+// variable rather than folded into _dashPendingSend's string.
+var _dashPendingImages = null;
+// The staged images awaiting the next send, and the ones just handed to a
+// send in case it is refused (SC6, Phase 4) -- mirrors acp.html's own
+// attachments/pendingAttachments (acp.html:1347,790). Each dashAttachments
+// entry is {mimeType, data, bytes, url, name}, the same shape acp.html's own
+// attachments carry (dashRenderTray()/dashAttachmentChip() below read all
+// five).
+var dashAttachments = [];
+var dashPendingAttachments = [];
 // The per-prompt image budget, mirroring acp.html's imageMaxCount/
 // imageMaxBytes defaults (acp.html's own IMAGE_LADDER comment) -- overwritten
 // from the server's `connected` meta the moment it arrives (dashHandle()
 // below), the same authority acp.html defers to, so the dashboard never
-// stages more than acp.py will actually accept. Read (not yet written to a
-// send payload) starting Phase 4, SC6.
+// stages more than acp.py will actually accept. Read AND written to a send
+// payload starting Phase 4, SC6 (dashSendPrompt()/dashHandle()'s `history`
+// branch below).
 var _dashImageMaxCount = 4;
 var _dashImageMaxBytes = 176 * 1024;
 // Queue/Steer + Stop state (SC5, dashboard/ACP feature-parity plan Phase 3),
@@ -1295,17 +1327,409 @@ function dashMaybeAttach(row, sid){
     .catch(function(){}); // no live-attach on a failed peek — static transcript stands as-is
 }
 
+// ---- Image paste-to-attach (SC6, dashboard/ACP feature-parity plan Phase 4)
+// -- dash-prefixed, index.html-only port of acp.html's own image-encode
+// pipeline (acp.html:1343-1703). No shared-module involvement (this feature
+// is entangled with this page's own composer/send-prompt lifecycle, not a
+// clean DOM+one-or-two-accessor extraction the way SC2-4 were); CSS is
+// already page-agnostic in style.css (.acp-tray/.acp-attach-*), so no
+// migration was needed here.
+
+// The encode ladder: longest edge, then quality. 1568 px is the point above
+// which the model downscales anyway, so pixels past it cost budget and buy
+// nothing. Each rung is tried in both formats before the next rung is, so
+// quality is spent before resolution is. Copied verbatim from acp.html.
+var IMAGE_LADDER = [
+  { edge: 1568, quality: 0.85 },
+  { edge: 1568, quality: 0.60 },
+  { edge: 1024, quality: 0.60 }
+];
+// WebP first because the thing most worth pasting here is a screenshot of a
+// UI, and JPEG rings around glyphs at exactly the quality that makes it fit.
+// Copied verbatim from acp.html.
+var IMAGE_FORMATS = ['image/webp', 'image/jpeg'];
+
+function dashImagesSupported() {
+  if (typeof FileReader === 'undefined') return false;
+  if (typeof Image === 'undefined') return false;
+  if (typeof URL === 'undefined' || !URL.createObjectURL) return false;
+  var probe = document.createElement('canvas');
+  return !!(probe && probe.getContext && probe.toBlob);
+}
+
+/** The image files on a clipboard or drag payload, in order. */
+function dashImageFilesFrom(source) {
+  var out = [];
+  if (!source) return out;
+  var files = source.files;
+  if (files && files.length) {
+    for (var i = 0; i < files.length; i++) {
+      var f = files[i];
+      if (f && typeof f.type === 'string' && f.type.indexOf('image/') === 0) {
+        out.push(f);
+      }
+    }
+    return out;
+  }
+  // The older shape, still what some builds populate for a clipboard paste.
+  var items = source.items;
+  if (items && items.length) {
+    for (var j = 0; j < items.length; j++) {
+      var it = items[j];
+      if (it && it.kind === 'file' && typeof it.type === 'string' &&
+          it.type.indexOf('image/') === 0 && it.getAsFile) {
+        var got = it.getAsFile();
+        if (got) out.push(got);
+      }
+    }
+  }
+  return out;
+}
+
+/* Whether a drag carries files at all -- the most a `dragover` is allowed to
+ * know. Only the metadata is exposed mid-drag, so this reads `types` and the
+ * `kind` of each item and never reaches for content. */
+function dashDragHasFiles(source) {
+  if (!source) return false;
+  var types = source.types;
+  if (types && types.length) {
+    for (var i = 0; i < types.length; i++) {
+      if (types[i] === 'Files') return true;
+    }
+  }
+  var items = source.items;
+  if (items && items.length) {
+    for (var j = 0; j < items.length; j++) {
+      if (items[j] && items[j].kind === 'file') return true;
+    }
+  }
+  return false;
+}
+
+function dashImageBudgetLeft() {
+  var used = 0;
+  for (var i = 0; i < dashAttachments.length; i++) used += dashAttachments[i].bytes;
+  return _dashImageMaxBytes - used;
+}
+
+function dashKb(bytes) { return Math.max(1, Math.round(bytes / 1024)) + ' KB'; }
+
+// Said in the transcript rather than only in the log strip -- mirrors
+// acp.html's own attachNote(): something the user spent effort on did not
+// happen, and a line in the debug log panel is not where they will look
+// for it.
+function dashAttachNote(message) {
+  addMessage('note', message);
+  logLine('error', message);
+}
+
+function dashLoadImage(file) {
+  return new Promise(function (resolve, reject) {
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = function () {
+      URL.revokeObjectURL(url);
+      reject(new Error('it could not be decoded as an image'));
+    };
+    img.src = url;
+  });
+}
+
+function dashEncodeOnce(img, rung, type) {
+  return new Promise(function (resolve) {
+    var w = img.naturalWidth || img.width || 0;
+    var h = img.naturalHeight || img.height || 0;
+    if (!w || !h) { resolve(null); return; }
+    var scale = Math.min(1, rung.edge / Math.max(w, h));
+    var canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    var ctx = canvas.getContext('2d');
+    if (!ctx) { resolve(null); return; }
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(function (blob) { resolve(blob || null); },
+                  type, rung.quality);
+  });
+}
+
+/* Walk the ladder until something fits, and keep the smallest seen so the
+ * refusal can say how close it got. Mirrors acp.html's encodeToBudget()
+ * exactly, including its security note: the returned blob's own `type` is
+ * what gets sent as `mimeType`, never the type asked for -- a browser that
+ * cannot encode a requested format falls back to PNG rather than failing,
+ * and a declared type that disagrees with the bytes is the one thing the
+ * agent handles worst. */
+function dashEncodeToBudget(img, budget) {
+  var attempts = [];
+  for (var r = 0; r < IMAGE_LADDER.length; r++) {
+    for (var f = 0; f < IMAGE_FORMATS.length; f++) {
+      attempts.push({ rung: IMAGE_LADDER[r], type: IMAGE_FORMATS[f] });
+    }
+  }
+  var best = null;
+  function attempt(i) {
+    if (i >= attempts.length) return Promise.resolve(best);
+    return dashEncodeOnce(img, attempts[i].rung, attempts[i].type)
+      .then(function (blob) {
+        if (!blob) return attempt(i + 1);
+        if (!best || blob.size < best.size) best = blob;
+        if (blob.size <= budget) return blob;
+        return attempt(i + 1);
+      });
+  }
+  return attempt(0);
+}
+
+function dashBlobToBase64(blob) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      // `readAsDataURL` yields `data:<mime>;base64,<payload>`, and the wire
+      // carries the payload alone -- the server re-attaches nothing and
+      // decodes exactly what arrives.
+      var s = String(reader.result || '');
+      var comma = s.indexOf(',');
+      if (comma < 0) { reject(new Error('the encoded image could not be read')); return; }
+      resolve(s.slice(comma + 1));
+    };
+    reader.onerror = function () {
+      reject(new Error('the encoded image could not be read'));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dashStageOne(file) {
+  var label = (file && file.name) ? file.name : 'the pasted image';
+  if (dashAttachments.length >= _dashImageMaxCount) {
+    dashAttachNote('at most ' + _dashImageMaxCount + ' images can go with one prompt — '
+               + label + ' was not attached');
+    return Promise.resolve();
+  }
+  var budget = dashImageBudgetLeft();
+  if (budget <= 0) {
+    dashAttachNote('the attached images already fill the ' + dashKb(_dashImageMaxBytes)
+               + ' a prompt allows — ' + label + ' was not attached');
+    return Promise.resolve();
+  }
+  return dashLoadImage(file).then(function (img) {
+    return dashEncodeToBudget(img, budget);
+  }).then(function (blob) {
+    if (!blob) {
+      dashAttachNote('this browser could not encode ' + label + ' — nothing attached');
+      return;
+    }
+    if (blob.size > budget) {
+      dashAttachNote(label + ' is still ' + dashKb(blob.size) + ' at the smallest '
+                 + 'this page can make it, and only ' + dashKb(budget)
+                 + ' is left in this prompt — not attached. Send what is '
+                 + 'staged first, or crop it.');
+      return;
+    }
+    return dashBlobToBase64(blob).then(function (data) {
+      dashAttachments.push({
+        mimeType: blob.type,
+        data: data,
+        bytes: blob.size,
+        url: URL.createObjectURL(blob),
+        name: label
+      });
+      dashRenderTray();
+      // Insert an [Image N] marker at the cursor so the user can see where
+      // the attachment sits in the prompt text.
+      var marker = '[Image ' + dashAttachments.length + ']';
+      var start = dashPromptInput.selectionStart != null
+        ? dashPromptInput.selectionStart : dashPromptInput.value.length;
+      var end = dashPromptInput.selectionEnd != null
+        ? dashPromptInput.selectionEnd : start;
+      dashPromptInput.value = dashPromptInput.value.slice(0, start)
+        + marker + dashPromptInput.value.slice(end);
+      dashPromptInput.selectionStart = dashPromptInput.selectionEnd = start + marker.length;
+      dashPromptInput.focus();
+      // This page has no textarea auto-grow (see the comment on
+      // initCommandPaletteDom's onPromptChanged above) -- refreshing the
+      // composer controls is the equivalent here.
+      dashRefreshComposerControls();
+      logLine('info', 'attached ' + label + ' as ' + blob.type + ', ' + dashKb(blob.size));
+    });
+  });
+}
+
+/* Staged one at a time rather than in parallel: `[Image N]` numbers them in
+ * the order they land, and the budget check for the second has to see what
+ * the first actually cost. Two concurrent encodes would race on both. */
+function dashStageFiles(files) {
+  if (!files.length) return;
+  if (!dashImagesSupported()) {
+    dashAttachNote('this browser cannot attach images here — nothing was attached');
+    return;
+  }
+  var chain = Promise.resolve();
+  files.forEach(function (file) {
+    chain = chain.then(function () { return dashStageOne(file); });
+  });
+  chain.catch(function (err) {
+    dashAttachNote('attaching an image failed: '
+               + ((err && err.message) ? err.message : String(err)));
+  });
+}
+
+function dashRevokeAttachment(item) {
+  // Without this every pasted image stays resident for the tab's lifetime:
+  // an object URL keeps its blob alive until it is revoked or the document
+  // goes away.
+  if (item && item.url && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+    URL.revokeObjectURL(item.url);
+  }
+}
+
+function dashClearAttachments() {
+  for (var i = 0; i < dashAttachments.length; i++) dashRevokeAttachment(dashAttachments[i]);
+  dashAttachments = [];
+  dashRenderTray();
+}
+
+function dashReleasePendingAttachments() {
+  for (var i = 0; i < dashPendingAttachments.length; i++) {
+    dashRevokeAttachment(dashPendingAttachments[i]);
+  }
+  dashPendingAttachments = [];
+}
+
+function dashRemoveAttachment(index) {
+  var item = dashAttachments[index];
+  if (!item) return;
+  dashRevokeAttachment(item);
+  dashAttachments.splice(index, 1);
+  // Renumber [Image N] markers in the textarea -- mirrors acp.html's own
+  // Fix 2 (removeAttachment). Remove the deleted attachment's own marker
+  // first, then shift every higher marker down by one.
+  var renum = dashPromptInput.value;
+  renum = renum.replace(new RegExp('\\[Image ' + (index + 1) + '\\]', 'g'), '');
+  for (var i = index + 1; i <= dashAttachments.length + 1; i++) {
+    renum = renum.replace(
+      new RegExp('\\[Image ' + (i + 1) + '\\]', 'g'),
+      '[Image ' + i + ']'
+    );
+  }
+  dashPromptInput.value = renum;
+  dashRenderTray();
+}
+
+function dashRenderTray() {
+  dashTrayEl.textContent = '';
+  if (!dashAttachments.length) {
+    dashTrayEl.hidden = true;
+    return;
+  }
+  dashTrayEl.hidden = false;
+  for (var i = 0; i < dashAttachments.length; i++) {
+    dashTrayEl.appendChild(dashAttachmentChip(dashAttachments[i], i));
+  }
+}
+
+/* One staged image. Every class name here is a literal and every string
+ * reaching the DOM goes through `textContent`, exactly as everywhere else on
+ * this page -- mirrors acp.html's own attachmentChip() including its
+ * security note: the one attribute sink is `img.src`, and what it receives
+ * is a `blob:` URL this page minted moments ago from bytes the user pasted,
+ * never a string off the wire. */
+function dashAttachmentChip(item, index) {
+  var chip = document.createElement('div');
+  chip.className = 'acp-attach';
+
+  var thumb = document.createElement('img');
+  thumb.className = 'acp-attach-thumb';
+  thumb.src = item.url;
+  // Decorative: the label beside it already names the image, and a screen
+  // reader reading both would say it twice.
+  thumb.setAttribute('alt', '');
+  chip.appendChild(thumb);
+
+  var label = document.createElement('span');
+  label.className = 'acp-attach-label';
+  label.textContent = 'Image ' + (index + 1);
+  chip.appendChild(label);
+
+  var size = document.createElement('span');
+  size.className = 'acp-attach-size';
+  size.textContent = dashKb(item.bytes);
+  chip.appendChild(size);
+
+  var drop = document.createElement('button');
+  drop.className = 'acp-attach-drop';
+  drop.type = 'button';
+  drop.textContent = '×';
+  drop.setAttribute('aria-label', 'Remove image ' + (index + 1));
+  // The index is captured from this render, and every mutation re-renders --
+  // so a chip's button can only ever address the position it is drawn at.
+  drop.addEventListener('click', function () { dashRemoveAttachment(index); });
+  chip.appendChild(drop);
+
+  return chip;
+}
+
+// Paste/drag-drop wiring -- mirrors acp.html's own listeners (acp.html:
+// 5912-5939) exactly, including their ordering rationale: `preventDefault`
+// only once images have actually been found, so an ordinary text paste (a
+// stack trace, a code block) falls through completely untouched.
+dashPromptInput.addEventListener('paste', function (ev) {
+  var files = dashImageFilesFrom(ev && ev.clipboardData);
+  if (!files.length) return;
+  if (ev.preventDefault) ev.preventDefault();
+  dashStageFiles(files);
+});
+// `dragover` has to preventDefault or the drop never fires -- the browser
+// navigates to the dropped file instead. `dashDragHasFiles`, not
+// `dashImageFilesFrom`: a browser deliberately withholds the file *contents*
+// until the drop, so `dataTransfer.files` is empty here.
+dashComposerEl.addEventListener('dragover', function (ev) {
+  if (!dashDragHasFiles(ev && ev.dataTransfer)) return;
+  if (ev.preventDefault) ev.preventDefault();
+});
+dashComposerEl.addEventListener('drop', function (ev) {
+  var files = dashImageFilesFrom(ev && ev.dataTransfer);
+  if (!files.length) return;
+  if (ev.preventDefault) ev.preventDefault();
+  dashStageFiles(files);
+});
+
 function dashSendPrompt(){
   var text = dashPromptInput.value;
-  if (!text.trim() || _dashTurnActive) return;
+  // An image with no words is a whole prompt (mirrors acp.html's own
+  // sendPrompt() guard exactly): paste a screenshot, press Enter. Pasting an
+  // image already inserts an [Image N] marker into the box, so `text` is
+  // normally non-empty anyway -- this only matters if the user deletes the
+  // marker text afterward and leaves an image staged with an empty box.
+  if ((!text.trim() && !dashAttachments.length) || _dashTurnActive) return;
   var sid = _viewingSid;
   if (!sid) return;
   if (_dashAttachedSid === sid) {
-    if (!send('prompt', {prompt: text}, sid)) {
+    var sendPayload = {prompt: text};
+    if (dashAttachments.length) {
+      // Only what the wire needs -- mirrors acp.html's own sendPrompt(). The
+      // thumbnail URL, byte count and file name stay on this page.
+      sendPayload.images = dashAttachments.map(function (item) {
+        return {mimeType: item.mimeType, data: item.data};
+      });
+    }
+    if (!send('prompt', sendPayload, sid)) {
       showToast('<div class="toast toast-error">Not connected — nothing sent<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
       return;
     }
     _dashSent = true;
+    // Handed over rather than revoked -- a refusal has to be able to give
+    // the images back (dashHandle()'s `error` case below), and re-staging
+    // them costs another paste, decode and re-encode. Mirrors acp.html's
+    // own sendPrompt()/pendingAttachments handover.
+    dashReleasePendingAttachments();
+    dashPendingAttachments = dashAttachments;
+    dashAttachments = [];
+    dashRenderTray();
     dashPromptInput.value = '';
     dashRefreshComposerControls();
     return;
@@ -1317,6 +1741,15 @@ function dashSendPrompt(){
   _dashOrigin = 'dashboard';
   _dashLoadingSid = sid;
   _dashPendingSend = text;
+  // Snapshot the wire format now (SC6, Phase 4) -- dashAttachments/the tray
+  // stay visible-and-disabled along with the rest of the composer while
+  // "Starting the agent…" shows, exactly like the prompt text above; the
+  // deferred send('prompt', ...) call site (dashHandle()'s `history` branch
+  // below) consumes this snapshot rather than re-reading dashAttachments,
+  // which could have changed by the time the session actually attaches.
+  _dashPendingImages = dashAttachments.length
+    ? dashAttachments.map(function (item) { return {mimeType: item.mimeType, data: item.data}; })
+    : null;
   dashPromptInput.disabled = true;
   dashSendBtn.disabled = true;
   dashSetComposerNote('Starting the agent…');
@@ -1361,6 +1794,13 @@ function dashCloseIfAbandoned(){
   }
   _dashSteerPending = null;
   setDashSteerStatus('');
+  // Images staged against the conversation this page is walking away from
+  // (SC6, Phase 4) -- mirrors acp.html's own releaseSession(), which clears
+  // both for the same reason: carrying them to whatever is opened next
+  // would put a screenshot in front of a different agent in a different
+  // directory.
+  dashClearAttachments();
+  dashReleasePendingAttachments();
   // Fix 5 (review, Phase 3 fix cycle): currently harmless -- both call sites
   // (a row-click switch, and pagehide) hide the composer right after this
   // runs -- but explicit for consistency with session_closed/agent_died/
@@ -1483,9 +1923,26 @@ function dashHandle(frame){
     if (_dashPendingSend !== null) {
       var text = _dashPendingSend;
       _dashPendingSend = null;
-      send('prompt', {prompt: text}, sid);
+      // Two send-prompt call sites need the `images` payload, not one (SC6,
+      // Phase 4) -- this is the deferred one: dashSendPrompt()'s immediate
+      // path above already covers the already-attached case. Without this,
+      // a first image+message sent to a not-yet-attached session would
+      // silently drop the image.
+      var sendPayload = {prompt: text};
+      if (_dashPendingImages) {
+        sendPayload.images = _dashPendingImages;
+        _dashPendingImages = null;
+      }
+      send('prompt', sendPayload, sid);
       _dashSent = true;
       dashPromptInput.value = '';
+      // The images just sent are spent -- mirrors dashSendPrompt()'s own
+      // immediate-path handover into dashPendingAttachments (restored on a
+      // refusal below, revoked once the turn actually starts).
+      dashReleasePendingAttachments();
+      dashPendingAttachments = dashAttachments;
+      dashAttachments = [];
+      dashRenderTray();
     }
     dashPromptInput.disabled = false;
     dashRefreshComposerControls();
@@ -1493,7 +1950,22 @@ function dashHandle(frame){
   }
   // hideCommandDropdown() on turn start: a mid-turn dropdown cannot be acted
   // on and would just be confusing -- mirrors acp.html's own setTurn(true).
-  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; hideCommandDropdown(); dashRefreshComposerControls(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
+  if (type === 'meta' && payload.turn === 'start') {
+    _dashTurnActive = true;
+    // The turn really started, so the images that went with it are spent --
+    // mirrors acp.html's own turn:start handling (acp.html:5138-5142, SC6
+    // Phase 4). No `if (!replaying)` guard is needed here: unlike acp.html,
+    // this branch is never reached during replay -- the `history` branch
+    // above renders buffered events through renderTranscriptHistory()
+    // directly, not by re-dispatching each one back through dashHandle().
+    dashReleasePendingAttachments();
+    hideCommandDropdown();
+    dashRefreshComposerControls();
+    dashUpdateCloseButton();
+    var _dp = document.getElementById('dashPicker');
+    if (_dp && !_dp.hidden) dashPickerRenderKeepRow();
+    return;
+  }
   if (type === 'meta' && payload.turn === 'end') {
     // Snapshot the queued prompt BEFORE clearing turn state, mirroring
     // acp.html's own ordering (acp.html:4737-4742) so the decision guards
@@ -1765,6 +2237,11 @@ function dashHandle(frame){
     }
     _dashSteerPending = null;
     setDashSteerStatus('');
+    // Images staged against the session just released too (SC6, Phase 4) --
+    // mirrors acp.html's own releaseSession(), same reasoning as the Queue/
+    // Steer reset above.
+    dashClearAttachments();
+    dashReleasePendingAttachments();
     dashUpdateCloseButton();
     dashPickerRunPending(); // fire pending close-then-create if any
     return;
@@ -1806,6 +2283,12 @@ function dashHandle(frame){
     _dashQueuedPrompt = null;
     _dashQueuedPromptSession = null;
     setDashSteerStatus('');
+    // Images staged against this now-dead agent too (SC6, Phase 4) -- there
+    // is nothing left to send them to, mirroring the Queue/Steer clear
+    // immediately above and acp.html's own agent_died reset.
+    dashClearAttachments();
+    dashReleasePendingAttachments();
+    _dashPendingImages = null;
     _dashAttachedSid = null;
     _dashOrigin = null;
     _dashTurnActive = false;
@@ -1875,6 +2358,30 @@ function dashHandle(frame){
       dashModeToggle.disabled = false;
       _dashSteerPending = null;
     }
+    // A refused prompt gives its staged images back (SC6, Phase 4) -- also
+    // unconditional, at the top, for the same reason the steer restore above
+    // is: acp.html's own restorePendingPrompt() runs for every refusal code,
+    // including close_in_progress/turn_in_progress/not_subscribed below,
+    // which return early -- a restore placed after those branches would never
+    // run for them. Mirrors acp.html's restorePendingPrompt(), images only:
+    // the dashboard has no pending-TEXT-restore mechanism to extend here (a
+    // pre-existing gap, out of this phase's scope). Gated on the error's own
+    // sid matching the viewed session, mirroring the steer-restore guard
+    // immediately above (Fix 3, Phase 3 review cycle) -- a sid-less
+    // error_frame() call must not restore images belonging to a different
+    // (or no) session.
+    if (dashPendingAttachments.length && sid && sid === _viewingSid) {
+      if (dashAttachments.length) {
+        // Images staged since the refused send take precedence -- mirrors
+        // acp.html's own "others have been attached since" guard.
+        for (var _pi = 0; _pi < dashPendingAttachments.length; _pi++) dashRevokeAttachment(dashPendingAttachments[_pi]);
+        addMessage('note', 'the refused prompt’s images are not restored — others have been attached since');
+      } else {
+        dashAttachments = dashPendingAttachments;
+        dashRenderTray();
+      }
+      dashPendingAttachments = [];
+    }
     dashRefreshComposerControls();
     // close_in_progress: server is in the middle of releasing this session —
     // treat it the same as session_closed for the pending-create path.
@@ -1894,7 +2401,7 @@ function dashHandle(frame){
     // textarea to begin with -- the typed text stays visible (disabled,
     // under the "Starting the agent…" note) for exactly this outcome, so
     // there is nothing to restore here, only to re-enable.
-    if (sid && sid === _dashLoadingSid) { _dashLoadingSid = null; _dashPendingSend = null; }
+    if (sid && sid === _dashLoadingSid) { _dashLoadingSid = null; _dashPendingSend = null; _dashPendingImages = null; }
     var errText = (payload && typeof payload.message === 'string') ? payload.message : 'The agent refused that.';
     showToast('<div class="toast toast-error">' + _escHtml(errText) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
     dashSetComposerNote('');

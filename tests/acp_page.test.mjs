@@ -10416,6 +10416,14 @@ const DASH_COMPOSER_CONTROLS_NAMES = [
 const DASH_QUEUE_STEER_WIRING_NAMES = [
   "dashStopBtn.addEventListener", "_dashCloseModeMenu", "dashSendModeBtn.addEventListener",
 ];
+// SC6 (Image paste-to-attach, dashboard/ACP feature-parity plan Phase 4) --
+// dash-prefixed, index.html-only (no composer-chrome.js involvement).
+const DASH_IMAGE_ATTACH_NAMES = [
+  "IMAGE_LADDER", "IMAGE_FORMATS", "dashImagesSupported", "dashImageFilesFrom",
+  "dashStageFiles", "dashStageOne", "dashRenderTray", "dashAttachmentChip",
+  "dashRemoveAttachment", "dashClearAttachments", "dashReleasePendingAttachments",
+  "dashRevokeAttachment", "function dashSendPrompt",
+];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
@@ -10485,6 +10493,24 @@ function dashPickerSource() {
   // picker comment.
   const handleFrom = src.indexOf("function dashCloseIfAbandoned");
   if (handleFrom < 0) throw new Error("index.html no longer defines dashCloseIfAbandoned");
+
+  // Image-attach pipeline region (SC6, dashboard/ACP feature-parity plan
+  // Phase 4): from IMAGE_LADDER's declaration through the end of
+  // dashSendPrompt, immediately before dashCloseIfAbandoned (handleFrom,
+  // above). Real source, not a hand-rewritten stand-in, for the same reason
+  // cmdPaletteRegion/queueSteerWiringRegion are -- the encode pipeline and
+  // dashSendPrompt's own images-payload logic must be exercised as written.
+  const imageFrom = src.indexOf("var IMAGE_LADDER = [");
+  if (imageFrom < 0) throw new Error("index.html no longer defines IMAGE_LADDER");
+  if (imageFrom > handleFrom) throw new Error("IMAGE_LADDER now follows dashCloseIfAbandoned");
+  const imageAttachRegion = src.slice(imageFrom, handleFrom);
+  for (const name of DASH_IMAGE_ATTACH_NAMES) {
+    if (!imageAttachRegion.includes(name)) {
+      throw new Error(
+        `the extracted image-attach region does not contain ${name}; it has moved`);
+    }
+  }
+
   // The picker section follows immediately after the closing `}` of dashHandle.
   const pickerCommentMarker = "// ---- Phase 4: ACP new-session picker";
   const pickerStart = src.indexOf("var _dashPickerWorkspaces");
@@ -10511,11 +10537,11 @@ function dashPickerSource() {
     }
   }
 
-  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, handleRegion, pickerRegion };
+  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, handleRegion, pickerRegion };
 }
 
 function loadDashPicker(opts = {}) {
-  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, handleRegion, pickerRegion } = dashPickerSource();
+  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, handleRegion, pickerRegion } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10580,6 +10606,9 @@ function loadDashPicker(opts = {}) {
   const dashSendPromptCalls = [];
   const systemMessages = [];
   const addMessageCalls = [];
+  // renderTranscriptHistory() call log (SC6, Phase 4) -- see the sandbox
+  // stub below.
+  const historyRenders = [];
   // Timer stand-in for setDashSteerStatus's steering_injected auto-clear
   // (SC5, Phase 3) -- mirrors the acp.html-side harness's own timers/
   // setTimeout/runTimers pattern (see loadPage() above) so a check can fire
@@ -10611,10 +10640,47 @@ function loadDashPicker(opts = {}) {
   // document-level listener). Mirrors loadPage()'s own docListeners Map +
   // fireDoc() helper (this file, ~line 1123) exactly.
   const dashDocListeners = new Map();
+  // Image tray element (SC6, dashboard/ACP feature-parity plan Phase 4) --
+  // pre-set exactly like dashComposerEl/dashPromptInput/dashSendBtn above.
+  const dashTrayElEl = new El("div");
+  dashTrayElEl.hidden = true; // matches real markup's `hidden` attribute
+
+  /* ---- the image-attachment surface (SC6, Phase 4) ---------------------
+   *
+   * Same reasoning and same stand-ins as loadPage()'s own image fixtures
+   * above (`FakeBlob`/`encodeBlob`/`RATE`): `FileReader`, `Image`, `Blob`,
+   * `URL` and a canvas 2D context are browser furniture the bare `vm`
+   * context lacks, stubbed rather than skipped because the paste path
+   * cannot be driven at all otherwise. The encoder is deterministic and
+   * swappable (`opts.encode`/`opts.noWebp`/`opts.imageWidth`/
+   * `opts.imageHeight`/`opts.imageDecodeFails`) for the same reason.
+   */
+  class DashFakeBlob {
+    constructor(size, type) { this.size = size; this.type = type; }
+  }
+  const dashObjectUrls = new Map();
+  const dashRevokedUrls = [];
+  let dashObjectUrlSeq = 0;
+  const DASH_IMAGE_RATE = { "image/webp": 0.06, "image/jpeg": 0.11, "image/png": 0.9 };
+  const dashEncodeBlob = opts.encode || ((type, quality, w, h) => {
+    const got = (type === "image/webp" && opts.noWebp) ? "image/png" : type;
+    return new DashFakeBlob(
+      Math.max(1, Math.round(w * h * (DASH_IMAGE_RATE[got] ?? 0.11) * quality)), got);
+  });
 
   const sandbox = {
     document: {
-      createElement: (tag) => new El(tag),
+      createElement: (tag) => {
+        const el = new El(tag);
+        // Canvas stand-in for the image-encode pipeline (SC6, Phase 4) --
+        // mirrors loadPage()'s own createElement override exactly.
+        if (String(tag).toLowerCase() === "canvas" && opts.images !== false) {
+          el.getContext = () => ({ drawImage() {} });
+          el.toBlob = (cb, type, quality) =>
+            cb(dashEncodeBlob(type, quality, el.width, el.height));
+        }
+        return el;
+      },
       getElementById: (id) => byId.get(id) ?? null,
       addEventListener: (type, fn) => {
         if (!dashDocListeners.has(type)) dashDocListeners.set(type, []);
@@ -10731,9 +10797,34 @@ function loadDashPicker(opts = {}) {
     // logic genuinely under test, so it is now real source, extracted as
     // composerControlsRegion and run below -- not stubbed.
     // The command-palette keydown listener's plain-Enter fallback
-    // (dashboard/ACP feature-parity plan, Phase 2) -- recorded so a test can
-    // assert it was (or, with the dropdown open, was NOT) called.
+    // (dashboard/ACP feature-parity plan, Phase 2) -- this placeholder is
+    // overwritten by the real dashSendPrompt() the moment imageAttachRegion
+    // runs below (SC6, Phase 4 -- its own top-level `function dashSendPrompt`
+    // declaration reassigns the sandbox global, the same way any other
+    // region's function declarations do). It is then re-wrapped to keep
+    // recording into dashSendPromptCalls, so every pre-Phase-4 assertion on
+    // that array keeps working unchanged while the real body -- now needed
+    // to test the images payload -- actually runs. See the wrap immediately
+    // after imageAttachRegion loads, below.
     dashSendPrompt: () => { dashSendPromptCalls.push(true); },
+    // Image tray + staged-image state (SC6, dashboard/ACP feature-parity
+    // plan Phase 4) -- overridable so a check can start with images already
+    // staged/pending, mirroring the Queue/Steer state above. dashAttachments/
+    // dashPendingAttachments are NOT re-declared by imageAttachRegion (its
+    // extraction starts at IMAGE_LADDER, after index.html's own `var
+    // dashAttachments = []`/`var dashPendingAttachments = []` lines), so
+    // these injected values are what the ported functions actually read.
+    dashTrayEl: dashTrayElEl,
+    dashAttachments: opts.dashAttachments !== undefined ? opts.dashAttachments : [],
+    dashPendingAttachments: opts.dashPendingAttachments !== undefined ? opts.dashPendingAttachments : [],
+    _dashPendingImages: opts.dashPendingImages !== undefined ? opts.dashPendingImages : null,
+    // transcript-renderer.js's history-replay entry point, called from
+    // dashHandle()'s `history` branch (handleRegion) -- not loaded by this
+    // harness (mirrors dashSetComposerNote/dashUpdateCloseButton above: a
+    // no-op stand-in for a dependency outside either extracted region's own
+    // concern). Recorded, not a blank no-op, so a Phase 4 check can confirm
+    // history rendering still happened alongside the images-payload flush.
+    renderTranscriptHistory: (events) => { historyRenders.push(events); },
     // dashHandle's agent_died/session_closed/agent_error branches call this
     // (transcript-renderer.js, not part of either extracted region). Records
     // every call (SC5, Phase 3 needs to assert on queue/steer notes and
@@ -10765,6 +10856,39 @@ function loadDashPicker(opts = {}) {
     loadFlatPage: () => {},
     console: { log() {}, warn() {}, error() {} },
   };
+  // Image API globals (SC6, dashboard/ACP feature-parity plan Phase 4) --
+  // assigned after the literal, same pattern and same reasoning as
+  // loadPage()'s own `if (opts.images !== false) { sandbox.Blob = ... }`
+  // block above.
+  if (opts.images !== false) {
+    sandbox.Blob = DashFakeBlob;
+    sandbox.URL = {
+      createObjectURL(source) {
+        const url = `blob:dash-fake-${++dashObjectUrlSeq}`;
+        dashObjectUrls.set(url, source);
+        return url;
+      },
+      revokeObjectURL(url) { dashRevokedUrls.push(url); },
+    };
+    sandbox.FileReader = class {
+      readAsDataURL(blob) {
+        this.result = `data:${blob.type};base64,b64-${blob.type}-${blob.size}`;
+        if (this.onload) this.onload();
+      }
+    };
+    sandbox.Image = class {
+      constructor() {
+        this.naturalWidth = opts.imageWidth ?? 1774;
+        this.naturalHeight = opts.imageHeight ?? 887;
+      }
+      set src(value) {
+        this._src = value;
+        if (opts.imageDecodeFails) { if (this.onerror) this.onerror(); }
+        else if (this.onload) this.onload();
+      }
+      get src() { return this._src; }
+    };
+  }
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
@@ -10789,15 +10913,38 @@ function loadDashPicker(opts = {}) {
     logToggle: byId.get("dashLogToggle"),
     isReplaying: () => sandbox._dashReplaying,
   });
-  // Run in real-file order: composer-controls (SC5, Phase 3 -- must precede
-  // cmdPaletteRegion, whose initCommandPaletteDom({onPromptChanged:
-  // dashRefreshComposerControls}) call reads it as a plain identifier value
-  // immediately, at this call's own execution time), then the command-
-  // palette wiring, then the queue/steer click wiring (SC5, Phase 3), then
-  // dashHandle, then the picker section (which also executes the parse-time
-  // event-listener wiring against the byId map above).
+  // Run in real-file order, with one deliberate exception: composer-controls
+  // (SC5, Phase 3 -- must precede cmdPaletteRegion, whose
+  // initCommandPaletteDom({onPromptChanged: dashRefreshComposerControls})
+  // call reads it as a plain identifier value immediately, at this call's
+  // own execution time), then command-palette wiring, THEN imageAttachRegion
+  // (SC6, Phase 4) ahead of its real textual position -- its own top-level
+  // `function dashSendPrompt` declaration overwrites the placeholder set in
+  // the sandbox literal above, and it must run BEFORE queueSteerWiringRegion,
+  // whose very first line (`dashSendBtn.addEventListener('click',
+  // dashSendPrompt)`) captures whatever `dashSendPrompt` resolves to AT THAT
+  // LINE'S OWN EXECUTION TIME -- unlike every other reference to
+  // dashSendPrompt in this file, which sits inside a function body and so
+  // resolves late, addEventListener's second argument is read immediately.
+  // In the real, single-script page this is a non-issue: dashSendPrompt is
+  // hoisted before any line runs, real or not, regardless of where its
+  // declaration sits textually. Splitting the source into separately-run vm
+  // regions loses that hoisting across region boundaries, so this harness
+  // has to sequence around it explicitly instead. Wrapped immediately after
+  // loading so dashSendPromptCalls keeps recording every call (every
+  // pre-Phase-4 test that asserts on it keeps working unmodified) while the
+  // real body actually runs -- and so queueSteerWiringRegion's click listener
+  // captures the wrapped version, not the raw one. Then queue/steer click
+  // wiring, then dashHandle, then the picker section (which also executes
+  // the parse-time event-listener wiring against the byId map above).
   vm.runInContext(composerControlsRegion, sandbox, { filename: "index.html#dash-composer-controls" });
   vm.runInContext(cmdPaletteRegion, sandbox, { filename: "index.html#dash-cmd-palette" });
+  vm.runInContext(imageAttachRegion, sandbox, { filename: "index.html#dash-image-attach" });
+  const _realDashSendPrompt = sandbox.dashSendPrompt;
+  sandbox.dashSendPrompt = function () {
+    dashSendPromptCalls.push(true);
+    return _realDashSendPrompt.apply(sandbox, arguments);
+  };
   vm.runInContext(queueSteerWiringRegion, sandbox, { filename: "index.html#dash-queue-steer" });
   vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
   vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
@@ -10835,6 +10982,35 @@ function loadDashPicker(opts = {}) {
       for (const fn of fns) fn(ev ?? {});
     },
     settle() { return new Promise((resolve) => setImmediate(resolve)); },
+    // ---- image-attach helpers (SC6, dashboard/ACP feature-parity plan
+    // Phase 4) -- mirror loadPage()'s own imageFile()/paste()/drop()/
+    // trayChips()/revoked() exactly, targeted at dashPromptInput/
+    // dashComposerEl/dashTrayEl instead of acpPrompt/acpComposer/acpTray.
+    historyRenders,
+    imageFile(type = "image/png", name = "screenshot.png") { return { type, name }; },
+    paste(files) {
+      let prevented = false;
+      sandbox.dashPromptInput.dispatch("paste", {
+        clipboardData: { files },
+        preventDefault() { prevented = true; },
+      });
+      return prevented;
+    },
+    drop(files) {
+      let allowed = false;
+      sandbox.dashComposerEl.dispatch("dragover", {
+        dataTransfer: { types: ["Files"], files: [] },
+        preventDefault() { allowed = true; },
+      });
+      sandbox.dashComposerEl.dispatch("drop", {
+        dataTransfer: { files },
+        preventDefault() {},
+      });
+      return allowed;
+    },
+    trayChips() { return sandbox.dashTrayEl.querySelectorAll(".acp-attach"); },
+    /** Every object URL the page has revoked, in order. */
+    revoked() { return dashRevokedUrls.slice(); },
   };
 }
 
@@ -11679,8 +11855,16 @@ check("queued prompt auto-sends on meta turn:end when the textarea is empty", ()
   p.sandbox.dashPromptInput.value = "";
   p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "end", stopReason: "end_turn" } });
   assertEqual(p.dashSendPromptCalls.length, 1, "dashSendPrompt must be called to flush the queued prompt");
-  assertEqual(p.sandbox.dashPromptInput.value, "queued message",
-    "the queued text must be placed into the textarea before sending");
+  // dashSendPrompt is real as of SC6 (Phase 4), not a call-counting stub --
+  // it places the queued text into the textarea, sends it for real, then
+  // clears the textarea on success, so what is actually observable after
+  // the whole call chain completes is the sent frame, not a mid-flight
+  // textarea snapshot (a stub-specific artifact the earlier version of this
+  // check depended on).
+  assertEqual(p.sentOf("prompt")[0].payload.prompt, "queued message",
+    "the queued text must actually be sent, not just placed into the textarea");
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "the textarea must be cleared once the queued prompt is actually sent");
   assertEqual(p.sandbox._dashQueuedPrompt, null, "the queued state must be cleared");
 });
 
@@ -12150,6 +12334,361 @@ check("Fix 7: a failed Steer send shows a not-connected toast", () => {
   assertEqual(p.sandbox._dashSteerPending, null, "a failed send must clear the pending-steer state");
   assertEqual(toasts.length, 1, "a failed steer send must show a toast, mirroring dashSendPrompt()'s own pattern");
   assert(/Not connected/.test(toasts[0]), "the toast must explain the send failed for lack of a connection");
+});
+
+// ---------------------------------------------------------------------------
+// Image paste-to-attach (SC6, dashboard/ACP feature-parity plan Phase 4) --
+// dash-prefixed, index.html-only. The encoder behind these is the same
+// deterministic stub loadPage()'s own image checks use (see loadDashPicker()'s
+// DashFakeBlob/dashEncodeBlob above): what they pin is the page's own
+// arithmetic and bookkeeping -- the ladder, the budget, the numbering, which
+// mimeType is reported, what gets revoked, and (dashboard-specific) which of
+// the two send-prompt call sites actually attaches the images.
+// ---------------------------------------------------------------------------
+
+check("dashboard: image attach — pasting an image stages it without touching the transcript", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const took = p.paste([p.imageFile()]);
+  assert(took, "the page did not take over an image paste itself");
+  await settleStaging();
+  assertEqual(p.trayChips().length, 1, "the image was not staged");
+  assertEqual(p.sandbox.dashTrayEl.hidden, false, "the tray stayed hidden");
+  assert(p.sandbox.dashTrayEl.textContent.includes("Image 1"),
+         "the chip is not labelled with the name the transcript will use");
+  assertEqual(p.sentOf("prompt").length, 0, "staging an image sent a prompt on its own");
+});
+
+check("dashboard: image attach — a paste carrying no image is left entirely alone", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const took = p.paste([{ type: "text/plain", name: "notes.txt" }]);
+  assert(!took, "an ordinary text paste was intercepted");
+  assertEqual(p.sandbox.dashTrayEl.hidden, true, "a text paste opened the tray");
+});
+
+check("dashboard: image attach — dropping an image onto the composer stages it", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const allowed = p.drop([p.imageFile()]);
+  assert(allowed, "dragover never called preventDefault, so a real browser would navigate to " +
+                  "the image instead of dropping it here");
+  await settleStaging();
+  assertEqual(p.trayChips().length, 1, "the dropped image was not staged");
+});
+
+check("dashboard: image attach — [Image N] marker inserted at cursor position", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashPromptInput.value = "look at ";
+  p.sandbox.dashPromptInput.selectionStart = p.sandbox.dashPromptInput.selectionEnd = 8;
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const val = p.sandbox.dashPromptInput.value;
+  assert(val.includes("[Image 1]"), "textarea should contain [Image 1] after paste — got: " + val);
+  const pos = val.indexOf("[Image 1]");
+  assertEqual(pos, 8, "[Image 1] should appear at cursor position 8 — got: " + pos);
+});
+
+check("dashboard: image attach — second paste inserts [Image 2]", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const val = p.sandbox.dashPromptInput.value;
+  assert(val.includes("[Image 1]"), "should contain [Image 1] — got: " + val);
+  assert(val.includes("[Image 2]"), "should contain [Image 2] — got: " + val);
+});
+
+check("dashboard: image attach — the type sent is the one the encoder produced, not the one asked for", async () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1",
+    noWebp: true, imageWidth: 200, imageHeight: 100,
+  });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashSendBtn.dispatch("click");
+  assertEqual(p.sentOf("prompt")[0].payload.images[0].mimeType, "image/png",
+              "the page reported the format it requested rather than the one it got back");
+});
+
+check("dashboard: image attach — the encoder walks down the ladder until something fits", async () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1",
+    encode: (type, quality) => ({ size: quality > 0.7 ? 900000 : 5000, type }),
+  });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 1,
+              "the first rung did not fit and the page gave up instead of trying a lower quality");
+  assert(p.sandbox.dashTrayEl.textContent.includes("5 KB"),
+         "the staged image is not the one the lower rung produced");
+});
+
+check("dashboard: image attach — an image that cannot be made to fit is refused, not truncated", async () => {
+  const p = loadDashPicker({
+    dashAttachedSid: "sess-1", viewingSid: "sess-1",
+    encode: (type) => ({ size: 900000, type }),
+  });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 0, "an oversized image was staged anyway");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /not attached/.test(note.text), "the refusal was not said anywhere the user will read it");
+});
+
+check("dashboard: image attach — a connected meta's image budget is enforced on the next paste", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "meta",
+    payload: { connected: true, maxMessageBytes: 262144, maxConnections: 8,
+               maxPromptImages: 1, maxPromptImageBytes: 180224 },
+  });
+  assertEqual(p.sandbox._dashImageMaxCount, 1, "sanity check — the budget state itself updated");
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.paste([p.imageFile("image/png", "second.png")]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 1, "the page ignored the cap the server advertised");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /at most 1 images/.test(note.text), "nothing said why the second image was dropped");
+});
+
+check("dashboard: image attach — removing a staged image gives its object URL back", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const before = p.revoked().length;
+  p.trayChips()[0].querySelector(".acp-attach-drop").dispatch("click");
+  assertEqual(p.trayChips().length, 0, "the chip stayed after being removed");
+  assert(p.revoked().length > before,
+         "the object URL was never revoked — its blob stays alive for the lifetime of the tab");
+});
+
+check("dashboard: image attach — removeAttachment renumbers [Image N] markers in textarea", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const val = p.sandbox.dashPromptInput.value;
+  assert(val.includes("[Image 1]"), "fixture: [Image 1] present — got: " + val);
+  assert(val.includes("[Image 2]"), "fixture: [Image 2] present — got: " + val);
+  const chips = p.trayChips();
+  assert(chips.length >= 1, "fixture: at least one chip");
+  const removeBtn = chips[0].querySelector("button");
+  assert(removeBtn !== null, "fixture: remove button on first chip");
+  removeBtn.dispatch("click");
+  const after = p.sandbox.dashPromptInput.value;
+  assert(!after.includes("[Image 2]"), "[Image 2] should have been renumbered to [Image 1] — got: " + after);
+  const count1 = (after.match(/\[Image 1\]/g) || []).length;
+  assert(count1 === 1,
+    "after removing first attachment, [Image 1] should appear exactly once for the remaining one — got: " + after);
+});
+
+check("dashboard: image attach — removeAttachment handles the middle element of 3", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashPromptInput.value = "[Image 1][Image 2][Image 3]";
+  const chips = p.trayChips();
+  assertEqual(chips.length, 3, "fixture: 3 chips — got: " + chips.length);
+  chips[1].querySelector("button").dispatch("click");
+  const after = p.sandbox.dashPromptInput.value;
+  const count1 = (after.match(/\[Image 1\]/g) || []).length;
+  assert(count1 === 1, "[Image 1] should appear exactly once — got: " + after);
+  const count2 = (after.match(/\[Image 2\]/g) || []).length;
+  assert(count2 === 1, "[Image 2] should appear exactly once (renumbered from [Image 3]) — got: " + after);
+  assert(!after.includes("[Image 3]"), "[Image 3] should not appear after removal — got: " + after);
+});
+
+check("dashboard: image attach — a browser with no image APIs refuses cleanly instead of throwing", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1", images: false });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 0, "something was staged with no encoder");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /cannot attach images/.test(note.text),
+         "the page failed silently rather than saying it could not attach");
+});
+
+check("dashboard: image attach — a staged image travels as payload.images independent of the prompt text", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashPromptInput.value = "what is wrong here?";
+  p.sandbox.dashSendBtn.dispatch("click");
+  const sent = p.sentOf("prompt")[0];
+  assert(sent, "the prompt was never sent");
+  assertEqual(sent.payload.prompt, "what is wrong here?",
+              "the text and the images should travel in separate fields");
+  assertEqual(sent.payload.images.length, 1, "the image never reached the wire");
+  assert(sent.payload.images[0].data.length > 0, "the image carried no data");
+  assertEqual(Object.keys(sent.payload.images[0]).sort().join(","), "data,mimeType",
+              "the wire carried more than the server reads");
+  assertEqual(p.trayChips().length, 0, "the tray kept the images after sending");
+});
+
+check("dashboard: image attach — an image with no words is a whole prompt", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashSendBtn.dispatch("click");
+  const sent = p.sentOf("prompt")[0];
+  assert(sent, "paste-and-send with an empty box sent nothing at all");
+  assertEqual(sent.payload.prompt, "[Image 1]",
+    "paste inserts [Image 1] marker — the prompt text should carry it");
+  assertEqual(sent.payload.images.length, 1, "the image never reached the wire");
+});
+
+check("dashboard: image attach — a started turn releases the images it consumed", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashSendBtn.dispatch("click");
+  const before = p.revoked().length;
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "start" } });
+  assert(p.revoked().length > before,
+         "the turn started but the sent images' object URLs were never revoked, so their " +
+         "blobs outlive the page's use for them");
+});
+
+check("dashboard: image attach — a refused prompt gives the images back", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashPromptInput.value = "look at this";
+  p.sandbox.dashSendBtn.dispatch("click");
+  assertEqual(p.trayChips().length, 0, "sanity check — the tray emptied on send");
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "turn_in_progress", message: "still answering" },
+  });
+  assertEqual(p.trayChips().length, 1,
+    "the refusal cost the user their attachment, which is another paste, decode and re-encode " +
+    "to replace");
+});
+
+check("dashboard: image attach — images staged since a refused send take precedence over restoring old ones", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashSendBtn.dispatch("click");
+  assertEqual(p.trayChips().length, 0, "sanity check — the tray emptied on send");
+  // A new image is staged before the refusal arrives.
+  p.paste([p.imageFile("image/png", "newer.png")]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 1, "sanity check — a new image is now staged");
+  const before = p.revoked().length;
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "internal_error", message: "refused" },
+  });
+  assertEqual(p.trayChips().length, 1,
+    "the refused send's images must not be restored over ones staged since");
+  assert(p.revoked().length > before,
+    "the refused send's images must still be revoked, not merely dropped, once superseded");
+  const note = p.addMessageCalls[p.addMessageCalls.length - 1];
+  assert(note && /others have been attached since/.test(note.text),
+    "the user was not told why the refused images were not restored");
+});
+
+check("dashboard: image attach — a sid-less error must not restore images belonging to a different session", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashSendBtn.dispatch("click");
+  assertEqual(p.trayChips().length, 0, "sanity check — the tray emptied on send");
+  p.sandbox.dashHandle({
+    type: "error", sessionId: null,
+    payload: { code: "bad_json", message: "Frame is not valid JSON." },
+  });
+  assertEqual(p.trayChips().length, 0,
+    "a sid-less error unrelated to this session must not restore images into the tray");
+});
+
+check("dashboard: image attach — closing the session drops the images staged against it", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const before = p.revoked().length;
+  p.sandbox.dashHandle({
+    type: "session_closed", sessionId: "sess-1", payload: { sessionId: "sess-1", reason: "closed" },
+  });
+  assertEqual(p.trayChips().length, 0, "the session went away but its staged images stayed behind");
+  assert(p.revoked().length > before, "the object URLs were never revoked");
+});
+
+check("dashboard: image attach — agent_died clears the staged images", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const before = p.revoked().length;
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "crashed" } });
+  assertEqual(p.trayChips().length, 0, "the agent died but its staged images stayed behind");
+  assert(p.revoked().length > before, "the object URLs were never revoked");
+});
+
+check("dashboard: image attach — dashCloseIfAbandoned drops images staged against the session just left", async () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashOrigin = "joined"; // skips the send('close', ...) arm
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  const before = p.revoked().length;
+  p.sandbox.dashCloseIfAbandoned();
+  assertEqual(p.trayChips().length, 0, "images staged for the previous session survived the switch");
+  assert(p.revoked().length > before,
+         "the tray was emptied but the object URLs behind it were not revoked");
+});
+
+check("dashboard: image attach — an image staged before the session has attached survives the lazy-attach flush", async () => {
+  // This is the exact regression scenario Phase 4's design guards against
+  // (plan's own named risk): a first image+message sent to a not-yet-attached
+  // session must not silently drop the image.
+  const p = loadDashPicker({ viewingSid: "sess-1" }); // dashAttachedSid defaults to null -- not yet attached
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  assertEqual(p.trayChips().length, 1, "sanity check — the image staged before attach");
+  p.sandbox.dashPromptInput.value = "[Image 1] what is this?";
+  p.sandbox.dashSendBtn.dispatch("click");
+  // The immediate path is not taken (not yet attached) -- nothing sent yet,
+  // and the composer locks while the session attaches.
+  assertEqual(p.sentOf("prompt").length, 0, "the prompt must not send before the session has attached");
+  assertEqual(p.sandbox.dashPromptInput.disabled, true, "the composer must lock while attaching");
+  assert(p.sandbox._dashPendingImages, "the staged image must be snapshotted into _dashPendingImages");
+  assertEqual(p.sandbox._dashPendingImages.length, 1, "exactly one image should be snapshotted");
+  // The tray itself must still show the image while attaching -- it is not
+  // moved/cleared until the deferred send actually fires.
+  assertEqual(p.trayChips().length, 1, "the tray must still show the staged image while attaching");
+  // The session finishes attaching; its history frame flushes the pending send.
+  p.sandbox.dashHandle({ type: "history", sessionId: "sess-1", payload: { events: [] } });
+  const sent = p.sentOf("prompt")[0];
+  assert(sent, "the deferred send never fired");
+  assertEqual(sent.payload.prompt, "[Image 1] what is this?", "the deferred text must be sent");
+  assertEqual(sent.payload.images.length, 1,
+    "a first image+message sent to a not-yet-attached session must not silently drop the image");
+  assert(sent.payload.images[0].data.length > 0, "the image carried no data");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "the composer must unlock once the send flushes");
+  assertEqual(p.trayChips().length, 0, "the tray must clear once the deferred send flushes");
+});
+
+check("dashboard: image attach — a refused lazy-attach load leaves the still-staged tray untouched", async () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.paste([p.imageFile()]);
+  await settleStaging();
+  p.sandbox.dashPromptInput.value = "[Image 1]";
+  p.sandbox.dashSendBtn.dispatch("click");
+  assertEqual(p.sandbox._dashLoadingSid, "sess-1", "sanity check — a lazy load is in flight");
+  assert(p.sandbox._dashPendingImages, "sanity check — an image snapshot is pending");
+  p.sandbox.dashHandle({
+    type: "error", sessionId: "sess-1", payload: { code: "internal_error", message: "load failed" },
+  });
+  assertEqual(p.sandbox._dashLoadingSid, null, "the lazy-load state must clear on a refusal");
+  assertEqual(p.sandbox._dashPendingImages, null, "the pending-image snapshot must clear on a refusal");
+  assertEqual(p.trayChips().length, 1,
+    "the staged image was never moved out of the tray for this path — it must still be there, " +
+    "not duplicated or lost, ready for the user to retry");
 });
 
 let failed = 0;
