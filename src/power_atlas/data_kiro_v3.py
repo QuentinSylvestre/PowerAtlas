@@ -140,12 +140,25 @@ def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tupl
     Phase 2 (rebuild): only on cache miss — read session.json files to parse
         cwd and display metadata.  All I/O outside _index_lock; swap atomically.
 
-    Fast path: if root mtime is unchanged AND the index is non-empty, skip the
-    Phase 1 stat scan entirely.  A new session.json can only appear when
-    kiro-cli creates a new session, which bumps the hash_dir mtime, which
-    bumps V3_SESSIONS_ROOT's mtime.  The existing new_json_mtimes ==
-    _session_json_mtimes check in Phase 1 handles the case where root mtime
-    changed but no session.json actually changed.
+    No fast path ahead of Phase 1 keyed on V3_SESSIONS_ROOT's own mtime: a
+    directory's mtime reflects changes to its own direct entries only, not to
+    anything nested inside them. A new session lands as
+    ``V3_SESSIONS_ROOT/<hash_dir>/<new_sess_dir>/`` — a new *grandchild* of
+    the root — which bumps `<hash_dir>`'s own mtime but never the root's,
+    since the root's direct children (the set of hash_dir names) did not
+    change. A prior version of this function skipped Phase 1 entirely
+    whenever the root's mtime matched the last-seen value, on the documented
+    assumption that any new session.json bumps the root's mtime — which is
+    false for every session created in a workspace whose hash dir already
+    existed, i.e. the common case. That skip made this cache freeze at
+    whatever session set existed the last time some brand-new workspace's
+    hash dir first appeared, silently hiding every session created in an
+    already-known workspace after that point (confirmed live: root mtime
+    unchanged since 2026-09-19, hiding 4 sessions created 2026-09-21 in a
+    workspace whose hash dir predates that freeze). Phase 1's own
+    new_json_mtimes == _session_json_mtimes check below is the real,
+    session-granular staleness test and always runs now; only Phase 2 (the
+    expensive JSON-parsing rebuild) is skipped when nothing changed.
 
     The lock is NEVER held across filesystem I/O.
     """
@@ -157,11 +170,6 @@ def _cwd_to_sessions() -> tuple[dict[str, list[tuple[str, str]]], dict[str, tupl
         current_root_mtime = V3_SESSIONS_ROOT.stat().st_mtime
     except OSError:
         return {}, {}
-
-    # Fast path: if root mtime unchanged and we have a cached index, skip Phase 1 entirely
-    with _index_lock:
-        if current_root_mtime == _root_mtime and _cwd_index:
-            return _cwd_index.copy(), _cwd_display.copy()
 
     # Phase 1: fast mtime-only scan (no JSON reads)
     new_json_mtimes: dict[str, float] = {}

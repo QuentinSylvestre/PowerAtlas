@@ -158,33 +158,56 @@ class TestKiroV3IsAvailable:
 
 
 class TestKiroV3CwtoCacheHit:
-    """Verify the O(1) fast path in _cwd_to_sessions is taken on cache hit."""
+    """Verify _cwd_to_sessions' cache both short-circuits when nothing changed
+    and — the regression this class exists to guard — still discovers a new
+    session added to an already-known hash dir even though V3_SESSIONS_ROOT's
+    own mtime never moves for it. A directory's mtime reflects only its own
+    direct children; a session lands as a *grandchild*
+    (root/hash_dir/sess_dir), which bumps hash_dir's mtime but never the
+    root's. A prior version of this cache skipped its Phase 1 staleness scan
+    whenever the root's mtime was unchanged, on the false assumption that any
+    new session bumps it — which froze the cache at whatever session set
+    existed the last time some brand-new workspace's hash dir first
+    appeared, silently hiding every session created afterward in an
+    already-known workspace. Confirmed live against a real ~/.kiro/sessions
+    tree: the root's mtime was frozen since 2026-09-19, hiding 4 sessions
+    created 2026-09-21 in a pre-existing workspace."""
 
-    def test_fast_path_returns_same_index_without_stat_calls(self, tmp_path, monkeypatch):
-        """When root mtime is unchanged and index is non-empty, second call returns same index."""
+    def test_cache_hit_returns_same_index_when_nothing_changed(self, tmp_path, monkeypatch):
         monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
         _make_session(tmp_path, "h1", "sess_fp", "C:\\W",
                       messages=[_user_line("Q1")])
 
-        # First call populates the cache
         index1, display1 = dv3._cwd_to_sessions()
         assert index1  # populated
-        # Record the cached root mtime
+
+        index2, display2 = dv3._cwd_to_sessions()
+        assert index2 == index1  # same result, nothing changed
+
+    def test_new_session_in_existing_hash_dir_is_discovered_without_root_mtime_changing(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(dv3, "V3_SESSIONS_ROOT", tmp_path)
+        _make_session(tmp_path, "h1", "sess_fp", "C:\\W",
+                      messages=[_user_line("Q1")])
+
+        index1, _ = dv3._cwd_to_sessions()
+        assert len(index1.get(dv3._normalize_path("C:\\W"), [])) == 1
         root_mtime_after_first = dv3._root_mtime
 
-        # Second call should take the fast path (root mtime unchanged)
-        index2, display2 = dv3._cwd_to_sessions()
-        assert index2 == index1  # same result
-        assert dv3._root_mtime == root_mtime_after_first  # mtime unchanged, fast path taken
-
-        # Add a new session — this should bump the root mtime and trigger Phase 1
+        # A second session in the SAME, already-known hash dir. Deliberately
+        # do not touch tmp_path's own mtime -- only h1's -- matching what
+        # actually happens on disk when a workspace that has been seen
+        # before gets a new session.
         _make_session(tmp_path, "h1", "sess_fp2", "C:\\W",
                       messages=[_user_line("Q2")])
         _bump_mtime(tmp_path / "h1")
-        _bump_mtime(tmp_path)  # root mtime changes
+        assert dv3.V3_SESSIONS_ROOT.stat().st_mtime == root_mtime_after_first, \
+            "test setup must not touch the root's mtime -- that is the scenario under test"
 
-        index3, _ = dv3._cwd_to_sessions()
-        assert len(index3.get(dv3._normalize_path("C:\\W"), [])) == 2  # new session discovered
+        index2, _ = dv3._cwd_to_sessions()
+        assert len(index2.get(dv3._normalize_path("C:\\W"), [])) == 2, \
+            "the new session must be discovered even though V3_SESSIONS_ROOT's mtime is unchanged"
 
 
 class TestKiroV3DiscoverWorkspaces:
