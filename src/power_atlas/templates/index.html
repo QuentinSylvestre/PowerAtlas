@@ -354,9 +354,24 @@
     </div>
     <div class="acp-composer" id="dashComposer" hidden>
       <div class="acp-composer-row">
+        <!-- Slash command palette (SC1, dashboard/ACP feature-parity plan
+             Phase 2) -- mirrors acp.html's #acpCmdDropdown, wired through the
+             shared composer-chrome.js module (initCommandPaletteDom). First
+             child so it is never a flex item of .acp-composer-row (same
+             reasoning acp.html's own markup comment gives). Shares
+             .acp-cmd-dropdown/.acp-cmd-* CSS with /acp via style.css --
+             see that file for the class, not this element's own id. -->
+        <div id="dashCmdDropdown" class="acp-cmd-dropdown" hidden role="listbox" aria-label="Commands &amp; skills">
+          <div class="acp-cmd-header">
+            <kbd class="acp-cmd-header-hint">↑↓&nbsp;navigate&nbsp; · &nbsp;Enter&nbsp;select&nbsp; · &nbsp;Esc&nbsp;close</kbd>
+          </div>
+          <ul role="presentation"></ul>
+        </div>
         <textarea class="acp-prompt" id="dashPromptInput" rows="2" spellcheck="false"
                   placeholder="Prompt this agent — Enter to send, Shift+Enter for a new line"
-                  aria-label="Prompt"></textarea>
+                  aria-label="Prompt"
+                  aria-haspopup="listbox" aria-controls="dashCmdDropdown"
+                  aria-expanded="false"></textarea>
         <button class="acp-btn acp-icon-btn" id="dashSendBtn" type="button" disabled
                 aria-label="Send">
           <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -897,9 +912,70 @@ function dashRefreshSendButton(){
   var hasText = dashPromptInput.value.trim().length > 0;
   dashSendBtn.disabled = !hasText || _dashTurnActive;
 }
-dashPromptInput.addEventListener('input', dashRefreshSendButton);
+// Slash command / skill autocomplete palette (SC1, dashboard/ACP
+// feature-parity plan Phase 2) -- composer-chrome.js's globals (cmdDropdownEl
+// et al., initCommandPaletteDom, showCommandDropdown, hideCommandDropdown,
+// isCommandDropdownVisible, moveCommandSelection, confirmCommandSelection)
+// are already true globals on this page (no IIFE -- see the comment on
+// initTranscriptDom above), so they are called bare below exactly as
+// acp.html's own keydown/input listeners call them from inside its IIFE.
+// `getTurnActive`/`cmdGetTurnActive` is deliberately NOT part of this DI:
+// nothing inside composer-chrome.js's ported code reads turn-active state,
+// and this page's own new listener code below reads `_dashTurnActive`
+// directly -- it is already a plain global on this page, the true mirror of
+// acp.html's own bare `!turnActive` read, needing no accessor at all.
+initCommandPaletteDom({
+  cmdDropdownEl: document.getElementById('dashCmdDropdown'),
+  promptInput: dashPromptInput,
+  getSessionId: function () { return _dashAttachedSid; },
+  send: send,
+  // acp.html's ported code calls autoGrowPrompt()+refreshComposerControls()
+  // after it changes promptInput.value; this page has no textarea auto-grow
+  // yet, so dashRefreshSendButton() -- keeping the Send button's
+  // enabled/disabled state in sync -- is the equivalent here.
+  onPromptChanged: dashRefreshSendButton,
+});
 dashPromptInput.addEventListener('keydown', function(e){
+  // Slash intercept: open the command palette when `/` is pressed into an
+  // empty box (no modifier keys, not during an active turn) -- mirrors
+  // acp.html's own intercept exactly, gated the same way (`!turnActive`
+  // there, `!_dashTurnActive` here -- see the comment above this block for
+  // why no accessor is used for this read).
+  if (e.key === '/' && dashPromptInput.value === '' &&
+      !e.shiftKey && !e.ctrlKey && !e.altKey && !_dashTurnActive) {
+    e.preventDefault();
+    dashPromptInput.value = '/';
+    dashRefreshSendButton();
+    showCommandDropdown('');
+    return;
+  }
+  // Dropdown keyboard navigation -- must run before the plain Enter-sends
+  // fallback below, exactly acp.html's own ordering, or Enter with the
+  // dropdown open would fire dashSendPrompt() instead of confirming a
+  // selection.
+  if (isCommandDropdownVisible()) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); moveCommandSelection(1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); moveCommandSelection(-1); return; }
+    if (e.key === 'Escape') { e.preventDefault(); hideCommandDropdown(); return; }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
+    if (e.key === 'Tab' && !e.shiftKey) { e.preventDefault(); confirmCommandSelection(); return; }
+  }
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); dashSendPrompt(); }
+});
+dashPromptInput.addEventListener('input', function(){
+  dashRefreshSendButton();
+  // Live slash-command filtering -- mirrors acp.html's own `input` listener:
+  // open or update the dropdown while the user is typing a /command token,
+  // hide it when they leave the command token.
+  var val = dashPromptInput.value;
+  var cmdMatch = val.match(/(?:^|\s)(\/\S*)$/);
+  if (cmdMatch) {
+    var partial = cmdMatch[1].slice(1);
+    var isMidText = cmdMatch[0].charAt(0) === ' ' || (cmdMatch.index > 0);
+    showCommandDropdown(partial, isMidText ? 'skills' : 'all');
+  } else {
+    hideCommandDropdown();
+  }
 });
 dashSendBtn.addEventListener('click', dashSendPrompt);
 
@@ -1050,6 +1126,11 @@ function dashHandle(frame){
     _dashAttachedSid = sid;
     _dashTurnActive = !!payload.turnActive;
     _dashLoadingSid = null;
+    // A new/resubscribed session means any prior command catalogue is gone —
+    // reset so stale slash-command suggestions from the old session never
+    // show up (SC1, dashboard/ACP feature-parity plan Phase 2) — mirrors
+    // acp.html's own `session`-frame handling.
+    resetCommandPalette();
     // The one place this page learns the workspace: `cwd` arrives on every
     // `session` frame, created or resubscribed alike -- mirrors acp.html's
     // own session-frame handling. Reset the reveal on every frame, not only
@@ -1098,7 +1179,9 @@ function dashHandle(frame){
     dashRefreshSendButton();
     return;
   }
-  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
+  // hideCommandDropdown() on turn start: a mid-turn dropdown cannot be acted
+  // on and would just be confusing -- mirrors acp.html's own setTurn(true).
+  if (type === 'meta' && payload.turn === 'start') { _dashTurnActive = true; hideCommandDropdown(); dashRefreshSendButton(); dashUpdateCloseButton(); var _dp = document.getElementById('dashPicker'); if (_dp && !_dp.hidden) dashPickerRenderKeepRow(); return; }
   if (type === 'meta' && payload.turn === 'end') { _dashTurnActive = false; dashRefreshSendButton(); dashUpdateCloseButton(); var _dp2 = document.getElementById('dashPicker'); if (_dp2 && !_dp2.hidden) dashPickerRenderKeepRow(); return; }
   // `connected` meta: the server's ack for this socket, once per connection.
   // The image budget comes off the wire rather than being written into this
@@ -1123,6 +1206,28 @@ function dashHandle(frame){
   if (type === 'meta' && 'contextPercent' in payload) {
     setContext(payload.contextPercent);
     logLine('info', '← context window ' + payload.contextPercent + '%');
+    return;
+  }
+  if (type === 'commands') {
+    // Slash command catalogue from the server (SC1, dashboard/ACP
+    // feature-parity plan Phase 2). Broadcast-only (not in history), so this
+    // is the only source for it after a reconnect.
+    setSessionCommands(payload && payload.commands);
+    return;
+  }
+  if (type === 'skills') {
+    // kiro-cli skills catalogue from the server. Broadcast-only (not in
+    // history), so this is the only source for it after a reconnect.
+    setSessionSkills(payload && payload.skills);
+    return;
+  }
+  if (type === 'commands_execute_result') {
+    // The command result — see composer-chrome.js's
+    // handleCommandsExecuteResult() for the full comment (compact exclusion,
+    // message rendering). commands_options_result is not handled here for
+    // the same reason acp.html no longer handles it: the client never sends
+    // commands_options, so this frame never arrives in production.
+    handleCommandsExecuteResult(payload);
     return;
   }
   if (type === 'chunk' || type === 'rendered' || type === 'tool_call' || type === 'tool_update') {
@@ -1165,21 +1270,30 @@ function dashHandle(frame){
     _sessionCwd = '';
     sidRevealed = false;
     renderSidLabel();
+    // The commands catalogue belonged to the released session too (SC1,
+    // dashboard/ACP feature-parity plan Phase 2) -- mirrors acp.html's own
+    // releaseSession() reset.
+    resetCommandPalette();
     dashUpdateCloseButton();
     dashPickerRunPending(); // fire pending close-then-create if any
     return;
   }
   if (type === 'agent_died') {
-    // Baseline reset (turn state, composer, context, sid/copy widget) --
-    // Phase 3 extends this to restore any pending steer text and re-enable
-    // the send-mode controls, Phase 5 to close an open sub-agent panel and
-    // clear crew state, since neither exists yet at this point in the plan.
-    // Mirrors the turn/composer-reset portion of acp.html's own agent_died
-    // handler (its steer/crew-restoration portions are exactly what Phases 3
-    // and 5 add here).
+    // Baseline reset (turn state, composer, context, sid/copy widget,
+    // command palette) -- Phase 3 extends this to restore any pending steer
+    // text and re-enable the send-mode controls, Phase 5 to close an open
+    // sub-agent panel and clear crew state, since neither exists yet at this
+    // point in the plan. Mirrors the turn/composer-reset portion of
+    // acp.html's own agent_died handler (its steer/crew-restoration portions
+    // are exactly what Phases 3 and 5 add here); the command-palette reset
+    // below has no acp.html counterpart in its own agent_died handler (a
+    // pre-existing gap there, out of this phase's scope to fix) but is cheap
+    // and correct to add here regardless, since the composer is disabled
+    // immediately afterward anyway.
     _dashAttachedSid = null;
     _dashOrigin = null;
     _dashTurnActive = false;
+    resetCommandPalette();
     // Three pre-existing dashboard state variables (not introduced by this
     // plan) that could otherwise leave stale lazy-load state if the agent
     // dies mid-lazy-load before a `session` frame confirms attach -- cleared

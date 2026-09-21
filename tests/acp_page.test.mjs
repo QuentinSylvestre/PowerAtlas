@@ -8894,10 +8894,21 @@ check("slashKeyOpensDropdown", (tpl) => {
   assert(drop.hidden, "clearing the prompt should hide the command dropdown");
 });
 
-// commandOptionsResultUpdatesDropdown
-// A 'commands_options_result' frame updates the open dropdown with server
-// suggestions.
-check("commandOptionsResultUpdatesDropdown", (tpl) => {
+// commandsOptionsResultIsANoOp
+// A 'commands_options_result' frame is not handled at all (dashboard/ACP
+// feature-parity plan, Phase 2, SC1's dead-path removal) — the client never
+// sends a commands_options request (confirmed by
+// plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md's Phase 7 review,
+// finding #3: "currently-dead client-side... unreachable today"), so this
+// frame can never arrive in production. This replaces the pre-Phase-2
+// commandOptionsResultUpdatesDropdown check, which exercised exactly the
+// applyCommandOptions()/commands_options_result path Phase 2 deliberately
+// dropped rather than ported — that check now describes removed behaviour,
+// not a regression. Delivering the frame anyway must be a silent no-op: the
+// open dropdown's contents are unchanged and handle() does not throw (an
+// unrecognized type falls through to the generic `logLine('in', ...)`
+// catch-all at the end of handle()).
+check("commandsOptionsResultIsANoOp", (tpl) => {
   const { page, live } = connected(tpl);
   // Seed one command so the dropdown opens.
   page.deliver({
@@ -8909,16 +8920,21 @@ check("commandOptionsResultUpdatesDropdown", (tpl) => {
     key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
   });
   assert(!page.el("acpCmdDropdown").hidden, "fixture: dropdown should be open");
-  // Server returns an additional suggestion.
+  const namesBefore = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
+                           .map((n) => n.textContent);
+  // A stray commands_options_result must not throw and must not touch the
+  // dropdown — there is no handler for it any more.
   page.deliver({
     type: "commands_options_result", sessionId: live,
     payload: { options: [{ name: "memory", description: "Memory stats" }] },
   });
-  const names = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
-                    .map((n) => n.textContent);
-  assert(names.includes("/memory"),
-    "commands_options_result should add the server suggestion to the dropdown; " +
-    "got: " + JSON.stringify(names));
+  assert(!page.el("acpCmdDropdown").hidden,
+    "commands_options_result must not close the dropdown");
+  const namesAfter = page.el("acpCmdDropdown").querySelectorAll(".acp-cmd-name")
+                          .map((n) => n.textContent);
+  assertEqual(JSON.stringify(namesAfter), JSON.stringify(namesBefore),
+    "commands_options_result must not add the server suggestion — the " +
+    "dead path it used to feed (applyCommandOptions) was dropped in Phase 2");
 });
 
 // commandsExecuteResultClosesDropdown
@@ -10382,9 +10398,33 @@ const DASH_PICKER_NAMES = [
   "dashPickerInitTaskMode",
 ];
 const DASH_HANDLE_NAMES = ["dashCloseIfAbandoned", "dashHandle"];
+const DASH_CMD_PALETTE_NAMES = [
+  "initCommandPaletteDom", "showCommandDropdown", "hideCommandDropdown",
+  "isCommandDropdownVisible", "moveCommandSelection", "confirmCommandSelection",
+];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
+
+  // Command-palette wiring region (SC1, dashboard/ACP feature-parity plan
+  // Phase 2): from the initCommandPaletteDom() call through the end of the
+  // `input` listener paired with it, immediately before dashSendBtn's own
+  // click wiring. Real source, not a hand-rewritten stand-in, for the same
+  // reason handleRegion below is one — this is genuine keyboard-dispatch
+  // logic (the `/` intercept, arrow-key navigation, Enter/Tab confirm) that
+  // must be exercised as written, not as re-described. Comes earlier in the
+  // file than dashHandle, so it is extracted and run first.
+  const cmdFrom = src.indexOf("initCommandPaletteDom({");
+  if (cmdFrom < 0) throw new Error("index.html no longer calls initCommandPaletteDom");
+  const cmdTo = src.indexOf("dashSendBtn.addEventListener('click', dashSendPrompt);", cmdFrom);
+  if (cmdTo < 0) throw new Error("index.html's composer wiring section has moved");
+  const cmdPaletteRegion = src.slice(cmdFrom, cmdTo);
+  for (const name of DASH_CMD_PALETTE_NAMES) {
+    if (!cmdPaletteRegion.includes(name)) {
+      throw new Error(
+        `the extracted command-palette region does not contain ${name}; it has moved`);
+    }
+  }
 
   // dashHandle region: from dashCloseIfAbandoned's declaration (the function
   // immediately preceding dashHandle -- pulled in too so its own review-fix
@@ -10420,11 +10460,11 @@ function dashPickerSource() {
     }
   }
 
-  return { handleRegion, pickerRegion };
+  return { cmdPaletteRegion, handleRegion, pickerRegion };
 }
 
 function loadDashPicker(opts = {}) {
-  const { handleRegion, pickerRegion } = dashPickerSource();
+  const { cmdPaletteRegion, handleRegion, pickerRegion } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10469,8 +10509,16 @@ function loadDashPicker(opts = {}) {
   byId.set("dashLog", new El("div"));
   byId.get("dashLog").hidden = true;
   byId.set("dashLogToggle", new El("button"));
+  // composer-chrome.js's slash command palette (SC1, dashboard/ACP
+  // feature-parity plan Phase 2) -- initCommandPaletteDom() (run from
+  // cmdPaletteRegion below) looks this up by id.
+  byId.set("dashCmdDropdown", new El("div"));
+  byId.get("dashCmdDropdown").hidden = true;
 
   const fetches = [];
+  const sentFrames = [];
+  const dashSendPromptCalls = [];
+  const systemMessages = [];
 
   const sandbox = {
     document: {
@@ -10517,15 +10565,33 @@ function loadDashPicker(opts = {}) {
     dashPromptInput: new El("input"),
     dashSendBtn: new El("button"),
     dashConnect: (cb) => { if (cb) cb(); },
-    send: () => true,
+    // Records every outgoing frame (default `sentOf()` below reads this).
+    // The command-palette region's initCommandPaletteDom() call captures
+    // whatever `send` resolves to *at harness-setup time* into its own
+    // cmdSend module variable (dashboard/ACP feature-parity plan, Phase 2) --
+    // unlike dashHandle's bare `send(...)` calls (late-bound, resolved fresh
+    // every time dashHandle runs), a post-construction `p.sandbox.send = ...`
+    // override would never reach it. Existing tests that install their own
+    // override afterward are unaffected -- they exercise dashHandle/picker
+    // paths, which stay late-bound.
+    send: (type, payload, sid) => { sentFrames.push({ type, payload, sid }); return true; },
     dashSetComposerNote: () => {},
     dashUpdateCloseButton: () => {},
     dashRefreshSendButton: () => {},
+    // The command-palette keydown listener's plain-Enter fallback
+    // (dashboard/ACP feature-parity plan, Phase 2) -- recorded so a test can
+    // assert it was (or, with the dropdown open, was NOT) called.
+    dashSendPrompt: () => { dashSendPromptCalls.push(true); },
     // dashHandle's agent_died/session_closed/agent_error branches call this
     // (transcript-renderer.js, not part of either extracted region) -- a
     // no-op here since these checks assert on dashHandle's own state, not on
     // transcript rendering.
     addMessage: () => {},
+    // composer-chrome.js's handleCommandsExecuteResult() (dashboard/ACP
+    // feature-parity plan, Phase 2) calls this (also transcript-renderer.js,
+    // not loaded by this harness) -- recorded, not a no-op, so a test can
+    // assert on the rendered command-result message.
+    addSystemMessage: (text) => { systemMessages.push(text); },
     dashRailMode: "project",
     dashRailMergeGroup: () => {},
     // dashPickerRailAdopt calls this (index.html) to surface a workspace
@@ -10563,9 +10629,12 @@ function loadDashPicker(opts = {}) {
     logToggle: byId.get("dashLogToggle"),
     isReplaying: () => sandbox._dashReplaying,
   });
-  // Run dashHandle first (it is declared before the picker in the page), then
-  // the picker section (which also executes the parse-time event-listener
-  // wiring against the byId map above).
+  // Run the command-palette wiring region first (it is declared before
+  // dashHandle in the real page -- see the comment on cmdPaletteRegion's
+  // extraction above), then dashHandle, then the picker section (which also
+  // executes the parse-time event-listener wiring against the byId map
+  // above).
+  vm.runInContext(cmdPaletteRegion, sandbox, { filename: "index.html#dash-cmd-palette" });
   vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
   vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
 
@@ -10573,6 +10642,10 @@ function loadDashPicker(opts = {}) {
     sandbox,
     byId,
     fetches,
+    sentFrames,
+    dashSendPromptCalls,
+    systemMessages,
+    sentOf(type) { return sentFrames.filter((f) => f.type === type); },
     /** Convenience: get an element by id, throws if absent. */
     el(id) {
       const found = byId.get(id);
@@ -10977,6 +11050,240 @@ check("dashCloseIfAbandoned clears the context indicator", () => {
     "dashCloseIfAbandoned must clear the context indicator (setContext(null)) -- without this, a " +
     "session viewed with no `session` frame ever arriving kept whatever the previously-viewed " +
     "session's context bar last showed");
+});
+
+// ---- dashboard slash-command / skill palette (SC1, dashboard/ACP
+// feature-parity plan, Phase 2) --------------------------------------------
+//
+// Wiring-level tests for the dashboard's consumption of composer-chrome.js's
+// command palette: the `/` keydown intercept, arrow-key navigation, Enter/Tab
+// confirm, and dashHandle()'s new `commands`/`skills`/`commands_execute_result`
+// cases plus the palette resets threaded into `session`/`session_closed`/
+// `agent_died`/`meta turn:start`. The palette's own core logic (dropdown
+// rendering, filtering, selection) is already exercised by acp.html's
+// pre-existing ~20 palette checks against the same composer-chrome.js source
+// (Design Decisions: "extracted features get wiring-level tests only") --
+// these checks are about whether the dashboard wires it up correctly, not
+// about re-proving the module's own behaviour.
+
+check("dashboard: '/' on an empty prompt opens the dropdown", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  // Seed at least one command -- an empty catalogue renders nothing and
+  // renderCommandDropdown() hides the (already-hidden) dropdown rather than
+  // showing an empty one, exactly mirroring acp.html's own
+  // slashKeyOpensDropdown fixture.
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "Tools list" }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  let prevented = false;
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() { prevented = true; },
+  });
+  assert(prevented, "'/' keydown should preventDefault so the browser does not also insert '/'");
+  assertEqual(p.sandbox.dashPromptInput.value, "/", "'/' keydown should set the textarea's value to '/'");
+  assertEqual(p.el("dashCmdDropdown").hidden, false,
+    "'/' on an empty, idle prompt must open the command dropdown");
+});
+
+check("dashboard: '/' is blocked during an active turn", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1", dashTurnActive: true });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "Tools list" }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true,
+    "'/' must not open the dropdown while _dashTurnActive is true, even with a populated " +
+    "catalogue -- mirrors acp.html's own !turnActive gate");
+});
+
+check("dashboard: a 'commands' frame populates the catalogue and shows in the open dropdown", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "context", description: "Show context usage" }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const names = p.el("dashCmdDropdown").querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(names.includes("/context"),
+    "the dropdown should show the command received in the 'commands' frame; got: " + JSON.stringify(names));
+});
+
+check("dashboard: a 'skills' frame populates the catalogue and badges entries", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "skills", sessionId: "sess-1",
+    payload: { skills: [{ name: "qplan", description: "Write a phased plan. More detail." }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  const drop = p.el("dashCmdDropdown");
+  const names = drop.querySelectorAll(".acp-cmd-name").map((n) => n.textContent);
+  assert(names.includes("/qplan"), "the dropdown should show the skill; got: " + JSON.stringify(names));
+  assertEqual(drop.querySelectorAll(".acp-cmd-skill-badge").length, 1,
+    "a skill entry must carry the skill badge, matching acp.html's own rendering");
+});
+
+check("dashboard: a new session frame resets the palette catalogue", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "List tools" }] },
+  });
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "C:\\work\\my-repo", turnActive: false, contextPercent: null },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true,
+    "a resubscribed/new session frame must reset the command catalogue (resetCommandPalette()) " +
+    "so a stale command from the previous session cannot appear -- the empty catalogue means '/' " +
+    "opens to nothing, so the dropdown stays hidden (renderCommandDropdown hides on an empty list)");
+});
+
+check("dashboard: session_closed resets the palette catalogue", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "List tools" }] },
+  });
+  p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: { message: "closed" } });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true,
+    "session_closed must reset the command catalogue, mirroring acp.html's own releaseSession()");
+});
+
+check("dashboard: agent_died resets the palette catalogue", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "List tools" }] },
+  });
+  p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "crashed" } });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true,
+    "agent_died must reset the command catalogue -- the composer is disabled immediately " +
+    "afterward regardless, but the catalogue must not survive into whatever is opened next");
+});
+
+check("dashboard: a turn-start meta frame closes an open dropdown", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "List tools" }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, false, "fixture: dropdown should be open");
+  p.sandbox.dashHandle({ type: "meta", sessionId: "sess-1", payload: { turn: "start" } });
+  assertEqual(p.el("dashCmdDropdown").hidden, true,
+    "a mid-turn dropdown cannot be acted on and would just be confusing -- mirrors acp.html's own setTurn(true)");
+});
+
+check("dashboard: arrow-key navigation + Enter selects a command, sends commands_execute, and does not fall through to dashSendPrompt", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1", dashAttachedSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [
+      { name: "context", description: "Show context usage" },
+      { name: "tools", description: "List tools" },
+    ] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "ArrowDown", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true, "confirming a selection must close the dropdown");
+  const executed = p.sentOf("commands_execute");
+  assertEqual(executed.length, 1, "selecting a (non-skill) command must send exactly one commands_execute");
+  assertEqual(executed[0].payload.name, "tools",
+    "ArrowDown from the first row must select the second ('tools'), not re-confirm the first");
+  assertEqual(executed[0].sid, "sess-1", "commands_execute must carry the attached session id");
+  assertEqual(p.sandbox.dashPromptInput.value, "",
+    "the textarea must clear after a command (not a skill) is confirmed");
+  assertEqual(p.dashSendPromptCalls.length, 0,
+    "Enter-with-the-dropdown-open must be consumed by confirmCommandSelection, never fall through " +
+    "to dashSendPrompt -- this is the exact ordering bug acp.html's own listener avoids by checking " +
+    "isCommandDropdownVisible() before its plain Enter-sends fallback");
+});
+
+check("dashboard: confirming a skill inserts '/<name> ' instead of sending commands_execute", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1", dashAttachedSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "skills", sessionId: "sess-1",
+    payload: { skills: [{ name: "qplan", description: "Write a phased plan." }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "Enter", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "/qplan ",
+    "confirming a skill must insert '/<name> ' into the textarea, not clear it");
+  assertEqual(p.sentOf("commands_execute").length, 0,
+    "a skill is dispatched via prompt text, never via commands_execute");
+});
+
+check("dashboard: a commands_execute_result frame closes the dropdown and renders the ack message", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "List tools" }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, false, "fixture: dropdown should be open");
+  p.sandbox.dashHandle({
+    type: "commands_execute_result", sessionId: "sess-1",
+    payload: { name: "tools", result: { success: true, message: "3 tools available." } },
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true, "commands_execute_result must close the dropdown");
+  assert(p.systemMessages.includes("3 tools available."),
+    "the ack's message must be rendered as a system message; got: " + JSON.stringify(p.systemMessages));
+});
+
+check("dashboard: a commands_options_result frame is a silent no-op", () => {
+  // SC1's dead-path removal (see the acp.html-side commandsOptionsResultIsANoOp
+  // check for the full citation): the dashboard never had a handler for this
+  // frame type to begin with, so this pins that dashHandle's generic fall-
+  // through (no matching `if`, function returns undefined) does not throw.
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands_options_result", sessionId: "sess-1",
+    payload: { options: [{ name: "memory", description: "Memory stats" }] },
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, true, "no dropdown state should change");
 });
 
 let failed = 0;

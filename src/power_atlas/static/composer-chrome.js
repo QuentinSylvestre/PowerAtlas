@@ -261,3 +261,323 @@ function railStored(key) {
 function railStore(key, value) {
   try { localStorage.setItem(key, value); } catch (e) { /* not fatal */ }
 }
+
+// ---- slash command / skill autocomplete palette (SC1) ----------------------
+//
+// Ported out of acp.html's inline script (dashboard/ACP feature-parity plan,
+// Phase 2), the same structural precedent Phase 1 set above: a plain
+// top-level declaration here, reached as a bare global from each host page's
+// own script (IIFE or not), with page-lifecycle state passed in as accessor
+// FUNCTIONS through initCommandPaletteDom() rather than closed over free
+// variables that would not exist once the code moved out of acp.html's IIFE.
+//
+// Two known-dead paths in acp.html's pre-Phase-2 implementation are
+// deliberately NOT ported (Success Criteria SC1; Design Decisions "Slash-
+// palette dead paths"; independently confirmed by
+// plans/done/260909-1127_ACP_V3_PRODUCTION_HARDENING.md's Phase 7 review,
+// finding #3): `_cmdOptionsTimer`/`applyCommandOptions()` and any handling of
+// `commands_options`/`commands_options_result` — the client never sends a
+// `commands_options` request (no send site for it ever existed in the code
+// this was ported from), so a `commands_options_result` reply can never
+// arrive in production; the code that merged one into the dropdown was
+// unreachable. `MAX_CMD_PARTIAL_CHARS` existed solely to cap the string that
+// dead send path would have put on the wire and is dropped for the same
+// reason — a numeric constant with no remaining reader, per CLAUDE.md's
+// "unused code is deleted, not kept as a shim" rule.
+//
+// `.acp-cmd-placeholder` (the dropdown's own dead path — a placeholder row
+// styled in style.css but never created by any code) has two further JS-side
+// remnants also dropped here: `renderCommandDropdown`'s `catalogueEmpty`
+// parameter (computed by its one caller, never read inside the function
+// body — the unused hook for a placeholder row that was never wired), and
+// `moveCommandSelection`'s `aria-disabled` branch (written to skip that
+// placeholder row when navigating past it — no `<li>` this module ever
+// creates sets `aria-disabled`, so the branch can never trigger).
+
+var sessionCommands = [];
+var sessionSkills = [];
+var cmdDropdownEl = null;
+var _cmdSelectedIndex = -1;
+var cmdPromptInput = null;
+// () => current session id, or null/'' when nothing is attached. REQUIRED —
+// see the file header for why a raw value cannot substitute for this.
+var cmdGetSessionId = null;
+// The host page's own send(type, payload, sid) function. REQUIRED — this
+// file has no WebSocket of its own, and (unlike `logLine`, ported as a true
+// global in Phase 1) `send` stays page-private on both hosts, so it must be
+// handed in rather than called bare.
+var cmdSend = null;
+// () => void, called after this module programmatically changes
+// cmdPromptInput.value (a skill completion inserted, a command cleared on
+// send) so the host page can re-run whatever textarea-height/composer-
+// control refresh logic it owns. acp.html's autoGrowPrompt() +
+// refreshComposerControls() are IIFE-private functions and cannot be reached
+// as bare globals from this file — the same IIFE boundary this file's header
+// comment documents for `sessionId`/`replaying`. The dashboard passes
+// dashRefreshSendButton (it has no textarea auto-grow yet, Phase 2 of the
+// dashboard/ACP feature-parity plan). Optional — defaults to a no-op so a
+// host page that supplies nothing still works.
+var cmdOnPromptChanged = function () {};
+
+/** Called once by each loading page's own inline script. `getSessionId` and
+ *  `send` are REQUIRED — see the file header for why a raw value/bare global
+ *  cannot substitute for either. Also attaches the dropdown's mousedown
+ *  delegate (mirrors initSidCopyDom()'s own click-listener attachment,
+ *  Phase 1 — DOM listeners this module owns are wired here, once, rather
+ *  than by each host page). */
+function initCommandPaletteDom(refs) {
+  cmdDropdownEl = refs.cmdDropdownEl;
+  cmdPromptInput = refs.promptInput;
+  cmdGetSessionId = refs.getSessionId;
+  cmdSend = refs.send;
+  cmdOnPromptChanged = refs.onPromptChanged || function () {};
+
+  // Delegated mousedown on the dropdown container: fires before the blur
+  // event on the textarea, so the dropdown is not hidden before the click
+  // registers. On mousedown, check if the target (or a closest ancestor
+  // within the dropdown) is an <li>; if so, prevent the textarea from losing
+  // focus, set the selection index to match the clicked <li>, then confirm.
+  cmdDropdownEl.addEventListener('mousedown', function (ev) {
+    var target = ev.target;
+    var ul = cmdDropdownEl.querySelector('ul');
+    if (!ul) return;
+    var items = ul.childNodes;
+    var clickedIdx = -1;
+    var node = target;
+    while (node && node !== cmdDropdownEl) {
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] === node) { clickedIdx = i; break; }
+      }
+      if (clickedIdx >= 0) break;
+      node = node.parentNode;
+    }
+    if (clickedIdx < 0) return;
+    ev.preventDefault(); // prevent blur on the textarea
+    _cmdSelectedIndex = clickedIdx;
+    updateCommandSelection();
+    confirmCommandSelection();
+  });
+}
+
+/** Returns true when the slash command dropdown is currently visible. */
+function isCommandDropdownVisible() {
+  return !cmdDropdownEl.hidden;
+}
+
+/** Populate and show the slash command dropdown.
+ *
+ *  `partial` is the text after the leading `/`; an empty string shows all.
+ *  Renders from the local `sessionCommands` and `sessionSkills` lists — the
+ *  WS frame for server-side suggestions is sent by the debounced input
+ *  handler path, not here, to avoid a double send when the input handler
+ *  also calls this. */
+function showCommandDropdown(partial, filter) {
+  // partial may be empty string (show all) or absent in programmatic invocations
+  // filter: 'skills' = skills only (mid-text /); 'all' or undefined = both
+  var lc = partial ? partial.toLowerCase() : '';
+  // Merge commands and skills into one flat list; preserve server order
+  // within each type (commands first, then skills).
+  var allItems = (filter === 'skills' ? [] : sessionCommands.map(function(c) {
+    return {name: c.name, description: c.description, isSkill: false};
+  })).concat(sessionSkills.map(function(s) {
+    // Skill descriptions are verbose multi-sentence paragraphs — show only
+    // the first sentence so the row stays compact.
+    var desc = s.description || '';
+    var dot = desc.indexOf('. ');
+    if (dot > 0) desc = desc.slice(0, dot + 1);
+    return {name: s.name, description: desc, isSkill: true};
+  }));
+  var items = allItems.filter(function(c) {
+    return !lc || (c.name || '').toLowerCase().indexOf(lc) !== -1;
+  });
+  // Cap at 5 items to keep the palette compact.
+  if (items.length > 5) items = items.slice(0, 5);
+  renderCommandDropdown(items);
+}
+
+/** Re-render the dropdown list from an array of `{name, description?, isSkill?}`. */
+function renderCommandDropdown(items) {
+  var ul = cmdDropdownEl.querySelector('ul');
+  if (!ul) {
+    ul = document.createElement('ul');
+    ul.setAttribute('role', 'presentation');
+    cmdDropdownEl.appendChild(ul);
+  }
+  ul.textContent = '';
+  if (!items.length) {
+    // No matches (or catalogue loading): hide the dropdown so Enter falls
+    // through to sendPrompt() rather than being consumed here. The user can
+    // see /text in the box already — no need for a visible "no match" signal
+    // that blocks the send key.
+    hideCommandDropdown();
+    return;
+  }
+  for (var i = 0; i < items.length; i++) {
+    var li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    li.id = 'acp-cmd-opt-' + i;
+    var nameSpan = document.createElement('span');
+    nameSpan.className = 'acp-cmd-name';
+    nameSpan.textContent = '/' + (items[i].name || '').replace(/^\//, '');
+    li.appendChild(nameSpan);
+    if (items[i].isSkill === true) {
+      // Badge appended as a flex sibling after nameSpan inside <li>.
+      var badge = document.createElement('span');
+      badge.className = 'acp-cmd-skill-badge';
+      badge.textContent = 'skill';
+      badge.setAttribute('aria-hidden', 'true');
+      li.appendChild(badge);
+    }
+    var descSpan = document.createElement('span');
+    descSpan.className = 'acp-cmd-desc';
+    descSpan.textContent = items[i].description || '';
+    li.appendChild(descSpan);
+    ul.appendChild(li);
+  }
+  _cmdSelectedIndex = 0;
+  updateCommandSelection();
+  cmdDropdownEl.hidden = false;
+  cmdPromptInput.setAttribute('aria-expanded', 'true');
+}
+
+/** Update the visual selection indicator in the dropdown. */
+function updateCommandSelection() {
+  var ul = cmdDropdownEl.querySelector('ul');
+  if (!ul) return;
+  var items = ul.childNodes;
+  for (var i = 0; i < items.length; i++) {
+    items[i].setAttribute('aria-selected', String(i === _cmdSelectedIndex));
+  }
+  if (_cmdSelectedIndex >= 0 && items[_cmdSelectedIndex]) {
+    var selectedId = items[_cmdSelectedIndex].id || ('acp-cmd-opt-' + _cmdSelectedIndex);
+    cmdPromptInput.setAttribute('aria-activedescendant', selectedId);
+    if (typeof items[_cmdSelectedIndex].scrollIntoView === 'function') {
+      items[_cmdSelectedIndex].scrollIntoView({block: 'nearest'});
+    }
+  } else {
+    cmdPromptInput.setAttribute('aria-activedescendant', '');
+  }
+}
+
+/** Hide the slash command dropdown. */
+function hideCommandDropdown() {
+  cmdDropdownEl.hidden = true;
+  _cmdSelectedIndex = -1;
+  cmdPromptInput.setAttribute('aria-expanded', 'false');
+  cmdPromptInput.setAttribute('aria-activedescendant', '');
+}
+
+/** Confirm the currently selected dropdown item.
+ *
+ *  Skills: insert "/<name> " into the prompt and focus it so the user can
+ *  type arguments — kiro-cli dispatches skills via prompt text, not via the
+ *  commands/execute wire method.
+ *
+ *  Commands: send `commands_execute` and clear the textarea, matching the
+ *  TUI behaviour for built-in slash commands.
+ *
+ *  No-op when no item is selected or the dropdown is not visible. */
+function confirmCommandSelection() {
+  if (!isCommandDropdownVisible()) return;
+  var ul = cmdDropdownEl.querySelector('ul');
+  if (!ul) { hideCommandDropdown(); return; }
+  var items = ul.childNodes;
+  var idx = _cmdSelectedIndex >= 0 ? _cmdSelectedIndex : 0;
+  if (!items[idx]) { hideCommandDropdown(); return; }
+  var nameEl = items[idx].querySelector('.acp-cmd-name');
+  if (!nameEl) { hideCommandDropdown(); return; }
+  var name = nameEl.textContent.replace(/^\//, '');
+  var isSkill = !!items[idx].querySelector('.acp-cmd-skill-badge');
+  hideCommandDropdown();
+  if (isSkill) {
+    // Replace the /token the user is currently typing with "/<name> ",
+    // preserving any text that precedes it in the prompt. This lets skills
+    // be called from the middle of a sentence, e.g.:
+    //   "look at this /qp" → "look at this /qplan "
+    // The same regex the input handler uses to detect the command token:
+    // match /word at start OR after whitespace at the end of the value.
+    var current = cmdPromptInput.value;
+    var tokenMatch = current.match(/(?:^|\s)(\/\S*)$/);
+    var completed = '/' + name + ' ';
+    if (tokenMatch) {
+      // Keep everything up to (but not including) the /token, then append
+      // the completed skill name. tokenMatch.index points at the start of
+      // the full match (which may include a leading space); the /token
+      // starts one character later when there is a space, or at index 0.
+      var tokenStart = tokenMatch.index + (tokenMatch[0].charAt(0) === '/' ? 0 : 1);
+      cmdPromptInput.value = current.slice(0, tokenStart) + completed;
+    } else {
+      cmdPromptInput.value = completed;
+    }
+    cmdOnPromptChanged();
+    cmdPromptInput.focus();
+    var len = cmdPromptInput.value.length;
+    cmdPromptInput.setSelectionRange(len, len);
+    return;
+  }
+  cmdPromptInput.value = '';
+  cmdOnPromptChanged();
+  var sid = cmdGetSessionId();
+  if (!sid) return;
+  cmdSend('commands_execute', { name: name }, sid);
+}
+
+/** Move the dropdown selection up or down. */
+function moveCommandSelection(delta) {
+  if (!isCommandDropdownVisible()) return;
+  var ul = cmdDropdownEl.querySelector('ul');
+  if (!ul) return;
+  var count = ul.childNodes.length;
+  if (!count) return;
+  var newIdx = (_cmdSelectedIndex + delta + count) % count;
+  _cmdSelectedIndex = newIdx;
+  updateCommandSelection();
+}
+
+/** Merge a `commands` frame's catalogue in and, if the dropdown is currently
+ *  open, refresh it against the new list — mirrors the `commands`
+ *  frame-handling both host pages used to carry inline. */
+function setSessionCommands(list) {
+  sessionCommands = list || [];
+  if (cmdDropdownEl && !cmdDropdownEl.hidden) {
+    showCommandDropdown(cmdPromptInput.value.slice(1));
+  }
+}
+
+/** Same as setSessionCommands(), for a `skills` frame. */
+function setSessionSkills(list) {
+  sessionSkills = list || [];
+  if (cmdDropdownEl && !cmdDropdownEl.hidden) {
+    showCommandDropdown(cmdPromptInput.value.slice(1));
+  }
+}
+
+/** Clear the catalogue and close the dropdown. Called by each host page
+ *  whenever the session it belonged to goes away — a new or resubscribed
+ *  `session` frame, `session_closed`, `agent_died` — so stale slash-command
+ *  suggestions from a previous session never show up in the next one. */
+function resetCommandPalette() {
+  sessionCommands = [];
+  sessionSkills = [];
+  hideCommandDropdown();
+}
+
+/** A `commands_execute_result` frame: render the command's ack (if any) as a
+ *  system message and close the dropdown — mirrors acp.html's original
+ *  handle() case exactly, including the `compact` exclusion: verified
+ *  2026-08-14 against kiro-cli 2.18.0 that its ack's own res.message is
+ *  "Compacting conversation..." — the *same* moment the dedicated
+ *  `compaction` frame (handled by each host page directly, not by this
+ *  module) already rendered "Compacting conversation context...". Rendering
+ *  both gave a palette-triggered compaction two "Compacting..." rows instead
+ *  of one; the typed `/compact` prompt does not go through this path at all,
+ *  so it never had the duplicate. */
+function handleCommandsExecuteResult(payload) {
+  hideCommandDropdown();
+  var res = payload && payload.result;
+  if (res && res.message && payload.name !== 'compact') {
+    addSystemMessage(res.message);
+  } else if (res && !res.success) {
+    addSystemMessage('Command failed.');
+  }
+}

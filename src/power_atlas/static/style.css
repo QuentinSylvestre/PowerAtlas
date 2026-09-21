@@ -1527,11 +1527,18 @@ body:has(> .acp-shell) .topbar-cluster { flex-shrink: 999; min-width: 130px; }
    the arrow cannot say one thing while the control reports another, the same
    reasoning `.acp-rail-group-chevron` states for the rail's identical
    technique. Kept as its own rule rather than sharing that class: the
-   selector has to key off `#acpLogToggle`, not `.acp-rail-group-toggle`. */
+   selector has to key off the toggle's own id (`#acpLogToggle`/
+   `#dashLogToggle`), not `.acp-rail-group-toggle`. `#dashLogToggle` added
+   dashboard/ACP feature-parity plan, Phase 2 (deferred from Phase 1: found
+   during that phase's review, but style.css wasn't in Phase 1's file
+   scope) — `.acp-log-toggle-chevron` itself was already shared by both
+   pages; only this ID-gated rotate/hover pair was /acp-only until now. */
 .acp-log-toggle-chevron { flex-shrink: 0; position: relative; width: 8px; height: 8px; }
 .acp-log-toggle-chevron::before { content: ""; position: absolute; left: 1px; top: 1px; width: 4px; height: 4px; border-right: 1.5px solid var(--text-dim); border-bottom: 1.5px solid var(--text-dim); transform: rotate(45deg); transform-origin: center; }
-#acpLogToggle[aria-expanded="false"] .acp-log-toggle-chevron::before { transform: rotate(-45deg); }
-#acpLogToggle:hover .acp-log-toggle-chevron::before { border-color: var(--text); }
+#acpLogToggle[aria-expanded="false"] .acp-log-toggle-chevron::before,
+#dashLogToggle[aria-expanded="false"] .acp-log-toggle-chevron::before { transform: rotate(-45deg); }
+#acpLogToggle:hover .acp-log-toggle-chevron::before,
+#dashLogToggle:hover .acp-log-toggle-chevron::before { border-color: var(--text); }
 .acp-log-line { display: flex; gap: 10px; white-space: pre-wrap; word-break: break-word; }
 .acp-log-time { color: var(--text-dim); flex-shrink: 0; }
 .acp-log-body { flex: 1; }
@@ -2290,4 +2297,122 @@ body:has(> .acp-shell) { height: 100dvh; }
   background: rgba(239, 68, 68, 0.25);
   border-color: #f87171;
   color: #fca5a5;
+}
+
+/* ---- slash command / skill autocomplete palette (SC1, dashboard/ACP
+   feature-parity plan Phase 2) -- migrated from acp.html's inline
+   <style nonce> block, the same .acp-taskmode-* precedent this file already
+   follows: shared by /acp's #acpCmdDropdown and the dashboard's
+   #dashCmdDropdown via one class, .acp-cmd-dropdown, rather than each page
+   keeping its own copy keyed to its own element id. .acp-cmd-placeholder
+   (styled here before the move) is NOT migrated -- SC1's dead path, a
+   placeholder row never created by any code on either page. */
+.acp-cmd-dropdown {
+  position: absolute;
+  /* Anchored to the top of .acp-composer-row (its containing block).
+     bottom: 100% places the dropdown's bottom edge flush with the top
+     of the row; margin-bottom adds a small gap above the textarea. */
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  background: var(--surface, #1a1d27);
+  border: 1px solid var(--border, #2d3244);
+  border-radius: 10px;
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04);
+  z-index: 200;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.acp-cmd-dropdown[hidden] { display: none; }
+.acp-cmd-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 5px 10px 4px;
+  border-bottom: 1px solid var(--border, #2d3244);
+  flex-shrink: 0;
+}
+.acp-cmd-header-hint {
+  font-size: 10px;
+  color: var(--text-dim, #5c6070);
+  background: none;
+  border: none;
+  font-family: inherit;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+.acp-cmd-dropdown ul {
+  list-style: none;
+  margin: 0;
+  padding: 3px 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border, #2d3244) transparent;
+}
+.acp-cmd-dropdown ul::-webkit-scrollbar { width: 3px; }
+.acp-cmd-dropdown ul::-webkit-scrollbar-thumb { background: var(--border, #2d3244); border-radius: 2px; }
+.acp-cmd-dropdown ul::-webkit-scrollbar-track { background: transparent; }
+.acp-cmd-dropdown li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.07s;
+  overflow: hidden;
+  min-width: 0;
+}
+.acp-cmd-dropdown li:hover,
+.acp-cmd-dropdown li[aria-selected="true"] {
+  background: var(--accent-dim, rgba(108,140,255,0.12));
+}
+/* Command name — monospace, accent colour, never wraps */
+.acp-cmd-dropdown li .acp-cmd-name {
+  color: var(--accent, #6c8cff);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+/* Separator dot between name and description */
+.acp-cmd-dropdown li .acp-cmd-name::after {
+  content: '·';
+  color: var(--border, #2d3244);
+  font-family: inherit;
+  margin-left: 8px;
+  font-weight: 400;
+}
+/* Description — muted, truncated, fills remaining width */
+.acp-cmd-dropdown li .acp-cmd-desc {
+  color: var(--text-muted, #8b90a0);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  opacity: 0.75;
+}
+/* Skill badge — subtle chip after the command name */
+.acp-cmd-skill-badge {
+  flex-shrink: 0;
+  padding: 1px 5px 1px 4px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  background: rgba(108, 140, 255, 0.12);
+  color: var(--accent, #6c8cff);
+  opacity: 0.7;
+  user-select: none;
+  white-space: nowrap;
+  line-height: 1.7;
 }
