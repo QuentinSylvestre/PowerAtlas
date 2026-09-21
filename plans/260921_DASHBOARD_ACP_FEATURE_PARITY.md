@@ -1,7 +1,7 @@
 # Dashboard / ACP Feature Parity
 
 > **Date**: 2026-09-21
-> **Status**: Draft
+> **Status**: In Progress — Phase 1 complete, Phases 2-6 pending
 > **Scope**: Port all of `/acp`'s features missing from the main dashboard onto the dashboard, except the mobile drill-down view toggle.
 > **Estimated effort**: ~2-3 weeks
 
@@ -161,23 +161,43 @@ Port the following functions, **adapted to call the new accessors instead of the
 **1e. AGENTS.md**: correct the claim "All JS for `/acp` is inline in `acp.html`" (`AGENTS.md:7`) to note that composer-chrome.js is now a shared static module loaded via `<script src>`, following the same "no restart needed, hard-reload picks up changes" rule already stated for `style.css`. Do NOT yet touch the "Exception" clause about `.acp-mode-*` — it remains accurate until Phase 3 migrates that CSS too (see Phase 3, and §8 Documentation Updates).
 
 **Exit criteria**:
-- [ ] `composer-chrome.js` created; `setContext`/`renderSidLabel`/`shortName`/`logLine`/`setLogOpen`/`railStored`/`railStore` live there, deleted from `acp.html`'s IIFE.
-- [ ] `initSidCopyDom`/`initLogDom` accept and use `getSessionId`/`isReplaying` accessor functions — no bare `sessionId`/`replaying` reads remain in the ported code; confirmed by grepping the new file for both identifiers and finding zero unqualified references.
-- [ ] Collision check performed against every new global name `composer-chrome.js` introduces (full list above), not just `railStored`/`railStore`; result documented.
-- [ ] SC3 bug fix applied: copy button copies `_sessionCwd` (full path) via `sidGetSessionId()`/`_sessionCwd`, display still shows the short name, on both `acp.html` (refactored) and `index.html` (new).
-- [ ] `acp.html` and `index.html` both load `composer-chrome.js` via `<script src>` (with matching conditional-nonce pattern) and call all three `initXxxDom()` functions with correctly-bound accessors.
-- [ ] The now-redundant `window.logLine = logLine;` line and comment removed from `acp.html`.
-- [ ] `dashHandle()`'s `meta` branch widened to handle `contextPercent` and `connected`/`maxPromptImages`/`maxPromptImageBytes` without removing existing turn-start/turn-end handling.
-- [ ] `dashHandle()` has a baseline `agent_died` case (turn/composer reset); documented as extended by Phases 3 and 5.
-- [ ] `index.html`'s `send()` and `dashConnect()` call `logLine(...)`, matching `acp.html`'s existing pattern.
-- [ ] `_dashReplaying` (or an equivalent reused flag) exists and is threaded into `initLogDom`'s `isReplaying` accessor.
-- [ ] `tests/test_web.py`'s CSP script-count assertion updated to 5 with a new named `composer-chrome.js` assertion; full `pytest tests/test_web.py -k TestAcpContentSecurityPolicy` passes.
-- [ ] `tests/acp_page.test.mjs:634-636`/`:1188-1193` comments corrected to state five script elements (both), verified against each test's own actual counting basis.
-- [ ] `composer-chrome.js` added to the VM-sandbox test harness's script-load step.
-- [ ] `/acp`'s full existing test suite (`node tests/acp_page.test.mjs`) passes unmodified in its assertions — confirms the refactor is behavior-preserving.
-- [ ] New wiring-level tests added for the dashboard's consumption of `initContextDom`/`initSidCopyDom`/`initLogDom`, using the region-extraction harness pattern (`tests/acp_page.test.mjs:10343-10482`) — including one that feeds a synthetic `meta` frame with `contextPercent` into `dashHandle()` and asserts `setContext` is called with the correct value, not just that DOM refs are wired.
-- [ ] `AGENTS.md:7`'s "All JS for `/acp` is inline" claim corrected.
-- [ ] Live QA: context bar, sid/copy widget (copies full path), debug log panel, and an `agent_died` frame (simulated) all work identically on `/acp` and `/`, verified against the same live/held session.
+- [x] `composer-chrome.js` created; `setContext`/`renderSidLabel`/`shortName`/`logLine`/`setLogOpen`/`railStored`/`railStore` live there, deleted from `acp.html`'s IIFE.
+- [x] `initSidCopyDom`/`initLogDom` accept and use `getSessionId`/`isReplaying` accessor functions — no bare `sessionId`/`replaying` reads remain in the ported code; confirmed by grepping the new file for both identifiers and finding zero unqualified references.
+- [x] Collision check performed against every new global name `composer-chrome.js` introduces (full list above), not just `railStored`/`railStore`; result documented.
+- [x] SC3 bug fix applied: copy button copies `_sessionCwd` (full path) via `sidGetSessionId()`/`_sessionCwd`, display still shows the short name, on both `acp.html` (refactored) and `index.html` (new).
+- [x] `acp.html` and `index.html` both load `composer-chrome.js` via `<script src>` (with matching conditional-nonce pattern) and call all three `initXxxDom()` functions with correctly-bound accessors.
+- [x] The now-redundant `window.logLine = logLine;` line and comment removed from `acp.html`.
+- [x] `dashHandle()`'s `meta` branch widened to handle `contextPercent` and `connected`/`maxPromptImages`/`maxPromptImageBytes` without removing existing turn-start/turn-end handling.
+- [x] `dashHandle()` has a baseline `agent_died` case (turn/composer reset); documented as extended by Phases 3 and 5.
+- [x] `index.html`'s `send()` and `dashConnect()` call `logLine(...)`, matching `acp.html`'s existing pattern.
+- [x] `_dashReplaying` (or an equivalent reused flag) exists and is threaded into `initLogDom`'s `isReplaying` accessor.
+- [x] `tests/test_web.py`'s CSP script-count assertion updated to 5 with a new named `composer-chrome.js` assertion; full `pytest tests/test_web.py -k TestAcpContentSecurityPolicy` passes.
+- [x] `tests/acp_page.test.mjs:634-636`/`:1188-1193` comments corrected to state five script elements (both), verified against each test's own actual counting basis. **Divergence**: the two counting bases turned out genuinely different, not identical as the plan's parenthetical assumed — `:634-636` counts `acp.html`'s own content block only (excludes `base.html`'s `htmx.min.js`, stripped by `render()`), which becomes **four**, not five, after Phase 1; `:1188-1193` counts the full served page including `htmx.min.js`, which becomes **five**. Wrote the numerically correct value at each site per the plan's own "verify each test's own counting basis first" instruction, rather than forcing both to five.
+- [x] `composer-chrome.js` added to the VM-sandbox test harness's script-load step.
+- [x] `/acp`'s full existing test suite (`node tests/acp_page.test.mjs`) passes unmodified in its assertions — confirms the refactor is behavior-preserving.
+- [x] New wiring-level tests added for the dashboard's consumption of `initContextDom`/`initSidCopyDom`/`initLogDom`, using the region-extraction harness pattern (`tests/acp_page.test.mjs:10343-10482`) — including one that feeds a synthetic `meta` frame with `contextPercent` into `dashHandle()` and asserts `setContext` is called with the correct value, not just that DOM refs are wired.
+- [x] `AGENTS.md:7`'s "All JS for `/acp` is inline" claim corrected.
+- [ ] Live QA: context bar, sid/copy widget (copies full path), debug log panel, and an `agent_died` frame (simulated) all work identically on `/acp` and `/`, verified against the same live/held session. **Not performed** — no PowerAtlas instance was confirmed running (checked running `python.exe`/`pythonw.exe` processes for a `power_atlas`/`poweratlas` command line; none found), and per governance PowerAtlas is never started/restarted autonomously. Deferred to the orchestrator's Step 5b QA pass.
+
+**Implementation (2026-09-21, code: d07c4f3)**
+
+Implemented Phase 1 of `plans/260921_DASHBOARD_ACP_FEATURE_PARITY.md`: created `src/power_atlas/static/composer-chrome.js`, a new plain top-level (no-IIFE) shared static module mirroring `transcript-renderer.js`'s existing structural precedent exactly, carrying the context-window usage indicator (SC2), the workspace/session-id tap-to-copy widget (SC3, with the SC3 bug fix applied so the copy button now copies `_sessionCwd`, the full path, instead of the short `shortName(cwd)` display name on both pages), and the debug/transport log panel (SC4). Every piece of the ported code that used to read `sessionId`/`replaying` as free variables inside `acp.html`'s IIFE now goes through required `getSessionId()`/`isReplaying()` accessor functions passed into `initContextDom`/`initSidCopyDom`/`initLogDom`, confirmed by grep to have zero unqualified references remaining. Performed and documented the full collision check for every new global name the module introduces against both templates — no collisions found, and `index.html`'s pre-existing `dashRailStored`/`dashRailStore` remain distinct from the new shared `railStored`/`railStore`.
+
+Refactored `acp.html` to load `composer-chrome.js` via `<script nonce>` right after `transcript-renderer.js`, deleted the now-superseded local function/state definitions from its inline IIFE (bare call sites resolve through the scope chain unchanged, same mechanism `transcript-renderer.js` already relies on), wired the three `initXxxDom()` calls next to the existing `initTranscriptDom()` call, and removed the now-redundant `window.logLine = logLine;` assignment and its stale comment (rewrote the comment to explain only `send`'s continued exposure).
+
+Wired `index.html`: added markup for the context indicator, sid/copy widget, and debug log toggle+panel into the transcript panel's `.section-label` header (next to the existing "Transcript" label and Close-session button, the dashboard's closest analogue to `acp.html`'s toolbar) plus a `#dashLog` panel after the composer; added the `composer-chrome.js` `<script>` tag with the same conditional-nonce pattern already used for `transcript-renderer.js`; introduced `_dashReplaying`, threaded into `initLogDom`'s accessor and toggled around both `renderTranscriptHistory()` call sites (`openSessionTranscript` and `dashHandle`'s `history` case); widened `dashHandle()`'s `meta` branch additively with new `connected` (storing `maxPromptImages`/`maxPromptImageBytes` into new `_dashImageMaxCount`/`_dashImageMaxBytes` state for Phase 4) and `contextPercent` cases, leaving the existing turn-start/turn-end branches untouched; added a baseline `agent_died` case (turn/composer reset, context/sid-copy clear, composer left visible-but-disabled with an explanatory note, mirroring `acp.html`'s reset portion — explicitly documented as extended by Phases 3 and 5); tracked `sidWorkspace`/`_sessionCwd` on session attach (`dashHandle`'s `session` case), release (`dashCloseIfAbandoned`, `session_closed`) and `agent_died`; and added `logLine(...)` calls to `send()` (mirroring `acp.html`'s exact pattern, including the "not connected" error path) and to `dashConnect()`'s `onopen`/`onmessage`/`onclose` (the last of which is a new handler — logging only, no state reset, since reconnect recovery is explicitly Phase 6's job).
+
+Updated `tests/test_web.py`'s CSP test for the new script count (4→5) with a named `composer-chrome.js` assertion, and fixed one pre-existing test whose string-based extraction of `setContext`'s body from `acp.html`'s source broke once the function moved to `composer-chrome.js` — that test's fix is a direct consequence of this phase's extraction, not an unrelated change (the original commit message characterized it as "unrelated"; correcting that characterization here). Updated `tests/acp_page.test.mjs`: added `composer-chrome.js` source loading to both the main `acp.html` sandbox and the dashboard's `loadDashPicker()` sandbox (the latter needed because two pre-existing dashboard tests already exercise the widened `session`-frame code path), corrected the two stale script-count comments against their actually-verified (and differing) counting bases, and added 8 new wiring-level checks — including the required synthetic `meta`-with-`contextPercent` test asserting `setContext` receives the right value, the SC3 full-path-copy regression test, the debug-log toggle/remember test, an `isReplaying`-accessor-is-live (not a snapshot) test, and the baseline `agent_died` reset test. Corrected `AGENTS.md`'s "All JS for `/acp` is inline" claim per Phase 1e (left the `.acp-mode-*` CSS exception clause untouched, as instructed — that's Phase 3's job).
+
+Verification: `pytest tests/test_web.py -k TestAcpContentSecurityPolicy` (8 passed), full `pytest tests/test_web.py --timeout=300` (1449 passed, 1 skipped), `node tests/acp_page.test.mjs` (460 passed, 0 failed), and `_check_test_names.py` (9 files clean). Live browser QA was not performed — no PowerAtlas instance was confirmed running; deferred to the orchestrator's own QA pass. Independently re-verified by the orchestrator (not just trusted): both test suites re-run clean, exit-criteria count (16) confirmed via `qvalidate --phase 1 --expect-ticked 16` (PASS).
+
+**Implementation Review (after Phase 1) fixes (2026-09-21, code: c42aa12)**
+
+Applied the three review-driven fixes to Phase 1, all in `src/power_atlas/templates/index.html`. Fix 1: `dashHandle()`'s `session`-frame case now calls `setContext(payload.contextPercent)` unconditionally (dropped the `typeof payload.contextPercent === 'number'` guard that was skipping the common null-`contextPercent` case and leaving a stale percentage on screen), and `dashCloseIfAbandoned()` now also calls `setContext(null)` alongside its existing sid/copy-widget reset, so a purely static/browse session view no longer leaves a previous session's context reading on screen. Fix 2: `dashConnect()`'s `_dashWs.onerror` handler, previously a silent no-op, now calls `logLine('error', 'socket error — the handshake may have been rejected')`, mirroring `acp.html`'s own `ws.onerror` handler exactly. Fix 3: the `agent_died` case in `dashHandle()` now also resets `_dashLoadingSid = null`, `_dashPendingSend = null`, and `_dashSent = false` — three pre-existing dashboard variables that weren't part of Phase 1's original baseline reset and could otherwise leave stale lazy-load state if the agent died mid-lazy-load.
+
+Test coverage for Fix 1 (mandatory, since both reviewers confirmed via mutation testing this path had zero coverage): extended `tests/acp_page.test.mjs`'s region-extraction harness to also load `dashCloseIfAbandoned` (previously unreachable from the harness), and added two new checks — a `session` frame with `contextPercent: null` clearing a stale prior reading, and `dashCloseIfAbandoned()` clearing the context indicator directly. Extended the existing baseline `agent_died` check with assertions for Fix 3's three additional resets. All three fixes were individually mutation-tested (reverted, confirmed the corresponding test failed, restored, confirmed clean) by the fixing sub-agent; re-verified independently by the orchestrator: `node tests/acp_page.test.mjs` → 462 passed, 0 failed; `pytest tests/test_web.py --timeout=300` → 1449 passed, 1 skipped; `_check_test_names.py` → clean.
+
+**Deferred to Phase 2**: `#dashLogToggle`'s chevron rotate/hover CSS has no matching rule (the existing `#acpLogToggle[aria-expanded="false"]`/`:hover` rule in `style.css:1533-1534` is ID-gated to `/acp`'s own toggle) — found during Phase 1 review, out of Phase 1's file scope (`style.css` isn't touched until Phase 2). See Phase 2's exit criteria below for the tracked fix.
 
 ### Phase 2: Slash-command/skill autocomplete palette (SC1) [QA]
 
@@ -216,6 +236,7 @@ Expose `setSessionCommands(list)`/`setSessionSkills(list)`/`resetCommandPalette(
 - [ ] `.acp-cmd-*` CSS (excluding `.acp-cmd-placeholder`) lives in `style.css`; `acp.html`'s inline `<style>` block no longer contains any of it.
 - [ ] Wiring-level tests added for the dashboard side (region-extraction harness).
 - [ ] Live QA: palette behaves identically on `/acp` and `/`, including keyboard nav and mouse selection.
+- [ ] (deferred from Phase 1) Add `#dashLogToggle` chevron rotate/hover CSS to `style.css`, mirroring the existing `#acpLogToggle[aria-expanded="false"]`/`:hover` rule (`style.css:1533-1534`, currently ID-gated to `/acp`'s own toggle only) — found during Phase 1 review; `style.css` wasn't in Phase 1's file scope.
 
 ### Phase 3: Queue/Steer send-mode toggle + Stop/cancel button (SC5) [QA]
 
@@ -368,7 +389,7 @@ Expose `setSessionCommands(list)`/`setSessionSkills(list)`/`resetCommandPalette(
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 1 | Shared-module foundation + SC2 + SC3 + SC4 [QA] | Not started | Includes DI-accessor fix and baseline `agent_died` handling |
+| 1 | Shared-module foundation + SC2 + SC3 + SC4 [QA] | Complete — Live QA pending | Code: `d07c4f3` + review fixes `c42aa12`. Includes DI-accessor fix and baseline `agent_died` handling. Live QA deferred to Step 5b (no running PowerAtlas instance to verify against). |
 | 2 | Slash-command palette (SC1) [QA] | Not started | Depends on Phase 1's `composer-chrome.js` |
 | 3 | Queue/Steer + Stop (SC5) [QA] | Not started | Depends on Phase 1's `composer-chrome.js` (reuses `railStored`/`railStore`); extends `agent_died`/`error` handling |
 | 4 | Image paste-to-attach (SC6) [QA] | Not started | Depends on Phase 1's `meta`-widening for `maxPromptImages`/`maxPromptImageBytes` |
@@ -425,7 +446,18 @@ Phases 2/3/4 have no dependency on each other's *output*, only on Phase 1's foun
 
 ## 9) Implementation Divergences from Plan
 
-<Reserved — filled during implementation>
+### Phase 1
+
+- Widened `dashHandle()`'s `session` case (not just the `meta` branch named in the plan's 1c text) to also call `setContext(payload.contextPercent)` — needed for parity, since `acp.html`'s own `session`-frame handler does the same; the initial cut got the call-site guard wrong (see Phase 1 review log entry below), fixed in the follow-up commit.
+- `tests/acp_page.test.mjs:634-636` and `:1188-1193`'s stale script-count comments were corrected to *different* numbers (four and five respectively), not both to five as the plan's literal text suggested — the plan itself pre-authorized this ("verify each test's own counting basis first") once direct verification showed the two harnesses count different things (content-block-only vs. full served page).
+- Extended `loadDashPicker()`'s test sandbox (not just the main `acp.html` sandbox the plan's exit criterion named) to also load `composer-chrome.js` — two pre-existing dashboard picker tests already send `session` frames that reach the newly-shared code and would otherwise `ReferenceError`.
+- Fixed an unrelated-looking but actually-caused-by-this-phase pytest test (`TestAcpContextWindow::test_the_page_narrows_the_value_again_before_the_style_sink` in `tests/test_web.py`) that read `setContext`'s body directly out of `acp.html`'s source — broke once the function moved to `composer-chrome.js`. (The original commit message characterized this as "fixing an unrelated pre-existing test"; that characterization was inaccurate — it's a direct consequence of the extraction, not unrelated. Corrected here since the commit text itself can't be amended.)
+- Did not add a literal `sidWorkspace`/`_sessionCwd` assignment inside `dashMaybeAttach()` as the plan's 1c text named — that function only reads `cwd` for an availability-fetch query string and never stores it into page state; the plan's citation was inaccurate. Centralized the assignment in `dashHandle()`'s `session` case instead (session attach, release, `agent_died`), which is the actual single source of truth, matching how `acp.html` does it.
+
+### Phase 1 review-fix follow-up
+
+- Extended `tests/acp_page.test.mjs`'s region-extraction harness to also load `dashCloseIfAbandoned` (previously unreachable from the harness at all) so the new context-clear regression tests could exercise it — required a no-op `window.addEventListener` sandbox stub, matching the existing `document.addEventListener` stub pattern.
+- Added test coverage for Fix 3 (`agent_died`'s extended reset) beyond what was strictly required for Fix 1, since the existing `agent_died` test already had the right setup to verify it cheaply and mutation-testing confirmed it catches a regression.
 
 ## Follow-up Work (Deferred)
 
@@ -462,6 +494,22 @@ Phases 2/3/4 have no dependency on each other's *output*, only on Phase 1's foun
 | 21 | Low | `index.html`'s new `composer-chrome.js` script tag lacked the conditional-nonce pattern already used for `transcript-renderer.js`. | Fixed — added the matching conditional pattern for consistency. |
 | 22 | Low | Phase 2's CSS migration range inadvertently included the `.acp-cmd-placeholder` rules despite SC1's explicit "not ported" exclusion for that dead path. | Fixed — excluded those lines from the migrated range; marked for deletion instead. |
 
+### 2026-09-21 — Implementation Review (after Phase 1, persona: Architect, Senior engineer)
+
+Implementation health: Green (post-fix). 6 findings (1 High, 2 Medium, 3 Low). Both reviewers independently re-ran `node tests/acp_page.test.mjs` and `pytest tests/test_web.py --timeout=300` and confirmed the implementer's pass claims; both independently confirmed `qvalidate --phase 1 --expect-ticked 16` PASS. Per the user's "1 qreview cycle per phase" instruction, findings were auto-fixed once (code commit `c42aa12`) and independently re-verified by the orchestrator (tests + diff read); no second persona re-review cycle was run.
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | High | `dashHandle()`'s `session` case guarded `setContext()` behind a `typeof` check `acp.html` doesn't have, and `dashCloseIfAbandoned()` never called `setContext(null)` — switching sessions could leave a stale context reading on screen. | Fixed — dropped the guard, added `setContext(null)` to `dashCloseIfAbandoned()`, added 2 mutation-verified regression tests (`c42aa12`). |
+| 2 | Medium | `#dashLogToggle`'s chevron rotate/hover CSS has no matching rule (`style.css:1533-1534` is ID-gated to `/acp`'s toggle); `style.css` isn't in Phase 1's file scope. | Fixed — deferred to Phase 2 (already touches `style.css`) via a `(deferred from Phase 1)` exit-criterion bullet. |
+| 3 | Medium | Plan's Implementation Divergences section and Progress Tracker still showed placeholder/"Not started" text despite 5 real implementer-reported divergences. | Fixed — both sections populated with the full divergence list and phase status. |
+| 4 | Low | `dashWs.onerror` was a silent no-op; `acp.html`'s `ws.onerror` logs a diagnostic via `logLine`, which the dashboard's new debug log omitted. | Fixed — mirrors `acp.html`'s diagnostic message exactly (`c42aa12`). |
+| 5 | Low | The `d07c4f3` commit message called a `test_web.py` fix "unrelated" when it's directly caused by this phase's `setContext` relocation — accurate fix, inaccurate characterization. | Fixed in the record — corrected in this phase's implementation notes and Divergences section above (commit history itself can't be amended per governance). |
+| 6 | Low | Baseline `agent_died` reset didn't clear `_dashLoadingSid`/`_dashPendingSend`/`_dashSent` — a narrow race if the agent dies mid-lazy-load. | Fixed — all three now reset to their existing defaults, with a mutation-verified test assertion (`c42aa12`). |
+
 ## Harness Improvement Opportunities
 
-<Reserved — none encountered during planning>
+<None encountered during planning>
+
+- A "1 qreview cycle per phase" cap suppresses `/qdev` Step 6's normal cycle-2 regression re-review, leaving only the orchestrator's own test re-run and diff read to catch a fix-introduced regression — cost: reduced independent-review assurance on every auto-fixed phase for the rest of this plan, versus the skill's default 2-cycle design — suggested change: document whether an explicit cycle-cap override is meant to skip only the *re-review*, or also the lighter self-verification substitute, so this judgment call doesn't have to be improvised per phase.
+- A review finding whose fix falls outside the just-completed phase's declared file scope (here: a CSS fix needing `style.css`, not touched until Phase 2) has no named `/qdev` routing mechanism — Step 7's "Deferred exit criteria" is scoped to criteria the phase itself declared, not new findings discovered during its own review — cost: had to improvise a `(deferred from Phase 1)`-shaped bullet on the next phase rather than follow a documented path — suggested change: extend Step 6/7 with an explicit "cross-phase-scoped finding" routing rule alongside the existing deferred-exit-criteria one.
