@@ -211,6 +211,34 @@ condition).
   - *Read the topic memory before designing on this.* `agent-playbook/memory/topics/kiro-cli.md` is on-demand and its trigger is "kiro-cli and ACP". It already records that `--trust-tools shell` is a tool allowlist and **not** a path boundary (a canary wrote above the session cwd with zero prompts), that bad `--agent`/`--trust-tools`/`--model` values fail open and silent, and that `read` never prompts. Skipping it cost a full probe campaign and produced a wrong intermediate conclusion.
   - *Not covered by the probe* — MCP tools, web/network tools, `delegate`, and deletion were not exercised; `match`/`exclude` glob scoping was read from the docs, not measured.
   - *Shape, borrowed from Kiro Crew* — Crew gates at execution, not at the prompt: per-tool auto-approve gates, a bundled deny-pattern list for destructive shell commands, sensitive-path guards, and the rule that the layered checks still apply when approvals are set to auto. For PowerAtlas that is two halves. **The agent half**: a dedicated dispatch agent definition whose tool allow-list and shell allow/deny settings are narrowed at the source, so most routine requests never reach PowerAtlas at all — this is what the *lean dispatch agent* item below becomes. Verify the exact custom-agent config keys against the current kiro-cli build before designing on them. **The PowerAtlas half**: for requests that do arrive on a session marked unattended, approve read-class tools, deny shell and write unless an explicit pattern allows them, and after a bounded wait cancel the turn and mark the session as needing attention rather than leaving it hanging until the silence timeout.
+  - **Seed for the implementation — decided 2026-09-21, not yet planned.** Four points this item should
+    start from, recorded before they are lost to a context compaction.
+    1. **Scope, per the user's own instruction**: prompts are wanted for *regular interactive ACP
+       sessions only*. The seven specific task modes (`spec`, `quick-spec`, `bug-fix`, `plan`, `vibe`,
+       `autonomous`, `semantic_reviewer`) keep the manufacturer-encoded permission level and are not
+       touched. This resolves the `modeId` collision that otherwise makes permissions and task mode
+       compete for one slot: only the picker's **Default** entry becomes PowerAtlas-owned. Note
+       `autonomous` keeping its own semantics is correct — it is the vendor's declared don't-ask mode.
+    2. **Where the agent lives**: `agent-playbook/providers/kiro/agents/poweratlas-acp.md`, deployed by
+       one `copy-file` row in `inventory.tsv` (`~/.kiro/agents/poweratlas-acp.md`), exactly mirroring
+       the existing `kiro_default.md` row at line 48. `verify-deployment` then covers it for free.
+       PowerAtlas side: add the name to `_VALID_TASK_MODES` (`acp.py`) and point the picker's Default
+       entry at it; the on/off toggle chooses whether Default resolves to `poweratlas-acp` or plain
+       `kiro_default`, read live like the notifications flag.
+    3. **The duplication hazard, which is the real design question.** `kiro_default.md` is not a thin
+       file — it carries the whole `resources:` list (AGENTS.md, memory, steering, skills), the MCP
+       servers and the model pin. A second agent must mirror all of it or ACP sessions silently lose
+       their governance loading, and then the two drift. Prefer generating `poweratlas-acp.md` at
+       deploy time from `kiro_default.md` plus a permissions-only overlay, reusing the
+       `MERGED: <name> (shared + kiro overlay)` machinery `setup.ps1` already runs for skills, so the
+       permissions block is the only thing that differs by construction.
+    4. **SC-9's inline UI is proven working, so nothing needs building there.** Demonstrated live in
+       `/acp` on 2026-09-19 with a workspace-local agent carrying `shell`/`fs_write` → `ask`: the turn
+       parked at `PENDING` showing the literal command, with **Allow / Deny / Always deny**; Deny gave
+       `Called 1 tool: execute · failed`, buttons locked, and the agent reporting the command did not
+       run. (Screenshots were session-local and are not retained — the observation is the record.)
+       A useful side finding: a **workspace-local** `.kiro/agents/kiro_default.md` shadows the global
+       one, which is how that demo was scoped without touching the deployed copy.
   - *What is not settled* — the allow/deny pattern set itself, and whether an "unattended" flag is per session, per dispatch, or per agent definition. Neither needs a measurement; both need a decision.
   - *This item gates the entire Automation & Workflows section* — all six items there assume the session can run unattended. It also raises the priority of the `[SECURITY]` loopback token item: an auto-approving session behind an unauthenticated loopback API is a different proposition from an attended one.
 
