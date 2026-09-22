@@ -2,7 +2,7 @@
 
 > **Date**: 2026-09-22
 > **Status**: Complete
-> **Last Updated**: <set by /qclose at archival>
+> **Last Updated**: 2026-09-22 15:55
 > **Scope**: Start ACP session on textarea focus instead of first send, for `available` kiro-cli-v3 sessions in the dashboard panel.
 
 ---
@@ -488,4 +488,22 @@ Full-effort review: 4 personas (Senior engineer, Architect, Reliability engineer
 Senior engineer + Reliability engineer. No findings. Health: Green. 670/670 tests passing.
 
 All 6 SC items satisfied. Clear-site discipline confirmed mechanically. Harness integration verified. No documentation violations. Step 9b SKIP — runtime surface requires PowerAtlas running (AGENTS.md "Never restart PowerAtlas autonomously"); harness covers all mechanically testable surfaces.
+
+
+
+## Completion Summary
+
+Dashboard eager-connect feature shipped. The dashboard session panel now starts
+an ACP session when the user clicks into the prompt textarea (instead of waiting
+for the first send), so the slash-command catalogue is populated before the first
+keystroke. All 6 SC items verified: harness (670/670) + live runtime QA (PASS).
+
+5 commits shipped (45426a3 impl, 0de456c cycle-1 fixes, 562ffef docs, 7ea305f
+final review, 4546daa FW-1 auto-retry fix).
+
+### Acknowledged at archival
+
+- Accepted (harness opportunity): SC-2 runtime coverage gap — slash-command
+  catalogue arrival requires a live agent; harness covers all mechanically
+  testable paths. Manual verification step 4 confirmed at runtime.
 
