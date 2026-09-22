@@ -12,12 +12,18 @@ Phase 6 adds ``session/cancel``, session close — which is *not*
 ``session/close``; see ``CLOSE_METHOD`` — and the context-window telemetry
 that arrives alongside them.
 
-Isolation boundary — this module imports exactly two names from the rest of
-``power_atlas``: ``config.CONFIG_DIR``, to place the agent's neutral cwd where
-every other PowerAtlas artifact lives, and ``launcher._SESSION_ID_RE``, so the
-guard in front of a client-supplied session id is the one the launch path
-already applies rather than a second copy free to drift from it. ``launcher``
-imports one name from ``config`` and nothing else. Two caches elsewhere in the
+Isolation boundary — this module imports from exactly two other ``power_atlas``
+modules, three names in all: ``config.CONFIG_DIR``, to place the agent's
+neutral cwd where every other PowerAtlas artifact lives;
+``config.DERIVED_AGENT_NAME``, so the PowerAtlas-generated kiro-cli agent that
+``_VALID_TASK_MODES`` accepts is named once in the package instead of copied
+here (added 2026-09-22, D-20,
+plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2 — the
+module that *writes* that agent, ``agent_profile``, is deliberately not
+imported); and ``launcher._SESSION_ID_RE``, so the guard in front of a
+client-supplied session id is the one the launch path already applies rather
+than a second copy free to drift from it. ``launcher`` imports one name from
+``config`` and nothing else. Two caches elsewhere in the
 package are plain unlocked ``OrderedDict``s, safe only because every current
 caller runs on the event loop — and this module now runs an OS reader thread
 that does not. Neither of the two modules holding them is imported here, and
@@ -703,14 +709,16 @@ _OVERLAY_STEERING: tuple[dict[str, str], ...] = (
 # of forwarding a typo into a surprising mode.
 #
 # Two consequences of the derived agent's membership, both deliberate:
-# - This set cannot tell whether the derived agent exists. With the
-#   permission posture off, PowerAtlas deletes ~/.kiro/agents/poweratlas-acp.md
-#   entirely (D-10 as revised 2026-09-22), so selecting it then forwards a
-#   modeId kiro-cli silently coerces to "vibe" — the exact failure this set
-#   exists to prevent, for this one value. Detecting it here would need
-#   `agent_profile`, which this module must not import (D-20), or config state
-#   it does not read. The UI (Phase 3) is what gates the offer; Phase 7's
-#   modeId_in_effect probe is what would catch a coercion.
+# - This set cannot tell whether the derived agent exists. With the permission
+#   posture off, PowerAtlas deletes ~/.kiro/agents/poweratlas-acp.md entirely
+#   (user decision 2026-09-22, recorded in that plan's § 9 Phase 1 divergences,
+#   code `c2f324b` — absence is the only representation of off), so a client
+#   that sends this modeId anyway gets a mode kiro-cli silently coerces to
+#   "vibe" — the exact failure this set exists to prevent, for this one value.
+#   Detecting it here would need `agent_profile`, which this module must not
+#   import (D-20), or config state this module does not read. Nothing in
+#   `acp.py` enforces it: the gate is upstream, in the picker's Default entry
+#   resolving to the base agent while the setting is off (SC-3).
 # - Only 5 of the 8 vendor modes are offered in the /acp UI's own picker
 #   (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3) — the other 3 (vibe,
 #   autonomous, semantic_reviewer) were only observed to exist, never
@@ -887,8 +895,8 @@ MAX_ERROR_DETAIL_CHARS = 512
 # it, which is the state for every test that does not opt in.
 #
 # **A hook and not an import, for a reason this module states about itself.**
-# The header above declares an isolation boundary — exactly two names from the
-# rest of the package — and a plan exit criterion greps this file for module
+# The header above declares an isolation boundary — exactly two modules from
+# the rest of the package — and a plan exit criterion greps this file for module
 # names to keep it honest. The consumer is `presence`, which needs to know
 # which locks written by *our* agent are orphans (D32). Importing it here would
 # break that boundary; importing `acp` from `presence` is the direction D9
@@ -928,8 +936,8 @@ def set_sessions_changed_hook(hook) -> None:
 #
 # A hook and not an import, for the same reason `sessions_changed_hook` above is
 # one: the consumer is `notifications`, and importing it here would add a third
-# name to the isolation boundary this module's header declares. `web.py` already
-# imports both and does the wiring.
+# module to the isolation boundary this module's header declares. `web.py`
+# already imports both and does the wiring.
 #
 # **This module decides no policy.** It reports `watched` — whether any socket is
 # currently attached to the session — as a fact, and the consumer decides what to
