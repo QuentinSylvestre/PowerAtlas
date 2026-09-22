@@ -2214,6 +2214,44 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
             meta["color"] = _resolve_workspace_color(ws_cwd, config)
         rows.append((meta, page_tagged))
 
+    # Pinned sessions from workspaces outside the current page (dashboard/ACP
+    # provider-filter bug fix): `force_cwds` already identifies every workspace
+    # that holds a pinned session, but the loop above only scans workspaces in
+    # `page_groups` (the paginated slice). When a provider filter is wide (e.g.
+    # "All") and there are many workspaces, a pinned session's workspace can
+    # fall entirely outside the current page and its pinned session silently
+    # disappears from the "Pinned sessions" section. This block fetches the
+    # missing workspaces separately so every pinned session always appears,
+    # regardless of which page its workspace would normally land on.
+    if lazy_mode and force_cwds:
+        page_group_norms = frozenset(_normalize_path(w[0]) for w in page_groups)
+        off_page_cwds = force_cwds - page_group_norms
+        if off_page_cwds:
+            for ws_cwd, _ws_count, _updated, ws_provs in workspaces:
+                ws_norm = _normalize_path(ws_cwd)
+                if ws_norm not in off_page_cwds:
+                    continue
+                ws_name = Path(ws_cwd).name or ws_cwd
+                off_tagged: list[tuple[object, str]] = []
+                for prov_name in ws_provs:
+                    try:
+                        off_tagged.extend(
+                            (s, prov_name)
+                            for s in data.get_sessions(ws_cwd, prov_name)
+                        )
+                    except Exception:
+                        log.exception(
+                            "ACP listing: could not read %s sessions for %s "
+                            "(off-page pinned scan)",
+                            prov_name, ws_cwd,
+                        )
+                ws_hash = data_kiro_v3.hash_dir_for_cwd(ws_cwd)
+                for s, prov_name in off_tagged:
+                    if s.session_id in pinned_set:
+                        pinned_sessions_found.append((ws_cwd, ws_name, s, prov_name))
+                        if ws_hash:
+                            hash_by_sid[s.session_id] = ws_hash
+
     pinned_sids = [s.session_id for _cwd, _name, s, _p in pinned_sessions_found]
     availability = _acp_availability(sids + pinned_sids, held, workspace_hashes=hash_by_sid)
     all_page_sessions = [s for _meta, page_tagged in rows for s, _p in page_tagged]
