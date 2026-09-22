@@ -2,10 +2,29 @@
 
 > **Date**: 2026-09-21
 > **Status**: Complete — Phases 1-6, Step 9 holistic review + fixes, and Step 9b exhaustive live QA all done. One honest gap remains (SC8 crew-panel live round-trip — see Follow-up Work).
+> **Last Updated**: 2026-09-22
 > **Scope**: Port all of `/acp`'s features missing from the main dashboard onto the dashboard, except the mobile drill-down view toggle.
 > **Estimated effort**: ~2-3 weeks
 
 ---
+
+## Completion Summary
+
+Closed via `/qclose` on 2026-09-22. All 6 phases, Step 9's holistic review + fixes, Step 9b's exhaustive live QA, and one post-closeout round (acp.html parity fix + SC8 retry) are complete. `qvalidate` passes clean (5/5 checks). Both test suites re-verified independently by the orchestrator at every stage, not merely trusted from sub-agent reports.
+
+### Acknowledged at archival
+
+- **Second `acp.html` `onclose` gap** (missing `closeSubagentView()`/sub-agent-WS teardown on a main-socket drop, found while fixing the crew-timer bug) — Accepted. Documented in Follow-up Work; fixing it would change UX (hiding the sub-agent panel on every transient reconnect blip) with no request to do so.
+- **Fix 2's narrow, sub-millisecond duplicate-send-detection timing edge** (found during Step 9b prep, never routed through a formal review cycle) — Accepted. Worst case is cosmetic, not a duplicate send; documented in Follow-up Work.
+- **SC8 (crew panel) real end-to-end live round-trip** — Accepted (already effectively resolved by the post-closeout retry: two genuinely different, well-informed attempts confirmed kiro-cli's real delegation tool was invoked both times, narrowing the gap to one specific `acp.py` wire condition rather than leaving it a broad unknown). No further action this session.
+- **Harness improvement: cycle-cap ambiguity** ("1 qreview cycle per phase" doesn't specify whether it also skips the lighter self-verification substitute) — Accepted (harness opportunity).
+- **Harness improvement: cross-phase-scoped finding routing** (a review finding whose fix needs a file outside the just-completed phase's scope has no named `/qdev` routing mechanism) — Accepted (harness opportunity).
+- **Harness improvement: Progress Tracker/Status-line false-positive flagging during Step 5 review** — Promoted: added a line to `/qdev`'s Step 5 telling reviewers not to flag this, since the update is structurally Step 7's job and always runs after Step 5 for the same phase. Landed in the config repo (`374828b`, pushed).
+- **Harness improvement: `exit_criteria_ticked` self-report miscount propagating unverified into review briefs** — Promoted: added a requirement that the orchestrator independently count ticked boxes from the plan file before dispatching `--expect-ticked N`. Landed in the config repo (`374828b`, pushed).
+- **Harness improvement: rate-limit mid-phase resume guidance** — Accepted (harness opportunity).
+- **Harness improvement: browser-tool-unavailable outcome for Live QA** — Accepted (harness opportunity); root cause was found and resolved within this plan (Chrome wasn't running).
+- **Harness improvement: mutation-testing parallel-dispatch process violation** — Accepted (harness opportunity); not a skill gap (the rule already existed in `/qreview`), a discipline note for future sessions.
+- **Harness improvement: `/qqa`'s browser-verification gate names Playwright specifically, this environment uses `mcp__claude-in-chrome__*`** — Accepted (harness opportunity); bookkeeping gap, not a quality one.
 
 ## Intent
 
