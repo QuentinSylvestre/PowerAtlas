@@ -1,7 +1,7 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: Draft  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 0 blocked, deny-floor design Gate awaiting user decision (see § 9)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -327,18 +327,27 @@ STOP and ask the user.** As of 2026-09-21 this precondition was NOT satisfied �
 premise, **stop and revise the design before Phase 1**.
 
 **Exit criteria**:
-- [ ] Step 0's precondition verified and recorded, or the phase stopped and the user asked
-- [ ] Every anchor re-located; the anchor → current file:line table recorded in § 9
-- [ ] `ACP_TOKEN` occurrence count recorded and compared against 14
-- [ ] The stale-token function names actually present after the parity port are recorded
-- [ ] `tools/acp_permission_probe.py` committed, and a run of it reproduces P1's mode-catalogue output
-- [ ] Default rule set recorded, each rule tagged documentation-sourced or measured, with its source
-- [ ] Deny-floor list drafted, every entry justified in one line
-- [ ] Floor bypass attempted in all four forms; the matching semantics (literal vs canonicalized) recorded
-- [ ] Each of the 7 unexercised capabilities recorded as fires / does-not-fire with its consent payload
-- [ ] "Always allow" persistence answered yes/no, with the diffed paths named
-- [ ] `~/.kiro` baseline recorded by filename and hash
-- [ ] A statement in § 9 confirming the design still holds, or naming what must change
+- [x] Step 0's precondition verified and recorded, or the phase stopped and the user asked
+- [x] Every anchor re-located; the anchor → current file:line table recorded in § 9
+- [x] `ACP_TOKEN` occurrence count recorded and compared against 14
+- [x] The stale-token function names actually present after the parity port are recorded
+- [ ] `tools/acp_permission_probe.py` committed, and a run of it reproduces P1's mode-catalogue output — **the run succeeds and reproduces P1 (verified); the commit is deliberately withheld pending the Gate decision below (see § 9)**
+- [x] Default rule set recorded, each rule tagged documentation-sourced or measured, with its source
+- [x] Deny-floor list drafted, every entry justified in one line
+- [x] Floor bypass attempted in all four forms; the matching semantics (literal vs canonicalized) recorded
+- [ ] Each of the 7 unexercised capabilities recorded as fires / does-not-fire with its consent payload — **6 of 7 measured live; `power` is untestable on this machine (no installed powers) — see § 9**
+- [x] "Always allow" persistence answered yes/no, with the diffed paths named
+- [x] `~/.kiro` baseline recorded by filename and hash
+- [x] A statement in § 9 confirming the design still holds, or naming what must change — **it names what must change; the Gate fired (see § 9)**
+
+**Gate fired.** Step 6's bypass-resistance test failed: the deny floor was defeated by 3 of its 4
+tested rephrasing forms (case-variant, alias/quoted form, `../`-traversal), confirming kiro-cli's
+shell-capability matching is a literal, case-sensitive string match with no canonicalization —
+directly contradicting D-13's characterization of the borrowed Kiro Crew deny list as
+"never-bypassed" (public trackers document the same literal-matching class of bypass against that
+list: kirodotdev/KiroCrew#8387, kirodotdev/Kiro#11498, kirodotdev/KiroCrew#8240). Per this phase's
+brief, this is named explicitly as a Gate-firing condition. **Status: blocked. See § 9 for full
+findings and the specific design question this raises for Phase 1.**
 
 ### Phase 1: Derived-agent generation and its settings [QA]
 
@@ -723,7 +732,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pre-flight — preconditions, anchors, harness, rule set | Not started | Step 0 STOPs if the parity plan is not complete |
+| 0 | Pre-flight — preconditions, anchors, harness, rule set | **Blocked — Gate fired** | 10/12 exit criteria met; deny floor failed bypass resistance (3/4 forms), see § 9 Gate statement |
 | 1 | Derived-agent generation and settings | Not started | Atomic write; textual injection; no YAML dep |
 | 2 | Mode wiring and frame enrichment | Not started | |
 | 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
@@ -808,8 +817,366 @@ file scopes — the `parallel-symmetry` check passed only because no annotations
 - `agent-playbook` — no longer involved (D-6)
 
 ## 9) Implementation Divergences from Plan
-<Reserved -- filled during implementation. Phase 0 writes its precondition statement, anchor table,
-recorded rule set and measurement results here.>
+
+### Phase 0 (2026-09-22) — pre-flight findings, and a Gate
+
+**Status: blocked.** Steps 0-5 and 7-9 completed cleanly; step 6 (deny-floor bypass resistance)
+failed against its own property-under-test. Per this phase's brief, "step 6 shows the floor is
+trivially bypassed" is a named Gate-firing condition. Full evidence below; the design question is
+left for the orchestrator/user, not resolved here.
+
+#### Step 0 — precondition (D-14)
+
+**Verified — measured (live check, 2026-09-22).** `plans/done/260922-0859_DASHBOARD_ACP_FEATURE_PARITY.md`
+line 4 reads `Status: Complete — Phases 1-6, Step 9 holistic review + fixes, and Step 9b exhaustive
+live QA all done.` `git status --short` against its full file scope (`templates/index.html`,
+`templates/acp.html`, `static/composer-chrome.js`, `static/style.css`, `tests/acp_page.test.mjs`,
+`tests/test_web.py`, `AGENTS.md`) returned empty — clean. Both conditions D-14 requires are
+satisfied; this corroborates the orchestrator's own pre-dispatch check.
+
+#### Anchor table — read from source (file:line), 2026-09-22
+
+| Anchor | Plan's citation | Current location | Status |
+|---|---|---|---|
+| `reportStaleToken` / `diagnoseRejectedHandshake` | not cited by line | `acp.html:5290`, `acp.html:5306` (unchanged, original names) | unmoved |
+| Ported stale-token functions in `index.html` | n/a (plan predicted a possible rename) | `dashReportStaleToken` (`index.html:944`), `dashDiagnoseRejectedHandshake` (`index.html:957`), called at `index.html:964` and `index.html:1169` | **renamed** during the parity port — see below |
+| `ACP_TOKEN` in `index.html` | 14 occurrences (2026-09-21) | **15 occurrences** (2026-09-22): decl `:893`, socket-URL use `:897`, 6 sentinel branches (`:1589, :3681, :4740, :5074, :5186, :5737`), 7 comments (`:211, :215, :939, :1586, :1587, :5071, :5181`) | +1, all in the +1 comment at `:939` (inside the `dashReportStaleToken` mirror comment the parity port added); sentinel-branch count unchanged at 6 — D-15's sizing still holds |
+| `acp-taskmode-option` | `acp.html` | `acp.html:383-388,564`; `index.html:3614,3626,3644,3699`; `style.css:2175,2187,2188,2192` | present in both templates + shared CSS, as expected post-parity |
+| `notifyToggle` / `autostartToggle` | `index.html` | `index.html:55` (autostart), `index.html:60` (notify), `index.html:4083` (notify handler) | unchanged |
+| `permission_request` (backend) | `acp.py`, `web.py` | `acp.py:186,188,192,4474,4479,4504,4549,4559,5928,5972,5977`; `web.py:444` | unchanged in shape |
+| `permission_request` (frontend) | `acp.html`, `index.html`, `transcript-renderer.js:1773/1781/1921` | `acp.html:4996,5027`; `index.html:889,3251`; `transcript-renderer.js:1781,1921` | `transcript-renderer.js` now has **2** hits, not 3 — `:1773` no longer matches; Phase 3's file scope still correctly includes this file |
+| `_on_permission_request` | `acp.py:4479` | `acp.py:4479` (def line) — **exact match, not drift**; the title-clamp assignment the plan's sketch targets is at `acp.py:4548`, one line before the `_emit` call at `:4549` | both cited for Phase 2 |
+| `MAX_PERMISSION_TITLE_CHARS` | `acp.py:589` | `acp.py:589` | exact match |
+| `_VALID_TASK_MODES` | `acp.py:691` | `acp.py:691` | exact match |
+| `_build_kas_session_params` | `acp.py:697` | `acp.py:697` | exact match |
+| `new_session` mode pass-through | `acp.py:4647` | `acp.py:4647` | exact match |
+| `load_session` mode omission | `acp.py:4751` | `acp.py:4751` (`**_build_kas_session_params()`, no argument) | exact match, confirmed still inert per P2 |
+| `_LOOPBACK_HOSTS` | `web.py:574` | `web.py:574` | exact match |
+| `_ACP_TOKEN` | `web.py:1269` | `web.py:1269` | exact match |
+| `_acp_token_ok` (def) | `web.py:1272` | `web.py:1272`, called `web.py:1550` | exact match |
+| `_acp_token_ok` (docstring mention) | `acp.py:5076` | `acp.py:5076` | exact match |
+| `same_origin_guard` | `web.py:771-772` | `web.py:772` (def) | exact match |
+| `RemoteAccessGuard` | `web.py:1204`, registered `:1248` | `web.py:1204` (class), `web.py:1248` (`app.add_middleware`) | exact match |
+| `_refuse` | `web.py:1167-1183` | `web.py:1167` | exact match |
+| `_cookie_ok` | `web.py:930-964` | `web.py:930` | exact match |
+| `set_cookie` call | `web.py:3245` | `web.py:3245` (`response.set_cookie(`) | exact match |
+| `make_device_cookie` / `_device_cookie_sig` | `web.py:891-905` | `web.py:891` (`_device_cookie_sig`), `web.py:898` (`make_device_cookie`) | exact match |
+| `remote_auth_exchange` | `web.py:3155` | `web.py:3155` | exact match |
+| `_SETTING_TYPES` | `web.py:3708` | `web.py:3708` | exact match |
+| `save_config` | `config.py:481-500` | `config.py:481` | exact match |
+| `_write_remote_secret` | `config.py:167-187` | `config.py:167` | exact match |
+| `pyproject.toml` package-data | `:37-38` | `:37-38` (`[tool.setuptools.package-data]`, `power_atlas = ["static/**", "templates/**"]`) | exact match; confirms no `agents/**` entry yet, per plan |
+| `tests/test_web.py` lifespan seam | `≈:10664` | `:10664`, `:10680` | exact match |
+
+Every anchor either matched exactly or was precisely re-located with its current line. No anchor was
+unfindable.
+
+#### Step 2 — stale-token function names post-port
+
+The parity plan's Phase 6 **did** port `reportStaleToken`/`diagnoseRejectedHandshake` into
+`index.html`'s `dashConnect()`, and **did** rename them: `dashReportStaleToken` (`index.html:944`)
+and `dashDiagnoseRejectedHandshake` (`index.html:957`), wired at `index.html:964` and `:1169`.
+`acp.html`'s originals are untouched at their original names. Neither pair moved into
+`composer-chrome.js`. This confirms R-17's premise exactly as predicted: Phase 6's own deletion
+check must be behavioral (drive a rejected handshake, assert no stale-token affordance renders),
+never a name-based grep for the old names alone — a grep for `reportStaleToken`/
+`diagnoseRejectedHandshake` would miss the `dash`-prefixed pair entirely.
+
+#### Step 3 — probe harness
+
+Written to `tools/acp_permission_probe.py` (526 lines; `tools/` did not previously exist in this
+repo, so `git status` will show it as a new untracked directory) — **not yet staged/committed to
+git**, held pending the Gate decision below (this phase's brief scopes the commit to a successful
+phase; a `blocked` return should not silently land a file the orchestrator hasn't seen). It is
+complete, tested, and ready to commit as-is once reviewed.
+
+Design: spawns `kiro-cli acp --agent-engine v3` directly over stdio NDJSON JSON-RPC 2.0 (never
+through PowerAtlas), drives `initialize` → `session/new` (binding the `_meta.kiro.modeId` to
+`--agent`) → an optional single `session/prompt` turn → a drain period, answers every inbound
+`_kiro/auth/getAccessToken` by shelling to `kiro-cli chat _ get-kas-token`, and records every
+`session/request_permission` in full before answering it per `--answer` (default `reject`, so
+nothing asked about actually runs). Token hygiene: the OIDC token is held in-process only; the one
+outbound frame shape that would carry it is redacted before being appended to any frame log.
+
+**Verified — measured (live probe, 2026-09-22, kiro-cli 2.22.1).** `--agent kiro_default --cwd
+<scratch dir>`, no prompt, reproduces P1 exactly: the mode catalogue (via a `config_option_update`
+notification) lists all 8 `_VALID_TASK_MODES` values, and `kiro_default` registers with
+`_meta.kiro.source: "global"`, `resource.source.origin: "user"` — matching P1's finding verbatim.
+`mode_in_effect` (`_meta.agentMode` and `modes.currentModeId`, both read from the `session/new`
+response) read `"kiro_default"`, confirming no coercion for the baseline case.
+
+Two bugs were found and fixed **before** any measurement that depended on them (both caught by
+advisor review, not self-discovered):
+1. `_pick_option`'s substring matching for `--answer allow_always` matched on the bare substring
+   `"always"`, which is also a substring of `reject_always` (`"Always deny"`) — a request for
+   "always allow" could have silently selected "always deny" instead. Fixed to match `kind` exactly
+   first (`allow_always`, `reject_once`, `allow_once`), falling back to a verb-prefix match
+   (`allow_`/`reject_`) only if no exact match exists, never a bare `"always"` substring.
+2. Mode coercion (R-2) was computed but never surfaced loudly — a silent `vibe` fallback would have
+   been visible only to an operator who happened to read `mode_in_effect` by eye. Fixed: `new_session`
+   now sets `mode_coerced` and prints an unconditional (non-`--verbose`) stderr warning the moment the
+   bound mode differs from the one requested, and the summary JSON carries `mode_coerced` explicitly.
+
+`kiro-cli agent validate --path <file>` was tried as an independent YAML-validity check and rejected
+as a viable one: it reports `Json supplied ... is invalid: invalid number at line 1 column 2` for
+**every** `.md`-frontmatter agent file tested, including the machine's own live, daily-used
+`kiro_default.md` — it appears to expect a JSON-format agent config, not the Markdown+YAML-frontmatter
+format this installation actually uses for `.md` agents, and its exit code is 0 even when it prints
+`Error:`. It is not a usable generation-failure gate for Phase 1 in its current form; see the
+YAML-fail-open finding below for what actually needs gating.
+
+#### Step 4 — default rule set (documentation-sourced)
+
+No empirical fallback was needed — the STOP-and-ask gate for moving `~/.kiro/settings/permissions.yaml`
+was never approached. Published documentation was reachable and used:
+
+- **Source**: [kiro.dev/docs/permissions/](https://kiro.dev/docs/permissions/) and
+  [kiro.dev/docs/cli/v3/permissions/](https://kiro.dev/docs/cli/v3/permissions/) — read
+  2026-09-22 (`read from kiro-cli docs`).
+- **Default rules with no `permissions.yaml` configured**:
+  | Rule | Effect | Doc reference |
+  |---|---|---|
+  | `fs_read` on `./**` | allow (silent) | kiro.dev/docs/permissions/ |
+  | `shell` for git read-only commands (`git status`, `git log`, `git diff`, `git branch`) | allow (silent) | kiro.dev/docs/permissions/ |
+  | `shell` for system-info commands (`pwd`, `whoami`, `uname`) | allow (silent) | kiro.dev/docs/permissions/ |
+  | `fs_write` to `~/.kiro/settings/`, `.kiro/settings/`, `~/.kiro/workspace-roots/` | **always deny** (Kiro scope, not overridable) | kiro.dev/docs/permissions/ |
+  | Writes to `.git/**`, `.kiro/agents/**`, `.kiro/hooks/**`, `.kiroignore` | always ask (Kiro scope) | kiro.dev/docs/permissions/ |
+  | Everything else | ask | kiro.dev/docs/permissions/ |
+- **Rule schema**: `capability` (`fs_read`, `fs_write`, `shell`, `web_fetch`, `web_search`, `mcp`,
+  `subagent`, `skill`, `power`, `context`, `diagnostics`, `sandbox_network`; meta-capabilities `all`,
+  `builtin`, `filesystem`), `effect` (`deny`/`ask`/`allow`), `match` (glob patterns), `exclude`
+  (glob patterns that must NOT match) — `read from kiro-cli docs`.
+- **Precedence**: "deny > ask > allow — a deny rule always wins regardless of scope"; scope order is
+  Kiro → administration → user → workspace → agent → session, most-restrictive-wins, no scope
+  hierarchy overrides deny — `read from kiro-cli docs`.
+
+**A load-bearing empirical correction to the precedence doc, found while establishing this set —
+measured (live probe, 2026-09-22):** the doc's "most restrictive wins" statement is *silent* on
+what happens **within one scope** when two rules of different effects both match the same resource
+via `match`. This was tested directly and is not documented:
+
+1. Agent-scope `{capability: all, effect: ask}` + `{capability: fs_read, match: ["./**"], effect:
+   allow}` (in either order) → an `fs_read` on a workspace file still fires an `ask`, with
+   `matchedRule: {capability: "all", effect: "ask"}` — the specific `allow` rule for the same
+   resource **never engages**, regardless of which rule is listed first. Caveat: whether the
+   `fs_read` rule's `./**` glob actually matched the resource at all was not isolated in this test —
+   kiro-cli reported the target in `rawInput.path` as an absolute Windows path (`c:\Users\...`), and
+   it is possible `./**` simply never matched that form, independent of the `all` rule's presence.
+   Points 2 and 3 below (same-capability `shell` rules, and the `exclude` fix) do not share this
+   ambiguity and carry the design implication on their own; Phase 1 should confirm `./**` matches on
+   Windows before relying on it.
+2. The same defeat happens **within a single capability**: `{capability: shell, match: ["echo *"],
+   effect: allow}` + `{capability: shell, effect: ask}` (blanket, same capability) → running `echo
+   ...` still asks, matched against the blanket `shell/ask` rule, not the specific `shell/allow`
+   rule that literally matches the command run.
+3. **The fix is `exclude`, not two same-capability rules.** `{capability: shell, match: ["echo *"],
+   effect: allow}` + `{capability: shell, exclude: ["echo *"], effect: ask}` (the blanket rule
+   *excludes* what the narrow rule covers) → `echo ...` runs silently, zero prompts. This is the
+   only mechanism tested that reproduces "allow X, ask about everything else" within one capability.
+
+**Design-affecting implication for Phase 1** (not fixed here — Phase 0 does not fix designs):
+`agent_profile.py`'s rule-assembly algorithm cannot express the "on" branch as "a blanket `all: ask`
+plus specific allow exceptions," nor as "a blanket `shell: ask` plus specific shell allow exceptions" —
+both are silently defeated by most-restrictive-wins with no error, no warning, and no visible signal
+that the intended allow-list is dead code. The assembly must instead emit narrower ask rules with an
+explicit `exclude` list populated from every narrower allow/deny rule's own `match` patterns for the
+same capability, or omit a same-capability catch-all `ask` entirely for capabilities that need a
+mixed allow/ask split. This directly affects whether the "on" branch can reproduce "fs_read on ./**
+allow, everything else fs_read ask" and "shell git-read allow, everything else shell ask" as literally
+stated in the doc-sourced default set above.
+
+#### Step 5 — deny floor (drafted)
+
+The always-on floor is scoped to `shell` and `fs_write` (D-13's own scope: "never-okay destructive
+shell patterns and sensitive-path writes"), each entry justified in one line:
+
+| Pattern (illustrative form) | Capability | Justified because |
+|---|---|---|
+| Recursive force-delete of the user's home directory or its ancestors (`Remove-Item -Recurse -Force ~`/`$HOME`/`/` and PowerShell/POSIX equivalents) | `shell` | Total data loss with no recovery path; never a legitimate ACP-session action |
+| Recursive force-delete of `.kiro`, `.git`, or any workspace-root ancestor | `shell` | Removes the very governance/history the agent's own trust depends on |
+| `fs_write` to `~/.kiro/settings/**`, `~/.kiro/agents/**` (outside the one file PowerAtlas itself generates), `~/.kiro/workspace-roots/**` | `fs_write` | Self-modification of the permission system that is supposed to be constraining the agent — already Kiro-scope always-deny per the doc-sourced defaults above, so this floor entry is redundant with a built-in and mainly documents the overlap rather than adding new coverage |
+| Piping a network fetch straight into a shell interpreter (`curl \| bash`/`iwr \| iex` and equivalents) | `shell` | Arbitrary remote code execution with no local review step |
+| Disabling or uninstalling security tooling referenced by this machine's own governance (Windows Defender, the git pre-commit hook, `.venv` isolation) | `shell` | Removes a control this very design assumes stays in place |
+
+(The specific Kiro Crew deny list itself — "137 built-in patterns" per public sources — was not
+directly inspectable: `kiro-cli crew` is not installed on this machine, and installing it purely to
+read its bundled deny list would be an irreversible, side-effecting action outside this phase's
+authority. The floor above is drafted from first principles plus the public documentation found
+during step 6's research, not transcribed from Crew's actual file.)
+
+#### Step 6 — bypass resistance (FAILED — the Gate)
+
+**Control — measured (live probe, 2026-09-22).** A floor entry `{capability: shell, match:
+["Remove-Item -Recurse -Force ./canary", "Remove-Item -Recurse -Force ./canary/*"], effect: deny}`
+(PowerShell-native syntax — see the shell-backend finding below) against a disposable canary
+directory: the exact literal command is silently blocked, zero `session/request_permission` frames,
+tool call fails immediately with `Tool call denied by user's permissions. Rule: deny shell matching
+"..." Source: agent-profile.` Canary survives. This is the floor working exactly as designed.
+
+**Bypass forms — measured (live probe, 2026-09-22), canary recreated before each:**
+
+| # | Form | Command | Result |
+|---|---|---|---|
+| 1 | Case-variant | `remove-item -recurse -force ./canary` | **BYPASSED** — canary deleted, zero prompt |
+| 2 | Quoted/aliased shell form | `rm -Recurse -Force "./canary"` (PowerShell's `rm` alias for `Remove-Item`, quoted path) | **BYPASSED** — canary deleted, zero prompt |
+| 3 | `../`-traversal | `Remove-Item -Recurse -Force ./sub/../canary` | **BYPASSED** — canary deleted, zero prompt |
+| 4 | Symlinked target | `Remove-Item -Recurse -Force ./canary-link` (symlink to `./canary`) | Literal string `"canary-link"` does not match `"canary"`, so the same literal-mismatch defeat applies — but in this instance PowerShell's own `Remove-Item -Recurse` on a directory symlink removed only the link, not the real target's contents, so the underlying canary happened to survive. This is an artifact of PowerShell's own symlink-deletion semantics, not evidence the floor generalizes to canonicalized matching — forms 1-3 already establish the matching is literal. **This form, as designed, cannot distinguish "the floor caught it" from "the OS didn't recurse through the link"** — both produce the same "canary survived" observation. A discriminating rerun would use a symlinked *file* (not directory) plus a write-through command, where a literal-match floor and a canonicalizing one would diverge observably; Phase 7 should use that shape if it re-attempts this bypass form live |
+
+**Matching semantics — measured, conclusive: literal, case-sensitive string matching against the
+raw command text, with no canonicalization, no alias resolution, and no path normalization.** This
+is not a PowerAtlas-specific finding — it corroborates kiro-cli's own documentation ("match entries
+are glob patterns tested against the command string, so the rule constrains the spelling of an
+action, not the action" — `read from` kirodotdev/Kiro#11498) and Kiro Crew's own public issue
+tracker, which documents the identical bypass class against its bundled deny list: `rm -rf ~` is
+denied but `rm -rf $HOME` (a different spelling, same destructive target) is not
+(kirodotdev/KiroCrew#8387), a PR specifically fixing missed `rm` flag-order variants
+(kirodotdev/KiroCrew#8240), and an agent that "reasons its way around" a deny rule by reformulating
+the command entirely (kirodotdev/Kiro#11498).
+
+**This directly contradicts D-13's characterization** of the borrowed Kiro Crew list as
+"never-bypassed" — the public record shows the opposite, repeatedly, and this phase's own live
+measurement reproduces the same defeat class against three of four tested forms on the very first
+attempt, using the simplest possible rephrasing (case).
+
+**Shell-backend finding, measured live and worth recording on its own:** kiro-cli's shell tool on
+this Windows machine executes via PowerShell. POSIX `rm -rf ./target` was tried first and does
+**not** execute destructively at all here — PowerShell's `Remove-Item` rejects `-rf` outright
+(`A parameter cannot be found that matches parameter name 'rf'`), confirmed by a control run against
+a non-denied decoy directory that survived. Any floor pattern written in POSIX shell idiom (as the
+GitHub-issue precedent and D-13's own phrasing, "never-okay destructive shell patterns," both
+implicitly assume) is **inert on this machine** — a real gap distinct from the literal-matching
+bypass above. The floor must be authored in whatever shell syntax the target machine's kiro-cli
+backend actually executes, which is platform-dependent and was not previously called out anywhere
+in the plan.
+
+**Per this phase's brief, this is a named Gate-firing condition** ("step 6 shows the floor is
+trivially bypassed"). R-5's mitigation text ("Addressed: Phase 0 step 6 tests case, quoting,
+traversal and symlink forms before the floor is trusted") frames the test's own result as the thing
+that decides whether the floor is trusted — the test says it should not be, as currently conceived.
+This phase does not resolve the design question; see the Gate statement at the end of this section.
+
+#### Step 7 — unexercised capabilities
+
+**A methodological finding came first and matters more than any individual capability result.** The
+very first step-7 probe (`mcp`) used a description with no bare `: ` in it, and it fired correctly.
+Every probe run **after** that one, until this was caught, used the description pattern
+`... measurement (step 7): web_fetch. ...` — an unquoted colon-space inside a plain YAML scalar,
+invalid frontmatter. That covers seven runs in sequence: `web_fetch` under `ask`, `web_search` under
+`ask`, `web_fetch` under `deny` (re-check), `web_search` under `deny` (re-check), `subagent`,
+`skill`, and a plain `fs_write` create. **All seven** showed zero permission prompts and the tool
+proceeded — nine data points total (1 clean + 7 broken + 1 more broken variant of the `fs_write`
+retest with an explicit `match` field, also silently open), a clean split: every broken-YAML run
+fell open, every valid-YAML run enforced correctly. That split is what makes the artifact diagnosis
+airtight, not just the single `web_fetch` re-run. **It was an artifact**, not a kiro-cli property. `kiro-cli agent validate --path` was tried as a check and (per the step-3
+notes above) turned out to be unusable for `.md`-format agents on this version regardless of validity.
+The correct diagnosis, found via advisor review before this was reported as a real finding, was
+functional: rewriting each description to remove the bare `: ` and rerunning reproduced the expected
+`ask` behavior in every case. **This is a live, accidental demonstration of exactly the SC-8/R-10
+fail-open threat the plan is built around**: a malformed `permissions:` block (here, caused by the
+whole frontmatter failing to parse, not the `permissions:` key itself) did not error, did not warn,
+and did not block the session from starting — it silently fell back to this machine's user-scope
+allow-all, identical in shape to P5's "blank permissions: key" finding, just reached by a different
+malformation. **Concrete Phase 1 implication**: `agent_profile.py`'s generation path needs *some*
+positive confirmation that the derived agent's `permissions:` block actually bound — not
+`kiro-cli agent validate` in its current form (shown unusable above) — before treating generation
+as successful; what mechanism can provide that confirmation is an open question for Phase 1, not
+answered here.
+
+**Results, all re-measured live with corrected YAML (2026-09-22), `mode_coerced: false` in every
+case:**
+
+| Capability | Fires under `ask`? | consent payload highlights |
+|---|---|---|
+| `mcp` | **Yes** | `toolId: "mcp_playwright_browser_navigate"`, `capability: "mcp"`, `resource: "playwright/browser_navigate"`, plus an `mcpTool.annotations` block (`readOnlyHint`, `destructiveHint`, `openWorldHint`) and `agentManagesTrust: true` — both outside Phase 2's 5-field consent allowlist (`capability`, `resource`, `matchedRule`, `scope`, `source`); noted for Phase 2, not acted on here |
+| `web_fetch` | **Yes** | `toolCall.title: "Fetch URL"`, standard 3-field consent (`capability`, `matchedRule`, `scope`/`source` implied by the shared shape) |
+| `web_search` | **Yes** | `toolCall.title: "web_search"` |
+| `subagent` | **Yes** | `toolCall.title: "Sub-agent: kiro_default"` |
+| `skill` | **Yes** | `toolCall.title: "Load skill: qmemory-eval"`, `toolId` implied `skill`-shaped; denying it correctly stopped the skill load (a downstream shell step in the same turn then ran via this machine's fallthrough allow-all — expected, not a new gap, see below) |
+| `power` | **Untestable live** — `~/.kiro/powers/installed.json` shows `"installedPowers": []` on this machine; nothing is installed to invoke. Capability name (`power`) is `read from kiro-cli docs` only, never exercised |
+| a deletion (`fs_write`) | **Yes** | `toolId: "delete_file"`, `capability: "fs_write"` (same tag as a plain write), `resource: "<filename>"`, `matchedRule: {capability: fs_write, effect: ask}` — reconciles cleanly with the plan's own recorded P4 payload for a plain write |
+
+**A capability not covered by any agent-scope rule inherits this machine's user-scope `allow-all`,
+not kiro-cli's documented ask-by-default** — measured directly (live probe, 2026-09-22): an agent
+whose only rule was `{capability: fs_read, match: ["./**"], effect: allow}` ran an unrelated `shell`
+command (`echo ...`) with zero prompts. This generalizes P5's "blank `permissions:` key" finding to
+"any capability the rule list is silent about," not only a wholly blank block. **Design-affecting
+implication for Phase 1**: the "on" branch's rule list cannot rely on omission defaulting to `ask` —
+every capability the design wants to gate must be named explicitly (subject to the `exclude`
+mechanism above for capabilities needing a mixed allow/ask split).
+
+#### Step 8 — "always allow" persistence
+
+**Answered: not reachable over the ACP protocol surface at all, on kiro-cli 2.22.1 — measured (live
+probe, 2026-09-22).** Every `session/request_permission` captured across this entire phase (11
+distinct requests, across `fs_read`, `fs_write`×2, `shell`×2, `mcp`, `web_fetch`, `web_search`,
+`subagent`, `skill`) offered exactly the same three options: `allow_once` ("Allow"), `reject_once`
+("Deny"), `reject_always` ("Always deny"). **`allow_always` was never once offered.** A probe run
+with `--answer allow_always` against a `shell: ask` rule confirmed this directly: no option of that
+kind existed, so the harness's documented fallback (verb-prefix match) selected `allow_once` instead.
+Diffed paths, before vs. after: `~/.kiro/agents/kiro_default.md`,
+`~/.kiro/agents/agent_config.json.example`, `~/.kiro/settings/permissions.yaml`, and
+`~/.kiro/workspace-roots/*/permissions.yaml` (all 12 directories) — **zero differences** apart from
+the probe agent file's own hash, which changed only because this phase rewrote its content between
+measurements (expected, not kiro-cli's doing). Combined with the plan's own already-recorded P3
+finding (`reject_always` "persists nothing to disk"), the conclusion is: **the ACP surface PowerAtlas
+actually drives cannot widen the permission posture at all, in either direction** — a
+design-favorable asymmetry worth stating in Phase 1/7's documentation rather than only in this
+section.
+
+#### Step 9 — `~/.kiro` baseline, by filename and hash
+
+Recorded before any Phase 0 probe touched the directory (2026-09-22T07:32:02Z) and reconfirmed
+identical after every mutating step, with the probe agent removed each time before the next:
+
+| File | SHA-256 |
+|---|---|
+| `~/.kiro/agents/kiro_default.md` | `4db4781968fa232cc643c46a3cbf5745b4f3b48d4399ce0482518b27e024ee16` |
+| `~/.kiro/agents/agent_config.json.example` | `1c2b829d84131c73627b973cf07c1f4bab521e9d1ab8d17de75691745432094e` |
+| `~/.kiro/settings/permissions.yaml` | `f8a0d44394b5b2a23ff363b69538911caeda28c97604ad7d6825b93ec40146c8` (matches the plan's own § 7 baseline, unchanged since 2026-09-21) |
+| `~/.kiro/workspace-roots/2d86113386de3488/permissions.yaml` | `114202c326e1dbe3ae7f09a06e29763b8b39c1715e6f9e6dec4da7d0fdb2925f` (pre-existing, 3 `mcp` allow rules for zoho/atlassian/playwright tool names — this is the "live MCP consent rules" the plan's own Current State already noted; not written by this phase) |
+| `~/.kiro/workspace-roots/*` (other 11 dirs) | no `permissions.yaml` present, before or after |
+
+**Expected churn, not a restoration failure**: `~/.kiro/sessions/` and `~/.kiro/session-index/` gain
+new entries on every probe run (kiro-cli's own session-history bookkeeping, unrelated to permission
+state) — not diffed further, and never restored, since nothing in the plan's threat model concerns
+that directory. No new `~/.kiro/workspace-roots/*` directory was created by any probe in this phase,
+despite each one using a distinct-from-production cwd — kiro-cli did not register the scratch probe
+cwd as its own workspace root within this phase's measurements. Final state, verified 2026-09-22:
+**identical to the baseline above**, byte-for-byte on every hashed file, with zero probe agent files
+remaining under `~/.kiro/agents/`.
+
+#### Gate statement
+
+**The design does not fully hold as stated, and this phase does not fix it.** Specifically:
+
+1. **D-13's deny floor, as literally specified, is not the guarantee SC-1 implies.** It blocks the
+   exact string it was written against and nothing else — a case change, a built-in shell alias, or a
+   no-op path segment each defeat it, matching the public, repeated experience of the very list D-13
+   cites as precedent. Whether the floor is re-scoped as explicit best-effort defense-in-depth (with
+   SC-1's language softened to match), or whether Phase 1 attempts broader pattern coverage
+   (enumerating case/alias variants per entry — itself an arms race the public trackers show never
+   fully closes), or something else, is a design decision for the orchestrator/user, not made here.
+2. **The floor must be authored per-platform.** POSIX `rm -rf` patterns are inert against this
+   machine's PowerShell-backed shell tool. A cross-platform PowerAtlas install needs either
+   platform-aware floor generation or floor entries covering both idioms.
+3. **The "on" branch's rule-assembly algorithm cannot use a same-capability (or `all`) catch-all
+   `ask` beside narrower `allow` rules** — most-restrictive-wins silently defeats the narrower rule
+   with no error. The `exclude` field is the mechanism that works instead, and Phase 1's design as
+   currently sketched ("deny floor + (allow-all | transcribed defaults)") does not yet account for
+   this.
+4. **Six of the seven previously-unexercised capabilities are confirmed correctly gated** (`mcp`,
+   `web_fetch`, `web_search`, `subagent`, `skill`, and `fs_write`/deletion all fire under `ask` and
+   are controllable). `power` remains untested (no installed powers on this machine). This part of
+   the design premise holds.
+5. **"Always allow" cannot be reached over the ACP surface at all**, so R-15's concern does not
+   apply to this delivery path specifically — the design is *more* favorable here than the plan
+   assumed, not less.
+6. **A malformed derived-agent frontmatter fails open, silently, exactly as R-10/SC-8 predict** —
+   demonstrated live, by accident, in this phase. Phase 1 needs a real post-generation confirmation
+   step; `kiro-cli agent validate` does not currently serve that role for `.md`-format agents.
+
+None of these are attempted fixes — per this phase's brief, that decision belongs to the
+orchestrator/user before Phase 1 proceeds.
 
 ## Follow-up Work (Deferred)
 
@@ -926,3 +1293,8 @@ guard that validates declared annotations cannot catch an annotation that should
   citing line numbers from an intermediate revision — cost: its per-line citations against that one
   file had to be treated as indicative rather than exact — suggested change: have `/qplan` dispatch the
   doc-impact scan either before the plan body is written or after it is committed, not concurrently.
+- **Override recorded (2026-09-22, `/qdev` invocation)**: user instructed 1 `/qreview` cycle per phase
+  (default: 2, cap-gated). No tier was declared in the header blockquote; `/qdev` inferred Major from
+  the plan's own structure (Dependency Graph, Risk Assessment, 4-persona plan review) and applied
+  `effort: full` at Step 9 accordingly — cost: none yet; recurring absence of an explicit tier would be
+  worth a `/qplan` template default — suggested change: none required unless this recurs.
