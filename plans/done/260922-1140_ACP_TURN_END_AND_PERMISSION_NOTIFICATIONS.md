@@ -1,7 +1,8 @@
 # ACP Turn-End and Permission-Needed Notifications
 
 > **Date**: 2026-09-19
-> **Status**: In Progress — implemented, unit-verified and runtime-verified; 3 claims unexercised (see QA)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Last Updated**: 2026-09-22 11:40
+> **Status**: Complete  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Scope**: Tell the operator, outside the page, that an ACP-hosted turn finished or is blocked on their approval.
 
 ---
