@@ -67,7 +67,12 @@ ACP* action on any kiro-cli session row, or by opening `/acp` directly.
   panel next to the rail — works for every provider, reading straight from disk. For a kiro-cli v3
   session that is already running live elsewhere, the panel auto-attaches and streams further output;
   for one that is not, a composer lets you send a prompt to spawn it live, without leaving the
-  dashboard for `/acp`
+  dashboard for `/acp`. The panel carries the same live-session tools `/acp` does: slash-command and
+  skill autocomplete, a context-window usage indicator, a tap-to-copy workspace/session-id widget, a
+  debug/transport log panel, Queue and Steer send modes with a Stop button, paste-or-drag image
+  attachments, a read-only sub-agent/crew panel for fan-outs, and automatic reconnect with exponential
+  backoff if the connection drops. `/acp` remains the only surface reachable from another device — the
+  dashboard's panel is loopback-only, like the rest of the dashboard
 - Drive kiro-cli sessions from the browser at `/acp`, with no terminal — create a session or resume an
   exited one over ACP, stream the agent's output, cancel a turn, close the session, queue a prompt for
   after the current turn, or steer the agent mid-turn. Paste a screenshot

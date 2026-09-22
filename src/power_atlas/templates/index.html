@@ -321,6 +321,16 @@
       <button class="acp-btn acp-log-toggle" id="dashLogToggle" type="button"
               aria-expanded="false" aria-controls="dashLog">Debug log<span
               class="acp-log-toggle-chevron" aria-hidden="true"></span></button>
+      <!-- WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase
+           6) -- mirrors acp.html's own #acpReconnect/#acpReload
+           (acp.html:163-164). Both hidden until dashConnect()'s onclose
+           handler decides which applies: Reconnect for an ordinary drop
+           (already auto-retried by the backoff timer below -- this button is
+           a manual retry-now escape hatch), Reload for a stale-token
+           handshake rejection or a failed session load, neither of which a
+           reconnect attempt alone can recover from. -->
+      <button class="acp-btn" id="dashReconnect" type="button" hidden>Reconnect</button>
+      <button class="acp-btn" id="dashReload" type="button" hidden>Reload page</button>
       <!-- Mirrors /acp's own #acpClose: same "hidden unless attached,
            disabled under a live turn (the server refuses a close then
            anyway)" rule, but independent of dashCloseIfAbandoned's
@@ -875,6 +885,25 @@ function dashWsUrl(){
   return scheme + '//' + location.host + WS_PATH + '?t=' + encodeURIComponent(ACP_TOKEN);
 }
 var _dashWs = null;
+// WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase 6) --
+// mirrors acp.html's own _reconnectTimer/_reconnectDelay (acp.html:730-731)
+// exactly, dash-prefixed. _dashOpened mirrors acp.html's connect()'s own
+// `opened` (acp.html:5323, reset at the top of connect()/dashConnect() and
+// set true in onopen): true once THIS connection attempt's onopen has
+// fired -- onclose reads it to decide whether the drop is an ordinary
+// transient one (reconnect with backoff) or the handshake itself was
+// refused (diagnose instead -- see dashDiagnoseRejectedHandshake() below).
+// _dashReconnectQueueSnapshot exists only to survive dashHandle()'s own
+// `session`-frame case, which (Fix 1, Phase 3 review) unconditionally
+// clears _dashQueuedPrompt/_dashQueuedPromptSession for the current sid --
+// see dashConnect()'s onclose and dashHandle()'s `session` case below for
+// the full snapshot/restore mechanism this correction requires.
+var _dashReconnectTimer = null;
+var _dashReconnectDelay = 1000; // ms; doubles each attempt, capped at 30000
+var _dashOpened = false;
+var _dashReconnectQueueSnapshot = null; // {text, sid} or null
+var dashReconnectBtn = document.getElementById('dashReconnect');
+var dashReloadBtn = document.getElementById('dashReload');
 // Returns whether the frame actually left, mirroring acp.html's own send().
 // A true global (this page's scripts carry no IIFE — see the comment on
 // initTranscriptDom above) is what lets transcript-renderer.js's
@@ -894,21 +923,66 @@ function send(type, payload, sid){
   logLine('out', '→ ' + type);
   return true;
 }
+// Mirrors acp.html's own reportStaleToken() (acp.html:5276-5290) -- the
+// /acp token (ACP_TOKEN above, shared with this page's own WS handshake) is
+// regenerated on every PowerAtlas launch and baked into the page at render
+// time, so a handshake refused while the server answers an ordinary GET
+// means this tab was served by an earlier, now-exited process. Reconnect
+// would replay the dead token forever; only a reload picks up the live one.
+function dashReportStaleToken() {
+  logLine('error', 'handshake rejected while the server is up: this tab was served ' +
+                   'by an earlier PowerAtlas process, and the /acp token is ' +
+                   'regenerated every launch. Reload to pick up the current one.');
+  dashReconnectBtn.hidden = true;
+  dashReloadBtn.hidden = false;
+}
+// Mirrors acp.html's own diagnoseRejectedHandshake() (acp.html:5292-5314):
+// no onopen fired, so the handshake itself was refused. web.py closes before
+// accept(), which the browser reports as an empty-reason 1006 -- from the
+// close event alone, indistinguishable from there being no server at all.
+// Ask the server directly: an ordinary GET of this same page succeeding
+// means the server is up and the token is what is stale.
+function dashDiagnoseRejectedHandshake() {
+  dashReconnectBtn.hidden = true;
+  fetch(location.pathname + location.search, {
+    cache: 'no-store',
+    credentials: 'same-origin'
+  }).then(function (res) {
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    dashReportStaleToken();
+  }).catch(function () {
+    logLine('info', 'the server is not answering — it may still be starting. ' +
+                    'Reconnect once it is back up.');
+    dashReconnectBtn.hidden = false;
+  });
+}
 // Opens the socket if needed (reused across session switches within one page
 // load, same as acp.html's single `ws`) and runs `onReady` once it is open —
-// immediately if a connection is already up. No reconnect-on-drop for this
-// MVP: a dropped socket silently ends live-attach until the next full page
-// load, which is never worse than the static transcript Phase 2 already
-// renders underneath it. (Phase 6, SC7, adds reconnect-on-drop once the full
-// state surface Phases 1-5 introduce exists to restore.)
+// immediately if a connection is already up. SC7 (Phase 6): an unexpected
+// drop after a successful open schedules an automatic reconnect with
+// exponential backoff (mirrors acp.html's own connect(), acp.html:5316-5392,
+// timing constants exactly), and restores or cleanly tears down the full
+// state surface Phases 1-5 introduced -- see the onclose handler below.
 function dashConnect(onReady){
   if (_dashWs && _dashWs.readyState === WebSocket.OPEN) { if (onReady) onReady(); return; }
   if (_dashWs && _dashWs.readyState === WebSocket.CONNECTING) {
     if (onReady) { var prev = _dashWs.onopen; _dashWs.onopen = function(e){ if (prev) prev(e); onReady(); }; }
     return;
   }
+  // Cancel any pending backoff timer -- mirrors acp.html's own connect()
+  // (acp.html:5319), preventing a double-connect when the manual Reconnect
+  // button is pressed while a timer is already scheduled.
+  if (_dashReconnectTimer) { clearTimeout(_dashReconnectTimer); _dashReconnectTimer = null; }
+  dashReconnectBtn.hidden = true;
+  dashReloadBtn.hidden = true;
+  _dashOpened = false;
   _dashWs = new WebSocket(dashWsUrl());
   _dashWs.onopen = function(e){
+    _dashOpened = true;
+    // SC7: successful open -- reset backoff and cancel any pending retry
+    // timer, mirroring acp.html's own ws.onopen (acp.html:5332-5334).
+    _dashReconnectDelay = 1000;
+    if (_dashReconnectTimer) { clearTimeout(_dashReconnectTimer); _dashReconnectTimer = null; }
     // Mirrors acp.html's ws.onopen logLine call.
     logLine('info', 'socket open to ' + location.host);
     if (onReady) onReady(e);
@@ -928,14 +1002,125 @@ function dashConnect(onReady){
     }
     dashHandle(frame);
   };
-  // Logging only here -- no state reset, no reconnect scheduling. Those
-  // belong to Phase 6 (SC7), which needs the full Phases 1-5 state surface to
-  // restore correctly; this handler's sole job for now is what acp.html's own
-  // ws.onclose already does first, unconditionally: say the socket dropped.
   _dashWs.onclose = function(ev){
     logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
+
+    // ---- SC7 (Phase 6): restore or tear down the full Phases 1-5 state ----
+    // ---- surface a drop leaves behind -------------------------------------
+
+    // Snapshot the Queue-mode prompt BEFORE anything below runs, and before
+    // any reconnect's re-subscribe can land a fresh `session` frame.
+    // dashHandle()'s `session` case (Fix 1, Phase 3 review) unconditionally
+    // clears _dashQueuedPrompt/_dashQueuedPromptSession for the current sid
+    // -- a deliberate fix for a different bug (a stale pre-crash queue
+    // auto-sending into an unrelated later turn). Setting these two back
+    // BEFORE the reconnect's re-subscribe would be undone the instant that
+    // frame lands; the snapshot survives it instead, and is re-applied by
+    // dashHandle()'s `session` case itself once that clear has already run
+    // (see that case for the other half of this mechanism, including why a
+    // still-active turn restores to the live queue but a turn that ended
+    // while disconnected does not).
+    _dashReconnectQueueSnapshot = (_dashQueuedPrompt !== null)
+      ? {text: _dashQueuedPrompt, sid: _dashQueuedPromptSession}
+      : null;
+
+    // A load or create in flight when the socket dropped must not leave the
+    // composer stuck under "Starting the agent…"/a pending-create with no
+    // recovery path -- mirrors acp.html's own onclose (acp.html:5353-5359,
+    // setPending(false)/pendingCreate=null/setTurn(false)/setLoading(null)).
+    // Harmless (a no-op reset to the same default) when nothing was in
+    // flight, exactly like acp.html's own unconditional resets here.
+    _dashLoadingSid = null;
+    _dashPendingSend = null;
+    _dashPendingImages = null;
+    _dashPendingCreate = null;
+    _dashTurnActive = false;
+    // _dashOrigin, unlike the above, is not in-flight-tracking state that
+    // defaults to a falsy value when nothing was pending -- it is meaningful
+    // for an ALREADY-CONFIRMED attach (_dashAttachedSid set), read later by
+    // dashCloseIfAbandoned() to decide whether this page must auto-close the
+    // session on navigate-away. Clearing it unconditionally would silently
+    // lose that fact across every reconnect. _dashAttachedSid itself is
+    // deliberately left untouched here too -- mirrors acp.html keeping
+    // `sessionId` across a drop so ws.onopen's own resubscribe (below) knows
+    // what to resubscribe to.
+    if (!_dashAttachedSid) {
+      _dashOrigin = null;
+    }
+
+    // A steer in flight when the socket dropped: restore the textarea so the
+    // user can retry -- the steer_ack that would have cleared it is never
+    // coming on a dead socket. Mirrors acp.html's own onclose
+    // (acp.html:5360-5371).
+    if (_dashSteerPending) {
+      dashPromptInput.value = _dashSteerPending;
+      _dashSteerPending = null;
+      dashPromptInput.disabled = false;
+      dashSendModeBtn.disabled = false;
+      dashModeToggle.disabled = false;
+    }
+    _dashStopInProgress = false;
+
+    // Close any open sub-agent panel and explicitly close/null dashSubWs --
+    // it has no reconnect loop of its own and must not be left orphaned
+    // holding a MAX_CONNECTIONS slot while the main socket is down. Reuses
+    // the dashCloseSubWs() helper Phase 5's review-fix cycle already added
+    // for exactly this call (Follow-up Work, "Phase 6 ready-made helper").
+    // Crew-panel setInterval timers are not touched here directly -- the
+    // reconnect's re-subscribe lands a fresh `session`/`history` frame,
+    // whose existing dashRemoveAllCrewPanels()/closeSubagentView() guards
+    // (wired live since Phase 5) tear them down the same way any other
+    // history reload already does.
+    dashCloseSubagentView();
+    dashCloseSubWs();
+
+    // A mid-turn command palette cannot be acted on across a drop -- close
+    // it rather than attempt to preserve its state, mirroring the palette's
+    // existing hideCommandDropdown() call on every other turn-state
+    // transition (e.g. meta turn:start above).
+    hideCommandDropdown();
+
+    // Re-render the image tray from the current dashAttachments/
+    // dashPendingAttachments (Phase 4 state, untouched by a drop -- the
+    // staged images are locally-held blobs, still valid) -- a deliberate,
+    // explicit re-render rather than an assumption the DOM already reflects
+    // them, since the composer-visibility changes above may have left it
+    // stale.
+    dashRenderTray();
+
+    dashRefreshComposerControls();
+    dashUpdateCloseButton();
+
+    if (_dashOpened) {
+      if (_dashReconnectTimer) { clearTimeout(_dashReconnectTimer); _dashReconnectTimer = null; }
+      dashReconnectBtn.hidden = false;
+      // SC7: schedule automatic reconnect with exponential backoff. The
+      // manual Reconnect button (wired below) still works, calling
+      // dashConnect() directly with the same resubscribe onReady.
+      _dashReconnectTimer = setTimeout(function() {
+        _dashReconnectTimer = null;
+        dashConnect(dashReconnectOnReady);
+      }, _dashReconnectDelay);
+      _dashReconnectDelay = Math.min(_dashReconnectDelay * 2, 30000);
+    } else {
+      dashDiagnoseRejectedHandshake();
+    }
   };
 }
+// Re-subscribes to whatever session this page was attached to before the
+// drop -- mirrors acp.html's own ws.onopen (acp.html:5337, `if (sessionId)
+// send('subscribe', {}, sessionId);`): a reconnect recovers an existing
+// view, it does not originate a new lazy-attach (that is dashSendPrompt()'s
+// own dashConnect(function(){ send('load', ...) }) call, untouched by this
+// phase). _dashAttachedSid, not _viewingSid: a reconnect has nothing to
+// resubscribe to for a session this page was only statically browsing
+// (never live-attached), and _dashAttachedSid is exactly the fact that
+// distinguishes the two, kept intact across the drop above for this reason.
+function dashReconnectOnReady() {
+  if (_dashAttachedSid) send('subscribe', {}, _dashAttachedSid);
+}
+dashReconnectBtn.addEventListener('click', function(){ dashConnect(dashReconnectOnReady); });
+dashReloadBtn.addEventListener('click', function(){ location.reload(); });
 var dashComposerEl = document.getElementById('dashComposer');
 // Image tray (SC6, dashboard/ACP feature-parity plan Phase 4) -- mirrors
 // acp.html's own trayEl (acp.html:588).
@@ -2425,6 +2610,10 @@ function dashCloseIfAbandoned(){
   // session's mode buttons stuck disabled.
   _dashQueuedPrompt = null;
   _dashQueuedPromptSession = null;
+  // A reconnect's snapshot (Phase 6, SC7) belonged to the session just
+  // walked away from too -- a stale snapshot must not resurface a
+  // discarded queue at some unrelated future reconnect.
+  _dashReconnectQueueSnapshot = null;
   _dashStopInProgress = false;
   if (_dashSteerPending) {
     dashSendModeBtn.disabled = false;
@@ -2532,6 +2721,40 @@ function dashHandle(frame){
     // this fresh attach's turn lifecycle and auto-send into the wrong turn.
     _dashQueuedPrompt = null;
     _dashQueuedPromptSession = null;
+    // Phase 6 (SC7): re-apply a reconnect's snapshot of the pre-drop queue
+    // state -- dashConnect()'s onclose handler cannot simply set these two
+    // before the reconnect's re-subscribe: the clear directly above (Fix 1,
+    // Phase 3 review) would immediately undo it. Only applies for the
+    // session the queue belonged to, and the snapshot is discarded
+    // afterward either way, so it can never leak into an unrelated later
+    // session frame (a plain session switch that happens to follow a
+    // reconnect, for example).
+    if (_dashReconnectQueueSnapshot && _dashReconnectQueueSnapshot.sid === sid) {
+      if (payload.turnActive) {
+        // The turn the prompt was queued behind is still running -- restore
+        // to the live queue variables so the existing meta turn:end flush
+        // (below) sends it normally, exactly as if the connection had never
+        // dropped.
+        _dashQueuedPrompt = _dashReconnectQueueSnapshot.text;
+        _dashQueuedPromptSession = _dashReconnectQueueSnapshot.sid;
+      } else {
+        // The turn ended while this page was disconnected -- the meta
+        // turn:end that would have flushed it was missed, and no future one
+        // is coming for this prompt specifically. Restoring to the live
+        // queue variables here would recreate the exact bug Fix 1 (Phase 3
+        // review) closed: a stale prompt silently auto-sending into a later,
+        // unrelated turn. Surface it in the textarea instead, mirroring
+        // acp.html's own _steerPending restore-to-textarea pattern, so the
+        // user decides whether to send it.
+        if (dashPromptInput.value.trim()) {
+          addMessage('note', 'Queued prompt not restored — you typed a new prompt while disconnected.');
+        } else {
+          dashPromptInput.value = _dashReconnectQueueSnapshot.text;
+          addMessage('note', 'The turn finished while disconnected — your queued prompt was not sent. Restored to the prompt box.');
+        }
+      }
+    }
+    _dashReconnectQueueSnapshot = null;
     _dashAttachedSid = sid;
     _dashTurnActive = !!payload.turnActive;
     _dashLoadingSid = null;
@@ -2912,6 +3135,9 @@ function dashHandle(frame){
     // so the composer is usable once a new session is opened).
     _dashQueuedPrompt = null;
     _dashQueuedPromptSession = null;
+    // A reconnect's snapshot (Phase 6, SC7) belonged to the session just
+    // released too -- same reasoning as dashCloseIfAbandoned()'s reset.
+    _dashReconnectQueueSnapshot = null;
     _dashStopInProgress = false;
     if (_dashSteerPending) {
       dashSendModeBtn.disabled = false;
@@ -2965,6 +3191,10 @@ function dashHandle(frame){
     // auto-send this stale pre-crash text into the wrong turn.
     _dashQueuedPrompt = null;
     _dashQueuedPromptSession = null;
+    // A reconnect's snapshot (Phase 6, SC7) belonged to this now-dead
+    // agent's session too -- same reasoning as the _dashQueuedPrompt clear
+    // immediately above.
+    _dashReconnectQueueSnapshot = null;
     setDashSteerStatus('');
     // Images staged against this now-dead agent too (SC6, Phase 4) -- there
     // is nothing left to send them to, mirroring the Queue/Steer clear
@@ -3121,7 +3351,18 @@ function dashHandle(frame){
     // textarea to begin with -- the typed text stays visible (disabled,
     // under the "Starting the agent…" note) for exactly this outcome, so
     // there is nothing to restore here, only to re-enable.
-    if (sid && sid === _dashLoadingSid) { _dashLoadingSid = null; _dashPendingSend = null; _dashPendingImages = null; }
+    if (sid && sid === _dashLoadingSid) {
+      _dashLoadingSid = null;
+      _dashPendingSend = null;
+      _dashPendingImages = null;
+      // Phase 6 (SC7): mirrors acp.html's own reportLoadFailure()
+      // (acp.html:1272-1284) -- the socket itself is fine (no onclose here),
+      // but this specific session's load failed and nothing else will retry
+      // it. Offers the same reload recovery a stale-token handshake
+      // rejection shows, for the same underlying reason: nothing left this
+      // connection can do about it on its own.
+      dashReloadBtn.hidden = false;
+    }
     var errText = (payload && typeof payload.message === 'string') ? payload.message : 'The agent refused that.';
     showToast('<div class="toast toast-error">' + _escHtml(errText) + '<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
     dashSetComposerNote('');

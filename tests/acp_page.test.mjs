@@ -10446,6 +10446,15 @@ const DASH_IMAGE_ATTACH_NAMES = [
   "dashRemoveAttachment", "dashClearAttachments", "dashReleasePendingAttachments",
   "dashRevokeAttachment", "function dashSendPrompt",
 ];
+// SC7 (WS reconnect-on-drop, dashboard/ACP feature-parity plan Phase 6) --
+// guards against dashConnect()'s reconnect/backoff machinery, or the
+// stale-token diagnosis it defers to, silently moving out of this region.
+const DASH_CONNECT_NAMES = [
+  "function dashConnect", "_dashReconnectTimer", "_dashReconnectDelay",
+  "_dashOpened", "_dashReconnectQueueSnapshot", "dashReportStaleToken",
+  "dashDiagnoseRejectedHandshake", "dashReconnectOnReady",
+  "dashReconnectBtn.addEventListener", "dashReloadBtn.addEventListener",
+];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
@@ -10584,11 +10593,35 @@ function dashPickerSource() {
     }
   }
 
-  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion };
+  // WS reconnect-on-drop region (SC7, dashboard/ACP feature-parity plan
+  // Phase 6): from dashWsUrl's declaration (dashConnect's own dependency)
+  // through immediately before dashComposerEl's declaration -- covers
+  // _dashWs/the reconnect-timer state, send(), dashReportStaleToken(),
+  // dashDiagnoseRejectedHandshake(), dashConnect() itself, and the
+  // Reconnect/Reload button wiring. Loaded only when a check opts in
+  // (loadDashPicker({realConnect: true})) -- see that function's own header
+  // comment for why: this region's real dashConnect() waits on a real
+  // WebSocket's onopen before firing its onReady callback, unlike the
+  // synchronous no-op stub every other region's checks are written against
+  // (dashSendPrompt()'s own lazy-attach path, the picker's session-creation
+  // flow), so it must never run unconditionally.
+  const wsUrlFrom = src.indexOf("function dashWsUrl(){");
+  if (wsUrlFrom < 0) throw new Error("index.html no longer defines dashWsUrl");
+  const connectTo = src.indexOf("var dashComposerEl = document.getElementById('dashComposer');", wsUrlFrom);
+  if (connectTo < 0) throw new Error("index.html's dashConnect region no longer precedes dashComposerEl's declaration");
+  const connectRegion = src.slice(wsUrlFrom, connectTo);
+  for (const name of DASH_CONNECT_NAMES) {
+    if (!connectRegion.includes(name)) {
+      throw new Error(
+        `the extracted connect region does not contain ${name}; it has moved`);
+    }
+  }
+
+  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion };
 }
 
 function loadDashPicker(opts = {}) {
-  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion } = dashPickerSource();
+  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10623,6 +10656,17 @@ function loadDashPicker(opts = {}) {
   // must too: without them, the `dashHandle creation branch …` checks further
   // down (which already send a `session` frame with a real `cwd`) would throw
   // a ReferenceError the moment that widened code runs.
+  // WS reconnect-on-drop DOM refs (SC7, dashboard/ACP feature-parity plan
+  // Phase 6) -- pre-set exactly like dashContext/etc. below: dashConnect()'s
+  // own top-level `document.getElementById` calls (connectRegion, loaded
+  // only when opts.realConnect is true) look these up at parse time, and its
+  // own `dashReconnectBtn.addEventListener(...)`/`dashReloadBtn.
+  // addEventListener(...)` calls run at parse time too. Matches the real
+  // markup's `hidden` attribute.
+  byId.set("dashReconnect", new El("button"));
+  byId.get("dashReconnect").hidden = true;
+  byId.set("dashReload", new El("button"));
+  byId.get("dashReload").hidden = true;
   byId.set("dashContext", new El("span"));
   byId.get("dashContext").hidden = true;
   byId.set("dashContextFill", new El("span"));
@@ -10666,6 +10710,9 @@ function loadDashPicker(opts = {}) {
   const dashSendPromptCalls = [];
   const systemMessages = [];
   const addMessageCalls = [];
+  // Whether location.reload() has been called (SC7, dashboard/ACP
+  // feature-parity plan Phase 6) -- dashReloadBtn's click handler.
+  let dashReloaded = false;
   // renderTranscriptHistory() call log (SC6, Phase 4) -- see the sandbox
   // stub below.
   const historyRenders = [];
@@ -10795,6 +10842,12 @@ function loadDashPicker(opts = {}) {
     addEventListener: () => {},
     fetch: (url, init) => {
       fetches.push({ url, init: init || {} });
+      // opts.fetchFails (SC7, dashboard/ACP feature-parity plan Phase 6):
+      // simulates a server that is not answering at all -- the branch
+      // dashDiagnoseRejectedHandshake()'s own .catch() covers, distinct from
+      // the default resolved-ok response below, which is what drives it to
+      // dashReportStaleToken() instead.
+      if (opts.fetchFails) return Promise.reject(new Error("network error"));
       return Promise.resolve({
         ok: true, status: 200,
         json: () => Promise.resolve(opts.workspacesResponse ?? {
@@ -10826,6 +10879,17 @@ function loadDashPicker(opts = {}) {
     _dashSteerPending: opts.dashSteerPending !== undefined ? opts.dashSteerPending : null,
     _dashStopInProgress: opts.dashStopInProgress !== undefined ? opts.dashStopInProgress : false,
     _dashSteerStatusTimer: null,
+    // WS reconnect-on-drop state (SC7, dashboard/ACP feature-parity plan
+    // Phase 6) -- dashHandle's `session`/`session_closed`/agent_died` cases
+    // (handleRegion, always loaded) reference _dashReconnectQueueSnapshot as
+    // a free variable regardless of whether this check opts into
+    // realConnect, so it must be pre-set here unconditionally, the same way
+    // _dashQueuedPrompt/etc. above are. dashReconnectBtn/dashReloadBtn are
+    // likewise referenced by dashHandle's `error` case (the reportLoadFailure
+    // parity branch) unconditionally.
+    _dashReconnectQueueSnapshot: opts.dashReconnectQueueSnapshot !== undefined ? opts.dashReconnectQueueSnapshot : null,
+    dashReconnectBtn: byId.get("dashReconnect"),
+    dashReloadBtn: byId.get("dashReload"),
     dashStopBtn: dashStopBtnEl,
     dashQueueSteerEl: dashQueueSteerElEl,
     dashSendModeBtn: dashSendModeBtnEl,
@@ -11015,11 +11079,24 @@ function loadDashPicker(opts = {}) {
     // connectSubWs(), which has no dependency on connect() either).
     WebSocket: DashFakeSubWs,
     dashWsUrl: () => "ws://test.invalid/ws/acp",
+    // WS_PATH (SC7, dashboard/ACP feature-parity plan Phase 6): the real
+    // dashWsUrl (connectRegion, loaded only when opts.realConnect is true)
+    // reads this as a free variable -- it is declared just before dashWsUrl
+    // in the real file, outside the extracted region, which starts at
+    // dashWsUrl's own declaration.
+    WS_PATH: "/ws/acp",
     // dashConnectSubWs()'s onopen/onerror logLine calls read location.host
     // (Fix 7, Phase 5 review, mirroring dashConnect()'s own onopen logLine
     // call) -- this sandbox has no browser `location` global otherwise,
     // unlike the acp.html-side harness's loadPage() (this file, ~line 886).
-    location: { protocol: "http:", host: "test.invalid" },
+    // pathname/search/reload (SC7, Phase 6): dashDiagnoseRejectedHandshake()
+    // fetches location.pathname + location.search, and dashReloadBtn's click
+    // handler calls location.reload() -- recorded, not a no-op, so a check
+    // can assert a reload was actually requested.
+    location: {
+      protocol: "http:", host: "test.invalid", pathname: "/", search: "",
+      reload: () => { dashReloaded = true; },
+    },
     console: { log() {}, warn() {}, error() {} },
   };
   // Image API globals (SC6, dashboard/ACP feature-parity plan Phase 4) --
@@ -11131,6 +11208,32 @@ function loadDashPicker(opts = {}) {
   vm.runInContext(crewSubagentRegion, sandbox, { filename: "index.html#dash-crew-subagent" });
   vm.runInContext(handleRegion, sandbox, { filename: "index.html#dashHandle" });
   vm.runInContext(pickerRegion, sandbox, { filename: "index.html#dash-picker" });
+  // WS reconnect-on-drop (SC7, dashboard/ACP feature-parity plan Phase 6) --
+  // opt-in only (see connectRegion's own header comment in dashPickerSource()
+  // for why): overwrites the synchronous no-op dashConnect stub set in the
+  // sandbox literal above with the real dashConnect()/dashWsUrl()/
+  // dashReportStaleToken()/dashDiagnoseRejectedHandshake(), and wires the
+  // real Reconnect/Reload buttons. Run last -- by this point every function
+  // dashConnect()'s onclose handler reaches as a free variable
+  // (dashRefreshComposerControls, dashCloseSubagentView, dashCloseSubWs,
+  // hideCommandDropdown, dashRenderTray, dashUpdateCloseButton, dashHandle
+  // itself via onmessage) is already real source from the regions above, not
+  // a stub -- exactly what a check driving a full reconnect (drop -> backoff
+  // -> reopen -> resubscribe -> session frame -> dashHandle) needs.
+  if (opts.realConnect) {
+    vm.runInContext(connectRegion, sandbox, { filename: "index.html#dash-connect" });
+    // connectRegion's own real `function send(...)` (it necessarily includes
+    // send() -- dashConnect() sits between it and dashWsUrl() in the real
+    // file) just overwrote the shared sentFrames-recording stub set in the
+    // sandbox literal above. Every other region's checks, and this region's
+    // own dashReconnectOnReady(), are written against that stub (send()
+    // returns true and records into sentFrames unconditionally, rather than
+    // actually gating on a fake socket's readyState and writing into ITS OWN
+    // `.sent` array) -- restore it so `sentOf()`/`sentFrames` stay the
+    // single source of truth a check reads, exactly as before this region
+    // loaded.
+    sandbox.send = (type, payload, sid) => { sentFrames.push({ type, payload, sid }); return true; };
+  }
 
   return {
     sandbox,
@@ -11235,6 +11338,49 @@ function loadDashPicker(opts = {}) {
       s.readyState = 3;
       if (s.onclose) s.onclose(ev ?? { code: 1000, reason: "" });
     },
+    // ---- WS reconnect-on-drop helpers (SC7, dashboard/ACP feature-parity
+    // plan Phase 6) -- only meaningful with loadDashPicker({realConnect:
+    // true}) (see connectRegion's own header comment). dashConnect()'s main
+    // socket shares the same DashFakeSubWs class and the same dashSubSockets
+    // array dashConnectSubWs()'s own sockets use (both construct `new
+    // WebSocket(dashWsUrl())`, and dashWsUrl() returns an identical URL for
+    // both in production, so there is no way to distinguish them by class or
+    // URL) -- these helpers address by construction order ("mainSocket() is
+    // whichever socket was opened last", mirroring loadPage()'s own
+    // last-opened socket() convention) rather than a fixed index, so a check
+    // that also opens a sub-agent socket (e.g. confirming dashCloseSubWs()
+    // fires on a main-socket drop) still addresses the right one at each
+    // step.
+    /** Whichever socket dashConnect()/dashConnectSubWs() has opened most
+     *  recently. */
+    mainSocket() { return this.subSocket(dashSubSockets.length - 1); },
+    /** How many sockets have been constructed so far, main and sub-agent
+     *  combined. */
+    mainSocketCount() { return dashSubSockets.length; },
+    /** Fire the most-recently-opened socket's onopen handler. */
+    openMain() {
+      const s = this.mainSocket();
+      s.readyState = DashFakeSubWs.OPEN;
+      if (!s.onopen) throw new Error("dashConnect set no onopen handler");
+      s.onopen();
+    },
+    /** Deliver a frame to the most-recently-opened socket's onmessage
+     *  handler. */
+    deliverMain(frame) {
+      const s = this.mainSocket();
+      if (!s.onmessage) throw new Error("dashConnect set no onmessage handler");
+      s.onmessage({ data: JSON.stringify(frame) });
+    },
+    /** Fire the most-recently-opened socket's onclose handler (simulates a
+     *  dropped connection). */
+    closeMain(ev) {
+      const s = this.mainSocket();
+      s.readyState = 3;
+      if (s.onclose) s.onclose(ev ?? { code: 1006, reason: "" });
+    },
+    /** Whether location.reload() has been called (dashReloadBtn's click
+     *  handler). */
+    reloaded() { return dashReloaded; },
   };
 }
 
@@ -13803,6 +13949,399 @@ check("dashboard: sub-agent panel — session_closed/error note text uses textCo
   assert(p.el("dashSubTranscript").textContent.includes(malicious),
     "the sub-agent's session_closed note must render as literal text");
   assert(!p.sandbox._dash_sub_note_xss, "the onerror handler must not fire -- note rendering must not use innerHTML");
+});
+
+// ============================================================================
+// SC7 (WS reconnect-on-drop, dashboard/ACP feature-parity plan Phase 6) --
+// dashConnect()'s real source (connectRegion, loadDashPicker({realConnect:
+// true})) is used throughout, not a hand-rewritten stand-in, for the same
+// reason cmdPaletteRegion/queueSteerWiringRegion/imageAttachRegion/
+// crewSubagentRegion are: the backoff scheduling, the stale-token diagnosis,
+// and the state-restoration logic must be exercised as written. Base
+// mechanics (checks 1-6) mirror acp.html's own SC-3 reconnect tests
+// (tests/acp_page.test.mjs, "auto reconnect scheduled on close when opened"
+// through "onclose while timer pending replaces timer not stacks") one for
+// one, dash-prefixed; the remaining checks cover each state-restoration
+// point 6b's plan text names, including the queue-state restore-ordering
+// correction (Follow-up Work: "Phase 6 design note") with a dedicated case
+// per branch of its turnActive gate.
+// ----------------------------------------------------------------------------
+
+check("dashboard: reconnect — auto reconnect scheduled on close when opened", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  const timersBefore = p.timers.length;
+  p.closeMain({ code: 1006, reason: "" });
+  assert(p.timers.length > timersBefore,
+    "a reconnect timer should be scheduled when the socket closes after being opened");
+  assertEqual(p.el("dashReconnect").hidden, false,
+    "the manual Reconnect button should also appear as an immediate-retry escape hatch");
+  const socketsBefore = p.mainSocketCount();
+  p.runTimers();
+  assert(p.mainSocketCount() > socketsBefore,
+    "the reconnect timer should call dashConnect() and open a new WebSocket");
+});
+
+check("dashboard: reconnect — reconnect delay doubles on each close", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  // onclose does not reset _dashOpened, so firing onclose twice on the same
+  // (already-closed) socket exercises the delay doubling without needing a
+  // successful reconnect and re-open between them -- mirrors acp.html's own
+  // equivalent test's own fixture comment exactly.
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers[p.timers.length - 1].ms, 1000,
+    "first reconnect timer should use 1000ms delay");
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers[p.timers.length - 1].ms, 2000,
+    "second reconnect timer should use doubled 2000ms delay");
+});
+
+check("dashboard: reconnect — reconnect delay capped at 30s", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  // 5 closes bring delay to 30000 (would be 32000 without the cap):
+  // 1k -> 2k -> 4k -> 8k -> 16k -> 30k.
+  for (let i = 0; i < 5; i++) p.closeMain({ code: 1006, reason: "" });
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers[p.timers.length - 1].ms, 30000,
+    "delay should be capped at 30000ms after 6 consecutive closes");
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers[p.timers.length - 1].ms, 30000,
+    "delay should remain at 30000ms once capped");
+});
+
+check("dashboard: reconnect — reconnect delay resets on open", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain({ code: 1006, reason: "" });
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers[p.timers.length - 1].ms, 2000,
+    "fixture: second timer should use 2000ms delay before the reset");
+  p.runTimers();
+  p.openMain(); // opens the new socket the reconnect timer constructed
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers[p.timers.length - 1].ms, 1000,
+    "delay should reset to 1000ms after onopen");
+});
+
+check("dashboard: reconnect — no auto reconnect when not opened; diagnosis runs instead", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect(); // constructs the socket but never opens it
+  const timersBefore = p.timers.length;
+  p.closeMain({ code: 4401, reason: "token expired" });
+  assertEqual(p.timers.length, timersBefore,
+    "no reconnect timer should be scheduled when the socket closes without having been opened");
+  assertEqual(p.el("dashReconnect").hidden, true,
+    "the Reconnect button must not appear on a rejected handshake -- diagnosis decides what to show instead");
+});
+
+check("dashboard: reconnect — onclose while a timer is pending replaces it, not stacks", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers.length, 1, "fixture: the first close should schedule exactly one timer");
+  p.closeMain({ code: 1006, reason: "" });
+  assertEqual(p.timers.length, 1,
+    "a second close while the retry timer is still pending must replace it, not stack a second one");
+});
+
+check("dashboard: reconnect — a stale-token handshake rejection shows Reload only, not Reconnect", async () => {
+  // Default fetch stub resolves { ok: true } -- the server is up, so the
+  // rejected handshake is diagnosed as a stale token.
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.closeMain({ code: 4401, reason: "token expired" }); // never opened
+  await p.settle();
+  assertEqual(p.el("dashReconnect").hidden, true,
+    "Reconnect must stay hidden for a stale-token rejection -- only a reload picks up the live token");
+  assertEqual(p.el("dashReload").hidden, false,
+    "Reload must be shown for a stale-token rejection");
+});
+
+check("dashboard: reconnect — a rejected handshake with the server unreachable shows Reconnect again, not Reload", async () => {
+  const p = loadDashPicker({ realConnect: true, fetchFails: true });
+  p.sandbox.dashConnect();
+  p.closeMain({ code: 1006, reason: "" }); // never opened
+  await p.settle();
+  assertEqual(p.el("dashReconnect").hidden, false,
+    "Reconnect must reappear once the diagnosis concludes the server itself is unreachable");
+  assertEqual(p.el("dashReload").hidden, true,
+    "Reload must not be shown when the server is unreachable -- there is no live token to have gone stale");
+});
+
+check("dashboard: reconnect — clicking Reconnect opens a socket and resubscribes the previously-attached session", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1" });
+  p.el("dashReconnect").dispatch("click");
+  assertEqual(p.mainSocketCount(), 1, "clicking Reconnect should open a WebSocket");
+  p.openMain();
+  const subs = p.sentFrames.filter((f) => f.type === "subscribe");
+  assertEqual(subs.length, 1, "reconnecting should resubscribe to the previously-attached session");
+  assertEqual(subs[0].sid, "sess-1", "the resubscribe must target the previously-attached session id");
+});
+
+check("dashboard: reconnect — a failed session load shows Reload without ever closing the socket (reportLoadFailure parity)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-load-fail" });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox._dashLoadingSid = "sess-load-fail";
+  p.deliverMain({
+    type: "error", sessionId: "sess-load-fail",
+    payload: { code: "agent_start_failed", message: "could not start" },
+  });
+  assertEqual(p.el("dashReload").hidden, false,
+    "a failed session load must show Reload -- mirrors acp.html's own reportLoadFailure(), a socket-level " +
+    "error that never triggers onclose");
+  assertEqual(p.mainSocketCount(), 1,
+    "a load failure is an ordinary error frame on a healthy socket -- it must not itself close or reopen it");
+});
+
+// ---- state-restoration points (6b's own list) --------------------------
+
+check("dashboard: reconnect — a drop resets _dashTurnActive so a stale active-turn UI does not survive it", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", dashTurnActive: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox._dashTurnActive, false, "a socket drop must reset _dashTurnActive to false");
+});
+
+check("dashboard: reconnect — a drop resets lazy-load state (_dashLoadingSid/_dashPendingSend/_dashPendingImages)", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox._dashLoadingSid = "sess-x";
+  p.sandbox._dashPendingSend = "hello";
+  p.sandbox._dashPendingImages = [{ mimeType: "image/png", data: "abc" }];
+  p.closeMain();
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "a drop during lazy-load must clear _dashLoadingSid -- the composer must not stay stuck under " +
+    "'Starting the agent…' with no recovery path");
+  assertEqual(p.sandbox._dashPendingSend, null, "a drop must clear _dashPendingSend");
+  assertEqual(p.sandbox._dashPendingImages, null, "a drop must clear _dashPendingImages");
+});
+
+check("dashboard: reconnect — a drop clears a pending close-then-create", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox._dashPendingCreate = { cwd: "/ws", mode: "kiro_default" };
+  p.closeMain();
+  assertEqual(p.sandbox._dashPendingCreate, null, "a drop must clear a pending close-then-create");
+});
+
+check("dashboard: reconnect — a drop preserves _dashOrigin for an already-attached session", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1" });
+  p.sandbox._dashOrigin = "dashboard";
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox._dashOrigin, "dashboard",
+    "a drop must not clear _dashOrigin for a session already confirmed attached -- " +
+    "dashCloseIfAbandoned() reads it later to decide whether to auto-close on navigate-away, and an " +
+    "unconditional clear here would silently lose that fact across every reconnect");
+});
+
+check("dashboard: reconnect — a drop clears _dashOrigin when no session was confirmed attached yet", () => {
+  const p = loadDashPicker({ realConnect: true }); // _dashAttachedSid defaults to null
+  p.sandbox._dashOrigin = "dashboard"; // e.g. set by dashSendPrompt's lazy-attach path
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox._dashOrigin, null,
+    "a drop during an unconfirmed lazy-load must reset _dashOrigin to its pre-attempt default");
+});
+
+check("dashboard: reconnect — a queued prompt survives the reconnect's session frame when the turn is still active", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "finish this thought";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  p.runTimers(); // fires the reconnect timer -> dashConnect() -> new socket
+  p.openMain();
+  // The re-subscribe's own `session` frame lands: its unconditional clear
+  // (Fix 1, Phase 3 review) runs first, and only THEN does the Phase 6
+  // restore re-apply the snapshot -- the naive "set the live vars before
+  // reconnecting" order would already have lost this by now.
+  p.deliverMain({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/ws", created: false, turnActive: true, contextPercent: null },
+  });
+  assertEqual(p.sandbox._dashQueuedPrompt, "finish this thought",
+    "the queued prompt must survive the reconnect's session frame, restored AFTER it lands, not before");
+  assertEqual(p.sandbox._dashQueuedPromptSession, "sess-1",
+    "the restored queue must still be scoped to the session it was queued against");
+});
+
+check("dashboard: reconnect — a queued prompt is surfaced in the textarea, not silently re-armed, when the turn ended while disconnected", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "finish this thought";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  p.runTimers();
+  p.openMain();
+  p.deliverMain({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/ws", created: false, turnActive: false, contextPercent: null },
+  });
+  assertEqual(p.sandbox._dashQueuedPrompt, null,
+    "a queue whose turn already ended while disconnected must not be re-armed as a live queue -- the " +
+    "meta turn:end that would flush it correctly was missed, and re-arming it would recreate the exact " +
+    "bug Fix 1 (Phase 3 review) closed: a stale prompt auto-sending into a later, unrelated turn");
+  assertEqual(p.sandbox.dashPromptInput.value, "finish this thought",
+    "the prompt must be surfaced in the textarea instead, so the user decides whether to send it");
+});
+
+check("dashboard: reconnect — a queue from a turn that ended while disconnected is discarded, not overwritten, if the user already typed something new", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox._dashQueuedPrompt = "finish this thought";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  p.runTimers();
+  p.openMain();
+  p.sandbox.dashPromptInput.value = "something the user typed while offline";
+  p.deliverMain({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/ws", created: false, turnActive: false, contextPercent: null },
+  });
+  assertEqual(p.sandbox.dashPromptInput.value, "something the user typed while offline",
+    "a queue that ended while disconnected must not clobber text the user has since typed");
+  assert(p.addMessageCalls.some((m) => m.role === "note" && /typed a new prompt/.test(m.text)),
+    "a discard note should explain why the queued prompt was not restored");
+});
+
+check("dashboard: reconnect — a reconnect's queue snapshot for one session is not applied to a different one", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-2" });
+  p.sandbox._dashQueuedPrompt = "belongs to sess-1";
+  p.sandbox._dashQueuedPromptSession = "sess-1";
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  p.runTimers();
+  p.openMain();
+  p.deliverMain({
+    type: "session", sessionId: "sess-2",
+    payload: { sessionId: "sess-2", cwd: "/ws2", created: false, turnActive: true, contextPercent: null },
+  });
+  assertEqual(p.sandbox._dashQueuedPrompt, null,
+    "a queue snapshot must not be applied to a session frame for a different session id");
+});
+
+check("dashboard: reconnect — a drop re-renders the image tray from the currently staged attachments", () => {
+  const p = loadDashPicker({
+    realConnect: true,
+    dashAttachments: [{ mimeType: "image/png", data: "x", bytes: 100, url: "blob:1", name: "a.png" }],
+  });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox.dashTrayEl.hidden = true; // simulate a stale DOM state
+  p.closeMain();
+  assertEqual(p.sandbox.dashTrayEl.hidden, false,
+    "a drop must re-render the tray from dashAttachments, un-hiding it when images are staged");
+  assertEqual(p.trayChips().length, 1, "the re-rendered tray must show the currently staged attachment");
+});
+
+check("dashboard: reconnect — a drop closes any open sub-agent panel and explicitly closes dashSubWs", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: the sub-agent panel should be open");
+  p.openSub(0);
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.el("dashSubPanel").hidden, true, "a main-socket drop must close any open sub-agent panel");
+  assertEqual(p.sandbox.dashSubWs, null,
+    "a main-socket drop must explicitly close and null dashSubWs -- it has no reconnect loop of its own " +
+    "and must not be left orphaned holding a MAX_CONNECTIONS slot");
+});
+
+check("dashboard: reconnect — the reconnect's own session/history frames tear down crew-panel timers, on reconnect specifically", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assertEqual(p.intervals.length, 1, "fixture: a running crew slot should have started its elapsed-time timer");
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.intervals.length, 1,
+    "a drop by itself must not tear down crew timers -- only a fresh session/history frame does, matching " +
+    "acp.html's own design (dashCloseSubagentView()/dashCloseSubWs() close the panel and socket, not the " +
+    "crew rendering itself)");
+  p.runTimers();
+  p.openMain();
+  p.deliverMain({
+    type: "session", sessionId: "sess-1",
+    payload: { sessionId: "sess-1", cwd: "/ws", created: false, turnActive: false, contextPercent: null },
+  });
+  p.deliverMain({ type: "history", sessionId: "sess-1", payload: { events: [] } });
+  assertEqual(p.intervals.length, 0,
+    "the reconnect's own history frame must tear down crew-panel timers via the existing " +
+    "dashRemoveAllCrewPanels()/dashCloseSubagentView() guards, confirmed to fire ON RECONNECT specifically " +
+    "-- not merely inferred from an unrelated new-session event");
+});
+
+check("dashboard: reconnect — a drop closes any open command palette", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle({
+    type: "commands", sessionId: "sess-1",
+    payload: { commands: [{ name: "tools", description: "Tools list" }] },
+  });
+  p.sandbox.dashPromptInput.value = "";
+  p.sandbox.dashPromptInput.dispatch("keydown", {
+    key: "/", shiftKey: false, ctrlKey: false, altKey: false, preventDefault() {},
+  });
+  assertEqual(p.el("dashCmdDropdown").hidden, false, "fixture: the palette should be open");
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.el("dashCmdDropdown").hidden, true,
+    "a drop must close any open command palette, matching its existing hideCommandDropdown() call on " +
+    "every other turn-state transition");
+});
+
+check("dashboard: reconnect — a steer in flight when the socket drops is restored to the textarea and re-enables the mode controls", () => {
+  const p = loadDashPicker({ realConnect: true, dashAttachedSid: "sess-1", dashSteerPending: "steer me" });
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashSendModeBtn.disabled = true;
+  p.sandbox.dashModeToggle.disabled = true;
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox.dashPromptInput.value, "steer me",
+    "a drop must restore the in-flight steer text to the textarea -- the steer_ack that would have " +
+    "cleared it is never coming on a dead socket");
+  assertEqual(p.sandbox._dashSteerPending, null, "_dashSteerPending must be cleared once restored");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false, "the textarea must be re-enabled");
+  assertEqual(p.sandbox.dashSendModeBtn.disabled, false, "the send-mode button must be re-enabled");
+  assertEqual(p.sandbox.dashModeToggle.disabled, false, "the mode toggle must be re-enabled");
+});
+
+check("dashboard: reconnect — a drop clears a Stop click's in-progress flag", () => {
+  const p = loadDashPicker({
+    realConnect: true, dashAttachedSid: "sess-1", dashTurnActive: true, dashStopInProgress: true,
+  });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.closeMain();
+  assertEqual(p.sandbox._dashStopInProgress, false,
+    "a drop must clear _dashStopInProgress -- otherwise Stop stays disabled forever with no turn:end " +
+    "coming to clear it");
 });
 
 let failed = 0;
