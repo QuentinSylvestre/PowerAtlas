@@ -1,8 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phase 0 complete; Gate resolved by user decision 2026-09-22 (deny floor
-> removed from scope entirely, see § 9); Phase 1 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 0 complete, reviewed, Gate resolved (deny floor removed from scope
+> entirely, user decision 2026-09-22, see § 9); Phase 1 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -1336,8 +1336,8 @@ guard that validates declared annotations cannot catch an annotation that should
 
 ### 2026-09-22 — Implementation Review (after Phase 0, persona: Security auditor, Senior engineer)
 
-Implementation health: Yellow (one item escalated, unresolved pending user decision; everything else
-fixed). 8 findings (0 High, 5 Medium, 3 Low).
+Implementation health: Green (all findings resolved — 7 fixed, 1 user-accepted). 8 findings
+(0 High, 5 Medium, 3 Low).
 
 | # | Severity | Finding (one line) | Resolution (one line) |
 |---|---|---|---|
@@ -1345,15 +1345,15 @@ fixed). 8 findings (0 High, 5 Medium, 3 Low).
 | 2 | Medium | `Probe.spawn()` discarded kiro-cli's stderr unconditionally, foreclosing a diagnostic signal for the exact class of failure (silent fail-open) Gate finding #6 found | Fixed — stderr captured to the harness's own stderr under `--verbose`, never into the redacted `--json-out` frame log |
 | 3 | Medium | Phase 1/Phase 7 exit criteria had no check for rule-assembly completeness, which is now the sole backstop for `on` with the floor gone; Step 7's capability-silence finding was missing from the Gate resolution's "remaining obligations" list | Fixed — added explicit Phase 1 structural criteria (every capability named, `exclude` populated, finding #6 decision recorded) and a Phase 7 live behavioral pair; folded the capability-silence finding into the Gate resolution's obligations list |
 | 4 | Medium | The probe harness never documented that the caller owns `~/.kiro/agents/` file lifecycle, nor named the bare-colon YAML pitfall that broke 7 of Phase 0's own 9 step-7 runs | Fixed — added a docstring paragraph naming both explicitly |
-| 5 | Medium | All three Phase 0 commits (`ea79482`, `7114f33`, `341780b`) carry a `Claude-Session:` trailer, which the user's own CLAUDE.md explicitly bans and states overrides the harness default | Escalated — cannot fix via `git commit --amend` (banned per Commit Safety rules); reported to user for their decision, not auto-resolved |
+| 5 | Medium | All three Phase 0 commits (`ea79482`, `7114f33`, `341780b`) carry a `Claude-Session:` trailer, which the user's own CLAUDE.md explicitly bans and states overrides the harness default | User: accepted — leave as-is; nothing pushed to `origin` yet, and no `--amend`/`rebase -i` available to fix it safely. All commits from this point on in the session omit the trailer |
 | 6 | Low | "Status: blocked" (Phase 0 body text and § 9's opening) had no forward pointer to the Gate resolution, reading as still-blocking to a top-down reader | Fixed — one-line forward references added at both sites |
 | 7 | Low | Risk table R-4/R-5 said "Moot" after the floor's removal, which reads as "problem gone" rather than "accepted, not mitigated" | Fixed — reworded to state the accepted residual exposure explicitly |
 | 8 | Low | § 9 Step 3's prose still said the harness was "not yet committed... held pending the Gate decision," stale relative to the exit-criteria line two paragraphs above it | Fixed — synced to record the actual commit and the two subsequent Step 5 fixes |
 
 Cycle 2 skipped per user instruction ("1 qreview cycle per phase," `/qdev` invocation 2026-09-22).
 Auto-fixes applied directly by the orchestrator (Light/inline-style editing — these were documentation
-and small, well-specified code changes, not a fresh sub-agent implementation phase). Finding 5 remains
-open pending the user's decision on how to handle the commit-trailer violation.
+and small, well-specified code changes, not a fresh sub-agent implementation phase). Finding 5 closed
+by user decision 2026-09-22 (leave as-is).
 
 ## Harness Improvement Opportunities
 
