@@ -381,7 +381,7 @@ body.dash-panel-resizing { cursor: col-resize; user-select: none; }
    its bounce curve for `transform` specifically: the curve reads fine for
    the hover scale-bump every other ghost-btn does, but overshooting a 32px
    lateral slide looks like a stumble rather than a slide. */
-.acp-rail-pin-btn { z-index: 1; transition: transform 150ms ease, background 120ms, color 120ms; }
+.acp-rail-pin-btn { z-index: 1; transition: background 120ms, color 120ms, opacity 120ms; }
 .acp-rail-pin-btn.pinned { color: var(--amber); }
 .pin-btn { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; width: 28px; height: 28px; padding: 0; display: flex; align-items: center; justify-content: center; opacity: 0; transition: all 0.1s; color: var(--text-muted); }
 .session-row:hover .pin-btn { opacity: 0.5; }
@@ -1787,17 +1787,11 @@ body:has(> .acp-shell) { height: 100dvh; }
 /* The whole header is the collapse control rather than the chevron alone. A
    10 px glyph is a 10 px target, and this rail is used with a thumb. */
 .acp-rail-group-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); color: inherit; font-family: inherit; font-size: 12px; text-align: left; padding: 3px 4px; cursor: pointer; }
-/* Room for the pin button that stays visible without a hover once pinned
-   (rail QA follow-up: "pinned projects keep something visible so we see
-   it's pinned" -- see .acp-rail-pin-btn). Keyed on `.pinned`, not just
-   `.acp-rail-pin-btn`'s existence -- the button itself is unconditional now
-   (dashRailGroupNode always creates one, so it can be reached on hover
-   whether or not the workspace is pinned yet), so an unpinned group's
-   count can still use the full row: the only thing that would overlap it
-   there is the hover-revealed actions overlay, and that overlap is already
-   how the equivalent session-row title/timestamp behave under their own
-   hover reveal. */
-.acp-rail-group-head:has(.acp-rail-pin-btn.pinned) .acp-rail-group-toggle { padding-right: 32px; }
+/* Room for the always-visible ⋯ button and the pin indicator when pinned.
+   32px clears ⋯ alone (one 28px button plus its 4px offset from the row
+   right); 64px clears ⋯ + pin (two buttons each 28px plus 4px gaps). */
+.acp-rail-group-head .acp-rail-group-toggle { padding-right: 32px; }
+.acp-rail-group-head:has(.acp-rail-pin-btn.pinned) .acp-rail-group-toggle { padding-right: 64px; }
 .acp-rail-group-toggle:hover { background: var(--surface-hover); }
 .acp-rail-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* Trails the label rather than leading it, so a heading starts at the rail's
@@ -1852,18 +1846,11 @@ body:has(> .acp-shell) { height: 100dvh; }
 .acp-rail-row:disabled { opacity: 0.45; cursor: default; }
 .acp-rail-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acp-rail-row-when { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
-/* Room for the pin button that stays visible without a hover once pinned --
-   the session-row equivalent of .acp-rail-group-toggle's own padding-right
-   above. .acp-rail-pin-btn.pinned sits permanently over the row's right edge
-   via .acp-rail-menu-wrap's `position: absolute; right: 4px`, and
-   .acp-rail-row-when lives in that exact spot in the row's own flex flow --
-   so an always-visible pinned button and the timestamp painted underneath it
-   collided at rest. 32px (one 28px ghost button plus its 4px offset) keeps
-   the timestamp inline before the pin icon instead of behind it. Applies
-   whether or not the pointer can hover, like the group-toggle rule: a touch
-   viewer never triggers the `hover: hover` reveal below and sees the same
-   collision otherwise. */
-.acp-rail-item:has(.acp-rail-pin-btn.pinned) .acp-rail-row { padding-right: 32px; }
+/* Room for the always-visible ⋯ button at rest, and the pin indicator when
+   pinned (both sit in .acp-rail-menu-wrap at right: 4px). 32px clears ⋯
+   alone; 64px clears ⋯ + pin (two 28px buttons plus the 4px gap and offset). */
+.acp-rail-item .acp-rail-row { padding-right: 32px; }
+.acp-rail-item:has(.acp-rail-pin-btn.pinned) .acp-rail-row { padding-right: 64px; }
 /* The row's actions menu. Present for loopback viewers and authenticated remote
    desktop browsers (non-mobile UA); absent for remote mobile browsers
    (ACP_CAN_DELETE=false). 32x40 keeps the row's touch height while taking as
@@ -2051,27 +2038,12 @@ body:has(> .acp-shell) { height: 100dvh; }
   .acp-rail-group-head:focus-within .acp-rail-group-count,
   .acp-rail-group-head:has(.acp-rail-group-actions [aria-expanded="true"]) .acp-rail-group-count { opacity: 0; }
 
-  /* The slide. `.slides` (added by dashRailRowNode/dashRailGroupNode only
-     when this row/group also renders a ⋯ trigger) draws the pin button one
-     button-width-plus-gap to the right of its own flex slot at rest --
-     exactly over the ⋯ trigger's own slot, which stays opacity: 0
-     underneath it until hovered (the rules above). `transform` rather than
-     a second absolute position: the button keeps its own reserved slot in
-     the flex flow throughout, so this is purely visual and never needs
-     re-numbering if a sibling is added or removed.
-     Hovering, keyboard focus, or an already-open ⋯ menu (pointer moved off
-     the trigger onto its own popup -- the same condition .acp-rail-menu-wrap's
-     own `:has` arm above keeps resume/acp/⋯ visible for) slides it back to
-     its own slot, uncovering ⋯ where it was. A row/group with no ⋯ at all
-     never gets `.slides`, so its pin button just sits in its own slot the
-     whole time -- there is nothing for it to make room for. */
-  .acp-rail-pin-btn.slides { transform: translateX(32px); }
-  .acp-rail-group-head:hover .acp-rail-pin-btn.slides,
-  .acp-rail-group-actions:focus-within .acp-rail-pin-btn.slides,
-  .acp-rail-group-head:has(.acp-rail-group-actions [aria-expanded="true"]) .acp-rail-pin-btn.slides,
-  .acp-rail-item:hover .acp-rail-pin-btn.slides,
-  .acp-rail-item:focus-within .acp-rail-pin-btn.slides,
-  .acp-rail-item:has(.acp-rail-menu-wrap > [aria-expanded="true"]) .acp-rail-pin-btn.slides { transform: none; }
+  /* ⋯ (more) button stays visible at rest on hover-capable devices -- same as
+     the pinned amber indicator on the pin button. The `acp-rail-more-btn` class
+     is added by dashRailGroupNode/dashRailRowNode to the ⋯ trigger specifically,
+     so this rule does not also show the apps/AI/other group-actions dropdowns. */
+  .acp-rail-group-head .acp-rail-more-btn,
+  .acp-rail-menu-wrap-ghost > .acp-rail-more-btn { opacity: 1; }
 }
 
 /* 40 px is a touch target and stays one wherever a thumb is the input. Where a

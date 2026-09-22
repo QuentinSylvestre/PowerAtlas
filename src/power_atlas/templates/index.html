@@ -4821,45 +4821,40 @@ function dashRailRowNode(session, flat, workspace){
     resumeBtn.addEventListener('click', function(e){ e.stopPropagation(); resumeSession(resumeBtn); });
     actions.appendChild(resumeBtn);
   }
-  // Pin is a top-level action now, not a ⋯ menu item (pin-button-redesign
-  // follow-up): a normal flex child of `actions`, inserted before `moreBtn`
-  // so it always has its own reserved slot. `.slides` (added below only when
-  // `moreBtn` exists) makes it sit at rest exactly over the ⋯ trigger's own
-  // slot instead of its own -- see .acp-rail-pin-btn in style.css -- and
-  // slide back to its natural spot on hover, uncovering ⋯ where it was.
+  // Pin button: visible at rest when pinned (amber), hidden otherwise.
+  // ⋯ is always visible beside it (see .acp-rail-more-btn in style.css).
   var pinBtn = document.createElement('button');
   pinBtn.type = 'button';
   pinBtn.className = 'acp-rail-ghost-btn acp-rail-pin-btn' + (session.pinned ? ' pinned' : '');
-  pinBtn.setAttribute('aria-label', session.pinned ? 'Unpin session' : 'Pin session');
-  pinBtn.title = session.pinned ? 'Unpin session' : 'Pin session';
+  pinBtn.setAttribute('aria-label', session.pinned ? 'Pinned' : 'Not pinned');
+  pinBtn.title = session.pinned ? 'Pinned' : 'Not pinned';
   pinBtn.appendChild(RAIL_ICON.pin());
-  pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinSession(pinBtn); });
   actions.appendChild(pinBtn);
-  // Delete only, now that pin has moved out of this menu -- so the trigger
-  // is conditional on there being anything left to put in it, rather than
-  // showing a ⋯ that opens onto nothing. Ported from /acp's own per-row ⋯
-  // menu, reusing the same /api/acp/sessions/delete endpoint, kiro-cli-v3
-  // only since that's the only store the endpoint ever touches (a
-  // v2/claude-code/kiro-ide id comes back "not found", which would read as a
-  // bogus error here). Uses this page's own hover-menu wiring
-  // (_wireRailActionMenu), not /acp's click-toggle railMenuNode -- the
-  // dashboard already has one hover-menu mechanism and every other
-  // row/group action here goes through it.
+  // ⋯ menu: always present; first item is Pin/Unpin, Delete follows for kiro-cli-v3.
+  var moreBtn = document.createElement('button');
+  moreBtn.type = 'button';
+  moreBtn.className = 'acp-rail-ghost-btn acp-rail-more-btn';
+  moreBtn.setAttribute('aria-haspopup', 'menu');
+  moreBtn.setAttribute('aria-expanded', 'false');
+  moreBtn.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
+  moreBtn.title = 'More';
+  moreBtn.appendChild(RAIL_ICON.more());
+  var moreMenu = document.createElement('div');
+  moreMenu.className = 'acp-rail-menu acp-rail-action-menu';
+  moreMenu.setAttribute('role', 'menu');
+  moreMenu.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
+  moreMenu.hidden = true;
+  var rowPinItem = document.createElement('button');
+  rowPinItem.type = 'button';
+  rowPinItem.className = 'acp-rail-menu-item acp-rail-action-item';
+  rowPinItem.setAttribute('role', 'menuitem');
+  rowPinItem.appendChild(RAIL_ICON.pin());
+  var rowPinLabel = document.createElement('span');
+  rowPinLabel.textContent = session.pinned ? 'Unpin session' : 'Pin session';
+  rowPinItem.appendChild(rowPinLabel);
+  rowPinItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); pinSession(pinBtn); });
+  moreMenu.appendChild(rowPinItem);
   if (ACP_TOKEN && session.provider === 'kiro-cli-v3') {
-    pinBtn.classList.add('slides');
-    var moreBtn = document.createElement('button');
-    moreBtn.type = 'button';
-    moreBtn.className = 'acp-rail-ghost-btn';
-    moreBtn.setAttribute('aria-haspopup', 'menu');
-    moreBtn.setAttribute('aria-expanded', 'false');
-    moreBtn.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
-    moreBtn.title = 'More';
-    moreBtn.appendChild(RAIL_ICON.more());
-    var moreMenu = document.createElement('div');
-    moreMenu.className = 'acp-rail-menu acp-rail-action-menu';
-    moreMenu.setAttribute('role', 'menu');
-    moreMenu.setAttribute('aria-label', 'Actions for ' + dashRailTitleText(session));
-    moreMenu.hidden = true;
     var deleteDivider = document.createElement('div');
     deleteDivider.className = 'acp-rail-menu-divider';
     moreMenu.appendChild(deleteDivider);
@@ -4888,17 +4883,17 @@ function dashRailRowNode(session, flat, workspace){
       dashDeleteSession(session);
     });
     moreMenu.appendChild(delItem);
-    _wireRailActionMenu(moreBtn, moreMenu);
-    actions.appendChild(moreBtn);
-    // Appended to `wrap`, not `actions`: `.acp-rail-menu-wrap` carries the
-    // same `transform: translateY(-50%)` centering trick
-    // `.acp-rail-group-actions` does above, which would misplace this
-    // `position: fixed` menu's viewport-relative coordinates. `wrap`
-    // (`.acp-rail-item`) has only `position: relative`, so it's a safe
-    // containing block for the menu while the trigger stays inside `actions`
-    // beside its sibling row buttons.
-    wrap.appendChild(moreMenu);
   }
+  _wireRailActionMenu(moreBtn, moreMenu);
+  actions.appendChild(moreBtn);
+  // Appended to `wrap`, not `actions`: `.acp-rail-menu-wrap` carries the
+  // same `transform: translateY(-50%)` centering trick
+  // `.acp-rail-group-actions` does above, which would misplace this
+  // `position: fixed` menu's viewport-relative coordinates. `wrap`
+  // (`.acp-rail-item`) has only `position: relative`, so it's a safe
+  // containing block for the menu while the trigger stays inside `actions`
+  // beside its sibling row buttons.
+  wrap.appendChild(moreMenu);
   wrap.appendChild(actions);
   return wrap;
 }
@@ -5247,24 +5242,19 @@ function dashRailGroupNode(group){
   // for openTerminal/newSessionInWorkspace/openWorkspaceSettings/
   // runLauncherInWorkspace.
   wrap.appendChild(aiMenu);
-  // Pin is a top-level action now, not a ⋯ menu item (pin-button-redesign
-  // follow-up): a normal flex child of `actions`, inserted before `moreBtn`
-  // so it always has its own reserved slot. `.slides` makes it sit at rest
-  // exactly over the ⋯ trigger's own slot instead of its own -- see
-  // .acp-rail-pin-btn in style.css -- and slide back to its natural spot on
-  // hover, uncovering ⋯ where it was. Settings and (further below) Delete
-  // stay in the ⋯ menu.
+  // Pin button is visible at rest when pinned (amber), hidden otherwise.
+  // ⋯ is always visible beside it (see .acp-rail-more-btn in style.css);
+  // no sliding needed -- both sit in their own flex slots.
   var pinBtn = document.createElement('button');
   pinBtn.type = 'button';
-  pinBtn.className = 'acp-rail-ghost-btn acp-rail-pin-btn slides' + (group.pinned ? ' pinned' : '');
-  pinBtn.setAttribute('aria-label', group.pinned ? 'Unpin workspace' : 'Pin workspace');
-  pinBtn.title = group.pinned ? 'Unpin workspace' : 'Pin workspace';
+  pinBtn.className = 'acp-rail-ghost-btn acp-rail-pin-btn' + (group.pinned ? ' pinned' : '');
+  pinBtn.setAttribute('aria-label', group.pinned ? 'Pinned' : 'Not pinned');
+  pinBtn.title = group.pinned ? 'Pinned' : 'Not pinned';
   pinBtn.appendChild(RAIL_ICON.pin());
-  pinBtn.addEventListener('click', function(e){ e.stopPropagation(); pinWorkspace(pinBtn); });
   actions.appendChild(pinBtn);
   var moreBtn = document.createElement('button');
   moreBtn.type = 'button';
-  moreBtn.className = 'acp-rail-ghost-btn';
+  moreBtn.className = 'acp-rail-ghost-btn acp-rail-more-btn';
   moreBtn.setAttribute('aria-haspopup', 'menu');
   moreBtn.setAttribute('aria-expanded', 'false');
   moreBtn.setAttribute('aria-label', 'More actions');
@@ -5275,6 +5265,20 @@ function dashRailGroupNode(group){
   moreMenu.setAttribute('role', 'menu');
   moreMenu.setAttribute('aria-label', 'More actions');
   moreMenu.hidden = true;
+  // Pin/Unpin is the first item in this menu (pin-hover-replace follow-up).
+  var pinItem = document.createElement('button');
+  pinItem.type = 'button';
+  pinItem.className = 'acp-rail-menu-item acp-rail-action-item';
+  pinItem.setAttribute('role', 'menuitem');
+  pinItem.appendChild(RAIL_ICON.pin());
+  var pinItemLabel = document.createElement('span');
+  pinItemLabel.textContent = group.pinned ? 'Unpin workspace' : 'Pin workspace';
+  pinItem.appendChild(pinItemLabel);
+  pinItem.addEventListener('click', function(e){ e.stopPropagation(); _closeAllRailActionMenus(); pinWorkspace(pinBtn); });
+  moreMenu.appendChild(pinItem);
+  var pinDivider = document.createElement('div');
+  pinDivider.className = 'acp-rail-menu-divider';
+  moreMenu.appendChild(pinDivider);
   var settingsItem = document.createElement('button');
   settingsItem.type = 'button';
   settingsItem.className = 'acp-rail-menu-item acp-rail-action-item';

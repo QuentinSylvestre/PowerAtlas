@@ -3474,8 +3474,10 @@ async def pin_session(request: Request):
 async def pin_folder(request: Request):
     body = await request.json()
     folder = body["folder"]
+    from .data import _normalize_path
     config = load_config()
-    if folder not in config.pinned_folders:
+    norm_folder = _normalize_path(folder)
+    if not any(_normalize_path(f) == norm_folder for f in config.pinned_folders):
         config.pinned_folders.append(folder)
         save_config(config)
     return {"ok": True}
@@ -3485,9 +3487,13 @@ async def pin_folder(request: Request):
 async def unpin_folder(request: Request):
     body = await request.json()
     folder = body["folder"]
+    from .data import _normalize_path
     config = load_config()
-    if folder in config.pinned_folders:
-        config.pinned_folders.remove(folder)
+    norm_folder = _normalize_path(folder)
+    original_len = len(config.pinned_folders)
+    config.pinned_folders = [f for f in config.pinned_folders
+                              if _normalize_path(f) != norm_folder]
+    if len(config.pinned_folders) < original_len:
         save_config(config)
     return {"ok": True}
 
