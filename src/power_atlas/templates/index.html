@@ -2866,7 +2866,7 @@ function dashHandle(frame){
       // Restore any prompt the user typed in B (via dashSendPrompt's
       // cross-session guard) before clearing _dashPendingSend -- without
       // this the textarea stays disabled with no text to re-send.
-      if (_dashPendingSend !== null && sid !== _viewingSid) {
+      if (_dashPendingSend !== null) {
         dashPromptInput.value = _dashPendingSend;
       }
       _dashPendingSend = null;

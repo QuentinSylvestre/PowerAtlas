@@ -1,7 +1,7 @@
-# 260922-1327 — Dashboard eager connect on textarea focus
+﻿# 260922-1327 — Dashboard eager connect on textarea focus
 
 > **Date**: 2026-09-22
-> **Status**: Draft
+> **Status**: In Progress
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Start ACP session on textarea focus instead of first send, for `available` kiro-cli-v3 sessions in the dashboard panel.
 
@@ -442,3 +442,42 @@ Running full-effort review (4 personas: Senior engineer, Architect, Reliability 
 | 11 | Low | No grep-gate exit criterion for all `_dashLoadingSid = null` sites. | Fixed — verification step 2 is now a mandatory grep-gate. |
 
 ## Harness Improvement Opportunities
+
+
+### Implementation (2026-09-22, code: 45426a3)
+
+Implemented all 6 steps in-session (Light tier). All plan steps match the implementation:
+Step 1: `_dashEagerLoadPending` and `_dashEagerFocusSuppressed` variables declared; 7 clear sites added (plus `session_closed` defense-in-depth); `_dashEagerLoadPending = false` placed before `var _dashWasLazyAttaching = _dashLoadingSid !== null` in `onclose` per plan spec.
+Step 2: Focus listener added after `dashSendBtn.addEventListener('click', dashSendPrompt)` with all 7 guards.
+Step 3: `_dashEagerFocusSuppressed` set/cleared synchronously around `dashPromptInput.focus()` in `dashStageOne`.
+Step 4: Double-load guard (`_dashLoadingSid === sid`) and cross-session guard (`_dashLoadingSid && _dashLoadingSid !== sid`) added in `dashSendPrompt` before the existing lazy-attach block.
+Step 5: Error handler modified to capture `wasEager = _dashEagerLoadPending` before clearing; `if (!wasEager) dashReloadBtn.hidden = false`.
+Step 6: 12 new test cases in `acp_page.test.mjs`; sandbox pre-declares `_dashEagerLoadPending` and `_dashEagerFocusSuppressed`.
+667/667 tests passing on initial commit.
+
+### 2026-09-22 — Implementation review (full effort, 4 personas, cycle 1)
+
+Full-effort review: 4 personas (Senior engineer, Architect, Reliability engineer, Frontend specialist). 11 findings (1 High → reclassified Medium, 4 Medium, 6 Low). 9 auto-resolved in cycle 1 (commit 0de456c). 1 Low resolved in cycle 2 inline. 1 Low (SC-2 untestable in harness) accepted.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | High→Medium | Cross-session stale-arrival: textarea left permanently disabled after A's session frame fires while B's prompt is pending; user input silently lost | Fixed (0de456c) — stale-arrival guard now restores `dashPromptInput.value` from `_dashPendingSend` and calls `disabled = false` + `dashRefreshComposerControls()` before return |
+| 2 | Medium | `_dashPendingSend` (for B) silently discarded by stale-arrival guard with no feedback | Fixed (0de456c) — restored to textarea before clearing |
+| 3 | Medium | BOM prepended to both files | Fixed (0de456c) — stripped |
+| 4 | Medium | `session_closed` handler did not clear `_dashLoadingSid` — could block focus listener after idle-TTL race | Fixed (0de456c) — added null clears to `session_closed` handler |
+| 5 | Medium | `_dashLoadingSid !== sid` branch in focus listener blocks B while A's load is in flight (Architect A-2) | Fixed by Fix 1 — once stale-arrival guard fires and re-enables textarea, B can proceed |
+| 6 | Low | `onclose` `_dashEagerLoadPending` placement after `_dashWasLazyAttaching` capture deviated from plan spec | Fixed (0de456c) — moved before capture |
+| 7 | Low | No `dashStageOne` end-to-end test | Accepted — the guard mechanism is tested via `_dashEagerFocusSuppressed` pre-set test; a full `dashStageOne` drive would require image encode pipeline setup |
+| 8 | Low | `!ACP_TOKEN` guard untested | Fixed (0de456c) — test added |
+| 9 | Low | No cross-session stale-arrival lifecycle test | Fixed (0de456c) — new test added verifying textarea re-enable + prompt restore |
+| 10 | Low | Test (h) label imprecise / inert `_dashEagerLoadPending` pre-set | Fixed (0de456c) — label updated, pre-set removed |
+| 11 | Low | SC-2 untestable in harness | Accepted — SC-2 is runtime-only (live agent needed); manual verification step 4 covers it |
+
+### 2026-09-22 — Implementation review (full effort, cycle 2)
+
+1 Low finding (redundant inner `sid !== _viewingSid` in stale-arrival restore — dead code). Applied inline (no commit). Ready state reached.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| 1 | Low | Redundant `sid !== _viewingSid` in stale-arrival restore guard (always true given outer gate) | Fixed inline — removed dead condition; no behavior change |
+
