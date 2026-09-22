@@ -85,6 +85,30 @@ class Config:
     # on the write path and sanitised to "" here on load — `load_config` is
     # documented as never raising and ~16 routes call it on the event loop.
     remote_bind_address: str = ""
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
+    #
+    # The ACP permission posture, and the kiro-cli agent it is derived from.
+    # `False` is allow-all, which is exactly the behaviour PowerAtlas shipped
+    # before this feature existed, so the default is a genuine no-op and
+    # installing a release changes no permission behaviour until the user opts
+    # in. `True` writes an explicit rule set into the derived agent.
+    #
+    # The boolean has no `web._SETTING_TYPES` entry on purpose:
+    # `/api/save-setting` rejects booleans before its type check (a Python
+    # `isinstance(True, int)` guard), so it gets its own route. The base-agent
+    # **name** is a string and does go through that route, validated on the
+    # write path by `agent_profile.validate_base_agent_name`.
+    acp_permissions_enabled: bool = False
+    acp_permission_base_agent: str = "kiro_default"
+
+
+# The kiro-cli agent PowerAtlas generates, named without its `.md` extension —
+# which is how kiro-cli's mode catalogue reports it and therefore how `modeId`
+# names it. Defined here rather than in `agent_profile.py` (D-20) because
+# `acp.py` imports `config` and nothing else intra-package: `_VALID_TASK_MODES`
+# can name the derived agent without acquiring a second intra-package import or
+# a duplicated string literal, and `acp.py` must not import `agent_profile`.
+DERIVED_AGENT_NAME = "poweratlas-acp"
 
 
 # The device secret backing the remote cookie. Its own file rather than a key

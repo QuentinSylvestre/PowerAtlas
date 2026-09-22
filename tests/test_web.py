@@ -51,11 +51,26 @@ def isolated_config(tmp_path, monkeypatch):
 
     A test that wants a populated config still writes one into `tmp_path`; a
     test that wants the real one no longer gets it by accident.
+
+    ``KIRO_AGENTS_DIR`` is redirected for the same reason and with the same
+    unconditional reach (260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL
+    Phase 1): ``lifespan`` now regenerates the derived kiro-cli agent at
+    startup, so every ``async with web_mod.lifespan(None)`` test in this file —
+    and every route test that reaches ``/api/save-setting`` — would otherwise
+    read the developer's real ``~/.kiro/agents/kiro_default.md`` and **write**
+    the real ``~/.kiro/agents/poweratlas-acp.md``, changing the permission
+    posture of their live sessions from a test run.
     """
+    from power_atlas import agent_profile as agent_profile_mod
     from power_atlas import config as config_mod
     monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
     monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config_mod, "REMOTE_SECRET_PATH", tmp_path / "remote-secret")
+    monkeypatch.setattr(agent_profile_mod, "KIRO_AGENTS_DIR", tmp_path / "kiro-agents")
+    # Process-global, so it would otherwise carry one test's generation outcome
+    # into the next one's assertions about the settings panel.
+    monkeypatch.setattr(agent_profile_mod, "_status",
+                        agent_profile_mod.GenerationStatus())
     return tmp_path
 
 
@@ -21876,3 +21891,605 @@ class TestSupervisor:
             assert "steercmd" not in all_names
         finally:
             self._cleanup_registry(acp_mod)
+
+
+# --- 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1 ---------
+#
+# Derived-agent generation. The properties below are the ones a UI test cannot
+# reach and the ones a silent failure here would cost: byte-identity outside the
+# injected block, replace-rather-than-duplicate, name validation before any path
+# is built, atomicity, and the two rule-assembly invariants Phase 0 measured
+# live (every gated capability named explicitly, and no blanket `ask` beside a
+# narrower `allow` without an `exclude`).
+
+_BASE_NO_PERMISSIONS = """\
+---
+description: A base agent
+model: claude-sonnet-4.6
+tools:
+  - "*"
+resources:
+  - file://AGENTS.md
+---
+
+# Body
+
+Text that must survive byte-for-byte.
+"""
+
+_BASE_WITH_PERMISSIONS = """\
+---
+description: A base agent
+permissions:
+  rules:
+    - capability: all
+      effect: deny
+
+model: claude-sonnet-4.6
+---
+
+# Body
+"""
+
+
+def _agent_profile():
+    from power_atlas import agent_profile as agent_profile_mod
+    return agent_profile_mod
+
+
+def _write_base(isolated_config, text=_BASE_NO_PERMISSIONS, name="kiro_default"):
+    """Put a fixture base agent where the redirected agents dir points."""
+    agents = isolated_config / "kiro-agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    path = agents / f"{name}.md"
+    path.write_bytes(text.encode("utf-8"))
+    return path
+
+
+class TestDerivedAgentInjectionIsTextual:
+    """D-18: the base survives byte-for-byte outside the injected block.
+
+    Asserted by excising the block from both sides and comparing the remainder,
+    which is the only check that distinguishes "did not parse" from "parsed and
+    happened to re-emit the same thing" -- a YAML round trip normalises quoting,
+    key order and flow style, and would fail exactly here.
+    """
+
+    def test_every_byte_outside_the_block_survives(self):
+        ap = _agent_profile()
+        derived = ap.build_derived_agent(_BASE_NO_PERMISSIONS, True)
+        kept_derived, block = ap.excise_permissions(derived)
+        kept_base, base_block = ap.excise_permissions(_BASE_NO_PERMISSIONS)
+        assert base_block == ""
+        assert kept_derived == kept_base
+        assert kept_derived == _BASE_NO_PERMISSIONS
+        assert block == ap.assemble_rules(True)
+
+    def test_the_off_state_also_round_trips(self):
+        ap = _agent_profile()
+        derived = ap.build_derived_agent(_BASE_NO_PERMISSIONS, False)
+        kept, block = ap.excise_permissions(derived)
+        assert kept == _BASE_NO_PERMISSIONS
+        assert block == ap.assemble_rules(False)
+        assert "capability: all" in block and "effect: allow" in block
+
+    def test_an_existing_block_is_replaced_not_duplicated_or_merged(self):
+        ap = _agent_profile()
+        derived = ap.build_derived_agent(_BASE_WITH_PERMISSIONS, True)
+        lines = derived.split("\n")
+        close = ap._frontmatter_bounds(lines)
+        assert len(ap._permissions_regions(lines, close)) == 1, (
+            "two top-level `permissions:` keys -- kiro-cli loads the file "
+            "anyway and which one wins is undefined")
+        assert "effect: deny" not in derived
+        kept, block = ap.excise_permissions(derived)
+        assert kept == ap.excise_permissions(_BASE_WITH_PERMISSIONS)[0]
+        assert block == ap.assemble_rules(True)
+        # The blank line that separated the old block from `model:` is part of
+        # the surrounding text, not of the block, so it is still there.
+        assert "\n\nmodel: claude-sonnet-4.6\n" in derived
+
+    def test_two_existing_blocks_collapse_to_one(self):
+        """A malformed base with a duplicate key must not leave one behind."""
+        ap = _agent_profile()
+        base = ("---\ndescription: d\npermissions:\n  rules: []\n"
+                "model: m\npermissions:\n  rules: []\n---\nbody\n")
+        derived = ap.build_derived_agent(base, True)
+        lines = derived.split("\n")
+        assert len(ap._permissions_regions(
+            lines, ap._frontmatter_bounds(lines))) == 1
+        assert "rules: []" not in derived
+
+    def test_an_inline_permissions_key_is_replaced(self):
+        ap = _agent_profile()
+        base = "---\ndescription: d\npermissions: {}\nmodel: m\n---\nbody\n"
+        derived = ap.build_derived_agent(base, True)
+        assert "permissions: {}" not in derived
+        assert ap.excise_permissions(derived)[0] == (
+            "---\ndescription: d\nmodel: m\n---\nbody\n")
+
+    def test_a_spaced_permissions_key_is_still_the_same_key(self):
+        """`permissions :` is legal YAML; missing it would leave two keys."""
+        ap = _agent_profile()
+        base = "---\ndescription: d\npermissions :\n  rules: []\n---\nbody\n"
+        derived = ap.build_derived_agent(base, True)
+        lines = derived.split("\n")
+        assert len(ap._permissions_regions(
+            lines, ap._frontmatter_bounds(lines))) == 1
+
+    def test_a_nested_permissions_key_is_left_alone(self):
+        ap = _agent_profile()
+        base = ("---\ndescription: d\nmcpServers:\n  x:\n    permissions: y\n"
+                "---\nbody\n")
+        derived = ap.build_derived_agent(base, True)
+        assert "    permissions: y" in derived
+
+    def test_crlf_and_trailing_content_are_preserved(self):
+        """Byte-identity means CRLF too: text-mode I/O would rewrite it."""
+        ap = _agent_profile()
+        base = "---\r\ndescription: d\r\n---\r\nbody\r\n"
+        derived = ap.build_derived_agent(base, True)
+        assert ap.excise_permissions(derived)[0] == base
+
+    def test_regeneration_is_idempotent(self):
+        ap = _agent_profile()
+        once = ap.build_derived_agent(_BASE_NO_PERMISSIONS, True)
+        twice = ap.build_derived_agent(once, True)
+        assert once == twice
+
+    def test_a_file_without_frontmatter_raises(self):
+        ap = _agent_profile()
+        for bad in ("", "no fence here\n", "---\nunterminated\n"):
+            with pytest.raises(ap.AgentProfileError):
+                ap.build_derived_agent(bad, True)
+
+
+class TestBaseAgentNameValidation:
+    """D-8: rejection happens before a path is built, so there is no traversal.
+
+    The Windows reserved names are the half a charset regex alone misses:
+    `CON.md` opens the console device, not a file.
+    """
+
+    @pytest.mark.parametrize("name", [
+        "../x", "..", "/etc/passwd", "C:\\Windows\\win.ini",
+        "a/b", "a\\b", "", " ", "x" * 65, "CON", "con", "NUL", "com1",
+        "LPT9", "has space", "has.dot", "x\x00y", None, 7, True,
+    ])
+    def test_an_invalid_name_raises_rather_than_resolving_a_path(self, name):
+        ap = _agent_profile()
+        with pytest.raises(ap.AgentProfileError):
+            ap.validate_base_agent_name(name)
+        with pytest.raises(ap.AgentProfileError):
+            ap.base_agent_path(name)
+
+    @pytest.mark.parametrize("name", ["kiro_default", "a", "x" * 64,
+                                      "my-agent_2", "CONSOLE"])
+    def test_a_valid_name_is_returned_unchanged(self, name):
+        ap = _agent_profile()
+        assert ap.validate_base_agent_name(name) == name
+
+    def test_the_resolved_path_stays_inside_the_agents_dir(self, isolated_config):
+        ap = _agent_profile()
+        assert ap.base_agent_path("kiro_default").parent == ap.KIRO_AGENTS_DIR
+        assert ap.derived_agent_path().name == "poweratlas-acp.md"
+
+
+class TestDerivedAgentWrite:
+    """The write is atomic and the base is never touched (D-19, SC-2)."""
+
+    def test_the_base_agent_is_never_modified(self, isolated_config):
+        import hashlib
+        ap = _agent_profile()
+        base = _write_base(isolated_config)
+        before = hashlib.sha256(base.read_bytes()).hexdigest()
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        after = hashlib.sha256(base.read_bytes()).hexdigest()
+        assert before == after
+        assert ap.derived_agent_path().exists()
+
+    def test_the_written_file_is_the_injected_base(self, isolated_config):
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        written = ap.derived_agent_path().read_bytes().decode("utf-8")
+        assert written == ap.build_derived_agent(_BASE_NO_PERMISSIONS, True)
+        assert ap.last_generation().ok is True
+        assert ap.derived_block_state() == "on"
+
+    def test_a_failed_write_keeps_the_previous_file_and_leaves_no_tmp(
+            self, isolated_config):
+        """D-10/SC-8: a regen failure must not widen or destroy the posture."""
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        good = ap.derived_agent_path().read_bytes()
+        assert ap.derived_block_state() == "on"
+
+        def boom(src, dst):
+            raise OSError(errno.EACCES, "denied")
+
+        with patch.object(ap.os, "replace", boom):
+            with pytest.raises(ap.AgentProfileError):
+                ap.regenerate(enabled=False, base_agent="kiro_default")
+        assert ap.derived_agent_path().read_bytes() == good, (
+            "the last good derived agent was replaced by a failed regen")
+        assert ap.derived_block_state() == "on"
+        assert not list(ap.KIRO_AGENTS_DIR.glob("*.tmp")), "tmp residue"
+        assert ap.last_generation().ok is False
+        assert ap.last_generation().error
+
+    def test_a_missing_base_agent_is_a_typed_error(self, isolated_config):
+        ap = _agent_profile()
+        with pytest.raises(ap.AgentProfileError):
+            ap.regenerate(enabled=True, base_agent="does_not_exist")
+        assert not ap.derived_agent_path().exists()
+        assert ap.derived_block_state() == "absent"
+
+    def test_naming_the_derived_agent_as_the_base_is_refused(
+            self, isolated_config):
+        """Generation reading its own output would compound the block."""
+        from power_atlas.config import DERIVED_AGENT_NAME
+        ap = _agent_profile()
+        _write_base(isolated_config, name=DERIVED_AGENT_NAME)
+        with pytest.raises(ap.AgentProfileError):
+            ap.regenerate(enabled=True, base_agent=DERIVED_AGENT_NAME)
+
+    def test_the_block_state_distinguishes_on_off_and_foreign(
+            self, isolated_config):
+        """SC-8's on-but-not-in-effect rests on this, not on the toggle."""
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        assert ap.derived_block_state() == "absent"
+        ap.regenerate(enabled=False, base_agent="kiro_default")
+        assert ap.derived_block_state() == "off"
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        assert ap.derived_block_state() == "on"
+        ap.derived_agent_path().write_bytes(
+            b"---\ndescription: d\npermissions:\n  rules: []\n---\nbody\n")
+        assert ap.derived_block_state() == "unknown"
+        ap.derived_agent_path().write_bytes(b"not an agent file\n")
+        assert ap.derived_block_state() == "unknown"
+
+
+def _parse_rules(block):
+    """Line-scan `block` into a list of rule dicts. Tests only.
+
+    A short splitter rather than a YAML dependency: the product deliberately
+    never parses this text (D-18), and the invariants below need the rules as
+    data. It understands exactly the grammar the shipped overlay uses -- one
+    `- capability:` item per rule, single-line flow sequences for `match` and
+    `exclude` -- and raises on anything else, so an overlay rewritten into a
+    shape this cannot read fails loudly instead of silently passing.
+    """
+    rules = []
+    for raw in block.split("\n"):
+        line = raw.strip()
+        if not line or line.startswith("#") or line == "rules:":
+            continue
+        if line.startswith("permissions"):
+            continue
+        if line.startswith("- capability:"):
+            rules.append({"capability": line.split(":", 1)[1].strip()})
+            continue
+        assert rules, f"rule field before any rule: {raw!r}"
+        key, _, value = line.partition(":")
+        value = value.strip()
+        if key in ("match", "exclude"):
+            assert value.startswith("[") and value.endswith("]"), (
+                f"{key} must be a single-line flow sequence: {raw!r}")
+            rules[-1][key] = [p.strip().strip('"')
+                              for p in value[1:-1].split(",") if p.strip()]
+        elif key == "effect":
+            rules[-1][key] = value
+        else:
+            raise AssertionError(f"unrecognised rule field: {raw!r}")
+    return rules
+
+
+# Phase 0 measured that kiro-cli's ACP surface exposes these capabilities, and
+# that a capability no rule names inherits the wider scopes rather than
+# defaulting to `ask`. With the deny floor dropped (D-13 superseded), correct
+# assembly here is the only backstop the feature ships.
+_GATED_CAPABILITIES = frozenset({
+    "fs_read", "fs_write", "shell", "web_fetch", "web_search",
+    "mcp", "subagent", "skill", "power",
+})
+
+
+def _blanket_ask_without_exclude(rules):
+    """Capabilities whose `ask` rule is silently defeated by a narrower allow.
+
+    Phase 0 measured this live: within one capability, a blanket `ask` beats a
+    narrower `allow` for the same resource regardless of rule order, with no
+    error and no warning, so the allow rule is dead code. `exclude` on the
+    blanket rule is the only mechanism that expresses "allow X, ask about
+    everything else". A meta-capability rule (`all`, `builtin`, `filesystem`)
+    does the same thing across every capability at once.
+    """
+    allowed_patterns = {}
+    for rule in rules:
+        if rule.get("effect") == "allow" and rule.get("match"):
+            allowed_patterns.setdefault(rule["capability"], set()).update(
+                rule["match"])
+    offenders = set()
+    for rule in rules:
+        if rule.get("effect") != "ask":
+            continue
+        scope = rule["capability"]
+        targets = (set(allowed_patterns)
+                   if scope in ("all", "builtin", "filesystem")
+                   else ({scope} if scope in allowed_patterns else set()))
+        for capability in targets:
+            if not allowed_patterns[capability] <= set(rule.get("exclude", [])):
+                offenders.add(capability)
+    return offenders
+
+
+class TestRuleAssemblyInvariants:
+    """The two properties Phase 0 measured, asserted against what ships.
+
+    Both failure modes are silent at runtime -- kiro-cli reports nothing and the
+    session simply runs ungated -- so they can only be caught here.
+    """
+
+    def test_the_checker_flags_the_measured_defeat(self):
+        """Negative fixture: the exact pair Phase 0 measured must be flagged.
+
+        Without this, a checker that never flags anything would pass the real
+        assertion below for the wrong reason.
+        """
+        defeated = ("permissions:\n  rules:\n"
+                    '    - capability: shell\n      match: ["echo *"]\n'
+                    "      effect: allow\n"
+                    "    - capability: shell\n      effect: ask\n")
+        assert _blanket_ask_without_exclude(_parse_rules(defeated)) == {"shell"}
+        blanket_all = ("permissions:\n  rules:\n"
+                       '    - capability: fs_read\n      match: ["./**"]\n'
+                       "      effect: allow\n"
+                       "    - capability: all\n      effect: ask\n")
+        assert _blanket_ask_without_exclude(
+            _parse_rules(blanket_all)) == {"fs_read"}
+        fixed = ("permissions:\n  rules:\n"
+                 '    - capability: shell\n      match: ["echo *"]\n'
+                 "      effect: allow\n"
+                 '    - capability: shell\n      exclude: ["echo *"]\n'
+                 "      effect: ask\n")
+        assert _blanket_ask_without_exclude(_parse_rules(fixed)) == set()
+
+    def test_no_blanket_ask_sits_beside_an_unexcluded_allow(self):
+        ap = _agent_profile()
+        rules = _parse_rules(ap.assemble_rules(True))
+        assert _blanket_ask_without_exclude(rules) == set(), (
+            "a blanket `ask` rule silently defeats the narrower `allow` rule "
+            "beside it; populate the blanket rule's `exclude`")
+
+    def test_every_gated_capability_is_named_explicitly(self):
+        ap = _agent_profile()
+        rules = _parse_rules(ap.assemble_rules(True))
+        named = {r["capability"] for r in rules}
+        missing = _GATED_CAPABILITIES - named
+        assert not missing, (
+            f"unnamed capabilities inherit the wider scopes, not `ask`: "
+            f"{sorted(missing)}")
+        assert not named & {"all", "builtin", "filesystem"}, (
+            "a meta-capability rule applies its effect across every "
+            "capability at once; `exclude` is a resource glob, not a "
+            "capability filter")
+
+    def test_every_rule_has_a_recognised_capability_and_effect(self):
+        ap = _agent_profile()
+        for rule in _parse_rules(ap.assemble_rules(True)):
+            assert rule["capability"] in _GATED_CAPABILITIES
+            assert rule["effect"] in ("allow", "ask", "deny")
+
+    def test_the_shell_allow_patterns_carry_no_trailing_wildcard(self):
+        """A `*` suffix would also match `git status && <anything>`.
+
+        kiro-cli matches a shell rule as a literal glob over the whole command
+        string with no canonicalisation (Phase 0 step 6), and whether `*` stops
+        at a chaining operator was never established. Too narrow costs a
+        prompt; too wide costs the guarantee this state exists to provide.
+        """
+        ap = _agent_profile()
+        for rule in _parse_rules(ap.assemble_rules(True)):
+            if rule["capability"] != "shell" or rule["effect"] != "allow":
+                continue
+            for pattern in rule["match"]:
+                assert not pattern.endswith("*"), pattern
+
+    def test_the_overlay_has_no_unquoted_colon_space_in_a_scalar(self):
+        """The exact malformation that fell open across 7 Phase 0 probe runs.
+
+        A bare `: ` inside a plain YAML scalar breaks the whole frontmatter, and
+        kiro-cli loads the file anyway with no error and no warning, falling
+        back to the wider scopes. Comments are exempt because a YAML lexer
+        discards them.
+        """
+        ap = _agent_profile()
+        for block in (ap.assemble_rules(True), ap.assemble_rules(False)):
+            for line in block.split("\n"):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                assert "\t" not in line, f"tab in YAML: {line!r}"
+                _, _, value = stripped.partition(":")
+                value = value.strip()
+                if value.startswith(("[", "{", '"')) or not value:
+                    continue
+                assert ": " not in value, (
+                    f"unquoted ': ' in a plain scalar: {line!r}")
+
+
+class TestOverlayIsReachableAtRuntime:
+    """`pyproject.toml` ships the overlay, and the runtime read finds it."""
+
+    def test_importlib_resources_can_read_the_overlay(self):
+        ap = _agent_profile()
+        text = ap.overlay_text()
+        assert text.startswith("permissions:")
+        assert "capability: fs_read" in text
+        assert "\r" not in text, "CRLF would leak into a byte-identical splice"
+
+    def test_pyproject_declares_the_overlay_as_package_data(self):
+        """The runtime read passes under an editable install regardless.
+
+        `importlib.resources` resolves to the source tree, so that half of the
+        criterion cannot see a missing `package-data` entry -- which is what
+        would make the wheel ship without the file.
+        """
+        import tomllib
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "pyproject.toml", "rb") as fh:
+            data = tomllib.load(fh)
+        patterns = data["tool"]["setuptools"]["package-data"]["power_atlas"]
+        assert any(p.startswith("agents") for p in patterns), patterns
+
+
+class TestAcpPermissionRoutes:
+    """D-11: a dedicated boolean route, and the name via `/api/save-setting`."""
+
+    def test_get_and_post_round_trip_the_boolean(self, client, isolated_config):
+        _write_base(isolated_config)
+        assert client.get("/api/acp-permissions").json()["enabled"] is False
+        resp = client.post("/api/acp-permissions", json={"enabled": True})
+        assert resp.json()["ok"] is True
+        assert resp.json()["enabled"] is True
+        assert client.get("/api/acp-permissions").json()["enabled"] is True
+        resp = client.post("/api/acp-permissions", json={"enabled": False})
+        assert resp.json()["enabled"] is False
+        assert client.get("/api/acp-permissions").json()["enabled"] is False
+
+    @pytest.mark.parametrize("body", [
+        {"enabled": "true"}, {"enabled": 1}, {"enabled": 0}, {"enabled": None},
+        {}, {"enabled": []}, {"other": True}, [],
+    ])
+    def test_a_non_boolean_body_is_refused(self, client, isolated_config, body):
+        _write_base(isolated_config)
+        resp = client.post("/api/acp-permissions", json=body)
+        assert resp.json()["ok"] is False
+        assert client.get("/api/acp-permissions").json()["enabled"] is False
+
+    def test_the_post_regenerates_and_reports_what_is_in_effect(
+            self, client, isolated_config):
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        body = client.post("/api/acp-permissions", json={"enabled": True}).json()
+        assert body["state"] == "on"
+        assert body["in_effect"] is True
+        assert body["generation_ok"] is True
+        assert ap.derived_agent_path().exists()
+
+    def test_a_generation_failure_reports_on_but_not_in_effect(
+            self, client, isolated_config):
+        """SC-8: the panel is the whole failure surface -- no toast, no badge."""
+        # No base agent on disk, so generation cannot succeed.
+        resp = client.post("/api/acp-permissions", json={"enabled": True})
+        body = resp.json()
+        assert body["ok"] is True, "the setting is still recorded"
+        assert body["enabled"] is True
+        assert body["in_effect"] is False
+        assert body["generation_ok"] is False
+        assert body["generation_error"]
+
+    def test_the_base_agent_name_goes_through_save_setting(
+            self, client, isolated_config):
+        from power_atlas import config as config_mod
+        _write_base(isolated_config, name="other_agent")
+        resp = client.post("/api/save-setting",
+                           json={"key": "acp_permission_base_agent",
+                                 "value": "other_agent"})
+        assert resp.json() == {"ok": True, "restart_required": False}
+        assert config_mod.load_config().acp_permission_base_agent == "other_agent"
+        assert _agent_profile().derived_agent_path().exists()
+
+    @pytest.mark.parametrize("value", [
+        "../x", "/etc/passwd", "", "   ", "x" * 65, "CON", "nul",
+        "has space", "a/b", "a\\b", "has.dot",
+    ])
+    def test_save_setting_rejects_a_name_failing_validation(
+            self, client, isolated_config, value):
+        from power_atlas import config as config_mod
+        resp = client.post("/api/save-setting",
+                           json={"key": "acp_permission_base_agent",
+                                 "value": value})
+        assert resp.json()["ok"] is False
+        assert config_mod.load_config().acp_permission_base_agent == "kiro_default"
+
+    def test_a_base_agent_name_change_does_not_touch_the_boolean(
+            self, client, isolated_config):
+        from power_atlas import config as config_mod
+        _write_base(isolated_config, name="other_agent")
+        client.post("/api/acp-permissions", json={"enabled": True})
+        client.post("/api/save-setting",
+                    json={"key": "acp_permission_base_agent",
+                          "value": "other_agent"})
+        assert config_mod.load_config().acp_permissions_enabled is True
+
+
+class TestGenerationRunsAtStartup:
+    """D-9's first trigger point, through the existing `lifespan` seam."""
+
+    @staticmethod
+    def _fake_acp():
+        import types
+        return types.SimpleNamespace(
+            start_sweeper=lambda: None, shutdown=lambda: None,
+            set_sessions_changed_hook=lambda h: None,
+            set_notify_hook=lambda h: None)
+
+    def test_lifespan_generates_the_derived_agent(self, isolated_config):
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_base(isolated_config)
+        (isolated_config / "config.toml").write_text(
+            "acp_permissions_enabled = true\n")
+
+        async def run():
+            async with web_mod.lifespan(None):
+                return ap.derived_agent_path().exists()
+
+        with patch.object(web_mod, "acp", self._fake_acp()):
+            assert asyncio.run(run()) is True
+        assert ap.derived_block_state() == "on"
+
+    def test_a_generation_failure_does_not_prevent_startup(self, isolated_config):
+        """A non-`AgentProfileError` is still not allowed to abort startup.
+
+        The typed error is what the module promises; the broad `except` is for
+        the bug it did not predict, and this asserts the broad half.
+        """
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        _write_base(isolated_config)
+
+        def boom(**kwargs):
+            raise RuntimeError("unexpected bug")
+
+        async def run():
+            async with web_mod.lifespan(None):
+                return "started"
+
+        with patch.object(web_mod, "acp", self._fake_acp()), \
+                patch.object(ap, "regenerate", boom):
+            assert asyncio.run(run()) == "started"
+
+    def test_startup_keeps_a_valid_derived_agent_when_regen_fails(
+            self, isolated_config):
+        """D-10: no base-agent fallback over a previously generated file."""
+        from power_atlas import web as web_mod
+        ap = _agent_profile()
+        base = _write_base(isolated_config)
+        ap.regenerate(enabled=True, base_agent="kiro_default")
+        good = ap.derived_agent_path().read_bytes()
+        # The base agent disappears, so the next regeneration cannot succeed.
+        base.unlink()
+
+        async def run():
+            async with web_mod.lifespan(None):
+                return "started"
+
+        with patch.object(web_mod, "acp", self._fake_acp()):
+            assert asyncio.run(run()) == "started"
+        assert ap.derived_agent_path().read_bytes() == good
+        assert ap.derived_block_state() == "on"

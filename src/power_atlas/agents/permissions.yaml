@@ -1,0 +1,79 @@
+permissions:
+  # Written by PowerAtlas. Every byte of this block comes from
+  # `src/power_atlas/agents/permissions.yaml` in the PowerAtlas source tree and
+  # the whole file is rewritten at startup and on every settings change, so an
+  # edit here is lost. Change the base agent or the overlay instead.
+  #
+  # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
+  #
+  # The PowerAtlas ACP permission posture is ON. These rules reproduce
+  # kiro-cli's own documented default posture (kiro.dev/docs/permissions/ and
+  # kiro.dev/docs/cli/v3/permissions/, read 2026-09-22) as an explicit rule
+  # list. Two measured properties of kiro-cli shape how they are written, both
+  # recorded in the plan's section 9:
+  #
+  #   * A capability no rule names does NOT fall back to ask. It inherits
+  #     whatever the wider scopes say, which on a machine whose
+  #     `~/.kiro/settings/permissions.yaml` is `all: allow` means it runs
+  #     silently. Every capability this posture gates is therefore named here
+  #     explicitly, and no capability relies on omission.
+  #
+  #   * Within one capability, a blanket `ask` rule silently defeats a
+  #     narrower `allow` rule for the same resource - most-restrictive-wins,
+  #     regardless of rule order, with no error and no warning. `exclude` is
+  #     the only mechanism that expresses "allow X, ask about everything
+  #     else", so every blanket `ask` below carries an `exclude` naming
+  #     exactly the patterns its paired `allow` rule matches.
+  #
+  # Not named here: the meta-capabilities `all`, `builtin` and `filesystem`.
+  # `exclude` is a resource glob, not a capability filter, so `all: ask` with
+  # an `exclude` would drop the excluded resource out of the ask for *every*
+  # capability at once, including `fs_write`.
+  #
+  # Also not named here: `context`, `diagnostics` and `sandbox_network`. The
+  # kiro-cli documentation lists them in the rule schema, but none of them was
+  # ever observed on the ACP surface PowerAtlas drives, so gating them is
+  # untested in both directions - it could prompt on every turn, and an
+  # unrecognised capability name risks rejecting the whole block, which fails
+  # open. Phase 7's live verification is where they get decided.
+  #
+  # `fs_write` needs no allow rules and no `exclude`. kiro-cli enforces its own
+  # non-overridable Kiro-scope rules underneath this file: writes to
+  # `~/.kiro/settings/`, `.kiro/settings/` and `~/.kiro/workspace-roots/` are
+  # always denied, and writes to `.git/**`, `.kiro/agents/**`, `.kiro/hooks/**`
+  # and `.kiroignore` always ask.
+  rules:
+    - capability: fs_read
+      match: ["./**"]
+      effect: allow
+    - capability: fs_read
+      exclude: ["./**"]
+      effect: ask
+    # The shell allow patterns are exact command strings with no trailing `*`,
+    # deliberately. kiro-cli matches a shell rule as a literal glob over the
+    # whole command string with no canonicalisation (measured, plan section 9
+    # step 6), and it was never established whether `*` stops at a chaining
+    # operator. `git status*` would then also match `git status && <anything>`
+    # and run it silently, which widens the posture in the one state this
+    # feature exists to narrow. An exact pattern costs a prompt on
+    # `git log --oneline`; a wildcard costs the guarantee.
+    - capability: shell
+      match: ["git status", "git log", "git diff", "git branch", "pwd", "whoami", "uname"]
+      effect: allow
+    - capability: shell
+      exclude: ["git status", "git log", "git diff", "git branch", "pwd", "whoami", "uname"]
+      effect: ask
+    - capability: fs_write
+      effect: ask
+    - capability: web_fetch
+      effect: ask
+    - capability: web_search
+      effect: ask
+    - capability: mcp
+      effect: ask
+    - capability: subagent
+      effect: ask
+    - capability: skill
+      effect: ask
+    - capability: power
+      effect: ask

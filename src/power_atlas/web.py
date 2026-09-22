@@ -38,7 +38,7 @@ from .config import (load_config, save_config, get_active_launch_profile,
                      LaunchProfile, ensure_remote_secret, load_remote_secret,
                      rotate_remote_secret, validate_remote_bind_address,
                      REMOTE_SECRET_MIN_LEN, REMOTE_SECRET_PATH)
-from . import autostart, data, icons, launcher, notifications, presence
+from . import agent_profile, autostart, data, icons, launcher, notifications, presence
 from .status_classifier import get_semantic_status, SemanticStatus
 
 # `acp` is throwaway prototype code and is imported under a guard, unlike every
@@ -455,8 +455,44 @@ def _notify_from_acp(event: str, session_id: str, cwd: str, detail: str,
                       event, session_id)
 
 
+async def _regenerate_derived_agent() -> None:
+    """Rewrite `~/.kiro/agents/poweratlas-acp.md` from the current settings.
+
+    260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
+
+    Called from exactly two places (D-9): startup, and every settings write that
+    changes what the derived agent should contain. Not per session creation —
+    two defined trigger points, and no filesystem I/O on the session-open path.
+
+    `asyncio.to_thread` because the work is three synchronous file operations and
+    this runs on the event loop, which is the same reason `_background_refresh`
+    threads out `data.refresh_stale_entries`.
+
+    It swallows everything. `agent_profile` promises a typed `AgentProfileError`
+    for the failures it predicted, but an unexpected bug in it must not abort
+    startup or turn a settings write into a 500 (D-10/SC-8) — the posture simply
+    stays whatever is already on disk, and
+    `agent_profile.last_generation()` carries the reason to the settings panel.
+    """
+    try:
+        config = load_config()
+        await asyncio.to_thread(
+            agent_profile.regenerate,
+            enabled=config.acp_permissions_enabled,
+            base_agent=config.acp_permission_base_agent)
+    except Exception:
+        log.exception("derived agent regeneration failed; "
+                      "the permission posture is unchanged")
+
+
 @asynccontextmanager
 async def lifespan(app_instance):
+    # Before the sweeper starts and before the first request is served, so a
+    # session created seconds after startup already sees the current posture.
+    # Guarded inside `_regenerate_derived_agent` rather than here, so that every
+    # caller of it inherits the same "never fatal" contract.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
+    await _regenerate_derived_agent()
     task = asyncio.create_task(_background_refresh())
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
@@ -3303,6 +3339,70 @@ async def toggle_notifications():
     return {"enabled": enabled}
 
 
+# --- ACP permission posture ----------------------------------------------
+# 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
+#
+# Its own pair of routes rather than a `_SETTING_TYPES` entry (D-11):
+# `/api/save-setting` rejects booleans before its type check, by design. The
+# base-agent *name* is a string and does go through that route.
+#
+# Shaped on `/api/notifications` but **set**, not toggled: the caller states the
+# value it wants. A toggle route cannot express "make sure this is off" and, for
+# a control whose two states are allow-all and ask, a lost response turning into
+# a second click is the wrong kind of ambiguity.
+
+
+def _acp_permission_state(config) -> dict:
+    """The posture as the settings panel has to render it (SC-8).
+
+    `enabled` is what the user asked for; `state` is what a session created
+    right now would actually get, read back off the derived agent on disk. They
+    disagree exactly when generation failed, which is the on-but-not-in-effect
+    case D-10 requires the panel to report — and the case where reporting only
+    the toggle would claim a posture that is not there.
+    """
+    enabled = bool(config.acp_permissions_enabled)
+    state = agent_profile.derived_block_state()
+    last = agent_profile.last_generation()
+    return {
+        "enabled": enabled,
+        "base_agent": config.acp_permission_base_agent,
+        "derived_agent": str(agent_profile.derived_agent_path()),
+        "state": state,
+        "in_effect": enabled and state == "on",
+        "generation_attempted": last.attempted,
+        "generation_ok": last.ok,
+        "generation_error": last.error,
+    }
+
+
+@app.get("/api/acp-permissions")
+async def get_acp_permissions():
+    return _acp_permission_state(load_config())
+
+
+@app.post("/api/acp-permissions")
+async def set_acp_permissions(request: Request):
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return {"ok": False, "error": "Invalid JSON body"}
+    enabled = body.get("enabled") if isinstance(body, dict) else None
+    # `isinstance(1, int)` is not the hazard here — `isinstance(1, bool)` is
+    # False — but `"true"`, `1` and `None` all read as "the caller meant on" to
+    # a `bool()` cast, and this is the control that decides whether a shell
+    # command asks. It has to be the literal boolean.
+    if not isinstance(enabled, bool):
+        return {"ok": False, "error": "enabled must be true or false"}
+    config = load_config()
+    # Mutate and save the same instance `load_config` returned, for the reason
+    # `/api/notifications` states: unknown top-level keys ride on `_extra`.
+    config.acp_permissions_enabled = enabled
+    save_config(config)
+    await _regenerate_derived_agent()
+    return {"ok": True, **_acp_permission_state(load_config())}
+
+
 @app.post("/api/open-folder", response_class=HTMLResponse)
 async def api_open_folder(request: Request):
     body = await request.json()
@@ -3717,6 +3817,12 @@ _SETTING_TYPES: dict[str, type] = {
     "acp_idle_ttl_seconds": int,
     "acp_prompt_silence_seconds": int,
     "remote_bind_address": str,
+    # The kiro-cli agent the derived ACP agent is built from. A name, never a
+    # path (D-8), validated on the write path below by
+    # `agent_profile.validate_base_agent_name` — which rejects before any path
+    # is built, so `../x` never reaches `Path`.
+    # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
+    "acp_permission_base_agent": str,
 }
 
 # Inclusive integer bounds, enforced on the write path only. `load_config` is
@@ -3849,8 +3955,27 @@ async def save_setting(request: Request):
                         "error": "Could not create the device secret; "
                                  "remote access not enabled"}
             value = value.strip()
+    if key == "acp_permission_base_agent":
+        # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
+        # The named error on the write path, before the value is persisted, for
+        # the same reason `remote_bind_address` has one: the alternative is a
+        # config.toml that stores a name generation can never resolve, with the
+        # reason visible only in the log.
+        value = value.strip()
+        try:
+            value = agent_profile.validate_base_agent_name(value)
+        except agent_profile.AgentProfileError:
+            return {"ok": False,
+                    "error": "Base agent must be 1-64 characters of "
+                             "letters, digits, '_' or '-', and not a Windows "
+                             "reserved device name"}
     setattr(config, key, value)
     save_config(config)
+    if key == "acp_permission_base_agent":
+        # The second of D-9's two trigger points. The derived agent is built
+        # from this file, so a new name that never regenerates leaves the
+        # posture reading as the old base agent's.
+        await _regenerate_derived_agent()
     return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}
 
 
