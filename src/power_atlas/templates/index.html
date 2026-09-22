@@ -4426,12 +4426,13 @@ function dashRailSummary(){
   dashRailStatusEl.textContent = text;
 }
 
-// ---- filter box (client-side, over what is already loaded) -------------
+// ---- filter box ---------------------------------------------------------
 //
-// The listing endpoint has no search parameter, and a request per keystroke
-// against a route whose per-row cost is a file read plus a liveness query is
-// an amplification lever, not a feature (same reasoning /acp's own rail
-// documents for its identical box).
+// In project mode, the filter is sent as the `q` query parameter, so the
+// server filters all workspaces by name/path before pagination — loading
+// more pages keeps the search result set. In date/status mode the server has
+// no session-title search parameter, so filtering stays client-side over
+// what is already loaded (same reasoning /acp's rail documents).
 var dashRailFilter = '';
 function dashRailMatchesFlat(session){
   if (!dashRailFilter) return true;
@@ -4444,9 +4445,21 @@ function dashRailMatches(group, session){
   return hay.indexOf(dashRailFilter) !== -1;
 }
 function dashRailSetFilter(text){
+  var prev = dashRailFilter;
   dashRailFilter = String(text || '').trim().toLowerCase();
   dashRailFocus = null;
-  dashRenderRail();
+  if (dashRailMode === 'project' && prev !== dashRailFilter) {
+    // Server-side: reload from page 1 with the new q value so all workspaces
+    // are searched, not only the ones already on screen.
+    dashRailGroups = [];
+    dashRailGroupsByCwd = Object.create(null);
+    dashRailGroupPage = 1;
+    dashRailHasMore = false;
+    dashRailPinned = [];
+    loadGroupPage(1);
+  } else {
+    dashRenderRail();
+  }
 }
 
 // ---- mode + persisted preferences ---------------------------------------
@@ -4561,6 +4574,7 @@ function loadGroupPage(page){
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
     project_sort: dashRailProjectSort,
+    q: dashRailFilter,
   }).then(function(data){
     dashRailBusy = false;
     (data.groups || []).forEach(dashRailMergeGroup);
@@ -5712,7 +5726,10 @@ function dashRenderRail(){
     var empty = document.createElement('div');
     empty.className = 'acp-rail-empty';
     empty.textContent = dashRailFilter
-      ? 'Nothing here matches that filter.'
+      ? (dashRailMode === 'project'
+          ? 'No workspaces match \u201c' + dashRailFilter + '\u201d.'
+          : 'Nothing here matches that filter — the filter narrows what\'s already loaded, so load '
+            + 'more sessions to widen it.')
       : 'No workspaces found.';
     dashRailGroupsEl.appendChild(empty);
   }
@@ -5860,6 +5877,11 @@ document.addEventListener('keydown', function(e){
   if (e.key === 'Escape' && !dashRailSettingsMenu.hidden) dashRailCloseMenus();
 });
 dashRailReloadBtn.addEventListener('click', function(){ dashRailReload(); });
+dashRailMoreEl.addEventListener('click', function(){
+  dashRailFocus = { more: true };
+  if (dashRailMode === 'date' || dashRailMode === 'status') { loadFlatPage(dashRailFlatPage + 1); return; }
+  loadGroupPage(dashRailGroupPage + 1);
+});
 var dashRailNewAcpBtn = document.getElementById('dashRailNewAcp');
 if (ACP_TOKEN) {
   dashRailNewAcpBtn.hidden = false;
@@ -5920,6 +5942,7 @@ function dashRailRefresh(){
     session_page: 1, session_size: DASH_RAIL_PROJECT_PAGE_SIZE,
     provider: window._activeProvider === 'all' ? '' : window._activeProvider,
     tag: window._activeTag, time_filter: window._activeTimeFilter,
+    q: dashRailFilter,
   }).then(function(data){
     var changed = false;
     (data.groups || []).forEach(function(g){ if (dashRailRefreshStates(g)) changed = true; });

@@ -1918,7 +1918,7 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
                  providers: frozenset[str] = frozenset({_ACP_V3_LISTING_PROVIDER}),
                  include_provider: bool = False,
                  tag: str = "", time_filter: str = "",
-                 sort: str = "recent") -> dict:
+                 sort: str = "recent", q: str = "") -> dict:
     """Build the listing payload. Blocking; runs off the loop.
 
     Paginated **independently at both levels** (D19). A post-pagination
@@ -2088,6 +2088,9 @@ def _acp_listing(cwd: str, group_page: int, group_size: int,
         group_page = 1
         groups_has_more = False
     else:
+        if q:
+            q_lower = q.lower()
+            workspaces = [w for w in workspaces if q_lower in w[0].lower()]
         group_total = len(workspaces)
         start = (group_page - 1) * group_size
         page_groups = workspaces[start:start + group_size]
@@ -2485,7 +2488,8 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
                                  mode: str = "", page: int = 1,
                                  size: int = _ACP_FLAT_PAGE_SIZE,
                                  provider: str = "", tag: str = "",
-                                 time_filter: str = "", project_sort: str = "recent"):
+                                 time_filter: str = "", project_sort: str = "recent",
+                                 q: str = ""):
     """The dashboard's own rail feed (dashboard/ACP-merge Phase 4): every
     enabled, available provider, not only kiro-cli-v3. Same parameters,
     pagination, `hidden`-tag/disabled-provider exclusions and grouped/
@@ -2537,7 +2541,7 @@ async def api_dashboard_sessions(response: Response, cwd: str = "", group_page: 
         _acp_listing, cwd,
         max(1, group_page), max(1, min(group_size, _ACP_MAX_GROUPS_PER_PAGE)),
         max(1, session_page), max(1, min(session_size, _ACP_MAX_SESSIONS_PER_GROUP)),
-        held, capacity, providers, True, tag, time_filter, sort)
+        held, capacity, providers, True, tag, time_filter, sort, q)
 
 
 # --- The create flow's workspace list ------------------------------------
