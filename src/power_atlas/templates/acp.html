@@ -5384,6 +5384,20 @@
         autoGrowPrompt();
         refreshComposerControls();
       }
+      // Fix 8 parity (dashboard/ACP feature-parity plan, Follow-up Work):
+      // crew-slot setInterval timers used to be left running here -- a
+      // reconnect's own clearTranscript() (via the fresh `session` frame,
+      // handle() above) tears them down via its own removeAllCrewPanels()
+      // guard, but only once reconnect actually succeeds. If it never does
+      // (an indefinitely failed reconnect, or the user never reconnects at
+      // all), those timers kept firing forever with nothing left to tick
+      // against -- mirrors index.html's dashConnect() onclose, which closed
+      // this same gap on the dashboard as Fix 8 (Step 9 review). Called
+      // directly here instead, so they are torn down immediately on any drop
+      // rather than waiting for a reconnect that may never come; the
+      // reconnect's own clearTranscript() guard remains a harmless,
+      // redundant no-op once nothing is left to remove.
+      removeAllCrewPanels();
       setState('closed', 'disconnected');
       logLine('info', 'socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
       if (opened) {

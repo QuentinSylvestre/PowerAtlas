@@ -8640,6 +8640,38 @@ check("crew timer does not fire after session release", (tpl) => {
     "crew panel should not be re-rendered after session release");
 });
 
+check("crew timer — a drop tears down crew-panel timers immediately, not waiting for a reconnect that may never come (parity with dashboard's Fix 8, Step 9 review)", (tpl) => {
+  // acp.html's own connect() onclose used to have no removeAllCrewPanels()
+  // (or equivalent) call at all -- a reconnect's clearTranscript() (via the
+  // fresh `session` frame) tears crew timers down, but only once reconnect
+  // actually succeeds. If it never does, those timers kept firing forever
+  // with nothing left to tick against. connect()'s onclose now calls
+  // removeAllCrewPanels() directly, closing the same gap index.html's
+  // dashConnect() onclose closed on the dashboard (Fix 8, Step 9 review;
+  // dashboard/ACP feature-parity plan Follow-up Work).
+  const { page, live } = connected(tpl);
+  const intervalsBaseline = page.intervals.length;
+  page.deliver(subagentsFrame(live, [
+    { sessionId: "sub-1", role: "explorer", task: "", status: "working",
+      action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  assert(page.intervals.length > intervalsBaseline,
+    "fixture: a running crew slot should have started its elapsed-time timer");
+  assertEqual(page.one("acpTranscript", ".acp-crew-panel") === null, false,
+    "fixture: a crew panel should be rendered before the drop");
+  // Simulate a WS drop with no subsequent session/history frame -- a
+  // reconnect that never succeeds.
+  page.socket().onclose({ code: 1006, reason: "" });
+  assertEqual(page.intervals.length, intervalsBaseline,
+    "a drop must tear down crew-panel timers immediately, even without a subsequent session/history frame " +
+    "-- an indefinitely failed reconnect must not leave them ticking forever");
+  // tick() should not throw or re-render the crew panel now that the timer
+  // and the panel it was ticking against are both gone.
+  page.tick();
+  assert(page.one("acpTranscript", ".acp-crew-panel") === null,
+    "the crew panel must be removed by the drop's teardown, not just its timer");
+});
+
 // -------------------------------------------------------------------- main --
 
 const template = process.argv[2]
