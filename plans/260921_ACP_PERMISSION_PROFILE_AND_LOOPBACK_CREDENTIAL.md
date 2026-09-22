@@ -1313,6 +1313,22 @@ Five questions this phase surfaced and could not answer without a live probe. Ev
 - The `isolated_config` test fixture now also redirects `agent_profile.KIRO_AGENTS_DIR` and resets its module state — necessary once `lifespan` regenerates at startup, or every test touching `lifespan` or `/api/save-setting` would read/write the developer's real `~/.kiro/agents/`. Verified after every run: the real agents dir still holds only its original two files, `kiro_default.md` unchanged (hash matches Phase 0's § 9 Step 9 baseline).
 - No live kiro-cli probe was run in this phase (authority boundary — Phase 0's brief authorised live probing explicitly, this phase's did not); the five Phase 7 questions above are the result.
 
+#### Step 5b QA verification (2026-09-22) — PASS
+
+`/qdev`'s per-phase QA (this phase is `[QA]`-annotated) ran against a real, isolated `uvicorn`
+instance of the actual FastAPI app — module-attribute patching matching `tests/test_web.py`'s own
+`isolated_config` fixture pattern (`CONFIG_DIR`, `CONFIG_PATH`, `REMOTE_SECRET_PATH`,
+`KIRO_AGENTS_DIR` all redirected to a scratch directory before the app module's first import), on a
+scratch port, with a fixture base agent — never touching the live PowerAtlas process or the real
+`~/.kiro`. Confirmed live, not only via pytest: `GET`/`POST /api/acp-permissions` round-trip
+correctly; enabling generates a derived agent carrying both the `permissions:` key and the
+provenance marker; disabling deletes it; a hand-authored foreign file at the derived-agent path
+survives a disable (the `unknown`-state guard the Step 5 review fix added, now confirmed end-to-end
+rather than only unit-tested); a bad base-agent name is rejected via `/api/save-setting`. One
+observation, not a defect: validation failures return HTTP 200 with `{"ok": false, "error": "..."}`
+rather than a 4xx status — consistent with this codebase's pre-existing `/api/save-setting`
+convention, not something this phase introduced.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
