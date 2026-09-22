@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 {% block content %}
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
@@ -1058,6 +1058,7 @@ function dashConnect(onReady){
     // agent_died's "process ended" -- both have _dashLoadingSid === null, so
     // gating on it here leaves them alone.
     var _dashWasLazyAttaching = _dashLoadingSid !== null;
+    _dashEagerLoadPending = false; // cleared before _dashLoadingSid so the flag reflects the load's state at drop time
     _dashLoadingSid = null;
     _dashPendingSend = null;
     _dashPendingImages = null;
@@ -1256,6 +1257,15 @@ var _dashOrigin = null;
 var _dashSent = false;
 var _dashTurnActive = false;
 var _dashLoadingSid = null;
+// true while a focus-triggered (eager) load is in flight for _dashLoadingSid.
+// Cleared in sync with every _dashLoadingSid = null assignment — never inside a
+// conditional block. Read by the error handler to suppress the Reload button for
+// load failures the user did not explicitly trigger (SC-5, eager-connect plan).
+var _dashEagerLoadPending = false;
+// true during a programmatic dashPromptInput.focus() call (e.g. the image-
+// attachment handler in dashStageOne) to suppress the eager-load focus listener.
+// Set/cleared synchronously around that call — no async gap.
+var _dashEagerFocusSuppressed = false;
 var _dashPendingSend = null;
 // Paired with _dashPendingSend above (SC6, dashboard/ACP feature-parity plan
 // Phase 4) -- populated alongside it whenever dashSendPrompt()'s immediate
@@ -1459,6 +1469,34 @@ dashPromptInput.addEventListener('input', function(){
   }
 });
 dashSendBtn.addEventListener('click', dashSendPrompt);
+// Eager-load trigger (eager-connect plan): start the ACP session as soon as
+// the user focuses the textarea, so the agent has time to start and deliver
+// commands/skills catalogue frames before the first keystroke.
+//
+// Guards -- skip if any of the following are true:
+//   _dashLoadingSid            -- a load is already in flight; avoids double-load.
+//   _dashAttachedSid           -- already attached (reconnect / previously-held session).
+//   _dashOrigin === 'joined'   -- a held session's subscribe is in flight but
+//                                 _dashAttachedSid not yet set; do not overwrite
+//                                 _dashOrigin with 'dashboard' (held-session race).
+//   _dashPendingCreate         -- a close-then-create flow is in progress; do not
+//                                 consume a slot that conflicts with the pending create.
+//   !_viewingSid               -- no session selected.
+//   !ACP_TOKEN                 -- ACP not available on this server.
+//   _dashEagerFocusSuppressed  -- programmatic focus (e.g. dashStageOne's image
+//                                 handler); set/cleared synchronously around that call.
+dashPromptInput.addEventListener('focus', function () {
+  if (_dashLoadingSid || _dashAttachedSid) return;
+  if (_dashOrigin === 'joined') return;
+  if (_dashPendingCreate) return;
+  if (!_viewingSid || !ACP_TOKEN) return;
+  if (_dashEagerFocusSuppressed) return;
+  var sid = _viewingSid;
+  _dashOrigin = 'dashboard';
+  _dashLoadingSid = sid;
+  _dashEagerLoadPending = true;
+  dashConnect(function () { send('load', {}, sid); });
+});
 
 // ---- Queue/Steer + Stop wiring (SC5, dashboard/ACP feature-parity plan
 // Phase 3) -- a duplicated, not extracted, feature (see the plan's Design
@@ -1856,7 +1894,12 @@ function dashStageOne(file) {
       dashPromptInput.value = dashPromptInput.value.slice(0, start)
         + marker + dashPromptInput.value.slice(end);
       dashPromptInput.selectionStart = dashPromptInput.selectionEnd = start + marker.length;
+      // Suppress the eager-load focus listener: this is a programmatic focus
+      // to restore cursor position after image attachment -- not user intent
+      // to start an ACP session.
+      _dashEagerFocusSuppressed = true;
       dashPromptInput.focus();
+      _dashEagerFocusSuppressed = false;
       // This page has no textarea auto-grow (see the comment on
       // initCommandPaletteDom's onPromptChanged above) -- refreshing the
       // composer controls is the equivalent here.
@@ -2072,6 +2115,34 @@ function dashSendPrompt(){
     dashRenderTray();
     dashPromptInput.value = '';
     dashRefreshComposerControls();
+    return;
+  }
+  // Eager-load in flight for this exact session: the focus listener already
+  // started a load. Set _dashPendingSend/Images so the history frame handler
+  // delivers the prompt once the session confirms, disable the input while
+  // waiting, and return without issuing a second load.
+  if (_dashLoadingSid === sid) {
+    _dashPendingSend = text;
+    _dashPendingImages = dashAttachments.length
+      ? dashAttachments.map(function (item) { return {mimeType: item.mimeType, data: item.data}; })
+      : null;
+    dashPromptInput.disabled = true;
+    dashSendBtn.disabled = true;
+    dashSetComposerNote('Starting the agent\u2026');
+    return;
+  }
+  // Cross-session guard: an eager load for a different session is in flight
+  // (user focused A, clicked B, sent from B's composer). The in-flight A
+  // load will be closed by the stale-arrival guard when its session frame
+  // arrives. Hold B's prompt and wait; the user can resend once A is cleared.
+  if (_dashLoadingSid && _dashLoadingSid !== sid) {
+    _dashPendingSend = text;
+    _dashPendingImages = dashAttachments.length
+      ? dashAttachments.map(function (item) { return {mimeType: item.mimeType, data: item.data}; })
+      : null;
+    dashPromptInput.disabled = true;
+    dashSendBtn.disabled = true;
+    dashSetComposerNote('Starting the agent\u2026');
     return;
   }
   // Not attached yet — the lazy 'available' -> first-send path (also the
@@ -2753,6 +2824,7 @@ function dashHandle(frame){
     // Phase 4: plans/260919_DASHBOARD_ACP_NEW_SESSION_PICKER.md
     if (payload && payload.created) {
       _viewingSid = sid;
+      _dashEagerLoadPending = false; // creation is not an eager load
       _dashLoadingSid = null; // creation is not a load-slot; prevents abandon-close path
       // Fix 2 (Phase 5 review): a sub-agent panel/crew state from whatever
       // session was previously viewed must not survive into this new
@@ -2789,6 +2861,7 @@ function dashHandle(frame){
       // load was still in flight (not yet attached) at the moment of
       // abandonment, so that function had nothing to act on yet.
       send('close', {}, sid);
+      _dashEagerLoadPending = false;
       _dashLoadingSid = null;
       _dashPendingSend = null;
       // Paired with _dashPendingSend above, for consistency (Fix 6, Phase 4
@@ -2846,6 +2919,7 @@ function dashHandle(frame){
     _dashReconnectQueueSnapshot = null;
     _dashAttachedSid = sid;
     _dashTurnActive = !!payload.turnActive;
+    _dashEagerLoadPending = false;
     _dashLoadingSid = null;
     // A new/resubscribed session means any prior command catalogue is gone —
     // reset so stale slash-command suggestions from the old session never
@@ -3269,6 +3343,7 @@ function dashHandle(frame){
     _dashAttachedSid = null;
     _dashOrigin = null;
     _dashTurnActive = false;
+    _dashEagerLoadPending = false; // defense-in-depth: session_closed normally arrives after _dashLoadingSid is already null
     setContext(null);
     // The sid/copy widget belonged to the session just released -- mirrors
     // acp.html's own releaseSession() reset.
@@ -3413,6 +3488,7 @@ function dashHandle(frame){
     // dies mid-lazy-load before a `session` frame confirms attach -- cleared
     // to the same defaults every other reset site in this file already uses
     // for them (review finding, Phase 1 fix cycle).
+    _dashEagerLoadPending = false;
     _dashLoadingSid = null;
     _dashPendingSend = null;
     _dashSent = false;
@@ -3538,6 +3614,8 @@ function dashHandle(frame){
     // session still mid-attach, by definition not yet _dashAttachedSid), so
     // this guard can never fire for those two codes.
     if (sid && sid === _dashLoadingSid) {
+      var wasEager = _dashEagerLoadPending;
+      _dashEagerLoadPending = false;
       _dashLoadingSid = null;
       _dashPendingSend = null;
       _dashPendingImages = null;
@@ -3547,7 +3625,11 @@ function dashHandle(frame){
       // it. Offers the same reload recovery a stale-token handshake
       // rejection shows, for the same underlying reason: nothing left this
       // connection can do about it on its own.
-      dashReloadBtn.hidden = false;
+      // Suppress the Reload button for focus-triggered (eager) load failures:
+      // the user never explicitly initiated this load, so a Reload prompt has
+      // no actionable meaning yet. Re-enable the textarea silently so the user
+      // can send when ready, at which point the normal lazy-attach fires.
+      if (!wasEager) dashReloadBtn.hidden = false;
       dashPromptInput.disabled = false;
       dashSetComposerNote('');
       // Recomputed again below at the tail for the non-early-return path

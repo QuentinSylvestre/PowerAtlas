@@ -1,4 +1,4 @@
-// Behavioural coverage for the browser-side code this repo has no other way to
+﻿// Behavioural coverage for the browser-side code this repo has no other way to
 // test: src/power_atlas/templates/acp.html, the remote-access panel in
 // templates/index.html, and the two rules in static/style.css that decide what
 // the /acp topbar shows whom.
@@ -11060,6 +11060,8 @@ function loadDashPicker(opts = {}) {
     _dashTurnActive: opts.dashTurnActive !== undefined ? opts.dashTurnActive : false,
     _viewingSid: opts.viewingSid !== undefined ? opts.viewingSid : null,
     _dashLoadingSid: null,
+    _dashEagerLoadPending: false,  // eager-connect plan
+    _dashEagerFocusSuppressed: false,  // eager-connect plan
     _dashSent: false,
     _dashOrigin: null,
     _dashPendingSend: null,
@@ -14893,6 +14895,188 @@ check("dashboard: reconnect — a drop clears a Stop click's in-progress flag", 
   assertEqual(p.sandbox._dashStopInProgress, false,
     "a drop must clear _dashStopInProgress -- otherwise Stop stays disabled forever with no turn:end " +
     "coming to clear it");
+});
+
+// ---- Eager-connect tests (eager-connect plan, 260922_DASH_EAGER_CONNECT_ON_FOCUS) ----
+// The focus listener added to dashPromptInput by this plan fires when the user
+// clicks into the textarea for an available kiro-cli-v3 session, starting the
+// ACP load before the first send so the commands/skills catalogue arrives early.
+
+check("dashboard: eager-connect — focus triggers a load for an available session", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sandbox._dashLoadingSid, "sess-1",
+    "focus on dashPromptInput must set _dashLoadingSid for the current session");
+  assertEqual(p.sandbox._dashEagerLoadPending, true,
+    "focus must set _dashEagerLoadPending so error handler suppresses Reload");
+  assertEqual(p.sandbox._dashOrigin, "dashboard",
+    "focus must set _dashOrigin to 'dashboard' for dashCloseIfAbandoned to work");
+  const loads = p.sentOf("load");
+  assertEqual(loads.length, 1, "focus must send exactly one load frame");
+  assertEqual(loads[0].sid, "sess-1", "the load frame must target the viewed session");
+});
+
+check("dashboard: eager-connect — focus guard: _dashLoadingSid already set prevents double-load", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not send a second load when _dashLoadingSid is already set");
+  assertEqual(p.sandbox._dashLoadingSid, "sess-1",
+    "_dashLoadingSid must be unchanged when the guard fires");
+});
+
+check("dashboard: eager-connect — focus guard: _dashAttachedSid already set (already attached)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1", dashAttachedSid: "sess-1" });
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not load when _dashAttachedSid is already set (session already live)");
+});
+
+check("dashboard: eager-connect — focus guard: _dashOrigin==='joined' (held-session subscribe in flight)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashOrigin = "joined";
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not load when _dashOrigin==='joined' — a held session subscribe is in flight");
+  assertEqual(p.sandbox._dashOrigin, "joined",
+    "_dashOrigin must not be overwritten from 'joined' to 'dashboard' by the focus guard");
+});
+
+check("dashboard: eager-connect — focus guard: _dashPendingCreate set (close-then-create in progress)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashPendingCreate = { cwd: "/foo", mode: "kiro_default" };
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not consume a slot when a close-then-create is in progress");
+});
+
+check("dashboard: eager-connect — focus guard: _dashEagerFocusSuppressed (programmatic focus)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashEagerFocusSuppressed = true;
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not load when _dashEagerFocusSuppressed is true (programmatic focus from image handler)");
+});
+
+check("dashboard: eager-connect — double-load guard same sid: send while eager load in flight holds prompt", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashEagerLoadPending = true;
+  p.sandbox.dashPromptInput.value = "hello";
+  p.sandbox.dashSendPrompt();
+  assertEqual(p.sandbox._dashPendingSend, "hello",
+    "_dashPendingSend must be set so the history frame delivers the prompt");
+  assertEqual(p.sentOf("load").length, 0,
+    "dashSendPrompt must not issue a second load when _dashLoadingSid === sid");
+  assertEqual(p.sandbox._dashLoadingSid, "sess-1",
+    "_dashLoadingSid must be unchanged — the in-flight load continues");
+  assertEqual(p.sandbox.dashPromptInput.disabled, true,
+    "the textarea must be disabled while waiting for the session frame");
+});
+
+check("dashboard: eager-connect — cross-session guard: send while different eager load is in flight", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-B" });
+  p.sandbox._dashLoadingSid = "sess-A";
+  p.sandbox._dashEagerLoadPending = true;
+  p.sandbox.dashPromptInput.value = "hello";
+  p.sandbox.dashSendPrompt();
+  assertEqual(p.sandbox._dashPendingSend, "hello",
+    "_dashPendingSend must be set for sess-B");
+  assertEqual(p.sentOf("load").length, 0,
+    "no new load must be sent for sess-B while sess-A's load is in flight");
+  assertEqual(p.sandbox._dashLoadingSid, "sess-A",
+    "_dashLoadingSid must remain sess-A (still in flight)");
+  assertEqual(p.sandbox.dashPromptInput.disabled, true,
+    "the textarea must be disabled while waiting for the stale-arrival guard to clear");
+});
+
+check("dashboard: eager-connect — error handler suppresses Reload for eager-triggered failures", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashEagerLoadPending = true;
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.deliverMain({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "too_many_sessions", message: "cap reached" },
+  });
+  assertEqual(p.el("dashReload").hidden, true,
+    "Reload button must stay hidden for a focus-triggered load failure (SC-5)");
+  assertEqual(p.sandbox.dashPromptInput.disabled, false,
+    "textarea must be re-enabled silently after eager-load failure");
+  assertEqual(p.sandbox._dashEagerLoadPending, false,
+    "_dashEagerLoadPending must be cleared by the error handler");
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "_dashLoadingSid must be cleared by the error handler");
+});
+
+check("dashboard: eager-connect — error handler shows Reload for non-eager (user-triggered) failures", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashEagerLoadPending = false;
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.deliverMain({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "too_many_sessions", message: "cap reached" },
+  });
+  assertEqual(p.el("dashReload").hidden, false,
+    "Reload button must appear for a non-eager (user-triggered) load failure");
+  assertEqual(p.sandbox._dashEagerLoadPending, false,
+    "_dashEagerLoadPending stays false");
+});
+
+check("dashboard: eager-connect — close_in_progress error with eager load suppresses Reload (hoisted _dashLoadingSid block runs first)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashEagerLoadPending = true;
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.deliverMain({
+    type: "error", sessionId: "sess-1",
+    payload: { code: "close_in_progress", message: "releasing" },
+  });
+  assertEqual(p.el("dashReload").hidden, true,
+    "Reload must stay hidden even for close_in_progress — the _dashLoadingSid block runs before the early return");
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "_dashLoadingSid must be cleared");
+});
+
+check("dashboard: eager-connect — onclose clears _dashEagerLoadPending before _dashWasLazyAttaching capture", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1" });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox._dashLoadingSid = "sess-1";
+  p.sandbox._dashEagerLoadPending = true;
+  p.closeMain();
+  assertEqual(p.sandbox._dashEagerLoadPending, false,
+    "onclose must clear _dashEagerLoadPending unconditionally");
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "onclose must clear _dashLoadingSid");
+});
+
+check("dashboard: eager-connect — stale-arrival guard clears _dashEagerLoadPending for a focus-then-navigate-away", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-2" });
+  p.sandbox._dashLoadingSid = "sess-1";  // focus was on sess-1
+  p.sandbox._dashEagerLoadPending = true;
+  p.sandbox.dashConnect();
+  p.openMain();
+  // Session frame for sess-1 arrives, but user is now viewing sess-2
+  p.deliverMain({ type: "session", sessionId: "sess-1", payload: {} });
+  assertEqual(p.sandbox._dashEagerLoadPending, false,
+    "stale-arrival guard must clear _dashEagerLoadPending when closing the orphaned session");
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "stale-arrival guard must clear _dashLoadingSid");
+  const closes = p.sentOf("close").filter(f => f.sid === "sess-1");
+  assertEqual(closes.length, 1,
+    "stale-arrival guard must send close for the orphaned session (SC-3)");
 });
 
 let failed = 0;
