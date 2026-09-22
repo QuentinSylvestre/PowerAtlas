@@ -1,7 +1,7 @@
 ﻿# 260922-1327 — Dashboard eager connect on textarea focus
 
 > **Date**: 2026-09-22
-> **Status**: In Progress
+> **Status**: Complete
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Start ACP session on textarea focus instead of first send, for `available` kiro-cli-v3 sessions in the dashboard panel.
 
@@ -480,4 +480,12 @@ Full-effort review: 4 personas (Senior engineer, Architect, Reliability engineer
 | # | Severity | Finding | Resolution |
 |---|---|---|---|
 | 1 | Low | Redundant `sid !== _viewingSid` in stale-arrival restore guard (always true given outer gate) | Fixed inline — removed dead condition; no behavior change |
+
+
+
+### 2026-09-22 — Final review (Step 9, full effort, 2 personas)
+
+Senior engineer + Reliability engineer. No findings. Health: Green. 670/670 tests passing.
+
+All 6 SC items satisfied. Clear-site discipline confirmed mechanically. Harness integration verified. No documentation violations. Step 9b SKIP — runtime surface requires PowerAtlas running (AGENTS.md "Never restart PowerAtlas autonomously"); harness covers all mechanically testable surfaces.
 
