@@ -10405,8 +10405,10 @@ const DASH_HANDLE_NAMES = [
   // SC8 (sub-agent/crew read-only panel, dashboard/ACP feature-parity plan
   // Phase 5) -- guards against the `subagents` case, and the agent_died/
   // session_closed crew/sub-agent teardown calls, silently moving out of
-  // dashHandle.
-  "subagents", "dashCloseSubagentView", "dashRemoveAllCrewPanels",
+  // dashHandle. dashCloseSubWs (Fix 8, Phase 5 review) guards the same for
+  // the explicit-socket-close call these teardown sites, and the new-session
+  // creation branch, now also make.
+  "subagents", "dashCloseSubagentView", "dashRemoveAllCrewPanels", "dashCloseSubWs",
 ];
 // SC8 (sub-agent/crew read-only panel, dashboard/ACP feature-parity plan
 // Phase 5) -- a duplicated, not extracted, feature (index.html-only, not
@@ -10418,6 +10420,10 @@ const DASH_CREW_SUBAGENT_NAMES = [
   "dashOpenSubagent", "dashCloseSubagentView", "dashConnectSubWs",
   "dashSubAppendChunk", "dashSubAddToolCall", "dashSubAddNote", "dashHandleSub",
   "window.removeAllCrewPanels", "window.closeSubagentView",
+  // Phase 5 review fixes: dashCloseSubWs (Fix 8, the explicit-close helper
+  // shared by agent_died/session_closed/new-session-creation teardown) and
+  // dashSubErrorShown (Fix 3, the onclose-fallback double-message guard).
+  "dashCloseSubWs", "dashSubErrorShown",
 ];
 const DASH_CMD_PALETTE_NAMES = [
   "initCommandPaletteDom", "showCommandDropdown", "hideCommandDropdown",
@@ -10518,7 +10524,9 @@ function dashPickerSource() {
   // imageAttachRegion below is one -- the crew-panel rendering, timer
   // cleanup and sub-agent-socket lifecycle logic must be exercised as
   // written.
-  const crewFrom = src.indexOf("var dashCrews = {};");
+  // Object.create(null), not {} (Fix 4, Phase 5 review) -- keyed directly by
+  // wire-controlled toolCallId.
+  const crewFrom = src.indexOf("var dashCrews = Object.create(null);");
   if (crewFrom < 0) throw new Error("index.html no longer defines dashCrews");
   if (crewFrom > handleFrom) throw new Error("dashCrews now follows dashCloseIfAbandoned");
 
@@ -11007,6 +11015,11 @@ function loadDashPicker(opts = {}) {
     // connectSubWs(), which has no dependency on connect() either).
     WebSocket: DashFakeSubWs,
     dashWsUrl: () => "ws://test.invalid/ws/acp",
+    // dashConnectSubWs()'s onopen/onerror logLine calls read location.host
+    // (Fix 7, Phase 5 review, mirroring dashConnect()'s own onopen logLine
+    // call) -- this sandbox has no browser `location` global otherwise,
+    // unlike the acp.html-side harness's loadPage() (this file, ~line 886).
+    location: { protocol: "http:", host: "test.invalid" },
     console: { log() {}, warn() {}, error() {} },
   };
   // Image API globals (SC6, dashboard/ACP feature-parity plan Phase 4) --
@@ -11573,6 +11586,15 @@ check("the baseline agent_died case resets turn state, disables the composer wit
   assertEqual(p.sandbox.dashPromptInput.disabled, true,
     "the composer must be disabled, not left usable against a dead agent");
   assertEqual(p.sandbox.dashSendBtn.disabled, true, "the send button must be disabled too");
+  // Fix 1 (Phase 5 review) -- reproduced live by a reviewer's temporary
+  // probe as a permanent regression: this session never opened a sub-agent
+  // panel, yet dashCloseSubagentView()'s dashComposerEl.hidden =
+  // !_dashAttachedSid side effect used to hide the composer's container
+  // outright (since _dashAttachedSid is already null by this point),
+  // burying the explanatory note set just below where nothing could see it.
+  assertEqual(p.sandbox.dashComposerEl.hidden, false,
+    "the composer must stay VISIBLE and disabled with the note below, even though no sub-agent " +
+    "panel was ever open for this session");
   assert(notes[notes.length - 1] && /agent process ended/.test(notes[notes.length - 1]),
     "an explanatory note must be shown, mirroring acp.html's own agent_died message");
   assertEqual(p.el("dashContext").hidden, true, "the context indicator must hide (setContext(null))");
@@ -13096,6 +13118,26 @@ check("dashboard: crew panel — a row is clickable and opens the sub-agent pane
   assertEqual(p.el("dashSubPanel").hidden, false, "clicking a crew row should open the sub-agent panel");
 });
 
+check("dashboard: crew panel — a toolCallId of '__proto__' is stored as a literal key, not reassigning dashCrews's own prototype (Fix 4, Phase 5 review)", () => {
+  const p = loadDashPicker({ viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "worker", task: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ], "__proto__"));
+  // dashCrews is keyed directly by the wire-controlled toolCallId
+  // (unrestricted by acp.py's frame format) -- on an ordinary object literal
+  // `dashCrews["__proto__"] = value` is intercepted by Object.prototype's
+  // own __proto__ accessor and reassigns the object's [[Prototype]] instead
+  // of storing a literal key. Object.create(null) has no such accessor in
+  // its chain, so the assignment behaves like any other key.
+  assert(Object.keys(p.sandbox.dashCrews).includes("__proto__"),
+    "the crew slot must be stored under the literal key '__proto__'");
+  assertEqual(typeof p.sandbox.dashCrews.hasOwnProperty, "undefined",
+    "dashCrews must be Object.create(null) -- inheriting Object.prototype methods here would mean " +
+    "the '__proto__' assignment above reassigned the object's own prototype instead of being stored");
+  assertEqual(p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row").length, 1,
+    "the crew row must still render normally for a toolCallId of '__proto__'");
+});
+
 check("dashboard: crew panel — persists after all entries are done (no auto-dismiss)", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   const now = Date.now() / 1000;
@@ -13354,11 +13396,23 @@ check("dashboard: crew panel — agent_died clears crew timers, crew state, and 
   ]));
   p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
   assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
   assert(p.intervals.length > baseline, "fixture: a timer should be registered for a running crew entry");
   p.sandbox.dashHandle({ type: "agent_died", sessionId: "sess-1", payload: { exitCode: 1, message: "" } });
   assertEqual(p.intervals.length, baseline, "agent_died must clear crew timers");
   assertEqual(Object.keys(p.sandbox.dashCrews).length, 0, "agent_died must clear crew state");
   assertEqual(p.el("dashSubPanel").hidden, true, "agent_died must close any open sub-agent panel");
+  // Fix 8 (Phase 5 review): explicit socket close, not just a hidden panel --
+  // see the session_closed test's own comment above for why.
+  assertEqual(p.sandbox.dashSubWs, null,
+    "agent_died must explicitly close and null dashSubWs, not just hide the panel");
+  // Fix 1 (Phase 5 review): unlike the baseline agent_died test above (no
+  // sub-agent panel ever opened there), THIS session's panel WAS open when
+  // agent_died fired -- confirms the composer still ends up visible-and-
+  // disabled correctly in that case too, not just the no-panel case.
+  assertEqual(p.sandbox.dashComposerEl.hidden, false,
+    "the composer must still end up visible-and-disabled even though a sub-agent panel WAS open " +
+    "when agent_died fired");
 });
 
 check("dashboard: crew panel — a removed slot's stale timer tick does not throw or leak", () => {
@@ -13425,6 +13479,28 @@ check("dashboard: sub-agent panel — opening a crew row's sub-agent sends exact
   assertEqual(subs[0].sessionId, "sub-1");
 });
 
+check("dashboard: sub-agent panel — dashConnectSubWs logs open/error/close/parse-failure lifecycle events (Fix 7, Phase 5 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  let lines = p.el("dashLog").childNodes.length;
+  assert(lines > 0,
+    "dashConnectSubWs's onopen must log a line, mirroring dashConnect()'s own onopen logLine call");
+  const s = p.subSocket(0);
+  s.onerror();
+  assert(p.el("dashLog").childNodes.length > lines, "dashConnectSubWs's onerror must log a line");
+  lines = p.el("dashLog").childNodes.length;
+  s.onmessage({ data: "not valid json" });
+  assert(p.el("dashLog").childNodes.length > lines,
+    "a JSON parse failure on the sub-agent socket must log a line");
+  lines = p.el("dashLog").childNodes.length;
+  p.closeSub(0, { code: 1000, reason: "" });
+  assert(p.el("dashLog").childNodes.length > lines, "dashConnectSubWs's onclose must log a line");
+});
+
 check("dashboard: sub-agent panel — the back button restores the main transcript and leaves the sub socket open", () => {
   const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
   p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
@@ -13463,6 +13539,33 @@ check("dashboard: sub-agent panel — reopening a sub-agent reuses the existing 
   assertEqual(p.subSocketCount(), 1, "a second socket must not be opened when the existing one is still OPEN");
   const subs = p.subSocket(0).sent.filter((f) => f.type === "subscribe");
   assertEqual(subs.length, 2, "expected a second subscribe sent on the reused socket");
+});
+
+check("dashboard: sub-agent panel — a frame for a previously-viewed sub-agent does not render into a just-opened DIFFERENT sub-agent's panel on the reused socket (Fix 6, Phase 5 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+    { sessionId: "sub-2", role: "writer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  const rows = p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row");
+  rows[0].dispatch("click"); // open sub-1
+  p.openSub(0);
+  p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: "hello from sub-1" } });
+  assert(p.el("dashSubTranscript").textContent.includes("hello from sub-1"),
+    "fixture: sub-1's own chunk should render while sub-1 is open");
+  // Switch straight to sub-2's row -- dashConnectSubWs() reuses the same
+  // still-OPEN socket rather than opening a new one (5e's own design,
+  // verified by the test above), so it never got a chance to fully drop the
+  // previous subscription before a frame still addressed to sub-1 could
+  // arrive.
+  rows[1].dispatch("click"); // switch to sub-2, reuses the same socket
+  assertEqual(p.subSocketCount(), 1, "fixture: switching sub-agents must reuse the existing socket, not open a new one");
+  assertEqual(p.sandbox.dashSubViewSid, "sub-2", "fixture: the panel must now be viewing sub-2");
+  // A frame still in flight for sub-1 at the moment of the switch.
+  p.deliverSub(0, { type: "chunk", sessionId: "sub-1", payload: { role: "agent", text: "late chunk from sub-1" } });
+  const body = p.el("dashSubTranscript").textContent;
+  assert(!body.includes("late chunk from sub-1"),
+    "a stale frame for the previously-viewed sub-agent must not render into the newly-opened one's transcript");
 });
 
 check("dashboard: sub-agent panel — renders its own chunk and tool_call frames via dashHandleSub", () => {
@@ -13520,9 +13623,41 @@ check("dashboard: sub-agent panel — session_closed closes any open sub-agent p
   ]));
   p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
   assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
   p.sandbox.dashHandle({ type: "session_closed", sessionId: "sess-1", payload: {} });
   assertEqual(p.el("dashSubPanel").hidden, true, "session_closed must close any open sub-agent panel");
   assertEqual(p.el("dashTranscriptWrap").hidden, false);
+  // Fix 8 (Phase 5 review): dashCloseSubagentView() only hides the panel, by
+  // design (a tap-to-reopen reuses the socket) -- session_closed's own
+  // session is already gone server-side, so nothing will ever reopen this
+  // socket. Leaving it open would hold its MAX_CONNECTIONS slot until the
+  // page reloads.
+  assertEqual(p.sandbox.dashSubWs, null,
+    "session_closed must explicitly close and null dashSubWs, not just hide the panel");
+});
+
+check("dashboard: sub-agent panel — creating a new session without closing the current one tears down an open sub-agent panel, crew state, and dashSubWs (Fix 2, Phase 5 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  assertEqual(p.el("dashSubPanel").hidden, false, "fixture: sub-agent panel should be open");
+  assert(p.sandbox.dashSubWs !== null, "fixture: dashSubWs should be open");
+  // The `session` frame shape dashPickerCreate/dashRailQuickCreate fire when
+  // the user creates a new session without first closing the one whose
+  // sub-agent panel is currently open (index.html's `payload.created` early
+  // branch, dashboard/ACP-new-session-picker plan Phase 4).
+  p.sandbox.dashHandle({
+    type: "session", sessionId: "sess-2",
+    payload: { created: true, cwd: "/ws2" },
+  });
+  assertEqual(p.el("dashSubPanel").hidden, true,
+    "new-session creation must close any open sub-agent panel from the previously-viewed session");
+  assertEqual(Object.keys(p.sandbox.dashCrews).length, 0,
+    "new-session creation must clear crew state from the previously-viewed session");
+  assertEqual(p.sandbox.dashSubWs, null,
+    "new-session creation must explicitly close and null dashSubWs, not just hide the panel");
 });
 
 check("dashboard: sub-agent panel — dashHandleSub is a distinct dispatcher, not threaded through dashHandle", () => {
@@ -13550,6 +13685,28 @@ check("dashboard: sub-agent panel — a too_many_connections error frame shows a
   const body = p.el("dashSubTranscript").textContent;
   assert(body.includes("Too many active connections"),
     "a too_many_connections error frame must render a clear, actionable message in the panel");
+});
+
+check("dashboard: sub-agent panel — a too_many_connections error frame followed by the server's own close does not double-message (Fix 3, Phase 5 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  // The real production sequence (acp.py's serve_socket()): an `error` frame
+  // arrives first (dashHandleSub's own case above already renders it), THEN
+  // the socket closes (code 1013) -- dashSubConnected is never set true by
+  // an error frame (only by a 'session' reply on a successful connect), so
+  // the onclose fallback below used to see !dashSubConnected still true and
+  // add its own generic "Could not connect" note right on top.
+  p.deliverSub(0, { type: "error", payload: { code: "too_many_connections", message: "At most 8 /acp sockets may be open at once." } });
+  p.closeSub(0, { code: 1013, reason: "too many connections" });
+  const notes = p.el("dashSubTranscript").querySelectorAll(".acp-msg-note");
+  assertEqual(notes.length, 1,
+    "exactly one note should render for a real too_many_connections rejection, not two");
+  assert(notes[0].textContent.includes("Too many active connections"),
+    "the one note shown must be the specific, actionable too_many_connections message, not the generic fallback");
 });
 
 check("dashboard: sub-agent panel — an onclose with no prior content shows a graceful fallback message (defense-in-depth)", () => {
@@ -13612,6 +13769,26 @@ check("dashboard: sub-agent panel — tool_call frame with an agent-controlled t
   assert(p.el("dashSubTranscript").textContent.includes(malicious),
     "the sub-agent's tool-call title must render as literal text");
   assert(!p.sandbox._dash_sub_tool_xss, "the onerror handler must not fire -- tool-call rendering must not use innerHTML");
+});
+
+check("dashboard: sub-agent panel — a second tool_call/tool_update for the same toolCallId retitles the existing row via textContent, not innerHTML (Fix 5, Phase 5 review)", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  p.sandbox.dashHandle(dashSubagentsFrame("sess-1", [
+    { sessionId: "sub-1", role: "explorer", task: "", sessionName: "", status: "working", action: "", done: false, error: "", startedAt: Date.now() / 1000 },
+  ]));
+  p.sandbox.transcriptEl.querySelectorAll(".acp-crew-row")[0].dispatch("click");
+  p.openSub(0);
+  p.deliverSub(0, { type: "tool_call", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: "reading file.py", kind: "", status: "" } });
+  const rowsBefore = p.el("dashSubTranscript").querySelectorAll(".acp-msg-tool").length;
+  const malicious = "<img src=x onerror=\"window._dash_sub_retitle_xss=true\">";
+  p.deliverSub(0, { type: "tool_update", sessionId: "sub-1", payload: { toolCallId: "tc-1", title: malicious, kind: "", status: "" } });
+  const rowsAfter = p.el("dashSubTranscript").querySelectorAll(".acp-msg-tool").length;
+  assertEqual(rowsAfter, rowsBefore,
+    "retitling an already-seen toolCallId must update the existing row's text, not append a new row");
+  assert(p.el("dashSubTranscript").textContent.includes(malicious),
+    "the retitled row must render the new title as literal text");
+  assert(!p.sandbox._dash_sub_retitle_xss,
+    "the onerror handler must not fire -- the retitle path must use textContent, never innerHTML");
 });
 
 check("dashboard: sub-agent panel — session_closed/error note text uses textContent, never innerHTML", () => {

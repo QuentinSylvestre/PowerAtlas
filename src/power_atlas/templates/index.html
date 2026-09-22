@@ -1861,7 +1861,12 @@ function dashSendPrompt(){
 // a unique sequence counter for no-anchor fan-outs ('_na_N'). Mirrors
 // acp.html's own crews/_noAnchorSeq/_noAnchorKey (acp.html:799-801).
 // {key: {entries: [], panel: null|Element, timer: null|int, allDone: false}}
-var dashCrews = {};
+// Object.create(null), not {} (Fix 4, Phase 5 review) -- keyed directly by
+// wire-controlled toolCallId (payload.toolCallId, unrestricted by acp.py's
+// frame format), so a key of '__proto__' must not reach a real Object
+// prototype. Matches dashSubToolRows's own Object.create(null) two lines
+// below dashSubWs, for the same reason.
+var dashCrews = Object.create(null);
 var _dashNoAnchorSeq = 0; // counter for no-anchor fan-out keys
 var _dashNoAnchorKey = null; // stable key for the current no-anchor fan-out
 
@@ -1981,7 +1986,7 @@ function dashRemoveSingleCrewPanel(key) {
 // acp.html's own removeAllCrewPanels (acp.html:1881-1886).
 function dashRemoveAllCrewPanels() {
   Object.keys(dashCrews).forEach(function(k) { dashRemoveSingleCrewPanel(k); });
-  dashCrews = {};
+  dashCrews = Object.create(null); // Fix 4, Phase 5 review -- see the declaration above
   _dashNoAnchorSeq = 0;
   _dashNoAnchorKey = null; // reset for the next session
 }
@@ -2107,6 +2112,16 @@ var dashSubToolRows = Object.create(null);
 // the plan's Phase 5 text) -- acp.html's own connectSubWs has no onclose
 // handler at all.
 var dashSubConnected = false;
+// True once dashHandleSub's 'error' case has rendered a note for the CURRENT
+// connection attempt (Fix 3, Phase 5 review) -- without this, a real
+// too_many_connections rejection double-messages: acp.py's serve_socket()
+// sends the `error` frame first (which dashHandleSub already renders below),
+// then closes the socket -- but dashSubConnected is only ever set true by a
+// 'session' frame (a successful connect), never by an 'error' frame, so
+// dashConnectSubWs()'s onclose fallback used to see !dashSubConnected still
+// true and add its own generic note on top. Reset alongside dashSubConnected
+// at the start of every connection attempt, same lifecycle.
+var dashSubErrorShown = false;
 
 function dashRenderSubHead() {
   var entry = dashCrewEntry(dashSubViewSid);
@@ -2159,6 +2174,23 @@ function dashCloseSubagentView() {
 }
 dashSubBackBtn.addEventListener('click', dashCloseSubagentView);
 
+// Explicitly closes dashSubWs and releases its MAX_CONNECTIONS slot right
+// away, instead of leaving it open until the page reloads (Fix 8, Phase 5
+// review) -- dashCloseSubagentView() deliberately does NOT do this itself
+// (see its own comment above): it only hides the panel, so a tap-to-reopen
+// reuses the same socket rather than paying a fresh handshake. Every
+// teardown trigger that actually ends the underlying session/crew state --
+// agent_died, session_closed, and creating a new session without first
+// closing the one currently viewed -- must close the socket outright
+// instead, and calls this alongside dashCloseSubagentView()/
+// dashRemoveAllCrewPanels() at each of those three call sites.
+function dashCloseSubWs() {
+  if (dashSubWs) {
+    try { dashSubWs.close(); } catch (e) {}
+    dashSubWs = null;
+  }
+}
+
 function dashConnectSubWs(sid) {
   if (dashSubWs && dashSubWs.readyState === WebSocket.OPEN) {
     dashSubWs.send(JSON.stringify({ type: 'subscribe', sessionId: sid, payload: {} }));
@@ -2166,15 +2198,30 @@ function dashConnectSubWs(sid) {
   }
   if (dashSubWs) { try { dashSubWs.close(); } catch (e) {} }
   dashSubConnected = false;
+  dashSubErrorShown = false;
   var socket = new WebSocket(dashWsUrl());
   dashSubWs = socket;
   socket.onopen = function () {
+    // Mirrors dashConnect()'s own ws.onopen logLine call (Fix 7, Phase 5
+    // review) -- previously silent, so a malformed frame or an unexpected
+    // close on this socket was invisible in the debug log.
+    logLine('info', 'sub-agent socket open to ' + location.host);
     socket.send(JSON.stringify({ type: 'subscribe', sessionId: sid, payload: {} }));
   };
   socket.onmessage = function (event) {
     var frame;
-    try { frame = JSON.parse(event.data); } catch (e) { return; }
+    try { frame = JSON.parse(event.data); } catch (e) {
+      // Mirrors dashConnect()'s own ws.onmessage parse-error logLine call
+      // (Fix 7, Phase 5 review).
+      logLine('error', '← unparseable sub-agent frame');
+      return;
+    }
     dashHandleSub(frame);
+  };
+  // Mirrors dashConnect()'s own ws.onerror logLine call (Fix 7, Phase 5
+  // review).
+  socket.onerror = function () {
+    logLine('error', 'sub-agent socket error — the handshake may have been rejected');
   };
   // Graceful handling of a rejected connection (SC8, Phase 5) -- client-side
   // only, no change to acp.py's MAX_CONNECTIONS itself (out of scope, see
@@ -2187,8 +2234,19 @@ function dashConnectSubWs(sid) {
   // or a close that outraces its own message). Without it, a connection that
   // never renders anything would leave the panel silently blank with no way
   // to tell "still loading" from "never going to load".
-  socket.onclose = function () {
-    if (socket === dashSubWs && !dashSubConnected) {
+  //
+  // Gated on !dashSubErrorShown too (Fix 3, Phase 5 review), not just
+  // !dashSubConnected -- otherwise a REAL too_many_connections rejection
+  // double-messages: dashHandleSub's own 'error' case already renders the
+  // specific, actionable note the moment that frame arrives, and
+  // dashSubConnected is never set true by an error frame (only by a
+  // successful 'session' reply), so this fallback used to fire its own
+  // generic note right on top of it every time.
+  socket.onclose = function (ev) {
+    // Mirrors dashConnect()'s own ws.onclose logLine call (Fix 7, Phase 5
+    // review).
+    logLine('info', 'sub-agent socket closed, code ' + ev.code + (ev.reason ? ' — ' + ev.reason : ''));
+    if (socket === dashSubWs && !dashSubConnected && !dashSubErrorShown) {
       dashSubAddNote('Could not connect to this sub-agent — try again.');
     }
   };
@@ -2259,6 +2317,18 @@ function dashSubAddNote(text) {
 function dashHandleSub(frame) {
   var type = frame && frame.type;
   var payload = (frame && frame.payload) || {};
+  // Staleness guard (Fix 6, Phase 5 review): dashSubWs is intentionally
+  // reused across a switch from one sub-agent to another (see
+  // dashConnectSubWs()'s reuse branch above) -- a frame already in flight
+  // for the PREVIOUSLY-viewed sub-agent at the moment of the switch would
+  // otherwise render into the panel now showing a DIFFERENT sub-agent.
+  // Mirrors the `sid !== _viewingSid` staleness guard dashHandle() already
+  // uses for the main socket's own frames, and the pattern Phase 4's Fix 1
+  // established for a stale in-flight image encode. A frame with no
+  // sessionId (e.g. the too_many_connections error frame, sent before any
+  // session is known) is connection-level, not session-specific, and always
+  // passes through.
+  if (frame && frame.sessionId && frame.sessionId !== dashSubViewSid) return;
   if (type === 'session') {
     dashSubConnected = true;
     dashSubTranscriptEl.textContent = '';
@@ -2298,6 +2368,7 @@ function dashHandleSub(frame) {
     // gets a clearer, actionable message; every other error frame falls back
     // to the server's own message, mirroring acp.html's combined
     // session_closed/error handling (acp.html:2130-2133).
+    dashSubErrorShown = true; // Fix 3, Phase 5 review -- see dashConnectSubWs()'s onclose comment
     dashSubAddNote(payload.code === 'too_many_connections'
       ? 'Too many active connections — close another session or sub-agent view and try again.'
       : (payload.message || 'this sub-agent session ended'));
@@ -2405,6 +2476,22 @@ function dashHandle(frame){
     if (payload && payload.created) {
       _viewingSid = sid;
       _dashLoadingSid = null; // creation is not a load-slot; prevents abandon-close path
+      // Fix 2 (Phase 5 review): a sub-agent panel/crew state from whatever
+      // session was previously viewed must not survive into this new
+      // session's view. The row-click session-switch path already gets this
+      // for free (renderTranscriptHistory() -> clearTranscript() -> the
+      // window.removeAllCrewPanels/closeSubagentView guards), but creating a
+      // session this way (dashPickerCreate/dashRailQuickCreate, without
+      // first closing the session currently viewed) never goes through that
+      // path -- so this branch must tear the same state down explicitly.
+      // dashCloseSubagentView() alone only hides the panel (by design, for
+      // the tap-to-reopen case); dashCloseSubWs() (Fix 8) additionally
+      // closes and nulls the now-orphaned socket outright, since nothing
+      // will ever reopen it for a sub-agent that belonged to a different
+      // session.
+      dashCloseSubagentView();
+      dashRemoveAllCrewPanels();
+      dashCloseSubWs();
       var transcriptEl = document.getElementById('dashTranscript');
       if (transcriptEl) transcriptEl.textContent = '';
       // Show composer directly — no dashMaybeAttach needed; this page created the session.
@@ -2811,6 +2898,11 @@ function dashHandle(frame){
     // tested there ("crew timer clears on session release").
     dashCloseSubagentView();
     dashRemoveAllCrewPanels();
+    // Explicitly closes dashSubWs too, not just hides the panel (Fix 8,
+    // Phase 5 review) -- the session it was subscribed to is already gone
+    // server-side, so nothing will ever reopen this socket; leaving it open
+    // would hold its MAX_CONNECTIONS slot until the page reloads.
+    dashCloseSubWs();
     // Queue/Steer state (SC5, Phase 3) belonged to the session just
     // released too -- neither must fire against whatever session is opened
     // next on this page. Mirrors acp.html's own releaseSession() (its
@@ -2891,6 +2983,22 @@ function dashHandle(frame){
     // conversation for either once the whole process has exited.
     dashCloseSubagentView();
     dashRemoveAllCrewPanels();
+    // Explicitly closes dashSubWs too, not just hides the panel (Fix 8,
+    // Phase 5 review) -- mirrors the session_closed teardown above; there is
+    // no process left on the other end for this socket to ever reconnect to.
+    dashCloseSubWs();
+    // Fix 1 (Phase 5 review): dashCloseSubagentView() (just above) sets
+    // dashComposerEl.hidden = !_dashAttachedSid, which by this point is
+    // always true, since _dashAttachedSid was already cleared a few lines
+    // above -- correct when a sub-agent panel actually WAS open and is now
+    // closing onto an unattached page, but wrong here: this handler's own
+    // established design (Phase 1/3) keeps the composer VISIBLE and
+    // disabled with an explanatory note a few lines below, regardless of
+    // whether a sub-agent panel was ever open. Without this line the note
+    // set below rendered into a hidden container and was never seen --
+    // reproduced live by a reviewer's probe on a session with no sub-agent
+    // panel ever opened.
+    dashComposerEl.hidden = false;
     // Three pre-existing dashboard state variables (not introduced by this
     // plan) that could otherwise leave stale lazy-load state if the agent
     // dies mid-lazy-load before a `session` frame confirms attach -- cleared
