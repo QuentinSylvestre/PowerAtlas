@@ -10455,6 +10455,17 @@ const DASH_CONNECT_NAMES = [
   "dashDiagnoseRejectedHandshake", "dashReconnectOnReady",
   "dashReconnectBtn.addEventListener", "dashReloadBtn.addEventListener",
 ];
+// Close-button click region (Fix 3, Phase 6 review): just the
+// dashCloseBtn.addEventListener('click', ...) listener itself, NOT the
+// surrounding var declarations for dashStopBtn/dashQueueSteerEl/etc. that sit
+// between it and dashUpdateCloseButton() in the real file -- those are
+// already separate, standalone El() instances directly in this harness's
+// sandbox literal (not looked up via document.getElementById), so replaying
+// their `var x = document.getElementById(...)` declarations here would
+// silently clobber every one of them with an unrelated (or null) lookup.
+// Real source, not a hand-rewritten stand-in, for the same reason every
+// other click-dispatch region in this file is one.
+const DASH_CLOSE_BTN_NAMES = ["dashCloseBtn.addEventListener"];
 
 function dashPickerSource() {
   const src = fs.readFileSync(INDEX_TEMPLATE, "utf8");
@@ -10617,11 +10628,28 @@ function dashPickerSource() {
     }
   }
 
-  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion };
+  // Close-button click region (Fix 3, Phase 6 review): see DASH_CLOSE_BTN_NAMES
+  // above for why this is a narrow, standalone slice rather than an extension
+  // of an existing region's boundary. Loaded unconditionally (not gated on
+  // realConnect) -- ordinary synchronous click-dispatch code, same as
+  // queueSteerWiringRegion.
+  const closeBtnFrom = src.indexOf("dashCloseBtn.addEventListener('click'");
+  if (closeBtnFrom < 0) throw new Error("index.html no longer wires dashCloseBtn's click listener");
+  const closeBtnTo = src.indexOf("// _dashAttachedSid: the sid this socket", closeBtnFrom);
+  if (closeBtnTo < 0) throw new Error("index.html's dashCloseBtn click region no longer precedes the _dashAttachedSid comment");
+  const closeBtnRegion = src.slice(closeBtnFrom, closeBtnTo);
+  for (const name of DASH_CLOSE_BTN_NAMES) {
+    if (!closeBtnRegion.includes(name)) {
+      throw new Error(
+        `the extracted close-button region does not contain ${name}; it has moved`);
+    }
+  }
+
+  return { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion };
 }
 
 function loadDashPicker(opts = {}) {
-  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion } = dashPickerSource();
+  const { composerControlsRegion, cmdPaletteRegion, queueSteerWiringRegion, imageAttachRegion, crewSubagentRegion, handleRegion, pickerRegion, connectRegion, closeBtnRegion } = dashPickerSource();
 
   // All picker-element IDs that must exist in the byId map for parse-time
   // wiring (document.getElementById calls in the picker script body) to work.
@@ -10890,6 +10918,12 @@ function loadDashPicker(opts = {}) {
     _dashReconnectQueueSnapshot: opts.dashReconnectQueueSnapshot !== undefined ? opts.dashReconnectQueueSnapshot : null,
     dashReconnectBtn: byId.get("dashReconnect"),
     dashReloadBtn: byId.get("dashReload"),
+    // Close-button (Fix 3, Phase 6 review) -- a standalone El() instance, not
+    // byId-registered, same reasoning as dashStopBtn/etc. immediately below:
+    // closeBtnRegion's own `dashCloseBtn.addEventListener(...)` call (run
+    // further down) reads this as a free variable at parse time, so it must
+    // already exist by then.
+    dashCloseBtn: new El("button"),
     dashStopBtn: dashStopBtnEl,
     dashQueueSteerEl: dashQueueSteerElEl,
     dashSendModeBtn: dashSendModeBtnEl,
@@ -11190,6 +11224,12 @@ function loadDashPicker(opts = {}) {
   // wiring, then dashHandle, then the picker section (which also executes
   // the parse-time event-listener wiring against the byId map above).
   vm.runInContext(composerControlsRegion, sandbox, { filename: "index.html#dash-composer-controls" });
+  // Close-button click wiring (Fix 3, Phase 6 review) -- self-contained
+  // (reads send/_dashAttachedSid/showToast/dashCloseBtn as free variables,
+  // all already present in the sandbox literal above), so unlike connectRegion
+  // this runs unconditionally, not gated on opts.realConnect -- ordinary
+  // synchronous click-dispatch code with no real-WebSocket dependency.
+  vm.runInContext(closeBtnRegion, sandbox, { filename: "index.html#dash-close-btn" });
   vm.runInContext(cmdPaletteRegion, sandbox, { filename: "index.html#dash-cmd-palette" });
   vm.runInContext(imageAttachRegion, sandbox, { filename: "index.html#dash-image-attach" });
   const _realDashSendPrompt = sandbox.dashSendPrompt;
@@ -12715,6 +12755,23 @@ check("Fix 7: a failed Steer send shows a not-connected toast", () => {
   assert(/Not connected/.test(toasts[0]), "the toast must explain the send failed for lack of a connection");
 });
 
+check("Fix 3 (Phase 6 review): a Close click during the reconnect/backoff window shows a not-connected toast", () => {
+  const p = loadDashPicker({ dashAttachedSid: "sess-1", viewingSid: "sess-1" });
+  const toasts = [];
+  p.sandbox.showToast = (html) => toasts.push(html);
+  // Simulates the reconnect/backoff window (socket down, waiting to retry) --
+  // send() returning false is exactly what a Close click sees there, the
+  // same failure Fix 7 (Phase 3 review) already handled for Stop/Steer.
+  p.sandbox.send = () => false;
+  p.sandbox.dashCloseBtn.dispatch("click");
+  assertEqual(toasts.length, 1,
+    "a failed close send must show a toast rather than silently doing nothing, mirroring Stop/Steer's " +
+    "own not-connected pattern (Fix 7, Phase 3 review)");
+  assert(/Not connected/.test(toasts[0]), "the toast must explain the send failed for lack of a connection");
+  assertEqual(p.sandbox.dashCloseBtn.disabled, false,
+    "a failed close send must not leave the button stuck in the disabled 'Closing…' state");
+});
+
 // ---------------------------------------------------------------------------
 // Image paste-to-attach (SC6, dashboard/ACP feature-parity plan Phase 4) --
 // dash-prefixed, index.html-only. The encoder behind these is the same
@@ -14101,6 +14158,30 @@ check("dashboard: reconnect — a failed session load shows Reload without ever 
     "a load failure is an ordinary error frame on a healthy socket -- it must not itself close or reopen it");
 });
 
+check("dashboard: reconnect — the Reload button clears once a different session's load succeeds (Fix 2, Phase 6 review)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-load-fail" });
+  p.sandbox.dashConnect();
+  p.openMain();
+  p.sandbox._dashLoadingSid = "sess-load-fail";
+  p.deliverMain({
+    type: "error", sessionId: "sess-load-fail",
+    payload: { code: "agent_start_failed", message: "could not start" },
+  });
+  assertEqual(p.el("dashReload").hidden, false, "fixture: the failed load must show Reload first");
+  // Switch to a different session and let ITS load succeed on the same,
+  // reused socket -- no fresh dashConnect() open happens on an ordinary
+  // session switch, which is exactly the case the fresh-socket-open-only
+  // reset used to miss.
+  p.sandbox._viewingSid = "sess-2";
+  p.deliverMain({
+    type: "session", sessionId: "sess-2",
+    payload: { sessionId: "sess-2", cwd: "/ws", created: false, turnActive: false, contextPercent: null },
+  });
+  assertEqual(p.el("dashReload").hidden, true,
+    "a successful session-frame attach for a different session must clear a Reload button left over " +
+    "from an earlier, unrelated load failure");
+});
+
 // ---- state-restoration points (6b's own list) --------------------------
 
 check("dashboard: reconnect — a drop resets _dashTurnActive so a stale active-turn UI does not survive it", () => {
@@ -14268,6 +14349,41 @@ check("dashboard: reconnect — a drop closes any open sub-agent panel and expli
   assertEqual(p.sandbox.dashSubWs, null,
     "a main-socket drop must explicitly close and null dashSubWs -- it has no reconnect loop of its own " +
     "and must not be left orphaned holding a MAX_CONNECTIONS slot");
+  // Fix 1 (Phase 6 review): a genuinely-open sub-agent panel closing onto a
+  // still-attached session must un-hide the composer -- the established
+  // pre-Phase-6 behavior (dashCloseSubagentView()'s own `dashComposerEl.hidden
+  // = !_dashAttachedSid`) -- confirming the guard added for the lazy-attach
+  // regression (see the dedicated check below) did not narrow this, the
+  // case it was designed to still handle correctly.
+  assertEqual(p.sandbox.dashComposerEl.hidden, false,
+    "closing a genuinely-open sub-agent panel onto a still-attached session must show the composer");
+});
+
+check("dashboard: reconnect — a drop during an unconfirmed lazy-attach re-enables the composer and clears the note (Fix 1, Phase 6 review)", () => {
+  const p = loadDashPicker({ realConnect: true });
+  p.sandbox.dashConnect();
+  p.openMain();
+  // Simulate dashSendPrompt()'s lazy-attach path in flight: _dashAttachedSid
+  // stays null for the entire wait, by design, while the composer is shown
+  // but disabled under a "Starting the agent…" note -- no sub-agent panel is
+  // ever open in this scenario.
+  p.sandbox._dashLoadingSid = "sess-x";
+  p.sandbox._dashPendingSend = "hello";
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashComposerEl.hidden = false;
+  const notes = [];
+  p.sandbox.dashSetComposerNote = (t) => notes.push(t);
+  p.closeMain();
+  assertEqual(p.sandbox.dashPromptInput.disabled, false,
+    "a drop during an unconfirmed lazy-attach must re-enable the composer -- the only other " +
+    "unconditional disabled = false reset in this handler lives inside the unrelated " +
+    "_dashSteerPending branch, and not even a later successful reconnect can fix this otherwise: " +
+    "dashReconnectOnReady() only resubscribes if (_dashAttachedSid), which stays null here");
+  assertEqual(notes[notes.length - 1], "",
+    "a drop during an unconfirmed lazy-attach must clear the 'Starting the agent…' note");
+  assertEqual(p.sandbox.dashComposerEl.hidden, false,
+    "the composer container itself must not be hidden either -- dashCloseSubagentView() runs " +
+    "unconditionally in this handler, and no sub-agent panel was ever open for this session");
 });
 
 check("dashboard: reconnect — the reconnect's own session/history frames tear down crew-panel timers, on reconnect specifically", () => {

@@ -1030,11 +1030,31 @@ function dashConnect(onReady){
     // setPending(false)/pendingCreate=null/setTurn(false)/setLoading(null)).
     // Harmless (a no-op reset to the same default) when nothing was in
     // flight, exactly like acp.html's own unconditional resets here.
+    // Fix 1 (Phase 6 review): captured BEFORE the reset below clears
+    // _dashLoadingSid to null. A genuinely in-flight lazy-attach
+    // (dashSendPrompt()'s "Starting the agent…" path, index.html ~2022-2025)
+    // disables dashPromptInput and sets a composer note, and _dashAttachedSid
+    // stays null for the entire wait by design -- so a drop during this
+    // exact window left both stuck: nothing below re-enables the textarea or
+    // clears the note (the only unconditional dashPromptInput.disabled =
+    // false reset in this handler lives inside the unrelated `if
+    // (_dashSteerPending)` branch below), and even a later successful
+    // reconnect can't fix it either, since dashReconnectOnReady() only
+    // resubscribes `if (_dashAttachedSid)`, which is still null here. Two
+    // OTHER composer-disabled-with-a-note states legitimately must survive a
+    // drop untouched -- dashMaybeAttach()'s 'locked' ("open elsewhere") and
+    // agent_died's "process ended" -- both have _dashLoadingSid === null, so
+    // gating on it here leaves them alone.
+    var _dashWasLazyAttaching = _dashLoadingSid !== null;
     _dashLoadingSid = null;
     _dashPendingSend = null;
     _dashPendingImages = null;
     _dashPendingCreate = null;
     _dashTurnActive = false;
+    if (_dashWasLazyAttaching) {
+      dashPromptInput.disabled = false;
+      dashSetComposerNote('');
+    }
     // _dashOrigin, unlike the above, is not in-flight-tracking state that
     // defaults to a falsy value when nothing was pending -- it is meaningful
     // for an ALREADY-CONFIRMED attach (_dashAttachedSid set), read later by
@@ -1168,7 +1188,15 @@ function dashUpdateCloseButton(){
 }
 dashCloseBtn.addEventListener('click', function(){
   if (!_dashAttachedSid) return;
-  if (!send('close', {}, _dashAttachedSid)) return;
+  if (!send('close', {}, _dashAttachedSid)) {
+    // Fix 3 (Phase 6 review): mirrors the Stop/Steer buttons' own
+    // not-connected toast (Fix 7, Phase 3 review) for the same class of
+    // failure -- clicking Close while a reconnect backoff timer is pending
+    // (socket down, waiting to retry) previously did nothing visible at all:
+    // no toast, no debug-log line the user would ever see.
+    showToast('<div class="toast toast-error">Not connected — nothing sent<button class="toast-dismiss" onclick="this.parentElement.remove()">×</button></div>');
+    return;
+  }
   dashCloseBtn.disabled = true;
   dashCloseBtn.textContent = 'Closing…';
 });
@@ -2336,6 +2364,20 @@ function dashOpenSubagent(sid) {
 }
 
 function dashCloseSubagentView() {
+  // Fix 1 (Phase 6 review): captured BEFORE the line below hides the panel.
+  // This function is called defensively from several teardown sites (onclose,
+  // session_closed, agent_died, new-session-creation) even when no sub-agent
+  // panel was ever open for the session in question -- in that case
+  // _dashAttachedSid being null (e.g. a lazy-attach still unconfirmed when
+  // the socket dropped) has nothing to do with a panel, and the unconditional
+  // composer-hide below regressed dashSendPrompt()'s lazy-attach flow: a drop
+  // mid-attach hid the whole composer container instead of leaving it
+  // visible-and-disabled under its "Starting the agent…" note. Callers that
+  // need a specific composer visibility regardless of the panel (agent_died,
+  // new-session-creation) already set it explicitly themselves right after
+  // calling this function, so gating this line on the panel having actually
+  // been open changes nothing for them.
+  var _dashPanelWasOpen = !dashSubPanelEl.hidden;
   dashSubViewSid = null;
   dashSubPanelEl.hidden = true;
   dashTranscriptWrapEl.hidden = false;
@@ -2348,8 +2390,12 @@ function dashCloseSubagentView() {
   // dashRefreshComposerControls() (Phase 3, which only governs which button
   // shows within an already-visible composer) on the same _dashAttachedSid
   // signal every other reset in this file already uses for "is there a live
-  // session to show a composer for at all".
-  dashComposerEl.hidden = !_dashAttachedSid;
+  // session to show a composer for at all". Only touched when a panel was
+  // actually open (see the guard comment above) -- otherwise this function
+  // must not have an opinion on composer visibility at all.
+  if (_dashPanelWasOpen) {
+    dashComposerEl.hidden = !_dashAttachedSid;
+  }
   dashRefreshComposerControls();
   // The socket is left open rather than closed: MAX_CONNECTIONS (acp.py)
   // budgets for a handful of sockets per viewer for exactly this shape --
@@ -2783,6 +2829,16 @@ function dashHandle(frame){
     dashSetComposerNote('');
     dashRefreshComposerControls();
     dashUpdateCloseButton();
+    // Fix 2 (Phase 6 review): this frame is proof a load/attach just
+    // succeeded, on whatever socket answered it -- the earliest reliable
+    // "we're good now" signal already used above for the same reasoning
+    // (setContext/dashSetComposerNote resets). A Reload button shown earlier
+    // by an unrelated load failure (dashHandle()'s `error` case) or a
+    // stale-token diagnosis must not linger once a different session's load
+    // goes on to succeed on the same, reused socket -- previously the only
+    // reset was dashConnect()'s own fresh-socket-open path, which does not
+    // run on every session switch.
+    dashReloadBtn.hidden = true;
     return;
   }
   if (sid && sid !== _viewingSid) return; // stale frame for a session no longer on screen
