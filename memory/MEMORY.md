@@ -186,6 +186,7 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Source**: this session (2026-08-11) — two direct `kiro-cli acp -a` 2.16.2 subprocess captures (a 3-stage all-succeed fan-out, and a 2-stage fan-out with one stage's command deliberately failed), both logged to session scratchpad only (not retained, same practice as the depth-2 probe above); corrections landed in `acp.py` (SUBAGENT_LIST_METHOD/SUBAGENT_ACTIVITY_METHOD/`_SUBAGENT_ACTIVE_STATUSES`/`_SUBAGENT_ROLE_KEYS`/`_SUBAGENT_TASK_KEYS`/`MAX_SUBAGENT_TASK_CHARS` comments, the `error =` line, the `agent_message_chunk` dispatch comment, and the content-only `tool_call_update` skip) and `tests/test_web.py` (matching comment corrections plus two new regression tests, `test_an_oversized_task_is_clipped` and `test_a_content_only_update_is_not_forwarded`) | **Verified**: 2026-08-11 (session, empirical — every claim backed by a raw captured JSON-RPC line, not model self-report)
 **Stale-when**: kiro-cli minor version changes past 2.16.2 — like the depth-2 entry, the exact status vocabulary and channel behavior are build-specific and should be re-measured rather than assumed to persist.
 **Update (2026-09-16, `260911_ACP_V3_FOLLOWUP_FEATURES`)**: A standalone probe driving `initialize` → `session/new` directly against a disposable `kiro-cli acp --agent-engine v3` subprocess found one more harness gap this entry's method didn't yet name: `session/new` blocks forever unless the client answers an inbound `_kiro/auth/getAccessToken` request the agent sends right after `initialize`'s response. Quote: "`session/new` blocks forever unless the client answers an inbound `_kiro/auth/getAccessToken` request the agent sends right after `initialize`'s response. Added a handler mirroring `acp.py`'s `_fulfill_token` (shells out to `kiro-cli chat _ get-kas-token`), plus a generic `-32601` refusal for any other inbound request so the probe never grants tool permission." Any future standalone probe using this session's method must implement that handler plus the generic `-32601` refusal, or the handshake hangs indefinitely (cost one 90s wasted attempt before being found).
+**Update (2026-09-22, `260921_DASHBOARD_ACP_FEATURE_PARITY`)**: PowerAtlas has run v3-only since 2026-09-17 (`data_kiro_v3.py:9`), but this entry's probe recipe ("use the `subagent` tool to dispatch N parallel stages...", driven via `kiro-cli acp -a`) exercises `_kiro.dev/subagent/list_update`, which is **v2-only** — `acp.py:4009` confirms that check never matches on v3 — so this recipe cannot fire through PowerAtlas at all, structurally, regardless of phrasing. v3's actual crew-panel trigger is `_on_agent_subtask_open`, gated on a `tool_call`'s `_meta.kiro.kind == "agent-subtask"` — confirmed as a real code path in `acp.py`, but **never observed to actually fire**: two live v3 probes during this plan's Step 9b QA both confirmed kiro-cli's real internal `invoke_subagent` delegation tool was genuinely invoked (concurrent execution, ~7-8s each), yet zero `subagents` frames arrived either time, and PowerAtlas's own server log never records `_meta.kiro` for `tool_call`/`tool_call_update` frames, so whether the tag is truly absent on the wire or merely unrecognized could not be determined without adding temporary diagnostic logging to `acp.py`.
 
 ### `close_session` having zero internal `await` points makes wire-call-mocking test synchronization silently useless
 
@@ -198,6 +199,47 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **Why**: Phase 1's Implementation Divergences deferred ~91 stale log-message literals to "Phase 4/Phase 6" by name — but Phase 4's file scope was `tests/test_web.py` and Phase 6's was documentation files; neither ever covered `acp.py`. This survived the whole plan's execution and 8 review sub-agents undetected, only surfacing when the orchestrator ran the plan's own final verification grep sweep after everything was believed done.
 **How to apply**: When a plan phase's own text defers cleanup work "to Phase N," verify Phase N's stated **File scope** line actually covers the deferred item's file before trusting the reference — a deferral naming a phase is not itself evidence that phase can act on it.
 **Source**: `260911_ACP_V2_TO_V3_ENGINE_CUTOVER`, code: `817ebf2` | **Verified**: 2026-09-12 (session, empirical)
+
+### [improvement_signal] A rate-limit-killed sub-agent's partial edits deserve the same scrutiny as a self-directed "done" return
+
+**Target**: `shared/skills/qdev/SKILL.md`
+**Why**: A rate-limit-killed sub-agent's partial/uncommitted edits were not given the same scrutiny as a self-reported "done" return, even though one of two rate-limited agents left a genuine structural bug (duplicate route registrations) in its working tree. The orchestrator had to independently diagnose and discard a bad partial diff; the parallel companion agent's partial diff turned out fine on inspection, so the risk is asymmetric and easy to under-scrutinize.
+**Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-12
+**Evidence-quote**: "a rate-limit-killed sub-agent's partial edits deserve the SAME scrutiny as a self-directed \"done\" return, not less — a near-finished-looking diff can still be silently wrong in a way that only a careful read (not just \"it looks mostly done\") catches."
+
+### [improvement_signal] qdev's docs-commit-message convention assumes every phase produces a code commit
+
+**Target**: `shared/skills/qdev/SKILL.md`
+**Why**: The `docs(<plan-slug>): phase N progress (code: <sha>)` commit-message convention assumes every phase produces a code commit; a pure-research-spike phase produces none, forcing ad hoc orchestrator judgment on how to cite it.
+**Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-16
+**Evidence-quote**: "the `docs(<plan-slug>): phase N progress (code: <sha>)` commit-message convention assumes every phase produces a code commit; Phase 2 (a pure research spike) produced none"
+
+### [improvement_signal] qvalidate's doc-updates check can't distinguish never-addressed from resolved-conditional
+
+**Target**: `shared/skills/qvalidate/SKILL.md`
+**Why**: qvalidate's doc-updates check can't distinguish "this Documentation Updates row states a requirement that was never addressed" from "this row states a conditional check that was actually run and resolved to no-change-needed" — both read as an unedited file and FAIL identically. A genuine FAIL had to be triaged and explicitly overridden by the user at /qclose time.
+**Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-12
+**Evidence-quote**: "`qvalidate`'s `doc-updates` check can't distinguish \"this Documentation Updates row states a requirement that was never addressed\" from \"this row states a conditional check that was actually run and resolved to no-change-needed\""
+
+### [improvement_signal] qdev Step 7's implementation-notes and Review Log asks live in different locations with no navigation prompt
+
+**Target**: `shared/skills/qdev/SKILL.md`
+**Why**: The Step 7 instruction to add an inline implementation-notes sub-section under the phase, and a separate Review Log entry appended to the centralized Review Log section, are adjacent asks with very different target locations — nothing prompts the explicit navigation switch for the second, and the orchestrator once misplaced a Review Log entry inline instead of centrally.
+**Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-09
+**Evidence-quote**: "the Step 7 instruction to add \"an implementation notes sub-section... under the completed phase\" and a separate \"Review Log entry\" (appended to the centralized section) are adjacent asks with very different target locations, and nothing in the process prompts the orchestrator to explicitly re-navigate to the centralized section for the second one"
+
+### [improvement_signal] Rename/consolidation plans need a cross-phase sweep step for stale references
+
+**Target**: `shared/skills/qplan/SKILL.md`
+**Why**: A rename/consolidation plan's per-file phase boundaries routinely leave a stale reference one file outside every phase's scope, surfacing only at a final whole-repo verification grep rather than during any phase's own review. Each instance required a full review cycle to surface rather than being caught by the implementing phase.
+**Frequency**: 1 (below threshold) | **Sessions**: (sourced from plan archive) | **Last observed**: 2026-09-12
+**Evidence-quote**: "when a rename/consolidation plan's phases partition a codebase by file, add one lightweight cross-phase sweep step (a repo-wide grep for the retired names, run once after all rename phases land, scoped to comments/docstrings only) rather than relying on each phase's reviewer to independently notice a neighbor file's drift"
+
+### `/acp` is unreachable via direct tool-driven URL navigation during automated QA
+
+**Why**: Every phase of `260921_DASHBOARD_ACP_FEATURE_PARITY`'s Live QA (Phases 1-6) reported `/acp` as unreachable ("403 Forbidden") and skipped testing it, treating it as an auth failure. Step 9b traced the actual cause to `web.py`'s `_acp_navigation_ok()`'s `Sec-Fetch-Site` cross-origin-navigation guard — a deliberate CSRF protection for a route that spawns a kiro-cli agent process on load, not an authentication problem.
+**How to apply**: When driving `/acp` during automated browser QA, reach it via a real in-page `<a href="/acp">` link click (e.g. the dashboard's own ACP nav button) — never a direct tool-driven URL navigation, which always returns 403 by design regardless of session/auth state.
+**Source**: `plans/done/260922-0859_DASHBOARD_ACP_FEATURE_PARITY.md`, Step 9b Review Log entry | **Verified**: 2026-09-22
 
 ## Feedback
 
