@@ -35,5 +35,8 @@ re-litigate a settled word. General programming vocabulary does not belong here.
   independent of anything PowerAtlas does.
 - **derived agent** — `~/.kiro/agents/poweratlas-acp.md`, which PowerAtlas *generates* from the base
   agent plus a permissions overlay. Never hand-edited and never committed: it is a build product,
-  regenerated at startup and on settings change. Editing it directly is always the wrong move — change
+  regenerated at startup and on settings change while the ACP permission setting is on, and **deleted**
+  (not written as an allow-all file) while it is off — writing an allow-all file even when off would
+  have made it selectable from kiro-cli's own terminal agent picker, widening posture for a user whose
+  own baseline is narrower than allow-all. Editing it directly is always the wrong move — change
   the base agent or the overlay instead.
