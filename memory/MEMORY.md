@@ -241,6 +241,19 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: When driving `/acp` during automated browser QA, reach it via a real in-page `<a href="/acp">` link click (e.g. the dashboard's own ACP nav button) — never a direct tool-driven URL navigation, which always returns 403 by design regardless of session/auth state.
 **Source**: `plans/done/260922-0859_DASHBOARD_ACP_FEATURE_PARITY.md`, Step 9b Review Log entry | **Verified**: 2026-09-22
 
+### WinRT toast template `ToastImageAndText01` silently drops the body — use `ToastText02` for two-slot toasts
+
+**Why**: `ToastImageAndText01` (template index 0) has exactly one text slot. Writing a second `Text` node into it raises inside the spawned PowerShell child, but the child exits with code 0, its stderr is routed to DEVNULL, and the `except Exception` guard in `notifications.py` only protects against spawn failure — so every observable signal reports success while the body is silently dropped. The body is the only thing that distinguishes "done" from "hit an error", and this had been broken since the feature was written.
+**How to apply**: Use template index 5 (`ToastText02`) when two text slots are needed. Materialise the node list with `@(...)` and guard the second slot explicitly. Do not infer success from exit code 0 or absence of exception when calling `_fire_windows_toast` — the failure mode is fully silent at every level above PowerShell's internal COM raise.
+**Source**: `plans/done/260922-1140_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` — Intent section, Q1 discovery | **Verified**: 2026-09-19 (live process, PowerShell child inspection)
+**Stale-when**: WinRT `Windows.UI.Notifications` API changes template numbering
+
+### Bare TOML section loads as `{}` — config sub-dicts must use `.get(key, default)` not `[key]`
+
+**Why**: A bare `[notifications]` table in `config.toml` is parsed by `load_config` as `{}` and passed explicitly to the dataclass, bypassing the field's default. So `config.notifications["enabled"]` raises `KeyError` for a user who writes `[notifications]` with no fields, while `config.notifications.get("enabled", False)` degrades gracefully. This trap applies to any config sub-dict where the user or a migration might write an empty section.
+**How to apply**: Never index into a config sub-dict with `["key"]`. Always use `.get("key", <default>)`. Applies to `config.notifications`, `config.provider_settings`, `config.workspace_settings`, and any other dict-typed field that could arrive empty from a bare TOML section.
+**Source**: `plans/done/260922-1140_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` — Exploration Discovery risk R5 | **Verified**: 2026-09-19 (code review, load_config path traced)
+
 ## Feedback
 
 ### Provider context must be identified from visual cues in screenshots, not assumed
@@ -404,6 +417,12 @@ After the rename, PowerAtlas picks up the new title on the next Refresh or page 
 **How to apply**: When touching anything mode-related in `acp.py`, use the full 8-value set, not an assumed 5. Treat `kiro_default`'s presence as machine-dependent — a fresh machine or CI environment with no global `kiro_default` agent configured has no `kiro_default` mode at all, and combined with the silent-fallback-to-`vibe` behavior, could see every session land in `vibe` with no error. `session/load`'s own `modeId` parameter has no observable effect on an already-created session (mode is fixed at creation) — confirmed via a fresh-process test (kill the creating process, spawn an unrelated one, `session/load` the existing session).
 **Source**: `plans/done/260916-1748_ACP_V3_FOLLOWUP_FEATURES.md` § Phase 2 Implementation notes (divergences 1-2) | **Verified**: 2026-09-16 (session, empirical — live probe against disposable `kiro-cli acp --agent-engine v3` subprocess, 3 independent confirming signals)
 **Stale-when**: kiro-cli minor version changes — the mode set, the `source`/`origin` metadata, and the invalid-modeId fallback behavior are all build-specific and should be re-measured rather than assumed to persist.
+
+### "Watched" terminology and the three-way notification split are settled
+
+**Why**: "Watched" was re-litigated during notifications exploration — "focused", "active" and "foreground" were all considered and rejected. The three-way split (server fires when unwatched, client fires when watched-but-hidden, visible tab fires nothing) is the only partition that works given what each surface can structurally observe: the server cannot see tab visibility (nothing carries it over the wire), and the client cannot see absence of socket (it is running in the attached tab). Permission requests deviate: they fire from both surfaces regardless of watched state, because they block the turn either way.
+**How to apply**: "Watched" = a session with at least one attached `_Connection` in `_registry.subscribers`. Distinct from "visible" (client-side `document.visibilityState`) and "unread" (the rail's localStorage marker). Server toasts when `not _registry.subscribers.get(sid)`. Client (`acp.html`) notifies when subscribed and `document.visibilityState === 'hidden'`, gated by `!replaying`. Visible tab fires nothing. `session/request_permission` fires always (both surfaces). Do not unify the two surfaces — they partition by design and the partition is exhaustive.
+**Source**: `plans/done/260922-1140_ACP_TURN_END_AND_PERMISSION_NOTIFICATIONS.md` — Resolved decisions Q2, Exploration Discovery item 6 | **Verified**: 2026-09-19 (runtime, watched gate proven in both directions on one session: unwatched `display_error` fired OS toast; same session's turn end with socket attached fired browser Notification only)
 
 ## Declined
 
