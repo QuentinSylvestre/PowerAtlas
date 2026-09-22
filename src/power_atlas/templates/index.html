@@ -2880,6 +2880,13 @@ function dashHandle(frame){
       dashSendBtn.disabled = false;
       dashSetComposerNote('');
       dashRefreshComposerControls();
+      // Auto-retry B's prompt now that A's slot is released. The restored
+      // value is in dashPromptInput.value; dashSendPrompt() reads it and
+      // takes the normal lazy-attach path for B (or the immediate-send path
+      // if B happened to attach already). No-op when the textarea is empty.
+      if (dashPromptInput.value.trim()) {
+        dashSendPrompt();
+      }
       return;
     }
     if (sid !== _viewingSid) return;

@@ -15108,17 +15108,23 @@ check("dashboard: eager-connect — stale-arrival re-enables composer for B afte
   p.openMain();
   // A's session frame arrives — stale-arrival guard should fire
   p.deliverMain({ type: "session", sessionId: "sess-A", payload: {} });
-  assertEqual(p.sandbox.dashPromptInput.disabled, false,
-    "stale-arrival guard must re-enable the textarea for the current session B");
+  assertEqual(p.sandbox.dashPromptInput.disabled, true,
+    "after auto-retry, textarea is disabled while the new load for B is in flight");
   assertEqual(p.sandbox.dashPromptInput.value, "hello from B",
     "stale-arrival guard must restore B's pending prompt to the textarea");
-  assertEqual(p.sandbox._dashPendingSend, null,
-    "_dashPendingSend must be cleared");
-  assertEqual(p.sandbox._dashLoadingSid, null,
-    "_dashLoadingSid must be cleared");
+  assertEqual(p.sandbox._dashPendingSend, "hello from B",
+    "_dashPendingSend must be re-set by the lazy-attach path for the new load");
+  assertEqual(p.sandbox._dashLoadingSid, "sess-B",
+    "_dashLoadingSid must be set to sess-B after the auto-retry lazy-attach");
   const closes = p.sentOf("close").filter(f => f.sid === "sess-A");
   assertEqual(closes.length, 1,
     "stale-arrival guard must send close for the orphaned session A");
+  // Auto-retry: dashSendPrompt() is called automatically since value is non-empty.
+  // With _dashAttachedSid null and _dashLoadingSid cleared, it takes the
+  // lazy-attach path and issues a load for sess-B.
+  const loads = p.sentOf("load").filter(f => f.sid === "sess-B");
+  assertEqual(loads.length, 1,
+    "stale-arrival guard must auto-retry B's prompt via dashSendPrompt (FW-1 fix)");
 });
 
 let failed = 0;
