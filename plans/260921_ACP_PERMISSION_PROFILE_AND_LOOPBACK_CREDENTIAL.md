@@ -477,13 +477,13 @@ be answered on its merits.
    not. Passing the real mode and adding a dated comment both satisfy it; doing nothing does not.
 
 **Exit criteria**:
-- [ ] `_VALID_TASK_MODES` accepts `DERIVED_AGENT_NAME` imported from `config`, with no duplicated literal and no new intra-package import in `acp.py` beyond `config`
-- [ ] Its docstring no longer claims to be a pure mirror of the vendor enumeration
-- [ ] A `permission_request` frame carries all five consent fields — asserted against a fixture copied from the P4 payload recorded in § 1
-- [ ] `_project_consent` drops an unexpected key rather than forwarding it — asserted with an extra field
-- [ ] A title longer than `MAX_PERMISSION_TITLE_CHARS` reaches the frame **unclamped** and the notification **clamped** — one test asserting both halves
-- [ ] The `load_session` mode situation is resolved so a reader cannot conclude the load path re-asserts the posture
-- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [x] `_VALID_TASK_MODES` accepts `DERIVED_AGENT_NAME` imported from `config`, with no duplicated literal and no new intra-package import in `acp.py` beyond `config` — added to the existing `from .config import CONFIG_DIR` line; the frozenset names the constant. `test_handle_new_accepts_the_derived_agent_as_a_mode` asserts `acp.DERIVED_AGENT_NAME is config.DERIVED_AGENT_NAME`, which a copied literal would fail
+- [x] Its docstring no longer claims to be a pure mirror of the vendor enumeration — the constant has no runtime docstring, so this is its comment block: it now opens "Every modeId `_handle_new` accepts. **No longer a pure mirror of kiro-cli's own enumeration**"
+- [x] A `permission_request` frame carries all five consent fields — asserted against a fixture copied from the P4 payload recorded in § 1 — `test_permission_request_forwards_the_measured_consent_payload`, exact-equality against the literal § 1 payload (which is what proves `askType`/`consentRound`/`workspaceRoot` are dropped)
+- [x] `_project_consent` drops an unexpected key rather than forwarding it — asserted with an extra field — `test_project_consent_drops_an_unexpected_key`, using the `mcp` extras Phase 0 § 9 measured (`mcpTool`, `agentManagesTrust`) plus a `matchedRule.match` list
+- [x] A title longer than `MAX_PERMISSION_TITLE_CHARS` reaches the frame **unclamped** and the notification **clamped** — one test asserting both halves — `test_permission_request_title_is_clamped_for_the_toast_only` (the morphed former `test_permission_request_title_is_clamped`)
+- [x] The `load_session` mode situation is resolved so a reader cannot conclude the load path re-asserts the posture — dated comment route (the option this phase's own wording sanctions): a P2-citing comment at the `session/load` call site, plus a line in `load_session`'s docstring and in `_build_kas_session_params`'s. Not the plumbing route — see § 9 Phase 2
+- [x] `pytest tests/test_web.py --timeout=300` passes — 1568 passed, 1 skipped (1562 + 6 new before this phase). The other 8 pytest modules also pass (440 passed, 2 skipped) and `_check_test_names.py` is clean (9 files)
 
 **Covers**: SC-3 (backend half), SC-4 (backend half)
 
@@ -515,6 +515,7 @@ pattern. Settings copy must state that the setting governs **newly created sessi
 - [ ] A frame carrying a `consent` block renders capability and resource; one carrying **no** consent block still renders without throwing
 - [ ] A consent `resource` and a title each containing `<script>alert(1)</script>` and quote characters render as inert text — the escaping assertion R-7 promises
 - [ ] A 500-character shell title renders without truncation
+- [ ] **(added, Phase 2 divergence, 2026-09-22)** With the permission setting `off`, the mode picker's Default entry does **not** offer `poweratlas-acp` as a selectable `modeId` — `acp.py`'s `_VALID_TASK_MODES` accepts it unconditionally (D-20's isolation boundary keeps `acp.py` from checking the toggle itself), so a client that sent it anyway while `off` would get kiro-cli's silent coercion to `vibe` (R-2) rather than an error. This criterion is the only place in the plan that verifies the picker actually excludes it — Phase 7's `modeId_in_effect` probe is the backstop if it doesn't
 - [ ] `node tests/acp_page.test.mjs` passes
 
 **Covers**: SC-1 (UI half), SC-4 (UI half), SC-8 (UI half)
@@ -747,7 +748,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 |---|---|---|---|
 | 0 | Pre-flight — preconditions, anchors, harness, rule set | **Complete — Gate resolved** | Deny floor failed bypass resistance (3/4 forms); user decision 2026-09-22 removed the floor from scope entirely (D-13 superseded) rather than patching it, see § 9 |
 | 1 | Derived-agent generation and settings | **Complete** | 15/15 exit criteria; 3 commits (`6490554` feat, `ae36282` self-fix, `c2f324b` Step 5 review fix — 3 High findings, generate-only-when-`on` policy adopted); Green health, see § 9 and Review Log |
-| 2 | Mode wiring and frame enrichment | Not started | |
+| 2 | Mode wiring and frame enrichment | **Implemented, review pending** | 7/7 exit criteria; 2 commits (`bf832a7`, `dba7684`); R-2 exposure flagged for Phase 3 (new criterion added), see § 9 |
 | 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
 | 4 | Local secret, login code, exchange `[P:3]` | Not started | Parallel-eligible with 3 |
 | 5 | Default-deny gate and the three doors | Not started | |
@@ -1328,6 +1329,22 @@ rather than only unit-tested); a bad base-agent name is rejected via `/api/save-
 observation, not a defect: validation failures return HTTP 200 with `{"ok": false, "error": "..."}`
 rather than a 4xx status — consistent with this codebase's pre-existing `/api/save-setting`
 convention, not something this phase introduced.
+
+### Phase 2 (2026-09-22) — mode wiring and frame enrichment
+
+Implementation (2026-09-22, code: `dba7684`)
+
+**Change 1 — `_VALID_TASK_MODES`.** `DERIVED_AGENT_NAME` joined the existing `from .config import CONFIG_DIR` line, so `acp.py` still imports from exactly two intra-package modules (three names in all, after this phase — the module header comment was corrected to say so, see below). The docstring no longer claims to mirror kiro-cli's enumeration; it separates the eight vendor values from PowerAtlas's own derived agent and records a new exposure this member creates (see "R-2 exposure" below). A test asserts `acp.DERIVED_AGENT_NAME is config.DERIVED_AGENT_NAME` — an identity check a copied literal would fail.
+
+**Change 2 — the permission frame.** A new `_project_consent` helper allowlists `capability`, `resource`, `scope`, `source` through `_as_text`, and rebuilds `matchedRule` as its own nested `{capability, effect}` allowlist rather than forwarding the object whole — a rule can legally carry `match`/`exclude` lists, and forwarding it whole would put unbounded agent-authored arrays in a browser. Accepts any input, returns `{}` for anything not a dict. The `_meta` → `kiro` → `consent` walk in `_on_permission_request` is now `isinstance`-guarded at each level instead of `or {}`-chained — the chain form raises past the point where `_pending_permission[request_id]` is stored, inside a `call_soon_threadsafe` callback where asyncio's default handler swallows the traceback, leaving a stored request nothing can answer. `toolCall.title` in the frame is now unclamped; `MAX_PERMISSION_TITLE_CHARS` moved to gate only the `_notify(...)` argument.
+
+**Change 3 — `load_session`'s mode.** Resolved by comment (the route the phase explicitly sanctioned), not by threading a real mode through: `_handle_load` has no per-session mode to pass, and P2 measured kiro-cli ignores the parameter on this method anyway, so manufacturing one would read as a stronger posture claim, not a more honest one. Three call sites now document this explicitly, dated and citing P2.
+
+**R-2 exposure introduced and documented, not fixed.** Phase 1's revised design (§ 9 Phase 1's Gate resolution) deletes the derived agent file entirely when the setting is off. `_VALID_TASK_MODES` now accepts `"poweratlas-acp"` as a modeId regardless of the toggle, so a client that sends it while off gets kiro-cli's silent coercion to `vibe` (R-2) rather than an error — `acp.py` cannot detect the toggle state without importing `agent_profile`, which D-20's isolation boundary forbids. SC-3 places the gate upstream (the picker's Default entry resolving to the base agent while off); the comment states plainly that nothing in `acp.py` itself enforces this. **Flagged for Phase 3 to own** (verify the picker actually excludes the derived-agent option while off) **and for Phase 7's live `modeId_in_effect` probe to catch** if it doesn't.
+
+**Two stale claims found outside this phase's file scope, reported not fixed**: `agent_profile.py:62` still says `acp.py` "imports exactly two intra-package names" (now three, same two modules); `config.py:115` says `acp.py` "imports config and nothing else intra-package," which was already false before this phase (`launcher` is the other) — neither file is in Phase 2's scope.
+
+**Tests**: 1568 passed, 1 skipped (up from 1562 + 1; 6 new tests). `tests/acp_page.test.mjs` not run — no template or static file touched this phase. A same-phase follow-up commit (`dba7684`) corrected three comment claims a pre-handback review pass caught: the module-header import count, a citation of "D-10 as revised" that should have cited the actual Gate-resolution decision, and an unverified claim that Phase 3's UI already gates the picker.
 
 ## Follow-up Work (Deferred)
 
