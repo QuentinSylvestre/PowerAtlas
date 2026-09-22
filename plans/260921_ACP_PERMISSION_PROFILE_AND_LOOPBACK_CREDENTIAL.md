@@ -425,21 +425,21 @@ is what the module promises, but an unexpected bug must not abort startup. It di
 > silently drop the base-agent key. **Use instead:** boolean route + `_SETTING_TYPES` string.
 
 **Exit criteria**:
-- [ ] `build_derived_agent` round-trips a fixture base agent: every byte outside the injected `permissions:` block is identical, asserted by comparing the full text with that block excised
-- [ ] A base agent that **already declares** `permissions:` has it replaced, not duplicated or merged
-- [ ] Invalid base names raise rather than resolving a path — asserted for `../x`, an absolute path, an empty string, an over-length name, and `CON`
-- [ ] The base agent is never modified — hash asserted before and after
-- [ ] The write is atomic: a simulated failure mid-write leaves the previous derived agent intact and no `.tmp` residue
-- [ ] `GET`/`POST /api/acp-permissions` round-trip the boolean; the POST rejects a non-boolean body
-- [ ] `acp_permission_base_agent` rejects a name failing validation via `/api/save-setting`
-- [ ] Generation is invoked from `lifespan` and the settings write path, asserted through the existing `async with web_mod.lifespan(None)` seam
-- [ ] A generation failure inside `lifespan` does not prevent startup, asserted by raising a non-`AgentProfileError` from a patched generator
-- [ ] On regen failure with a valid derived agent already on disk, that file is **kept**, not replaced by a base-agent fallback (D-10)
-- [ ] `pyproject.toml` `package-data` includes the overlay, and an `importlib.resources` read confirms it is reachable at runtime rather than merely present in the source tree
-- [ ] **(added, Step 5 review, 2026-09-22 — with the deny floor dropped, this is the sole remaining backstop for `on`)** The `on` branch's assembled rule set names every capability this design wants to gate explicitly — no capability is left uncovered on the assumption that omission defaults to `ask` (Phase 0 § 9, Step 7: a capability the rule list is silent about inherits allow-all, not ask)
-- [ ] **(added, Step 5 review, 2026-09-22)** No same-capability (or `all`) blanket `ask` rule sits beside a narrower `allow` rule without a populated `exclude` — asserted against a fixture reproducing Phase 0 § 9 Step 4's measured defeat (`{shell, match: [...], allow}` + `{shell, ask}` silently loses the specific rule; `exclude` is the only mechanism that reproduces "allow X, ask about everything else")
-- [ ] **(added, Step 5 review, 2026-09-22)** A recorded decision on Gate finding #6 (a malformed derived-agent `permissions:` block fails open silently, reproduced live in Phase 0): either a real post-generation bind-confirmation mechanism ships in this phase, or the decision to defer it to Phase 7 is recorded here with the reason — `kiro-cli agent validate` was tried in Phase 0 and found unusable for `.md`-format agents, so this is not a solved problem to silently inherit
-- [ ] `pytest tests/test_web.py --timeout=300` passes
+- [x] `build_derived_agent` round-trips a fixture base agent: every byte outside the injected `permissions:` block is identical, asserted by comparing the full text with that block excised — `excise_permissions` is the shared inverse both the test and the post-write self-check use; 10 injection tests including CRLF, an inline `permissions: {}`, a `permissions :` spaced key, a nested `permissions:` left alone, and idempotence
+- [x] A base agent that **already declares** `permissions:` has it replaced, not duplicated or merged — and a base carrying **two** top-level `permissions:` keys collapses to one, since leaving one behind is the same silent fail-open. The Step 5 review caught three spellings the first implementation replaced only *partially*, each manufacturing the fail-open shape: a **column-0 block sequence** (`permissions:` then `- capability: …` unindented, which left the base's rule items stranded after the injected mapping — a root document mixing a mapping with a sequence, which does not parse), a **comment between the key and its indented value**, and a **quoted key** (`"permissions":`). All three are now regression-tested, as is the inverse — a comment introducing the *next* key, and a sequence belonging to an *earlier* key, are both left where they were
+- [x] Invalid base names raise rather than resolving a path — asserted for `../x`, an absolute path, an empty string, an over-length name, and `CON`, plus `..`, a Windows drive path, `a/b`, `a\b`, `con`/`NUL`/`com1`/`LPT9`, an embedded NUL, and non-string types; both `validate_base_agent_name` and `base_agent_path` are asserted, so no path is built either way
+- [x] The base agent is never modified — SHA-256 asserted before and after
+- [x] The write is atomic: a simulated failure mid-write leaves the previous derived agent intact and no `.tmp` residue — `os.replace` patched to raise `EACCES`; the previous file's bytes and its block state (`on`) both asserted unchanged
+- [x] `GET`/`POST /api/acp-permissions` round-trip the boolean; the POST rejects a non-boolean body — 8 rejected bodies (`"true"`, `1`, `0`, `None`, `{}`, `[]`, a list, a wrong key), each asserted to leave the stored value untouched. The route **sets** rather than toggles (unlike `/api/notifications`): a toggle cannot express "make sure this is off"
+- [x] `acp_permission_base_agent` rejects a name failing validation via `/api/save-setting` — 11 values, each asserted not to reach `config.toml`
+- [x] Generation is invoked from `lifespan` and the settings write path, asserted through the existing `async with web_mod.lifespan(None)` seam
+- [x] A generation failure inside `lifespan` does not prevent startup, asserted by raising a non-`AgentProfileError` (`RuntimeError`) from a patched generator
+- [x] On regen failure with a valid derived agent already on disk, that file is **kept**, not replaced by a base-agent fallback (D-10) — asserted through `lifespan` with the base agent deleted after a successful generation. No base-agent fallback is written in any path: "fall back to the base agent" is resolved at mode-selection time (Phases 2-3), never by copying the base over the derived file
+- [x] `pyproject.toml` `package-data` includes the overlay, and an `importlib.resources` read confirms it is reachable at runtime rather than merely present in the source tree — both halves asserted, because the `importlib.resources` read alone passes under an editable install regardless. Additionally **measured**: `pip wheel . --no-deps` produces a wheel containing `power_atlas/agents/permissions.yaml`
+- [x] **(added, Step 5 review, 2026-09-22 — with the deny floor dropped, this is the sole remaining backstop for `on`)** The `on` branch's assembled rule set names every capability this design wants to gate explicitly — all 9 capabilities Phase 0 § 9 Step 7 measured on the ACP surface (`fs_read`, `fs_write`, `shell`, `web_fetch`, `web_search`, `mcp`, `subagent`, `skill`, `power`) are named, and the test fails when any one is removed (mutation-verified). The 3 doc-only schema names (`context`, `diagnostics`, `sandbox_network`) are deliberately **not** named, with the reason written into the overlay itself and carried to Phase 7 — see § 9 Phase 1
+- [x] **(added, Step 5 review, 2026-09-22)** No same-capability (or `all`) blanket `ask` rule sits beside a narrower `allow` rule without a populated `exclude` — the checker is asserted against a negative fixture reproducing Phase 0 § 9 Step 4's measured defeat in both its forms (same-capability `{shell, match, allow}` + `{shell, ask}`, and the `all`-scoped variant), and mutation-verified: deleting the shipped `shell` `exclude` line fails the test
+- [x] **(added, Step 5 review, 2026-09-22)** A recorded decision on Gate finding #6 — **split decision, both halves shipped or named.** A post-write **structural self-verification** ships now: after `os.replace` the written file is re-read and re-excised, and generation fails (keeping the last-good file) unless the block is byte-identical to the assembled overlay *and* every other byte still matches the base. Live **bind** confirmation is explicitly deferred to Phase 7, because it requires a kiro-cli spawn, an auth round trip and a *triggered* prompt — P5 proves `modeId_in_effect` alone is insufficient — which cannot run inside `lifespan` or a settings write, and `kiro-cli agent validate` is unusable for `.md` agents. Full reasoning and what the self-check does *not* cover: § 9 Phase 1
+- [x] `pytest tests/test_web.py --timeout=300` passes — 1526 passed, 1 skipped. The other 8 pytest modules also pass (440 passed, 2 skipped), and `_check_test_names.py` is clean
 
 **Covers**: SC-1, SC-2, SC-8 (backend half)
 
@@ -746,7 +746,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
 | 0 | Pre-flight — preconditions, anchors, harness, rule set | **Complete — Gate resolved** | Deny floor failed bypass resistance (3/4 forms); user decision 2026-09-22 removed the floor from scope entirely (D-13 superseded) rather than patching it, see § 9 |
-| 1 | Derived-agent generation and settings | Not started | Atomic write; textual injection; no YAML dep |
+| 1 | Derived-agent generation and settings | **Implemented, review pending** | 15/15 exit criteria; 2 commits (`6490554` feat, `ae36282` fix — 3 YAML-splice fail-open shapes self-caught and fixed); one divergence (generate-in-both-states) flagged for review, see § 9 |
 | 2 | Mode wiring and frame enrichment | Not started | |
 | 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
 | 4 | Local secret, login code, exchange `[P:3]` | Not started | Parallel-eligible with 3 |
@@ -1236,6 +1236,83 @@ floor-specific — and remain Phase 1/7 obligations independent of this decision
 ships** (Step 5 review finding, Security auditor persona, 2026-09-22). Phase 1's and Phase 7's exit
 criteria (§ 5) now include explicit checks for this — see the added items in each phase below.
 
+### Phase 1 (2026-09-22) — derived-agent generation
+
+Implementation (2026-09-22, code: `ae36282`)
+
+#### What shipped
+
+`src/power_atlas/agent_profile.py` (new) builds `~/.kiro/agents/poweratlas-acp.md` from a configurable base agent. The base is never modified, which is what keeps interactive terminal kiro-cli sessions' posture independent of anything PowerAtlas does.
+
+Injection is textual (D-18). `_frontmatter_bounds` locates the fences on kiro-cli's own rule — opening fence is line 1, closing fence is the first subsequent `---` — and `_permissions_regions` returns the line span of every top-level `permissions:` block. `inject_permissions` replaces the first and drops the rest; when there is none it inserts before the closing fence. `excise_permissions` is the shared inverse, which is what makes the byte-identity claim checkable rather than asserted: two files agree outside the injected block if and only if their excised forms are equal, and that same function is what the test and the post-write self-check both use.
+
+I/O is binary in both directions with an explicit UTF-8 decode. Text mode on Windows would turn a `\r\n` base agent into `\n` on the way in and back on the way out — for a file whose byte-identity is the contract, a round trip through text mode is a rewrite. Splitting is `text.split("\n")` rather than `splitlines()`, which also splits on `\x85`/`\u2028` and would corrupt an odd base. A UTF-8 BOM is tolerated on line 1 and not stripped.
+
+The write is `save_config`'s pattern — tmp -> `fsync` -> `os.replace`, tmp unlinked on any failure (D-19). Not `_write_remote_secret`'s in-place `O_CREAT|O_TRUNC`: a torn secret fails closed via its length check, a torn `permissions:` block fails open. A `threading.Lock` serialises generation, since two settings writes dispatched through `asyncio.to_thread` would otherwise race on the same `.tmp`.
+
+`config.py` gains `acp_permissions_enabled: bool = False`, `acp_permission_base_agent: str = "kiro_default"`, and `DERIVED_AGENT_NAME = "poweratlas-acp"` (D-20 — in `config.py` so Phase 2 can name it from `acp.py` without a second intra-package import). No load-time sanitisation: `load_config` must never raise, and a hand-edited bad name surfaces as a typed error in the generation status instead.
+
+`web.py` gains `_regenerate_derived_agent()`, called from `lifespan` (before the sweeper) and from the two settings write paths, through `asyncio.to_thread` (D-9), swallowing every exception with `log.exception`. `GET`/`POST /api/acp-permissions` carry the boolean; `acp_permission_base_agent` goes through `/api/save-setting` with validation on the write path, mirroring how `remote_bind_address` produces its named error there (D-11).
+
+#### The rule set, and why it looks the way it does
+
+`(allow-all | transcribed defaults)`, no floor. The `on` branch is the package-data overlay `src/power_atlas/agents/permissions.yaml`; the `off` branch is a four-line `all: allow` Python constant. One file rather than two because the `off` block has nothing to review as YAML, and a Python constant keeps all the *reviewable* rule text in one auditable artifact.
+
+Both properties Phase 0 measured are encoded, and both are mutation-verified in the suite:
+
+- **Every gated capability is named explicitly.** All 9 that Phase 0 Step 7 exercised on the ACP surface: `fs_read`, `fs_write`, `shell`, `web_fetch`, `web_search`, `mcp`, `subagent`, `skill`, `power`. A capability no rule names inherits the wider scopes, not `ask`.
+- **No blanket `ask` sits beside a narrower `allow` without a populated `exclude`.** The `fs_read` and `shell` ask rules carry `exclude` lists naming exactly their paired allow rule's `match` patterns. The test's checker is proved to bite by a negative fixture reproducing the measured defeat in both its forms — same-capability (`{shell, match: ["echo *"], allow}` + `{shell, ask}`) and the `all`-scoped variant.
+
+No meta-capability (`all`, `builtin`, `filesystem`) appears in the `on` set, and the test forbids one. `exclude` is a resource glob, not a capability filter, so `all: ask` with an `exclude` would drop the excluded resource out of the ask for *every* capability at once, `fs_write` included.
+
+`fs_write` needs no allow rules and no `exclude`: kiro-cli's non-overridable Kiro-scope rules already always-deny writes to `~/.kiro/settings/` etc. and always-ask writes to `.git/**` etc.
+
+#### Decision on Gate finding #6 — post-generation bind confirmation
+
+**Split: a structural self-verification ships now; live bind confirmation is deferred to Phase 7.**
+
+What ships: after `os.replace`, `regenerate()` re-reads the written file and re-excises it, and fails — keeping the last-good file — unless the block is byte-identical to the assembled overlay *and* every other byte still matches the base. This is not decorative. It is the definition of "previously-validated" that D-10 leaves undefined, and it covers the one fail-open this module can *create*: a bad splice. The overlay itself is static committed package data, not the dynamic content that caused Phase 0's accident, and a test asserts it contains no bare `: ` inside a plain scalar and no tabs — the exact malformation that fell open across 7 consecutive probe runs.
+
+Why the rest is deferred rather than attempted: confirming a *bind* needs a kiro-cli spawn, an auth-token round trip and a triggered prompt, since P5 proves `modeId_in_effect` alone is insufficient. None of that belongs inside `lifespan` or a settings write. Hand-rolling a YAML validator instead is the arms race the user rejected for the floor, and D-18 forbids adding a parser. `kiro-cli agent validate --path` is unusable for `.md` agents. Phase 7 already owns the harness.
+
+`derived_block_state()` is the other half of SC-8 and is what the panel should read rather than the toggle. It classifies the on-disk block as `on` / `off` / `unknown` / `absent` by comparing it against both assembled forms, and `in_effect` is `enabled and state == "on"`. This matters for a specific case: a user flips off->on, regeneration fails, and D-10 correctly keeps the file already on disk — which is the **allow-all** one. Reporting only the toggle would then claim a posture that is not there.
+
+#### The Step 5 review fix (`ae36282`)
+
+The first implementation replaced only *part* of the base's block in three shapes, and each partial replace manufactures the silent fail-open this phase exists to prevent. Reproduced live before fixing, regression-tested after.
+
+The worst is a column-0 block sequence, which is how YAML lets `permissions:` take a list without indenting it:
+
+```yaml
+permissions:
+- capability: all
+  effect: deny
+```
+
+The region scan stopped at the `- ` item because its first character is not a space or tab, so only the key line was replaced and the base's rule items were left stranded at column 0 after the injected mapping — a root document mixing a mapping with a sequence, which does not parse, which kiro-cli loads anyway with no error and no warning. The post-write self-verify could not catch it: `excise_permissions` made the same wrong split on both sides, so the file read back as a correct `on`. Same class: a comment between the key and its indented value ended the region early, and a quoted key (`"permissions":`) was not recognised at all, leaving a duplicate top-level key.
+
+`-` and `#` now continue a block; the trailing trim hands back trailing blank lines and trailing column-0 comments so a comment introducing the *next* key still belongs to that key; and `-` continues a block only once a `permissions:` key has started, so a sequence belonging to an earlier key is untouched.
+
+#### What Phase 7 needs to measure
+
+Five questions this phase surfaced and could not answer without a live probe. Every one of them fails in the safe direction — toward more prompts, never fewer — so none blocks shipping `on` as opt-in.
+
+1. **Live bind confirmation.** Generate for real, then `tools/acp_permission_probe.py --agent poweratlas-acp` with reject-default: prompt `echo hi` and assert an `ask` with `matchedRule: {shell, ask}` and `source: agent-profile`. That is the confirmation deferred from criterion 14, and it also confirms the shipped overlay's capability names are all accepted.
+2. **Whether `resources:` loading is `fs_read`-gated.** The highest-value one. The base agent loads `file://~/.kiro/steering/*.md` and an absolute playbook path, both outside `./**`. If resource loading goes through `fs_read`, an `on` session prompts at session start before the user has typed anything — which would make `on` unusable in practice. A bare `session/new` with no prompt should raise zero prompts.
+3. **Whether `./**` matches on Windows.** kiro-cli reported `rawInput.path` as an absolute `c:\Users\…` path in Phase 0, and Step 4's test 1 did not isolate whether `./**` matched it at all. Benign either way: if it does not match, `fs_read` over-asks.
+4. **Whether `*` stops at `&&` / `;` / `|`.** One prompt decides it: `git status && echo x` against `match: ["git status*"]`. If it asks, the exact-literal shell patterns can be widened back to kiro's own default shape and the ergonomic cost disappears. Worth doing early, since `allow_always` is never offered over the ACP surface (Phase 0 Step 8), so `git log -5` prompts *every* time under exact literals.
+5. **The `context` / `diagnostics` / `sandbox_network` decision.** Include them only if the assembled block still binds with them present; otherwise the omission stands with the reason already recorded in the overlay.
+
+#### Divergences flagged for orchestrator attention
+
+- `POST /api/acp-permissions` **sets** the boolean rather than toggling it (mirrors `/api/notifications`'s route shape, not its verb) — a toggle cannot express "make sure this is off," and the exit criterion "the POST rejects a non-boolean body" presupposes set semantics.
+- Shell allow patterns are exact command-string literals, not `*`-widened — kiro-cli's own default posture presumably does prefix-plus-chain-detection a glob cannot safely express, and Phase 0 never measured whether `*` stops at a chaining operator (`git status*` could also match `git status && <anything>`). Conservative default; Phase 7 item 4 above resolves it.
+- Three doc-only capability names (`context`, `diagnostics`, `sandbox_network`) are deliberately omitted from the `on` set — never observed live on the ACP surface in Phase 0, and an unrecognised capability name risks rejecting the whole block (the exact fail-open hazard this phase defends against).
+- **Generation now runs in both toggle states** — `off` was previously a filesystem no-op (PowerAtlas wrote nothing to `~/.kiro/`); now `~/.kiro/agents/poweratlas-acp.md` is written on every startup regardless of the toggle, so that the on-disk file always agrees with the setting (otherwise a previously-generated `on` file stays selectable in kiro-cli's own agent picker after the user turns the setting back off). Its content in the `off` state is allow-all, matching today's default — but the Gate resolution's "`off` is a byte-for-byte no-op over today's behaviour" claim was about ACP-session *permission behaviour*, not about the filesystem: a terminal kiro-cli user could now manually select `poweratlas-acp` from the agent picker (P1: any file under `~/.kiro/agents/` registers in the mode catalogue) and get PowerAtlas's allow-all posture, which widens their own posture if their machine's baseline is narrower than allow-all. The alternative (generate only when `on`) was not chosen silently — flagged here for orchestrator/user review, not resolved by the implementer.
+- `GET /api/acp-permissions` reads the derived-agent file on the event loop rather than via `asyncio.to_thread` — matches existing precedent (`/api/remote-access`, every route's `load_config()` call) for settings-panel routes, not a hot path.
+- The `isolated_config` test fixture now also redirects `agent_profile.KIRO_AGENTS_DIR` and resets its module state — necessary once `lifespan` regenerates at startup, or every test touching `lifespan` or `/api/save-setting` would read/write the developer's real `~/.kiro/agents/`. Verified after every run: the real agents dir still holds only its original two files, `kiro_default.md` unchanged (hash matches Phase 0's § 9 Step 9 baseline).
+- No live kiro-cli probe was run in this phase (authority boundary — Phase 0's brief authorised live probing explicitly, this phase's did not); the five Phase 7 questions above are the result.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
@@ -1380,3 +1457,18 @@ by user decision 2026-09-22 (leave as-is).
   the plan's own structure (Dependency Graph, Risk Assessment, 4-persona plan review) and applied
   `effort: full` at Step 9 accordingly — cost: none yet; recurring absence of an explicit tier would be
   worth a `/qplan` template default — suggested change: none required unless this recurs.
+- Phase 1's implementation brief enumerated verification commands (pytest, name check) but not whether
+  live kiro-cli probing was in scope, while the phase's own open design questions were empirical ones
+  Phase 0 had already answered by probing — cost: 5 questions deferred to Phase 7 that a 5-minute probe
+  run would have settled, and one design choice (exact-literal shell patterns over widened globs) made
+  on the conservative branch rather than the measured one — suggested change: when a phase inherits open
+  empirical questions from a predecessor's findings, the dispatch brief should state explicitly whether
+  the predecessor's probe authority carries forward.
+- Phase 1's own exit criteria (written before Phase 0's Gate resolution) referenced a deny floor that no
+  longer exists; three replacement criteria were appended after the Gate resolution, but the phase
+  body's own prose (the "rule assembly is deny floor + ..." line) needed a separate manual correction —
+  cost: low here, since the orchestrator's Phase 1 dispatch brief pre-empted it inline ("if you see any
+  reference to deny floor logic, that's stale"), but a sub-agent relying on the plan body alone would
+  have been misled — suggested change: when a Gate resolution supersedes a design decision referenced by
+  a not-yet-executed phase's own prose (not just its exit criteria), `/qdev` should re-read and correct
+  the affected phase body at resolution time, not only append to its criteria.
