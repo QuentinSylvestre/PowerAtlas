@@ -455,18 +455,26 @@ def _notify_from_acp(event: str, session_id: str, cwd: str, detail: str,
                       event, session_id)
 
 
-async def _regenerate_derived_agent() -> None:
-    """Rewrite `~/.kiro/agents/poweratlas-acp.md` from the current settings.
+async def _sync_derived_agent() -> None:
+    """Bring `~/.kiro/agents/poweratlas-acp.md` in line with the settings.
 
     260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1.
+
+    Writes the file when the posture setting is on and **deletes** it when the
+    setting is off — `off` is a filesystem no-op only if nothing is left behind,
+    since any file under `~/.kiro/agents/` is selectable from kiro-cli's own
+    agent picker (P1). See `agent_profile`'s module docstring.
 
     Called from exactly two places (D-9): startup, and every settings write that
     changes what the derived agent should contain. Not per session creation —
     two defined trigger points, and no filesystem I/O on the session-open path.
 
-    `asyncio.to_thread` because the work is three synchronous file operations and
+    `asyncio.to_thread` because the work is a few synchronous file operations and
     this runs on the event loop, which is the same reason `_background_refresh`
-    threads out `data.refresh_stale_entries`.
+    threads out `data.refresh_stale_entries`. `load_config()` is *not* called
+    here: `agent_profile.sync_from_config` reads it inside its own lock, so two
+    rapid settings writes cannot each capture a snapshot out here and then
+    publish in scheduling order rather than in the order they were saved.
 
     It swallows everything. `agent_profile` promises a typed `AgentProfileError`
     for the failures it predicted, but an unexpected bug in it must not abort
@@ -475,13 +483,9 @@ async def _regenerate_derived_agent() -> None:
     `agent_profile.last_generation()` carries the reason to the settings panel.
     """
     try:
-        config = load_config()
-        await asyncio.to_thread(
-            agent_profile.regenerate,
-            enabled=config.acp_permissions_enabled,
-            base_agent=config.acp_permission_base_agent)
+        await asyncio.to_thread(agent_profile.sync_from_config)
     except Exception:
-        log.exception("derived agent regeneration failed; "
+        log.exception("derived agent sync failed; "
                       "the permission posture is unchanged")
 
 
@@ -489,10 +493,10 @@ async def _regenerate_derived_agent() -> None:
 async def lifespan(app_instance):
     # Before the sweeper starts and before the first request is served, so a
     # session created seconds after startup already sees the current posture.
-    # Guarded inside `_regenerate_derived_agent` rather than here, so that every
+    # Guarded inside `_sync_derived_agent` rather than here, so that every
     # caller of it inherits the same "never fatal" contract.
     # 260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL Phase 1
-    await _regenerate_derived_agent()
+    await _sync_derived_agent()
     task = asyncio.create_task(_background_refresh())
     # Guarded exactly as the teardown below is. An `acp` import failure is
     # designed to degrade to "/acp disabled" (see the import at the top of this
@@ -3360,6 +3364,12 @@ def _acp_permission_state(config) -> dict:
     disagree exactly when generation failed, which is the on-but-not-in-effect
     case D-10 requires the panel to report — and the case where reporting only
     the toggle would claim a posture that is not there.
+
+    The healthy `off` pairing is `enabled=False`, `state="absent"`,
+    `generation_ok=True`: `off` deletes the derived agent, so absence is the
+    expected reading rather than a failure. `enabled=False` with any other state
+    means a file PowerAtlas could not remove is still selectable, and
+    `generation_error` says which.
     """
     enabled = bool(config.acp_permissions_enabled)
     state = agent_profile.derived_block_state()
@@ -3399,7 +3409,7 @@ async def set_acp_permissions(request: Request):
     # `/api/notifications` states: unknown top-level keys ride on `_extra`.
     config.acp_permissions_enabled = enabled
     save_config(config)
-    await _regenerate_derived_agent()
+    await _sync_derived_agent()
     return {"ok": True, **_acp_permission_state(load_config())}
 
 
@@ -3975,7 +3985,14 @@ async def save_setting(request: Request):
         # The second of D-9's two trigger points. The derived agent is built
         # from this file, so a new name that never regenerates leaves the
         # posture reading as the old base agent's.
-        await _regenerate_derived_agent()
+        await _sync_derived_agent()
+        # The same generation-outcome fields `POST /api/acp-permissions`
+        # returns, for the same reason (SC-8). A bare `{"ok": True}` here
+        # reported unqualified success for a rename whose regeneration had
+        # failed — the setting was saved, which is all `ok` ever meant, but the
+        # caller had no way to see that the posture had not moved with it.
+        return {"ok": True, "restart_required": key in _RESTART_TO_APPLY,
+                **_acp_permission_state(load_config())}
     return {"ok": True, "restart_required": key in _RESTART_TO_APPLY}
 
 

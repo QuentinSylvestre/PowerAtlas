@@ -37,11 +37,26 @@ permissions:
   # unrecognised capability name risks rejecting the whole block, which fails
   # open. Phase 7's live verification is where they get decided.
   #
-  # `fs_write` needs no allow rules and no `exclude`. kiro-cli enforces its own
-  # non-overridable Kiro-scope rules underneath this file: writes to
-  # `~/.kiro/settings/`, `.kiro/settings/` and `~/.kiro/workspace-roots/` are
-  # always denied, and writes to `.git/**`, `.kiro/agents/**`, `.kiro/hooks/**`
-  # and `.kiroignore` always ask.
+  # `fs_write` needs no allow rules and no `exclude`, but it does need one deny
+  # rule. kiro-cli enforces its own non-overridable Kiro-scope rules underneath
+  # this file: writes to `~/.kiro/settings/`, `.kiro/settings/` and
+  # `~/.kiro/workspace-roots/` are always denied, and writes to `.git/**`,
+  # `.kiro/agents/**`, `.kiro/hooks/**` and `.kiroignore` always ask. Those
+  # built-ins are not enough for the agents directory. `.kiro/agents/**` is
+  # workspace-relative and always-**ask**, so a single `fs_write` approval lets
+  # a session rewrite THIS block — the one constraining it — and the rewrite
+  # stays in effect until the next restart or settings write. The deny rule
+  # below closes that, and it is not the deny floor the user rejected on
+  # 2026-09-22 (D-13): that was a list of destructive shell-command patterns,
+  # defeated by rephrasing, because a command can be spelled many ways. A path
+  # is not rephrasable the same way. It sits beside the blanket `fs_write: ask`
+  # as the more-restrictive side, which the documented precedence (deny always
+  # wins regardless of scope) already resolves without an `exclude`.
+  #
+  # Whether `**/.kiro/...` matches the absolute Windows path kiro-cli reports in
+  # `rawInput.path` is the same open question as `./**` (Phase 7 item 3). If it
+  # misses, the blanket `fs_write: ask` still applies, so the posture is no
+  # wider than it was before this rule existed.
   rules:
     - capability: fs_read
       match: ["./**"]
@@ -57,12 +72,25 @@ permissions:
     # and run it silently, which widens the posture in the one state this
     # feature exists to narrow. An exact pattern costs a prompt on
     # `git log --oneline`; a wildcard costs the guarantee.
+    #
+    # Flagged rather than changed: `git status`, `git log`, `git diff` and
+    # `git branch` can each execute repository-controlled code, because git
+    # honours `.gitattributes` `textconv` filters and repo-local
+    # `diff.external` config from the checkout it is run in. Allowing them
+    # silently therefore allows a cloned repository to run a command of its
+    # choosing. This reproduces kiro-cli's own documented default posture, so it
+    # is not a regression this feature introduces — but PowerAtlas is now the
+    # artifact asserting these four commands are safe to allow without a
+    # prompt, which is a different claim from inheriting a default.
     - capability: shell
       match: ["git status", "git log", "git diff", "git branch", "pwd", "whoami", "uname"]
       effect: allow
     - capability: shell
       exclude: ["git status", "git log", "git diff", "git branch", "pwd", "whoami", "uname"]
       effect: ask
+    - capability: fs_write
+      match: ["**/.kiro/agents/**", "**/.kiro/settings/**"]
+      effect: deny
     - capability: fs_write
       effect: ask
     - capability: web_fetch

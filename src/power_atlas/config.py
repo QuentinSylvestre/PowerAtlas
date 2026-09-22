@@ -93,6 +93,13 @@ class Config:
     # installing a release changes no permission behaviour until the user opts
     # in. `True` writes an explicit rule set into the derived agent.
     #
+    # `False` is a no-op on the **filesystem** too: it deletes the derived agent
+    # rather than writing an allow-all one. Any file under `~/.kiro/agents/`
+    # registers in kiro-cli's own mode catalogue (P1), so an allow-all
+    # `poweratlas-acp` left on disk is selectable from a terminal session's
+    # agent picker and would widen the posture of a user whose machine baseline
+    # is narrower than allow-all. See `agent_profile`'s module docstring.
+    #
     # The boolean has no `web._SETTING_TYPES` entry on purpose:
     # `/api/save-setting` rejects booleans before its type check (a Python
     # `isinstance(True, int)` guard), so it gets its own route. The base-agent
