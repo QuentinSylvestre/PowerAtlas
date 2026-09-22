@@ -22,6 +22,18 @@ only. It is never printed, logged, or written to a ``--json-out`` dump --
 the one outbound message shape that would carry it (the getAccessToken
 reply) is redacted before being recorded anywhere.
 
+Agent-file lifecycle: this script never creates or deletes anything under
+``~/.kiro/agents/``. ``--agent`` must name an agent file that already
+exists; a probe-only agent (e.g. ``pa-probe-*``) must be created before
+the run and removed after it by the caller -- Phase 0's own runs did this
+by hand. Watch for one specific trap: an unquoted ``: `` inside an agent's
+``description:`` field (a plain YAML scalar) breaks frontmatter parsing
+silently -- kiro-cli loads the file anyway and falls back to this
+machine's user-scope allow-all with zero warning. Seven of Phase 0's own
+nine step-7 probe runs fell open this exact way before it was diagnosed;
+quote or avoid colons in any agent description you author for this
+harness.
+
 Usage:
     python tools/acp_permission_probe.py --agent kiro_default --cwd <dir>
     python tools/acp_permission_probe.py --agent pa-probe-shell-ask \\
@@ -128,12 +140,19 @@ class Probe:
                 "shell=True, which cannot hold clean stdio for JSON-RPC.")
         self.cwd.mkdir(parents=True, exist_ok=True)
         self._t0 = time.monotonic()
+        # Under --verbose, capture kiro-cli's own stderr to the harness's stderr
+        # (never into self.frames / --json-out, to preserve token-hygiene: stderr
+        # is unstructured text we don't control and must not assume is safe to
+        # persist). Gate finding #6 was diagnosed only by a lucky functional
+        # recheck; a captured stderr line might have surfaced a parse failure
+        # directly. Default stays DEVNULL to avoid an extra thread on every run.
+        stderr_target = subprocess.PIPE if self.verbose else subprocess.DEVNULL
         try:
             self._proc = subprocess.Popen(
                 [exe, *ACP_ARGS],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=stderr_target,
                 cwd=str(self.cwd),
                 text=True,
                 encoding="utf-8",
@@ -145,6 +164,16 @@ class Probe:
             raise ProbeError(f"could not start kiro-cli: {exc}") from exc
         self._reader = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader.start()
+        if self.verbose:
+            threading.Thread(target=self._stderr_loop, daemon=True).start()
+
+    def _stderr_loop(self) -> None:
+        proc = self._proc
+        assert proc is not None and proc.stderr is not None
+        for line in proc.stderr:
+            line = line.rstrip()
+            if line:
+                self._log("[kiro-cli stderr]", line)
 
     def _reader_loop(self) -> None:
         proc = self._proc
@@ -328,12 +357,26 @@ class Probe:
             kind = str(opt.get("kind", "")).lower()
             if kind.startswith(verb):
                 return opt.get("optionId")
-        if options:
+        if options and verb != "reject":
+            # Safe to guess among allow-shaped options: the operator explicitly
+            # asked for an allow-shaped answer, so any option here is consistent
+            # with that intent.
             self.errors.append(
                 f"no option kind matched {self.answer!r} (wanted {exact!r}) among "
                 f"{[opt.get('kind') for opt in options]!r}; used the first "
                 "option instead so the turn does not hang")
             return options[0].get("optionId")
+        if options:
+            # verb == "reject" and no reject-kind option exists: options[0] could
+            # be an allow-shaped option (e.g. kiro-cli renames "reject_once" in a
+            # future version), which would silently run the exact action the
+            # default --answer reject promises never runs. Treat this identically
+            # to "no options at all" -- an error reply, not a guessed allow.
+            self.errors.append(
+                f"no reject-kind option found among "
+                f"{[opt.get('kind') for opt in options]!r}; refusing to guess an "
+                "allow-shaped option under --answer reject")
+            return None
         return None
 
     def _handle_notification(self, msg: dict) -> None:
