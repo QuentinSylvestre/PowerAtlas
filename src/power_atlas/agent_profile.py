@@ -79,11 +79,23 @@ _WIN_RESERVED = {"CON", "PRN", "AUX", "NUL",
 
 # A top-level `permissions` key inside the frontmatter. Anchored at column 0, so
 # a nested `permissions:` under some other mapping is left alone. `\s*` before
-# the colon because `permissions :` is legal YAML and a missed match here would
-# leave the base's own block in place beside the injected one — two top-level
-# keys of the same name, which is the fail-open shape this module exists to
-# avoid.
-_PERMISSIONS_KEY_RE = re.compile(r"^permissions\s*:")
+# the colon because `permissions :` is legal YAML, and the quoted spellings
+# because `"permissions":` is the same key. Every missed spelling leaves the
+# base's own block in place beside the injected one — two top-level keys of the
+# same name, which is the fail-open shape this module exists to avoid.
+_PERMISSIONS_KEY_RE = re.compile(
+    r"""^(?:permissions|"permissions"|'permissions')\s*:""")
+
+# Characters that continue a `permissions:` block on a line of their own.
+# Space and tab are the ordinary indented case. `-` is a **block sequence at
+# column 0**, which is how YAML lets `permissions:` take a list without
+# indenting it — valid, common, and the case that makes this set more than
+# "indented": stopping at it replaces the key line only and leaves the base's
+# rule items stranded at column 0 after the injected mapping, which is a root
+# document that mixes a mapping with a sequence and does not parse at all.
+# `#` is a comment, which a YAML lexer discards but which sits between the key
+# and its indented value often enough to matter.
+_BLOCK_CONTINUATION_CHARS = " \t-#"
 
 # The overlay is package data, read through `importlib.resources` so it survives
 # a wheel build. Read once and cached: it is a committed constant, and a
@@ -228,12 +240,17 @@ def _frontmatter_bounds(lines: list[str]) -> int:
 def _permissions_regions(lines: list[str], close: int) -> list[tuple[int, int]]:
     """Half-open `[start, end)` line spans of every top-level `permissions:`.
 
-    A block runs from its key line through every following blank or indented
-    line, stopping at the first non-empty line that starts at column 0 — which
-    covers `permissions: {}` inline, a nested mapping, and blank lines inside
-    one. Trailing blank lines are handed back to the surrounding text rather
-    than swallowed, so a blank line that separated the block from the next key
-    survives the round trip byte-for-byte.
+    A block runs from its key line through every following blank line and every
+    line beginning with `_BLOCK_CONTINUATION_CHARS`, stopping at the first line
+    that starts a new top-level key. That covers `permissions: {}` inline, an
+    indented mapping, a column-0 block sequence, interleaved comments, and blank
+    lines inside any of them.
+
+    Trailing blank lines and trailing column-0 comments are handed back to the
+    surrounding text rather than swallowed: a blank line that separated the
+    block from the next key, and a comment that introduces the next key, both
+    survive the round trip byte-for-byte. Handing them back is also the
+    conservative direction — it preserves more of the base.
 
     Every match is returned, not just the first. A base agent carrying two
     top-level `permissions:` keys is malformed YAML that kiro-cli loads anyway,
@@ -249,13 +266,17 @@ def _permissions_regions(lines: list[str], close: int) -> list[tuple[int, int]]:
         j = i + 1
         while j < close:
             stripped = lines[j].rstrip("\r")
-            if stripped == "" or stripped[0] in " \t":
+            if stripped == "" or stripped[0] in _BLOCK_CONTINUATION_CHARS:
                 j += 1
                 continue
             break
         end = j
-        while end - 1 > i and lines[end - 1].rstrip("\r") == "":
-            end -= 1
+        while end - 1 > i:
+            tail = lines[end - 1].rstrip("\r")
+            if tail == "" or tail.startswith("#"):
+                end -= 1
+                continue
+            break
         regions.append((i, end))
         i = j
     return regions

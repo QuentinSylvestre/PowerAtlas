@@ -22017,6 +22017,64 @@ class TestDerivedAgentInjectionIsTextual:
         assert len(ap._permissions_regions(
             lines, ap._frontmatter_bounds(lines))) == 1
 
+    @pytest.mark.parametrize("key", ['"permissions":', "'permissions':"])
+    def test_a_quoted_permissions_key_is_still_the_same_key(self, key):
+        """`"permissions":` is the same YAML key, so it must be replaced."""
+        ap = _agent_profile()
+        base = f"---\ndescription: d\n{key}\n  rules: []\nmodel: m\n---\nbody\n"
+        derived = ap.build_derived_agent(base, True)
+        assert key not in derived
+        assert ap.excise_permissions(derived)[0] == (
+            "---\ndescription: d\nmodel: m\n---\nbody\n")
+
+    def test_a_column_zero_block_sequence_is_part_of_the_block(self):
+        """YAML lets `permissions:` take a list without indenting it.
+
+        Stopping the region at the `- ` item replaced the key line only and
+        left the base's rule items stranded at column 0 after the injected
+        mapping — a root document that mixes a mapping with a sequence, which
+        does not parse, which is the silent fail-open this module exists to
+        prevent. The self-verify could not catch it: `excise_permissions` made
+        the same wrong split on both sides and the file read back as `on`.
+        """
+        ap = _agent_profile()
+        base = ("---\ndescription: d\npermissions:\n- capability: all\n"
+                "  effect: deny\nmodel: x\n---\nbody\n")
+        derived = ap.build_derived_agent(base, True)
+        assert "- capability: all" not in derived
+        assert "effect: deny" not in derived
+        assert ap.excise_permissions(derived)[0] == (
+            "---\ndescription: d\nmodel: x\n---\nbody\n")
+
+    def test_a_comment_between_the_key_and_its_value_is_part_of_the_block(self):
+        ap = _agent_profile()
+        base = ("---\ndescription: d\npermissions:\n# note\n  rules: []\n"
+                "model: m\n---\nbody\n")
+        derived = ap.build_derived_agent(base, True)
+        assert "rules: []" not in derived
+        assert "# note" not in derived
+        assert ap.excise_permissions(derived)[0] == (
+            "---\ndescription: d\nmodel: m\n---\nbody\n")
+
+    def test_a_comment_introducing_the_next_key_is_handed_back(self):
+        """The trailing-comment handback keeps the base's own structure."""
+        ap = _agent_profile()
+        base = ("---\ndescription: d\npermissions:\n  rules: []\n# next\n"
+                "model: m\n---\nbody\n")
+        derived = ap.build_derived_agent(base, True)
+        assert ap.excise_permissions(derived)[0] == (
+            "---\ndescription: d\n# next\nmodel: m\n---\nbody\n")
+
+    def test_a_sequence_belonging_to_an_earlier_key_is_not_absorbed(self):
+        """`-` only continues a block once a `permissions:` key has started."""
+        ap = _agent_profile()
+        base = ('---\ntools:\n- "*"\npermissions:\n  rules: []\nmodel: m\n'
+                "---\nbody\n")
+        derived = ap.build_derived_agent(base, True)
+        assert '- "*"' in derived
+        assert ap.excise_permissions(derived)[0] == (
+            '---\ntools:\n- "*"\nmodel: m\n---\nbody\n')
+
     def test_a_nested_permissions_key_is_left_alone(self):
         ap = _agent_profile()
         base = ("---\ndescription: d\nmcpServers:\n  x:\n    permissions: y\n"
