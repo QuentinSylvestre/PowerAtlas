@@ -6720,11 +6720,15 @@ class TestAcpTaskModeSelection:
     an optional ``payload["mode"]`` on ``session/new`` is now threaded end to
     end: client picker -> ``send('new', ...)`` -> ``_handle_new`` validation
     -> ``_supervisor.new_session(cwd, mode=...)`` ->
-    ``_build_kas_session_params(mode_id=...)``. Validation uses the full
-    8-value set kiro-cli's own session/new response enumerates (Phase 2
-    divergence 1) -- wider than the 5 modes the UI picker itself offers,
-    since 3 of the 8 (vibe, autonomous, semantic_reviewer) were only observed
-    to exist and never behaviorally characterized.
+    ``_build_kas_session_params(mode_id=...)``. Validation covers the 8-value
+    set kiro-cli's own session/new response enumerates
+    (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) -- wider
+    than the 5 modes the UI picker itself offers, since 3 of the 8 (vibe,
+    autonomous, semantic_reviewer) were only observed to exist and never
+    behaviorally characterized -- **plus PowerAtlas's own derived agent**,
+    added 2026-09-22
+    (plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2),
+    which makes the set no longer a pure mirror of the vendor enumeration.
     """
 
     def test_new_session_threads_a_mode_into_modeid(self, acp_store):
@@ -6788,10 +6792,12 @@ class TestAcpTaskModeSelection:
     ])
     def test_handle_new_accepts_every_valid_task_mode(
             self, acp_store, tmp_path, mode):
-        """All 8 modes kiro-cli's own session/new response enumerates (Phase 2
-        divergence 1) are accepted by the backend -- not just the 5 the UI
-        picker itself offers (vibe/autonomous/semantic_reviewer are backend
-        robustness only, per Phase 3's design)."""
+        """All 8 modes kiro-cli's own session/new response enumerates
+        (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 2 divergence 1) are
+        accepted by the backend -- not just the 5 the UI picker itself offers
+        (vibe/autonomous/semantic_reviewer are backend robustness only, per
+        that plan's Phase 3 design). The derived agent, the 9th value, has its
+        own test below."""
         acp_mod, _store = acp_store
         conn = _acp_conn(acp_mod)
         seen = {}
@@ -6804,6 +6810,39 @@ class TestAcpTaskModeSelection:
             asyncio.run(acp_mod._handle_new(
                 conn, {"cwd": str(tmp_path), "mode": mode}))
         assert seen["mode"] == mode
+        errors = [f["payload"].get("code") for f in _queued(conn)
+                  if f.get("type") == "error"]
+        assert not errors, errors
+
+    def test_handle_new_accepts_the_derived_agent_as_a_mode(
+            self, acp_store, tmp_path):
+        """The derived agent is selectable through ``modeId``.
+
+        PowerAtlas generates ``~/.kiro/agents/poweratlas-acp.md``, and probe P1
+        established that any file under ``~/.kiro/agents/`` registers in
+        kiro-cli's own mode catalogue -- so the name is a real modeId, just not
+        one the vendor enumeration contains
+        (plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
+        Phase 2). Asserted through ``config.DERIVED_AGENT_NAME`` rather than the
+        string, and with an identity check that ``acp`` names that same object,
+        because D-20's point is one definition site: a copied literal in
+        ``acp.py`` would drift from the filename ``agent_profile`` writes.
+        """
+        from power_atlas.config import DERIVED_AGENT_NAME
+        acp_mod, _store = acp_store
+        assert acp_mod.DERIVED_AGENT_NAME is DERIVED_AGENT_NAME
+        assert DERIVED_AGENT_NAME in acp_mod._VALID_TASK_MODES
+        conn = _acp_conn(acp_mod)
+        seen = {}
+
+        async def fake_new_session(self, cwd, mode=None):
+            seen["mode"] = mode
+            return {"sessionId": "taskmode-000d", "cwd": cwd}
+
+        with patch.object(acp_mod._Supervisor, "new_session", fake_new_session):
+            asyncio.run(acp_mod._handle_new(
+                conn, {"cwd": str(tmp_path), "mode": DERIVED_AGENT_NAME}))
+        assert seen["mode"] == DERIVED_AGENT_NAME
         errors = [f["payload"].get("code") for f in _queued(conn)
                   if f.get("type") == "error"]
         assert not errors, errors
@@ -21228,20 +21267,48 @@ class TestSupervisor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _permission_request_msg(request_id, sid, title="Pick one", options=None):
+    def _permission_request_msg(request_id, sid, title="Pick one", options=None,
+                                meta=None):
         if options is None:
             options = [
                 {"optionId": "opt-0", "name": "Requirements", "kind": "allow_once"},
                 {"optionId": "opt-1", "name": "Technical Design", "kind": "allow_once"},
             ]
+        params = {
+            "sessionId": sid,
+            "toolCall": {"toolCallId": "tc-1", "title": title, "status": "pending"},
+            "options": options,
+        }
+        # `meta` is the `params._meta` block kiro-cli attaches to a real
+        # request; omitted by default so every pre-existing caller keeps
+        # exercising the no-consent shape.
+        if meta is not None:
+            params["_meta"] = meta
         return {
             "jsonrpc": "2.0", "id": request_id, "method": "session/request_permission",
-            "params": {
-                "sessionId": sid,
-                "toolCall": {"toolCallId": "tc-1", "title": title, "status": "pending"},
-                "options": options,
-            },
+            "params": params,
         }
+
+    # The literal `_meta` payload measured on a real `fs_write` prompt (probe
+    # P4, 2026-09-21, kiro-cli 2.22.x), reproduced from
+    # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md § 1
+    # "Current State". Not a synthetic fixture: the fields the projection must
+    # forward and the three it must drop are both what the agent really sent.
+    _P4_META = {
+        "kiro": {
+            "toolId": "fs_write",
+            "consentRound": 1,
+            "consent": {
+                "capability": "fs_write",
+                "resource": "p4-meta-target.txt",
+                "askType": "explicit",
+                "scope": "agent",
+                "source": "agent-profile",
+                "matchedRule": {"capability": "fs_write", "effect": "ask"},
+                "workspaceRoot": "C:\\scratch",
+            },
+        },
+    }
 
     def test_on_permission_request_emits_frame_and_stores_pending_state(
             self, monkeypatch):
@@ -21275,11 +21342,20 @@ class TestSupervisor:
         finally:
             self._cleanup_registry(acp_mod)
 
-    def test_permission_request_title_is_clamped(self, monkeypatch):
-        """The one agent-authored string that reached the page unbounded.
+    def test_permission_request_title_is_clamped_for_the_toast_only(
+            self, monkeypatch):
+        """Both halves of D-5's split, in one test.
 
-        It now also rides a desktop notification, where an unbounded value is
-        worse than untidy.
+        The title was clamped for both the frame and the desktop notification
+        when the clamp was added (2026-09-19). Since 2026-09-22 (D-5,
+        plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2)
+        the clamp belongs to the notification alone: 200 characters is a toast
+        body's budget, while a shell prompt's title *is* the literal command and
+        a write prompt's is the only thing naming the file — clamping the page's
+        copy truncates the thing the user is being asked to approve. Asserted
+        together because "moved" is the property, and two separate tests would
+        each still pass if the clamp were dropped from both places or applied to
+        both.
         """
         from power_atlas import acp as acp_mod
         sv3 = self._sv3(monkeypatch)
@@ -21287,14 +21363,164 @@ class TestSupervisor:
         sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
         sv3.history[sid] = acp_mod._History()
         conn = self._conn_v3(acp_mod, sid)
+        seen = []
+        previous = acp_mod.notify_hook
         try:
+            acp_mod.set_notify_hook(lambda *a: seen.append(a))
             sv3._on_agent_request(self._permission_request_msg(
                 7, sid, title="x" * 5000,
                 options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
             payload = [f for f in _queued(conn)
                        if f["type"] == "permission_request"][0]["payload"]
-            assert len(payload["toolCall"]["title"]) == \
-                acp_mod.MAX_PERMISSION_TITLE_CHARS
+            assert payload["toolCall"]["title"] == "x" * 5000, (
+                "the frame's title must reach the page unclamped: got "
+                f"{len(payload['toolCall']['title'])} chars")
+            assert seen and seen[0][3] == "x" * acp_mod.MAX_PERMISSION_TITLE_CHARS, (
+                "the notification's title must still be clamped")
+        finally:
+            acp_mod.notify_hook = previous
+            self._cleanup_registry(acp_mod)
+
+    def test_permission_request_forwards_the_measured_consent_payload(
+            self, monkeypatch):
+        """All five allowlisted consent fields reach the frame, and nothing else.
+
+        Driven by the literal `_meta` payload measured on a real `fs_write`
+        prompt (probe P4, 2026-09-21) rather than a hand-written one, so the
+        three fields dropped here (`askType`, `consentRound` — which is outside
+        `consent` anyway — and `workspaceRoot`, an absolute path) are fields the
+        agent really sends. Exact equality, not a subset check: that is what
+        makes this assert the allowlist rather than only its five members.
+        """
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permconsent-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                11, sid, title="Write File", meta=self._P4_META,
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payload = [f for f in _queued(conn)
+                       if f["type"] == "permission_request"][0]["payload"]
+            assert payload["consent"] == {
+                "capability": "fs_write",
+                "resource": "p4-meta-target.txt",
+                "scope": "agent",
+                "source": "agent-profile",
+                "matchedRule": {"capability": "fs_write", "effect": "ask"},
+            }, f"got {payload['consent']!r}"
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_permission_request_without_consent_still_emits_an_empty_block(
+            self, monkeypatch):
+        """No `_meta` at all yields `consent: {}`, not a missing key.
+
+        The frame's shape must not depend on the agent's payload -- the same
+        reason `_as_text` narrows every other agent-authored field. A `web_fetch`
+        prompt was measured carrying only three of the five fields, and a
+        pre-permission-posture kiro-cli build carries none, so the renderer sees
+        this shape in production.
+        """
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permnocons-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            sv3._on_agent_request(self._permission_request_msg(
+                12, sid, title="Pick one",
+                options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payload = [f for f in _queued(conn)
+                       if f["type"] == "permission_request"][0]["payload"]
+            assert payload["consent"] == {}
+        finally:
+            self._cleanup_registry(acp_mod)
+
+    def test_project_consent_drops_an_unexpected_key(self):
+        """An allowlist, not a blacklist.
+
+        The extras here are the ones Phase 0 measured on a live `mcp` prompt
+        (`mcpTool` annotations, `agentManagesTrust`) plus a rule carrying a
+        `match` list, which the permissions schema allows. This payload is
+        agent-authored, schema-checked nowhere, and lands in a browser, so a
+        field this module has never seen must not reach the page by default --
+        the same defensive rebuild `_on_permission_request` already applies to
+        each of its `options`.
+        """
+        from power_atlas import acp as acp_mod
+        projected = acp_mod._project_consent({
+            "capability": "mcp",
+            "resource": "playwright/browser_navigate",
+            "scope": "agent",
+            "source": "agent-profile",
+            "matchedRule": {
+                "capability": "mcp", "effect": "ask",
+                "match": ["playwright/*"],
+            },
+            "mcpTool": {"annotations": {"destructiveHint": True}},
+            "agentManagesTrust": True,
+        })
+        assert projected == {
+            "capability": "mcp",
+            "resource": "playwright/browser_navigate",
+            "scope": "agent",
+            "source": "agent-profile",
+            "matchedRule": {"capability": "mcp", "effect": "ask"},
+        }, f"got {projected!r}"
+
+    def test_project_consent_tolerates_every_non_dict_shape(self):
+        """Never raises, whatever the agent sent.
+
+        `_on_permission_request` runs off `loop.call_soon_threadsafe`, where an
+        AttributeError is swallowed silently by asyncio's default handler --
+        and it would fire *after* the pending entry is stored, leaving an entry
+        nothing can answer and no frame to answer it with. Exactly the
+        invisible-hang class `test_on_permission_request_non_dict_params_is_
+        refused_not_raised` covers for `params`, one level deeper.
+        """
+        from power_atlas import acp as acp_mod
+        for shape in (None, "a string", ["a", "list"], 7, True):
+            assert acp_mod._project_consent(shape) == {}, f"shape {shape!r}"
+        # A non-dict `matchedRule` is dropped rather than forwarded raw.
+        assert acp_mod._project_consent(
+            {"capability": "shell", "matchedRule": "ask"}) == {
+                "capability": "shell"}
+        # A non-string where a string was measured narrows to "" (the
+        # `_as_text` contract), keeping the frame's types stable.
+        assert acp_mod._project_consent({"resource": {"nested": 1}}) == {
+            "resource": ""}
+
+    def test_permission_request_with_a_truthy_non_dict_meta_still_emits(
+            self, monkeypatch):
+        """The `or {}` chain this could have been written as raises here.
+
+        A truthy non-dict `_meta` (or `_meta.kiro`, or `consent`) makes
+        `(params.get("_meta") or {}).get("kiro")` raise AttributeError past the
+        point the pending entry is already stored. The frame must still be
+        emitted, with an empty consent block.
+        """
+        from power_atlas import acp as acp_mod
+        sv3 = self._sv3(monkeypatch)
+        sid = "sess_permbadmet-0000-0000-000001"
+        sv3.sessions[sid] = acp_mod._new_session_record("C:\\scratch")
+        sv3.history[sid] = acp_mod._History()
+        conn = self._conn_v3(acp_mod, sid)
+        try:
+            for request_id, meta in ((13, ["not", "a", "dict"]),
+                                     (14, {"kiro": "not a dict"}),
+                                     (15, {"kiro": {"consent": "not a dict"}})):
+                sv3._on_agent_request(self._permission_request_msg(
+                    request_id, sid, title="t", meta=meta,
+                    options=[{"optionId": "o", "name": "n", "kind": "allow_once"}]))
+            payloads = [f["payload"] for f in _queued(conn)
+                        if f["type"] == "permission_request"]
+            assert len(payloads) == 3, f"got {len(payloads)} frame(s)"
+            assert all(p["consent"] == {} for p in payloads), f"got {payloads!r}"
+            assert {13, 14, 15} <= set(sv3._pending_permission)
         finally:
             self._cleanup_registry(acp_mod)
 

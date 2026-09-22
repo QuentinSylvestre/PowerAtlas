@@ -79,7 +79,7 @@ from typing import Any, Final
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from .config import CONFIG_DIR
+from .config import CONFIG_DIR, DERIVED_AGENT_NAME
 from .launcher import _SESSION_ID_RE
 
 log = logging.getLogger("power_atlas.acp")
@@ -582,10 +582,20 @@ MAX_STEER_CHARS = 4000
 # rather than reusing either of them.
 MAX_TITLE_CHARS = 200
 
-# Cap on a `session/request_permission` tool-call title. Added 2026-09-19: this
-# field was the one agent-authored string reaching the page with no bound at
-# all, while seven siblings above and below have one. It now also rides a
-# desktop notification, where an unbounded string is worse than merely untidy.
+# Cap on a `session/request_permission` tool-call title **as it rides a desktop
+# notification**. Added 2026-09-19, when this field was the one agent-authored
+# string reaching the page with no bound at all while seven siblings above and
+# below had one, and the same clamped value fed both the notification and the
+# frame.
+#
+# Narrowed to the notification alone on 2026-09-22 (D-5,
+# plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2): 200
+# characters is a toast body's budget, and a shell prompt puts the literal
+# command in the title while a write prompt puts a path — truncating either is
+# truncating the thing the user is being asked to approve. The frame's copy is
+# now unclamped and bounded only by MAX_AGENT_LINE_BYTES, which caps the whole
+# inbound agent line this title arrived on; the renderer, not this constant, is
+# what keeps a long one from wrecking the layout.
 MAX_PERMISSION_TITLE_CHARS = 200
 
 # What `_handle_prompt`/`_handle_close`/`_handle_cancel` answer a frame
@@ -677,20 +687,39 @@ _OVERLAY_STEERING: tuple[dict[str, str], ...] = (
 )
 
 
-# Full set of modeId values kiro-cli's own session/new response enumerates
-# (modes.availableModes / configOptions[id="mode"].options), confirmed via a
-# disposable live probe against kiro-cli 2.21.4 (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md
-# Phase 2). Used by _handle_new to validate an incoming task-mode selection —
-# an unrecognized modeId silently falls back to "vibe" agent-side rather than
+# Every modeId _handle_new accepts. **No longer a pure mirror of kiro-cli's
+# own enumeration** (amended 2026-09-22,
+# plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2): the
+# first 8 are that enumeration (modes.availableModes /
+# configOptions[id="mode"].options, confirmed via a disposable live probe
+# against kiro-cli 2.21.4, plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 2),
+# and DERIVED_AGENT_NAME is PowerAtlas's own derived agent, which kiro-cli
+# enumerates only once that file exists on disk (any file under
+# ~/.kiro/agents/ registers in the mode catalogue — probe P1).
+#
+# Used by _handle_new to validate an incoming task-mode selection: an
+# unrecognized modeId silently falls back to "vibe" agent-side rather than
 # erroring, so PowerAtlas rejects anything outside this set up front instead
-# of forwarding a typo into a surprising mode. Only 5 of these 8 are offered
-# in the /acp UI's own picker (Phase 3) — the other 3 (vibe, autonomous,
-# semantic_reviewer) were only observed to exist, never behaviorally
-# characterized, so they are accepted here for backend robustness but not
-# exposed as UI options.
+# of forwarding a typo into a surprising mode.
+#
+# Two consequences of the derived agent's membership, both deliberate:
+# - This set cannot tell whether the derived agent exists. With the
+#   permission posture off, PowerAtlas deletes ~/.kiro/agents/poweratlas-acp.md
+#   entirely (D-10 as revised 2026-09-22), so selecting it then forwards a
+#   modeId kiro-cli silently coerces to "vibe" — the exact failure this set
+#   exists to prevent, for this one value. Detecting it here would need
+#   `agent_profile`, which this module must not import (D-20), or config state
+#   it does not read. The UI (Phase 3) is what gates the offer; Phase 7's
+#   modeId_in_effect probe is what would catch a coercion.
+# - Only 5 of the 8 vendor modes are offered in the /acp UI's own picker
+#   (plans/260911_ACP_V3_FOLLOWUP_FEATURES.md Phase 3) — the other 3 (vibe,
+#   autonomous, semantic_reviewer) were only observed to exist, never
+#   behaviorally characterized, so they are accepted here for backend
+#   robustness but not exposed as UI options.
 _VALID_TASK_MODES: Final[frozenset[str]] = frozenset({
     "vibe", "spec", "quick-spec", "bug-fix", "plan",
     "autonomous", "semantic_reviewer", "kiro_default",
+    DERIVED_AGENT_NAME,
 })
 
 
@@ -700,6 +729,14 @@ def _build_kas_session_params(mode_id: str = "kiro_default") -> dict[str, Any]:
     The _meta.kiro key is a KAS protocol field accepted by KiroSessionMetaSchema
     in acp-server.js. The steering list is delivered as clientSteeringDocs via
     createSessionState(..., kiroMeta?.steering ...).
+
+    ``mode_id`` only does anything on ``session/new``. Measured 2026-09-21
+    (probe P2, kiro-cli 2.22.x,
+    plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md § 1): the
+    agent binds its mode — and therefore its permission posture — at
+    ``session/new`` and ignores this field on ``session/load``. A caller on the
+    load path is not choosing a posture, whatever it passes here; see
+    `load_session`'s own call site.
     """
     return {
         "_meta": {
@@ -1173,6 +1210,59 @@ def _as_text(value) -> str:
     these as text and nothing else.
     """
     return value if isinstance(value, str) else ""
+
+
+# The plain-string fields of an agent-authored `_meta.kiro.consent` payload
+# that a `permission_request` frame forwards. `matchedRule` is the fifth
+# allowlisted field and is nested, so `_project_consent` rebuilds it separately.
+_CONSENT_TEXT_FIELDS: Final[tuple[str, ...]] = (
+    "capability", "resource", "scope", "source")
+
+# The fields of a `consent.matchedRule` object that are forwarded. Measured
+# shape is exactly these two (probe P4, 2026-09-21, and Phase 0 § 9's
+# per-capability table), but a rule in the permissions schema can also carry
+# `match`/`exclude` *lists*, which is why this is an allowlist rather than a
+# pass-through of the nested object.
+_CONSENT_RULE_FIELDS: Final[tuple[str, ...]] = ("capability", "effect")
+
+
+def _project_consent(consent) -> dict[str, Any]:
+    """The five allowlisted fields of a permission request's consent payload.
+
+    kiro-cli puts *why* a permission is being asked for under
+    ``params._meta.kiro.consent`` — the capability, the resource, the rule that
+    matched and the scope it came from. Without it a write prompt reads
+    ``"Write File"`` with no path at all (D-5,
+    plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md Phase 2).
+
+    **An allowlist, not a blacklist**, and rebuilt field by field for the same
+    reason `_on_permission_request` already rebuilds each of its ``options``:
+    this payload is agent-authored, is schema-checked nowhere on the way in,
+    and lands in a browser. The measured shape carries fields this UI has no
+    use for — ``askType``, ``consentRound``, ``workspaceRoot`` (an absolute
+    path) — and an `mcp` prompt adds two more (``mcpTool`` annotations,
+    ``agentManagesTrust``), so what is *not* forwarded grows without this
+    module changing.
+
+    Accepts any input, returning ``{}`` for anything that is not a dict: this
+    runs from `_on_permission_request`, which runs off
+    ``loop.call_soon_threadsafe``, where an ``AttributeError`` on a truthy
+    non-dict is swallowed silently by asyncio's default handler and the agent's
+    request is left answered by nobody. A field is omitted rather than emitted
+    empty, so a prompt that carries three of the five (measured: ``web_fetch``)
+    does not render two blank rows.
+    """
+    if not isinstance(consent, dict):
+        return {}
+    projected: dict[str, Any] = {}
+    for key in _CONSENT_TEXT_FIELDS:
+        if key in consent:
+            projected[key] = _as_text(consent[key])
+    rule = consent.get("matchedRule")
+    if isinstance(rule, dict):
+        projected["matchedRule"] = {
+            key: _as_text(rule.get(key)) for key in _CONSENT_RULE_FIELDS}
+    return projected
 
 
 def _agent_subtask_output_text(raw_output) -> str:
@@ -4489,6 +4579,13 @@ class _Supervisor:
         — see the "SC-9 UI shape & pending-request tracking" Design Decisions
         row in plans/260908_ACP_V3_PRODUCTION_HARDENING.md.
 
+        The frame carries the *unclamped* title plus an allowlisted projection
+        of ``params._meta.kiro.consent`` (`_project_consent`), so a prompt can
+        be answered on its merits rather than on the word "Write File"; only
+        the desktop notification still clamps (D-5,
+        plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
+        Phase 2).
+
         A malformed request (no ``sessionId``, no usable options, or a
         ``sessionId`` that names no registered session) is refused via the
         same `_refuse` path `_on_agent_request`'s own unhandled-method
@@ -4545,18 +4642,38 @@ class _Supervisor:
             "session_id": session_id,
             "options": options,
         }
-        title = _as_text(tool_call.get("title"))[:MAX_PERMISSION_TITLE_CHARS]
+        title = _as_text(tool_call.get("title"))
+        # Every level type-guarded rather than `or {}`-chained: a truthy
+        # non-dict at any of the three (`_meta`, `kiro`, `consent`) would raise
+        # AttributeError here — past the _pending_permission store above, which
+        # would leave an entry nothing can answer and no frame to answer it
+        # with, out of a call_soon_threadsafe callback where asyncio's default
+        # handler swallows the traceback. Same failure class as the non-dict
+        # `params` guard at the top of this method.
+        meta = params.get("_meta")
+        kiro_meta = meta.get("kiro") if isinstance(meta, dict) else None
+        consent = kiro_meta.get("consent") if isinstance(kiro_meta, dict) else None
         _emit(session_id, envelope("permission_request", {
             "requestId": request_id,
             "sessionId": session_id,
+            # Unclamped, unlike the notification below (D-5,
+            # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
+            # Phase 2): a shell prompt's title *is* the command and a write
+            # prompt's path is the only thing distinguishing it from any other
+            # write, so the page gets the whole string and the toast gets the
+            # clamp its 200-character budget was sized for.
             "toolCall": {"title": title},
+            # Always present, `{}` when the agent sent none, so the frame's
+            # shape does not depend on the agent's payload.
+            "consent": _project_consent(consent),
             "options": options,
         }, session_id))
         # Notified unconditionally, unlike turn end: this request has stopped
         # the turn and will keep it stopped until a human answers or the
         # silence timeout cancels it, so "someone has the page open" is not
         # evidence anyone has seen it.
-        _notify("permission_request", session_id, title)
+        _notify("permission_request", session_id,
+                title[:MAX_PERMISSION_TITLE_CHARS])
 
     async def _fulfill_token(self, request_id) -> None:
         """Fetch a fresh OIDC token and deliver it to the agent.
@@ -4703,6 +4820,10 @@ class _Supervisor:
         No lock-hint check; diff backfill via _get_tool_diffs_v3. `cwd`
         arrives already resolved by the caller (_handle_load, via
         _stored_session_cwd_v3).
+
+        Takes no mode and sets no permission posture: the resumed session keeps
+        whatever it bound at `session/new`. See the comment on the
+        `session/load` request below for the measurement behind that.
         """
         if self.at_capacity():
             raise SessionLimit(_session_limit_message())
@@ -4745,6 +4866,22 @@ class _Supervisor:
             self._reserved -= 1
             reserved = False
             try:
+                # `_build_kas_session_params()` with no mode argument on
+                # purpose. The payload still carries the signature's default
+                # `modeId`, but **this call asserts no mode and no permission
+                # posture**, because the agent does not read the field here.
+                # Measured 2026-09-21 (probe P2, kiro-cli 2.22.x,
+                # plans/260921_ACP_PERMISSION_PROFILE_AND_LOOPBACK_CREDENTIAL.md
+                # § 1): the agent binds its mode at `session/new` and ignores
+                # `modeId` on `session/load` — a fresh process sending
+                # "kiro_default" here still reported the session's original
+                # bound mode and still raised that mode's permission prompts.
+                # So the default value the signature supplies is inert on this
+                # path; threading a real mode in would read as a re-assertion
+                # of posture that does not happen, which is why it is not done.
+                # A resumed session keeps whatever posture it was created with;
+                # that is a property of kiro-cli, not a PowerAtlas choice
+                # (D-12).
                 await self._request(
                     "session/load",
                     {"sessionId": session_id, "cwd": cwd, "mcpServers": [],
