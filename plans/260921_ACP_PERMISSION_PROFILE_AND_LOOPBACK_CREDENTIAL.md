@@ -1,7 +1,8 @@
 # ACP Permission Profile and Loopback Credential
 
 > **Date**: 2026-09-21
-> **Status**: In Progress — Phase 0 blocked, deny-floor design Gate awaiting user decision (see § 9)  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
+> **Status**: In Progress — Phase 0 complete; Gate resolved by user decision 2026-09-22 (deny floor
+> removed from scope entirely, see § 9); Phase 1 next  <!-- Status grammar: shared/skills/qplan/TEMPLATES.md § Status Grammar -->
 > **Last Updated**: <set by /qclose at archival>
 > **Scope**: Give ACP sessions a configurable permission posture through a PowerAtlas-generated
 > kiro-cli agent profile, and require a credential on every loopback HTTP/WebSocket route.
@@ -45,10 +46,14 @@ lets a rogue process answer its own prompts, and a credentialed API still runs e
 ### Success criteria
 
 - **SC-1 — Permission posture is a user setting.** Two states: **off** = allow-all (today's
-  behaviour, the default) and **on** = explicit rules reproducing kiro-cli's default posture. Both
-  states additionally carry an always-on **deny floor** (never-okay destructive shell patterns and
-  sensitive-path writes), expressed with kiro-cli's `deny` effect, which beats both `ask` and `allow`
-  in the scope merge. The floor's bypass resistance is **tested, not assumed** (Phase 0, Phase 7).
+  behaviour, unchanged, the default) and **on** = explicit rules reproducing kiro-cli's default
+  posture. **No PowerAtlas-authored deny floor.** D-13's floor is removed from this plan's scope —
+  user decision 2026-09-22, made after Phase 0 measured live that a bespoke pattern-based floor
+  cannot be built with a defensible bypass-resistance guarantee at this layer (§ 9 Gate statement),
+  and after concluding the future unattended-automation follow-on (D-1's out-of-scope rule engine)
+  will need its own protection model regardless, since it runs with nobody watching — a different
+  problem than this plan's interactive-session scope. **off** is therefore a genuine no-op over
+  today's behaviour; **on** is where this plan's actual posture improvement lives.
 - **SC-2 — PowerAtlas owns and generates the derived agent.** It writes
   `~/.kiro/agents/poweratlas-acp.md`, derived at write time from a configurable **base agent**
   (default `kiro_default`) by injecting a `permissions:` key into that file's frontmatter, **textually
@@ -196,9 +201,10 @@ re-locates them all before any edit.
 ## 2) Goal
 
 Ship a PowerAtlas-generated kiro-cli agent profile that makes interactive ACP sessions ask before
-running shell or writing files, configurable between allow-all and kiro-cli's default posture with an
-always-on deny floor; and put a one-time login code plus HttpOnly cookie in front of every loopback
-route, retiring the page-injected `_ACP_TOKEN` it replaces.
+running shell or writing files, configurable between allow-all and kiro-cli's default posture (no
+PowerAtlas-authored deny floor — D-13 superseded 2026-09-22, see § 9); and put a one-time login code
+plus HttpOnly cookie in front of every loopback route, retiring the page-injected `_ACP_TOKEN` it
+replaces.
 
 ## 3) Design Decisions
 
@@ -216,7 +222,7 @@ route, retiring the page-injected `_ACP_TOKEN` it replaces.
 | D-10 Generation failure | Fall back to the base agent **only when no previously-validated derived agent exists**; settings panel reports on-but-not-in-effect | Fail closed; toast; per-session badge; always fall back | User decision 2026-09-21 (continuity), narrowed to settings-panel-only. The last-good qualifier is a review finding: an unconditional fallback *widens* posture on a transient regen failure |
 | D-11 Config shape | Dedicated bool route + string in `_SETTING_TYPES` | One `[permissions]` table | `/api/save-setting` rejects booleans by design; `POST /api/notifications` full-dict-replaces |
 | D-12 Rollout | New sessions only; documented in settings copy | Surface ungated live sessions; close and recreate | Measured property of kiro-cli (P2), not a PowerAtlas choice |
-| D-13 Rule set | Two states plus an always-on **deny floor** | A PowerAtlas-authored ask-list; no floor | User decision 2026-09-21, borrowed from Kiro Crew's never-bypassed bundled deny list; kiro-cli's `deny` effect expresses the same layering |
+| D-13 Rule set | ~~Two states plus an always-on **deny floor**~~ **SUPERSEDED 2026-09-22: two states, no floor** | (orig.) borrowed from Kiro Crew's "never-bypassed" bundled deny list | Phase 0 measured live that the borrowed precedent's "never-bypassed" characterization is false (3 of 4 tested rephrasing forms bypassed a floor entry with zero prompt — § 9 Gate statement). User decision 2026-09-22: drop the floor entirely rather than patch it — a bespoke pattern-based floor can't be built with a defensible guarantee at this layer, and the future unattended-automation follow-on (D-1's out-of-scope rule engine) needs its own protection model regardless, since "an ask rule with nobody watching is a bounded wait, not a policy" (D-1) applies there too |
 | D-14 Execution order | Starts only after the parity plan completes; **Phase 0 step 0 verifies it** | Backend-first concurrent; fully parallel | User decision 2026-09-21. The precondition is checkable, so it is checked rather than assumed |
 | D-15 `ACP_TOKEN` sentinel | Introduce `ACP_AVAILABLE` **before** removing the credential | Delete and repair the fallout | Six dashboard branches use it as the ACP-availability flag, and the failure is silent |
 | D-16 Login-code exchange | Mirror `remote_auth_exchange`'s hardening, but **not** its peer-keyed backoff | Reuse the peer-keyed backoff verbatim | On loopback every caller is `127.0.0.1`, so a peer-keyed lockout lets one bad process throttle the legitimate user for up to 5 minutes |
@@ -235,7 +241,7 @@ route, retiring the page-injected `_ACP_TOKEN` it replaces.
 | Category | Change needed | Owner | Status |
 |---|---|---|---|
 | Secrets / Env vars | New on-disk local secret at `CONFIG_DIR/local-secret`, created at first start. No external provisioning | Implementer | Pending |
-| Rollout / cutover | None. Defaults **off** (allow-all), so installing this release changes no permission behaviour until the user opts in — except that deny-floor patterns become blocked | — | N/A |
+| Rollout / cutover | None. Defaults **off** (allow-all), and **off** is now a genuine no-op over today's behaviour (no floor, D-13 superseded) — installing this release changes no permission behaviour until the user opts in | — | N/A |
 | Data migration / backfill | None. The derived agent is a regenerable build product, not state | — | N/A |
 
 CI/CD, IAM, cloud, DNS and third-party rows do not apply — a local desktop application with no cloud
@@ -331,7 +337,7 @@ premise, **stop and revise the design before Phase 1**.
 - [x] Every anchor re-located; the anchor → current file:line table recorded in § 9
 - [x] `ACP_TOKEN` occurrence count recorded and compared against 14
 - [x] The stale-token function names actually present after the parity port are recorded
-- [ ] `tools/acp_permission_probe.py` committed, and a run of it reproduces P1's mode-catalogue output — **the run succeeds and reproduces P1 (verified); the commit is deliberately withheld pending the Gate decision below (see § 9)**
+- [x] `tools/acp_permission_probe.py` committed, and a run of it reproduces P1's mode-catalogue output — verified; committed as `ea79482` once the orchestrator reviewed it (Gate decision no longer blocks this — it's independently useful infrastructure)
 - [x] Default rule set recorded, each rule tagged documentation-sourced or measured, with its source
 - [x] Deny-floor list drafted, every entry justified in one line
 - [x] Floor bypass attempted in all four forms; the matching semantics (literal vs canonicalized) recorded
@@ -392,8 +398,11 @@ def _validate(name: str) -> str:
     return name
 ```
 
-The rule assembly is `deny floor + (allow-all | transcribed defaults)`, floor first so its precedence
-is visible to a human reading the generated file. Both branches always include the floor (D-13).
+The rule assembly is `(allow-all | transcribed defaults)` — **no floor layer** (D-13 superseded
+2026-09-22, § 9). The `on` branch's `transcribed defaults` still needs Phase 0's `exclude` finding
+(§ 9 Step 4): a same-capability blanket `ask` rule silently defeats a narrower `allow` rule for the
+same resource unless the blanket rule carries an `exclude` populated from the narrower rule's own
+`match` patterns. That finding is independent of the floor decision and still applies.
 
 Settings (D-11): `GET`/`POST /api/acp-permissions` for the boolean, mirroring `/api/notifications`;
 `acp_permission_base_agent` in `_SETTING_TYPES` as `str`, validated on the write path with the same
@@ -653,8 +662,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 - [ ] The same session raises a prompt for a file write that **names the file**
 - [ ] `consent.scope` reads `agent` and `consent.source` reads `agent-profile` — matching the P4 values recorded in § 1
 - [ ] `modeId_in_effect` reads `DERIVED_AGENT_NAME`, confirming no silent coercion to `vibe`
-- [ ] With the setting **off**, no prompt is raised **and** a deny-floor pattern is still blocked — the assertion that the floor is genuinely always-on
-- [ ] At least one Phase 0 bypass form (case-variant, quoted, traversal, symlink) is re-attempted live against the shipped floor and blocked
+- [ ] With the setting **off**, no prompt is raised and no pattern is blocked — confirms **off** is a genuine no-op over today's behaviour (D-13 superseded 2026-09-22, no floor layer exists)
 - [ ] Denying a prompt leaves the tool `failed` with no side effect on disk
 - [ ] The UI is reachable from all three doors after a restart
 - [ ] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
@@ -674,8 +682,8 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | R-1 Anchors stale at execution | High | Addressed: Phase 0 re-locates every anchor; phases cite names, not lines |
 | R-2 Silent coercion to `vibe` | High | Addressed: Phase 7 asserts `modeId_in_effect` and `consent.scope`/`source` |
 | R-3 Fallback runs ungated while the toggle reads on | Medium | **Accepted by the user** (D-10), narrowed to settings-panel reporting, and further narrowed so a valid derived agent is never replaced by a fallback. See Follow-up #1 |
-| R-4 Deny floor blocks legitimate work | Medium | Addressed: Phase 0 justifies every entry; Phase 7 exercises the floor in both toggle states |
-| R-5 Deny floor bypassed by rephrasing | High | Addressed: Phase 0 step 6 tests case, quoting, traversal and symlink forms before the floor is trusted |
+| R-4 Deny floor blocks legitimate work | Medium | **Moot — floor removed from scope**, D-13 superseded 2026-09-22 |
+| R-5 Deny floor bypassed by rephrasing | High | **Confirmed true** (Phase 0 step 6: 3 of 4 forms bypassed live), which is *why* D-13 was superseded rather than patched — **moot as a shipping risk**, floor removed from scope 2026-09-22 |
 | R-6 Lockout — no door works | High | Addressed: Phase 5 asserts all three doors; D-22 keeps an unpersistable secret in memory so cookies still verify |
 | R-7 `acp.py` isolation boundary eroded | Medium | Addressed: `DERIVED_AGENT_NAME` lives in `config.py`, already imported; `agent_profile.py` is never imported by `acp.py` |
 | R-8 Consent block is agent-authored and lands in a browser | Medium | Addressed: Phase 2 allowlists five fields; Phase 3 asserts escaping with an injection payload |
@@ -732,7 +740,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 
 | # | Phase/Task | Status | Notes |
 |---|---|---|---|
-| 0 | Pre-flight — preconditions, anchors, harness, rule set | **Blocked — Gate fired** | 10/12 exit criteria met; deny floor failed bypass resistance (3/4 forms), see § 9 Gate statement |
+| 0 | Pre-flight — preconditions, anchors, harness, rule set | **Complete — Gate resolved** | Deny floor failed bypass resistance (3/4 forms); user decision 2026-09-22 removed the floor from scope entirely (D-13 superseded) rather than patching it, see § 9 |
 | 1 | Derived-agent generation and settings | Not started | Atomic write; textual injection; no YAML dep |
 | 2 | Mode wiring and frame enrichment | Not started | |
 | 3 | Settings and permission-prompt UI `[P:4]` | Not started | Includes `transcript-renderer.js`; parallel-eligible with 4 |
@@ -781,7 +789,7 @@ file scopes — the `parallel-symmetry` check passed only because no annotations
 | Item | Strategy | Safety effect |
 |---|---|---|
 | Existing ACP sessions at toggle-on | Unchanged — the agent binds at `session/new` (P2) | No mid-session change; documented in settings copy |
-| Default posture | Off = allow-all as today, **plus** the deny floor | Installing changes nothing opted into, except floor patterns become blocked |
+| Default posture | Off = allow-all as today, **unchanged** (no floor, D-13 superseded) | Installing this release changes nothing opted into |
 | `_ACP_TOKEN` consumers | None external — per-launch, page-injected, no documented API | Removal is internal |
 | A tab open across a restart | Improves: the cookie survives, so it reconnects instead of showing "stale token, reload" | The stale-token branch is deleted because its state can no longer occur |
 | A bookmarked bare URL | **Regression**: it currently works and afterwards lands on the open-from-tray page | Deliberate (D-3); mitigated by tray "Copy login link" and documented in README |
@@ -1178,6 +1186,41 @@ remaining under `~/.kiro/agents/`.
 None of these are attempted fixes — per this phase's brief, that decision belongs to the
 orchestrator/user before Phase 1 proceeds.
 
+#### Gate resolution — user decision, 2026-09-22
+
+Escalated through `/qcouncil` (Full stakes tier — large blast radius: Phase 1's rule-assembly code,
+SC-1's guarantee language, README, settings UI copy). Four options were debated by 12 sub-agents
+(4 advocates, 4 prosecutors, 4 independent jurors: Senior engineer, Security auditor, Reliability
+engineer, Architect). The jury landed unanimously (4-0) on patching the mechanically-closable
+bypasses (alias enumeration, conditional case-insensitivity) while rewriting SC-1's language to
+disclose what remains open — two jurors independently verified against the actual `acp.py` code
+that a fourth, more invasive option (routing enforcement through PowerAtlas's own process) rested on
+a misattributed code citation and would have made PowerAtlas's own liveness safety-critical for
+enforcement, colliding with this project's no-autonomous-restart governance constraint.
+
+**The user did not take the council's recommendation.** Presented with the plain-language trade-off,
+the user's decision was to drop the deny floor from this plan's scope entirely, for two reasons
+stated directly: (1) "we're unable to design it perfectly" — consistent with Phase 0's own finding
+that even the recommended patch (Option C) left known gaps (flag-order variants, `$HOME`-vs-`~`
+expansion, the unresolved symlink form) uncovered; (2) the future unattended-automation follow-on
+("auto-mode") will need its own protection model regardless, since it runs with nobody watching —
+a categorically different problem than backstopping an interactive, human-supervised session, so
+investing in a bespoke floor here doesn't carry forward. The user also confirmed, in the same
+exchange, that the floor was never intended to matter in the **on** (ask-based) state — its whole
+job was backstopping **off** (allow-all) — and chose to drop it from `off` as well rather than keep
+it as insurance against Phase 0's separately-measured rule-assembly bug (Gate finding #3) that could
+cause `on`'s own ask-blanket to silently degrade toward allow-all. That bug still needs fixing in
+Phase 1 (§ Design Decisions, Phase 1's rule-assembly note above) — it's just no longer backstopped
+by a floor if the fix is incomplete.
+
+**Net effect**: D-13 is superseded (see § 3). `off` is now a byte-for-byte no-op over today's
+shipped behaviour. `on` is where this plan's entire posture improvement lives. SC-1, the Goal
+statement, Phase 1's rule-assembly description, Phase 7's exit criteria, the Risk Assessment table
+(R-4, R-5), the External Dependencies rollout row, and the Backwards Compatibility table have all
+been updated to match. Gate findings #2 (platform-authoring), #3 (most-restrictive-wins/`exclude`),
+and #6 (silent fail-open on malformed frontmatter) are **not** resolved by dropping the floor — they
+were never floor-specific — and remain Phase 1/7 obligations independent of this decision.
+
 ## Follow-up Work (Deferred)
 
 1. **Fail-closed on generation failure.** R-3 accepted rather than fixed: a session whose derived agent
@@ -1188,7 +1231,10 @@ orchestrator/user before Phase 1 proceeds.
    gate. Source: D-9.
 3. **`/partials/launchers` env leak.** Its own `[SECURITY]` roadmap item. SC-5 removes anonymous
    reachability but does not fix the leak. Source: Intent scope boundaries.
-4. **The unattended rule engine.** Its own roadmap item, carrying the Automation-gating role. Source: D-1.
+4. **The unattended rule engine.** Its own roadmap item, carrying the Automation-gating role. Now also
+   inherits the protection-model role this plan's deny floor would have played — a session with
+   nobody watching needs its own answer to "never-okay actions," since D-13 was superseded rather
+   than fixed (see § 9 Gate resolution, user decision 2026-09-22). Source: D-1.
 5. **Login code in process arguments.** R-11 accepted: a code passed on a browser command line is
    readable by any same-user process. Mitigated by a 120 s single-use TTL, not eliminated. A
    loopback-only local handoff (e.g. a file-backed one-shot the browser is pointed at) would remove it.
