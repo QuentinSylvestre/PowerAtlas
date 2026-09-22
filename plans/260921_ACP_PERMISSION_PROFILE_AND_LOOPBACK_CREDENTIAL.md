@@ -353,7 +353,8 @@ directly contradicting D-13's characterization of the borrowed Kiro Crew deny li
 "never-bypassed" (public trackers document the same literal-matching class of bypass against that
 list: kirodotdev/KiroCrew#8387, kirodotdev/Kiro#11498, kirodotdev/KiroCrew#8240). Per this phase's
 brief, this is named explicitly as a Gate-firing condition. **Status: blocked. See § 9 for full
-findings and the specific design question this raises for Phase 1.**
+findings and the specific design question this raises for Phase 1.** *(Resolved 2026-09-22 — see
+§ 9 "Gate resolution": the floor was dropped from scope entirely, not patched.)*
 
 ### Phase 1: Derived-agent generation and its settings [QA]
 
@@ -435,6 +436,9 @@ is what the module promises, but an unexpected bug must not abort startup. It di
 - [ ] A generation failure inside `lifespan` does not prevent startup, asserted by raising a non-`AgentProfileError` from a patched generator
 - [ ] On regen failure with a valid derived agent already on disk, that file is **kept**, not replaced by a base-agent fallback (D-10)
 - [ ] `pyproject.toml` `package-data` includes the overlay, and an `importlib.resources` read confirms it is reachable at runtime rather than merely present in the source tree
+- [ ] **(added, Step 5 review, 2026-09-22 — with the deny floor dropped, this is the sole remaining backstop for `on`)** The `on` branch's assembled rule set names every capability this design wants to gate explicitly — no capability is left uncovered on the assumption that omission defaults to `ask` (Phase 0 § 9, Step 7: a capability the rule list is silent about inherits allow-all, not ask)
+- [ ] **(added, Step 5 review, 2026-09-22)** No same-capability (or `all`) blanket `ask` rule sits beside a narrower `allow` rule without a populated `exclude` — asserted against a fixture reproducing Phase 0 § 9 Step 4's measured defeat (`{shell, match: [...], allow}` + `{shell, ask}` silently loses the specific rule; `exclude` is the only mechanism that reproduces "allow X, ask about everything else")
+- [ ] **(added, Step 5 review, 2026-09-22)** A recorded decision on Gate finding #6 (a malformed derived-agent `permissions:` block fails open silently, reproduced live in Phase 0): either a real post-generation bind-confirmation mechanism ships in this phase, or the decision to defer it to Phase 7 is recorded here with the reason — `kiro-cli agent validate` was tried in Phase 0 and found unusable for `.md`-format agents, so this is not a solved problem to silently inherit
 - [ ] `pytest tests/test_web.py --timeout=300` passes
 
 **Covers**: SC-1, SC-2, SC-8 (backend half)
@@ -663,6 +667,7 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 - [ ] `consent.scope` reads `agent` and `consent.source` reads `agent-profile` — matching the P4 values recorded in § 1
 - [ ] `modeId_in_effect` reads `DERIVED_AGENT_NAME`, confirming no silent coercion to `vibe`
 - [ ] With the setting **off**, no prompt is raised and no pattern is blocked — confirms **off** is a genuine no-op over today's behaviour (D-13 superseded 2026-09-22, no floor layer exists)
+- [ ] **(added, Step 5 review, 2026-09-22)** With the setting **on**: an allow-listed command (e.g. `git status`) runs silently with no prompt, **and** a capability this design intends to gate but that isn't allow-listed (e.g. `web_fetch`, or another capability from Phase 0 § 9 Step 7's list) still prompts — the live pair confirming rule-assembly completeness is what backstops `on` now that no floor exists
 - [ ] Denying a prompt leaves the tool `failed` with no side effect on disk
 - [ ] The UI is reachable from all three doors after a restart
 - [ ] `README.md` updated: the Default→agent mapping, the "tool permissions are asked, not assumed" paragraph (already stale today), the `http://127.0.0.1:<port>` bare-visit behaviour, and the new loopback credential as user-visible WebUI surface
@@ -682,8 +687,8 @@ supervised kiro-cli process and is never done autonomously. The phase presents t
 | R-1 Anchors stale at execution | High | Addressed: Phase 0 re-locates every anchor; phases cite names, not lines |
 | R-2 Silent coercion to `vibe` | High | Addressed: Phase 7 asserts `modeId_in_effect` and `consent.scope`/`source` |
 | R-3 Fallback runs ungated while the toggle reads on | Medium | **Accepted by the user** (D-10), narrowed to settings-panel reporting, and further narrowed so a valid derived agent is never replaced by a fallback. See Follow-up #1 |
-| R-4 Deny floor blocks legitimate work | Medium | **Moot — floor removed from scope**, D-13 superseded 2026-09-22 |
-| R-5 Deny floor bypassed by rephrasing | High | **Confirmed true** (Phase 0 step 6: 3 of 4 forms bypassed live), which is *why* D-13 was superseded rather than patched — **moot as a shipping risk**, floor removed from scope 2026-09-22 |
+| R-4 Deny floor blocks legitimate work | Medium | **No longer applicable** — no floor ships (D-13 superseded 2026-09-22), so it cannot block anything |
+| R-5 Deny floor bypassed by rephrasing | High | **Confirmed true** (Phase 0 step 6: 3 of 4 forms bypassed live), which is *why* D-13 was superseded rather than patched. **Accepted, not mitigated**: `off` (allow-all) now ships with no PowerAtlas-authored control at all — this is a knowing return to today's shipped behaviour, not a "problem solved." A reader should not infer zero risk from "no floor"; it means the same exposure allow-all already has today |
 | R-6 Lockout — no door works | High | Addressed: Phase 5 asserts all three doors; D-22 keeps an unpersistable secret in memory so cookies still verify |
 | R-7 `acp.py` isolation boundary eroded | Medium | Addressed: `DERIVED_AGENT_NAME` lives in `config.py`, already imported; `agent_profile.py` is never imported by `acp.py` |
 | R-8 Consent block is agent-authored and lands in a browser | Medium | Addressed: Phase 2 allowlists five fields; Phase 3 asserts escaping with an injection payload |
@@ -828,7 +833,8 @@ file scopes — the `parallel-symmetry` check passed only because no annotations
 
 ### Phase 0 (2026-09-22) — pre-flight findings, and a Gate
 
-**Status: blocked.** Steps 0-5 and 7-9 completed cleanly; step 6 (deny-floor bypass resistance)
+**Status: blocked.** *(Resolved 2026-09-22 — see "Gate resolution" below: the floor was dropped from
+scope entirely, not patched.)* Steps 0-5 and 7-9 completed cleanly; step 6 (deny-floor bypass resistance)
 failed against its own property-under-test. Per this phase's brief, "step 6 shows the floor is
 trivially bypassed" is a named Gate-firing condition. Full evidence below; the design question is
 left for the orchestrator/user, not resolved here.
@@ -893,10 +899,12 @@ never a name-based grep for the old names alone — a grep for `reportStaleToken
 #### Step 3 — probe harness
 
 Written to `tools/acp_permission_probe.py` (526 lines; `tools/` did not previously exist in this
-repo, so `git status` will show it as a new untracked directory) — **not yet staged/committed to
-git**, held pending the Gate decision below (this phase's brief scopes the commit to a successful
-phase; a `blocked` return should not silently land a file the orchestrator hasn't seen). It is
-complete, tested, and ready to commit as-is once reviewed.
+repo). *(Committed 2026-09-22 as `ea79482` after orchestrator review — the commit was initially
+withheld pending the Gate decision below, since this phase's brief scoped the commit to a successful
+phase and a `blocked` return should not silently land a file the orchestrator hasn't seen; once
+reviewed, it was committed as independently useful infrastructure regardless of the Gate's outcome.
+Two further fixes landed in the Step 5 review after Gate resolution: `_pick_option`'s reject-path
+no longer falls back to `options[0]`, and kiro-cli's stderr is now captured under `--verbose`.)*
 
 Design: spawns `kiro-cli acp --agent-engine v3` directly over stdio NDJSON JSON-RPC 2.0 (never
 through PowerAtlas), drives `initialize` → `session/new` (binding the `_meta.kiro.modeId` to
@@ -1218,8 +1226,15 @@ shipped behaviour. `on` is where this plan's entire posture improvement lives. S
 statement, Phase 1's rule-assembly description, Phase 7's exit criteria, the Risk Assessment table
 (R-4, R-5), the External Dependencies rollout row, and the Backwards Compatibility table have all
 been updated to match. Gate findings #2 (platform-authoring), #3 (most-restrictive-wins/`exclude`),
-and #6 (silent fail-open on malformed frontmatter) are **not** resolved by dropping the floor — they
-were never floor-specific — and remain Phase 1/7 obligations independent of this decision.
+#6 (silent fail-open on malformed frontmatter), and **Step 7's capability-silence finding** ("a
+capability the rule list is silent about inherits this machine's user-scope allow-all, not
+kiro-cli's documented ask-by-default" — every gated capability must be named explicitly, omission
+does not default to `ask`) are **not** resolved by dropping the floor — they were never
+floor-specific — and remain Phase 1/7 obligations independent of this decision.
+
+**With the floor gone, correct rule assembly in the `on` state is now the *only* backstop this plan
+ships** (Step 5 review finding, Security auditor persona, 2026-09-22). Phase 1's and Phase 7's exit
+criteria (§ 5) now include explicit checks for this — see the added items in each phase below.
 
 ## Follow-up Work (Deferred)
 
@@ -1318,6 +1333,27 @@ the class a second review cycle exists to catch: a fix that introduces a new cla
 PC-1 also shows a limit of the mechanical check: `parallel-symmetry` passed on the committed version
 **because no annotations existed to verify**, not because the no-eligible-pairs claim was true. A
 guard that validates declared annotations cannot catch an annotation that should have been declared.
+
+### 2026-09-22 — Implementation Review (after Phase 0, persona: Security auditor, Senior engineer)
+
+Implementation health: Yellow (one item escalated, unresolved pending user decision; everything else
+fixed). 8 findings (0 High, 5 Medium, 3 Low).
+
+| # | Severity | Finding (one line) | Resolution (one line) |
+|---|---|---|---|
+| 1 | Medium | `_pick_option`'s reject-path fell back to `options[0]` when no reject-kind option existed, which could silently pick an allow-shaped option | Fixed — reject path now returns the same no-match error-reply as an empty option list, never guesses allow |
+| 2 | Medium | `Probe.spawn()` discarded kiro-cli's stderr unconditionally, foreclosing a diagnostic signal for the exact class of failure (silent fail-open) Gate finding #6 found | Fixed — stderr captured to the harness's own stderr under `--verbose`, never into the redacted `--json-out` frame log |
+| 3 | Medium | Phase 1/Phase 7 exit criteria had no check for rule-assembly completeness, which is now the sole backstop for `on` with the floor gone; Step 7's capability-silence finding was missing from the Gate resolution's "remaining obligations" list | Fixed — added explicit Phase 1 structural criteria (every capability named, `exclude` populated, finding #6 decision recorded) and a Phase 7 live behavioral pair; folded the capability-silence finding into the Gate resolution's obligations list |
+| 4 | Medium | The probe harness never documented that the caller owns `~/.kiro/agents/` file lifecycle, nor named the bare-colon YAML pitfall that broke 7 of Phase 0's own 9 step-7 runs | Fixed — added a docstring paragraph naming both explicitly |
+| 5 | Medium | All three Phase 0 commits (`ea79482`, `7114f33`, `341780b`) carry a `Claude-Session:` trailer, which the user's own CLAUDE.md explicitly bans and states overrides the harness default | Escalated — cannot fix via `git commit --amend` (banned per Commit Safety rules); reported to user for their decision, not auto-resolved |
+| 6 | Low | "Status: blocked" (Phase 0 body text and § 9's opening) had no forward pointer to the Gate resolution, reading as still-blocking to a top-down reader | Fixed — one-line forward references added at both sites |
+| 7 | Low | Risk table R-4/R-5 said "Moot" after the floor's removal, which reads as "problem gone" rather than "accepted, not mitigated" | Fixed — reworded to state the accepted residual exposure explicitly |
+| 8 | Low | § 9 Step 3's prose still said the harness was "not yet committed... held pending the Gate decision," stale relative to the exit-criteria line two paragraphs above it | Fixed — synced to record the actual commit and the two subsequent Step 5 fixes |
+
+Cycle 2 skipped per user instruction ("1 qreview cycle per phase," `/qdev` invocation 2026-09-22).
+Auto-fixes applied directly by the orchestrator (Light/inline-style editing — these were documentation
+and small, well-specified code changes, not a fresh sub-agent implementation phase). Finding 5 remains
+open pending the user's decision on how to handle the commit-trailer violation.
 
 ## Harness Improvement Opportunities
 
