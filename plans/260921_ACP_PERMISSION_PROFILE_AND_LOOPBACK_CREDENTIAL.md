@@ -341,7 +341,7 @@ premise, **stop and revise the design before Phase 1**.
 - [x] Default rule set recorded, each rule tagged documentation-sourced or measured, with its source
 - [x] Deny-floor list drafted, every entry justified in one line
 - [x] Floor bypass attempted in all four forms; the matching semantics (literal vs canonicalized) recorded
-- [ ] Each of the 7 unexercised capabilities recorded as fires / does-not-fire with its consent payload — **6 of 7 measured live; `power` is untestable on this machine (no installed powers) — see § 9**
+- [ ] Each of the 7 unexercised capabilities recorded as fires / does-not-fire with its consent payload — **6 of 7 measured live; `power` is untestable on this machine (no installed powers) — see § 9. Environment limitation, not deferred to a later phase: `power` was never part of any Success Criterion or the Gate's own findings, and the Gate was resolved with this gap already accounted for. No further action needed unless a future machine has powers installed to re-probe with.**
 - [x] "Always allow" persistence answered yes/no, with the diffed paths named
 - [x] `~/.kiro` baseline recorded by filename and hash
 - [x] A statement in § 9 confirming the design still holds, or naming what must change — **it names what must change; the Gate fired (see § 9)**
