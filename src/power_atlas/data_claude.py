@@ -409,6 +409,25 @@ def _parse_session_file(jsonl_path: Path, st: os.stat_result | None = None) -> t
                 custom_title = ct
             break
 
+    # ai-title is appended after each conversation turn and can appear beyond
+    # the 500-line head-scan cap in long sessions. Same tail-scan pattern as
+    # custom-title above, guarded so we skip it when the head scan already found
+    # one (both scans would return the same value; the guard avoids the extra
+    # pass for short sessions where the head already has it).
+    if not title:
+        for line in reversed(tail_lines):
+            if "ai-title" not in line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if obj.get("type") == "ai-title":
+                at = obj.get("aiTitle", "")
+                if at:
+                    title = at
+                break
+
     for line in reversed(tail_lines):
         if last_prompt and last_reply_tail:
             break
