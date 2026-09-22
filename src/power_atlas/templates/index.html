@@ -1,4 +1,4 @@
-﻿{% extends "base.html" %}
+{% extends "base.html" %}
 {% block content %}
 <div class="topbar">
   <img src="/static/poweratlas-banner.png" class="topbar-banner" alt="PowerAtlas">
@@ -1057,8 +1057,8 @@ function dashConnect(onReady){
     // drop untouched -- dashMaybeAttach()'s 'locked' ("open elsewhere") and
     // agent_died's "process ended" -- both have _dashLoadingSid === null, so
     // gating on it here leaves them alone.
+    _dashEagerLoadPending = false; // cleared before _dashWasLazyAttaching capture (plan Step 1 requirement)
     var _dashWasLazyAttaching = _dashLoadingSid !== null;
-    _dashEagerLoadPending = false; // cleared before _dashLoadingSid so the flag reflects the load's state at drop time
     _dashLoadingSid = null;
     _dashPendingSend = null;
     _dashPendingImages = null;
@@ -2863,10 +2863,23 @@ function dashHandle(frame){
       send('close', {}, sid);
       _dashEagerLoadPending = false;
       _dashLoadingSid = null;
+      // Restore any prompt the user typed in B (via dashSendPrompt's
+      // cross-session guard) before clearing _dashPendingSend -- without
+      // this the textarea stays disabled with no text to re-send.
+      if (_dashPendingSend !== null && sid !== _viewingSid) {
+        dashPromptInput.value = _dashPendingSend;
+      }
       _dashPendingSend = null;
       // Paired with _dashPendingSend above, for consistency (Fix 6, Phase 4
       // review) -- same reasoning as dashCloseIfAbandoned's reset above.
       _dashPendingImages = null;
+      // Re-enable the composer for whatever session the user is now viewing
+      // (the cross-session guard in dashSendPrompt may have disabled it while
+      // waiting for this stale load to resolve).
+      dashPromptInput.disabled = false;
+      dashSendBtn.disabled = false;
+      dashSetComposerNote('');
+      dashRefreshComposerControls();
       return;
     }
     if (sid !== _viewingSid) return;
@@ -3344,6 +3357,12 @@ function dashHandle(frame){
     _dashOrigin = null;
     _dashTurnActive = false;
     _dashEagerLoadPending = false; // defense-in-depth: session_closed normally arrives after _dashLoadingSid is already null
+    // If the server sends session_closed before the session frame arrives
+    // (e.g. idle-TTL sweep racing a load in flight), clear the load state
+    // so the focus listener can start a new eager load for the next session.
+    _dashLoadingSid = null;
+    _dashPendingSend = null;
+    _dashPendingImages = null;
     setContext(null);
     // The sid/copy widget belonged to the session just released -- mirrors
     // acp.html's own releaseSession() reset.

@@ -1,4 +1,4 @@
-﻿// Behavioural coverage for the browser-side code this repo has no other way to
+// Behavioural coverage for the browser-side code this repo has no other way to
 // test: src/power_atlas/templates/acp.html, the remote-access panel in
 // templates/index.html, and the two rules in static/style.css that decide what
 // the /acp topbar shows whom.
@@ -14981,10 +14981,9 @@ check("dashboard: eager-connect — double-load guard same sid: send while eager
     "the textarea must be disabled while waiting for the session frame");
 });
 
-check("dashboard: eager-connect — cross-session guard: send while different eager load is in flight", () => {
+check("dashboard: eager-connect — cross-session guard: send while different load is in flight", () => {
   const p = loadDashPicker({ realConnect: true, viewingSid: "sess-B" });
   p.sandbox._dashLoadingSid = "sess-A";
-  p.sandbox._dashEagerLoadPending = true;
   p.sandbox.dashPromptInput.value = "hello";
   p.sandbox.dashSendPrompt();
   assertEqual(p.sandbox._dashPendingSend, "hello",
@@ -15077,6 +15076,49 @@ check("dashboard: eager-connect — stale-arrival guard clears _dashEagerLoadPen
   const closes = p.sentOf("close").filter(f => f.sid === "sess-1");
   assertEqual(closes.length, 1,
     "stale-arrival guard must send close for the orphaned session (SC-3)");
+});
+
+check("dashboard: eager-connect — focus guard: !_viewingSid (no session selected)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: null });
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not load when _viewingSid is null");
+});
+
+check("dashboard: eager-connect — focus guard: !ACP_TOKEN (ACP not available)", () => {
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-1", acpToken: null });
+  p.sandbox.dashConnect();
+  p.sandbox.dashPromptInput.dispatch("focus");
+  assertEqual(p.sentOf("load").length, 0,
+    "focus must not load when ACP_TOKEN is falsy");
+});
+
+check("dashboard: eager-connect — stale-arrival re-enables composer for B after A's session frame arrives mid-cross-session", () => {
+  // Scenario: user focuses A (eager load), clicks B (cross-session guard
+  // holds B's prompt with textarea disabled), A's session frame arrives.
+  const p = loadDashPicker({ realConnect: true, viewingSid: "sess-B" });
+  p.sandbox._dashLoadingSid = "sess-A";
+  p.sandbox._dashEagerLoadPending = true;
+  // Simulate cross-session guard already fired: textarea is disabled, prompt held
+  p.sandbox._dashPendingSend = "hello from B";
+  p.sandbox.dashPromptInput.disabled = true;
+  p.sandbox.dashSendBtn.disabled = true;
+  p.sandbox.dashConnect();
+  p.openMain();
+  // A's session frame arrives — stale-arrival guard should fire
+  p.deliverMain({ type: "session", sessionId: "sess-A", payload: {} });
+  assertEqual(p.sandbox.dashPromptInput.disabled, false,
+    "stale-arrival guard must re-enable the textarea for the current session B");
+  assertEqual(p.sandbox.dashPromptInput.value, "hello from B",
+    "stale-arrival guard must restore B's pending prompt to the textarea");
+  assertEqual(p.sandbox._dashPendingSend, null,
+    "_dashPendingSend must be cleared");
+  assertEqual(p.sandbox._dashLoadingSid, null,
+    "_dashLoadingSid must be cleared");
+  const closes = p.sentOf("close").filter(f => f.sid === "sess-A");
+  assertEqual(closes.length, 1,
+    "stale-arrival guard must send close for the orphaned session A");
 });
 
 let failed = 0;
